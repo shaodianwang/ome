@@ -1,0 +1,13 @@
+# p8334: [gen] inplaceonly image engine N=4 rp RecreateInstance  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 co=none topo=engine img=${OME_EVAL_NGINX_ALT_IMAGE} edit=image
+# reason: the push changes the runner image, the one diff InPlaceOnly patches onto the live pod: every engine pod is patched in place (UIDs stable) and ends running the new image, one at a time within maxUnavailable 1 (floor N-1), never surging above N; restart policy RecreateInstanceOnPodRestart plays no part, nothing restarts; every Instance ends on the new revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8334 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "InPlaceOnly", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

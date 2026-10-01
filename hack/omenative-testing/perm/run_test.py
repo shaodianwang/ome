@@ -1581,6 +1581,176 @@ class CanaryHeaderTest(unittest.TestCase):
         self.assertTrue(any("cell=" in e for e in self._errs(base + " cell=canary/Staging/readyTimeout[quota],")))
         self.assertTrue(any("cell=" in e for e in self._errs(base + " cell=canary/Idle/newTarget[secondaryOnly:engine]")))
 
+class BudgetRoundingTest(unittest.TestCase):
+    """A percent budget resolves the way the engine's per-Component budget
+    does: rounded up and clamped to the fleet, for maxUnavailable as for
+    maxSurge. The Deployment convention of rounding maxUnavailable down is
+    not the engine's rule, so the floor the harness holds a roll to must not
+    follow it either."""
+
+    def test_percent_rounds_up_like_the_engine(self):
+        self.assertEqual(1, run.resolve_max_unavailable("10%", 4))
+        self.assertEqual(1, run.resolve_max_unavailable("10%", 8))
+        self.assertEqual(1, run.resolve_max_unavailable("25%", 4))
+        self.assertEqual(2, run.resolve_max_unavailable("25%", 8))
+        self.assertEqual(2, run.resolve_max_unavailable("50%", 4))
+        self.assertEqual(4, run.resolve_max_unavailable("50%", 8))
+        self.assertEqual(8, run.resolve_max_unavailable("100%", 8))
+        self.assertEqual(0, run.resolve_max_unavailable("0%", 8))
+        self.assertEqual(4, run.resolve_budget("150%", 4), "clamped to the fleet")
+
+    def test_integers_pass_through_and_junk_reads_as_zero(self):
+        self.assertEqual(1, run.resolve_max_unavailable(1, 4))
+        self.assertEqual(0, run.resolve_max_unavailable(-1, 4))
+        self.assertEqual(3, run.resolve_max_unavailable("3", 4))
+        self.assertEqual(0, run.resolve_max_unavailable("many", 4))
+        self.assertEqual(0, run.resolve_max_unavailable(None, 4))
+
+
+class RolloutEditTest(unittest.TestCase):
+    """The rollout edits ride the trigger as a runner override on every
+    bumped member; a template edit counts an in-place strategy by hash and an
+    image edit in place; expect=held on a push validates only as a change a
+    strict in-place strategy cannot apply, and its verdict reads the hold,
+    its reason and the corrective push."""
+
+    BASE = "# p999: x Ne=2 Nd=2 Nr=0 ceil_e=2 ceil_d=3 ceil_r=0 topo=pd"
+    SINGLE = {"engine": 1, "decoder": 1, "router": 1}
+    GANG = {"engine": 2, "decoder": 1, "router": 1}
+
+    def _errs(self, header):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_trigger_patch_carries_the_edit(self):
+        bump = {"annotations": {run.TRIGGER_ANNO: run.TRIGGER_VAL, "ome.io/deploymentMode": "OMENative"}}
+        self.assertEqual({"spec": {"engine": bump}}, run._rollout_trigger_patch({"engine"}, None, None, self.SINGLE))
+        env = run._rollout_trigger_patch({"engine"}, "env", None, self.SINGLE)["spec"]["engine"]
+        self.assertEqual([{"name": "TEST_REV", "value": run.TRIGGER_VAL}], env["runner"]["env"])
+        self.assertEqual(bump["annotations"], env["annotations"])
+        res = run._rollout_trigger_patch({"engine"}, "resources", None, self.SINGLE)["spec"]["engine"]
+        self.assertEqual({"requests": {"cpu": run.EDIT_CPU_REQUEST}}, res["runner"]["resources"])
+        probe = run._rollout_trigger_patch({"engine"}, "probe", None, self.SINGLE)["spec"]["engine"]
+        self.assertEqual({"periodSeconds": run.EDIT_PROBE_PERIOD_S}, probe["runner"]["readinessProbe"])
+        img = run._rollout_trigger_patch({"engine"}, "image", "nginx:alt", self.SINGLE)["spec"]["engine"]
+        self.assertEqual({"image": "nginx:alt"}, img["runner"])
+        both = run._rollout_trigger_patch({"engine", "decoder"}, "image", "nginx:alt", self.GANG)["spec"]
+        self.assertEqual({"runner": {"name": run.MAIN_CONTAINER, "image": "nginx:alt"}}, both["engine"]["leader"],
+                         "a leader runner names its container")
+        self.assertNotIn("runner", both["engine"])
+        self.assertEqual({"image": "nginx:alt"}, both["decoder"]["runner"])
+
+    def test_fix_patch_puts_the_runner_back(self):
+        self.assertEqual({"spec": {"engine": {"runner": None}}}, run._rollout_fix_patch({"engine"}, {"engine": 1}, {}))
+        self.assertEqual({"spec": {"engine": {"leader": {"runner": None}}}}, run._rollout_fix_patch({"engine"}, {"engine": 2}, {}))
+        had = {"engine": {"env": [{"name": "X", "value": "1"}]}}
+        self.assertEqual({"spec": {"engine": {"runner": had["engine"]}}}, run._rollout_fix_patch({"engine"}, {"engine": 1}, had))
+        spec = {"engine": {"runner": {"image": "a"}}, "decoder": {"leader": {"runner": {"name": "ome-container"}}}, "router": {}}
+        self.assertEqual({"engine": {"image": "a"}, "decoder": {"name": "ome-container"}, "router": None},
+                         run._runner_overrides(spec, {"engine", "decoder", "router"}, {"engine": 1, "decoder": 2, "router": 1}))
+
+    def test_edits_validate_in_rollout_mode(self):
+        for edit in sorted(run.TEMPLATE_EDITS):
+            self.assertEqual([], self._errs(self.BASE + f" edit={edit}"))
+        self.assertEqual([], self._errs(self.BASE + " edit=image img=nginx:alt"))
+        self.assertTrue(any("needs img=" in e for e in self._errs(self.BASE + " edit=image")))
+        runtimerev = self.BASE.replace(" Ne=", " mode=runtimerev rt=x Ne=")
+        self.assertTrue(any("mode=rollout" in e for e in self._errs(runtimerev + " edit=probe")))
+        self.assertEqual([], self._errs(runtimerev + " edit=resources"), "a runtime resources edit is unchanged")
+
+    def test_held_push_validates_as_a_change_the_strategy_cannot_apply(self):
+        for edit in sorted(run.TEMPLATE_EDITS):
+            self.assertEqual([], self._errs(self.BASE + f" edit={edit} expect=held"))
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=start edit=env expect=held floor_soft=1"))
+        self.assertTrue(any("expect=held on a push" in e for e in self._errs(self.BASE + " expect=held")))
+        self.assertTrue(any("expect=held on a push" in e for e in self._errs(self.BASE + " edit=image img=nginx:alt expect=held")))
+        canary = self.BASE.replace(" Ne=", " mode=canary Ne=")
+        self.assertTrue(any("expect=held on a push" in e for e in self._errs(canary + " edit=env expect=held")))
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=start during=idle expect=held"),
+                         "the idle reading of expect=held is unchanged")
+
+    def test_held_push_state_and_counting(self):
+        self.assertIsNone(run._held_push_new({"edit": "env"}))
+        self.assertIsNone(run._held_push_new({"edit": "env", "expect": "held", "during": "idle"}))
+        self.assertIsNone(run._held_push_new({"edit": "image", "expect": "held"}))
+        self.assertEqual({"until": None, "before": {}, "broken": None, "min_ready": {}, "events": [], "fixed_at": None,
+                          "fix_error": None}, run._held_push_new({"edit": "resources", "expect": "held"}))
+        info = {"strat": {"engine": "InPlaceOnly"}}
+        for edit in sorted(run.TEMPLATE_EDITS):
+            self.assertEqual({"engine": "surge"}, run.update_modes(info, {"engine"}, edit))
+        self.assertEqual({"engine": "inplace"}, run.update_modes(info, {"engine"}, "image"))
+        self.assertEqual({"engine": "inplace"}, run.update_modes(info, {"engine"}, None),
+                         "a held push lands its corrective revision in place")
+
+    def test_hold_observation(self):
+        old = {"engine": {"u1", "u2"}}
+        pods = {"e0": {"comp": "engine", "alive": True, "uid": "u1", "newanno": False},
+                "e1": {"comp": "engine", "alive": True, "uid": "u2", "newanno": False}}
+        hold = run._held_push_new({"edit": "env", "expect": "held"})
+        run._held_push_observe(hold, pods, {"engine"}, old, {"engine": (2, 2, 0)}, 10.0)
+        self.assertIsNone(hold["broken"])
+        self.assertEqual({"engine": 2}, hold["min_ready"])
+        run._held_push_observe(hold, pods, {"engine"}, old, {"engine": (2, 1, 0)}, 20.0)
+        self.assertEqual({"engine": 1}, hold["min_ready"], "the least ready count is kept")
+        pods["e1"]["newanno"] = True
+        run._held_push_observe(hold, pods, {"engine"}, old, {"engine": (2, 2, 0)}, 30.0)
+        self.assertEqual((30.0, "engine pod carries the pushed revision's annotation"), hold["broken"])
+        hold = run._held_push_new({"edit": "env", "expect": "held"})
+        pods["e1"] = {"comp": "engine", "alive": True, "uid": "u3", "newanno": False}
+        run._held_push_observe(hold, pods, {"engine"}, old, {"engine": (2, 2, 0)}, 5.0)
+        self.assertEqual((5.0, "engine pod set changed (1 new, 1 gone)"), hold["broken"])
+
+    def test_hold_tick_lands_the_fix_once_the_window_passes(self):
+        calls = []
+        orig_kubectl, orig_events = run.kubectl, run._isvc_events_since
+        run.kubectl = lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0, "", "")
+        run._isvc_events_since = lambda cid, since: [(run.HELD_PUSH_REASON, "OMENative component=engine instance=0 rejected update")]
+        try:
+            hold = run._held_push_new({"edit": "env", "expect": "held"})
+            hold["until"] = 100.0
+            pods = {"e0": {"comp": "engine", "alive": True, "uid": "u1", "newanno": False}}
+            args = ("p1", {"engine"}, {"engine": 1}, pods, {"engine": {"u1"}}, {"engine": (1, 1, 0)}, 0.0)
+            run._held_push_tick(hold, *args, 50.0)
+            self.assertEqual([], calls)
+            self.assertIsNone(hold["fixed_at"])
+            run._held_push_tick(hold, *args, 100.0)
+            self.assertEqual(100.0, hold["fixed_at"])
+            self.assertEqual(1, len(calls))
+            self.assertIn('"runner": null', calls[0][-1])
+            self.assertEqual(1, len(hold["events"]))
+            run._held_push_tick(hold, *args, 200.0)
+            self.assertEqual(1, len(calls), "the corrective push fires once")
+        finally:
+            run.kubectl, run._isvc_events_since = orig_kubectl, orig_events
+
+    def test_held_push_verdict(self):
+        def judge(hold, spec=None, hdr=None):
+            notes, checks = [], []
+            verdict = run._held_push_checks(hold, {"engine"}, "env", spec or {"engine": {}}, {"engine": 1}, {"engine": 2},
+                                            hdr or {}, "PASS", notes, checks)
+            return verdict, notes
+
+        good = {"until": 1.0, "before": {"engine": None}, "broken": None, "min_ready": {"engine": 2}, "fixed_at": 90.0,
+                "fix_error": None,
+                "events": [(run.HELD_PUSH_REASON, "OMENative component=engine instance=0 rejected update: "
+                                                  "InPlaceOnly strategy but diff exceeds container images")]}
+        self.assertEqual(("PASS", []), judge(good))
+        had = {"env": [{"name": "X", "value": "1"}]}
+        self.assertEqual("PASS", judge(dict(good, before={"engine": had}), spec={"engine": {"runner": had}})[0],
+                         "a member that had a runner before the push keeps it")
+        self.assertEqual("FAIL", judge(dict(good, broken=(3.0, "engine pod set changed (1 new, 1 gone)")))[0])
+        self.assertEqual("FAIL", judge(dict(good, min_ready={"engine": 1}))[0])
+        self.assertEqual("PASS", judge(dict(good, min_ready={"engine": 1}), hdr={"floor_soft": 1})[0],
+                         "a case that broke an Instance itself waives the hold floor")
+        self.assertEqual("FAIL", judge(dict(good, events=[("RestartTriggered", "component=engine instance=0")]))[0])
+        self.assertEqual("FAIL", judge(dict(good, fixed_at=None))[0])
+        self.assertEqual("FAIL", judge(good, spec={"engine": {"runner": {"env": []}}})[0])
+        self.assertEqual("INFRA-FAIL", judge(dict(good, fix_error="corrective push failed: x"))[0])
+
+
 class RolloutEditHeaderTest(unittest.TestCase):
     """edit=env is a rollout-mode pod-template edit: it validates, and it
     turns an in-place strategy's update mode into the hash-counted recreate

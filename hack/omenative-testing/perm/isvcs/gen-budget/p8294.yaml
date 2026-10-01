@@ -1,0 +1,22 @@
+# p8294: [gen] budget canary engine N=8 RecreatePod u25pct  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=8 ceil_d=0 ceil_r=0 co=none topo=engine canary=auto
+# reason: a 4-step auto canary (10/30/60/100 percent capacity and traffic, timed soaks); the engine resolves a percent budget as N x percent rounded up and clamped to N, so maxUnavailable 25% of 8 is 2; each capacity step rebuilds its Instances drain-first at most 2 at a time, so at least N-2 = 6 stay ready and nothing surges above N; the ladder walks every step to Stable with every Instance on the canary revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8294 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: "25%" } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

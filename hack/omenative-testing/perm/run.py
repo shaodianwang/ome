@@ -367,20 +367,28 @@ def parse_duration(v):
 
 def resolve_max_unavailable(mu, n):
     """maxUnavailable → absolute Instance count against n, resolved as the
-    engine resolves a per-Component budget: ints pass through; percent
-    strings are ceil(n * percent / 100), clamped to n, so '25%' of 8 = 2,
-    '100%' of 8 = 8, and at the small sizes '50%' of 1 and '25%' of 2 are
-    both 1 (a positive percent never rounds to zero). Anything unparsable = 0."""
-    if isinstance(mu, int):
-        return mu
-    s = str(mu).strip()
+    engine resolves a per-Component budget (resolve_budget, shared with
+    maxSurge): ints pass through, clamped at 0; percent strings are
+    ceil(n * percent / 100), clamped to n, so '25%' of 8 = 2, '100%' of 8 = 8,
+    and at the small sizes '50%' of 1 and '25%' of 2 are both 1 (a positive
+    percent never rounds to zero). Anything unparsable = 0."""
+    return resolve_budget(mu, n)
+
+
+def resolve_budget(value, n):
+    """A rolling-update budget (maxSurge or maxUnavailable) as an absolute
+    Instance count against n: the per-Component rounding rule the engine
+    applies to both, a percent rounded up and clamped to n."""
+    if isinstance(value, int):
+        return max(0, value)
+    s = str(value).strip()
     if s.endswith("%"):
         try:
-            return min(n, -(-n * int(float(s[:-1])) // 100))
+            return max(0, min(n, -(-n * int(float(s[:-1])) // 100)))
         except ValueError:
             return 0
     try:
-        return int(s)
+        return max(0, int(s))
     except (TypeError, ValueError):
         return 0
 
@@ -518,10 +526,12 @@ def update_modes(info, configured, edit=None):
     """Per-Component update mode the watcher counts by: "inplace" when the
     strategy patches the live pod (the new revision shows as the bumped
     annotation on the same pod), else "surge" (a new pod at a new revision
-    hash). A rollout with edit=env changes the pod template beyond container
-    images, so an in-place strategy resolves to a recreate and its pods are
-    counted by hash like any drain-first roll."""
-    return {c: ("inplace" if info["strat"].get(c) in IN_PLACE_TYPES and edit != "env" else "surge")
+    hash). A rollout with a template edit (TEMPLATE_EDITS) changes the pod
+    template beyond container images, so an in-place strategy resolves to a
+    recreate and its pods are counted by hash like any drain-first roll; an
+    image edit is the diff an in-place strategy patches, so it counts in
+    place."""
+    return {c: ("inplace" if info["strat"].get(c) in IN_PLACE_TYPES and edit not in TEMPLATE_EDITS else "surge")
             for c in configured}
 
 
@@ -2166,6 +2176,200 @@ def _midroll_patch(edit, bumped):
     else:
         life = {"restartPolicy": edit["value"]}
     return {"spec": {c: {"lifecycle": dict(life)} for c in sorted(bumped)}}
+
+
+# Rollout-mode edits ride the trigger beside the annotation bump as a runner
+# override on every bumped member. An image change is the one diff an
+# in-place strategy patches onto the live pod; an env, a resources or a
+# probe change exceeds container images, so on a single-pod Instance
+# InPlaceIfPossible resolves it to a recreate and InPlaceOnly refuses the
+# push, while a gang is rebuilt whole under either.
+IMAGE_EDIT = "image"
+TEMPLATE_EDITS = {"env", "resources", "probe"}
+ROLLOUT_EDITS = TEMPLATE_EDITS | {IMAGE_EDIT}
+# The override each template edit writes: a value the fixture runtime does
+# not already carry, inside its limits, so the pod still schedules and starts.
+EDIT_CPU_REQUEST = "60m"
+EDIT_PROBE_PERIOD_S = 3
+TEMPLATE_EDIT_OVERRIDES = {
+    "env": {"env": [{"name": "TEST_REV", "value": TRIGGER_VAL}]},
+    "resources": {"resources": {"requests": {"cpu": EDIT_CPU_REQUEST}}},
+    "probe": {"readinessProbe": {"periodSeconds": EDIT_PROBE_PERIOD_S}},
+}
+# expect=held on a push: the strategy cannot apply the change, so the push
+# must hold with a reason for the hold window (IDLE_HOLD_S), and then the
+# corrective push, the override dropped, lands. The reason is the event the
+# engine records when a strict in-place strategy refuses a diff.
+HELD_PUSH = "held"
+HELD_PUSH_REASON = "InPlaceUpdateNotPossible"
+
+
+def _held_push(hdr):
+    """Whether a rollout case expects its push to be held: expect=held on a
+    push whose edit the strategy cannot apply (not the idle-fault reading of
+    expect=held, which during=idle selects)."""
+    return (str(hdr.get("expect") or "") == HELD_PUSH and hdr.get("during") != IDLE_FAULT_PHASE
+            and str(hdr.get("edit") or "") in TEMPLATE_EDITS)
+
+
+def _runner_override_on(comp, override, pods_per_inst):
+    """The spec fragment that sets a runner override on comp: under leader on
+    a multi-node Component, whose leader runner must name its container, on
+    the Component itself otherwise."""
+    if pods_per_inst.get(comp, 1) > 1:
+        return {"leader": {"runner": {"name": MAIN_CONTAINER, **override}}}
+    return {"runner": override}
+
+
+def _rollout_trigger_patch(bumped, edit, image, pods_per_inst):
+    """The merge patch that triggers the roll: the annotation bump on every
+    bumped member, plus the runner override a rollout edit adds."""
+    patch = {"spec": {c: {"annotations": {TRIGGER_ANNO: TRIGGER_VAL, "ome.io/deploymentMode": "OMENative"}}
+                      for c in sorted(bumped)}}
+    override = None
+    if edit == IMAGE_EDIT:
+        override = {"image": str(image)}
+    elif edit in TEMPLATE_EDITS:
+        override = TEMPLATE_EDIT_OVERRIDES[edit]
+    if override:
+        for c in sorted(bumped):
+            patch["spec"][c].update(_runner_override_on(c, dict(override), pods_per_inst))
+    return patch
+
+
+def _runner_overrides(spec, bumped, pods_per_inst):
+    """{member: its runner override in the live spec, None when it has none}
+    (the leader's runner on a multi-node Component)."""
+    out = {}
+    for c in sorted(bumped):
+        comp = spec.get(c) or {}
+        out[c] = (comp.get("leader") or {}).get("runner") if pods_per_inst.get(c, 1) > 1 else comp.get("runner")
+    return out
+
+
+def _rollout_fix_patch(bumped, pods_per_inst, before):
+    """The corrective push after a held one: every bumped member's runner put
+    back to what it was before the push (a merge-patch null removes one the
+    member never had) with the annotation bump left in place, so the target
+    differs from the running revision by the annotation alone."""
+    return {"spec": {c: ({"leader": {"runner": before.get(c)}} if pods_per_inst.get(c, 1) > 1 else {"runner": before.get(c)})
+                     for c in sorted(bumped)}}
+
+
+def _edit_label(edit, image=None):
+    if edit == IMAGE_EDIT:
+        return f" + runner image {image}"
+    if edit in TEMPLATE_EDITS:
+        return f" + runner {edit} edit"
+    return ""
+
+
+def _held_push_new(hdr):
+    """State of a held push: when the hold ends, what broke it, the least
+    ready Instances seen per bumped Component while it held, the events read
+    at its end, and when the corrective push landed."""
+    if not _held_push(hdr):
+        return None
+    return {"until": None, "before": {}, "broken": None, "min_ready": {}, "events": [], "fixed_at": None, "fix_error": None}
+
+
+def _held_push_observe(hold, pod_state, bumped, old_uids, agg, now_rel):
+    """One sample of the hold: the bumped Components' pod sets must be the
+    pre-push ones (no pod created, deleted or patched onto the pushed
+    revision), and their ready counts are tracked for the capacity claim."""
+    for c in sorted(bumped):
+        alive = [p for p in pod_state.values() if p and p["alive"] and p["comp"] == c]
+        uids = {p["uid"] for p in alive if p.get("uid")}
+        before = old_uids.get(c, set())
+        rd = agg.get(c, (0, 0, 0))[1]
+        if c not in hold["min_ready"] or rd < hold["min_ready"][c]:
+            hold["min_ready"][c] = rd
+        if hold["broken"]:
+            continue
+        if uids != before:
+            hold["broken"] = (now_rel, f"{c} pod set changed ({len(uids - before)} new, {len(before - uids)} gone)")
+        elif any(p.get("newanno") for p in alive):
+            hold["broken"] = (now_rel, f"{c} pod carries the pushed revision's annotation")
+
+
+def _held_push_tick(hold, case_id, bumped, pods_per_inst, pod_state, old_uids, agg, trigger_ts, now):
+    """Observe the hold and, once its window has passed, read the reason the
+    push was held and land the corrective push (latched)."""
+    if not hold or hold["fixed_at"] is not None or hold["fix_error"] or trigger_ts is None:
+        return
+    _held_push_observe(hold, pod_state, bumped, old_uids, agg, now - trigger_ts)
+    if now < hold["until"]:
+        return
+    hold["events"] = _isvc_events_since(case_id, trigger_ts)
+    rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
+                 "-p", json.dumps(_rollout_fix_patch(bumped, pods_per_inst, hold["before"])))
+    if rr.returncode != 0:
+        hold["fix_error"] = f"corrective push failed: {rr.stderr.strip()[:160]}"
+        print(f"    ✗ {hold['fix_error']}")
+        return
+    hold["fixed_at"] = now - trigger_ts
+    print(f"\n  Phase 3b: the push held {IDLE_HOLD_S}s; corrective push (the runner put back) on "
+          f"{sorted(bumped)} at t={hold['fixed_at']:.0f}s")
+
+
+def _held_push_checks(hold, bumped, edit, spec, pods_per_inst, N, hdr, verdict, notes, checks):
+    """The held-push verdict. The push held: for the hold window no pod of a
+    bumped Component was created, deleted or patched onto the pushed revision
+    and every Instance stayed ready; the hold had a reason: an
+    InPlaceUpdateNotPossible event names the Component; then the corrective
+    push landed and the live spec carries the runner the member had before
+    the push. Convergence and in-place UID stability are the roll's usual
+    checks."""
+    if hold["fix_error"]:
+        verdict = "INFRA-FAIL"
+        notes.append(f"INFRA-FAIL: {hold['fix_error']}")
+        checks.append(f"  ✗ INFRA-FAIL (held push): {hold['fix_error']}")
+        return verdict
+    if hold["broken"]:
+        at, what = hold["broken"]
+        verdict = "FAIL"
+        notes.append(f"held push: {what} {at:.0f}s after the push")
+        checks.append(f"  ✗ held push: the {edit} edit was not held — {what} {at:.0f}s after the push "
+                      f"(a strict in-place strategy refuses a diff beyond container images, it does not recreate)")
+    else:
+        checks.append(f"  ✓ held push: the {edit} edit was held {IDLE_HOLD_S}s — no pod of {sorted(bumped)} "
+                      f"created, deleted or patched")
+    floor_soft = bool(hdr.get("floor_soft"))
+    for c in sorted(bumped):
+        mr = hold["min_ready"].get(c, N[c])
+        if mr >= N[c]:
+            checks.append(f"  ✓ held push: {c} kept all {N[c]} Instances ready through the hold")
+        elif floor_soft:
+            checks.append(f"  ⚠ held push: {c} dipped to {mr} ready Instance(s) through the hold — "
+                          f"case opted out (floor_soft=1); informational")
+        else:
+            verdict = "FAIL"
+            notes.append(f"held push: {c} dipped to {mr} ready through the hold")
+            checks.append(f"  ✗ held push: {c} dipped to {mr} ready Instance(s) (< N={N[c]}) while the push was held")
+    for c in sorted(bumped):
+        named = [m for reason, m in hold["events"] if reason == HELD_PUSH_REASON and f"component={c} instance=" in m]
+        if named:
+            checks.append(f"  ✓ held push: a {HELD_PUSH_REASON} event names {c}: {named[0][:160]}")
+        else:
+            verdict = "FAIL"
+            notes.append(f"held push: no {HELD_PUSH_REASON} event named {c}")
+            checks.append(f"  ✗ held push: no {HELD_PUSH_REASON} event named {c} during the hold (a hold without a reason)")
+    if hold["fixed_at"] is None:
+        verdict = "FAIL"
+        notes.append("held push: the corrective push never landed")
+        checks.append("  ✗ held push: the corrective push never landed")
+        return verdict
+    checks.append(f"  ✓ held push: the corrective push landed at t={hold['fixed_at']:.0f}s")
+    for c, runner in _runner_overrides(spec, bumped, pods_per_inst).items():
+        before = hold["before"].get(c)
+        if runner != before:
+            verdict = "FAIL"
+            notes.append(f"held push: {c} still carries the pushed runner override after the corrective push")
+            checks.append(f"  ✗ held push: the live spec of {c} carries {json.dumps(runner)[:120]} where the push "
+                          f"found {json.dumps(before)[:80]}")
+        else:
+            checks.append(f"  ✓ held push: the live spec of {c} carries the runner it had before the push")
+    return verdict
 
 
 def _midroll_tick(edit, case_id, bumped, pod_state, old_hashes, now_rel):
@@ -7233,12 +7437,15 @@ HDR_VALIDATORS = {
     "rt": lambda v: bool(str(v)),
     # edit= names the field the trigger changes. runtimerev: which runtime
     # field (material/env, image, resources, or a noop label touch). rollout:
-    # edit=env adds a TEST_REV runner env override to the annotation bump, a
-    # pod-template diff beyond container images, so an in-place strategy on a
-    # single-pod Component resolves to a recreate.
-    # edit=strategy:<type> / edit=restartPolicy:<policy> are mid-roll edits of
-    # every bumped member's lifecycle at during=settling|rotating.
-    "edit": lambda v: v in {"material", "noop", "image", "resources", "env"} or _midroll_edit(v) is not None,
+    # a runner override beside the annotation bump on every bumped member:
+    # edit=image (with img=) changes the runner image, the diff an in-place
+    # strategy patches onto the live pod; edit=env|resources|probe is a
+    # pod-template diff beyond container images, which InPlaceIfPossible on a
+    # single-pod Component resolves to a recreate and InPlaceOnly refuses
+    # (expect=held). edit=strategy:<type> / edit=restartPolicy:<policy> are
+    # mid-roll edits of every bumped member's lifecycle at
+    # during=settling|rotating.
+    "edit": lambda v: v in {"material", "noop", "image", "resources", "env", "probe"} or _midroll_edit(v) is not None,
     "img": lambda v: bool(str(v)) and not runtime_fixtures.unknown_tokens(str(v)),
     "break": lambda v: v == "stuck",
     # Scenario knobs. during= times a destructive op against an in-flight one:
@@ -7469,6 +7676,8 @@ def validate_case_file(path):
         errs.append(f"{path}:1: mode=runtimerev needs rt=<dedicated CSR name>")
     if fields.get("edit") == "image" and "img" not in fields:
         errs.append(f"{path}:1: edit=image needs img=<image-ref>")
+    if fields.get("edit") == "probe" and mode != "rollout":
+        errs.append(f"{path}:1: edit=probe is a rollout-mode runner edit (mode=rollout)")
     if _midroll_edit(fields.get("edit")) is not None:
         if mode != "rollout":
             errs.append(f"{path}:1: edit={fields['edit']} is a mid-roll edit of a rollout case (mode=rollout)")
@@ -7524,7 +7733,14 @@ def validate_case_file(path):
                     f"(needs rollback=1 during=held)")
     expect = str(fields.get("expect", ""))
     outcomes = _idle_expects(fault_kind)
-    if expect in IDLE_EXPECTS_ALL and (during != IDLE_FAULT_PHASE or expect not in outcomes):
+    if expect == HELD_PUSH and during != IDLE_FAULT_PHASE:
+        # A push the strategy cannot apply: held with a reason, then the
+        # corrective push lands.
+        if mode != "rollout" or str(fields.get("edit", "")) not in TEMPLATE_EDITS:
+            errs.append(f"{path}:1: expect=held on a push needs mode=rollout and "
+                        f"edit={'|'.join(sorted(TEMPLATE_EDITS))} (a change a strict in-place strategy "
+                        f"cannot apply); a held repair at idle needs during={IDLE_FAULT_PHASE}")
+    elif expect in IDLE_EXPECTS_ALL and (during != IDLE_FAULT_PHASE or expect not in outcomes):
         errs.append(f"{path}:1: expect={expect} reads a persistent fault's outcome on the idle service "
                     f"(needs during={IDLE_FAULT_PHASE}; fault={fields.get('fault') or '(none)'} has outcomes "
                     f"{', '.join(sorted(outcomes)) or 'none'})")
@@ -13341,7 +13557,8 @@ def run_case(case_id):
     policy, members, order, soak = info["policy"], info["members"], info["order"], info["soak"]
     pacing, ratio_tol = info["pacing"], info["ratio_tol"]
     edit = hdr.get("edit")
-    modes = update_modes(info, configured, edit)
+    hold = _held_push_new(hdr)       # expect=held: the push holds, then the corrective push lands in place
+    modes = update_modes(info, configured, None if hold else edit)
     rb = _rollback_new(hdr)          # optional rollback=1: re-apply the starting revision at during=<hook>
     # Pods per Instance: 1 ('default' single-pod runner) or 1 + worker.size
     # (multi-node leader + workers). The Instance-level counters use this to
@@ -13373,7 +13590,8 @@ def run_case(case_id):
 
     # Dynamic timeouts.
     init_budget = min(MAX_BUDGET_S, INIT_BASE_S + INIT_PER_POD_S * sum(N[c] for c in configured))
-    rotate_budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] for c in bumped) + soak)
+    rotate_budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] for c in bumped) + soak
+                        + (IDLE_HOLD_S if hold else 0))
     # Sequential rolls members one-after-another, not concurrently — the
     # wall-clock is the SUM of per-member rolls + handoffs, not the max. The
     # base formula (tuned for concurrent RollingUpdate/BlueGreen) under-budgets
@@ -13475,25 +13693,13 @@ def run_case(case_id):
                             print(f"  ✗ ROLLBACK SETUP FAILED: {rb['error']}")
                             state = "INFRA-FAIL"
                             break
-                        patch = {"spec": {c: {"annotations": {TRIGGER_ANNO: TRIGGER_VAL,
-                                                              "ome.io/deploymentMode": "OMENative"}}
-                                          for c in sorted(bumped)}}
-                        if edit == "env":
-                            # A pod-template diff beyond container images: the
-                            # runner env rides the revision, so the new revision
-                            # cannot be patched in place. A multi-node Component
-                            # renders its leader's runner, and a leader runner
-                            # must name the container it overrides.
-                            env = [{"name": "TEST_REV", "value": TRIGGER_VAL}]
-                            for c in sorted(bumped):
-                                if pods_per_inst.get(c, 1) > 1:
-                                    patch["spec"][c]["leader"] = {"runner": {"name": MAIN_CONTAINER, "env": env}}
-                                else:
-                                    patch["spec"][c]["runner"] = {"env": env}
+                        if hold:
+                            hold["before"] = _runner_overrides(_isvc_spec(case_id), bumped, pods_per_inst)
+                        patch = _rollout_trigger_patch(bumped, edit, hdr.get("img"), pods_per_inst)
                         if rb and rb["stuck"]:
                             _rollback_break_patch(patch, bumped, pods_per_inst)
                         print(f"\n  Phase 2: triggering rotation (bump {TRIGGER_ANNO}→{TRIGGER_VAL}"
-                              f"{' + runner env edit' if edit == 'env' else ''}"
+                              f"{_edit_label(edit, hdr.get('img'))}"
                               f"{' + a readiness probe the new revision never passes' if rb and rb['stuck'] else ''}"
                               f" on {sorted(bumped)})")
                         rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
@@ -13504,10 +13710,23 @@ def run_case(case_id):
                             break
                         trigger_ts = time.time()
                         deadline_rotate = trigger_ts + rotate_budget
-                        goal = (f"rollback at {rb['hook']}, then all N back on the starting revision" if rb
-                                else "all N on new revision")
-                        print(f"\n  Phase 3: watching rotation (peak ≤ {ce}/{cd}/{cr}; bumped {sorted(bumped)} → {goal})")
+                        if hold:
+                            hold["until"] = trigger_ts + IDLE_HOLD_S
+                            print(f"\n  Phase 3: the {edit} edit must hold {IDLE_HOLD_S}s with a reason "
+                                  f"(no pod of {sorted(bumped)} created, deleted or patched), then the corrective push lands")
+                        else:
+                            goal = (f"rollback at {rb['hook']}, then all N back on the starting revision" if rb
+                                    else "all N on new revision")
+                            print(f"\n  Phase 3: watching rotation (peak ≤ {ce}/{cd}/{cr}; bumped {sorted(bumped)} → {goal})")
                         state = "ROTATING"
+
+                # A held push changes no pod, so no watch event arrives to run
+                # the hooks below: the fault hook and the hold are ticked here.
+                if state == "ROTATING" and hold:
+                    _fault_tick({"fault": fault, "trigger_ts": trigger_ts, "old_hashes": old_hashes,
+                                 "pod_state": pod_state, "pods_per_inst": pods_per_inst, "inv": inv})
+                    _held_push_tick(hold, case_id, bumped, pods_per_inst, pod_state, old_uids,
+                                    aggregate(pod_state, old_hashes, modes, pods_per_inst), trigger_ts, now)
 
                 # CONVERGED is gated on `progressed`: we must have OBSERVED the rollout
                 # perturb the pods first, else stable_since latches on the pre-rollout
@@ -13648,6 +13867,7 @@ def run_case(case_id):
                 _midroll_tick(medit, case_id, bumped, pod_state, old_hashes, tnow)
                 # Rollback hook: read at every event (and between events, in the idle branch).
                 _rollback_tick(rb, case_id, bumped, pod_state, old_hashes, pods_per_inst, N, now, tnow)
+                _held_push_tick(hold, case_id, bumped, pods_per_inst, pod_state, old_uids, agg, trigger_ts, now)
                 # Per-Component timing for Sequential ordering/soak.
                 for c in bumped:
                     a, rd, up = agg.get(c, (0, 0, 0))
@@ -13869,12 +14089,13 @@ def run_case(case_id):
             checks.append(f"  ⓘ {c} strategy switched mid-roll ({info['strat'].get(c)} → {medit['value']}): "
                           f"UID stability is not a claim across the switch")
             continue
-        if edit == "env" and info["strat"].get(c) in IN_PLACE_TYPES:
-            # The env edit is a pod-template diff beyond container images, so
-            # the controller resolves the in-place strategy to a recreate; UID
-            # rotation is the expected outcome and the drain-first checks
-            # (ratio band, capacity floor) judge the roll.
-            checks.append(f"  ⓘ {c} in-place on a pod-template env edit → recreate (UID rotation expected; the diff exceeds container images)")
+        if edit in TEMPLATE_EDITS and info["strat"].get(c) in IN_PLACE_TYPES and not hold:
+            # A template edit is a pod-template diff beyond container images,
+            # so the controller resolves the in-place strategy to a recreate;
+            # UID rotation is the expected outcome and the drain-first checks
+            # (ratio band, capacity floor) judge the roll. A held push lands
+            # the corrective, annotation-only revision in place instead.
+            checks.append(f"  ⓘ {c} in-place on a pod-template {edit} edit → recreate (UID rotation expected; the diff exceeds container images)")
             continue
         if rb and rb["stuck"] and info["strat"].get(c) in IN_PLACE_TYPES:
             # The readiness probe is a pod-template diff beyond container
@@ -13922,6 +14143,11 @@ def run_case(case_id):
     # carries it on every bumped member.
     if medit:
         verdict = _midroll_checks(medit, _isvc_spec(case_id), bumped, verdict, notes, checks)
+
+    # Check 6d: a held push was held with a reason and the corrective push
+    # landed with no override left behind.
+    if hold:
+        verdict = _held_push_checks(hold, bumped, edit, _isvc_spec(case_id), pods_per_inst, N, hdr, verdict, notes, checks)
 
     # Check 7: Sequential ordering + soak (only meaningful with ≥2 bumped members in order).
     if state == "CONVERGED" and policy == "Sequential":

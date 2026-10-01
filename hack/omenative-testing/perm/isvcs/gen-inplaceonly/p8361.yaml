@@ -1,0 +1,15 @@
+# p8361: [gen] inplaceonly env engine-mn W1 N=4 rp None  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 co=none topo=engine-mn edit=env
+# reason: the push changes the runner env, a diff beyond container images; a gang runs every in-place strategy as a whole-gang recreate (eligibility reads the leader's spec alone, and a patched leader beside unpatched workers would split the gang), so InPlaceOnly refuses nothing on it: each gang is rebuilt at the new revision within maxUnavailable 1 (floor N-1), never surging above N; restart policy None plays no part, nothing restarts
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8361 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "InPlaceOnly", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

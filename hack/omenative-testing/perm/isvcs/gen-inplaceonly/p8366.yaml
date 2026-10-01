@@ -1,0 +1,15 @@
+# p8366: [gen] inplaceonly resources engine-mn W1 N=4 rp RecreateInstance  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 co=none topo=engine-mn edit=resources
+# reason: the push changes the runner CPU request, a diff beyond container images; a gang runs every in-place strategy as a whole-gang recreate (eligibility reads the leader's spec alone, and a patched leader beside unpatched workers would split the gang), so InPlaceOnly refuses nothing on it: each gang is rebuilt at the new revision within maxUnavailable 1 (floor N-1), never surging above N; restart policy RecreateInstanceOnPodRestart plays no part, nothing restarts
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8366 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "InPlaceOnly", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

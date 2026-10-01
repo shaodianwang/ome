@@ -171,6 +171,22 @@ runners (run.py + the KIND CI lane) already implement:
                           short of one pod (fault=quota:<n>; on a gang, room
                           for all but one member), under a repair at steady
                           state (mode=kill) and under a roll, lifted or never
+    gen-budget/    p8200+  percent budgets as the engine resolves them:
+                          maxSurge (SurgeThenDrain) and maxUnavailable
+                          (RecreatePod) at 10, 25 and 50 percent on fleets of
+                          4 and 8, single-pod and gang, for a plain push, a
+                          push with one Instance crash-looping on the running
+                          revision, and a canary ladder; each case states the
+                          rounding rule and the ceiling or floor it yields
+    gen-inplaceonly/ p8330+ the strict in-place strategy on its own terms: an
+                          image change rolls in place with stable pod
+                          identities; an env, resources or probe change is
+                          refused on a single-pod Instance (expect=held: the
+                          hold, its reason, then the corrective push lands
+                          in place) and rebuilds a gang whole; a crash loop
+                          at idle is repaired by a rebuild, and under a push
+                          it is fixed in place or waits for the corrective
+                          push
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -402,6 +418,8 @@ GEN_BLOCKS = {
     "gen-evict": (7400, 7440),
     "gen-preempt": (7440, 7500),
     "gen-pending": (7500, 7600),
+    "gen-budget": (8200, 8330),
+    "gen-inplaceonly": (8330, 8400),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -826,10 +844,17 @@ def is_mn(topo):
     return topo.endswith("-mn")
 
 
+def budget_count(n, value):
+    """A rolling-update budget as the engine resolves it against n
+    Instances: an int as is, a percent as n x percent / 100 rounded up and
+    clamped to n, for maxSurge and maxUnavailable alike."""
+    if isinstance(value, str) and value.endswith("%"):
+        return min(n, math.ceil(n * int(value[:-1]) / 100))
+    return value
+
+
 def surge_count(n, s):
-    if isinstance(s, str) and s.endswith("%"):
-        return math.ceil(n * int(s[:-1]) / 100)
-    return s
+    return budget_count(n, s)
 
 
 def budget_tag(strat, surge, unavail):
@@ -3171,6 +3196,271 @@ def emit_pending(add):
                             cell=("pending", cause, "roll", topo, w, strat, rp, lift))
 
 
+# ── gen-budget: percent budgets as the engine resolves them ─────────────────
+# The engine resolves a percent budget, maxSurge and maxUnavailable alike, as
+# N x percent / 100 rounded up and clamped to N (the per-Component budget of
+# the escalation package); the Deployment convention of rounding
+# maxUnavailable down is not its rule. Each strategy spends one budget:
+# SurgeThenDrain its maxSurge above N, RecreatePod its maxUnavailable below
+# N. Three percents at two fleet sizes: 10 percent rounds up to 1 at both
+# (rounded down it would be 0 and no roll could start), 25 and 50 percent
+# scale with N. The gang shapes run at width 1; the prefill/decode gang
+# stays at the small fleet (its 34-pod fleet at 8 would cost a lane shard
+# per case, and the rounding is a function of N and the percent, which the
+# single-pod cells at 8 carry). The crash-loop push runs under restart
+# policy None (the roll owns the broken Instance under either policy); the
+# canary ladder is the story families' four-step auto ladder.
+BUDGET_PERCENTS = ["10%", "25%", "50%"]
+BUDGET_AXES = [("SurgeThenDrain", "maxSurge"), ("RecreatePod", "maxUnavailable")]
+BUDGET_SHAPES = [("engine", 4, 0), ("engine", 8, 0), ("pd", 4, 0), ("pd", 8, 0),
+                 ("engine-mn", 4, 1), ("engine-mn", 8, 1), ("pd-mn", 4, 1)]
+BUDGET_CRASH_RP = "None"
+BUDGET_LADDER_SHAPES = [("engine", 4, 0), ("engine", 8, 0), ("pd", 4, 0), ("pd", 8, 0), ("engine-mn", 4, 1)]
+
+
+def _budget_split(strat, pct):
+    """(maxSurge, maxUnavailable) with the percent on the budget the strategy spends."""
+    return (pct, 0) if strat == "SurgeThenDrain" else (0, pct)
+
+
+def _budget_rule(n, pct, strat):
+    """The rounding rule, with this cell's numbers, for the case's second line."""
+    which = "maxSurge" if strat == "SurgeThenDrain" else "maxUnavailable"
+    out = (f"the engine resolves a percent budget as N x percent rounded up and clamped to N, so "
+           f"{which} {pct} of {n} is {budget_count(n, pct)}")
+    if n * int(pct[:-1]) < 100:
+        out += " (rounded down it would be 0 and the roll could not start)"
+    return out
+
+
+def _budget_bounds(n, pct, strat, gang):
+    k = budget_count(n, pct)
+    if strat == "SurgeThenDrain":
+        out = f"the surge keeps the peak at or under N+{k} = {n + k} Instances and never drops below N ready"
+    else:
+        out = f"the drain-first roll keeps at least N-{k} = {n - k} Instances ready and never surges above N"
+    if gang:
+        out += ", each gang Instance replaced or rebuilt whole"
+    return out
+
+
+def _budget_push_reason(topo, n, pct, strat):
+    out = (f"plain bump; {_budget_rule(n, pct, strat)}; {_budget_bounds(n, pct, strat, is_mn(topo))}; "
+           f"every Instance ends on the new revision")
+    if is_pd(topo):
+        out += "; decoder and router are negative controls (co=none)"
+    return out
+
+
+def _budget_crash_reason(topo, n, pct, strat):
+    k = budget_count(n, pct)
+    out = (f"{_crash_how('start')}; its Instance is off the target from that moment, so the roll owns it: "
+           f"{CRASH_LANDS[strat]}, admitted within the same budget as its peers, and no repair is recorded for it "
+           f"after the bump; {_budget_rule(n, pct, strat)}; ")
+    if strat == "SurgeThenDrain":
+        out += f"the peak stays at or under N+{k} = {n + k}"
+    else:
+        out += f"nothing surges above N and at most {k} Instance(s) are drained at once"
+    out += "; every Instance ends on the new revision; floor waived — the crash itself costs settled capacity for the length of the roll"
+    if is_pd(topo):
+        out += "; decoder and router are negative controls (co=none)"
+    return out
+
+
+def _budget_ladder_reason(topo, n, pct, strat):
+    k = budget_count(n, pct)
+    steps = "/".join(str(tw) for _nc, tw in STORY_LADDER)
+    out = (f"a {len(STORY_LADDER)}-step auto canary ({steps} percent capacity and traffic, timed soaks); "
+           f"{_budget_rule(n, pct, strat)}; ")
+    if strat == "SurgeThenDrain":
+        out += (f"each capacity step builds its Instances at most {k} at a time, so the peak stays at or under "
+                f"N+{k} = {n + k} and the fleet never drops below N ready")
+    else:
+        out += (f"each capacity step rebuilds its Instances drain-first at most {k} at a time, so at least "
+                f"N-{k} = {n - k} stay ready and nothing surges above N")
+    out += "; the ladder walks every step to Stable with every Instance on the canary revision"
+    if is_pd(topo):
+        out += "; decoder and router are group members on their canonical surge budget"
+    return out
+
+
+def emit_budget(add):
+    for topo, n, w in BUDGET_SHAPES:
+        for strat, which in BUDGET_AXES:
+            for pct in BUDGET_PERCENTS:
+                surge, unavail = _budget_split(strat, pct)
+                kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge), co="none", topo=topo)
+                meta = dict(strat=strat, verb="none", budget=f"{which} {pct}")
+                desc = f"{GEN_MARK} budget push {shape_tag(topo, w)} N={n} {strat} {budget_tag(strat, surge, unavail)}"
+                life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+                add("gen-budget", desc, kv, comps(topo, n, w, life), _budget_push_reason(topo, n, pct, strat), meta,
+                    cell=("budget", "push", topo, w, n, strat, pct))
+    for topo, n, w in BUDGET_SHAPES:
+        for strat, which in BUDGET_AXES:
+            for pct in BUDGET_PERCENTS:
+                surge, unavail = _budget_split(strat, pct)
+                kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge), fault="crashloop:old", form="start",
+                          floor_soft=1, co="none", topo=topo)
+                meta = dict(strat=strat, verb="crashloop:start", rp=BUDGET_CRASH_RP, victim="engine", budget=f"{which} {pct}")
+                desc = (f"{GEN_MARK} budget crashloop start {shape_tag(topo, w)} N={n} {strat} "
+                        f"{budget_tag(strat, surge, unavail)} rp {BUDGET_CRASH_RP}")
+                life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[BUDGET_CRASH_RP])
+                d_life = lib.lifecycle(restart=RP_FULL[BUDGET_CRASH_RP]) if is_pd(topo) else None
+                add("gen-budget", desc, kv, comps(topo, n, w, life, d_life=d_life),
+                    _budget_crash_reason(topo, n, pct, strat), meta,
+                    cell=("budget", "crashloop", topo, w, n, strat, pct))
+    for topo, n, w in BUDGET_LADDER_SHAPES:
+        for strat, which in BUDGET_AXES:
+            for pct in BUDGET_PERCENTS:
+                surge, unavail = _budget_split(strat, pct)
+                kv = dict(mode="canary", **counts(topo, n), **ceilings(topo, n, strat, surge), canary="auto",
+                          co="none", topo=topo)
+                if is_pd(topo):
+                    # Decoder and router are group members on their canonical surge lifecycle.
+                    kv.update(ceil_d=n + 1, ceil_r=lib.NR + 1)
+                meta = dict(strat=strat, verb="canary", budget=f"{which} {pct}")
+                desc = f"{GEN_MARK} budget canary {shape_tag(topo, w)} N={n} {strat} {budget_tag(strat, surge, unavail)}"
+                case_comps = comps(topo, n, w, lib.lifecycle(strat=strat, surge=surge, unavail=unavail))
+                add("gen-budget", desc, kv, case_comps, _budget_ladder_reason(topo, n, pct, strat), meta,
+                    cell=("budget", "canary", topo, w, n, strat, pct),
+                    coord=story_group(case_comps, story_ladder("auto")))
+
+
+# ── gen-inplaceonly: the strict in-place strategy on its own terms ──────────
+# InPlaceOnly applies a diff confined to container images and nothing else.
+# On a single-pod Instance any other template change is refused: the engine
+# records an InPlaceUpdateNotPossible event, stamps nothing, and the push
+# holds until a push it can apply lands (expect=held drives the hold, its
+# reason and the corrective push). A gang runs every in-place strategy as a
+# whole-gang recreate (eligibility reads the leader's spec alone), so the
+# strategy refuses nothing on it. A repair is not an update, so a crash loop
+# at idle is repaired by a rebuild whatever the strategy; under a push the
+# roll owns the broken Instance and a repair yields to it, so the fix lands
+# in place (an image change patches the crashing pod itself) or waits for
+# the corrective push. Shapes at one fleet size, both restart policies: the
+# policy is live under the crash loops and a negative control under the
+# pushes (nothing restarts); the budget is the canonical maxUnavailable 1.
+IPO_STRAT = "InPlaceOnly"
+IPO_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 4, 1)]
+IPO_TEMPLATE_EDITS = ["env", "resources", "probe"]
+IPO_EDIT_WHAT = {"env": "runner env", "resources": "runner CPU request", "probe": "runner readiness period"}
+IPO_IDLE_CRASHES = [("start", "None"), ("start", "RecreateInstance"), ("load", "RecreateInstance")]
+IPO_GANG_RULE = ("a gang runs every in-place strategy as a whole-gang recreate (eligibility reads the leader's spec "
+                 "alone, and a patched leader beside unpatched workers would split the gang), so InPlaceOnly refuses "
+                 "nothing on it")
+IPO_FLOOR_WAIVED = "floor waived — the crash itself costs settled capacity for the length of the roll"
+
+
+def _ipo_lifecycles(topo, rp):
+    life = lib.lifecycle(strat=IPO_STRAT, surge=0, unavail=1, restart=RP_FULL[rp])
+    return life, (lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None)
+
+
+def _ipo_controls(topo):
+    return "; decoder and router are negative controls (co=none)" if is_pd(topo) else ""
+
+
+def _ipo_image_reason(topo, rp):
+    if is_mn(topo):
+        out = (f"the push changes the runner image; {IPO_GANG_RULE}: each gang is rebuilt at the new revision within "
+               f"maxUnavailable 1 (floor N-1), never surging above N, UIDs rotate")
+    else:
+        out = ("the push changes the runner image, the one diff InPlaceOnly patches onto the live pod: every engine pod "
+               "is patched in place (UIDs stable) and ends running the new image, one at a time within maxUnavailable 1 "
+               "(floor N-1), never surging above N")
+    return out + f"; restart policy {RP_FULL[rp]} plays no part, nothing restarts{_ipo_controls(topo)}; every Instance ends on the new revision"
+
+
+def _ipo_held_reason(topo, edit, rp):
+    what = IPO_EDIT_WHAT[edit]
+    if is_mn(topo):
+        out = (f"the push changes the {what}, a diff beyond container images; {IPO_GANG_RULE}: each gang is rebuilt at "
+               f"the new revision within maxUnavailable 1 (floor N-1), never surging above N")
+    else:
+        out = (f"the push changes the {what}, a diff beyond container images, which InPlaceOnly refuses on a single-pod "
+               f"Instance: for the hold window nothing is recreated, patched or surged, every Instance keeps serving on "
+               f"the running revision at N, and an InPlaceUpdateNotPossible event says why; then the corrective push "
+               f"drops the override and, an annotation-only diff, lands in place on every Instance with UIDs stable")
+    return out + f"; restart policy {RP_FULL[rp]} plays no part, nothing restarts{_ipo_controls(topo)}"
+
+
+def _ipo_idle_reason(topo, form, rp):
+    trigger = ("the crash-loop repair (a pod stuck past the grace)" if rp == "None"
+               else "the runner-restart repair (RecreateInstanceOnPodRestart)")
+    scope = "the whole gang" if is_mn(topo) else "the pod"
+    return (f"{_break_how(form, 'engine', 'on the settled service')} under InPlaceOnly; a repair is not an update, so "
+            f"the update strategy plays no part and {trigger} rebuilds the Instance in place ({scope}, every pod new, "
+            f"Ready and serving on the running revision) within the budget, a RestartTriggered event names it, and "
+            f"nothing surges above N")
+
+
+def _ipo_crash_image_reason(topo, rp):
+    if is_mn(topo):
+        lands = f"{IPO_GANG_RULE}, so the crashing gang is rebuilt whole at the new revision"
+    else:
+        lands = ("the diff is images only, so the in-place patch lands the new image on the crashing pod itself, which "
+                 "starts and serves (same UID)")
+    return (f"{_crash_how('start')}; its Instance is off the target from that moment, so the roll owns it: {lands}, "
+            f"admitted within maxUnavailable 1, and no repair is recorded for it after the bump under restart policy "
+            f"{RP_FULL[rp]}; every Instance ends on the new revision; {IPO_FLOOR_WAIVED}{_ipo_controls(topo)}")
+
+
+def _ipo_crash_held_reason(topo, rp):
+    if is_mn(topo):
+        return (f"{_crash_how('start')} as a push that changes the runner env lands; {IPO_GANG_RULE}: the crashing gang "
+                f"is rebuilt whole at the new revision within maxUnavailable 1 with no repair recorded for it after the "
+                f"bump under restart policy {RP_FULL[rp]}; every Instance ends on the new revision; {IPO_FLOOR_WAIVED}")
+    return (f"{_crash_how('start')} as a push that changes the runner env lands, a diff InPlaceOnly refuses: the roll "
+            f"owns the broken Instance from the bump and a repair yields to the roll, so under restart policy "
+            f"{RP_FULL[rp]} the Instance stays broken through the hold while the healthy Instances keep serving and an "
+            f"InPlaceUpdateNotPossible event says why; the corrective push drops the env override and lands in place on "
+            f"every Instance, the broken one included (its image is patched back, same UID), with no repair recorded "
+            f"for it after the bump; floor waived — the crash itself costs settled capacity until the corrective push "
+            f"lands{_ipo_controls(topo)}")
+
+
+def emit_inplaceonly(add):
+    for topo, n, w in IPO_SHAPES:
+        gang = is_mn(topo)
+        landing = "recreate" if gang else "held"
+        base = dict(**counts(topo, n), **ceilings(topo, n, IPO_STRAT, 0), co="none", topo=topo)
+        for rp in RESTARTS:
+            life, d_life = _ipo_lifecycles(topo, rp)
+            add("gen-inplaceonly", f"{GEN_MARK} inplaceonly image {shape_tag(topo, w)} N={n} rp {rp}",
+                dict(base, edit="image", img=ALT_IMAGE), comps(topo, n, w, life, d_life=d_life),
+                _ipo_image_reason(topo, rp), dict(strat=IPO_STRAT, verb="image", rp=rp),
+                cell=("inplaceonly", "image", topo, w, rp))
+            for edit in IPO_TEMPLATE_EDITS:
+                kv = dict(base, edit=edit)
+                if not gang:
+                    kv["expect"] = "held"
+                add("gen-inplaceonly", f"{GEN_MARK} inplaceonly {edit} {shape_tag(topo, w)} N={n} rp {rp}", kv,
+                    comps(topo, n, w, life, d_life=d_life), _ipo_held_reason(topo, edit, rp),
+                    dict(strat=IPO_STRAT, verb=f"{edit}@{landing}", rp=rp),
+                    cell=("inplaceonly", edit, topo, w, rp))
+        for form, rp in IPO_IDLE_CRASHES:
+            life, d_life = _ipo_lifecycles(topo, rp)
+            kv = dict(base, fault="crashloop:old", form=form, during=IDLE_PHASE, expect="repaired")
+            add("gen-inplaceonly", f"{GEN_MARK} inplaceonly crashloop idle {form} {shape_tag(topo, w)} N={n} rp {rp}", kv,
+                comps(topo, n, w, life, d_life=d_life), _ipo_idle_reason(topo, form, rp),
+                dict(strat=IPO_STRAT, verb=f"crashloop:{form}@idle", rp=rp, victim="engine"),
+                cell=("inplaceonly", "idle", form, topo, w, rp))
+        for rp in RESTARTS:
+            life, d_life = _ipo_lifecycles(topo, rp)
+            crash = dict(base, fault="crashloop:old", form="start", floor_soft=1)
+            add("gen-inplaceonly", f"{GEN_MARK} inplaceonly crashloop start image {shape_tag(topo, w)} N={n} rp {rp}",
+                dict(crash, edit="image", img=ALT_IMAGE), comps(topo, n, w, life, d_life=d_life),
+                _ipo_crash_image_reason(topo, rp), dict(strat=IPO_STRAT, verb="crashloop:start+image", rp=rp, victim="engine"),
+                cell=("inplaceonly", "crash-image", topo, w, rp))
+            kv = dict(crash, edit="env")
+            if not gang:
+                kv["expect"] = "held"
+            add("gen-inplaceonly", f"{GEN_MARK} inplaceonly crashloop start env {shape_tag(topo, w)} N={n} rp {rp}", kv,
+                comps(topo, n, w, life, d_life=d_life), _ipo_crash_held_reason(topo, rp),
+                dict(strat=IPO_STRAT, verb=f"crashloop:start+env@{landing}", rp=rp, victim="engine"),
+                cell=("inplaceonly", "crash-env", topo, w, rp))
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 def build_outputs():
     """{relative path under isvcs/: file text} — the entire owned output set."""
@@ -3247,6 +3537,8 @@ def build_outputs():
     emit_evict(add)
     emit_preempt(add)
     emit_pending(add)
+    emit_budget(add)
+    emit_inplaceonly(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -3336,6 +3628,8 @@ def manifest(rows):
     lines += table_if("By runtime edit (runtime-edit-repair)", "edit")
     lines += table("By lift (preempt and pending families)",
                    tally(lambda kv, m: m["lift"], where=lambda kv, m: "lift" in m))
+    lines += table("By percent budget (gen-budget)",
+                   tally(lambda kv, m: m["budget"], where=lambda kv, m: "budget" in m))
     parked_rows = [(f, n, m["parked"]) for f, n, _kv, m in rows if "parked" in m]
     if parked_rows:
         lines += ["### Parked cells (XFAIL on a tracked issue)", "",
@@ -3593,6 +3887,47 @@ def manifest(rows):
         " the whole gang short of one member. A gang surge roll held to the"
         " end by that quota is the tight-cluster family's cell, so the pending"
         " family leaves its `quota:<members-1> lift=never` cell out.",
+        "- gen-budget drives the percent budgets the engine resolves: maxSurge under"
+        " SurgeThenDrain and maxUnavailable under RecreatePod at"
+        f" {', '.join(BUDGET_PERCENTS)} on fleets of 4 and 8 Instances, for a plain"
+        " push, a push with one engine Instance crash-looping on the running"
+        " revision (form=start, restart policy None: the roll owns the broken"
+        " Instance under either policy) and the story families' four-step auto"
+        " canary. The engine resolves a percent budget as N x percent rounded up"
+        " and clamped to N, for both budgets alike (the Deployment convention of"
+        " rounding maxUnavailable down is not its rule), and every case states"
+        " the rule with its own numbers: at 10 percent both fleets round up to 1,"
+        " where rounding down would leave 0 and no roll could start, so the roll"
+        " converging is the proof; at 25 and 50 percent the ceiling or floor"
+        " scales with N. Left out, with the reason: the in-place strategies,"
+        " whose maxUnavailable the drain-first cells already read and whose own"
+        " family is gen-inplaceonly; the prefill/decode gang at 8 Instances, a"
+        " 34-pod fleet that would cost a lane shard per case while the rounding"
+        " is a function of N and the percent, which the single-pod cells at 8"
+        " carry; the crash form load and the restart policy under the crash"
+        " loop (gen-crashloop crosses both at 25 percent); and the gangs under"
+        " the canary beyond the engine gang at 4 (the pod budget of a canary"
+        " lane). The capacity floor is waived on the crash-loop cells as on"
+        " every crash-loop case; the ceiling stays hard.",
+        "- gen-inplaceonly drives InPlaceOnly on what sets it apart. An image"
+        " change is the one diff it patches onto the live pod: on a single-pod"
+        " Instance the roll lands in place with UIDs stable; a gang runs every"
+        " in-place strategy as a whole-gang recreate (eligibility reads the"
+        " leader's spec alone), so it is rebuilt whole and never refused. An"
+        " env, a resources or a probe change exceeds container images: on a"
+        " single-pod Instance the push is refused (`expect=held`: nothing is"
+        " recreated, patched or surged for the hold window, an"
+        " InPlaceUpdateNotPossible event says why, then the corrective push"
+        " drops the override and lands in place); on a gang it is a whole-gang"
+        " recreate. A crash loop at idle is repaired by a rebuild, since a"
+        " repair is not an update (form=load under restart policy None is left"
+        " out, as in every idle family: no repair is promised there). A crash"
+        " loop under a push belongs to the roll: an image push patches the"
+        " crashing pod itself and it serves again; an env push is refused, the"
+        " repair yields to the roll, and the Instance waits broken for the"
+        " corrective push, which patches it in place. One fleet size (4), both"
+        " restart policies everywhere (live under the crash loops, a negative"
+        " control under the pushes), the canonical budget maxUnavailable 1.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

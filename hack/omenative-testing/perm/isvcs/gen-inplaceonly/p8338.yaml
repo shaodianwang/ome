@@ -1,0 +1,13 @@
+# p8338: [gen] inplaceonly crashloop idle start engine N=4 rp None  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 fault=crashloop:old co=none topo=engine form=start during=idle expect=repaired
+# reason: the engine's highest Instance's pod on the settled service is pointed at an image with no shell, so it crashes at every start and is never Ready again under InPlaceOnly; a repair is not an update, so the update strategy plays no part and the crash-loop repair (a pod stuck past the grace) rebuilds the Instance in place (the pod, every pod new, Ready and serving on the running revision) within the budget, a RestartTriggered event names it, and nothing surges above N
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8338 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "InPlaceOnly", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

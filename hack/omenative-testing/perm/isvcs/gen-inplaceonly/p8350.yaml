@@ -1,0 +1,23 @@
+# p8350: [gen] inplaceonly env pd N=4 rp RecreateInstance  Ne=4 Nd=4 Nr=2 ceil_e=4 ceil_d=4 ceil_r=2 co=none topo=pd edit=env expect=held
+# reason: the push changes the runner env, a diff beyond container images, which InPlaceOnly refuses on a single-pod Instance: for the hold window nothing is recreated, patched or surged, every Instance keeps serving on the running revision at N, and an InPlaceUpdateNotPossible event says why; then the corrective push drops the override and, an annotation-only diff, lands in place on every Instance with UIDs stable; restart policy RecreateInstanceOnPodRestart plays no part, nothing restarts; decoder and router are negative controls (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8350 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "InPlaceOnly", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

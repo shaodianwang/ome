@@ -163,6 +163,8 @@ PREARM_VERBS = {"rollback", "pause", "promote", "repin", "resume", "timeout-set"
                 "planedit", "groupremove", "scale", "planinvalid"}
 UPDATE_STRATEGIES = {"SurgeThenDrain", "RecreatePod", "InPlaceIfPossible", "InPlaceOnly"}
 RESTART_POLICY_NAMES = {"None", "RecreateInstanceOnPodRestart"}
+# The rollout-mode runner edits a push carries beside its annotation bump.
+ROLLOUT_EDITS = {"image", "env", "resources", "probe"}
 IDLE_EXPECTS = {"repaired", "held", "heals", "parked", "relocated"}
 
 HEADER_VALUES = {
@@ -246,7 +248,7 @@ def _fault(v):
 def _edit(v):
     kind, sep, value = str(v).partition(":")
     if not sep:
-        return v in {"material", "noop", "image", "resources", "env"}
+        return v in {"material", "noop", "image", "resources", "env", "probe"}
     return value in {"strategy": UPDATE_STRATEGIES, "restartPolicy": RESTART_POLICY_NAMES}.get(kind, set())
 
 
@@ -551,7 +553,10 @@ def classify_operation(h, mode, size):
         detail = "persistent fault at idle" + (f", {pause} {h['pauseat']} the repair" if pause else "")
         detail += ", the fix pushed while paused" if h.get("push") else ""
         return "steady state", detail, pause or ""
-    return "push", "env edit" if edit == "env" else "annotation bump", ""
+    detail = f"{edit} edit" if edit in ROLLOUT_EDITS else "annotation bump"
+    # A push the strategy cannot apply is held and the corrective push lands.
+    second = "push" if h.get("expect") == "held" else ""
+    return "push", detail, second
 
 
 def pairing_second_operation(h):
@@ -759,7 +764,8 @@ def classify_overlap(h, mode, operation, second, faults, verbs):
         overlap.append("operation+fault")
     if second:
         overlap.append("operation+operation")
-    if mode == "rebump" or verbs & {"rebump", "rebump-fix", "rtedit"} or h.get("proto2"):
+    held_push = operation == "push" and h.get("expect") == "held"
+    if mode == "rebump" or verbs & {"rebump", "rebump-fix", "rtedit"} or h.get("proto2") or held_push:
         overlap.append("two revisions in a row")
     return overlap
 

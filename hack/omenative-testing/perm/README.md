@@ -98,7 +98,8 @@ perm/
 │   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/ gen-rollback/ gen-crashloop-new/ gen-crashloop-group/ gen-pause-repair/ gen-ops-held/ gen-runtime-edit-repair/ gen-migrate-bump/  — generated hot core (see isvcs/MANIFEST.md)
 │   ├── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary
 │   ├── gen-size/ gen-router-gang/  — generated small fleets (one and two Instances per Component) and the engine gang behind a router
-│   └── gen-readiness/ gen-gang-member/ gen-tight/ gen-evict/ gen-preempt/ gen-pending/  — generated fault families (see isvcs/MANIFEST.md)
+│   ├── gen-readiness/ gen-gang-member/ gen-tight/ gen-evict/ gen-preempt/ gen-pending/  — generated fault families (see isvcs/MANIFEST.md)
+│   └── gen-budget/ gen-inplaceonly/  — percent budgets as the engine resolves them; the strict in-place strategy on its own terms
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -214,11 +215,16 @@ For each case:
    (every coordination-group member when the case declares a group;
    `bump=<members>` names the members to bump instead, so an engine-only
    change can land under a group whose other members stay as negative
-   controls). With
-   `edit=env` the same patch also sets the bumped runner's `TEST_REV` env, a
-   pod-template diff beyond container images: an in-place strategy then
-   resolves to a recreate, UID rotation is expected, and the drain-first
-   checks (ratio band, capacity floor) judge the roll.
+   controls). A rollout edit rides the same patch as a runner override on
+   every bumped member: `edit=image` (with `img=`) changes the runner image,
+   the one diff an in-place strategy patches onto the live pod;
+   `edit=env|resources|probe` is a pod-template diff beyond container
+   images (the runner's `TEST_REV` env, its CPU request, its readiness
+   period), so `InPlaceIfPossible` on a single-pod Component resolves it to
+   a recreate (UID rotation is expected and the drain-first checks judge the
+   roll), a gang is rebuilt whole under either in-place variant, and
+   `InPlaceOnly` on a single-pod Component refuses it: such a case states
+   `expect=held` (see *A push the strategy cannot apply*).
 5. Sample the trajectory until convergence or the budget expires (the budget
    scales with pod count and is extended for Sequential coordination).
 6. Replay the trajectory → **peak** alive and **final** alive per Component +
@@ -954,6 +960,37 @@ request: the engine's own migration is a born-terminal relocation record
 written when a lost Instance is rebuilt elsewhere, so only a node loss
 provokes it, and that belongs to the node-loss family.
 
+### A push the strategy cannot apply (`edit=env|resources|probe expect=held`)
+
+`InPlaceOnly` applies a diff confined to container images and nothing else;
+on a single-pod Component any other template change is refused, and a gang
+is rebuilt whole under either in-place variant, so it is never refused
+there. A rollout case whose `edit=` is a template change states
+`expect=held` when the strategy must refuse it, and the runner then judges
+the operator's story in two halves. For the hold window (`IDLE_HOLD_S`,
+90 s scaled by `OME_TEST_TIMEOUT_MULT`) after the push no pod of a bumped
+Component may be created, deleted or patched onto the pushed revision
+(same UIDs, no pod carrying the bumped annotation), every Instance must
+stay ready (`floor_soft=1` waives this where the case broke an Instance
+itself), and an `InPlaceUpdateNotPossible` event must name the Component:
+the engine records one when it refuses the diff, and a hold with no reason
+fails. Then the runner lands the corrective push, every bumped member's
+runner put back to what it was before the push (removed where it had none)
+with the annotation bump left in place, so the target differs from the
+running revision by the annotation alone; the usual rollout checks judge
+that roll, counted in place (same UIDs, the bumped annotation on every
+pod), and the live spec must carry the pre-push runner at the end. The
+engine's refusal leaves the rows untouched (nothing is stamped Updating),
+and a repair of a broken Instance yields to a roll whose target it is not,
+so a crash-looping Instance under a held push stays broken until the
+corrective push patches it in place (`fault=crashloop:old form=start` with
+`expect=held` reads that: the Instance ends on the corrective revision
+serving with no repair recorded after the bump). A held push changes no
+pod, so the fault hook and the hold are ticked between watch events. The
+generated `isvcs/gen-inplaceonly/` family drives the three template edits,
+the image edit, and the crash loop under each, on the single-pod and gang
+shapes.
+
 ### Fault cases: quota isolation, cordon impact, leak remediation
 
 - **`fault=crashloop:old` with `form=start|load`** breaks one old-revision
@@ -1415,6 +1452,16 @@ expected to **surge with** the engine; an *independent* (un-grouped) decoder mus
 **not** surge from an engine-only bump. Single-pod cases additionally assert the
 surviving pod's UID never rotated (skipped for gangs, where pods are recreated).
 
+Ceiling and floor: the ceiling is the header's `ceil_*` (in Instances); the
+floor is `N - maxUnavailable`, read from the case body. A percent budget is
+resolved the way the engine's per-Component budget resolves both budgets:
+`N x percent / 100` rounded **up** and clamped to N, so `10%` of 4 is 1 and
+`25%` of 8 is 2. The engine applies the same rounding to `maxSurge` and to
+`maxUnavailable`; the Deployment convention of rounding `maxUnavailable`
+down is not its rule, and a generator that states a percent case's ceiling
+uses the same formula (`budget_count`). The generated `isvcs/gen-budget/`
+family drives 10, 25 and 50 percent on both budgets at N=4 and N=8.
+
 ### Continuous invariants
 
 Every case, whatever its verb, is also judged on conditions the verb's own
@@ -1524,7 +1571,15 @@ Four generators write into `isvcs/`; re-run one after editing it:
   a fix push lands), the small fleets and the engine gang behind a router
   (`p8000`–`p8199`) → `isvcs/gen-size/` and `isvcs/gen-router-gang/`, the fault
   families (`p7000`–`p7399`) → `isvcs/gen-readiness/`, `isvcs/gen-gang-member/`,
-  `isvcs/gen-tight/`, `isvcs/gen-evict/`, `isvcs/gen-preempt/` and `isvcs/gen-pending/`, plus
+  `isvcs/gen-tight/`, `isvcs/gen-evict/`, `isvcs/gen-preempt/` and `isvcs/gen-pending/`, the percent budgets (`p8200`–`p8329`) →
+  `isvcs/gen-budget/` (maxSurge and maxUnavailable at 10, 25 and 50 percent
+  on fleets of 4 and 8, for a plain push, a push with a crash-looping
+  Instance and a canary ladder; each case states the engine's rounding rule
+  and the ceiling or floor it yields), and the strict in-place strategy
+  (`p8330`–`p8399`) → `isvcs/gen-inplaceonly/` (an image change rolls in
+  place with stable pod identities, an env, resources or probe change is
+  refused on a single-pod Instance and rebuilt whole on a gang, and a crash
+  loop under each is repaired or fixed the way the strategy allows), plus
   `isvcs/MANIFEST.md` (per-dimension counts, the
   constraint ledger with every omitted cell and its reason, missing-hook
   catalog). The story families are canary lanes in CI: the pipeline gives

@@ -339,6 +339,8 @@ EVAL_SOFT_FEATURES: list[dict[str, str]] = [
         "gen-evict",
         "gen-preempt",
         "gen-pending",
+        "gen-budget",
+        "gen-inplaceonly",
     )
 ]
 

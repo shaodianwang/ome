@@ -1,0 +1,13 @@
+# p8206: [gen] budget push engine N=8 SurgeThenDrain s10pct  Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 co=none topo=engine
+# reason: plain bump; the engine resolves a percent budget as N x percent rounded up and clamped to N, so maxSurge 10% of 8 is 1 (rounded down it would be 0 and the roll could not start); the surge keeps the peak at or under N+1 = 9 Instances and never drops below N ready; every Instance ends on the new revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8206 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: "10%", maxUnavailable: 0 } } }

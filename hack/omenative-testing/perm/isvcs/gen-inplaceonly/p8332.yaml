@@ -1,0 +1,13 @@
+# p8332: [gen] inplaceonly resources engine N=4 rp None  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 co=none topo=engine edit=resources expect=held
+# reason: the push changes the runner CPU request, a diff beyond container images, which InPlaceOnly refuses on a single-pod Instance: for the hold window nothing is recreated, patched or surged, every Instance keeps serving on the running revision at N, and an InPlaceUpdateNotPossible event says why; then the corrective push drops the override and, an annotation-only diff, lands in place on every Instance with UIDs stable; restart policy None plays no part, nothing restarts
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8332 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "InPlaceOnly", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
