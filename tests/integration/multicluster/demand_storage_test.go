@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	ometesting "github.com/ome-projects/ome/pkg/utils/testing"
 )
 
 func TestDemandContractStorage(t *testing.T) {
@@ -39,7 +40,7 @@ func TestDemandContractStorage(t *testing.T) {
 					delete(installed.Spec.Versions[i].Schema.OpenAPIV3Schema.Properties["spec"].Properties["placementExecution"].Properties, "demand")
 				}
 			}
-			env := &envtest.Environment{CRDs: []*apiextensionsv1.CustomResourceDefinition{installed}}
+			env := ometesting.EtcdForBusyHosts(&envtest.Environment{CRDs: []*apiextensionsv1.CustomResourceDefinition{installed}})
 			cfg, err := env.Start()
 			if err != nil {
 				t.Fatal(err)

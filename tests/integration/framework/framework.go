@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	ometesting "github.com/ome-projects/ome/pkg/utils/testing"
 )
 
 // defaultControlPlaneStopTimeout is the upper bound on how long
@@ -178,7 +179,7 @@ func (f *Framework) Init() (*rest.Config, error) {
 		stopTimeout = defaultControlPlaneStopTimeout
 	}
 
-	f.testEnv = &envtest.Environment{
+	f.testEnv = ometesting.EtcdForBusyHosts(&envtest.Environment{
 		CRDDirectoryPaths:        crdPaths,
 		ErrorIfCRDPathMissing:    true,
 		ControlPlaneStopTimeout:  stopTimeout,
@@ -186,7 +187,7 @@ func (f *Framework) Init() (*rest.Config, error) {
 		CRDInstallOptions: envtest.CRDInstallOptions{
 			MaxTime: defaultCRDInstallTimeout,
 		},
-	}
+	})
 	if f.webhooksEnabled() {
 		var paths []string
 		if f.WebhookPath != "" {
@@ -242,11 +243,14 @@ func startControlPlane(env *envtest.Environment) (*rest.Config, error) {
 	return nil, err
 }
 
-// controlPlaneDropped reports the bring-up failures that mean the apiserver
-// process stopped answering rather than rejected a request.
+// controlPlaneDropped reports the bring-up failures that mean the control
+// plane stopped answering rather than rejected a request: the apiserver
+// dropping its connection, or etcd failing a CRD write because its proposal
+// did not commit in time while neighbouring control planes were booting.
 func controlPlaneDropped(err error) bool {
 	msg := err.Error()
 	for _, sig := range []string{
+		"etcdserver: request timed out",
 		"http2: client connection lost",
 		"connection refused",
 		"connection reset by peer",

@@ -20,6 +20,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/placement/plan"
+	ometesting "github.com/ome-projects/ome/pkg/utils/testing"
 )
 
 func TestPlanStorageCompatibility(t *testing.T) {
@@ -80,7 +81,7 @@ func TestPlanStorageCompatibility(t *testing.T) {
 					tt.prune(installed.Spec.Versions[i].Schema.OpenAPIV3Schema.Properties["status"].Properties["placement"].Properties)
 				}
 			}
-			env := &envtest.Environment{CRDs: []*apiextensionsv1.CustomResourceDefinition{installed}}
+			env := ometesting.EtcdForBusyHosts(&envtest.Environment{CRDs: []*apiextensionsv1.CustomResourceDefinition{installed}})
 			cfg, err := env.Start()
 			if err != nil {
 				t.Fatal(err)

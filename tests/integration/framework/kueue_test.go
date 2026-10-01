@@ -30,6 +30,7 @@ import (
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	podtesting "sigs.k8s.io/kueue/pkg/util/testingjobs/pod"
 
+	ometesting "github.com/ome-projects/ome/pkg/utils/testing"
 	"github.com/ome-projects/ome/tests/integration/framework"
 )
 
@@ -65,10 +66,10 @@ func TestStartKueue(t *testing.T) {
 	webhookDir, err := framework.KueueWebhookDir()
 	g.Expect(err).NotTo(gomega.HaveOccurred(), "resolve Kueue webhook dir")
 
-	testEnv := &envtest.Environment{
+	testEnv := ometesting.EtcdForBusyHosts(&envtest.Environment{
 		CRDDirectoryPaths:     []string{crdDir},
 		ErrorIfCRDPathMissing: true,
-	}
+	})
 	testEnv.WebhookInstallOptions.Paths = []string{webhookDir}
 
 	cfg, err := testEnv.Start()

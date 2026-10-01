@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	ometesting "github.com/ome-projects/ome/pkg/utils/testing"
 	"github.com/ome-projects/ome/pkg/validation"
 )
 
@@ -43,7 +44,7 @@ func TestStoredLegacyPlacementSurvivesSchemaUpgrade(t *testing.T) {
 	spec.Properties["placement"] = legacyPlacement
 	spec.XValidations = nil
 	previous.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"] = spec
-	env := &envtest.Environment{CRDs: []*apiextensionsv1.CustomResourceDefinition{previous}}
+	env := ometesting.EtcdForBusyHosts(&envtest.Environment{CRDs: []*apiextensionsv1.CustomResourceDefinition{previous}})
 	cfg, err := env.Start()
 	if err != nil {
 		t.Fatal(err)

@@ -46,6 +46,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic/translators"
+	ometesting "github.com/ome-projects/ome/pkg/utils/testing"
 	"github.com/ome-projects/ome/tests/integration/components"
 	"github.com/ome-projects/ome/tests/integration/util"
 	"github.com/ome-projects/ome/tests/perf/inferenceservice/runner/config"
@@ -273,6 +274,7 @@ func startEnvtest(ctx context.Context, root string) (*envtest.Environment, *rest
 			MaxTime: 2 * time.Minute,
 		},
 	}
+	ometesting.EtcdForBusyHosts(testEnv)
 	// Raise apiserver request limits to survive a high-load run.
 	testEnv.ControlPlane.GetAPIServer().Configure().
 		Append("max-requests-inflight", fmt.Sprintf("%d", *maxRequestsInflight)).

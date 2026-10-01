@@ -20,6 +20,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	clientset "github.com/ome-projects/ome/pkg/client/clientset/versioned"
+	ometesting "github.com/ome-projects/ome/pkg/utils/testing"
 )
 
 // TestAgainstLiveAPIServer exercises the path the unit tests cannot: the
@@ -45,6 +46,7 @@ func TestAgainstLiveAPIServer(t *testing.T) {
 		},
 		ErrorIfCRDPathMissing: true,
 	}
+	ometesting.EtcdForBusyHosts(env)
 	cfg, err := env.Start()
 	if err != nil {
 		t.Fatalf("start envtest: %v", err)

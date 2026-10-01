@@ -21,6 +21,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
+	ometesting "github.com/ome-projects/ome/pkg/utils/testing"
 	"github.com/ome-projects/ome/pkg/validation"
 )
 
@@ -33,7 +34,7 @@ func TestPlacementIntentStorage(t *testing.T) {
 	if err := yaml.Unmarshal(data, &crd); err != nil {
 		t.Fatal(err)
 	}
-	env := &envtest.Environment{CRDs: []*apiextensionsv1.CustomResourceDefinition{&crd}}
+	env := ometesting.EtcdForBusyHosts(&envtest.Environment{CRDs: []*apiextensionsv1.CustomResourceDefinition{&crd}})
 	cfg, err := env.Start()
 	if err != nil {
 		t.Fatal(err)
