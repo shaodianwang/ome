@@ -26,7 +26,7 @@ python3 -m unittest discover -s .buildkite -p 'test_*.py' -v
 echo "--- OMENative YAML/Python harness unit tests ---"
 (
   cd hack/omenative-testing/perm
-  python3 -m unittest -v run_test.py
+  python3 -m unittest -v run_test.py coverage_test.py
 )
 
 # Rust toolchain for `pkg/xet` (CGo wrapper around a Rust staticlib).

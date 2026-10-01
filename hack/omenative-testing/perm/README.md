@@ -65,6 +65,7 @@ perm/
 ├── gen_mn.py              — generator: multi-node (gang) rollout cases → isvcs/rollout/ (--check)
 ├── gen_runtime.py         — generator: runtime-triggered cases → isvcs/runtime-rev/ (--check)
 ├── generate_cases.py      — generator: hot-core permutation corpus → isvcs/gen-*/ (byte-stable; --check)
+├── coverage.py            — the coverage ledger: the scenario space rendered from the case headers (--json, --check)
 ├── runtime_fixtures.py    — renders runtime/ for a target cluster (ns, storage, arch, images)
 ├── runtime/               — fixture TEMPLATES (see runtime_fixtures.py; not directly applicable)
 │   ├── csr.yaml            — single-pod ClusterServingRuntime (nginx + a startup sleep)
@@ -869,6 +870,79 @@ driven). Keep
 the `topo=` tag and any `infeasible=1` / `notimpl=1` header flags so the harness
 groups and scores correctly.
 ```
+
+## Coverage ledger (`coverage.py`)
+
+`coverage.py` renders the scenario space the marathon tracks from the
+committed cases: line 1 (the header) and line 2 (the `# reason:`) of every
+case under `isvcs/`, plus the facts a header does not carry and the body
+does (the engine's update strategy and budget, its restart policy, the gang
+width, the rollout group kind, the canary steps).
+
+```bash
+python3 coverage.py            # the Markdown ledger on stdout
+python3 coverage.py --cases    # ... plus one row per case
+python3 coverage.py --json     # the same facts as JSON
+python3 coverage.py --check    # nonzero on an unclassified header value or a story with no case
+```
+
+The ledger's cell is (shape family, operation, fault row):
+
+- **shape family** — the Components present (from `Ne`/`Nd`/`Nr`: `engine`,
+  `engine+router`, `engine+decoder+router`; `engine+decoder` is tabulated but
+  outside the product) times `single` or `gang` (`topo=*-mn`), with the
+  gang width and the Instance count (`1`, `2`, `many`) as details;
+- **operation** — what the operator does, from `mode=` and its knobs:
+  `steady state` (`mode=kill`, or a persistent fault at `during=idle`),
+  `push` (a plain bump, `edit=env`, `mode=partition`, `mode=rebump`, a
+  pairing-protocol patch), `rollback` (of a plain rollout; a canary's
+  rollback is a step kind), `scale up` / `scale down` (`mode=scaledown` by
+  its targets), `migrate`, `delete` (`mode=recreate`), `pause` / `freeze`
+  (`pause=` under a kill, lifted by the harness), `canary`, `strategy or
+  policy edit` (`edit=strategy:*` / `edit=restartPolicy:*`), `runtime edit`
+  (`mode=runtimerev`). `admission reject` and `remove component` are counted
+  but not crossed with the faults. A second operation landing on the first
+  (a scale, pause or push at a canary hook; `during=rollout|migrate`) is
+  the `operation+operation` overlap;
+- **fault row** — (kind, form, side). `fault=crashloop:old` is `crash at
+  start` / `crash after Ready` by `form=`, `imagepull:old` is `image pull`,
+  `configkey:missing` is `config missing`, `node:notready` and
+  `cordon:source` are `node`, `quota:<n>` is `quota`, `ctrlrestart` is
+  `controller restart`; `mode=kill`, `podkill` and `pkill=1` are `pod
+  deleted by hand` on a single-pod service and `gang member lost` on a gang;
+  a canary's `img=` is `image pull` on the new revision, or `sibling broken`
+  when `imgcomp=` names the decoder or the router; `break=stuck` is
+  `readiness never passes`; a runtime-rev `expect=recover` is `image pull`
+  on the new revision; `analysis=breach` is `metric breach` (one-shot when
+  `health=breach` decays under `analysis=pass`); `analysis=inconclusive` is
+  `analysis source unusable`. The form is `one-shot` when the harness takes
+  the cause away again (`lift=`, `verb=quotalift`, a decaying breach) or
+  the controller heals it once (a pod delete, a controller restart), else
+  `persistent`. The side follows `victim=`, the break's `old` victim, and
+  run.py's component-blind podkill rule (the newest new-revision pod dies
+  mid-rotation under a replacement-first strategy, a settled pod otherwise).
+  A case with two faults counts in both rows.
+
+Cells the product does not need carry a written reason in `EXCLUDED_CELLS`
+(a steady state with no fault asserts nothing; a single-pod Instance has no
+gang member to lose; on a gang a hand-deleted pod is a lost member). The
+report lists the empty cells biggest holes first (the fault rows,
+operations and shape families with no case anywhere, then counts per axis
+value, then every hole by name), crosses the operations and faults with the
+group policy, update strategy, budget and restart policy, places every
+event on its timing hook (`settling`, `rotating`, the canary states, `paused`,
+...), tallies the overlaps and the canary step kinds, and lists the parked
+cases with their issues.
+
+The operator stories of the marathon goal live in `STORIES` at the top of
+the script, one predicate over a parsed case per story; the report prints the
+cases and cells that prove each, and `--check` fails on a story with no
+case. `run_test.py` runs `coverage.py --check` beside the generator checks,
+so a header value the ledger cannot classify (a new verb, a new fault kind)
+fails CI until it is mapped to an axis there. What no header can express is
+listed under "Not derivable from the headers" in the report (the scheduler
+lane, production profiles, the `last Instance` and `held floor` timings,
+auto versus manual migration, the webhook, apiserver and eviction faults).
 
 ## Future knobs
 

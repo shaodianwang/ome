@@ -380,6 +380,15 @@ class GeneratedCorpusTest(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, msg=(r.stdout + r.stderr))
 
+    def test_coverage_ledger_check_passes(self):
+        """Every header value is one the coverage ledger can place on an axis
+        and every operator story has at least one case: a new verb or knob
+        is classified in coverage.py before it merges, and a story never
+        loses its last case unnoticed."""
+        r = subprocess.run([sys.executable, str(HERE / "coverage.py"), "--check"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, msg=(r.stdout + r.stderr))
+
     def test_regenerating_the_corpus_writes_nothing_and_deletes_nothing(self):
         """Regenerating a copy of the committed tree through the real write
         paths leaves every file byte-identical and deletes none — including
