@@ -8319,3 +8319,350 @@ class BrokenOperationTest(unittest.TestCase):
             self.assertEqual([], run._broken_rows("p999", "decoder"))
             self.assertEqual("Deleting", run._broken_row("p999", "engine", 2).get("phase"))
             self.assertIsNone(run._broken_row("p999", "engine", 5))
+class MoveMomentFaultTest(unittest.TestCase):
+    """A break, or a node loss, fired at a moment of a move (mode=migrate
+    at=accept|surge|drain): when each moment is due, whose pod the victim
+    rule picks, that the phase hooks leave the fault alone, the header rules,
+    and the end state the verdict reads."""
+
+    OLD = {"h1"}
+
+    def _pod(self, comp, inst, uid, *, runner="default", ready=True, serving=True, node="n1", alive=True):
+        return {"comp": comp, "inst": str(inst), "runner": runner, "alive": alive, "ready": ready,
+                "serving": serving, "hash": "h1", "uid": uid, "node": node}
+
+    def _fleet(self):
+        return {
+            "e0": self._pod("engine", 0, "u0", node="n0"),
+            "e1": self._pod("engine", 1, "u1"),
+            "e2": self._pod("engine", 2, "u2", node="n2"),
+            "d0": self._pod("decoder", 0, "v0"),
+            "d1": self._pod("decoder", 1, "v1"),
+        }
+
+    def test_accept_is_due_once_the_request_is_recorded_anywhere(self):
+        pods = self._fleet()
+        args = (pods, None, None, False, "engine", {"u0"}, {"u0", "u1", "u2"})
+        self.assertFalse(run._move_moment_due("accept", *args))
+        self.assertTrue(run._move_moment_due("accept", pods, {"phase": "Accepted"}, None, False, "engine", {"u0"}, {"u0", "u1", "u2"}))
+        self.assertTrue(run._move_moment_due("accept", pods, None, {"phase": "Accepted"}, False, "engine", {"u0"}, {"u0", "u1", "u2"}))
+        self.assertTrue(run._move_moment_due("accept", pods, None, None, True, "engine", {"u0"}, {"u0", "u1", "u2"}))
+
+    def test_surge_is_due_once_a_fresh_pod_or_the_record_says_so(self):
+        pods = self._fleet()
+        orig = {"u0", "u1", "u2"}
+        self.assertFalse(run._move_moment_due("surge", pods, {"phase": "Accepted"}, None, True, "engine", {"u0"}, orig))
+        self.assertTrue(run._move_moment_due("surge", pods, {"phase": "SurgeReady"}, None, True, "engine", {"u0"}, orig))
+        pods["e3"] = self._pod("engine", 3, "fresh", ready=False, serving=False)
+        self.assertTrue(run._move_moment_due("surge", pods, {"phase": "Accepted"}, None, True, "engine", {"u0"}, orig))
+
+    def test_drain_is_due_once_a_source_pod_is_going_or_the_record_says_so(self):
+        pods = self._fleet()
+        orig = {"u0", "u1", "u2"}
+        self.assertFalse(run._move_moment_due("drain", pods, {"phase": "SurgeReady"}, None, True, "engine", {"u0"}, orig))
+        self.assertTrue(run._move_moment_due("drain", pods, {"phase": "Draining"}, None, True, "engine", {"u0"}, orig))
+        pods["e0"]["alive"] = False
+        self.assertTrue(run._move_moment_due("drain", pods, {"phase": "SurgeReady"}, None, True, "engine", {"u0"}, orig))
+
+    def test_victim_rule_per_moment_and_victim(self):
+        pods = self._fleet()
+        orig = {"u0", "u1", "u2"}
+        pick = lambda victim, at, kind="crashloop": run._move_victim(victim, at, kind, pods, self.OLD, "engine", "0", orig)
+        self.assertEqual("e0", pick("moved", "accept"), "at accept the moved Instance has only its source pod")
+        self.assertIsNone(pick("moved", "surge"), "no replacement pod yet")
+        pods["e3"] = self._pod("engine", 3, "fresh", ready=False, serving=False)
+        self.assertEqual("e3", pick("moved", "surge"), "at surge the replacement is the moved Instance's pod")
+        self.assertEqual("e3", pick("moved", "drain"))
+        self.assertEqual("e0", pick("moved", "surge", "node"), "a node loss is always the source node's")
+        self.assertEqual("e2", pick("peer", "surge"), "the highest other Instance on its original pods")
+        self.assertEqual("d1", pick("sibling", "accept"), "the decoder's highest Instance")
+
+    def test_gang_victim_is_a_leader(self):
+        pods = {"e0-l": self._pod("engine", 0, "u0", runner="leader"), "e0-w": self._pod("engine", 0, "w0", runner="worker"),
+                "e1-l": self._pod("engine", 1, "u1", runner="leader"), "e1-w": self._pod("engine", 1, "w1", runner="worker")}
+        orig = {"u0", "w0", "u1", "w1"}
+        self.assertEqual("e0-l", run._move_victim("moved", "accept", "crashloop", pods, self.OLD, "engine", "0", orig))
+        pods["e2-w"] = self._pod("engine", 2, "fw", runner="worker", ready=False, serving=False)
+        self.assertIsNone(run._move_victim("moved", "surge", "crashloop", pods, self.OLD, "engine", "0", orig),
+                          "a replacement worker is not the victim; the leader is awaited")
+        pods["e2-l"] = self._pod("engine", 2, "fl", runner="leader", ready=False, serving=False)
+        self.assertEqual("e2-l", run._move_victim("moved", "surge", "crashloop", pods, self.OLD, "engine", "0", orig))
+
+    def test_phase_hooks_leave_a_move_moment_fault_alone(self):
+        fault = run._fault_new("p999", {"fault": "crashloop:old", "form": "start", "at": "surge", "victim": "moved"})
+        self.assertTrue(run._fault_at_move(fault))
+        ctx = {"fault": fault, "trigger_ts": 1.0, "old_hashes": self.OLD, "pod_state": self._fleet(),
+               "pods_per_inst": {"engine": 1, "decoder": 1, "router": 1}}
+        run._fault_tick(ctx)
+        self.assertFalse(fault["fired"])
+        self.assertFalse(run._fault_at_move(run._fault_new("p999", {"fault": "crashloop:old", "form": "start"})))
+
+    def test_move_new_binds_the_moment_and_the_victim(self):
+        fault = run._fault_new("p999", {"mode": "migrate", "fault": "imagepull:old", "at": "drain"})
+        mv = run._move_new({"mode": "migrate"}, fault)
+        self.assertEqual(("drain", run.MOVE_DEFAULT_VICTIM, False), (mv["at"], mv["victim"], mv["fired"]))
+        self.assertIsNone(run._move_new({"mode": "rollout"}, fault))
+        self.assertIsNone(run._move_new({"mode": "migrate"}, run._fault_new("p999", {"fault": "imagepull:old"})))
+
+    def _end(self, pods, fault, src_uids, completed, idx="3", n=3):
+        ctx = {"N": {"engine": n, "decoder": 0, "router": 0}, "pods_per_inst": {"engine": 1, "decoder": 1, "router": 1},
+               "pod_state": pods}
+        return run._move_end_state(ctx, fault, "engine", idx, src_uids, completed)
+
+    def test_end_state_reads_the_moved_component_whole_and_serving(self):
+        pods = self._fleet()
+        del pods["e0"]
+        pods["e3"] = self._pod("engine", 3, "fresh", node="n3")
+        fault = {"kind": "crashloop", "crash_uid": "gone", "crash_pod": "e0"}
+        self.assertEqual((True, "whole, Ready and serving"), self._end(pods, fault, {"u0"}, True))
+        pods["e0"] = self._pod("engine", 0, "u0", node="n0")
+        ok, why = self._end(pods, fault, {"u0"}, True)
+        self.assertFalse(ok)
+        self.assertIn("source pod is still alive", why)
+        del pods["e0"]
+        pods["e3"]["serving"] = False
+        self.assertIn("not serving", self._end(pods, fault, {"u0"}, True)[1])
+        pods["e3"]["serving"] = True
+        pods["e2"]["ready"] = False
+        self.assertIn("whole serving Instance(s)", self._end(pods, fault, {"u0"}, True)[1])
+
+    def test_end_state_waits_for_the_pod_the_fault_hit_to_go(self):
+        pods = self._fleet()
+        pods["e1"]["ready"] = pods["e1"]["serving"] = False
+        fault = {"kind": "imagepull", "crash_uid": "u1", "crash_pod": "e1"}
+        ok, why = self._end(pods, fault, set(), False, idx="0")
+        self.assertFalse(ok)
+        self.assertIn("still there and not serving", why)
+        pods["e1"] = self._pod("engine", 1, "rebuilt")
+        self.assertTrue(self._end(pods, fault, set(), False, idx="0")[0])
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_header_rules(self):
+        base = "# p999: x mode=migrate mig=Auto inst=0 {fault} at={at} victim={victim} Ne=4 Nd={nd} Nr={nr} ceil_e=5 ceil_d={nd} ceil_r={nr} topo={topo}"
+        ok = lambda **kw: base.format(**{"fault": "fault=crashloop:old form=start", "at": "surge", "victim": "moved",
+                                         "nd": 0, "nr": 0, "topo": "engine", **kw})
+        self.assertEqual([], self._errs(ok()))
+        self.assertEqual([], self._errs(ok(fault="fault=imagepull:old", at="accept", victim="peer")))
+        self.assertEqual([], self._errs(ok(fault="fault=imagepull:old", at="drain", victim="sibling", nd=4, nr=2, topo="pd")))
+        node = ok(fault="fault=node:notready lift=after-recover needs=forcedelete floor_soft=1", at="accept")
+        self.assertEqual([], self._errs(node))
+        self.assertTrue(any("needs Nd>0" in e for e in self._errs(ok(victim="sibling"))))
+        self.assertTrue(any("source node's" in e for e in self._errs(
+            ok(fault="fault=node:notready lift=after-recover needs=forcedelete", victim="peer"))))
+        self.assertTrue(any("force-delete policy" in e for e in self._errs(
+            ok(fault="fault=node:notready lift=after-recover"))))
+        self.assertTrue(any("lift=after-recover" in e for e in self._errs(
+            ok(fault="fault=node:notready needs=forcedelete lift=after-settle"))))
+        self.assertTrue(any("mode=migrate" in e for e in self._errs(ok().replace("mode=migrate ", ""))))
+        self.assertTrue(any("mig=Never" in e for e in self._errs(ok().replace("mig=Auto", "mig=Never"))))
+        self.assertTrue(any("does not combine" in e for e in self._errs(ok().replace(" at=", " expect=repaired at="))))
+        self.assertTrue(any("does not combine" in e for e in self._errs(ok().replace(" at=", " during=rollout at="))))
+        self.assertTrue(any("needs mode=migrate at=" in e for e in self._errs(ok().replace(" at=surge", ""))))
+        self.assertTrue(any("malformed header value at=" in e for e in self._errs(ok(at="later"))))
+        self.assertTrue(any("fires a break of the running fleet" in e for e in self._errs(ok(fault="fault=podkill:settling"))))
+
+
+class GeneratedFaultMoveFamilyTest(unittest.TestCase):
+    """gen-fault-move: a break, or a node loss, at a moment of a move, on the
+    moved Instance, a peer or the decoder, under the restart policy that
+    promises the repair; every cell is a valid migrate case."""
+
+    def _rows(self):
+        outputs, rows = generate_cases.build_outputs()
+        return outputs, [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-fault-move"]
+
+    def test_generated_family_crosses_every_axis(self):
+        outputs, fam = self._rows()
+        self.assertEqual(75, len(fam))
+        self.assertEqual({"engine", "pd", "engine-mn"}, {kv["topo"] for _n, kv, _m in fam})
+        self.assertEqual(set(generate_cases.MOVE_MOMENTS), {kv["at"] for _n, kv, _m in fam})
+        self.assertEqual({"moved", "peer", "sibling"}, {kv["victim"] for _n, kv, _m in fam})
+        self.assertEqual({"moved"}, {kv["victim"] for _n, kv, _m in fam if kv["fault"].startswith("node:")})
+        self.assertEqual({"pd"}, {kv["topo"] for _n, kv, _m in fam if kv["victim"] == "sibling"})
+        cells = {(kv["topo"], kv["at"], kv["victim"], kv["fault"], kv.get("form"), m["rp"]) for _n, kv, m in fam}
+        self.assertEqual(75, len(cells))
+        for topo in ("engine", "pd", "engine-mn"):
+            for at in generate_cases.MOVE_MOMENTS:
+                for victim in generate_cases.MOVE_VICTIMS[topo]:
+                    self.assertIn((topo, at, victim, "crashloop:old", "start", "None"), cells)
+                    self.assertIn((topo, at, victim, "imagepull:old", None, "None"), cells)
+                    self.assertIn((topo, at, victim, "crashloop:old", "load", "RecreateInstance"), cells)
+            for at in generate_cases.MOVE_NODE_MOMENTS:
+                for rp in ("None", "RecreateInstance"):
+                    self.assertIn((topo, at, "moved", "node:notready", None, rp), cells)
+        for name, kv, m in fam:
+            self.assertEqual(("migrate", "Auto", 0, "none"), (kv["mode"], kv["mig"], kv["inst"], kv["co"]))
+            self.assertEqual(kv["Ne"] + 1, kv["ceil_e"], "the move's one replacement is the only surge")
+            self.assertEqual(kv["Nd"], kv["ceil_d"], "a repair rebuilds in place")
+            text = outputs[f"gen-fault-move/{name}.yaml"]
+            self.assertIn(f'restartPolicy: "{generate_cases.RP_FULL[m["rp"]]}"', text)
+            self.assertNotIn("- components:", text, "no rollout group: it would hold the repair")
+            if kv["fault"].startswith("node:"):
+                self.assertEqual(("after-recover", "forcedelete", 1), (kv["lift"], kv["needs"], kv["floor_soft"]))
+                self.assertIn("kubelet of the node under the moved Instance's source pod", text)
+            else:
+                self.assertNotIn("floor_soft", kv, "a break lowers the floor by one Instance instead of waiving it")
+                self.assertNotIn("lift", kv)
+            if kv["victim"] in ("peer", "sibling"):
+                self.assertIn("RestartTriggered event names", text)
+                self.assertIn("the move completes", text)
+            else:
+                self.assertIn("the move finishes, or is abandoned with a reason", text)
+
+    def test_every_cell_validates_as_a_case_file(self):
+        outputs, fam = self._rows()
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, _kv, _m in fam:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(outputs[f"gen-fault-move/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)
+
+    def test_node_cells_run_on_the_force_delete_lane(self):
+        sys.path.insert(0, str(HERE.parents[2] / ".buildkite"))
+        try:
+            import generate_pipeline as gp
+        finally:
+            sys.path.pop(0)
+        lanes = {(feature, topology, variant): cases for feature, topology, variant, _env, cases in gp._eval_lanes()
+                 if feature == "gen-fault-move"}
+        for topology in ("engine", "pd", "engine-mn"):
+            policy = lanes[("gen-fault-move", topology, gp.EVAL_FORCE_DELETE_SLUG)]
+            self.assertEqual(4, len(policy), topology)
+            self.assertTrue(all(gp._eval_case_header_fields(c).get("fault") == "node:notready" for c in policy))
+            plain = lanes[("gen-fault-move", topology, "")]
+            self.assertFalse(any(gp._eval_case_header_fields(c).get("needs") for c in plain))
+
+
+class RuntimeEditBreakTest(unittest.TestCase):
+    """A break may ride a runtime edit that rolls (mode=runtimerev): the
+    header rules, the floor lowered once the break fired, how the status
+    says a broken edited revision has not landed, and the gates a recovery
+    adds (a reason while it held, every row settled afterwards)."""
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_header_rules(self):
+        base = ("# p999: x mode=runtimerev rt=ome-coordtest-rt-p999 expect={expect} edit=image img=${{OME_EVAL_NGINX_ALT_IMAGE}} "
+                "{fault} Ne=3 Nd={nd} Nr=0 ceil_e=4 ceil_d={nd} ceil_r=0 topo={topo}")
+        ok = lambda **kw: base.format(**{"expect": "roll", "fault": "fault=crashloop:old form=start", "nd": 0, "topo": "engine", **kw})
+        self.assertEqual([], self._errs(ok()))
+        self.assertEqual([], self._errs(ok(fault="fault=imagepull:old victimcomp=decoder", nd=3, topo="pd")))
+        self.assertEqual([], self._errs(ok(fault="fault=crashloop:old form=load")))
+        self.assertTrue(any("rides an edit that rolls" in e for e in self._errs(ok(expect="noroll"))))
+        self.assertTrue(any("rides an edit that rolls" in e for e in self._errs(ok(expect="recover", fault="fault=imagepull:old break=stuck"))))
+        self.assertTrue(any("rides an edit that rolls" in e for e in self._errs(ok(fault="fault=imagepull:old during=rollout"))))
+        self.assertTrue(any("needs Nd>0" in e for e in self._errs(ok(fault="fault=imagepull:old victimcomp=decoder"))))
+        self.assertTrue(any("mode=rollout|runtimerev" in e for e in self._errs(
+            "# p999: x mode=scaledown to_e=2 fault=imagepull:old Ne=3 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine")))
+
+    def test_floor_allowance_follows_the_fired_break(self):
+        ctx = {"fault": run._fault_new("p999", {"fault": "imagepull:old"})}
+        run._break_allowance_tick(ctx)
+        self.assertNotIn("floor_allowance", ctx)
+        ctx["fault"].update(fired=True, crash_comp="engine", crash_inst="2", crash_pod="e2", crash_uid="u2")
+        run._break_allowance_tick(ctx)
+        self.assertEqual({"engine": 1}, ctx["floor_allowance"])
+
+    def test_push_unlanded_reads_hold_retry_block_and_failed_row(self):
+        held = inference_replica("engine", 3, current="rev-a", update="rev-b")
+        held["status"]["rolloutHold"] = {"gate": "Held", "reason": "retry ladder spent"}
+        retry = inference_replica("decoder", 3, current="rev-a", update="rev-b")
+        retry["status"]["retryBlocks"] = [{"targetRevision": "rev-b", "state": "Backoff", "attemptsStarted": 1}]
+        failed = inference_replica("router", 3, current="rev-a", update="rev-b")
+        failed["status"]["instanceStatuses"][2]["phase"] = "Failed"
+        converged = inference_replica("engine", 3, current="rev-b", update="rev-b")
+        converged["status"]["rolloutHold"] = {"gate": "Held"}
+        by = {"engine": held, "decoder": retry, "router": failed}
+        self.assertEqual({"engine": "rolloutHold gate=Held", "decoder": "retry block Backoff", "router": "Failed row(s) 2"},
+                         run._push_unlanded(by, {"engine", "decoder", "router"}))
+        self.assertEqual({"engine": ""}, run._push_unlanded({"engine": converged}, {"engine"}),
+                         "a converged revision pair says the push landed, whatever is left in the status")
+        self.assertEqual({"engine": ""}, run._push_unlanded({}, {"engine"}))
+
+    def test_hold_reason_is_hard_for_a_pull_failure_and_reported_for_a_stuck_readiness(self):
+        notes, checks = [], []
+        self.assertEqual("PASS", run._hold_reason_checks({"engine": "Failed row(s) 3"}, 40.0, True, "PASS", notes, checks))
+        self.assertIn("held with a reason", checks[-1])
+        self.assertEqual("FAIL", run._hold_reason_checks({"engine": ""}, 90.0, True, "PASS", notes, checks))
+        self.assertIn("never said why", checks[-1])
+        self.assertEqual("PASS", run._hold_reason_checks({"engine": ""}, 90.0, False, "PASS", [], checks))
+        self.assertTrue(checks[-1].lstrip().startswith("ⓘ"))
+
+    def test_rows_settled_gate(self):
+        checks = []
+        self.assertEqual("PASS", run._rows_settled_checks(True, "", "PASS", [], checks))
+        self.assertEqual("FAIL", run._rows_settled_checks(False, "engine/2: Instance is not settled", "PASS", [], checks))
+        self.assertIn("left mid-operation", checks[-1])
+
+
+class GeneratedFaultEditFamilyTest(unittest.TestCase):
+    """gen-fault-edit: a break of the running revision as a runtime edit
+    lands, on the engine or the decoder, and a bad edit (an image that cannot
+    be pulled, a readiness that never passes) followed by the corrective
+    edit; every cell is a valid runtimerev case on its own runtime."""
+
+    def _rows(self):
+        outputs, rows = generate_cases.build_outputs()
+        return outputs, [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-fault-edit"]
+
+    def test_generated_family_crosses_every_axis(self):
+        outputs, fam = self._rows()
+        self.assertEqual(52, len(fam))
+        breaks = [(n, kv, m) for n, kv, m in fam if "fault" in kv]
+        bad = [(n, kv, m) for n, kv, m in fam if "fault" not in kv]
+        self.assertEqual((40, 12), (len(breaks), len(bad)))
+        cells = {(kv["topo"], m["strat"], kv["fault"], kv.get("form"), kv.get("victimcomp", "engine"), kv["edit"], m["rp"])
+                 for _n, kv, m in breaks}
+        self.assertEqual(40, len(cells))
+        for topo in ("engine", "pd", "engine-mn"):
+            for strat in ("SurgeThenDrain", "RecreatePod"):
+                for victim in generate_cases.EDIT_VICTIMS[topo]:
+                    for edit in generate_cases.EDIT_VERBS[topo]:
+                        self.assertIn((topo, strat, "crashloop:old", "start", victim, edit, "None"), cells)
+                        self.assertIn((topo, strat, "imagepull:old", None, victim, edit, "None"), cells)
+                        self.assertIn((topo, strat, "crashloop:old", "load", victim, edit, "None"), cells)
+                        self.assertIn((topo, strat, "crashloop:old", "load", victim, edit, "RecreateInstance"), cells)
+        bad_cells = {(kv["topo"], m["strat"], kv.get("break")) for _n, kv, m in bad}
+        self.assertEqual(12, len(bad_cells))
+        for topo in ("engine", "pd", "engine-mn"):
+            for strat in ("SurgeThenDrain", "RecreatePod"):
+                self.assertIn((topo, strat, None), bad_cells)
+                self.assertIn((topo, strat, "stuck"), bad_cells)
+        for name, kv, m in fam:
+            self.assertEqual(("runtimerev", f"ome-coordtest-rt-{name}", "none"), (kv["mode"], kv["rt"], kv["co"]))
+            text = outputs[f"gen-fault-edit/{name}.yaml"]
+            self.assertIn(f"name: ome-coordtest-rt-{name}", text.split("---")[0], "the case ships its own runtime")
+            self.assertIn(f"kind: ClusterServingRuntime, name: ome-coordtest-rt-{name}, autoSync: true", text)
+            if kv["topo"].endswith("-mn"):
+                self.assertIn("leader:", text.split("---")[0], "a gang shape ships the gang runtime")
+            surge = 1 if m["strat"] == "SurgeThenDrain" else 0
+            self.assertEqual(kv["Ne"] + surge, kv["ceil_e"])
+            if kv["topo"].startswith("pd"):
+                self.assertEqual((kv["Nd"] + surge, kv["Nr"] + 1), (kv["ceil_d"], kv["ceil_r"]),
+                                 "the decoder rolls under the case's strategy, the router under its default surge")
+            self.assertIn(f'restartPolicy: "{generate_cases.RP_FULL[m["rp"]]}"', text)
+            if "fault" in kv:
+                self.assertEqual("roll", kv["expect"])
+                self.assertEqual(kv["edit"] == "image", "img" in kv)
+                self.assertIn("so the roll owns it", text)
+            else:
+                self.assertEqual(("recover", "None"), (kv["expect"], m["rp"]))
+                self.assertNotIn("edit", kv)
+                self.assertIn("corrective edit", text)
+
+    def test_every_cell_validates_as_a_case_file(self):
+        outputs, fam = self._rows()
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, _kv, _m in fam:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(outputs[f"gen-fault-edit/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)

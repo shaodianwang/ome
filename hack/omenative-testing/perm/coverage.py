@@ -193,7 +193,9 @@ HEADER_VALUES = {
     "pauseat": {"before", "during", "after"},
     "push": {"fix"},
     "terminal": {"Stable", "RolledBack", "Failed", "Held"},
-    "victim": {"stable", "canary"},
+    # a podkill's aim (stable, canary), or whose pod a move-moment fault hits
+    # (the Instance being moved, a peer of it, the decoder)
+    "victim": {"stable", "canary", "moved", "peer", "sibling"},
     "victimcomp": set(COMPONENTS),
     "imgcomp": set(COMPONENTS),
     "form": {"start", "load", "persist", "recover"},
@@ -636,12 +638,12 @@ def classify_faults(h, mode, pods, strategy, verbs):
         component, side = podkill_victim(h, param.partition("@")[0], strategy, pods)
         faults.append((pod_delete_kind(pods), "one-shot", side, component))
     elif kind == "crashloop":
-        component = str(h.get("victimcomp", "engine"))
+        component = break_component(h)
         crash = "crash at start" if h.get("form") == "start" else "crash after Ready"
         side = "new" if param == "new" else "running"
         faults.append(("sibling broken" if component != "engine" else crash, "persistent", side, component))
     elif kind == "imagepull":
-        component = str(h.get("victimcomp", "engine"))
+        component = break_component(h)
         side = "new" if param == "new" else "running"
         faults.append(("sibling broken" if component != "engine" else "image pull", "persistent", side, component))
     elif kind == "configkey":
@@ -675,6 +677,12 @@ def classify_faults(h, mode, pods, strategy, verbs):
     if h.get("analysis") == "inconclusive":
         faults.append(("analysis source unusable", "persistent", "-", "prometheus"))
     return faults
+
+
+def break_component(h):
+    """The Component a break hits: victimcomp=, else the decoder when a
+    move-moment fault names the sibling, else the engine."""
+    return str(h.get("victimcomp") or ("decoder" if h.get("victim") == "sibling" else "engine"))
 
 
 def fault_lifted(h, verbs):
@@ -736,6 +744,8 @@ def classify_timing(h, mode, operation, verbs, canary_steps):
         return "paused" if h.get("pause") else "steady state"
     if h.get("prearm"):
         return "steady state"
+    if h.get("at"):
+        return "migrating"   # a fault, or the bump, lands at a moment of the move
     fault_phase = str(h.get("fault", "")).partition(":")[2].partition("@")[0]
     if fault_phase not in FAULT_PHASES | CANARY_HOOKS | {"idle"}:
         fault_phase = ""
@@ -753,8 +763,6 @@ def classify_timing(h, mode, operation, verbs, canary_steps):
         return "canary analysis"
     if str(h.get("fault", "")).startswith(("crashloop:", "imagepull:")):
         return "settling"
-    if h.get("at"):
-        return "migrating"   # the bump lands at a moment of the move
     if h.get("stuck"):
         # the operation lands on a push whose retry ladder is spent (held) or whose first attempt failed
         return "held floor" if h["stuck"] == "held" else "rotating"

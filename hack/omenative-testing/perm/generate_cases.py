@@ -198,6 +198,27 @@ runners (run.py + the KIND CI lane) already implement:
                           (mode=recreate with during=idle): everything goes
                           within budget, the broken pod included, and the same
                           name comes back clean
+    gen-fault-move/ p7800+  a fault at a moment of a move: an Instance is
+                          moved by request and, as the request is accepted,
+                          as its replacement pod appears or as its source
+                          drains (at=accept|surge|drain), a pod breaks
+                          (crash at start, crash after Ready, an image that
+                          cannot be pulled) on the moved Instance, on a peer
+                          or on the decoder (victim=moved|peer|sibling), or
+                          the source node dies; the move finishes or is
+                          abandoned with a reason, the Instance ends whole
+                          and serving on one pod set, a broken peer is
+                          repaired under its policy
+    gen-fault-edit/ p7900+  a fault during a runtime edit: the runtime every
+                          Component inherits gets a new image or runner env
+                          and, as the edit lands, a pod of the running
+                          revision breaks on the engine or on the decoder
+                          (the roll owns it: it ends on the edited revision
+                          with no repair); and the edit itself is bad (an
+                          image that cannot be pulled, a readiness that
+                          never passes): it holds within budget with a
+                          reason, the old revision keeps serving, and a
+                          corrective edit lands
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -389,6 +410,36 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     is "down by one" there, and "down by two" asks for zero, which the API
     does not run as zero. A rolling group is crossed in where a decoder
     exists, as in the crashloop family.
+  - fault-move runs one gang width (the move copies the whole gang) and no
+    pd-mn shape (the gang axis is engine-mn's, the sibling axis pd's); the
+    update strategy is dormant (no roll is in flight: a move surges whatever
+    the strategy and a repair rebuilds in place), so one canonical budget;
+    no rollout group (a group holds repairs while no run is open, the idle
+    family's parked cell). A crash at start and a pull failure reach the
+    crash-loop repair under either restart policy and run under None; the
+    after-Ready form is the one the policy decides and runs under
+    RecreateInstanceOnPodRestart, the policy that promises its repair. The
+    node loss is the source node's (the story), at accept and at surge (at
+    drain the source is already going: its node dying then is the sweep of
+    a terminating pod, which the surge moment reads with the replacement in
+    place), on the force-delete lane only (a source pod on a silent node is
+    never freed without the policy, so the move cannot finish; that fate is
+    the node family's parked cell). The readiness switch (fault=readiness:old,
+    a pod that keeps running and leaves rotation) is not fired at a move
+    moment: it is repaired under neither restart policy, so it is the
+    broken-Instance families' break, not one a move answers.
+  - fault-edit rolls engine, decoder and router (every Component inherits
+    the runtime) under the surge and the drain-first strategies; the in-place
+    variants are the switch family's. The image edit runs on every shape and
+    the env edit on the engine shape only: under these two strategies both
+    are one new revision, and the pod-template difference between them
+    matters to an in-place strategy alone. A crash at start and a pull
+    failure open no runner-restart trigger, so they run under restart policy
+    None while the roll owns the Instance; the after-Ready form runs under
+    both policies, since under RecreateInstanceOnPodRestart the trigger
+    competes with the roll. The bad-edit cells run under None: a revision
+    that never becomes Ready restarts no runner. One gang width, no pd-mn,
+    no group, no readiness loss on the running side, as in fault-move.
 
 The t=3 covering fill over the deferred dimensions (coordination/rollout
 groups, canary promotion, budget x coordination interactions) is the --fill
@@ -445,6 +496,8 @@ GEN_BLOCKS = {
     "gen-inplaceonly": (8330, 8400),
     "gen-fault-scale": (7600, 7700),
     "gen-fault-delete": (7700, 7800),
+    "gen-fault-move": (7800, 7900),
+    "gen-fault-edit": (7900, 8000),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -827,6 +880,8 @@ HAND_PINNED_KILL = {
 #   ("rollback", hook, topo, w, strat, surge, unavail, co)
 #   ("pause-repair", topo, w, form, rp, co, pause, moment, push)
 #   ("migrate-bump", first, hook, topo, w, strat, surge, unavail, co)
+#   ("fault-move", kind, form, at, victim, topo, w, rp)
+#   ("fault-edit", kind, form, victim, edit, topo, w, strat, rp) / ("bad-edit", kind, topo, w, strat)
 # A park is added here as (key): (issue, reason, invariant scope) and
 # rendered into the header. The heal family's lift=after-failed cells are
 # parked on HEAL_ISSUE with a per-axis reason, filled in next to its emitter.
@@ -1796,16 +1851,20 @@ HELD_READY_TIMEOUT, HELD_PAUSED_READY_TIMEOUT = "90s", "180s"
 PODKILL_PAUSE_HOLD_S, PODKILL_GATE_HOLD_S, PODKILL_RELEASE_AFTER_S = 45, 30, 60
 
 CSR_SINGLE_TEXT = (HERE / "runtime" / "csr.yaml").read_text()
+CSR_GANG_TEXT = (HERE / "runtime" / "csr-multinode.yaml").read_text()
 CSR_METRICS_TEXT = (HERE / "runtime" / "csr-metrics.yaml").read_text()
 METRICS_ENV_HEAD = '      env:\n        - { name: TEST_STARTUP_DELAY, value: "15" }'
 
 
-def dedicated_runtime(name, metrics):
+def dedicated_runtime(name, metrics, gang=False):
     """The fixture runtime under a per-case name, so a runtime edit touches
-    one case. The metrics runtime gets TEST_REV first in its env list: the
-    entry the runtime env edit rewrites."""
+    one case: the gang runtime for a gang shape, else the single-pod one.
+    The metrics runtime gets TEST_REV first in its env list: the entry the
+    runtime env edit rewrites."""
+    if gang:
+        return CSR_GANG_TEXT.replace(lib.CSR_MN, name)
     if not metrics:
-        return CSR_SINGLE_TEXT.replace("ome-coordtest-cpu", name)
+        return CSR_SINGLE_TEXT.replace(lib.CSR, name)
     text = CSR_METRICS_TEXT.replace("ome-coordtest-metrics", name)
     if METRICS_ENV_HEAD not in text:
         sys.exit("csr-metrics.yaml: the runner env list does not start as the generator expects")
@@ -3656,6 +3715,227 @@ def emit_fault_delete(add):
                         _broken_delete_reason(kind, form, topo, co), meta,
                         cell=("broken-delete", kind, form, topo, w, co, rp),
                         coord=lib.coord_for(co) if co != "none" else None)
+# ── gen-fault-move: a fault at a moment of a move ────────────────────────────
+# An Instance is moved by request and, at a moment of the move, a pod breaks
+# or the source node dies. One gang width (the move copies the whole gang),
+# the canonical surge budget (no roll is in flight; the strategy is dormant),
+# no group (a group holds repairs while no run is open).
+MOVE_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1)]
+MOVE_MOMENTS = ["accept", "surge", "drain"]
+# (kind, form, the restart policy the cell runs under): a crash at start and
+# a pull failure reach the crash-loop repair under either policy; the
+# after-Ready form is the one the policy decides, so it runs under the policy
+# that promises its repair.
+MOVE_BREAKS = [("crashloop", "start", "None"), ("imagepull", None, "None"), ("crashloop", "load", "RecreateInstance")]
+MOVE_VICTIMS = {"engine": ["moved", "peer"], "pd": ["moved", "peer", "sibling"], "engine-mn": ["moved", "peer"]}
+# The source node dies at accept or at surge (at drain the source is already
+# going); read on the force-delete lane, under both restart policies.
+MOVE_NODE_MOMENTS = ["accept", "surge"]
+MOVE_WHEN = {"accept": "as soon as the request is recorded, before the replacement exists",
+             "surge": "as the replacement pod appears, before it is Ready",
+             "drain": "as the source is being taken down, the replacement Ready and serving"}
+MOVE_BREAK_HOW = {("crashloop", "start"): "is pointed at an image with no shell, so it crashes at every start and is never Ready again",
+                  ("crashloop", "load"): "has its runner killed every few seconds while it is up, so it dies after Ready and comes back between crashes",
+                  ("imagepull", None): "is pointed at an image that cannot be pulled, so the kubelet parks it in ImagePullBackOff and it is never Ready again"}
+MOVE_REPAIR_HOW = {"None": "an Instance that serves nothing is rebuilt by the crash-loop repair once its pod has sat past the stuck-pod grace",
+                   "RecreateInstance": "a runner that dies after Ready re-arms the whole-Instance rebuild"}
+
+
+def _move_fault_pod(at, victim):
+    """(when, whose pod) the fault hits, in words."""
+    if victim == "sibling":
+        return MOVE_WHEN[at], "the decoder's highest Instance's pod"
+    if victim == "peer":
+        return MOVE_WHEN[at], "the pod of the moved Component's highest other Instance"
+    return {"accept": ("as soon as the request is recorded, before its replacement exists", "the moved Instance's source pod"),
+            "surge": ("as soon as it appears, before it is Ready", "the moved Instance's replacement pod"),
+            "drain": ("as the source is being taken down", "the moved Instance's replacement pod, Ready and serving,")}[at]
+
+
+def _move_fault_reason(kind, form, at, victim, rp, topo):
+    when, pod = _move_fault_pod(at, victim)
+    out = (f"{when}, {pod} {MOVE_BREAK_HOW[(kind, form)]}; the move finishes, or is abandoned with a reason its "
+           f"record carries, within budget and is recorded once (one ledger row, one controller record); the moved "
+           f"Instance ends whole, Ready and serving on one pod set, the engine holds N whole Instances on distinct "
+           f"indices, and nothing exceeds N+1 alive")
+    if victim == "moved":
+        out += (f"; no pod the fault hit survives unserving: the move or the repair rebuilds it under restart policy "
+                f"{RP_FULL[rp]} ({MOVE_REPAIR_HOW[rp]})")
+        if at == "surge":
+            out += "; a replacement that never comes up is the move's to abandon or to retry, and either way the Instance keeps serving on exactly one pod set"
+    else:
+        out += (f"; the move completes (a broken {'peer' if victim == 'peer' else 'sibling'} is not the move's to care "
+                f"about) and the broken Instance is rebuilt, every pod new, Ready and serving on its running revision, "
+                f"by a repair a RestartTriggered event names, under restart policy {RP_FULL[rp]} "
+                f"({MOVE_REPAIR_HOW[rp]}); the capacity floor, lowered by that one Instance, holds throughout")
+    if victim == "sibling":
+        out += "; the decoder is otherwise untouched: nothing rotates and nothing surges there"
+    if is_pd(topo):
+        out += "; the router keeps its pods"
+    if is_mn(topo):
+        out += "; each Instance is a gang, moved and rebuilt whole"
+    return out
+
+
+def _move_node_reason(at, rp, topo):
+    out = (f"the kubelet of the node under the moved Instance's source pod is stopped {MOVE_WHEN[at]}; the node reads "
+           f"NotReady and the source serves nothing; with the force-delete policy the pod names the dead node holds are "
+           f"freed once its unreachable evidence is older than the threshold: the move's replacement, surging "
+           f"elsewhere, takes over and the sweep drains the source, so the move finishes, or is abandoned with a reason "
+           f"its record carries, and either way the Instance ends whole, Ready and serving off the dead node, recorded "
+           f"once; under restart policy {RP_FULL[rp]} {NODE_RELOCATION_REBUILD[rp]}; the floor is waived: the dead "
+           f"node takes every pod on it, peers and siblings included, and the same sweep rebuilds those; then the "
+           f"kubelet is started again")
+    if is_mn(topo):
+        out += "; the gang's members on live nodes may keep their pods"
+    return out
+
+
+def emit_fault_move(add):
+    for topo, n, w in MOVE_SHAPES:
+        base = dict(mode="migrate", **counts(topo, n), ceil_e=n + 1, ceil_d=(n if is_pd(topo) else 0),
+                    ceil_r=(lib.NR if is_pd(topo) else 0))
+        for at in MOVE_MOMENTS:
+            for victim in MOVE_VICTIMS[topo]:
+                for kind, form, rp in MOVE_BREAKS:
+                    kv = dict(base, fault=f"{kind}:old", co="none", topo=topo)
+                    if form:
+                        kv["form"] = form
+                    kv.update(victim=victim, mig="Auto", inst=0, at=at)
+                    meta = dict(strat="SurgeThenDrain", verb=f"{_storm_label(kind, form)}@move-{at}", rp=rp,
+                                victim=("decoder" if victim == "sibling" else "engine"), at=at, who=victim)
+                    desc = (f"{GEN_MARK} fault-move {_storm_label(kind, form)} at {at} on {victim} "
+                            f"{shape_tag(topo, w)} N={n} rp {rp}")
+                    life = lib.lifecycle(restart=RP_FULL[rp])
+                    d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+                    add("gen-fault-move", desc, kv, comps(topo, n, w, life, d_life=d_life),
+                        _move_fault_reason(kind, form, at, victim, rp, topo), meta,
+                        cell=("fault-move", kind, form, at, victim, topo, w, rp))
+        for at in MOVE_NODE_MOMENTS:
+            for rp in RESTARTS:
+                kv = dict(base, fault=f"node:{NODE_PARAM}", floor_soft=1, co="none", topo=topo)
+                kv.update(victim="moved", mig="Auto", inst=0, at=at, lift="after-recover", needs=NODE_NEEDS["relocated"])
+                meta = dict(strat="SurgeThenDrain", verb=f"node@move-{at}", rp=rp, victim="engine", at=at, who="moved")
+                desc = f"{GEN_MARK} fault-move node at {at} on moved {shape_tag(topo, w)} N={n} rp {rp}"
+                life = lib.lifecycle(restart=RP_FULL[rp])
+                d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+                add("gen-fault-move", desc, kv, comps(topo, n, w, life, d_life=d_life),
+                    _move_node_reason(at, rp, topo), meta,
+                    cell=("fault-move", "node", None, at, "moved", topo, w, rp))
+
+
+# ── gen-fault-edit: a fault during a runtime edit ────────────────────────────
+# The runtime every Component inherits is edited, so engine, decoder and
+# router each roll onto their own new revision. As the edit lands a pod of
+# the running revision breaks (the roll owns it), or the edit itself is bad
+# (it holds with a reason, the old revision keeps serving, a corrective edit
+# lands). One gang width; the surge and the drain-first strategies.
+EDIT_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1)]
+EDIT_STRATS = {"SurgeThenDrain": (1, 0), "RecreatePod": (0, 1)}
+# (kind, form, the restart policies the cell runs under): a crash at start
+# and a pull failure open no runner-restart trigger; the after-Ready form
+# does, so it runs under both.
+EDIT_BREAKS = [("crashloop", "start", ["None"]), ("imagepull", None, ["None"]),
+               ("crashloop", "load", ["None", "RecreateInstance"])]
+EDIT_VICTIMS = {"engine": ["engine"], "pd": ["engine", "decoder"], "engine-mn": ["engine"]}
+# The image edit on every shape; the env edit on the engine shape as the
+# control (the same new revision under these strategies).
+EDIT_VERBS = {"engine": ["image", "env"], "pd": ["image"], "engine-mn": ["image"]}
+# The bad edit: an image that cannot be pulled (expect=recover) and a
+# readiness that never passes (expect=recover break=stuck).
+BAD_EDITS = [("imagepull", None), ("readiness", "stuck")]
+EDIT_RP_FOR_BAD = "None"
+EDIT_LANDS = {"SurgeThenDrain": "the surge brings the fixed replacement up beside it and drains it",
+              "RecreatePod": "the recreate drains it and rebuilds the Instance at the edited revision"}
+
+
+def _edit_break_reason(kind, form, victim, edit, strat, rp, topo):
+    what = "a new image" if edit == "image" else "a new runner env"
+    rolls = ("engine, decoder and router roll, each onto its own new revision" if is_pd(topo)
+             else "the engine rolls onto a new revision")
+    out = (f"the runtime every Component inherits gets {what}, so {rolls}; as the edit lands "
+           f"{_break_how(form or 'start', victim)}; its "
+           f"Instance is off the target from that moment, so the roll owns it: {EDIT_LANDS[strat]}, admitted within "
+           f"the same budget as its peers, and no repair is recorded for it after the edit; every Instance of every "
+           f"Component ends on the edited revision serving, the healthy Instances hold the floor lowered by the one "
+           f"broken Instance, and no Instance row is left mid-operation")
+    if form == "load" and rp == "None":
+        out += ("; under restart policy None a runner that dies after Ready is the kubelet's restart, and the roll "
+                "must still land on a pod the kubelet alone keeps restarting")
+    elif form == "load":
+        out += ("; under RecreateInstanceOnPodRestart the runner-restart trigger competes with the roll, and the roll "
+                "must win")
+    if victim == "decoder":
+        out += "; the engine's own roll converges untouched by the decoder's break"
+    if is_mn(topo):
+        out += "; each Instance is a gang, replaced whole"
+    return out
+
+
+def _bad_edit_reason(kind, strat, topo):
+    floor = ("the floor N under the surge strategy" if strat == "SurgeThenDrain" else
+             "the floor N-1 under the drain-first strategy, which takes one Instance into the attempt")
+    if kind == "imagepull":
+        out = (f"the runtime every Component inherits is pointed at an image that cannot be pulled, so every "
+               f"Component's new revision parks in ImagePullBackOff; within budget the status says why the push has "
+               f"not landed (a Failed row, a retry block or a hold), the old revision keeps serving on every Instance "
+               f"the attempt did not take ({floor}), and nothing promotes the broken revision; then a corrective edit "
+               f"(the good image back, plus a runner env change for a distinct revision) lands on every Instance of "
+               f"every Component, serving, with no row left mid-operation")
+    else:
+        out = (f"the runtime every Component inherits gets a readiness probe that never passes and a new runner env, "
+               f"so every Component's new revision runs but is never Ready; the old revision keeps serving on every "
+               f"Instance the attempt did not take ({floor}), nothing promotes the broken revision, and whether the "
+               f"status says why within budget is reported (a pod that runs but never passes readiness escalates "
+               f"nothing before its ready timeout); then a corrective edit (the probe restored, plus a distinct runner "
+               f"env) lands on every Instance of every Component, serving, with no row left mid-operation")
+    out += "; the restart policy is None: a revision that never becomes Ready restarts no runner, so it decides nothing here"
+    if is_mn(topo):
+        out += "; each Instance is a gang, attempted and replaced whole"
+    return out
+
+
+def _edit_kv(topo, n, strat, surge):
+    """Counts and ceilings of an edit case: engine and decoder roll under the
+    case's strategy, the router under its default surge of one."""
+    ce = n + surge if strat == "SurgeThenDrain" else n
+    return dict(mode="runtimerev", Ne=n, Nd=(n if is_pd(topo) else 0), Nr=(lib.NR if is_pd(topo) else 0),
+                ceil_e=ce, ceil_d=(ce if is_pd(topo) else 0), ceil_r=(lib.NR + 1 if is_pd(topo) else 0))
+
+
+def emit_fault_edit(add):
+    for topo, n, w in EDIT_SHAPES:
+        for strat, (surge, unavail) in EDIT_STRATS.items():
+            for kind, form, policies in EDIT_BREAKS:
+                for victim in EDIT_VICTIMS[topo]:
+                    for edit in EDIT_VERBS[topo]:
+                        for rp in policies:
+                            kv = dict(_edit_kv(topo, n, strat, surge), fault=f"{kind}:old", co="none", topo=topo)
+                            if form:
+                                kv["form"] = form
+                            if victim != "engine":
+                                kv["victimcomp"] = victim
+                            kv.update(expect="roll", edit=edit)
+                            if edit == "image":
+                                kv["img"] = ALT_IMAGE
+                            meta = dict(strat=strat, verb=f"{_storm_label(kind, form)}@edit", rp=rp, victim=victim,
+                                        rtedit=edit)
+                            desc = (f"{GEN_MARK} fault-edit {_storm_label(kind, form)} on {victim} edit {edit} "
+                                    f"{shape_tag(topo, w)} N={n} {strat} rp {rp}")
+                            life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                            add("gen-fault-edit", desc, kv, comps(topo, n, w, life, d_life=life),
+                                _edit_break_reason(kind, form, victim, edit, strat, rp, topo), meta,
+                                cell=("fault-edit", kind, form, victim, edit, topo, w, strat, rp), dedicated=True)
+            for kind, brk in BAD_EDITS:
+                kv = dict(_edit_kv(topo, n, strat, surge), co="none", topo=topo, expect="recover")
+                if brk:
+                    kv["break"] = brk
+                meta = dict(strat=strat, verb=f"bad-edit:{kind}", rp=EDIT_RP_FOR_BAD, rtedit="image")
+                desc = f"{GEN_MARK} bad-edit {kind} {shape_tag(topo, w)} N={n} {strat}"
+                life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[EDIT_RP_FOR_BAD])
+                add("gen-fault-edit", desc, kv, comps(topo, n, w, life, d_life=life),
+                    _bad_edit_reason(kind, strat, topo), meta,
+                    cell=("bad-edit", kind, topo, w, strat), dedicated=True)
 
 
 # ── assembly ─────────────────────────────────────────────────────────────────
@@ -3694,7 +3974,8 @@ def build_outputs():
             rt_name = f"ome-coordtest-rt-{name}"
             kv = dict(kv, rt=rt_name)
             before = (gen_runtime.dedicated_csr(kv["topo"], rt_name) if edit_runtime
-                      else dedicated_runtime(rt_name, metrics=(runtime == lib.CSR_METRICS)))
+                      else dedicated_runtime(rt_name, metrics=(runtime == lib.CSR_METRICS),
+                                             gang=any(c["w"] > 0 for c in case_comps or [])))
             runtime = rt_name
         text = body(name) if body else lib.render(name, case_comps, coord=coord, runtime=runtime)
         if before:
@@ -3738,6 +4019,8 @@ def build_outputs():
     emit_inplaceonly(add)
     emit_fault_scale(add)
     emit_fault_delete(add)
+    emit_fault_move(add)
+    emit_fault_edit(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -3810,7 +4093,7 @@ def manifest(rows):
     lines += table("By coordination", tally(lambda kv, m: kv.get("co", "none")))
     edits = {}
     for _f, _n, _kv, m in rows:
-        if "edit" in m:
+        if "edit" in m and _f == "gen-switch":
             edits[m["edit"]] = edits.get(m["edit"], 0) + 1
     if edits:
         lines += table("By mid-roll edit (gen-switch)", edits)
@@ -3824,13 +4107,17 @@ def manifest(rows):
     lines += table_if("By stuck kind (ops-held)", "stuck")
     lines += table_if("By operation on the stuck Component (ops-held)", "op")
     lines += table_if("By overlap order (runtime-edit-repair)", "order")
-    lines += table_if("By runtime edit (runtime-edit-repair)", "edit")
+    lines += table("By runtime edit (runtime-edit-repair and fault-edit families)",
+                   tally(lambda kv, m: m["edit"], where=lambda kv, m: "edit" in m and kv.get("mode") == "runtimerev"))
     lines += table("By lift (preempt and pending families)",
                    tally(lambda kv, m: m["lift"], where=lambda kv, m: "lift" in m))
     lines += table("By percent budget (gen-budget)",
                    tally(lambda kv, m: m["budget"], where=lambda kv, m: "budget" in m))
     lines += table("By operation on a service with a broken Instance",
                    tally(lambda kv, m: m["op"], where=lambda kv, m: "op" in m))
+    lines += table("By move moment (fault-move)", tally(lambda kv, m: m["at"], where=lambda kv, m: "at" in m))
+    lines += table("By move victim (fault-move)", tally(lambda kv, m: m["who"], where=lambda kv, m: "who" in m))
+    lines += table("By runtime edit (fault-edit)", tally(lambda kv, m: m["rtedit"], where=lambda kv, m: "rtedit" in m))
     parked_rows = [(f, n, m["parked"]) for f, n, _kv, m in rows if "parked" in m]
     if parked_rows:
         lines += ["### Parked cells (XFAIL on a tracked issue)", "",
@@ -4145,6 +4432,46 @@ def manifest(rows):
         " to one is down by one there, and down by two asks for zero, which the"
         " API does not run as zero. A rolling group is crossed in where a"
         " decoder exists; the delete family keeps the same axes.",
+        "- gen-fault-move fires the fault at a moment of a move (at=accept, the"
+        " request recorded; at=surge, the replacement pod up; at=drain, the"
+        " source going) on the moved Instance (its source pod at accept, its"
+        " replacement at surge and at drain), on a peer (the highest other"
+        " Instance) or on the decoder (victim=sibling, PD only). Left out, with"
+        " the reason: pd-mn (the move copies a whole gang whatever the decoder"
+        " does; the gang axis is engine-mn's, the sibling axis pd's); the update"
+        " strategy (dormant: no roll is in flight, a move surges whatever the"
+        " strategy and a repair rebuilds in place); a rollout group (it holds"
+        " repairs while no run is open, the idle family's parked cell); the"
+        " restart policy on a crash at start and a pull failure (both reach the"
+        " crash-loop repair under either policy, so they run under None) while"
+        " the after-Ready form runs under RecreateInstanceOnPodRestart, the one"
+        " policy that promises its repair; a node loss anywhere but the source"
+        " node (the story), at drain (the source is already going, its node dying"
+        " then is the sweep of a terminating pod, which the surge moment reads"
+        " with the replacement in place), and on the lane without the"
+        " force-delete policy (a source pod on a silent node is never freed, so"
+        " the move cannot finish; that fate is the node family's parked cell);"
+        " the readiness switch (fault=readiness:old is repaired under neither"
+        " restart policy, so it is the broken-Instance families' break and is"
+        " not fired at a move moment).",
+        "- gen-fault-edit edits the dedicated runtime every Component inherits"
+        " (engine, decoder and router each roll onto their own revision) under"
+        " the surge and the drain-first strategies, and breaks a pod of the"
+        " running revision on the engine or the decoder as the edit lands; its"
+        " bad-edit half pushes an image that cannot be pulled or a readiness"
+        " that never passes and then the corrective edit. Left out, with the"
+        " reason: the in-place strategies (the switch family's); the env edit"
+        " beyond the engine shape (under these strategies both edits are one new"
+        " revision; the pod-template difference matters to an in-place strategy"
+        " alone); the restart policy on a crash at start and a pull failure"
+        " (they open no runner-restart trigger, so the roll owns the Instance"
+        " either way; the after-Ready form runs under both); any restart policy"
+        " but None on the bad edit (a revision that never becomes Ready restarts"
+        " no runner); pd-mn, a rollout group and a readiness loss on the running"
+        " side, as in fault-move. The readiness-that-never-passes cell asserts the"
+        " fix and the floor and reports whether the status said why: nothing"
+        " escalates a pod that runs but never passes readiness before its ready"
+        " timeout.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

@@ -804,7 +804,13 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-fault-scale", "pd", "")], 4)
         for topology in ("engine", "pd", "engine-mn"):
             self.assertEqual(shard_counts[("gen-fault-delete", topology, "")], 1)
-        self.assertEqual(job_count, 409)
+        for topology in ("engine", "engine-mn", "pd"):
+            self.assertEqual(shard_counts[("gen-fault-move", topology, "")], 2)
+            self.assertEqual(shard_counts[("gen-fault-move", topology, gp.EVAL_FORCE_DELETE_SLUG)], 1)
+        self.assertEqual(shard_counts[("gen-fault-edit", "engine", "")], 2)
+        self.assertEqual(shard_counts[("gen-fault-edit", "engine-mn", "")], 1)
+        self.assertEqual(shard_counts[("gen-fault-edit", "pd", "")], 2)
+        self.assertEqual(job_count, 423)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin
@@ -836,7 +842,9 @@ class TestCheckedInTreeClassification(unittest.TestCase):
             cases = set(command.group(1).split()[2:])
             if f"-{gp.EVAL_FORCE_DELETE_SLUG}" in key.group(1):
                 self.assertIn(f'{gp.EVAL_FORCE_DELETE_ENV}: "1"', block)
-                self.assertTrue(key.group(1).startswith("omenative-e2e-gen-node-"), key.group(1))
+                # the node family, and the node loss at a moment of a move
+                self.assertTrue(key.group(1).startswith(("omenative-e2e-gen-node-", "omenative-e2e-gen-fault-move-")),
+                                key.group(1))
                 twin_cases |= cases
             else:
                 self.assertNotIn(gp.EVAL_FORCE_DELETE_ENV, block)

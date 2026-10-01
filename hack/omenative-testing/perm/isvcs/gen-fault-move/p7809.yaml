@@ -1,0 +1,13 @@
+# p7809: [gen] fault-move crashloop:start at surge on peer engine N=4 rp None  mode=migrate Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=crashloop:old co=none topo=engine form=start victim=peer mig=Auto inst=0 at=surge
+# reason: as the replacement pod appears, before it is Ready, the pod of the moved Component's highest other Instance is pointed at an image with no shell, so it crashes at every start and is never Ready again; the move finishes, or is abandoned with a reason its record carries, within budget and is recorded once (one ledger row, one controller record); the moved Instance ends whole, Ready and serving on one pod set, the engine holds N whole Instances on distinct indices, and nothing exceeds N+1 alive; the move completes (a broken peer is not the move's to care about) and the broken Instance is rebuilt, every pod new, Ready and serving on its running revision, by a repair a RestartTriggered event names, under restart policy None (an Instance that serves nothing is rebuilt by the crash-loop repair once its pod has sat past the stuck-pod grace); the capacity floor, lowered by that one Instance, holds throughout
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7809 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

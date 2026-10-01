@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **3179**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -44,14 +44,16 @@ Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) 
 | gen-inplaceonly | 45 | p8330..p8374 |
 | gen-fault-scale | 98 | p7600..p7697 |
 | gen-fault-delete | 28 | p7700..p7727 |
+| gen-fault-move | 75 | p7800..p7874 |
+| gen-fault-edit | 52 | p7900..p7951 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 769 |
-| engine-mn | 705 |
-| pd | 972 |
+| engine | 811 |
+| engine-mn | 739 |
+| pd | 1023 |
 | pd-mn | 606 |
 
 ### By update strategy
@@ -61,13 +63,15 @@ Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) 
 | (dormant: nothing rolls) | 166 |
 | InPlaceIfPossible | 404 |
 | InPlaceOnly | 281 |
-| RecreatePod | 676 |
-| SurgeThenDrain | 1525 |
+| RecreatePod | 702 |
+| SurgeThenDrain | 1626 |
 
 ### By failure verb / phase
 
 | value | cases |
 |---|---|
+| bad-edit:imagepull | 6 |
+| bad-edit:readiness | 6 |
 | bump-at-accept | 26 |
 | bump-at-drain | 26 |
 | bump-at-surge | 26 |
@@ -84,8 +88,12 @@ Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:load@delete | 8 |
 | crashloop:load@down1 | 8 |
 | crashloop:load@down2 | 6 |
+| crashloop:load@edit | 20 |
 | crashloop:load@gate | 4 |
 | crashloop:load@idle | 91 |
+| crashloop:load@move-accept | 7 |
+| crashloop:load@move-drain | 7 |
+| crashloop:load@move-surge | 7 |
 | crashloop:load@prestart | 16 |
 | crashloop:load@promote | 8 |
 | crashloop:load@sibling | 10 |
@@ -107,8 +115,12 @@ Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:start@delete | 8 |
 | crashloop:start@down1 | 8 |
 | crashloop:start@down2 | 6 |
+| crashloop:start@edit | 10 |
 | crashloop:start@gate | 4 |
 | crashloop:start@idle | 182 |
+| crashloop:start@move-accept | 7 |
+| crashloop:start@move-drain | 7 |
+| crashloop:start@move-surge | 7 |
 | crashloop:start@prestart | 16 |
 | crashloop:start@promote | 8 |
 | crashloop:start@sibling | 20 |
@@ -136,7 +148,11 @@ Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) 
 | imagepull@delete | 8 |
 | imagepull@down1 | 8 |
 | imagepull@down2 | 6 |
+| imagepull@edit | 10 |
 | imagepull@gate | 4 |
+| imagepull@move-accept | 7 |
+| imagepull@move-drain | 7 |
+| imagepull@move-surge | 7 |
 | imagepull@prestart | 16 |
 | imagepull@promote | 8 |
 | imagepull@toone | 6 |
@@ -149,6 +165,8 @@ Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) 
 | node:parked | 32 |
 | node:relocated | 32 |
 | node:repaired | 32 |
+| node@move-accept | 6 |
+| node@move-surge | 6 |
 | none | 140 |
 | pending:quota:roll | 22 |
 | pending:quota:steady | 12 |
@@ -202,22 +220,22 @@ Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (unset — baseline) | 758 |
-| None | 1120 |
-| RecreateInstance | 1174 |
+| None | 1210 |
+| RecreateInstance | 1211 |
 
 ### By pause
 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 2758 |
+| off | 2885 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 2872 |
+| (no pause around a repair) | 2999 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -226,7 +244,7 @@ Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 2872 |
+| (no pause around a repair) | 2999 |
 | fix | 90 |
 | none | 90 |
 
@@ -236,7 +254,7 @@ Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 48 |
 | canary | 24 |
-| none | 2369 |
+| none | 2496 |
 | ratio | 16 |
 | rolling | 561 |
 | seq | 34 |
@@ -245,8 +263,6 @@ Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| env | 42 |
-| image | 42 |
 | restartPolicy None to RecreateInstance at rotating | 6 |
 | restartPolicy None to RecreateInstance at settling | 6 |
 | restartPolicy RecreateInstance to None at rotating | 6 |
@@ -282,9 +298,9 @@ Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 2289 |
-| decoder | 60 |
-| engine | 703 |
+| (no break) | 2301 |
+| decoder | 77 |
+| engine | 801 |
 
 ### By migration mode (node family)
 
@@ -337,42 +353,12 @@ Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) 
 | crash-during-edit | 48 |
 | edit-during-repair | 36 |
 
-### By runtime edit (runtime-edit-repair)
+### By runtime edit (runtime-edit-repair and fault-edit families)
 
 | value | cases |
 |---|---|
 | env | 42 |
 | image | 42 |
-| restartPolicy None to RecreateInstance at rotating | 6 |
-| restartPolicy None to RecreateInstance at settling | 6 |
-| restartPolicy RecreateInstance to None at rotating | 6 |
-| restartPolicy RecreateInstance to None at settling | 6 |
-| strategy InPlaceIfPossible to InPlaceOnly at rotating | 6 |
-| strategy InPlaceIfPossible to InPlaceOnly at settling | 6 |
-| strategy InPlaceIfPossible to RecreatePod at rotating | 6 |
-| strategy InPlaceIfPossible to RecreatePod at settling | 6 |
-| strategy InPlaceIfPossible to SurgeThenDrain at rotating | 6 |
-| strategy InPlaceIfPossible to SurgeThenDrain at settling | 6 |
-| strategy InPlaceOnly to InPlaceIfPossible at rotating | 6 |
-| strategy InPlaceOnly to InPlaceIfPossible at settling | 6 |
-| strategy InPlaceOnly to RecreatePod at rotating | 6 |
-| strategy InPlaceOnly to RecreatePod at settling | 6 |
-| strategy InPlaceOnly to SurgeThenDrain at rotating | 6 |
-| strategy InPlaceOnly to SurgeThenDrain at settling | 6 |
-| strategy RecreatePod to InPlaceIfPossible at rotating | 6 |
-| strategy RecreatePod to InPlaceIfPossible at settling | 6 |
-| strategy RecreatePod to InPlaceOnly at rotating | 6 |
-| strategy RecreatePod to InPlaceOnly at settling | 6 |
-| strategy RecreatePod to SurgeThenDrain at rotating | 6 |
-| strategy RecreatePod to SurgeThenDrain at rotating while an Instance crashes | 6 |
-| strategy RecreatePod to SurgeThenDrain at settling | 6 |
-| strategy SurgeThenDrain to InPlaceIfPossible at rotating | 6 |
-| strategy SurgeThenDrain to InPlaceIfPossible at settling | 6 |
-| strategy SurgeThenDrain to InPlaceOnly at rotating | 6 |
-| strategy SurgeThenDrain to InPlaceOnly at settling | 6 |
-| strategy SurgeThenDrain to RecreatePod at rotating | 6 |
-| strategy SurgeThenDrain to RecreatePod at rotating while an Instance crashes | 6 |
-| strategy SurgeThenDrain to RecreatePod at settling | 6 |
 
 ### By lift (preempt and pending families)
 
@@ -404,6 +390,29 @@ Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) 
 | scale-zero | 16 |
 | toone | 21 |
 | up1 | 28 |
+
+### By move moment (fault-move)
+
+| value | cases |
+|---|---|
+| accept | 27 |
+| drain | 21 |
+| surge | 27 |
+
+### By move victim (fault-move)
+
+| value | cases |
+|---|---|
+| moved | 39 |
+| peer | 27 |
+| sibling | 9 |
+
+### By runtime edit (fault-edit)
+
+| value | cases |
+|---|---|
+| env | 8 |
+| image | 44 |
 
 ### Parked cells (XFAIL on a tracked issue)
 
@@ -473,6 +482,8 @@ Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) 
 - gen-budget drives the percent budgets the engine resolves: maxSurge under SurgeThenDrain and maxUnavailable under RecreatePod at 10%, 25%, 50% on fleets of 4 and 8 Instances, for a plain push, a push with one engine Instance crash-looping on the running revision (form=start, restart policy None: the roll owns the broken Instance under either policy) and the story families' four-step auto canary. The engine resolves a percent budget as N x percent rounded up and clamped to N, for both budgets alike (the Deployment convention of rounding maxUnavailable down is not its rule), and every case states the rule with its own numbers: at 10 percent both fleets round up to 1, where rounding down would leave 0 and no roll could start, so the roll converging is the proof; at 25 and 50 percent the ceiling or floor scales with N. Left out, with the reason: the in-place strategies, whose maxUnavailable the drain-first cells already read and whose own family is gen-inplaceonly; the prefill/decode gang at 8 Instances, a 34-pod fleet that would cost a lane shard per case while the rounding is a function of N and the percent, which the single-pod cells at 8 carry; the crash form load and the restart policy under the crash loop (gen-crashloop crosses both at 25 percent); and the gangs under the canary beyond the engine gang at 4 (the pod budget of a canary lane). The capacity floor is waived on the crash-loop cells as on every crash-loop case; the ceiling stays hard.
 - gen-inplaceonly drives InPlaceOnly on what sets it apart. An image change is the one diff it patches onto the live pod: on a single-pod Instance the roll lands in place with UIDs stable; a gang runs every in-place strategy as a whole-gang recreate (eligibility reads the leader's spec alone), so it is rebuilt whole and never refused. An env, a resources or a probe change exceeds container images: on a single-pod Instance the push is refused (`expect=held`: nothing is recreated, patched or surged for the hold window, an InPlaceUpdateNotPossible event says why, then the corrective push drops the override and lands in place); on a gang it is a whole-gang recreate. A crash loop at idle is repaired by a rebuild, since a repair is not an update (form=load under restart policy None is left out, as in every idle family: no repair is promised there). A crash loop under a push belongs to the roll: an image push patches the crashing pod itself and it serves again; an env push is refused, the repair yields to the roll, and the Instance waits broken for the corrective push, which patches it in place. One fleet size (4), both restart policies everywhere (live under the crash loops, a negative control under the pushes), the canonical budget maxUnavailable 1.
 - gen-fault-scale and gen-fault-delete break Instance 0 of the settled service, the lowest index, so a scale-down's natural victim (the highest index) and the broken Instance differ and the order of removal can be told apart. The engine runs under SurgeThenDrain with maxSurge 1 and maxUnavailable 1 in both families: nothing rolls, so the strategy is dormant, and the unavailability budget of one admits the repair that takes the broken Instance offline (the canonical budget of zero holds it). Readiness loss is repaired under neither restart policy, so its policy axis is collapsed to None; a crash at start, a crash after Ready and a pull failure run under both, and each scale-up cell states on line two what becomes of the broken Instance (expect=repaired|left) and why. On the gang fleet of two only down by one and up by one are emitted: to one is down by one there, and down by two asks for zero, which the API does not run as zero. A rolling group is crossed in where a decoder exists; the delete family keeps the same axes.
+- gen-fault-move fires the fault at a moment of a move (at=accept, the request recorded; at=surge, the replacement pod up; at=drain, the source going) on the moved Instance (its source pod at accept, its replacement at surge and at drain), on a peer (the highest other Instance) or on the decoder (victim=sibling, PD only). Left out, with the reason: pd-mn (the move copies a whole gang whatever the decoder does; the gang axis is engine-mn's, the sibling axis pd's); the update strategy (dormant: no roll is in flight, a move surges whatever the strategy and a repair rebuilds in place); a rollout group (it holds repairs while no run is open, the idle family's parked cell); the restart policy on a crash at start and a pull failure (both reach the crash-loop repair under either policy, so they run under None) while the after-Ready form runs under RecreateInstanceOnPodRestart, the one policy that promises its repair; a node loss anywhere but the source node (the story), at drain (the source is already going, its node dying then is the sweep of a terminating pod, which the surge moment reads with the replacement in place), and on the lane without the force-delete policy (a source pod on a silent node is never freed, so the move cannot finish; that fate is the node family's parked cell); the readiness switch (fault=readiness:old is repaired under neither restart policy, so it is the broken-Instance families' break and is not fired at a move moment).
+- gen-fault-edit edits the dedicated runtime every Component inherits (engine, decoder and router each roll onto their own revision) under the surge and the drain-first strategies, and breaks a pod of the running revision on the engine or the decoder as the edit lands; its bad-edit half pushes an image that cannot be pulled or a readiness that never passes and then the corrective edit. Left out, with the reason: the in-place strategies (the switch family's); the env edit beyond the engine shape (under these strategies both edits are one new revision; the pod-template difference matters to an in-place strategy alone); the restart policy on a crash at start and a pull failure (they open no runner-restart trigger, so the roll owns the Instance either way; the after-Ready form runs under both); any restart policy but None on the bad edit (a revision that never becomes Ready restarts no runner); pd-mn, a rollout group and a readiness loss on the running side, as in fault-move. The readiness-that-never-passes cell asserts the fix and the floor and reports whether the status said why: nothing escalates a pod that runs but never passes readiness before its ready timeout.
 - Kill-family cells pinned by hand-written restart/ cases are excluded:
 
   - p130: engine SurgeThenDrain rp=None

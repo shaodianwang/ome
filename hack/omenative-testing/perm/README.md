@@ -100,7 +100,8 @@ perm/
 │   ├── gen-size/ gen-router-gang/  — generated small fleets (one and two Instances per Component) and the engine gang behind a router
 │   ├── gen-readiness/ gen-gang-member/ gen-tight/ gen-evict/ gen-preempt/ gen-pending/  — generated fault families (see isvcs/MANIFEST.md)
 │   ├── gen-budget/ gen-inplaceonly/  — percent budgets as the engine resolves them; the strict in-place strategy on its own terms
-│   └── gen-fault-scale/ gen-fault-delete/  — generated: a scale or a delete on a service with a broken Instance
+│   ├── gen-fault-scale/ gen-fault-delete/  — generated: a scale or a delete on a service with a broken Instance
+│   └── gen-fault-move/ gen-fault-edit/  — generated faults crossed with a move and with a runtime edit
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -1060,6 +1061,85 @@ one, down by two, to one, up by one and delete; the engine runs under
 budget of zero holds it). `isvcs/MANIFEST.md` lists the cells left out and
 why.
 
+### A fault at a moment of a move (`mode=migrate at=accept|surge|drain`)
+
+`at=` fires the case's fault at a moment of the move the request files:
+`accept` once the request is recorded (the controller's record in
+`status.migrations`, the ledger row or the consumed annotation, whichever
+shows first), `surge` once the replacement pod has appeared (a pod the fleet
+did not have, or the record at `SurgeReady`), `drain` once a source pod is
+being taken down or gone (or the record at `Draining`). The record is read
+every 2 s while the moment is armed. `victim=` names whose pod: `moved` (the
+Instance being moved: its source pod at accept, its replacement at surge and
+at drain; on a gang its leader), `peer` (the highest other Instance of the
+moved Component still on its original pods) or `sibling` (the decoder's
+highest Instance). The faults are the breaks (`fault=crashloop:old
+form=start|load`, `fault=imagepull:old`, patched or killed as under a
+rollout) and the source node's loss (`fault=node:notready`, always the node
+under the moved Instance's source pod, with `lift=after-recover` and
+`needs=forcedelete`: the kubelet is started again once the Instance has
+settled, and the cell SKIPs off the force-delete lane as the node family's
+do). A moment whose victim pod never shows within the grace is recorded as
+missed and fails the case. A break lowers the capacity floor by the one
+Instance it broke instead of waiving it; a node loss waives it (the dead
+node takes every pod on it).
+
+The verdict is the operator's end state. The move finishes (`Completed`) or
+is abandoned with a reason its record carries (`Failed` with a reason; a
+`Failed` without one, or no terminal record within budget, fails). It is
+recorded once: one ledger row for the request, no other row, one controller
+record. Once the record is terminal the runner watches until the moved
+Instance reads whole, Ready and serving on one pod set at the index the
+record names (its replacement index when the move completed, its source
+index otherwise), with no source pod alive after a completed move, no pod
+the fault hit surviving unserving, and the moved Component holding N whole
+Instances on N distinct indices, sustained for the stability window within
+the idle budget (the relocation budget for a node loss). A break on a `peer`
+or a `sibling` must not fail the move, and that Instance must be rebuilt
+(every pod new, Ready and serving) with a `RestartTriggered` event naming it.
+The ceiling, the floor, index partition and gang atomicity are the migrate
+checks; Components neither moved nor broken keep their pods (reported, not
+asserted, under a node loss). A repair recorded for the moved Instance
+itself is reported, not judged: the move or the repair may own it. The
+generated `isvcs/gen-fault-move/` family (`p7800`+) crosses the three
+moments with the three victims, the three breaks and the node loss over the
+engine, PD and gang shapes; `isvcs/MANIFEST.md` lists what it leaves out and
+why.
+
+### A fault during a runtime edit (`mode=runtimerev` with a break, `expect=recover`)
+
+A break (`fault=crashloop:old form=start|load`, `fault=imagepull:old`,
+`victimcomp=engine|decoder`) may ride a runtime edit that rolls
+(`expect=roll` with `edit=image img=…` or `edit=env`): it fires as the edit
+lands on the dedicated runtime, so the broken Instance is off the target
+from that moment and the roll owns it. On top of the usual roll checks the
+verdict requires the broken Instance to end on the post-edit revision
+serving with no `RestartTriggered` event naming it after the edit, the
+healthy Instances to hold the floor lowered by the one broken Instance, and
+every Instance row to settle (Ready, no operation open; polled for
+`ROWS_SETTLE_S`) once the pods have converged. Every Component inherits the
+runtime, so on a PD service the decoder (and the router, on its own default
+surge) roll too; a decoder victim is the sibling that inherits the same
+runtime.
+
+The recovery guards (`expect=recover`: the runtime is pointed at an image
+that cannot be pulled; `expect=recover break=stuck`: its readiness probe
+never passes) read, before the corrective edit, whether the status says why
+the pushed revision has not landed (a `Failed` row, a retry block or a
+rollout hold on some Component, with the update revision still differing
+from the current one), waiting up to `HOLD_REASON_WAIT_S` (90 s scaled):
+hard for the pull failure, which the kubelet reports and the stuck-pod
+breaker escalates, reported for the readiness that never passes, which
+nothing escalates before its ready timeout. After the fix they add that
+nothing exceeded its ceiling, that the old revision kept serving throughout
+(`N - maxUnavailable`: N under a surge, N-1 under the drain-first strategy,
+which takes one Instance into the attempt) and that no row is left
+mid-operation. The generated `isvcs/gen-fault-edit/` family (`p7900`+)
+crosses the breaks with the engine and decoder victims, the image and env
+edits, the surge and drain-first strategies and the restart policies, and
+runs both bad edits under both strategies, on the engine, PD and gang
+shapes.
+
 ### Fault cases: quota isolation, cordon impact, leak remediation
 
 - **`fault=crashloop:old` with `form=start|load`** breaks one old-revision
@@ -1648,7 +1728,12 @@ Four generators write into `isvcs/`; re-run one after editing it:
   (`p8330`–`p8399`) → `isvcs/gen-inplaceonly/` (an image change rolls in
   place with stable pod identities, an env, resources or probe change is
   refused on a single-pod Instance and rebuilt whole on a gang, and a crash
-  loop under each is repaired or fixed the way the strategy allows), plus
+  loop under each is repaired or fixed the way the strategy allows), and the
+  faults crossed with a move and with a runtime edit (`p7800`–`p7999`) →
+  `isvcs/gen-fault-move/` (a break, or the loss of the source node, at accept,
+  at surge or at drain of a move, on the moved Instance, a peer or the decoder)
+  and `isvcs/gen-fault-edit/` (a break of the running revision as the edit of
+  the inherited runtime lands, and a bad edit followed by its fix), plus
   `isvcs/MANIFEST.md` (per-dimension counts, the
   constraint ledger with every omitted cell and its reason, missing-hook
   catalog). The story families are canary lanes in CI: the pipeline gives
@@ -1753,7 +1838,9 @@ The ledger's cell is (shape family, operation, fault row):
   `persistent`. The side follows `victim=`, the break's `old` victim, and
   run.py's component-blind podkill rule (the newest new-revision pod dies
   mid-rotation under a replacement-first strategy, a settled pod otherwise).
-  A case with two faults counts in both rows.
+  A case with two faults counts in both rows. A fault at a moment of a move
+  (`mode=migrate at=`) sits on the `migrating` timing, and `victim=sibling`
+  there puts it on the decoder as a sibling break.
 
 Cells the product does not need carry a written reason in `EXCLUDED_CELLS`
 (a steady state with no fault asserts nothing; a single-pod Instance has no

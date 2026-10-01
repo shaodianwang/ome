@@ -1,0 +1,23 @@
+# p7833: [gen] fault-move crashloop:load at surge on moved pd N=4 rp RecreateInstance  mode=migrate Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 fault=crashloop:old co=none topo=pd form=load victim=moved mig=Auto inst=0 at=surge
+# reason: as soon as it appears, before it is Ready, the moved Instance's replacement pod has its runner killed every few seconds while it is up, so it dies after Ready and comes back between crashes; the move finishes, or is abandoned with a reason its record carries, within budget and is recorded once (one ledger row, one controller record); the moved Instance ends whole, Ready and serving on one pod set, the engine holds N whole Instances on distinct indices, and nothing exceeds N+1 alive; no pod the fault hit survives unserving: the move or the repair rebuilds it under restart policy RecreateInstanceOnPodRestart (a runner that dies after Ready re-arms the whole-Instance rebuild); a replacement that never comes up is the move's to abandon or to retry, and either way the Instance keeps serving on exactly one pod set; the router keeps its pods
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7833 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

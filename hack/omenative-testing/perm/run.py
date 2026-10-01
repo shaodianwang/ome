@@ -1950,6 +1950,10 @@ REPAIR_HOOK = "repair"
 # How long the handler waits, after the edit, for every Instance row to
 # settle (Ready, no operation) once the pods have converged.
 ROWS_SETTLE_S = int(60 * TIMEOUT_MULT)
+# How long a broken edited revision is given to say why it holds (a Failed
+# row, a retry block or a rollout hold on the Component) before the
+# corrective edit lands.
+HOLD_REASON_WAIT_S = int(90 * TIMEOUT_MULT)
 # imagepull has one form: an image that cannot be pulled never runs.
 IMAGEPULL_FORMS = {"start"}
 BREAK_VICTIM_COMPS = {"engine", "decoder"}
@@ -1996,6 +2000,19 @@ BROKEN_ROWS_SETTLE_S = int(60 * TIMEOUT_MULT)
 # A readiness break before a scale or a delete keeps its switch set until the
 # case ends: only the persistent form is a broken-Instance operation.
 BROKEN_READINESS_FORMS = {"persist"}
+# A break, or a node loss, fired at a moment of a move (mode=migrate
+# at=<moment>): accept once the request is recorded, surge once the
+# replacement pod has appeared, drain once the source is being taken down.
+# victim= names whose pod breaks: moved (the Instance being moved: its source
+# pod at accept, its replacement at surge and at drain; a node loss is always
+# the source node's), peer (another Instance of the moved Component) or
+# sibling (the decoder's highest Instance).
+MOVE_HOOKS = {"accept", "surge", "drain"}
+MOVE_VICTIMS = {"moved", "peer", "sibling"}
+MOVE_FAULTS = BREAK_FAULTS | {"node"}
+MOVE_DEFAULT_VICTIM = "moved"
+# How long a moment that has arrived waits for its victim pod to exist.
+MOVE_VICTIM_GRACE_S = int(60 * TIMEOUT_MULT)
 # configkey:missing removes the ConfigMap key the victim's runner env reads
 # and restarts the runner, so its next start fails with
 # CreateContainerConfigError until the key is put back at lift=<phase>.
@@ -2517,20 +2534,9 @@ def _migration_record(case_id, comp, req_uuid):
 
 
 def _overlap_bump_due(ov, pod_state, record, ledger_entry, anno_consumed, mcomp, src_uids, orig_uids):
-    """Whether the move has reached the moment the bump is filed at: accept
-    once the request is recorded anywhere (the controller's record, the
-    ledger row, or the consumed annotation); surge once a pod the fleet did
-    not have is up for the migrated Component (or the record says so); drain
-    once a source pod is being taken down or gone (or the record says so)."""
-    phase = (record or {}).get("phase")
-    if ov["at"] == "accept":
-        return record is not None or ledger_entry is not None or bool(anno_consumed)
-    if ov["at"] == "surge":
-        return phase in RECORD_SURGE_PHASES or any(
-            p and p["alive"] and p.get("comp") == mcomp and p.get("uid") and p["uid"] not in orig_uids
-            for p in pod_state.values())
-    live = {p["uid"] for p in pod_state.values() if p and p["alive"] and p.get("uid")}
-    return phase == RECORD_DRAIN_PHASE or bool(set(src_uids) - live)
+    """Whether the move has reached the moment the bump is filed at (see
+    _move_moment_due)."""
+    return _move_moment_due(ov["at"], pod_state, record, ledger_entry, anno_consumed, mcomp, src_uids, orig_uids)
 
 
 def _pod_on_new(p, old_hashes):
@@ -3579,6 +3585,7 @@ def _fault_new(case_id, hdr):
             "exitafter": int(hdr.get("exitafter") or 0),
             "fixfirst": bool(hdr.get("fixfirst")),
             "member": str(hdr.get("kill") or ""),
+            "at": str(hdr.get("at") or ""),
             "fired": False, "infra_fail": None, "notes": []}
 
 
@@ -3586,6 +3593,12 @@ def _fault_at_idle(f):
     """True when the case fires its fault on the idle service (during=idle)
     and never bumps; the phase hooks must then leave it alone."""
     return bool(f) and f.get("during") == IDLE_FAULT_PHASE
+
+
+def _fault_at_move(f):
+    """True when the case fires its fault at a moment of a move (mode=migrate
+    at=<moment>): the migrate handler fires it, the phase hooks leave it alone."""
+    return bool(f) and bool(f.get("at"))
 
 
 def _fault_on_new(f):
@@ -3602,10 +3615,10 @@ def _fault_before_push(f):
 
 
 def _fault_fired_by_handler(f):
-    """True when the handler fires the fault itself, on the settled service:
-    at idle, or ahead of a runtime edit that lands on the repair (during=repair).
-    The phase hooks must then leave it alone."""
-    return bool(f) and f.get("during") in (IDLE_FAULT_PHASE, REPAIR_HOOK)
+    """True when the handler fires the fault itself: on the settled service at
+    idle, ahead of a runtime edit that lands on the repair (during=repair), or
+    at a moment of a move (at=). The phase hooks must then leave it alone."""
+    return bool(f) and (f.get("during") in (IDLE_FAULT_PHASE, REPAIR_HOOK) or _fault_at_move(f))
 
 
 _QTY_BIN = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4, "Pi": 1024**5, "Ei": 1024**6}
@@ -4098,6 +4111,13 @@ def _fault_crashloop_fire(f, pod_state, old_hashes, inv=None):
         f["infra_fail"] = (f"{f['kind']}: {len(victims)} live old-revision {comp} pod(s) to break, {count} asked"
                            if victims else f"{f['kind']}: no live old-revision {comp} pod to break")
         return
+    _break_named_pods(f, pod_state, victims, inv)
+
+
+def _break_named_pods(f, pod_state, victims, inv=None):
+    """Break the named live pods the way the fault says: form=start and
+    imagepull point the pod at the break image, form=load starts the killer."""
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
     records = []
     for victim in victims:
         state = pod_state.get(victim) or {}
@@ -4457,6 +4477,13 @@ def _manager_nodes():
     return set((r.stdout or "").split()) if r.returncode == 0 else set()
 
 
+def _node_allowed(node, nodes, managers):
+    """Whether a node may lose its kubelet: a worker that is a running
+    container and hosts no manager pod."""
+    info = nodes.get(node)
+    return bool(info) and not info["control_plane"] and node not in managers and _node_is_container(node)
+
+
 def _node_pick(pod_state, old_hashes, comp):
     """(victim pod, its node) by the break rule over the pods whose node may
     lose its kubelet: a worker that is a running container and hosts no
@@ -4468,9 +4495,7 @@ def _node_pick(pod_state, old_hashes, comp):
         if not p or not node:
             continue
         if node not in allowed:
-            info = nodes.get(node)
-            allowed[node] = (bool(info) and not info["control_plane"] and node not in managers
-                             and _node_is_container(node))
+            allowed[node] = _node_allowed(node, nodes, managers)
         if allowed[node]:
             eligible[name] = p
     victim = _crashloop_pick_pod(eligible, old_hashes, comp)
@@ -4508,7 +4533,14 @@ def _fault_node_fire(f, pod_state, old_hashes):
         f["skip"] = f"node fault unavailable here: {node}"
         f["notes"].append(f"ⓘ {f['skip']}")
         return
+    _node_stop(f, victim, node, pod_state)
+
+
+def _node_stop(f, victim, node, pod_state):
+    """Stop the kubelet of `node`, the node under the victim pod (see
+    _fault_node_fire)."""
     state = pod_state.get(victim) or {}
+    comp = state.get("comp") or f.get("victimcomp") or BREAK_DEFAULT_COMP
     f.update(crash_pod=victim, crash_inst=str(state.get("inst", "0")), crash_comp=state.get("comp", comp),
              crash_hash=state.get("hash", ""), crash_uid=state.get("uid", ""), node=node,
              bite="its node NotReady with no pod of it serving there", cause=f"the kubelet of node {node}",
@@ -7497,10 +7529,11 @@ HDR_VALIDATORS = {
     "dup": lambda v: v == 1,      # migrate: re-file the same request UUID (dedup contract)
     "hint": lambda v: v == 1,     # migrate: carry hint_target_nodes (soft placement assert)
     # migrate: the revision bump filed at a moment of the move (then=bump
-    # at=accept|surge|drain); during=settling|rotating|last is the reverse,
-    # the request filed at a moment of a roll.
+    # at=accept|surge|drain), or a fault fired at one (at= with
+    # fault=crashloop|imagepull:old or fault=node:notready); during=settling|
+    # rotating|last is the reverse, the request filed at a moment of a roll.
     "then": lambda v: v in MIGRATE_THEN,
-    "at": lambda v: v in BUMP_AT_HOOKS,
+    "at": lambda v: v in BUMP_AT_HOOKS | MOVE_HOOKS,
     # co= names the coordination group kind the case carries; canary is a
     # canary group on a rollout case (its ladder is observed only in mode=canary).
     "co": lambda v: v in {"none", "rolling", "ratio", "percomp", "seq", "bluegreen", "canary"},
@@ -7549,7 +7582,10 @@ HDR_VALIDATORS = {
     "release": lambda v: v in RELEASE_VERBS,
     "releaseafter": _int_ge0,
     "pairto": _pairing_token,
-    "victim": lambda v: v in {"stable", "canary"},
+    # victim= aims a podkill at the stable or the canary revision, or a
+    # move-moment fault (at=) at the Instance being moved, a peer of it, or
+    # the decoder (sibling).
+    "victim": lambda v: v in {"stable", "canary"} | MOVE_VICTIMS,
     # victimcomp= narrows a podkill to one Component (one side of a PD pair);
     # imgcomp= narrows img= to one bumped member; ratio_tol= is invariant E's
     # tolerance in percent (default 50); xcheck=sectraffic scopes a notimpl
@@ -7695,6 +7731,9 @@ def validate_case_file(path):
         if not re.match(r"^\s*#\s*reason:\s*\S", second):
             errs.append(f"{path}:2: infeasible=1 requires an adjacent '# reason: <why unsatisfiable>' comment on line 2")
     mode = fields.get("mode", "rollout")
+    # at= names the moment of a move a fault fires at (mode=migrate); with
+    # then= the moment is the bump's (the overlap rules below).
+    at_move = "at" in fields and "then" not in fields and "fault" in fields
     if mode == "scaledown" and not any(k in fields for k in ("to_e", "to_d", "to_r")):
         errs.append(f"{path}:1: mode=scaledown needs a to_e/to_d/to_r target")
     if "stuck" in fields:
@@ -7837,8 +7876,9 @@ def validate_case_file(path):
                                                      str(fields.get("prearm", ""))):
         errs.append(f"{path}:1: timeout= is the value verb=timeout-set (or prearm=timeout-set) writes")
     hook_verbs = {str(fields.get(k, "")) for k in ("verb", "verb2")} - {""}
-    if "victim" in fields and not (str(fields.get("fault", "")).startswith(("podkill:", "evict:")) or "podkill" in hook_verbs):
-        errs.append(f"{path}:1: victim= aims a podkill or an eviction (needs fault=podkill:<hook>, fault=evict:<hook> or verb=podkill)")
+    if "victim" in fields and not at_move and not (str(fields.get("fault", "")).startswith(("podkill:", "evict:")) or "podkill" in hook_verbs):
+        errs.append(f"{path}:1: victim= aims a podkill or an eviction (needs fault=podkill:<hook>, fault=evict:<hook> or verb=podkill), "
+                    f"or a move-moment fault (needs mode=migrate at=<moment>)")
     if "victimcomp" in fields and fault_kind not in ("podkill", "evict") and fault_kind not in BREAK_FAULTS and "podkill" not in hook_verbs and fault_kind != READINESS_FAULT:
         errs.append(f"{path}:1: victimcomp= aims a podkill, an eviction or a break at one Component "
                     f"(needs fault=podkill:<phase>, fault=evict:<phase>, verb=podkill or fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM})")
@@ -7893,11 +7933,20 @@ def validate_case_file(path):
                         f"(needs fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM} after a bump)")
     if fault_kind == "imagepull" and str(fields.get("form", "start")) not in IMAGEPULL_FORMS:
         errs.append(f"{path}:1: fault=imagepull:{break_param} has only form=start: an image that cannot be pulled never runs")
-    if fault_kind in BREAK_FAULTS and break_param == CRASHLOOP_VICTIM and mode not in BREAK_MODES and not broken_op:
+    if (fault_kind in BREAK_FAULTS and break_param == CRASHLOOP_VICTIM and mode not in BREAK_MODES and not broken_op
+            and not (mode == "migrate" and at_move)):
         errs.append(f"{path}:1: fault={fields.get('fault')} breaks a pod of the revision a rollout leaves behind (mode={'|'.join(sorted(BREAK_MODES))}), "
-                    f"or one Instance before a scale or a delete (mode={'|'.join(sorted(BROKEN_OP_MODES))} during={IDLE_FAULT_PHASE}); "
+                    f"one Instance before a scale or a delete (mode={'|'.join(sorted(BROKEN_OP_MODES))} during={IDLE_FAULT_PHASE}), "
+                    f"or a pod of the running fleet at a moment of a move (mode=migrate at=<moment>); "
                     f"under a canary name the grid state it breaks it in (fault={fault_kind}:canary-<state>)")
     pushed_crash = fault_kind == "crashloop" and break_param == CRASHLOOP_NEW
+    if fault_kind in BREAK_FAULTS and mode == "runtimerev" and during != REPAIR_HOOK:
+        # The roll a runtime edit starts must own the broken Instance, so the
+        # edit has to roll; the recovery guards drive their own breaks. With
+        # during=repair the edit lands on the open repair instead (above).
+        if str(fields.get("expect", "roll")) != "roll" or "break" in fields or "during" in fields:
+            errs.append(f"{path}:1: fault={fields.get('fault')} under mode=runtimerev rides an edit that rolls as it "
+                        f"lands (expect=roll, no break=, no during= other than during={REPAIR_HOOK})")
     if fault_kind in BREAK_FAULTS and break_param != CRASHLOOP_VICTIM and mode != "canary" and not (pushed_crash and mode == "rollout"):
         errs.append(f"{path}:1: fault={fields.get('fault')} breaks the stable side at a canary hook or before the push, "
                     f"or the revision the push brings (mode=canary; a crash loop the push brings also runs as mode=rollout)")
@@ -8030,7 +8079,7 @@ def validate_case_file(path):
     # request the policy admits.
     if ("then" in fields or "at" in fields) and mode != "migrate":
         errs.append(f"{path}:1: then=/at= are migrate-mode knobs (the bump filed at a moment of the move)")
-    if ("then" in fields) != ("at" in fields):
+    if ("then" in fields) != ("at" in fields) and not at_move:
         errs.append(f"{path}:1: then={'|'.join(sorted(MIGRATE_THEN))} and at={'|'.join(sorted(BUMP_AT_HOOKS))} "
                     f"name the change and the moment of the move it is filed at (both or neither)")
     if "then" in fields and during:
@@ -8053,6 +8102,39 @@ def validate_case_file(path):
                     f"filed at its last one (needs mode=migrate during=last)")
     if mode == "migrate" and during == "last" and not last_inst:
         errs.append(f"{path}:1: during=last moves the Instance the roll has not reached (needs inst={LAST_INSTANCE})")
+    # A fault at a moment of a move: at=<moment> names when, victim= whose
+    # pod; the move is one Instance's, admitted by the policy, and nothing
+    # else is layered on the case.
+    move_victim = str(fields.get("victim", MOVE_DEFAULT_VICTIM))
+    if at_move:
+        if mode != "migrate":
+            errs.append(f"{path}:1: at={fields['at']} is the moment of a move a fault fires at (mode=migrate)")
+        if not (fault_kind in BREAK_FAULTS and break_param == CRASHLOOP_VICTIM) and not (fault_kind == "node" and str(fields.get("fault", "")).partition(":")[2] == NODE_PARAM):
+            errs.append(f"{path}:1: at={fields['at']} fires a break of the running fleet or a node loss "
+                        f"(fault=crashloop|imagepull:{CRASHLOOP_VICTIM} or fault=node:{NODE_PARAM})")
+        if move_victim not in MOVE_VICTIMS:
+            errs.append(f"{path}:1: victim={fields.get('victim')} under at= names whose pod breaks "
+                        f"(victim={'|'.join(sorted(MOVE_VICTIMS))})")
+        if move_victim == "sibling" and fields.get("Nd", 0) == 0:
+            errs.append(f"{path}:1: victim=sibling breaks the decoder's highest Instance (needs Nd>0)")
+        if fault_kind == "node" and move_victim != MOVE_DEFAULT_VICTIM:
+            errs.append(f"{path}:1: a node loss during a move is the source node's (victim={MOVE_DEFAULT_VICTIM})")
+        if fault_kind == "node" and str(fields.get("lift", "")) != "after-recover":
+            errs.append(f"{path}:1: fault=node:{NODE_PARAM} at a move moment is lifted once the Instance serves again "
+                        f"(needs lift=after-recover)")
+        if fault_kind == "node" and str(fields.get("needs", "")) != NEEDS_FORCE_DELETE:
+            errs.append(f"{path}:1: a source pod on a silent node is freed only by the force-delete policy "
+                        f"(needs={NEEDS_FORCE_DELETE}; SKIP where the controller config differs)")
+        if fields.get("mig") == "Never":
+            errs.append(f"{path}:1: a move-moment fault needs a move the policy admits (mig=Never rejects the request)")
+        if len(str(fields.get("inst", 0)).split(",")) != 1:
+            errs.append(f"{path}:1: a move-moment fault rides one Instance's move (inst= names one)")
+        for k in ("dup", "hint", "blocked", "during", "victimcomp", "expect", "victims"):
+            if k in fields:
+                errs.append(f"{path}:1: {k}= does not combine with a move-moment fault (victim= names the pod, "
+                            f"the verdict is the move's end state)")
+    elif move_victim in MOVE_VICTIMS and "victim" in fields:
+        errs.append(f"{path}:1: victim={fields['victim']} names the pod a move-moment fault hits (needs mode=migrate at=<moment>)")
     if fields.get("blocked") and "fault" not in fields:
         errs.append(f"{path}:1: blocked=1 requires a fault= header")
     if mode == "pairing" and "proto" not in fields:
@@ -8087,11 +8169,12 @@ def validate_case_file(path):
                     f"(needs fault=configkey:{CONFIGKEY_PARAM} or fault=node:{NODE_PARAM})")
     if fault_kind in LIFT_FAULTS:
         phases = LIFT_PHASES_BY_FAULT[fault_kind]
-        if during != IDLE_FAULT_PHASE:
-            errs.append(f"{path}:1: fault={fields.get('fault')} fires on the idle service (needs during={IDLE_FAULT_PHASE})")
+        if during != IDLE_FAULT_PHASE and not at_move:
+            errs.append(f"{path}:1: fault={fields.get('fault')} fires on the idle service (needs during={IDLE_FAULT_PHASE}) "
+                        f"or at a moment of a move (needs mode=migrate at=<moment>)")
         if lift not in phases:
             errs.append(f"{path}:1: fault={fields.get('fault')} needs lift={'|'.join(sorted(phases))} (when the cause is lifted)")
-        if expect not in outcomes:
+        if expect not in outcomes and not at_move:
             errs.append(f"{path}:1: fault={fields.get('fault')} needs expect={'|'.join(sorted(outcomes))} (what the Instance comes to)")
         if fault_kind == "configkey" and expect == "parked":
             if lift != "after-failed":
@@ -9185,7 +9268,10 @@ def _runtime_recover_stuck(case_id, yaml_file, desc, hdr, csr):
             break
     if not stuck:
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "no surge pod appeared for the broken rollout")
-    time.sleep(20)  # let it settle as stuck: running, not Ready, not escalated
+    # The surge pod runs but never passes readiness; whether the status says
+    # why the push has not landed is read (nothing escalates such a pod
+    # before its ready timeout), then the fix is pushed.
+    reasons, waited = _wait_hold_reason(ctx, HOLD_REASON_WAIT_S)
     seen_before = set(ctx["old_hashes"]) | set(ctx.get("seen_hashes", set())) | stuck
 
     print("  Phase 2b: CORRECTIVE edit — restore readiness + bump a distinct good rev")
@@ -9236,12 +9322,14 @@ def _runtime_recover_stuck(case_id, yaml_file, desc, hdr, csr):
             break
 
     verdict, notes, checks = "PASS", [], []
+    verdict = _hold_reason_checks(reasons, waited, False, verdict, notes, checks)
     if state != "RECOVERED":
         verdict = "FAIL"
         notes.append("corrective rollout deadlocked behind an unhealthy prior surge (maxSurge held by a never-ready, never-escalated surge)")
         checks.append("  ✗ deadlock: corrective edit never rolled forward — a stuck surge held the maxSurge budget and never escalated")
     else:
         checks.append("  ✓ recovery: corrective edit rolled forward despite the unhealthy prior-rollout surge")
+        verdict = _recover_floor_and_rows_checks(ctx, verdict, notes, checks)
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
@@ -9274,7 +9362,9 @@ def _runtime_recover(case_id, yaml_file, desc, hdr, csr):
                for p in ctx["pod_state"].values()):
             break
     seen_before = set(ctx["old_hashes"]) | set(ctx.get("seen_hashes", set()))
-    time.sleep(10)  # let the bad pod reach ImagePullBackOff / escalate
+    # The bad pod reaches ImagePullBackOff and the status says why the push
+    # has not landed; the fix is pushed once it does (or the wait ends).
+    reasons, waited = _wait_hold_reason(ctx, HOLD_REASON_WAIT_S)
 
     print("  Phase 2b: CORRECTIVE edit — restore good image + bump env (distinct good revision)")
     if not _csr_set_image(csr, comps, good):
@@ -9324,12 +9414,14 @@ def _runtime_recover(case_id, yaml_file, desc, hdr, csr):
             break
 
     verdict, notes, checks = "PASS", [], []
+    verdict = _hold_reason_checks(reasons, waited, True, verdict, notes, checks)
     if state != "RECOVERED":
         verdict = "FAIL"
         notes.append("failed rollout never recovered after a corrective runtime edit (terminal wedge)")
         checks.append("  ✗ recovery: ISVC stayed wedged on the failed rollout — corrective runtime edit was not acted on")
     else:
         checks.append("  ✓ recovery: corrective runtime edit rolled the ISVC onto a healthy revision")
+        verdict = _recover_floor_and_rows_checks(ctx, verdict, notes, checks)
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
@@ -9475,12 +9567,14 @@ def _rows_settled_checks(settled, why, verdict, notes, checks):
 def _break_after_roll_checks(ctx, pre_final, since_ts, verdict, notes, checks):
     """The break's claims once a runtime edit's roll has converged: the
     broken Instance ended on the post-edit revision serving with no repair
-    recorded for it since `since_ts`, and no row is left mid-operation."""
+    recorded for it since `since_ts`, the healthy Instances held the floor
+    lowered by the broken one, and no row is left mid-operation."""
     f = ctx.get("fault")
     if not f or f.get("kind") not in BREAK_FAULTS:
         return verdict
     verdict = _crashloop_checks(f, ctx["pod_state"], pre_final, since_ts, verdict, notes, checks,
                                 bumped=ctx["configured"])
+    verdict = min_ready_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
     settled, why = _wait_rows_settled(ctx["case_id"], ctx["N"], ctx["configured"], ROWS_SETTLE_S)
     return _rows_settled_checks(settled, why, verdict, notes, checks)
 
@@ -9596,6 +9690,67 @@ def _runtimerev_repair(case_id, yaml_file, desc, hdr, csr):
         verdict = _rebuild_count_checks(f, len(seen_uids - pre_edit_uids), ppi[comp], verdict, notes, checks)
         verdict = _break_after_roll_checks(ctx, pre_final, edit_ts, verdict, notes, checks)
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+def _break_allowance_tick(ctx):
+    """Once a break has fired, the floor the healthy Instances must hold is
+    lowered by the Instances it broke."""
+    f = ctx.get("fault")
+    if f and f.get("fired") and f.get("crash_comp") and "floor_allowance" not in ctx:
+        ctx["floor_allowance"] = {f["crash_comp"]: len(_break_victims(f))}
+
+
+def _wait_hold_reason(ctx, budget_s):
+    """Watch, up to budget_s, for the status to say why the pushed revision
+    has not landed on some configured Component. Returns ({comp: reason},
+    seconds waited)."""
+    t0, reasons = time.time(), {}
+    while time.time() - t0 < budget_s and not ctx["closed"]:
+        _read_one(ctx)
+        reasons = _push_unlanded(_ir_by_component(ctx["case_id"]), ctx["configured"])
+        if any(reasons.values()):
+            break
+        t_end = time.time() + 3.0
+        while time.time() < t_end and not ctx["closed"]:
+            _read_one(ctx)
+    return reasons, time.time() - t0
+
+
+def _hold_reason_checks(reasons, waited, hard, verdict, notes, checks):
+    """The broken edited revision said why it held before the fix landed.
+    Hard where the kubelet reports the break (a pull that fails); reported
+    where nothing escalates a pod that runs but never passes readiness."""
+    said = {c: r for c, r in reasons.items() if r}
+    if said:
+        checks.append(f"  ✓ the broken revision held with a reason after {waited:.0f}s: "
+                      + "; ".join(f"{c}: {r}" for c, r in sorted(said.items())))
+    elif hard:
+        verdict = "FAIL"
+        notes.append(f"the broken revision held {waited:.0f}s with no reason in the status")
+        checks.append(f"  ✗ the broken revision held {waited:.0f}s and the status never said why (no hold, no retry "
+                      f"block, no Failed row) — a wait with no reason")
+    else:
+        checks.append(f"  ⓘ the broken revision held {waited:.0f}s with no reason in the status: a pod that runs but "
+                      f"never passes readiness escalates nothing before its ready timeout (reported)")
+    return verdict
+
+
+def _recover_floor_and_rows_checks(ctx, verdict, notes, checks):
+    """Nothing exceeded its ceiling, the old revision kept serving while the
+    broken edit held and the fix rolled, and no row is left mid-operation
+    after the recovery."""
+    hdr, N = ctx.get("hdr") or {}, ctx["N"]
+    ceil = {"engine": hdr.get("ceil_e", N["engine"]), "decoder": hdr.get("ceil_d", N["decoder"]),
+            "router": hdr.get("ceil_r", N["router"])}
+    for c in COMPS:
+        if N[c] and ctx["peaks"][c] > ceil[c]:
+            verdict = "FAIL"
+            notes.append(f"{c} peak {ctx['peaks'][c]}>ceil {ceil[c]}")
+            checks.append(f"  ✗ {c} peak {ctx['peaks'][c]} > ceiling {ceil[c]}")
+        elif N[c]:
+            checks.append(f"  ✓ {c} peak {ctx['peaks'][c]} ≤ ceiling {ceil[c]}")
+    verdict = min_ready_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks,
+                               label="old-revision capacity floor")
+    settled, why = _wait_rows_settled(ctx["case_id"], ctx["N"], ctx["configured"], ROWS_SETTLE_S)
+    return _rows_settled_checks(settled, why, verdict, notes, checks)
 
 
 def _runtimerev(case_id, yaml_file, desc, hdr):
@@ -9678,6 +9833,7 @@ def _runtimerev(case_id, yaml_file, desc, hdr):
         state, stable = "ROTATING", None
         while ctx["trigger_ts"] and time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
             _read_one(ctx)
+            _break_allowance_tick(ctx)
             if converged():
                 if stable is None:
                     stable = time.time()
@@ -9792,15 +9948,295 @@ def _isvc_events(case_id):
     items.sort(key=lambda it: str(it.get("lastTimestamp") or it.get("eventTime") or ""))
     return [(str(it.get("reason") or ""), str(it.get("message") or "")) for it in items]
 
+# ── A fault at a moment of a move (mode=migrate at=accept|surge|drain) ───────
+# An Instance is being moved by request and, while the move is in flight, a
+# pod breaks or the source node dies. The verdict is the operator's end
+# state: the move finishes, or is abandoned with a reason, and is recorded
+# once; the moved Instance ends whole, Ready and serving on one pod set; a
+# broken peer or sibling is rebuilt under its policy while the move
+# completes; the capacity floor, lowered by the one broken Instance, holds;
+# Components the move and the fault never touched keep their pods.
+def _move_new(hdr, f):
+    """Bookkeeping of a fault fired at a moment of a move (or None): when it
+    fired, what it hit, and what the end state read."""
+    if hdr.get("mode") != "migrate" or not _fault_at_move(f):
+        return None
+    return {"at": f["at"], "victim": f.get("victim") or MOVE_DEFAULT_VICTIM, "fired": False, "fired_at": None,
+            "fired_phase": None, "due_at": None, "missed": None, "pod": None, "seen": (None, None, False),
+            "last_poll": 0.0, "end": None, "end_index": None, "end_nodes": []}
+
+
+def _move_moment_due(at, pod_state, record, ledger_entry, anno_consumed, mcomp, src_uids, orig_uids):
+    """Whether the move has reached the named moment: accept once the request
+    is recorded anywhere (the controller's record, the ledger row, or the
+    consumed annotation); surge once a pod the fleet did not have is up for
+    the moved Component (or the record says so); drain once a source pod is
+    being taken down or gone (or the record says so)."""
+    phase = (record or {}).get("phase")
+    if at == "accept":
+        return record is not None or ledger_entry is not None or bool(anno_consumed)
+    if at == "surge":
+        return phase in RECORD_SURGE_PHASES or any(
+            p and p["alive"] and p.get("comp") == mcomp and p.get("uid") and p["uid"] not in orig_uids
+            for p in pod_state.values())
+    live = {p["uid"] for p in pod_state.values() if p and p["alive"] and p.get("uid")}
+    return phase == RECORD_DRAIN_PHASE or bool(set(src_uids) - live)
+
+
+def _move_victim(victim, at, kind, pod_state, old_hashes, mcomp, inst, orig_uids):
+    """The pod a move-moment fault hits (None while no such pod is live).
+    moved: the Instance's source pod (its leader on a gang) at accept, its
+    replacement (a fresh pod of the moved Component) at surge and at drain;
+    a node loss is the source node's at every moment. peer: the highest
+    other Instance of the moved Component still on its original pods.
+    sibling: the decoder's highest Instance."""
+    if victim == "sibling":
+        return _crashloop_pick_pod(pod_state, old_hashes, "decoder")
+
+    def pool(keep):
+        return {n: p for n, p in pod_state.items() if p and p["alive"] and p.get("comp") == mcomp and keep(p)}
+
+    if victim == "peer":
+        pods = pool(lambda p: str(p.get("inst")) != str(inst) and p.get("uid") in orig_uids)
+    elif at == "accept" or kind == "node":
+        pods = pool(lambda p: str(p.get("inst")) == str(inst) and p.get("uid") in orig_uids)
+    else:
+        pods = pool(lambda p: p.get("uid") and p["uid"] not in orig_uids)
+    return _crashloop_pick_pod(pods, old_hashes, mcomp)
+
+
+def _move_fire(f, mv, ctx):
+    """Fire the fault on the resolved victim pod: a break patches or kills
+    it; a node loss stops the kubelet under it (an ineligible node is a skip,
+    never a failure)."""
+    pod_state, name = ctx["pod_state"], mv["pod"]
+    f["fired"], f["fired_ts"] = True, time.time()
+    if f["kind"] == "node":
+        node = (pod_state.get(name) or {}).get("node")
+        if not node or not _node_allowed(node, _nodes_info(), _manager_nodes()):
+            f["skip"] = (f"node fault unavailable here: the node under {name} ({node or '?'}) is the control plane, "
+                         f"hosts the manager, or is not a running container of this host's docker")
+            f["notes"].append(f"ⓘ {f['skip']}")
+            return
+        _node_stop(f, name, node, pod_state)
+        return
+    _break_named_pods(f, pod_state, [name], ctx.get("inv"))
+
+
+def _move_tick(ctx, f, mv, now, mcomp, inst, reqs, src_uids, orig_uids):
+    """Read the move's record while the moment is armed; once the moment has
+    arrived and the victim pod exists, fire. A moment whose victim never
+    shows within the grace is recorded as missed."""
+    if mv["fired"] or mv["missed"] or f.get("skip") or f.get("infra_fail"):
+        return
+    case_id, (req_uuid, anno_key, _from) = ctx["case_id"], reqs[inst]
+    if now - mv["last_poll"] >= OVERLAP_POLL_S:
+        mv["last_poll"] = now
+        mv["seen"] = (_migration_record(case_id, mcomp, req_uuid), _migration_ledger_entry(case_id, req_uuid),
+                      anno_key not in _isvc_annotations(case_id))
+    if not _move_moment_due(mv["at"], ctx["pod_state"], *mv["seen"], mcomp, src_uids, orig_uids):
+        return
+    mv["due_at"] = mv["due_at"] or now
+    mv["pod"] = _move_victim(mv["victim"], mv["at"], f["kind"], ctx["pod_state"], ctx["old_hashes"], mcomp, inst,
+                             orig_uids)
+    if mv["pod"] is None:
+        if now - mv["due_at"] >= MOVE_VICTIM_GRACE_S:
+            mv["missed"] = f"no {mv['victim']} pod was live within {MOVE_VICTIM_GRACE_S}s of the moment"
+        return
+    mv["fired_phase"] = (mv["seen"][0] or {}).get("phase")
+    _move_fire(f, mv, ctx)
+    if f.get("skip") or f.get("infra_fail"):
+        return
+    mv["fired"], mv["fired_at"] = True, time.time()
+    if f["kind"] in BREAK_FAULTS:
+        ctx["floor_allowance"] = {f["crash_comp"]: 1}
+    print(f"    ⚡ at {mv['at']} of the move ({mv['fired_at'] - ctx['trigger_ts']:.0f}s after the request; "
+          f"record {mv['fired_phase'] or 'not yet written'}): {f['kind']} on the {mv['victim']} pod {mv['pod']}")
+
+
+def _move_end_state(ctx, f, mcomp, idx, src_uids, completed):
+    """(ok, why) of the moved Component now: the Instance at idx is whole
+    (every pod slot filled), Ready and serving; no source pod survives a
+    completed move; no pod a break hit survives unserving; and the Component
+    holds N whole serving Instances on N distinct indices."""
+    n, ppi = ctx["N"][mcomp], max(1, ctx["pods_per_inst"].get(mcomp, 1))
+    pods = _instance_pods(ctx["pod_state"], mcomp, idx)
+    if len(pods) != ppi:
+        return False, f"Instance {idx} has {len(pods)}/{ppi} pod(s)"
+    down = [name for name, p in pods if not (p.get("ready") and p.get("serving"))]
+    if down:
+        return False, f"Instance {idx} is not serving ({', '.join(down)})"
+    live = {p["uid"]: p for p in ctx["pod_state"].values() if p and p["alive"] and p.get("uid")}
+    if completed and src_uids & set(live):
+        return False, "a source pod is still alive after the move completed"
+    hit = live.get(f.get("crash_uid"))
+    if f["kind"] in BREAK_FAULTS and hit is not None and not (hit.get("ready") and hit.get("serving")):
+        return False, f"the pod the fault hit ({f.get('crash_pod')}) is still there and not serving"
+    by = _instances_by_index(ctx["pod_state"], {mcomp})
+    whole = [i for i, ps in by.items() if len(ps) == ppi and all(p.get("ready") and p.get("serving") for p in ps)]
+    if len(by) != n or len(whole) != n:
+        return False, f"{mcomp} holds {len(whole)} whole serving Instance(s) over {len(by)} index(es), want {n}"
+    return True, "whole, Ready and serving"
+
+
+def _move_wait_end(ctx, f, mv, mcomp, inst, entry, ph, src_uids):
+    """Watch, once the move's record is terminal, until the moved Component
+    reads its end state for STABILITY_S or the budget ends; a node loss is
+    lifted (the kubelet started again) once that is read."""
+    completed = ph == "Completed"
+    idx = str(entry.get("surgeInstance")) if completed and entry.get("surgeInstance") is not None else str(inst)
+    mv["end_index"] = idx
+    budget = _relocation_budget(ctx, mcomp, ctx.get("force_delete")) if f["kind"] == "node" else _idle_budget(ctx)
+    deadline = time.time() + budget
+    print(f"  Phase 4: watching {mcomp} Instance {idx} settle after the move (≤{budget}s)")
+    stable, held, why = None, False, "not read"
+    while time.time() < deadline and not ctx["closed"]:
+        _read_one(ctx)
+        ok, why = _move_end_state(ctx, f, mcomp, idx, src_uids, completed)
+        if not ok:
+            stable = None
+            continue
+        stable = stable or time.time()
+        if time.time() - stable >= STABILITY_S:
+            held = True
+            break
+    mv["end"] = (held, why)
+    mv["end_nodes"] = sorted({p.get("node") or "?" for _n, p in _instance_pods(ctx["pod_state"], mcomp, idx)})
+    if f["kind"] == "node" and _node_restore(f):
+        f["notes"].append(f"node {f['node']}: kubelet started again once the move had settled")
+
+
+def _move_fault_checks(ctx, f, mv, mcomp, inst, reqs, entries, ir_entries, verdict, notes, checks):
+    """The operator's end state when a pod broke, or the source node died,
+    during a move (see the section comment above _move_new)."""
+    case_id = ctx["case_id"]
+    what = f"{f['kind']}{' form=' + f['form'] if f.get('form') else ''} on the {mv['victim']} at {mv['at']} of the move"
+
+    def fail(note, line):
+        nonlocal verdict
+        if verdict != "INFRA-FAIL":
+            verdict = "FAIL"
+        notes.append(note)
+        checks.append(line)
+
+    if f.get("infra_fail"):
+        return verdict   # the apparatus error is the verdict (_fault_finalize)
+    if not mv["fired"]:
+        missed = mv["missed"] or "the moment was not reached"
+        fail(f"{what} never fired ({missed})", f"  ✗ {what}: never fired ({missed}); nothing else is judged")
+        return verdict
+    t0 = ctx["trigger_ts"]
+    checks.append(f"  ✓ {what}: fired {mv['fired_at'] - t0:.0f}s after the request on {mv['pod']}"
+                  + (f" (record {mv['fired_phase']})" if mv["fired_phase"] else ""))
+    req_uuid = reqs[inst][0]
+    entry = entries.get(inst) or {}
+    record = next((m for m in ir_entries or [] if m.get("requestUUID") == req_uuid), None) or {}
+    ph = record.get("phase") or entry.get("phase")
+    reason = str(record.get("reason") or entry.get("reason") or record.get("message") or entry.get("message") or "")
+    on_peer = mv["victim"] in ("peer", "sibling")
+    if ph == "Completed":
+        checks.append(f"  ✓ the move finished (surgeInstance={entry.get('surgeInstance', record.get('surgeInstance'))})")
+    elif ph == "Failed" and on_peer:
+        fail(f"the move was abandoned although the break hit a {mv['victim']} ({reason or 'no reason'})",
+             f"  ✗ the move must finish when the break hits a {mv['victim']}, not the moved Instance; it was "
+             f"abandoned ({reason or 'no reason recorded'})")
+    elif ph == "Failed" and reason:
+        checks.append(f"  ✓ the move was abandoned with a reason: {reason[:160]}")
+    elif ph == "Failed":
+        fail("the move was abandoned without a reason",
+             "  ✗ the move was abandoned and neither the controller's record nor the ledger says why")
+    else:
+        fail(f"the move never finished (phase={ph})",
+             f"  ✗ the move neither finished nor was abandoned within budget (phase={ph}) — the fault wedged it")
+    rows = _migration_ledger_entries(case_id)
+    mine = sum(1 for e in rows if e.get("requestUUID") == req_uuid)
+    if mine == 1 and len(rows) == len(reqs):
+        checks.append("  ✓ the move is recorded once: one ledger row for the request and no other move")
+    else:
+        fail(f"ledger rows: {mine} for the request, {len(rows)} in all (want 1 and {len(reqs)})",
+             f"  ✗ the move must be recorded once: {mine} ledger row(s) carry the request and {len(rows)} exist in "
+             f"all (want 1 and {len(reqs)}) — a move was dropped or repeated")
+    if ir_entries is None:
+        checks.append("  ⓘ IR status.migrations unavailable on this build — the once-recorded check reads the ledger alone")
+    else:
+        n_ir = sum(1 for m in ir_entries if m.get("requestUUID") == req_uuid)
+        if n_ir == 1:
+            checks.append("  ✓ the controller holds one record for the request")
+        else:
+            fail(f"IR status.migrations holds {n_ir} records for the request",
+                 f"  ✗ the controller holds {n_ir} record(s) for the request (want exactly one)")
+    ok, why = mv["end"] or (False, "not read")
+    idx = mv["end_index"]
+    if ok:
+        checks.append(f"  ✓ the moved Instance (index {idx}) ends whole, Ready and serving on "
+                      f"{', '.join(mv['end_nodes']) or '?'}, and {mcomp} holds N whole Instances")
+    else:
+        fail(f"the moved Instance (index {idx}) did not end whole and serving: {why}",
+             f"  ✗ the moved Instance (index {idx}) must end whole, Ready and serving on one pod set: {why}")
+    comp, binst = f.get("crash_comp"), f.get("crash_inst")
+    events = _isvc_events_since(case_id, f.get("fired_ts") or t0)
+    repairs = [m for r, m in events if r == "RestartTriggered" and _event_names_instance(m, comp, binst)]
+    if on_peer:
+        pods = _instance_pods(ctx["pod_state"], comp, binst)
+        if _instance_rebuilt(pods, {f.get("crash_uid")}):
+            checks.append(f"  ✓ the broken {mv['victim']} ({comp} Instance {binst}) was rebuilt and serves again")
+        else:
+            down = [n for n, p in pods if not (p.get("ready") and p.get("serving"))]
+            fail(f"the broken {mv['victim']} {comp}/{binst} was not rebuilt to serving",
+                 f"  ✗ the broken {mv['victim']} ({comp} Instance {binst}) must be rebuilt, Ready and serving: "
+                 f"{len(pods)} pod(s), not serving {down}")
+        if repairs:
+            checks.append(f"  ✓ a RestartTriggered event names {comp} Instance {binst}: {repairs[0][:160]}")
+        else:
+            fail(f"no RestartTriggered event named the broken {mv['victim']} {comp}/{binst}",
+                 f"  ✗ no RestartTriggered event named the broken {mv['victim']} ({comp} Instance {binst}) — a rebuild "
+                 f"the product did not record as a repair is not its repair")
+    elif f["kind"] in BREAK_FAULTS:
+        checks.append(f"  ⓘ {'a repair was' if repairs else 'no repair was'} recorded for the moved Instance after "
+                      f"the break" + (f": {repairs[0][:120]}" if repairs else "") + " (the move or the repair may own it)")
+    if f.get("kills") is not None and f.get("form") == "load":
+        checks.append(f"  ⓘ {f['kind']}: runner killed {f['kills']} time(s) while the pod the fault hit ran")
+    for c in sorted(ctx["configured"] - {mcomp, comp}):
+        now_uids = {p["uid"] for p in ctx["pod_state"].values() if p and p["alive"] and p.get("comp") == c and p.get("uid")}
+        if now_uids == ctx["old_uids"].get(c, set()):
+            checks.append(f"  ✓ {c} untouched: the same pods throughout")
+        elif f["kind"] == "node":
+            checks.append(f"  ⓘ {c} changed pods: the dead node took its pods on that node with the victim (reported)")
+        else:
+            fail(f"{c} was touched", f"  ✗ {c} must stay untouched: pods changed "
+                                      f"{sorted(now_uids ^ ctx['old_uids'].get(c, set()))[:4]}")
+    if f["kind"] == "node":
+        checks.append(f"  ⓘ node {f.get('node')}: kubelet {'started again' if f.get('kubelet_restored') else 'not started again'} "
+                      f"after the move settled")
+    return verdict
+
 
 def _migrate(case_id, yaml_file, desc, hdr):
     """Set an explicit migration-request annotation; assert the audit ledger
     reaches Completed, a replacement Instance surges onto a different node, the
     source drains, and the annotation is cleared. mig=Never must be REJECTED
-    (no surge, no Completed)."""
+    (no surge, no Completed).
+
+    A fault at a moment of the move (at=accept|surge|drain with a break or a
+    node loss, victim=moved|peer|sibling) is fired by this handler; the
+    verdict then reads the operator's end state (_move_fault_checks)."""
+    lifecycle = {}
+    if hdr.get("at") and str(hdr.get("fault", "")).partition(":")[0] == "node":
+        reason = _node_fault_capability()
+        if reason:
+            print(f"  ⓘ node fault unavailable here: {reason}")
+            return _write_fail(case_id, desc, hdr, "SKIP", f"node fault unavailable here: {reason}")
+        lifecycle, read_err = _controller_lifecycle_config()
+        reason = _needs_unmet(str(hdr.get("needs") or ""), lifecycle, read_err)
+        if reason:
+            print(f"  ⓘ {reason}")
+            return _write_fail(case_id, desc, hdr, "SKIP", reason)
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
     if err:
         return _write_fail(case_id, desc, hdr, *err)
+    ctx["force_delete"] = (lifecycle or {}).get(FORCE_DELETE_KEY)
+    f = ctx["fault"]
+    mv = _move_new(hdr, f)
     N = ctx["N"]
     mig_mode = hdr.get("mig", "Auto")
     mcomp = "engine" if "engine" in ctx["configured"] else sorted(ctx["configured"])[0]
@@ -9900,8 +10336,8 @@ def _migrate(case_id, yaml_file, desc, hdr):
     orig_uids = {p["uid"] for p in ctx["pod_state"].values()
                  if p and p["alive"] and p["comp"] == mcomp and p.get("uid")}
     budget = rotate_budget
-    if ov:
-        budget = min(MAX_BUDGET_S, 2 * budget)   # two ops (rollout + migration) share the window
+    if ov or mv:
+        budget = min(MAX_BUDGET_S, 2 * budget)   # two ops (rollout or repair + migration) share the window
     never_grace = 90
     print(f"  Phase 3: watching migration (ledger {case_id}-ome-migration-audit; ≤{budget}s)")
     surge_seen, surge_nodes, last_poll, state = set(), {}, 0.0, "WATCHING"
@@ -9947,6 +10383,8 @@ def _migrate(case_id, yaml_file, desc, hdr):
             if ov["fired"] and rollout_conv_ts is None and _rollout_done():
                 rollout_conv_ts = now
                 print(f"    ↷ in-flight rollout converged at {now - ov['t0']:.0f}s")
+        if mv:
+            _move_tick(ctx, f, mv, now, mcomp, inst, reqs, src_uids, orig_uids)
         if now - last_poll >= 5:
             last_poll = now
             ents = {i: (_migration_ledger_entry(case_id, ru) or {}) for i, (ru, _, _) in reqs.items()}
@@ -9985,6 +10423,8 @@ def _migrate(case_id, yaml_file, desc, hdr):
                 rollout_conv_ts = time.time()
                 print(f"    ↷ in-flight rollout converged at {rollout_conv_ts - ov['t0']:.0f}s (post-migration)")
                 break
+    if mv and f.get("skip"):
+        return _finish(case_id, desc, hdr, ctx, "SKIP", "SKIP", [f["skip"]], [])
     # Collapse the per-source ledger into the single-inst vars the verdict block
     # below already consumes; ph=="Completed" only when EVERY request completed.
     entries = {i: (_migration_ledger_entry(case_id, ru) or {}) for i, (ru, _, _) in reqs.items()}
@@ -10029,6 +10469,8 @@ def _migrate(case_id, yaml_file, desc, hdr):
                 anno_cleared = _anno_cleared()
             if anno_cleared and src_gone:
                 break
+    if mv and mv["fired"] and not f.get("infra_fail"):
+        _move_wait_end(ctx, f, mv, mcomp, inst, entry, ph, src_uids)
 
     if ov and ov["fired"] and rollout_conv_ts is not None and ph == "Completed":
         _overlap_settle_rows(ov, ctx, case_id, bumped, time.time() + migrate_settle_budget(len(req_insts)))
@@ -10180,6 +10622,12 @@ def _migrate(case_id, yaml_file, desc, hdr):
         # Capacity floor: the source must have served throughout the bounded
         # failure (and the follow-up, when lifted).
         verdict = min_ready_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
+    elif mv:
+        verdict = _move_fault_checks(ctx, f, mv, mcomp, inst, reqs, entries, _ir_status_migrations(case_id, mcomp),
+                                     verdict, notes, checks)
+        verdict = min_ready_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
+        verdict = index_collision_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
+        verdict = gang_atomicity_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
     else:
         if ph == "Completed":
             checks.append(f"  ✓ ledger Completed (surgeInstance={entry.get('surgeInstance')})")

@@ -343,6 +343,8 @@ EVAL_SOFT_FEATURES: list[dict[str, str]] = [
         "gen-inplaceonly",
         "gen-fault-scale",
         "gen-fault-delete",
+        "gen-fault-move",
+        "gen-fault-edit",
     )
 ]
 
