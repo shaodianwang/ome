@@ -29,9 +29,9 @@ func partitionForNewCount(desired, newCount int32) int32 {
 // revision while the canary is in flight. The stable revision carries traffic
 // until the final 100% write lands and drains in-flight requests through the
 // drain window after it, so its last serving instance is not released by a
-// step; the done sentinel releases it once the cutover is complete. A
-// Component with a single instance has no instance to spare and stages in
-// place.
+// step; the done sentinel releases it, and the unit reads Stable once that
+// instance has rolled. A Component with a single instance has no instance to
+// spare and stages in place.
 func heldFloor(desired int32) int32 {
 	if desired > 1 {
 		return 1

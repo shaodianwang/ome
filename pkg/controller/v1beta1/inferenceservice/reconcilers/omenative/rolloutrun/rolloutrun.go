@@ -453,9 +453,10 @@ func retargeted(isvc *v1beta1.InferenceService, active *v1beta1.RolloutRun, targ
 
 // closedOutcome decides whether the run reached a terminal state: RolledBack
 // (the canary's sticky hold settled) or Completed — every pinned group's
-// members converged to the pinned target, or the group rests Staged (a
-// lifecycle partition deliberately holds mixed revisions; keying completion
-// on full convergence alone would pin such a run's plan forever).
+// members converged to the pinned target (a canary unit also reports Stable),
+// or the group rests Staged (a lifecycle partition deliberately holds mixed
+// revisions; keying completion on full convergence alone would pin such a
+// run's plan forever).
 func closedOutcome(isvc *v1beta1.InferenceService, active *v1beta1.RolloutRun, targets map[v1beta1.ComponentType]targetPair) (v1beta1.RolloutRunOutcome, bool) {
 	pinnedFor := map[v1beta1.ComponentType]string{}
 	for _, t := range active.TargetRevisions {
@@ -499,6 +500,13 @@ func closedOutcome(isvc *v1beta1.InferenceService, active *v1beta1.RolloutRun, t
 				return "", false
 			}
 			if int(cs.CurrentStep) < len(g.Canary.Steps) {
+				return "", false
+			}
+			// The done sentinel releases the last held instance; the unit
+			// reads Stable once that instance has rolled. The run stays
+			// pinned until then, because a plan resolved only through the pin
+			// must still drive the unit to report it.
+			if primaryPhase(isvc, g) != v1beta1.RolloutPhaseStable {
 				return "", false
 			}
 			// The done sentinel can lead the IR counters by a pass; closing

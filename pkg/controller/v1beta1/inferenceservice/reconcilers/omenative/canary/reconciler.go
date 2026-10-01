@@ -126,6 +126,9 @@ type MemberRevisions struct {
 	// revision, as the capacity gate counts it; above zero, the target's
 	// pods have reached Ready.
 	ReadyCanaryCapacity int32
+	// DesiredReplicas is the member's steady instance count, the capacity
+	// its target must reach before the cutover is complete.
+	DesiredReplicas int32
 }
 
 // The ready Pod count bounds the exact ready Instance count and remains the
@@ -240,8 +243,9 @@ func (r *Result) wake(d time.Duration) *Result {
 // Reconcile advances the canary toward the declared plan, mutating isvc.Status
 // in-memory. No-op (Active=false) when spec.rollout.canary is unset. Per step it
 // performs capacity → traffic → pause, advancing on promotion; the final step
-// (TrafficWeight 100) shifts traffic off the stable revision, drains it, and
-// completes, which releases its last instance to roll.
+// (TrafficWeight 100) shifts traffic off the stable revision, drains it,
+// releases its last instance to roll, and reads Stable once every instance
+// serves the canary revision.
 func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// Operator annotations are applied in status first and removed by the
 	// controller after the flush; the pass only records which ones it took,
@@ -403,8 +407,9 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 	applyGroupTraffic(in, step.Traffic)
 
 	// Final step (TrafficWeight 100): shift traffic off the stable revision,
-	// hold its last instance through the drain window, then complete; the
-	// done sentinel releases that instance to roll.
+	// hold its last instance through the drain window, then release it: the
+	// done sentinel drops the floor, the held instance rolls, and the unit
+	// reads Stable once nothing serves the stable revision.
 	if int(cs.CurrentStep) == len(plan.Steps)-1 {
 		// Anchor the drain window and the final gate to the moment 100%
 		// traffic actually shifts, not to step entry: on slow capacity the
@@ -448,20 +453,15 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 				cs.PromotedThrough = v
 				take(constants.RolloutPromoteAnnotation)
 			}
-			setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseStable)
-			// Every member's target owns its traffic now; the pre-canary
-			// stable is the revision each superseded.
-			recordPromotedRevisions(in, cs.StableRevisionHash)
-			// Mark done (sentinel), don't clear: keeps EffectivePartition at
-			// partition 0 so the held stable instance rolls now that traffic
-			// has left it and drained, instead of being re-held by a step-0
-			// partition. ObservedTrafficWeight stays 100 (all on canary).
+			// Mark done (sentinel), don't clear: EffectivePartition reads the
+			// sentinel as partition 0, which releases the held stable instance
+			// now that traffic has left it and drained, instead of re-holding
+			// it under a step-0 partition. ObservedTrafficWeight stays 100
+			// (all on canary). The release is projected on the next pass, so
+			// the roll it starts is finished by finishCutover from here on.
 			cs.CurrentStep = int32(len(plan.Steps))
 			cs.ObservedTrafficWeight = 100
-			// The canary revision is the stable revision now: drop the pre-canary
-			// identity so it cannot leak into a later rollout's rollback target.
-			cs.StableRevisionHash = ""
-			return &Result{Active: true, Complete: true, Partition: 0}, nil
+			return finishCutover(in, cs), nil
 		}
 		return (&Result{Active: true, Partition: partition}).wake(in.Requeue), nil
 	}
@@ -512,6 +512,62 @@ func pausedResult(in ReconcileInputs, cs *v1beta1.CanaryStatus, plan *v1beta1.Gr
 	}
 	partition := stepPartition(plan.Steps[cs.CurrentStep], in.DesiredReplicas)
 	return (&Result{Active: true, Partition: partition}).wake(in.Requeue)
+}
+
+// finishCutover runs a unit whose done sentinel is set. The sentinel released
+// the held floor, so the last stable instance is rolling; until every member
+// serves on its target revision alone the unit stays Promoting at partition 0
+// and comes back at the step cadence, because the roll it waits on moves no
+// annotation and no step. Once the cutover has landed the promoted revisions
+// are recorded, the pre-canary identity is dropped (the canary revision is
+// the stable revision now, so it cannot leak into a later rollout's rollback
+// target), and the unit reads Stable; that transition is the one Complete
+// pass. A unit with no pre-canary identity on record has nothing left to
+// roll and reads Stable at once, which also keeps a canary pod lost after
+// completion a workload repair, not a canary state.
+func finishCutover(in ReconcileInputs, cs *v1beta1.CanaryStatus) *Result {
+	if cs.StableRevisionHash == "" {
+		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseStable)
+		return &Result{Active: false}
+	}
+	if !cutoverComplete(in) {
+		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhasePromoting)
+		return (&Result{Active: true, Partition: 0}).wake(in.Requeue)
+	}
+	// Every member's target owns its traffic now; the pre-canary stable is
+	// the revision each superseded.
+	recordPromotedRevisions(in, cs.StableRevisionHash)
+	cs.StableRevisionHash = ""
+	setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseStable)
+	return &Result{Active: true, Complete: true, Partition: 0}
+}
+
+// cutoverComplete reports whether the released cutover has landed on every
+// member of the unit: the target revision has its full capacity Ready and no
+// ready pod serves another revision, so the held stable instance has rolled
+// and drained. The primary is read from its own ready counts; each secondary
+// from the pair the dispatcher resolved for it.
+func cutoverComplete(in ReconcileInputs) bool {
+	if readyCanaryCapacity(in) < in.DesiredReplicas || servesOtherRevision(in.PerRevisionPods, in.CanaryRevisionHash) {
+		return false
+	}
+	for c, m := range in.Secondaries {
+		if m.ReadyCanaryCapacity < m.DesiredReplicas || servesOtherRevision(in.GroupReadyPerRevisionPods[c], m.CanaryRevisionHash) {
+			return false
+		}
+	}
+	return true
+}
+
+// servesOtherRevision reports whether any ready pod runs a revision other
+// than hash.
+func servesOtherRevision(readyPods map[string]int32, hash string) bool {
+	for h, n := range readyPods {
+		if h != "" && h != hash && n > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // resetCanaryStatus re-arms the state machine at step 0 toward a new target,

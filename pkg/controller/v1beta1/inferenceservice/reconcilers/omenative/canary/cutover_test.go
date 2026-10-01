@@ -28,12 +28,58 @@ func expectSoleTarget(t *testing.T, isvc *v1beta1.InferenceService, comp v1beta1
 	}
 }
 
+// expectReleased asserts the pass that releases the held floor, or any pass
+// while the released instance is still rolling: the done sentinel is set, the
+// projected partition is 0, the unit stays Promoting rather than Stable, and
+// the pass asks to come back, since the roll it waits on moves no annotation
+// and no step.
+func expectReleased(t *testing.T, isvc *v1beta1.InferenceService, res *Result, steps int) {
+	t.Helper()
+	cs := isvc.Status.Canary
+	if cs == nil || int(cs.CurrentStep) != steps {
+		t.Fatalf("the release must set the done sentinel, got %+v", cs)
+	}
+	if !res.Active || res.Complete || res.Partition != 0 {
+		t.Fatalf("the release must stay active at partition 0 without completing, got %+v", res)
+	}
+	if res.RequeueAfter == 0 && !res.Requeue {
+		t.Fatalf("the release must ask to come back for the roll it started, got %+v", res)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhasePromoting {
+		t.Fatalf("a unit with an instance still on the stable revision is not Stable, got %q", phaseOf(isvc))
+	}
+	if cs.StableRevisionHash == "" {
+		t.Fatal("the pre-canary identity is kept until nothing runs it")
+	}
+	ext := &v1beta1.ComponentExtensionSpec{MinReplicas: intPtr(4)}
+	if p := StepPartition(isvc, v1beta1.EngineComponent, ext); p == nil || *p != 0 {
+		t.Fatalf("the done sentinel must project partition 0, got %v", fmtPartition(p))
+	}
+}
+
+// expectStableAfterRoll asserts the one pass that completes the cutover: the
+// unit reads Stable, the pass is the Complete edge and the pre-canary
+// identity is dropped.
+func expectStableAfterRoll(t *testing.T, isvc *v1beta1.InferenceService, res *Result) {
+	t.Helper()
+	if !res.Active || !res.Complete || res.Partition != 0 {
+		t.Fatalf("every instance on the canary revision must complete the cutover, got %+v", res)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhaseStable {
+		t.Fatalf("a unit entirely on the canary revision reads Stable, got %q", phaseOf(isvc))
+	}
+	if isvc.Status.Canary.StableRevisionHash != "" {
+		t.Fatalf("completion drops the pre-canary identity, got %q", isvc.Status.Canary.StableRevisionHash)
+	}
+}
+
 // The final step keeps the last stable instance serving until the traffic
 // shift lands and the drain window elapses: the stable revision carries the
 // previous step's weight until the 100% write, so its capacity cannot go
 // before the write, and the drain window is the wait between that write and
 // the scale-down. The step stages every other instance, shifts onto the
-// canary capacity that is Ready, and the done sentinel releases the hold.
+// canary capacity that is Ready, the done sentinel releases the hold, and the
+// unit reads Stable only once the released instance has rolled.
 func TestReconcile_FinalStepHoldsTheLastStableInstanceThroughTheDrain(t *testing.T) {
 	isvc := pinActiveRun(canaryISVC(twoStep(), i32(60)))
 	in := baseInputs(isvc, map[string]int32{"new": 2, "old": 2})
@@ -71,21 +117,105 @@ func TestReconcile_FinalStepHoldsTheLastStableInstanceThroughTheDrain(t *testing
 		t.Fatalf("drain window must keep the hold, got %+v", res)
 	}
 
-	// The window elapses: the canary completes and the sentinel releases the
-	// last instance to roll.
+	// The window elapses: the sentinel releases the last instance to roll.
+	// The unit is not Stable yet; that instance still serves the stable
+	// revision.
 	in.Now = in.Now.Add(31 * time.Second)
-	res = mustReconcile(t, isvc, in)
-	if !res.Complete || res.Partition != 0 || phaseOf(isvc) != v1beta1.RolloutPhaseStable {
-		t.Fatalf("drain elapsed must complete and release, got phase=%q res=%+v", phaseOf(isvc), res)
+	expectReleased(t, isvc, mustReconcile(t, isvc, in), 2)
+	expectSoleTarget(t, isvc, v1beta1.EngineComponent, "new")
+
+	// The roll is in flight: the replacement is Ready while the stable
+	// instance drains. Still not Stable.
+	in.PerRevisionPods = map[string]int32{"new": 4, "old": 1}
+	expectReleased(t, isvc, mustReconcile(t, isvc, in), 2)
+
+	// The stable instance is gone: the cutover is complete.
+	in.PerRevisionPods = map[string]int32{"new": 4}
+	expectStableAfterRoll(t, isvc, mustReconcile(t, isvc, in))
+
+	// A finished canary is inert, and a canary pod lost after completion is
+	// the workload's repair, not a return to Promoting.
+	in.PerRevisionPods = map[string]int32{"new": 3}
+	if res := mustReconcile(t, isvc, in); res.Active || phaseOf(isvc) != v1beta1.RolloutPhaseStable {
+		t.Fatalf("capacity lost after completion must leave the unit Stable and inactive, got phase=%q res=%+v", phaseOf(isvc), res)
 	}
-	if p := StepPartition(isvc, v1beta1.EngineComponent, ext); p == nil || *p != 0 {
-		t.Fatalf("done sentinel must release the stable instance, got %v", fmtPartition(p))
+}
+
+// The pass that releases the floor can also be the pass that completes: a
+// unit whose every instance is already on the canary revision when the drain
+// elapses has nothing left to roll.
+func TestReconcile_DrainElapsedWithNothingHeldCompletesAtOnce(t *testing.T) {
+	isvc := pinActiveRun(canaryISVC(twoStep(), i32(60)))
+	in := baseInputs(isvc, map[string]int32{"old": 1})
+	in.TargetID = "t1"
+	in.DesiredReplicas = 1
+	mustReconcile(t, isvc, in) // a single instance stages in place
+	in.PerRevisionPods = map[string]int32{"new": 1}
+	mustReconcile(t, isvc, in) // step 0 serves, manual hold
+	annotate(isvc, constants.RolloutPromoteAnnotation, "new")
+	mustReconcile(t, isvc, in)
+	delete(isvc.Annotations, constants.RolloutPromoteAnnotation)
+	if res := mustReconcile(t, isvc, in); res.Complete || phaseOf(isvc) != v1beta1.RolloutPhasePromoting {
+		t.Fatalf("100%% traffic opens the drain window, got phase=%q res=%+v", phaseOf(isvc), res)
+	}
+	in.Now = in.Now.Add(61 * time.Second)
+	expectStableAfterRoll(t, isvc, mustReconcile(t, isvc, in))
+}
+
+// A two-member unit completes when every member has rolled: the primary on
+// the canary revision alone does not make the unit Stable while a secondary
+// still serves an instance on its stable revision or is short of its
+// capacity.
+func TestReconcile_CutoverCompletesWhenEverySecondaryHasRolled(t *testing.T) {
+	isvc := pinActiveRun(canaryISVC(twoStep(), nil))
+	in := baseInputs(isvc, map[string]int32{"new": 2, "old": 2})
+	in.TargetID = "t1"
+	in.Secondaries = map[v1beta1.ComponentType]MemberRevisions{
+		v1beta1.DecoderComponent: {CanaryRevisionHash: "dnew", StableRevisionHash: "dold", ReadyCanaryCapacity: 2, DesiredReplicas: 4},
+	}
+	in.GroupReadyPerRevisionPods = map[v1beta1.ComponentType]map[string]int32{
+		v1beta1.DecoderComponent: {"dnew": 2, "dold": 2},
+	}
+	mustReconcile(t, isvc, in)
+	annotate(isvc, constants.RolloutPromoteAnnotation, "new")
+	mustReconcile(t, isvc, in)
+	delete(isvc.Annotations, constants.RolloutPromoteAnnotation)
+
+	// The primary rolled entirely; the decoder still holds its last stable
+	// instance.
+	in.PerRevisionPods = map[string]int32{"new": 4}
+	in.Secondaries[v1beta1.DecoderComponent] = MemberRevisions{CanaryRevisionHash: "dnew", StableRevisionHash: "dold", ReadyCanaryCapacity: 3, DesiredReplicas: 4}
+	in.GroupReadyPerRevisionPods[v1beta1.DecoderComponent] = map[string]int32{"dnew": 3, "dold": 1}
+	expectReleased(t, isvc, mustReconcile(t, isvc, in), 2)
+
+	// The decoder's replacement is Ready but its stable instance still serves.
+	in.Secondaries[v1beta1.DecoderComponent] = MemberRevisions{CanaryRevisionHash: "dnew", StableRevisionHash: "dold", ReadyCanaryCapacity: 4, DesiredReplicas: 4}
+	in.GroupReadyPerRevisionPods[v1beta1.DecoderComponent] = map[string]int32{"dnew": 4, "dold": 1}
+	expectReleased(t, isvc, mustReconcile(t, isvc, in), 2)
+
+	in.GroupReadyPerRevisionPods[v1beta1.DecoderComponent] = map[string]int32{"dnew": 4}
+	expectStableAfterRoll(t, isvc, mustReconcile(t, isvc, in))
+	if got := isvc.Status.Components[v1beta1.DecoderComponent].LatestRolledoutRevision; got == "" {
+		t.Fatal("completion records the decoder's promoted revision")
+	}
+}
+
+// A done sentinel with no pre-canary identity on record has nothing left to
+// roll and reads Stable at once, whatever the pod set looks like.
+func TestReconcile_DoneWithoutStableIdentityReadsStable(t *testing.T) {
+	isvc := pinActiveRun(canaryISVC(twoStep(), nil))
+	isvc.Status.Canary = &v1beta1.CanaryStatus{TargetID: "t1", CanaryRevisionHash: "new", CurrentStep: 2, ObservedTrafficWeight: 100}
+	in := baseInputs(isvc, map[string]int32{"new": 3, "old": 1})
+	in.TargetID = "t1"
+	if res := mustReconcile(t, isvc, in); res.Active || phaseOf(isvc) != v1beta1.RolloutPhaseStable {
+		t.Fatalf("a done sentinel without a stable identity reads Stable, got phase=%q res=%+v", phaseOf(isvc), res)
 	}
 }
 
 // A single-step plan cuts over the same way: all but one instance stage on
-// the canary revision, traffic moves once they are Ready, and the last
-// stable instance rolls after completion.
+// the canary revision, traffic moves once they are Ready, the undelayed
+// cutover releases the last stable instance in the same pass, and the unit
+// reads Stable once that instance has rolled.
 func TestReconcile_SingleStepPlanStagesAllButTheLastInstance(t *testing.T) {
 	steps := []v1beta1.RolloutGroupStep{{Capacity: intstr.FromString("100%"), Traffic: 100}}
 	isvc := pinActiveRun(canaryISVC(steps, nil))
@@ -95,10 +225,10 @@ func TestReconcile_SingleStepPlanStagesAllButTheLastInstance(t *testing.T) {
 		t.Fatalf("staging must hold one stable instance, got phase=%q res=%+v", phaseOf(isvc), res)
 	}
 	in.PerRevisionPods = map[string]int32{"new": 3, "old": 1}
-	if res := mustReconcile(t, isvc, in); !res.Complete || res.Partition != 0 {
-		t.Fatalf("three Ready canary instances complete an undelayed cutover, got %+v", res)
-	}
+	expectReleased(t, isvc, mustReconcile(t, isvc, in), 1)
 	expectSoleTarget(t, isvc, v1beta1.EngineComponent, "new")
+	in.PerRevisionPods = map[string]int32{"new": 4}
+	expectStableAfterRoll(t, isvc, mustReconcile(t, isvc, in))
 }
 
 // A Component with a single instance has nothing to hold back: it stages
@@ -115,8 +245,9 @@ func TestReconcile_SingleInstanceComponentStagesInPlace(t *testing.T) {
 
 // The dispatcher-level cutover: the pass that finds the staged canary
 // capacity Ready moves 100% traffic onto it while the projected partition
-// still holds the last stable instance; the drain window then elapses and the
-// sentinel releases it.
+// still holds the last stable instance; the drain window then elapses, the
+// sentinel releases it, and the unit reads Stable once the released instance
+// is on the canary revision.
 func TestDispatch_CutoverMovesTrafficBeforeReleasingStableCapacity(t *testing.T) {
 	ns := "default"
 	n4 := 4
@@ -171,14 +302,35 @@ func TestDispatch_CutoverMovesTrafficBeforeReleasingStableCapacity(t *testing.T)
 	}
 
 	deps.Now = deps.Now.Add(61 * time.Second)
-	if _, err := Dispatch(ctx, deps); err != nil {
+	out, err := Dispatch(ctx, deps)
+	if err != nil {
 		t.Fatalf("Dispatch (drain elapsed): %v", err)
 	}
-	if got := isvc.Status.Components[v1beta1.EngineComponent].RolloutPhase; got != v1beta1.RolloutPhaseStable {
-		t.Fatalf("drain elapsed must complete the canary, got phase %q", got)
+	if got := isvc.Status.Components[v1beta1.EngineComponent].RolloutPhase; got != v1beta1.RolloutPhasePromoting {
+		t.Fatalf("drain elapsed releases the held instance but is not Stable while it runs the stable revision, got phase %q", got)
 	}
 	if p := StepPartition(isvc, v1beta1.EngineComponent, ext); p == nil || *p != 0 {
-		t.Fatalf("completion must release the last stable instance, got partition %v", fmtPartition(p))
+		t.Fatalf("the release must project partition 0, got partition %v", fmtPartition(p))
+	}
+	if out.RequeueAfter == 0 && !out.Requeue {
+		t.Fatalf("the release must ask to come back for the roll it started, got %+v", out)
+	}
+
+	// The held instance rolls onto the canary revision.
+	if err := c.Delete(ctx, canaryPod(ns, isvc.Name, "engine", "old", isvc.Name+"-engine-0")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Create(ctx, canaryPod(ns, isvc.Name, "engine", "new", isvc.Name+"-engine-0")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Dispatch(ctx, deps); err != nil {
+		t.Fatalf("Dispatch (rolled): %v", err)
+	}
+	if got := isvc.Status.Components[v1beta1.EngineComponent].RolloutPhase; got != v1beta1.RolloutPhaseStable {
+		t.Fatalf("every instance on the canary revision completes the canary, got phase %q", got)
+	}
+	if cs := isvc.Status.Canary; cs == nil || cs.CurrentStep != 2 || cs.StableRevisionHash != "" {
+		t.Fatalf("completion keeps the done sentinel and drops the pre-canary identity, got %+v", cs)
 	}
 }
 

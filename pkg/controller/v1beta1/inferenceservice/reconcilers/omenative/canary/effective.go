@@ -59,12 +59,13 @@ func EffectivePartition(isvc *v1beta1.InferenceService, component v1beta1.Compon
 	if idx < 0 {
 		idx = 0
 	}
-	// Done sentinel (CurrentStep past the last step): the canary finished — hold
-	// NOTHING, the component runs entirely on the canary revision (partition 0).
-	// This is the release of the held floor: the final traffic write landed
-	// and the drain window elapsed, so the last stable instance rolls now.
-	// Don't clamp to the final step and recompute: the floor would strand
-	// that instance on the stable revision permanently after completion.
+	// Done sentinel (CurrentStep past the last step): hold NOTHING, the
+	// component rolls entirely onto the canary revision (partition 0). This
+	// is the release of the held floor: the final traffic write landed and
+	// the drain window elapsed, so the last stable instance rolls now and the
+	// unit reads Stable once it has. Don't clamp to the final step and
+	// recompute: the floor would strand that instance on the stable revision
+	// permanently after completion.
 	if int(idx) >= len(plan.Steps) {
 		zero := int32(0)
 		return &zero, true

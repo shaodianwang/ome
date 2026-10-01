@@ -472,9 +472,10 @@ func groupRollbackInputs(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup
 // persisted stable revision the rollback check uses, so a rollback returns
 // traffic to the revision the member reverts to. The Ready capacity on the
 // target is counted as the capacity gate counts it, so the member's latest
-// ready revision is published on the same evidence the gate reads. The
-// protocols come from the two ControllerRevisions through the cached client,
-// as the primary's do.
+// ready revision is published on the same evidence the gate reads, and the
+// member's steady instance count is what that capacity must reach for the
+// cutover to be complete. The protocols come from the two ControllerRevisions
+// through the cached client, as the primary's do.
 func secondaryRevisions(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, primary v1beta1.ComponentType, g *v1beta1.RolloutGroup, observed map[v1beta1.ComponentType]observedCanaryRevisions, stable map[v1beta1.ComponentType]string, readyPerRev map[v1beta1.ComponentType]map[string]int32, observedPods map[v1beta1.ComponentType][]*corev1.Pod) (map[v1beta1.ComponentType]MemberRevisions, error) {
 	out := map[v1beta1.ComponentType]MemberRevisions{}
 	for _, comp := range configuredComponents(g) {
@@ -486,6 +487,7 @@ func secondaryRevisions(ctx context.Context, reads client.Reader, isvc *v1beta1.
 			CanaryRevisionHash:  target,
 			StableRevisionHash:  stable[comp],
 			ReadyCanaryCapacity: readyCapacityCount(readyPerRev[comp][target], observed[comp].readyTargetInstanceCount(observedPods[comp])),
+			DesiredReplicas:     componentReplicas(isvc, comp),
 		}
 		var err error
 		if m.CanaryPairingProtocol, _, err = coordination.PairingProtocolForRevision(ctx, reads, isvc.Namespace, isvc.Name, comp, m.CanaryRevisionHash); err != nil {

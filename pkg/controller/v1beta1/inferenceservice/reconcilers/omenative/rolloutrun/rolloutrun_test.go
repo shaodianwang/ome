@@ -1207,6 +1207,65 @@ func TestRollingBackRunStaysOpen(t *testing.T) {
 	}
 }
 
+// A canary run at the done sentinel stays open while its unit still reads
+// Promoting: the sentinel released the last held instance, and the unit
+// reports Stable only once that instance has rolled. The run closes Completed
+// on that report, so a plan resolved only through the pin keeps driving the
+// unit until then.
+func TestCanaryRunClosesOnceTheUnitReadsStable(t *testing.T) {
+	isvc := isvcFixture(v1beta1.RolloutGroup{
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+		Canary:     canaryBody(10, 100),
+	})
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			RolloutPhase: v1beta1.RolloutPhasePromoting,
+			Canary: &v1beta1.CanaryStatus{
+				CanaryRevisionHash:    hashOf(t, newRev),
+				StableRevisionHash:    hashOf(t, oldRev),
+				CurrentStep:           2,
+				ObservedTrafficWeight: 100,
+			},
+		},
+	}
+	isvc.Status.Rollout = &v1beta1.RolloutStatus{
+		ActiveRun: &v1beta1.RolloutRun{
+			RunID: "llm-a-run",
+			TargetRevisions: []v1beta1.RolloutRunTarget{
+				{Component: v1beta1.EngineComponent, Revision: hashOf(t, newRev), StableRevision: hashOf(t, oldRev)},
+			},
+			Plan: v1beta1.RolloutRunPlan{Groups: []v1beta1.RolloutRunGroup{{
+				Group: v1beta1.RolloutGroup{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+					Canary:     canaryBody(10, 100),
+				},
+			}}},
+		},
+	}
+	converged := namedIR("llm-a-engine", newRev, newRev)
+	converged.Status.Replicas, converged.Status.UpdatedReplicas = 4, 4
+	in := testInputs(t, isvc, converged)
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if isvc.Status.Rollout.ActiveRun == nil {
+		t.Fatalf("a unit still Promoting at the done sentinel must keep its run pinned, got lastRun=%+v", isvc.Status.Rollout.LastRun)
+	}
+
+	engine := isvc.Status.Components[v1beta1.EngineComponent]
+	engine.RolloutPhase = v1beta1.RolloutPhaseStable
+	isvc.Status.Components[v1beta1.EngineComponent] = engine
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if isvc.Status.Rollout.ActiveRun != nil {
+		t.Fatalf("a unit that reads Stable on a converged workload must close its run, still active: %+v", isvc.Status.Rollout.ActiveRun)
+	}
+	if last := isvc.Status.Rollout.LastRun; last == nil || last.Outcome != v1beta1.RolloutRunCompleted {
+		t.Fatalf("lastRun = %+v, want Completed", last)
+	}
+}
+
 // A run adopted around an in-flight canary finds the IRs already advanced
 // to their targets, so the current revision names no stable. The unit's
 // record may carry none either, and a secondary has no record at all; each

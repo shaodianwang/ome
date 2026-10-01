@@ -174,9 +174,12 @@ func applyHolds(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanaryStatu
 	}
 
 	// Done sentinel: a finished canary keeps its status at CurrentStep ==
-	// len(steps). EffectivePartition maps that to the final step; a nil
-	// status would re-default to step 0's partition and hold instances back
-	// on the old revision after completion.
+	// len(steps). EffectivePartition maps that to partition 0; a nil status
+	// would re-default to step 0's partition and hold instances back on the
+	// old revision after completion. The sentinel is the release of the held
+	// floor, so the unit finishes the cutover from here: it stays Promoting
+	// while the last stable instance rolls and reads Stable once every
+	// member serves on its target alone.
 	if cs != nil && int(cs.CurrentStep) >= steps {
 		if shouldRearm(in, cs, targetChanged, rearmDone) {
 			resetCanaryStatus(in.ISVC, in.Component, cs, in.TargetID, in.CanaryRevisionHash, in.Now)
@@ -186,8 +189,7 @@ func applyHolds(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanaryStatu
 			// a done canary evaluates no gates.
 			syncPromotedThrough(in, cs, take)
 			ignoreRollback(in, take)
-			setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseStable)
-			return cs, &Result{Active: false}, nil
+			return cs, finishCutover(in, cs), nil
 		}
 	}
 
