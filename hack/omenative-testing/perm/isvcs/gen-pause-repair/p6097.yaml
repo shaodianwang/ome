@@ -1,0 +1,27 @@
+# p6097: [gen] freeze during repair crashloop start pd N=4 rp RecreateInstance co rolling push fix  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 pause=freeze fault=crashloop:old floor_soft=1 co=rolling topo=pd form=start during=idle victimcomp=engine expect=repaired pauseat=during push=fix
+# reason: the engine's highest Instance's pod on the settled service is pointed at an image with no shell, so it crashes at every start and is never Ready again; the service is frozen while the repair is in flight; while frozen the repair already open finishes, its new pods come up and serve, and nothing else is rebuilt; the fix pushed while paused lands on no Instance until the unpause; after the unpause the fix lands on every Instance, the broken one included, within the roll's budget; nothing repairs that Instance again on the revision it was running, and no Instance is left mid-operation; the rollingUpdate group lists the broken Component and changes none of this: a repair of an Instance that serves nothing is admitted without the budget or the gate; floor waived — the crash itself costs settled capacity
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6097 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          rollingUpdate: {}

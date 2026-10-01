@@ -4,7 +4,7 @@
 Emits the constraint-filtered cross product of
     topology x updateStrategy x failure verb x injection phase x
     restartPolicy x pause
-into nineteen generator-owned folders, using ONLY verbs and hooks the runners
+into twenty generator-owned folders, using ONLY verbs and hooks the runners
 (run.py + the KIND CI lane) already implement:
 
     gen-rollout/   p1000+  baseline revision-bump rollouts (failure=none)
@@ -99,6 +99,14 @@ into nineteen generator-owned folders, using ONLY verbs and hooks the runners
                           and under the zero budgets of a rolling group; the
                           fix lands within the policy's own rule and never
                           last on the broken Instance (fixfirst=1)
+    gen-pause-repair/ p6000+  a crash loop on the settled service, then the
+                          operator pauses or freezes the service before the
+                          repair opens, while it is in flight or after it has
+                          finished (pause=, pauseat=), pushes the fix while
+                          paused or nothing (push=), and unpauses; crossed
+                          with shape x crash form x restartPolicy x group;
+                          nothing but the repair in flight moves while paused
+                          and the fix lands on every Instance afterwards
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -209,6 +217,17 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     group and a ratio needs two Components, so engine-only runs blueGreen
     and the zero-budget rolling group alone. maintainRatio's tolerance is 50
     at N=2 (a crashing Instance alone is half the fleet) and 25 at N=4.
+  - The pause-and-repair family leaves out form=load under restartPolicy
+    None: a runner that dies after Ready and comes back is a container
+    restart the kubelet owns under that policy, not a wedge, so no repair is
+    promised and there is no repair to time a pause against. A freeze after
+    the repair has finished is a pause: nothing is left for the deeper hold
+    to suspend, so only pause=true is emitted at pauseat=after. The engine
+    runs SurgeThenDrain maxSurge 1 maxUnavailable 1: a fresh crash-loop
+    repair is charged against the unavailability budget, so under
+    maxUnavailable 0 the repair the pause is timed against never opens. The
+    grouped cells run live: a repair of an Instance that serves nothing is admitted without the budget or the gate,
+    so the group changes nothing.
 
 The t=3 covering fill over the deferred dimensions (coordination/rollout
 groups, canary promotion, budget x coordination interactions) is the --fill
@@ -248,6 +267,7 @@ GEN_BLOCKS = {
     "gen-rollback": (5800, 6000),
     "gen-crashloop-new": (5000, 5200),
     "gen-crashloop-group": (5400, 5800),
+    "gen-pause-repair": (6000, 6200),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -298,6 +318,27 @@ def switch_budget(a, b):
     surge step needs headroom above N, a drain-first or in-place step needs
     headroom below it, and the merge patch keeps the budget as declared."""
     return (1 if "SurgeThenDrain" in (a, b) else 0, 1)
+# The pause-and-repair family: the engine's highest Instance breaks on the
+# settled service, the operator pauses or freezes the service before the
+# repair opens, while it is in flight or after it has finished, pushes the
+# fix while paused or nothing, and unpauses; with no group or under a
+# rollingUpdate group over the Components a bump would roll. The engine runs
+# SurgeThenDrain maxSurge 1 maxUnavailable 1 so the repair the pause is
+# timed against is admitted by the unavailability budget. A crash after
+# Ready under restartPolicy None is a container restart the kubelet owns,
+# not a wedge: no repair is promised there. A freeze after the repair has
+# finished holds nothing a pause does not, so only the plain pause is
+# emitted at that moment.
+PAUSE_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1)]
+PAUSE_DEPTHS = ["true", "freeze"]
+PAUSE_MOMENTS = ["before", "during", "after"]
+PAUSE_PUSHES = ["", "fix"]
+PAUSE_GROUPS = ["none", "rolling"]
+PAUSE_BUDGET = (1, 1)
+UNPROMISED_REPAIR = {("load", "None")}
+# The grouped cells whose repair the group's gate holds today are parked,
+# through the issue= header key, on the issue that tracks it.
+GROUPED_REPAIR_ISSUE = 1977
 
 
 # The steady-state and sibling crash-loop families. A service carries no group
@@ -511,6 +552,7 @@ HAND_PINNED_KILL = {
 #   ("heal", topo, w, rp, lift, co)
 #   ("imagepull", "settling", topo, w, strat, rp, co) / ("imagepull", "idle", topo, w, rp)
 #   ("rollback", hook, topo, w, strat, surge, unavail, co)
+#   ("pause-repair", topo, w, form, rp, co, pause, moment, push)
 # A park is added here as (key): (issue, reason, invariant scope) and
 # rendered into the header. The heal family's lift=after-failed cells are
 # parked on HEAL_ISSUE with a per-axis reason, filled in next to its emitter.
@@ -528,8 +570,9 @@ MISSING_HOOKS = [
     "mid-surge injection points beyond first-surge-observed (k-th surge, "
     "mid-drain, pre-settle tail) — FAULT_PHASES has settling/rotating/migrating "
     "only",
-    "pause-under-rollout hook (ome.io/rollout-paused is only exercised inside "
-    "mode=kill; no verb pauses an in-flight rotation)",
+    "pause-under-rollout hook (ome.io/rollout-paused is exercised inside "
+    "mode=kill and around a repair at idle, pauseat=; no verb pauses an "
+    "in-flight rotation)",
     "decoder-targeted mode=kill (the kill handler always picks the engine when "
     "one is configured)",
     "controller restart while a repair is open (a crash loop at idle with the "
@@ -953,6 +996,95 @@ def emit_switch(add):
                 add("gen-switch", desc, kv, comps(topo, n, w, life, d_life=d_life),
                     _switch_crash_reason(from_, to, co), meta,
                     cell=("switch-crash", SWITCH_CRASH_HOOK, topo, w, n, from_, to, co), coord=coord)
+# ── gen-pause-repair: a pause or a freeze around the repair of a crash loop ─
+def pause_group_for(co, topo):
+    """The spec.rollout.groups block a pause-and-repair case carries: a
+    rollingUpdate group over engine and decoder, or over the engine alone
+    where there is no decoder."""
+    if co == "none":
+        return None
+    return lib.coord_for(co, comps=(["engine", "decoder"] if is_pd(topo) else ["engine"]))
+
+
+def _pause_reason(form, pause, moment, push, co):
+    word = "frozen" if pause == "freeze" else "paused"
+    how = ("the engine's highest Instance's pod on the settled service is pointed at an image with no shell, "
+           "so it crashes at every start and is never Ready again"
+           if form == "start" else
+           "the engine's highest Instance's pod on the settled service has its runner killed every few seconds "
+           "while it is up, so it dies after Ready and comes back between crashes")
+    when = {"before": f"the service is {word} before the repair opens",
+            "during": f"the service is {word} while the repair is in flight",
+            "after": f"the service is {word} after the repair has finished"}[moment]
+    if moment == "after":
+        held = f"while {word} nothing is rebuilt"
+    elif pause == "freeze" and moment == "before":
+        held = "while frozen nothing is rebuilt, the broken Instance included"
+    elif pause == "freeze":
+        held = ("while frozen the repair already open finishes, its new pods come up and serve, and nothing "
+                "else is rebuilt")
+    else:
+        held = ("while paused the broken Instance is still repaired on the revision it runs, since a pause holds "
+                "the fleet and not the repair, and nothing else is rebuilt")
+    if push == "fix":
+        held += "; the fix pushed while paused lands on no Instance until the unpause"
+        after = ("after the unpause the fix lands on every Instance, the broken one included, within the roll's "
+                 "budget; nothing repairs that Instance again on the revision it was running, and no Instance is "
+                 "left mid-operation")
+    elif pause == "freeze" and moment == "before":
+        after = ("after the unpause the repair opens and rebuilds the broken Instance Ready and serving on its "
+                 "running revision, and everything else stays as it was")
+    else:
+        after = ("after the unpause nothing moves: every Instance keeps serving its running revision and no "
+                 "Instance is left mid-operation")
+    out = f"{how}; {when}; {held}; {after}"
+    if co != "none":
+        out += ("; the rollingUpdate group lists the broken Component and changes none of this: a repair of an "
+                "Instance that serves nothing is admitted without the budget or the gate")
+    if push == "fix":
+        out += "; floor waived — the crash itself costs settled capacity"
+    return out
+
+
+def emit_pause_repair(add):
+    surge, unavail = PAUSE_BUDGET
+    for topo, n, w in PAUSE_SHAPES:
+        for rp in RESTARTS:
+            for form in CRASH_FORMS:
+                if (form, rp) in UNPROMISED_REPAIR:
+                    continue   # constraint ledger: no repair is promised there
+                for co in PAUSE_GROUPS:
+                    for moment in PAUSE_MOMENTS:
+                        for pause in PAUSE_DEPTHS:
+                            if pause == "freeze" and moment == "after":
+                                continue   # constraint ledger: nothing left for a freeze to hold
+                            for push in PAUSE_PUSHES:
+                                if push:
+                                    kv = dict(**counts(topo, n), **ceilings(topo, n, "SurgeThenDrain", surge))
+                                    if co != "none" and is_pd(topo):
+                                        kv["ceil_d"] = n + 1   # the group rolls the decoder too
+                                else:
+                                    kv = dict(**counts(topo, n), ceil_e=n, ceil_d=(n if is_pd(topo) else 0),
+                                              ceil_r=(lib.NR if is_pd(topo) else 0))
+                                kv.update(pause=pause, fault="crashloop:old")
+                                if push:
+                                    kv["floor_soft"] = 1
+                                kv.update(co=co, topo=topo, form=form, during="idle", victimcomp="engine",
+                                          expect="repaired", pauseat=moment)
+                                if push:
+                                    kv["push"] = push
+                                meta = dict(strat="SurgeThenDrain", verb=f"crashloop:{form}@idle", rp=rp,
+                                            pause=pause, moment=moment, push=push or "none", victim="engine")
+                                desc = (f"{GEN_MARK} {'freeze' if pause == 'freeze' else 'pause'} {moment} repair "
+                                        f"crashloop {form} {shape_tag(topo, w)} N={n} rp {rp} co {co} "
+                                        f"push {push or 'none'}")
+                                life = lib.lifecycle(strat="SurgeThenDrain", surge=surge, unavail=unavail,
+                                                     restart=RP_FULL[rp])
+                                d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+                                add("gen-pause-repair", desc, kv, comps(topo, n, w, life, d_life=d_life),
+                                    _pause_reason(form, pause, moment, push, co), meta,
+                                    cell=("pause-repair", topo, w, form, rp, co, pause, moment, push),
+                                    coord=pause_group_for(co, topo))
 
 
 # ── gen-crashloop-idle / gen-crashloop-sibling: a break under a rollout group ─
@@ -1970,6 +2102,7 @@ def build_outputs():
     emit_rollback(add)
     emit_crashloop_new(add)
     emit_crashloop_group(add)
+    emit_pause_repair(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -2028,6 +2161,8 @@ def manifest(rows):
     lines += table("By failure verb / phase", tally(lambda kv, m: m["verb"]))
     lines += table("By restartPolicy", tally(lambda kv, m: m.get("rp", "(unset — baseline)")))
     lines += table("By pause", tally(lambda kv, m: m.get("pause", "off")))
+    lines += table("By pause moment", tally(lambda kv, m: m.get("moment", "(no pause around a repair)")))
+    lines += table("By push while paused", tally(lambda kv, m: m.get("push", "(no pause around a repair)")))
     lines += table("By coordination", tally(lambda kv, m: kv.get("co", "none")))
     edits = {}
     for _f, _n, _kv, m in rows:
@@ -2049,8 +2184,9 @@ def manifest(rows):
     lines += [
         "## Constraint ledger (tuples excluded during construction)",
         "",
-        "- `pause` multiplies only `mode=kill`: run.py consumes the pause header"
-        " nowhere else, so a paused rollout case would carry a dead knob.",
+        "- `pause` multiplies `mode=kill` and the pause-and-repair family"
+        " (`pauseat=`); run.py consumes the pause header nowhere else, and a"
+        " rollout case that pauses without `pauseat=` is rejected as a dead knob.",
         "- `pause=freeze` pairs only with `RecreateInstanceOnPodRestart`: the"
         " freeze lift downgrades to a plain pause, which parks policy None's"
         " Create recovery — freeze+None could never repair while paused.",
@@ -2203,6 +2339,18 @@ def manifest(rows):
         " Components, so engine-only runs blueGreen and the zero-budget"
         " rolling group alone; maintainRatio's tolerance is 50 at N=2 and 25"
         " at N=4.",
+        "- The pause-and-repair family leaves out `form=load` under"
+        " `restartPolicy: None`: a runner that dies after Ready and comes back"
+        " is a container restart the kubelet owns under that policy, not a"
+        " wedge, so there is no repair to time a pause against.",
+        "- A freeze after the repair has finished holds nothing a pause does"
+        " not, so the family emits only `pause=true` at `pauseat=after`.",
+        "- The pause-and-repair family runs the engine under SurgeThenDrain"
+        " maxSurge 1 maxUnavailable 1: a fresh crash-loop repair is charged"
+        " against the unavailability budget, so under maxUnavailable 0 the"
+        " repair the pause is timed against never opens.",
+        "- The grouped pause-and-repair cells run live: a repair of an Instance that serves nothing is admitted without the budget or the gate,"
+        " so the rollingUpdate group changes nothing.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

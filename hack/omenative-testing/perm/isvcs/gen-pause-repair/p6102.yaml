@@ -1,0 +1,23 @@
+# p6102: [gen] freeze before repair crashloop load pd N=4 rp RecreateInstance co none push none  Ne=4 Nd=4 Nr=2 ceil_e=4 ceil_d=4 ceil_r=2 pause=freeze fault=crashloop:old co=none topo=pd form=load during=idle victimcomp=engine expect=repaired pauseat=before
+# reason: the engine's highest Instance's pod on the settled service has its runner killed every few seconds while it is up, so it dies after Ready and comes back between crashes; the service is frozen before the repair opens; while frozen nothing is rebuilt, the broken Instance included; after the unpause the repair opens and rebuilds the broken Instance Ready and serving on its running revision, and everything else stays as it was
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6102 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

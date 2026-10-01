@@ -95,7 +95,7 @@ perm/
 │   ├── rollout/           — 96 rollout cases (topology × lifecycle × coordination)
 │   ├── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
 │   ├── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/ gen-crashloop-idle/ gen-crashloop-sibling/
-│   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/ gen-rollback/ gen-crashloop-new/ gen-crashloop-group/  — generated hot core (see isvcs/MANIFEST.md)
+│   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/ gen-rollback/ gen-crashloop-new/ gen-crashloop-group/ gen-pause-repair/  — generated hot core (see isvcs/MANIFEST.md)
 │   └── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
@@ -996,6 +996,44 @@ a removal. `rollback=1` in canary mode keeps its own meaning (the
   kubelet alone between kills; whether a repair opens there is the product's
   answer, and the killer stops the moment the pod is rebuilt.
 
+- **`pause=true|freeze` with `pauseat=before|during|after` and `push=fix`**
+  (rollout mode, `during=idle` with a break fault) is a pause, or a freeze,
+  around the repair of the broken Instance. `pause=true` is the plain pause:
+  no fleet change starts or advances, but the restart policy keeps repairing
+  Instances at the revision they run. `pause=freeze` is the deeper one: the
+  repair pass is suspended too, except a repair already under way, which
+  finishes its step. `pauseat=` says when the pause lands against the
+  repair: `before` sets the annotation and then fires the break, `during`
+  waits for the first sign of the repair (a `RestartTriggered` event naming
+  the Instance, its row `Restarting`, or a pod of it gone or replaced) and
+  pauses while it is in flight, `after` waits for the Instance to be rebuilt
+  and serving first. `push=fix` then bumps the revision while the service is
+  paused (the bump re-renders the broken pod from its template, so it is the
+  fix); absent, nothing is pushed. The service is held for `IDLE_HOLD_S`,
+  measured from the pause or the break, whichever came last, and unpaused.
+  The verdict holds the product to what a pause promises: while paused no
+  Instance other than the broken one gets a new pod and no pod moves to
+  another revision; the broken Instance is repaired before the unpause
+  under a plain pause and under a freeze that caught the repair in flight,
+  and left as it stood under a freeze that landed first or once its repair
+  was already done; after the unpause, with the fix pushed, every bumped
+  Instance ends Ready and serving on the new revision within the roll's
+  budget and the broken one is never repaired again on the revision it was
+  running (the roll owns it); with nothing pushed, a freeze that landed first
+  releases exactly one repair, recorded by its event, and every other cell
+  moves nothing; in every cell the InferenceReplica rows end Ready with no
+  operation open and peaks stay under the header ceilings. A repair that
+  never opens, or never finishes, leaves the pause nothing to land on and
+  fails the case; a repair the product announces it is holding (a
+  `RepairHeld` event naming the Instance) ends that wait at once, with the
+  hold's own words in the verdict. The generated `isvcs/gen-pause-repair/` family crosses
+  the verb with the three single-gang shapes, both crash forms under the
+  restart policies that promise a repair, both depths, the three moments,
+  the push and a `rollingUpdate` group; the engine runs `maxUnavailable: 1`
+  so the repair fits the unavailability budget, and the grouped cells run
+  live: a repair of an Instance that serves nothing is admitted without the
+  budget or the gate.
+
 - **`fault=quota` cases run serially.** A quota case creates a *namespace-wide*
   ResourceQuota sized from a live usage snapshot, so run concurrently it both
   blocks other cases' pod admissions and mis-sizes its own headroom.
@@ -1122,11 +1160,11 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `gen_cases.py`'s feature counters).
 - `gen_runtime.py` — the runtime-triggered cases (`p400`+) → `isvcs/runtime-rev/`.
 - `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p2799`,
-  `p3000`–`p4999`, `p5000`–`p5799` and `p5800`–`p5999`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
+  `p3000`–`p4999`, `p5000`–`p5799`, `p5800`–`p5999` and `p6000`–`p6199`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
   `isvcs/gen-restart/`, `isvcs/gen-crashloop/`, `isvcs/gen-switch/`,
   `isvcs/gen-crashloop-idle/`, `isvcs/gen-crashloop-sibling/`,
   `isvcs/gen-heal/`, `isvcs/gen-imagepull/`, `isvcs/gen-node/`,
-  `isvcs/gen-ctrlrestart/`, `isvcs/gen-rollback/`, `isvcs/gen-crashloop-new/`, `isvcs/gen-crashloop-group/`, and the operator stories driven through a canary (`p5200`–`p5399`) →
+  `isvcs/gen-ctrlrestart/`, `isvcs/gen-rollback/`, `isvcs/gen-crashloop-new/`, `isvcs/gen-crashloop-group/`, `isvcs/gen-pause-repair/`, and the operator stories driven through a canary (`p5200`–`p5399`) →
   `isvcs/gen-canary-crash/` (a canary rolls the fix while the running
   revision breaks under it), `isvcs/gen-canary-second-rev/` (a second revision
   lands while the first canary is staging or serving) and

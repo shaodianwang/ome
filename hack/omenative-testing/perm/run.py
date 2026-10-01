@@ -1946,8 +1946,29 @@ def _idle_expects(fault_kind):
     if fault_kind in LIFT_FAULTS:
         return LIFT_EXPECTS
     return set()
-# How long a held repair, or a park, must hold before it is believed.
+# How long a held repair, or a park, must hold before it is believed, and
+# how long a paused service is watched before the unpause.
 IDLE_HOLD_S = int(90 * TIMEOUT_MULT)
+# A pause around a repair (rollout mode, a break fault at idle, pause=true|
+# freeze): pauseat= says when the pause lands against the repair of the
+# broken Instance — before it opens, while it is in flight, after it has
+# finished — and push=fix pushes the fix while the service is paused.
+PAUSE_MOMENTS = {"before", "during", "after"}
+PAUSE_PUSHES = {"fix"}
+
+
+def _pause_repair_contract(pmode, moment, push):
+    """What a pause promises for one cell. repair_while_paused: the broken
+    Instance is rebuilt, Ready and serving before the unpause — a plain
+    pause holds the fleet, not the repair, and a freeze finishes the repair
+    already open. repair_after_unpause: the repair opens once the pause is
+    lifted — a freeze that landed before the repair with nothing pushed;
+    with the fix pushed the roll owns the Instance instead. Whatever the
+    cell, nothing else is rebuilt and no revision moves while paused."""
+    repair_while_paused = (pmode == "true" and moment in ("before", "during")) or \
+        (pmode == "freeze" and moment == "during")
+    return {"repair_while_paused": repair_while_paused,
+            "repair_after_unpause": pmode == "freeze" and moment == "before" and push != "fix"}
 # The operator mailbox that tears Failed Instances down for a rebuild; a
 # heal the harness claims must have happened without it.
 RESET_ANNO = "ome.io/reset-instances"
@@ -3653,6 +3674,12 @@ def _event_names_instance(message, comp, inst):
     return re.search(rf"component={re.escape(comp)} instance={inst}\b", message) is not None
 
 
+def _instance_rebuilt_whole(pods, pre_uids, expected):
+    """_instance_rebuilt over the Instance's full pod set: a gang half-way
+    through its rebuild has only new pods alive and is not rebuilt yet."""
+    return len(pods) >= max(1, expected) and _instance_rebuilt(pods, pre_uids)
+
+
 def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, checks, bumped=None, surges=None):
     """The break verdict after a roll. A victim on a bumped Component ended
     on the new revision with its pods serving, and no repair was recorded for
@@ -4806,6 +4833,372 @@ def _idle_fault(case_id, yaml_file, desc, hdr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
+# ── A pause or a freeze around a repair (pauseat=) ───────────────────────────
+def _repair_open(pods, pre_uids, expected, row_phase, named):
+    """True while the broken Instance's repair is under way: the product has
+    named it (a RestartTriggered event, a Restarting row) or its pod set
+    has started to change (a pod gone or replaced), and the Instance is not
+    rebuilt and serving yet."""
+    changed = len(pods) < max(1, expected) or any(p.get("uid") and p["uid"] not in pre_uids for _n, p in pods)
+    signalled = named or row_phase == "Restarting" or changed
+    return signalled and not _instance_rebuilt_whole(pods, pre_uids, expected)
+
+
+def _paused_changes(pod_state, baseline_uids, old_hashes):
+    """One tick of the paused window: {(component, instance): pod names}
+    for pods that did not exist when the pause landed, and the pods that
+    carry a revision the service was not running at the pause."""
+    created, new_rev = defaultdict(set), set()
+    for name, p in pod_state.items():
+        if not p:
+            continue
+        if p.get("uid") and p["uid"] not in baseline_uids:
+            created[(p.get("comp"), str(p.get("inst", "0")))].add(name)
+        if p.get("hash") and old_hashes and p["hash"] not in old_hashes:
+            new_rev.add(name)
+    return created, new_rev
+
+
+def _victim_events(case_id, since_epoch, comp, inst):
+    """(repairs, holds): the RestartTriggered and the RepairHeld events
+    naming the broken Instance at or after since_epoch. A hold is the
+    product saying it will not repair the Instance for now, so a wait for
+    that repair can end on it instead of running out its budget."""
+    repairs, holds = [], []
+    for reason, m in _isvc_events_since(case_id, since_epoch):
+        if not _event_names_instance(m, comp, inst):
+            continue
+        if reason == "RestartTriggered":
+            repairs.append(m)
+        elif reason == "RepairHeld":
+            holds.append(m)
+    return repairs, holds
+
+
+def _victim_repairs(case_id, since_epoch, comp, inst):
+    """The RestartTriggered events naming the broken Instance at or after
+    since_epoch."""
+    return _victim_events(case_id, since_epoch, comp, inst)[0]
+
+
+def _repair_declared_held(repairs, holds):
+    """True when the product has announced it is holding the Instance's
+    repair and has not run one: waiting longer cannot change the verdict."""
+    return bool(holds) and not repairs
+
+
+def _pause_repair_checks(f, contract, out, verdict, notes, checks):
+    """The pause-and-repair verdict. While paused: no Instance other than the
+    broken one changes, no pod moves to another revision, and the broken
+    Instance is repaired exactly where the contract says — before the
+    unpause under a plain pause (or a freeze that caught the repair in
+    flight), never under a freeze that landed first or once the repair was
+    already done. After the unpause: the end state holds, the repair the
+    contract still owes is recorded, no second rebuild of the running
+    revision is, and no Instance is left mid-operation."""
+    inst, comp = f["crash_inst"], f["crash_comp"]
+    pmode, moment, push = out["pmode"], out["moment"], out["push"]
+    word = "frozen" if pmode == "freeze" else "paused"
+    who = f"{comp} Instance {inst}"
+    if moment == "before":
+        checks.append(f"  ⓘ the service was {word} {out['pause_lead_s']:.0f}s before the break")
+    else:
+        when = ("while its repair was in flight" if moment == "during" and not out.get("repair_done_at_pause")
+                else "after its repair had finished")
+        checks.append(f"  ✓ the pause landed {out['moment_at']:.0f}s after the break, {when} "
+                      f"(row {out.get('row_at_pause') or 'Ready'})")
+        if moment == "during" and out.get("repair_done_at_pause"):
+            checks.append(f"  ⓘ the repair of {who} had already finished when the pause landed; "
+                          f"the in-flight window closed before the watcher caught it")
+    paused = out["paused"]
+    held = paused["held_s"]
+    foreign = {k: sorted(v) for k, v in paused["created"].items() if k != (comp, inst)}
+    if foreign:
+        verdict = "FAIL"
+        named = "; ".join(f"{c}/{i}: {', '.join(n)}" for (c, i), n in sorted(foreign.items()))
+        notes.append(f"pods of other Instances were created while {word}: {named}")
+        checks.append(f"  ✗ while {word} nothing but the repair in flight may be rebuilt, yet pods appeared on "
+                      f"other Instances: {named}")
+    else:
+        checks.append(f"  ✓ no Instance other than {who} changed across the {held:.0f}s {word} window")
+    if paused["new_rev"]:
+        verdict = "FAIL"
+        notes.append(f"pods moved to a new revision while {word}: {', '.join(paused['new_rev'][:4])}")
+        checks.append(f"  ✗ a revision change landed while {word} ({len(paused['new_rev'])} pod(s) on a new revision): "
+                      f"{', '.join(paused['new_rev'][:6])}")
+    elif push == "fix":
+        checks.append(f"  ✓ the fix pushed while {word} landed on nothing until the unpause")
+    else:
+        checks.append(f"  ✓ no revision changed while {word}")
+    victim_new = sorted(paused["created"].get((comp, inst), set()))
+    if contract["repair_while_paused"]:
+        why = ("the repair already open finished its step" if pmode == "freeze"
+               else "a pause holds the fleet, not the repair")
+        if paused["rebuilt_at"] is not None:
+            checks.append(f"  ✓ {who} was rebuilt, Ready and serving {paused['rebuilt_at']:.0f}s into the {word} window ({why})")
+        elif paused.get("held"):
+            verdict = "FAIL"
+            notes.append(f"the repair of {who} was held, not run, while {word}: {paused['held'][0][:120]}")
+            checks.append(f"  ✗ the repair of {who} was held, not run, while {word} ({why}): {paused['held'][0][:160]}")
+        else:
+            verdict = "FAIL"
+            notes.append(f"{who} was not rebuilt to serving while {word}")
+            checks.append(f"  ✗ {who} was not rebuilt to Ready+serving while {word} within {held:.0f}s ({why})")
+        if paused["repairs"]:
+            checks.append(f"  ⓘ a RestartTriggered event names {who} while {word}: {paused['repairs'][0][:160]}")
+    else:
+        why = "a freeze starts no repair" if moment == "before" else "its repair was already done"
+        if victim_new or paused["repairs"]:
+            verdict = "FAIL"
+            detail = paused["repairs"][0][:160] if paused["repairs"] else ", ".join(victim_new)
+            notes.append(f"{who} was rebuilt while {word} ({why})")
+            checks.append(f"  ✗ {who} was rebuilt while {word} — {why}: {detail}")
+        else:
+            checks.append(f"  ✓ {who} was left as it stood while {word} ({why})")
+    if out["state"] != "CONVERGED":
+        verdict = "FAIL"
+        notes.append(f"end state not reached after the unpause (state={out['state']})")
+        checks.append(f"  ✗ after the unpause the service never reached its end state within budget "
+                      f"({out['end_detail']})")
+    elif push == "fix":
+        checks.append(f"  ✓ after the unpause the fix landed on every Instance of {', '.join(sorted(out['bumped']))}, "
+                      f"{who} included, all Ready and serving on the new revision ({out['converged_at']:.0f}s)")
+    else:
+        checks.append(f"  ✓ after the unpause every Instance is Ready and serving on its running revision "
+                      f"({out['converged_at']:.0f}s)")
+    after = out["repairs_after_unpause"]
+    if contract["repair_after_unpause"]:
+        if after:
+            checks.append(f"  ✓ the unpause released the repair of {who}: {after[0][:160]}")
+        else:
+            verdict = "FAIL"
+            notes.append(f"no RestartTriggered event named {who} after the unpause")
+            checks.append(f"  ✗ no RestartTriggered event named {who} after the unpause "
+                          f"(the freeze was lifted with the Instance still broken; only a repair can own its rebuild)")
+    elif after:
+        verdict = "FAIL"
+        why = "the roll owned it after the unpause" if push == "fix" else "it had already been repaired"
+        notes.append(f"{who} was repaired again after the unpause ({why})")
+        checks.append(f"  ✗ {who} was repaired again on the revision it was running after the unpause — {why}: {after[0][:160]}")
+    else:
+        checks.append(f"  ✓ no second rebuild of {who} on the revision it was running after the unpause")
+    if out["ir_settled"]:
+        checks.append("  ✓ no Instance left mid-operation: every row Ready with no operation open")
+    else:
+        verdict = "FAIL"
+        notes.append(f"an Instance was left mid-operation after the unpause ({out['ir_detail']})")
+        checks.append(f"  ✗ an Instance was left mid-operation after the unpause: {out['ir_detail']}")
+    if out["pause_left"]:
+        verdict = "FAIL"
+        notes.append(f"the pause annotation still reads {out['pause_left']!r} at the end")
+        checks.append(f"  ✗ ome.io/rollout-paused still reads {out['pause_left']!r} after the unpause")
+    return verdict
+
+
+def _pause_repair_ceiling_checks(ctx, verdict, notes, checks):
+    """Peak alive Instances against the header ceilings: with the fix
+    pushed, the roll's surge after the unpause; with nothing pushed, N
+    (a repair rebuilds in place)."""
+    hdr = ctx["hdr"]
+    ceil = {"engine": hdr.get("ceil_e", ctx["N"]["engine"]), "decoder": hdr.get("ceil_d", ctx["N"]["decoder"]),
+            "router": hdr.get("ceil_r", ctx["N"]["router"])}
+    for c in sorted(ctx["configured"]):
+        peak = ctx["peaks"][c]
+        if peak > ceil[c]:
+            verdict = "FAIL"
+            notes.append(f"{c} peak {peak} > ceiling {ceil[c]}")
+            checks.append(f"  ✗ {c} peak {peak} > ceiling {ceil[c]}")
+        else:
+            checks.append(f"  ✓ {c} peak {peak} ≤ ceiling {ceil[c]}")
+    return verdict
+
+
+def _pause_repair(case_id, yaml_file, desc, hdr):
+    """pause=true|freeze with pauseat=: a break on the idle service, a pause
+    landed before its repair opens, while the repair is in flight or after
+    it has finished, the fix pushed while paused when push=fix, then the
+    unpause. The verdict holds the product to what a pause promises:
+    nothing new starts while paused, work already under way finishes, the
+    unpause resumes where things stood, and a fix pushed under the pause
+    lands on every Instance afterwards, the broken one included, with no
+    second rebuild of the revision it was running."""
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    f = ctx["fault"]
+    N, configured, ppi = ctx["N"], ctx["configured"], ctx["pods_per_inst"]
+    pmode, moment, push = str(hdr.get("pause")), str(hdr.get("pauseat")), str(hdr.get("push") or "")
+    contract = _pause_repair_contract(pmode, moment, push)
+    bumped = _bumped(ctx) if push == "fix" else set()
+    ctx["track_comps"] = sorted(configured)
+    budget = _idle_budget(ctx)
+    out = {"pmode": pmode, "moment": moment, "push": push, "bumped": sorted(bumped), "pause_lead_s": 0.0,
+           "moment_at": None, "row_at_pause": "", "repair_done_at_pause": False, "state": "WATCHING",
+           "end_detail": "", "converged_at": None, "repairs_after_unpause": [], "ir_settled": False,
+           "ir_detail": "", "pause_left": ""}
+    paused_since = None
+    if moment == "before":
+        print(f"  Phase 2: pause the idle service (ome.io/rollout-paused={pmode}) before the break")
+        paused_since = time.time()
+        _pause_annotation(case_id, pmode)
+    print(f"  Phase 3: {f['kind']} fault on the {'paused' if paused_since else 'idle'} service "
+          f"(pause {pmode} {moment} the repair; {'fix pushed while paused' if push else 'nothing pushed'})")
+    _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"])
+    ctx["trigger_ts"] = fault_ts = time.time()
+    if paused_since is not None:
+        out["pause_lead_s"] = fault_ts - paused_since
+    if f.get("skip"):
+        return _finish(case_id, desc, hdr, ctx, "SKIP", "SKIP", [f["skip"]], [])
+    if f["infra_fail"]:
+        if paused_since is not None:
+            _pause_annotation(case_id, "", settle=False)
+        return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
+    comp, inst = f["crash_comp"], f["crash_inst"]
+    expected_pods = ppi.get(comp, 1)
+    pre_uids = {p["uid"] for _n, p in _instance_pods(ctx["pod_state"], comp, inst) if p.get("uid")}
+
+    def victim_pods():
+        return _instance_pods(ctx["pod_state"], comp, inst)
+
+    if moment != "before":
+        want = "the repair to open" if moment == "during" else "the repair to finish"
+        print(f"  Phase 4: waiting for {want} on {comp} Instance {inst} (≤{budget}s)")
+        reached, stable, last_read, row, named, held = False, None, 0.0, "", False, []
+        while time.time() - fault_ts < budget and not ctx["closed"]:
+            _read_one(ctx)
+            now = time.time()
+            if now - last_read >= 2.0:
+                last_read = now
+                row = _ir_row_phase(case_id, comp, inst)
+                repairs, held = _victim_events(case_id, fault_ts, comp, inst)
+                named = bool(repairs)
+                if _repair_declared_held(repairs, held):
+                    break   # the product will not repair it: the pause has nothing to land on
+            pods = victim_pods()
+            whole = _instance_rebuilt_whole(pods, pre_uids, expected_pods)
+            if moment == "during":
+                if whole or _repair_open(pods, pre_uids, expected_pods, row, named):
+                    reached, out["repair_done_at_pause"] = True, whole
+                    break
+            elif whole:
+                stable = stable or now
+                if now - stable >= STABILITY_S:
+                    reached = True
+                    break
+            else:
+                stable = None
+        if not reached:
+            verdict, notes, checks = "FAIL", [], []
+            what = "opened" if moment == "during" else "finished"
+            why = f"was held, not run: {held[0][:160]}" if held and not named else f"never {what} within {budget}s (row {row or '?'})"
+            notes.append(f"the repair of {comp} Instance {inst} {why}; the pause had nothing to land on")
+            checks.append(f"  ✗ the repair of {comp} Instance {inst} {why}; the pause had nothing to land on")
+            verdict = _idle_peak_checks(ctx, verdict, notes, checks)
+            return _finish(case_id, desc, hdr, ctx, "NO_REPAIR", verdict, notes, checks)
+        out["moment_at"], out["row_at_pause"] = time.time() - fault_ts, row
+        print(f"  Phase 5: pause (ome.io/rollout-paused={pmode}) {out['moment_at']:.0f}s after the break (row {row or '?'})")
+        paused_since = time.time()
+    baseline = {p["uid"] for p in ctx["pod_state"].values() if p and p.get("uid")}
+    if moment != "before":
+        _pause_annotation(case_id, pmode)
+    if push == "fix":
+        print(f"  Phase 6: push the fix while {pmode}: bump {sorted(bumped)}")
+        if not _bump_rev(ctx, bumped):
+            f["infra_fail"] = f"fix push refused: {ctx.get('trigger_error', 'patch failed')}"
+            _pause_annotation(case_id, "", settle=False)
+            return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
+        ctx["trigger_ts"] = fault_ts
+    print(f"  Phase 7: holding {IDLE_HOLD_S}s {'frozen' if pmode == 'freeze' else 'paused'}"
+          + (f"; {comp} Instance {inst} must be rebuilt meanwhile" if contract["repair_while_paused"] else
+             f"; nothing may rebuild {comp} Instance {inst} meanwhile"))
+    created, new_rev, rebuilt_at, stable, held, last_read = defaultdict(set), set(), None, None, [], 0.0
+    # The hold is measured from whichever came last, the pause or the break,
+    # so a freeze that landed first is still watched for a full window after
+    # the break it must not repair.
+    hold_end = max(paused_since, fault_ts) + IDLE_HOLD_S
+    while not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        if contract["repair_while_paused"] and rebuilt_at is None and now - last_read >= 2.0:
+            last_read = now
+            held = _victim_events(case_id, fault_ts, comp, inst)[1]
+        tick_created, tick_new_rev = _paused_changes(ctx["pod_state"], baseline, ctx["old_hashes"])
+        for k, v in tick_created.items():
+            created[k] |= v
+        new_rev |= tick_new_rev
+        if _instance_rebuilt_whole(victim_pods(), pre_uids, expected_pods):
+            stable = stable or now
+            if rebuilt_at is None and now - stable >= STABILITY_S:
+                rebuilt_at = stable - paused_since
+                print(f"    {comp} Instance {inst} rebuilt and serving {rebuilt_at:.0f}s into the hold")
+        else:
+            stable = None
+        # A repair owed while paused is waited for up to the budget, unless the
+        # product has announced it will not run it.
+        if now >= hold_end and (not contract["repair_while_paused"] or rebuilt_at is not None or held
+                                or now - paused_since >= budget):
+            break
+    out["paused"] = {"created": {k: set(v) for k, v in created.items()}, "new_rev": sorted(new_rev),
+                     "rebuilt_at": rebuilt_at, "held_s": time.time() - paused_since,
+                     "repairs": _victim_repairs(case_id, paused_since, comp, inst),
+                     "held": held if rebuilt_at is None else []}
+    print(f"  Phase 8: unpause (ome.io/rollout-paused removed); row {_ir_row_phase(case_id, comp, inst) or '?'} at the lift")
+    unpause_ts = time.time()
+    _pause_annotation(case_id, "")
+
+    def converged():
+        agg, serving = ctx["agg"], _serving_instance_counts(ctx["pod_state"], ppi)
+        for c in configured:
+            alive, ready, updated = agg.get(c, (0, 0, 0))
+            if alive != N[c] or ready != N[c] or serving.get(c, 0) != N[c]:
+                return False, f"{c} {alive} alive/{ready} ready/{serving.get(c, 0)} serving of {N[c]}"
+            if updated != (N[c] if c in bumped else 0):
+                return False, f"{c} {updated} Instance(s) on a new revision, want {N[c] if c in bumped else 0}"
+        pods = victim_pods()
+        if not _instance_rebuilt_whole(pods, pre_uids, expected_pods):
+            return False, f"{comp} Instance {inst} not rebuilt to serving ({len(pods)} pod(s))"
+        if push == "fix" and any(p.get("hash") in ctx["old_hashes"] for _n, p in pods):
+            return False, f"{comp} Instance {inst} still on the old revision"
+        return True, ""
+
+    print(f"  Phase 9: watching the end state after the unpause (≤{budget}s)")
+    stable, detail, last_read = None, "", 0.0
+    while time.time() - unpause_ts < budget and not ctx["closed"]:
+        _read_one(ctx)
+        ok, detail = converged()
+        if ok:
+            stable = stable or time.time()
+            if time.time() - stable >= STABILITY_S:
+                out["state"], out["converged_at"] = "CONVERGED", stable - unpause_ts
+                ctx["converged_at"] = stable - unpause_ts
+                break
+            continue
+        stable = None
+        # With nothing pushed only a repair can finish the Instance; a hold
+        # the product announced on it, with no repair run, is its last word.
+        if push != "fix" and time.time() - last_read >= 2.0:
+            last_read = time.time()
+            if _repair_declared_held(*_victim_events(case_id, fault_ts, comp, inst)):
+                out["state"] = "HELD"
+                detail = f"the repair was held, not run: {_victim_events(case_id, fault_ts, comp, inst)[1][0][:160]}"
+                break
+    out["end_detail"] = detail
+    out["repairs_after_unpause"] = _victim_repairs(case_id, unpause_ts, comp, inst)
+    out["ir_settled"], out["ir_detail"] = _initial_ir_settled(_fetch_initial_ir_items(case_id) or [], N, configured)
+    out["pause_left"] = _isvc_pause_value(case_id)
+    verdict, notes, checks = "PASS", [], []
+    verdict = _pause_repair_checks(f, contract, out, verdict, notes, checks)
+    verdict = _pause_repair_ceiling_checks(ctx, verdict, notes, checks)
+    verdict = index_collision_checks(ctx, sorted(configured), verdict, notes, checks)
+    if push == "fix":
+        verdict = gang_atomicity_checks(ctx, sorted(bumped), verdict, notes, checks)
+        verdict = surge_before_drain_checks(ctx, sorted(bumped), verdict, notes, checks)
+        verdict = min_ready_checks(ctx, sorted(bumped), verdict, notes, checks)
+    if f.get("kills") is not None and f["form"] == "load":
+        checks.append(f"  ⓘ {f['kind']}: runner killed {f['kills']} time(s) while the pod ran the old revision")
+    return _finish(case_id, desc, hdr, ctx, out["state"], verdict, notes, checks)
+
+
 def write_result(case_id, desc, Ne, Nd, Nr, ce, cd, cr, peaks, final,
                  converged_at, policy, verdict, note, new_final):
     ts = int(time.time())
@@ -5085,6 +5478,11 @@ HDR_VALIDATORS = {
     # needs=<policy> (fault=node): the deployed force-delete policy the
     # outcome is read against; SKIP where the controller config differs.
     "needs": lambda v: v in NEEDS,
+    # pauseat=<moment> (rollout + a break at idle + pause=): when the pause
+    # lands against the broken Instance's repair; push=fix pushes the fix
+    # while the service is paused.
+    "pauseat": lambda v: v in PAUSE_MOMENTS,
+    "push": lambda v: v in PAUSE_PUSHES,
 }
 HDR_REQUIRED = ("Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r")
 
@@ -5407,6 +5805,21 @@ def validate_case_file(path):
     if "needs" in fields and fault_kind != "node":
         errs.append(f"{path}:1: needs={fields['needs']} names the force-delete policy a node outcome is read against "
                     f"(needs fault=node:{NODE_PARAM})")
+    if "pauseat" in fields:
+        if mode != "rollout":
+            errs.append(f"{path}:1: pauseat= times a pause against a repair on a rollout case (mode=rollout)")
+        if during != IDLE_FAULT_PHASE or fault_kind not in BREAK_FAULTS:
+            errs.append(f"{path}:1: pauseat= needs during={IDLE_FAULT_PHASE} and a break fault "
+                        f"(fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM}) whose repair the pause is timed against")
+        if "pause" not in fields:
+            errs.append(f"{path}:1: pauseat= needs pause=true|freeze (how deep the pause is)")
+        if expect == "held":
+            errs.append(f"{path}:1: pauseat= reads the repair the pause is timed against; expect=held names a repair that never runs")
+    elif mode == "rollout" and "pause" in fields:
+        errs.append(f"{path}:1: pause= on a rollout case needs pauseat={'|'.join(sorted(PAUSE_MOMENTS))} "
+                    f"(when the pause lands against the repair); the pause verb alone is a dead knob here")
+    if "push" in fields and "pauseat" not in fields:
+        errs.append(f"{path}:1: push={fields['push']} is pushed while the service is paused (needs pauseat=)")
     if not re.search(rf"\bname:\s*{re.escape(cid)}\b", text):
         errs.append(f"{path}:1: no document with metadata name '{cid}' (run.py gets the ISVC by case id)")
     return errs
@@ -7491,15 +7904,17 @@ def _compremove(case_id, yaml_file, desc, hdr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
-def _pause_annotation(case_id, value):
+def _pause_annotation(case_id, value, settle=True):
     """Set or clear (value "") the rollout-paused annotation on the case ISVC
-    and let it project onto the IR before the next trigger."""
+    and, unless told not to, let it project onto the IR before the next
+    trigger."""
     if value:
         kubectl("-n", NS, "annotate", "isvc", case_id,
                 f"ome.io/rollout-paused={value}", "--overwrite")
     else:
         kubectl("-n", NS, "annotate", "isvc", case_id, "ome.io/rollout-paused-")
-    time.sleep(PAUSE_PROJECT_S)
+    if settle:
+        time.sleep(PAUSE_PROJECT_S)
 
 
 def _isvc_pause_value(case_id):
@@ -10037,6 +10452,8 @@ def run_case(case_id):
     if mode != "rollout":
         return run_mode_case(case_id, yaml_file, desc, hdr, mode)
     if hdr.get("during") == IDLE_FAULT_PHASE:
+        if hdr.get("pauseat"):
+            return _pause_repair(case_id, yaml_file, desc, hdr)
         return _idle_fault(case_id, yaml_file, desc, hdr)
     if str(hdr.get("fault", "")) == f"crashloop:{CRASHLOOP_NEW}":
         return _crashloop_new(case_id, yaml_file, desc, hdr)

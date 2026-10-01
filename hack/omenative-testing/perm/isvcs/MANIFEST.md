@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **1913**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **2093**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -28,14 +28,15 @@ Total generated cases: **1913**. The whole-corpus per-PR cap (hand + generated) 
 | gen-rollback | 126 | p5800..p5925 |
 | gen-crashloop-new | 72 | p5000..p5071 |
 | gen-crashloop-group | 72 | p5400..p5471 |
+| gen-pause-repair | 180 | p6000..p6179 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 424 |
-| engine-mn | 383 |
-| pd | 586 |
+| engine | 484 |
+| engine-mn | 443 |
+| pd | 646 |
 | pd-mn | 520 |
 
 ### By update strategy
@@ -46,7 +47,7 @@ Total generated cases: **1913**. The whole-corpus per-PR cap (hand + generated) 
 | InPlaceIfPossible | 296 |
 | InPlaceOnly | 236 |
 | RecreatePod | 375 |
-| SurgeThenDrain | 966 |
+| SurgeThenDrain | 1146 |
 
 ### By failure verb / phase
 
@@ -58,7 +59,7 @@ Total generated cases: **1913**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:load@canary | 16 |
 | crashloop:load@capacity | 16 |
 | crashloop:load@gate | 4 |
-| crashloop:load@idle | 28 |
+| crashloop:load@idle | 88 |
 | crashloop:load@prestart | 16 |
 | crashloop:load@promote | 8 |
 | crashloop:load@sibling | 10 |
@@ -73,7 +74,7 @@ Total generated cases: **1913**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:start@canary | 16 |
 | crashloop:start@capacity | 16 |
 | crashloop:start@gate | 4 |
-| crashloop:start@idle | 56 |
+| crashloop:start@idle | 176 |
 | crashloop:start@prestart | 16 |
 | crashloop:start@promote | 8 |
 | crashloop:start@sibling | 20 |
@@ -121,16 +122,33 @@ Total generated cases: **1913**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (unset — baseline) | 388 |
-| None | 743 |
-| RecreateInstance | 782 |
+| None | 803 |
+| RecreateInstance | 902 |
 
 ### By pause
 
 | value | cases |
 |---|---|
-| freeze | 38 |
+| freeze | 110 |
 | off | 1799 |
-| true | 76 |
+| true | 184 |
+
+### By pause moment
+
+| value | cases |
+|---|---|
+| (no pause around a repair) | 1913 |
+| after | 36 |
+| before | 72 |
+| during | 72 |
+
+### By push while paused
+
+| value | cases |
+|---|---|
+| (no pause around a repair) | 1913 |
+| fix | 90 |
+| none | 90 |
 
 ### By coordination
 
@@ -138,9 +156,9 @@ Total generated cases: **1913**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 48 |
 | canary | 24 |
-| none | 1448 |
+| none | 1538 |
 | ratio | 16 |
-| rolling | 343 |
+| rolling | 433 |
 | seq | 34 |
 
 ### By mid-roll edit (gen-switch)
@@ -184,7 +202,7 @@ Total generated cases: **1913**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | (no break) | 1583 |
 | decoder | 60 |
-| engine | 270 |
+| engine | 450 |
 
 ### By migration mode (node family)
 
@@ -226,7 +244,7 @@ Total generated cases: **1913**. The whole-corpus per-PR cap (hand + generated) 
 
 ## Constraint ledger (tuples excluded during construction)
 
-- `pause` multiplies only `mode=kill`: run.py consumes the pause header nowhere else, so a paused rollout case would carry a dead knob.
+- `pause` multiplies `mode=kill` and the pause-and-repair family (`pauseat=`); run.py consumes the pause header nowhere else, and a rollout case that pauses without `pauseat=` is rejected as a dead knob.
 - `pause=freeze` pairs only with `RecreateInstanceOnPodRestart`: the freeze lift downgrades to a plain pause, which parks policy None's Create recovery — freeze+None could never repair while paused.
 - In-place strategies on single-pod engine-only topologies are excluded from gen-fault: the component-blind podkill victim is the in-place pod itself and its recreate trips the UID-stability check by harness design (a missing component-scoped victim hook, see below).
 - `fault=podkill:migrating` needs `mode=migrate` — out of scope here.
@@ -252,6 +270,10 @@ Total generated cases: **1913**. The whole-corpus per-PR cap (hand + generated) 
 - A rollback's `draining` hook is not emitted for an in-place strategy on a single-pod topology: an annotation-only diff is patched in place, so no pod of the starting revision ever drains and the hook never arrives (a gang falls back to a whole-gang recreate, which drains).
 - crashloop:new arms the engine's new revision, so its group axis (co=none | co=rolling) exists only on the PD topologies; it runs each strategy at its canonical budget and leaves InPlaceOnly out: form=load's exit switch is a pod-template env diff in-place cannot carry (the InPlaceIfPossible cell documents the fallback) and form=start's image patch lands the same way under either in-place type.
 - The group family runs a policy only where it has a peer: a one-member sequence is a blueGreen group and a ratio needs two Components, so engine-only runs blueGreen and the zero-budget rolling group alone; maintainRatio's tolerance is 50 at N=2 and 25 at N=4.
+- The pause-and-repair family leaves out `form=load` under `restartPolicy: None`: a runner that dies after Ready and comes back is a container restart the kubelet owns under that policy, not a wedge, so there is no repair to time a pause against.
+- A freeze after the repair has finished holds nothing a pause does not, so the family emits only `pause=true` at `pauseat=after`.
+- The pause-and-repair family runs the engine under SurgeThenDrain maxSurge 1 maxUnavailable 1: a fresh crash-loop repair is charged against the unavailability budget, so under maxUnavailable 0 the repair the pause is timed against never opens.
+- The grouped pause-and-repair cells run live: a repair of an Instance that serves nothing is admitted without the budget or the gate, so the rollingUpdate group changes nothing.
 - Kill-family cells pinned by hand-written restart/ cases are excluded:
 
   - p130: engine SurgeThenDrain rp=None
@@ -280,7 +302,7 @@ The family asserts the intended behaviour, `expect=heals`, on every cell; the ce
 - kill-instance verb (atomic delete of a whole gang) — today only reachable as the RecreateInstanceOnPodRestart cascade from one pod death
 - component-scoped podkill victim (fault=podkill:<phase>:<component>) — victim selection is component-blind, so PD podkill can never target the engine at settling, and single-pod in-place engine victims are unreachable
 - mid-surge injection points beyond first-surge-observed (k-th surge, mid-drain, pre-settle tail) — FAULT_PHASES has settling/rotating/migrating only
-- pause-under-rollout hook (ome.io/rollout-paused is only exercised inside mode=kill; no verb pauses an in-flight rotation)
+- pause-under-rollout hook (ome.io/rollout-paused is exercised inside mode=kill and around a repair at idle, pauseat=; no verb pauses an in-flight rotation)
 - decoder-targeted mode=kill (the kill handler always picks the engine when one is configured)
 - controller restart while a repair is open (a crash loop at idle with the manager deleted once the rebuild has started) — the runner fires one fault per case and the idle-break handler fires no second one
 

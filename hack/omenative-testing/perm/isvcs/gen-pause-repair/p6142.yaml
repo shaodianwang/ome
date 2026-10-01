@@ -1,0 +1,15 @@
+# p6142: [gen] freeze before repair crashloop start engine-mn W1 N=2 rp RecreateInstance co none push none  Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 pause=freeze fault=crashloop:old co=none topo=engine-mn form=start during=idle victimcomp=engine expect=repaired pauseat=before
+# reason: the engine's highest Instance's pod on the settled service is pointed at an image with no shell, so it crashes at every start and is never Ready again; the service is frozen before the repair opens; while frozen nothing is rebuilt, the broken Instance included; after the unpause the repair opens and rebuilds the broken Instance Ready and serving on its running revision, and everything else stays as it was
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6142 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }

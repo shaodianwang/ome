@@ -5430,3 +5430,287 @@ class CrashloopNewFaultTest(unittest.TestCase):
                                  "the group rolls the decoder under the same strategy")
                 self.assertIn("- components: [engine, decoder]" if kv["co"] in ("bluegreen", "ratio", "rolling")
                               else "- components: [engine]", text)
+
+
+class PauseRepairTest(unittest.TestCase):
+    """A pause or a freeze around the repair of a broken Instance (pauseat=,
+    push=): the header, the contract per cell, the in-flight predicate, the
+    paused-window bookkeeping, and the verdict."""
+
+    BASE = "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
+    IDLE = BASE + " fault=crashloop:old form=start during=idle expect=repaired"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_header_times_a_pause_against_the_repair(self):
+        for moment in ("before", "during", "after"):
+            self.assertEqual([], self._errs(self.IDLE + f" pause=true pauseat={moment}"))
+            self.assertEqual([], self._errs(self.IDLE + f" pause=freeze pauseat={moment} push=fix"))
+        self.assertEqual([], self._errs(self.BASE + " fault=imagepull:old during=idle pause=true pauseat=before"))
+        self.assertTrue(any("malformed header value pauseat=" in e for e in self._errs(self.IDLE + " pause=true pauseat=later")))
+        self.assertTrue(any("malformed header value push=" in e for e in self._errs(self.IDLE + " pause=true pauseat=before push=break")))
+        self.assertTrue(any("needs pause=true|freeze" in e for e in self._errs(self.IDLE + " pauseat=before")))
+        self.assertTrue(any("needs pauseat=" in e for e in self._errs(self.IDLE + " pause=true")),
+                        "a pause verb a rollout case never times is a dead knob")
+        self.assertTrue(any("needs pauseat=" in e for e in self._errs(self.IDLE + " push=fix")))
+        self.assertTrue(any("needs during=idle and a break fault" in e
+                            for e in self._errs(self.BASE + " fault=crashloop:old form=start pause=true pauseat=before")))
+        self.assertTrue(any("needs during=idle and a break fault" in e
+                            for e in self._errs(self.BASE + " fault=podkill:settling pause=true pauseat=before")))
+        self.assertTrue(any("expect=held" in e
+                            for e in self._errs(self.IDLE.replace("expect=repaired", "expect=held") + " pause=true pauseat=before")))
+        kill = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None pause=true topo=engine"
+        self.assertEqual([], self._errs(kill), "the kill family's pause verb is untouched")
+        self.assertTrue(any("mode=rollout" in e for e in self._errs(kill + " pauseat=before")))
+
+    def test_contract_per_cell(self):
+        c = run._pause_repair_contract
+        self.assertEqual({"repair_while_paused": True, "repair_after_unpause": False}, c("true", "before", ""))
+        self.assertEqual({"repair_while_paused": True, "repair_after_unpause": False}, c("true", "during", "fix"))
+        self.assertEqual({"repair_while_paused": False, "repair_after_unpause": False}, c("true", "after", "fix"))
+        self.assertEqual({"repair_while_paused": False, "repair_after_unpause": True}, c("freeze", "before", ""),
+                         "a freeze that lands first owes the repair at the unfreeze")
+        self.assertEqual({"repair_while_paused": False, "repair_after_unpause": False}, c("freeze", "before", "fix"),
+                         "with the fix pushed the roll owns the Instance after the unfreeze")
+        self.assertEqual({"repair_while_paused": True, "repair_after_unpause": False}, c("freeze", "during", ""),
+                         "a freeze finishes the repair already open")
+        self.assertEqual({"repair_while_paused": False, "repair_after_unpause": False}, c("freeze", "after", ""))
+
+    def test_repair_open_reads_the_product_or_the_pod_set(self):
+        old = {"e1": {"alive": True, "ready": True, "serving": True, "uid": "u-old"}}
+        pods = sorted(old.items())
+        self.assertFalse(run._repair_open(pods, {"u-old"}, 1, "Ready", False))
+        self.assertTrue(run._repair_open(pods, {"u-old"}, 1, "Restarting", False), "a Restarting row names the repair")
+        self.assertTrue(run._repair_open(pods, {"u-old"}, 1, "Ready", True), "so does the event")
+        self.assertTrue(run._repair_open([], {"u-old"}, 1, "", False), "a pod gone is the repair's first move")
+        half = [("e1", {"alive": True, "ready": True, "serving": True, "uid": "u-new"})]
+        self.assertTrue(run._repair_open(half, {"u-old", "u-old-w"}, 2, "", False), "a gang half rebuilt is still open")
+        self.assertFalse(run._repair_open(half, {"u-old"}, 1, "Restarting", True), "rebuilt and serving is not open")
+        self.assertTrue(run._instance_rebuilt_whole(half, {"u-old"}, 1))
+        self.assertFalse(run._instance_rebuilt_whole(half, {"u-old"}, 2))
+
+    def test_paused_changes_split_the_victim_from_everyone_else(self):
+        state = {
+            "e0": {"alive": True, "comp": "engine", "inst": "0", "uid": "u0", "hash": "old"},
+            "e1": {"alive": True, "comp": "engine", "inst": "1", "uid": "u1-new", "hash": "old"},
+            "d0": {"alive": False, "comp": "decoder", "inst": "0", "uid": "d0-new", "hash": "old"},
+            "e2": {"alive": True, "comp": "engine", "inst": "2", "uid": "u2", "hash": "new"},
+            "gone": None,
+        }
+        created, new_rev = run._paused_changes(state, {"u0", "u2"}, {"old"})
+        self.assertEqual({("engine", "1"): {"e1"}, ("decoder", "0"): {"d0"}}, dict(created),
+                         "a pod already terminating still counts as created while paused")
+        self.assertEqual({"e2"}, new_rev)
+        created, new_rev = run._paused_changes(state, {"u0", "u1-new", "d0-new", "u2"}, {"old", "new"})
+        self.assertEqual(({}, set()), (dict(created), new_rev))
+
+    def _out(self, **over):
+        out = {"pmode": "true", "moment": "before", "push": "fix", "bumped": ["engine"], "pause_lead_s": 15.0,
+               "moment_at": None, "row_at_pause": "", "repair_done_at_pause": False, "state": "CONVERGED",
+               "end_detail": "", "converged_at": 80.0, "repairs_after_unpause": [], "ir_settled": True,
+               "ir_detail": "", "pause_left": "",
+               "paused": {"created": {("engine", "1"): {"e1"}}, "new_rev": [], "rebuilt_at": 40.0, "held_s": 95.0,
+                          "repairs": ["OMENative component=engine instance=1 restart triggered: pod e1 wedged"]}}
+        paused = dict(out["paused"], **over.pop("paused", {}))
+        out.update(over)
+        out["paused"] = paused
+        return out
+
+    def test_verdict_holds_the_pause_to_its_promise(self):
+        f = {"kind": "crashloop", "crash_inst": "1", "crash_comp": "engine", "form": "start"}
+        repair = "OMENative component=engine instance=1 restart triggered: pod e1 wedged"
+
+        def judge(contract, out):
+            notes, checks = [], []
+            return run._pause_repair_checks(f, contract, out, "PASS", notes, checks), notes, checks
+
+        plain_before = run._pause_repair_contract("true", "before", "fix")
+        v, _n, checks = judge(plain_before, self._out())
+        self.assertEqual("PASS", v)
+        self.assertTrue(any("landed on nothing until the unpause" in c for c in checks))
+        self.assertTrue(any("no second rebuild" in c for c in checks))
+        v, notes, _c = judge(plain_before, self._out(paused={"created": {("engine", "1"): {"e1"}, ("engine", "0"): {"e0"}}}))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("other Instances" in n for n in notes))
+        v, notes, _c = judge(plain_before, self._out(paused={"new_rev": ["e0"]}))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("new revision while paused" in n for n in notes))
+        v, notes, _c = judge(plain_before, self._out(paused={"rebuilt_at": None, "created": {}}))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("not rebuilt to serving while paused" in n for n in notes))
+        hold = "OMENative component=engine instance=1 crash-loop repair held by Plan: no run open"
+        v, notes, _c = judge(plain_before, self._out(paused={"rebuilt_at": None, "created": {}, "held": [hold]}))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("held, not run" in n and "no run open" in n for n in notes),
+                        "a hold the product announced is the failure's own words")
+        v, notes, _c = judge(plain_before, self._out(repairs_after_unpause=[repair]))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("repaired again after the unpause" in n for n in notes))
+        v, notes, _c = judge(plain_before, self._out(state="WATCHING", end_detail="engine 1 alive/1 ready/1 serving of 2"))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("end state not reached" in n for n in notes))
+        v, notes, _c = judge(plain_before, self._out(ir_settled=False, ir_detail="engine/1: Instance is not settled"))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("mid-operation" in n for n in notes))
+        v, notes, _c = judge(plain_before, self._out(pause_left="true"))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("annotation still reads" in n for n in notes))
+
+        freeze_before = run._pause_repair_contract("freeze", "before", "")
+        frozen = self._out(pmode="freeze", push="", bumped=[], paused={"created": {}, "rebuilt_at": None, "repairs": []},
+                           repairs_after_unpause=[repair])
+        v, _n, checks = judge(freeze_before, frozen)
+        self.assertEqual("PASS", v)
+        self.assertTrue(any("left as it stood while frozen" in c for c in checks))
+        self.assertTrue(any("released the repair" in c for c in checks))
+        v, notes, _c = judge(freeze_before, dict(frozen, repairs_after_unpause=[]))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("after the unpause" in n and "no RestartTriggered" in n for n in notes))
+        v, notes, _c = judge(freeze_before, dict(frozen, paused=dict(frozen["paused"], created={("engine", "1"): {"e1"}})))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("rebuilt while frozen" in n for n in notes))
+        v, notes, _c = judge(freeze_before, dict(frozen, paused=dict(frozen["paused"], repairs=[repair])))
+        self.assertEqual("FAIL", v, "a repair recorded while frozen is a repair that ran")
+
+        after = run._pause_repair_contract("true", "after", "")
+        done = self._out(moment="after", push="", bumped=[], moment_at=70.0, row_at_pause="Ready",
+                         paused={"created": {}, "rebuilt_at": None, "repairs": []})
+        v, _n, checks = judge(after, done)
+        self.assertEqual("PASS", v)
+        self.assertTrue(any("after its repair had finished" in c for c in checks))
+        self.assertTrue(any("every Instance is Ready and serving on its running revision" in c for c in checks))
+        v, notes, _c = judge(after, dict(done, repairs_after_unpause=[repair]))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("already been repaired" in n for n in notes))
+
+        during = run._pause_repair_contract("freeze", "during", "fix")
+        caught = self._out(pmode="freeze", moment="during", moment_at=12.0, row_at_pause="Restarting")
+        v, _n, checks = judge(during, caught)
+        self.assertEqual("PASS", v)
+        self.assertTrue(any("while its repair was in flight" in c for c in checks))
+        v, _n, checks = judge(during, dict(caught, repair_done_at_pause=True))
+        self.assertEqual("PASS", v)
+        self.assertTrue(any("had already finished when the pause landed" in c for c in checks))
+
+    def test_victim_events_split_repairs_from_holds(self):
+        orig = run._isvc_events_since
+        run._isvc_events_since = lambda case_id, since: [
+            ("RestartTriggered", "OMENative component=engine instance=1 restart triggered: pod e1 wedged"),
+            ("RepairHeld", "OMENative component=engine instance=1 crash-loop repair held by Plan: no run open"),
+            ("RepairHeld", "OMENative component=engine instance=0 crash-loop repair held by Plan: no run open"),
+            ("RestartTriggered", "OMENative component=engine instance=10 restart triggered: pod e10 wedged"),
+            ("RestartTriggered", "OMENative component=decoder instance=1 restart triggered: pod d1 wedged")]
+        try:
+            repairs, holds = run._victim_events("p999", 0.0, "engine", "1")
+            self.assertEqual(1, len(repairs))
+            self.assertIn("pod e1", repairs[0])
+            self.assertEqual(1, len(holds))
+            self.assertIn("instance=1", holds[0])
+            self.assertEqual(repairs, run._victim_repairs("p999", 0.0, "engine", "1"))
+        finally:
+            run._isvc_events_since = orig
+        self.assertTrue(run._repair_declared_held([], ["held"]))
+        self.assertFalse(run._repair_declared_held(["ran"], ["held"]), "a repair that ran outranks a hold before it")
+        self.assertFalse(run._repair_declared_held([], []))
+
+    def test_ceilings_read_the_header(self):
+        ctx = {"hdr": {"ceil_e": 3, "ceil_d": 0, "ceil_r": 0}, "N": {"engine": 2, "decoder": 0, "router": 0},
+               "configured": {"engine"}, "peaks": {"engine": 3, "decoder": 0, "router": 0}}
+        self.assertEqual("PASS", run._pause_repair_ceiling_checks(ctx, "PASS", [], []))
+        ctx["peaks"]["engine"] = 4
+        notes = []
+        self.assertEqual("FAIL", run._pause_repair_ceiling_checks(ctx, "PASS", notes, []))
+        self.assertTrue(any("peak 4 > ceiling 3" in n for n in notes))
+
+    def test_pause_annotation_settles_unless_told_not_to(self):
+        calls, slept = [], []
+        orig_kubectl, orig_sleep = run.kubectl, run.time.sleep
+        run.kubectl = lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0, "", "")
+        run.time.sleep = lambda s: slept.append(s)
+        try:
+            run._pause_annotation("p999", "freeze")
+            run._pause_annotation("p999", "", settle=False)
+        finally:
+            run.kubectl, run.time.sleep = orig_kubectl, orig_sleep
+        self.assertEqual([run.PAUSE_PROJECT_S], slept)
+        self.assertIn("ome.io/rollout-paused=freeze", calls[0])
+        self.assertIn("ome.io/rollout-paused-", calls[1])
+
+    def test_idle_case_with_a_pause_moment_runs_the_pause_handler(self):
+        routed = []
+        orig = (run._pause_repair, run._idle_fault, run.find_isvc, run.parse_header,
+                run.duplicate_id_errors, run.collect_case_files)
+        run._pause_repair = lambda *a: routed.append("pause") or 0
+        run._idle_fault = lambda *a: routed.append("idle") or 0
+        run.find_isvc = lambda cid: Path("p999.yaml")
+        run.duplicate_id_errors = lambda cases: []
+        run.collect_case_files = lambda: []
+        try:
+            run.parse_header = lambda p: ("x", {"during": "idle", "fault": "crashloop:old", "pause": "true", "pauseat": "before"})
+            run.run_case("p999")
+            run.parse_header = lambda p: ("x", {"during": "idle", "fault": "crashloop:old"})
+            run.run_case("p999")
+        finally:
+            (run._pause_repair, run._idle_fault, run.find_isvc, run.parse_header,
+             run.duplicate_id_errors, run.collect_case_files) = orig
+        self.assertEqual(["pause", "idle"], routed)
+
+    def test_generated_family_crosses_every_axis(self):
+        """The pause-and-repair family: three shapes, every (crash form,
+        restart policy) pair a repair is promised for, no group or a
+        rollingUpdate group, the pause landing before, during or after the
+        repair at both depths (a freeze after the repair is a pause), with
+        the fix pushed while paused or nothing; every cell runs live, a repair
+        of an Instance that serves nothing being admitted without the budget
+        or the gate."""
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-pause-repair"]
+        self.assertEqual(180, len(fam))
+        self.assertEqual(("p6000", "p6179"), (fam[0][0], fam[-1][0]))
+        self.assertEqual({"engine", "pd", "engine-mn"}, {kv["topo"] for _n, kv, _m in fam})
+        self.assertEqual({("start", "None"), ("start", "RecreateInstance"), ("load", "RecreateInstance")},
+                         {(kv["form"], m["rp"]) for _n, kv, m in fam},
+                         "a crash after Ready under policy None promises no repair")
+        self.assertEqual({("true", "before"), ("freeze", "before"), ("true", "during"), ("freeze", "during"),
+                          ("true", "after")},
+                         {(kv["pause"], kv["pauseat"]) for _n, kv, _m in fam},
+                         "a freeze after the repair has finished holds nothing a pause does not")
+        self.assertEqual({"none", "fix"}, {m["push"] for _n, kv, m in fam})
+        self.assertEqual({"none", "rolling"}, {kv["co"] for _n, kv, _m in fam})
+        for n, kv, m in fam:
+            text = outputs[f"gen-pause-repair/{n}.yaml"]
+            self.assertEqual(("crashloop:old", "idle", "repaired", "engine"),
+                             (kv["fault"], kv["during"], kv["expect"], kv["victimcomp"]))
+            self.assertNotIn("mode", kv)
+            self.assertIn('rollingUpdate: { maxSurge: 1, maxUnavailable: 1 }', text,
+                          "the repair the pause is timed against must fit the unavailability budget")
+            self.assertIn(f'restartPolicy: "{generate_cases.RP_FULL[m["rp"]]}"', text)
+            if m["push"] == "fix":
+                self.assertEqual(("fix", 1, kv["Ne"] + 1), (kv["push"], kv["floor_soft"], kv["ceil_e"]))
+                want_d = kv["Nd"] + 1 if (kv["co"] != "none" and kv["topo"].startswith("pd")) else kv["Nd"]
+                self.assertEqual(want_d, kv["ceil_d"], "only a group rolls the decoder behind the fix")
+            else:
+                self.assertNotIn("push", kv)
+                self.assertNotIn("floor_soft", kv)
+                self.assertEqual((kv["Ne"], kv["Nd"], kv["Nr"]), (kv["ceil_e"], kv["ceil_d"], kv["ceil_r"]),
+                                 "nothing surges when nothing is pushed")
+            members = "[engine, decoder]" if kv["topo"].startswith("pd") else "[engine]"
+            if kv["co"] == "none":
+                self.assertNotIn("  rollout:\n    groups:", text)
+            else:
+                self.assertIn(f"        - components: {members}\n          rollingUpdate: {{}}", text)
+            self.assertNotIn("notimpl", kv)
+            self.assertNotIn("issue", kv)
+            self.assertNotIn("parked", m)
+            self.assertNotIn("parked:", text.splitlines()[1])
+            if kv["co"] != "none":
+                self.assertIn("admitted without the budget or the gate", text.splitlines()[1],
+                              "a grouped cell states the rule its repair runs under")
+            when = {"before": "before the repair opens", "during": "while the repair is in flight",
+                    "after": "after the repair has finished"}[kv["pauseat"]]
+            self.assertIn(when, text.splitlines()[1].split(";")[1], "line two says when the pause lands")
+

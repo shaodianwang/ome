@@ -180,6 +180,8 @@ HEADER_VALUES = {
     "restart": {"None", "RecreateInstance"},
     "kill": {"leader", "worker"},
     "pause": {"true", "freeze"},
+    "pauseat": {"before", "during", "after"},
+    "push": {"fix"},
     "terminal": {"Stable", "RolledBack", "Failed", "Held"},
     "victim": {"stable", "canary"},
     "victimcomp": set(COMPONENTS),
@@ -530,7 +532,10 @@ def classify_operation(h, mode, size):
     if h.get("rollback"):
         return "rollback", f"the starting revision re-applied at {during}", "push"
     if during == "idle":
-        return "steady state", "persistent fault at idle", ""
+        pause = {"true": "pause", "freeze": "freeze"}.get(str(h.get("pause", ""))) if h.get("pauseat") else ""
+        detail = "persistent fault at idle" + (f", {pause} {h['pauseat']} the repair" if pause else "")
+        detail += ", the fix pushed while paused" if h.get("push") else ""
+        return "steady state", detail, pause or ""
     return "push", "env edit" if edit == "env" else "annotation bump", ""
 
 

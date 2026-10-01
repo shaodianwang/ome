@@ -1,0 +1,15 @@
+# p6124: [gen] pause during repair crashloop start engine-mn W1 N=2 rp None co none push none  Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 pause=true fault=crashloop:old co=none topo=engine-mn form=start during=idle victimcomp=engine expect=repaired pauseat=during
+# reason: the engine's highest Instance's pod on the settled service is pointed at an image with no shell, so it crashes at every start and is never Ready again; the service is paused while the repair is in flight; while paused the broken Instance is still repaired on the revision it runs, since a pause holds the fleet and not the repair, and nothing else is rebuilt; after the unpause nothing moves: every Instance keeps serving its running revision and no Instance is left mid-operation
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6124 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }

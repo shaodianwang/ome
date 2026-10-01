@@ -1,0 +1,13 @@
+# p6043: [gen] freeze before repair crashloop load engine N=4 rp RecreateInstance co none push fix  Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 pause=freeze fault=crashloop:old floor_soft=1 co=none topo=engine form=load during=idle victimcomp=engine expect=repaired pauseat=before push=fix
+# reason: the engine's highest Instance's pod on the settled service has its runner killed every few seconds while it is up, so it dies after Ready and comes back between crashes; the service is frozen before the repair opens; while frozen nothing is rebuilt, the broken Instance included; the fix pushed while paused lands on no Instance until the unpause; after the unpause the fix lands on every Instance, the broken one included, within the roll's budget; nothing repairs that Instance again on the revision it was running, and no Instance is left mid-operation; floor waived — the crash itself costs settled capacity
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6043 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
