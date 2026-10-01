@@ -182,9 +182,9 @@ func Reconcile(ctx context.Context, in Inputs) (Outcome, error) {
 	if !fresh {
 		return Outcome{RequeueAfter: shortRequeue}, nil
 	}
-	if !divergedMember(isvc, targets) && !canaryMidFlight(isvc) {
-		setPlanReady(isvc, corev1.ConditionTrue, v1beta1.RolloutPlanReasonNoRun, "no rollout in progress", now)
-		setPlanDrift(isvc, false, v1beta1.RolloutPlanDriftReasonInSync, "", now)
+	diverged := divergedMember(isvc, targets)
+	if !diverged && !canaryMidFlight(isvc, nil) {
+		settleNoRun(isvc, now)
 		return Outcome{}, nil
 	}
 
@@ -200,8 +200,14 @@ func Reconcile(ctx context.Context, in Inputs) (Outcome, error) {
 		}
 		return Outcome{Parked: true, RequeueAfter: parkRequeue}, nil
 	}
+	// A ref-sourced canary's done sentinel is only exact against the composed
+	// body; a finished ladder with nothing diverged needs no run.
+	if !diverged && !canaryMidFlight(isvc, plan.groups) {
+		settleNoRun(isvc, now)
+		return Outcome{}, nil
+	}
 
-	adopting := !retargeting && canaryMidFlight(isvc)
+	adopting := !retargeting && canaryMidFlight(isvc, plan.groups)
 	openRun(isvc, plan, targets, stableOverrides, adopting, now)
 	recordRunOpened(isvc, plan, adopting)
 	setPlanReady(isvc, corev1.ConditionTrue, v1beta1.RolloutPlanReasonPinned,
@@ -215,6 +221,12 @@ func Reconcile(ctx context.Context, in Inputs) (Outcome, error) {
 			"run %s opened (%s)", isvc.Status.Rollout.ActiveRun.RunID, combinedPlanDigest(plan.digests))
 	}
 	return Outcome{StateChanged: true, RequeueAfter: shortRequeue, Opened: true, Adopted: adopting}, nil
+}
+
+// settleNoRun records the idle state: no run is pinned and none is needed.
+func settleNoRun(isvc *v1beta1.InferenceService, now metav1.Time) {
+	setPlanReady(isvc, corev1.ConditionTrue, v1beta1.RolloutPlanReasonNoRun, "no rollout in progress", now)
+	setPlanDrift(isvc, false, v1beta1.RolloutPlanDriftReasonInSync, "", now)
 }
 
 func activeRun(isvc *v1beta1.InferenceService) *v1beta1.RolloutRun {
