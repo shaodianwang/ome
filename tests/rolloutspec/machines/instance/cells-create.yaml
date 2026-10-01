@@ -176,7 +176,7 @@ cells:
   - state: Create/CreatePods
     event: pod.nodeLost
     outcome: defer
-    note: node loss produces no fast evidence of its own; the pass keeps polling and the operation deadline is what ends the attempt, at which point the disposition may record a relocation directive so the rebuild is steered off the suspect node
+    note: node loss produces no fast evidence of its own for a pod that never reached Ready; the pass keeps polling and the operation deadline is what ends the attempt, at which point the disposition may record a relocation directive so the rebuild is steered off the suspect node. A pod of the attempt that had reached Ready before its node went silent has its Ready withdrawn by the control plane and is freed by the silent-kubelet sweep at the policy's threshold, as a Ready row's pod is (see Ready/pod.nodeLost), and the same attempt rebuilds the name
     placement: perm
     coverage: {perm: [], unit: [TestDispose_RelocationDirective_GPUCase], kind: []}
     status: current

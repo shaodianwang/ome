@@ -25,11 +25,11 @@ tick=4 hold cleared
 tick=4 pass result=after:5s
 tick=5 note the replacement's kubelet stops reporting; with no policy the name is held, the row reports NodeUnknown and its deadline is parked
 tick=5 apply pod.phaseTerminal[Unknown] pod=svc-a-engine-0-default-1 now=t+0s
-tick=5 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-6f8b1e6c waiting=NodeUnknown strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-1 reason=NodeUnknown message=NodeUnknown: pod svc-a-engine-0-default-1 is in phase Unknown on node node-0; its kubelet has stopped reporting, so the name is held rather than recycled} precondition=ok
+tick=5 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-6f8b1e6c waiting=NodeUnknown strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-1 reason=NodeUnknown message=NodeUnknown: pod svc-a-engine-0-default-1 on node node-0 is not reported by its kubelet, so the name is held rather than recycled} precondition=ok
 tick=5 row=0 write no-op precondition=no-change
 tick=5 hold cleared
 tick=5 pass result=after:5s
-tick=5 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-6f8b1e6c waiting=NodeUnknown strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-0-default-1 reason=NodeUnknown message=NodeUnknown: pod svc-a-engine-0-default-1 is in phase Unknown on node node-0; its kubelet has stopped reporting, so the name is held rather than recycled} precondition=ok
+tick=5 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-6f8b1e6c waiting=NodeUnknown strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-0-default-1 reason=NodeUnknown message=NodeUnknown: pod svc-a-engine-0-default-1 on node node-0 is not reported by its kubelet, so the name is held rather than recycled} precondition=ok
 tick=6 note nothing else arrives; the held row re-derives the same wait and the source is still in rotation
 tick=6 apply clock.advance by=5m0s now=t+5m0s
 tick=6 row=0 write no-op precondition=no-change

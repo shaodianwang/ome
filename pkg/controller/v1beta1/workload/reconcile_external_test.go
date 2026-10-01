@@ -226,6 +226,10 @@ var testRequeueIntervals = workloadtypes.RequeueIntervals{
 	Gate:      3 * time.Second,
 }
 
+// recoveryStepFloor is the least the recovery harness advances its clock
+// per pass.
+const recoveryStepFloor = 30 * time.Second
+
 func minimalInput(t *testing.T) workloadtypes.ReconcileInput {
 	t.Helper()
 	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
@@ -1205,6 +1209,17 @@ type recoveryHarness struct {
 	// badImageHeals makes the kubelet model treat the bad image as
 	// pullable from now on: the registry has the tag again.
 	badImageHeals bool
+
+	// forceDelete is the input's ForceDeletePolicy; nil models an operator
+	// config with no forceDelete block.
+	forceDelete *workloadtypes.ForceDeletePolicy
+
+	// nodeNames, when set, turns on the node model: the kubelet model
+	// binds every new pod to the least-loaded node whose kubelet is alive.
+	// deadNodes names the nodes whose kubelet has stopped — nothing on
+	// them is updated or finishes terminating until the node recovers.
+	nodeNames []string
+	deadNodes map[string]bool
 }
 
 func recoveryPodSpec(image string) *corev1.PodSpec {
@@ -1317,14 +1332,25 @@ func (h *recoveryHarness) kubelet() {
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
+		if h.deadNodes[pod.Spec.NodeName] {
+			// The kubelet under this pod is stopped: nothing it reports
+			// changes, and a pod deleted on it never finishes terminating.
+			continue
+		}
 		if pod.DeletionTimestamp != nil {
 			h.finishTermination(pod)
 			continue
 		}
-		if pod.CreationTimestamp.IsZero() {
-			// PodStuckInTerminalWaiting measures stuck age from CreationTimestamp
-			// against the fake clock; stamp it deterministically.
-			pod.CreationTimestamp = metav1.NewTime(h.clk.Now())
+		unbound := len(h.nodeNames) > 0 && pod.Spec.NodeName == ""
+		if pod.CreationTimestamp.IsZero() || unbound {
+			if pod.CreationTimestamp.IsZero() {
+				// PodStuckInTerminalWaiting measures stuck age from CreationTimestamp
+				// against the fake clock; stamp it deterministically.
+				pod.CreationTimestamp = metav1.NewTime(h.clk.Now())
+			}
+			if unbound {
+				pod.Spec.NodeName = h.leastLoadedLiveNode(pods.Items)
+			}
 			if err := h.c.Update(h.ctx, pod); err != nil {
 				h.t.Fatalf("kubelet stamp creation %s: %v", pod.Name, err)
 			}
@@ -1626,12 +1652,22 @@ func (h *recoveryHarness) interceptDelete(ctx context.Context, cl client.WithWat
 	if err := cl.Get(ctx, client.ObjectKeyFromObject(pod), stored); err != nil {
 		return err
 	}
+	options := &client.DeleteOptions{}
+	for _, opt := range opts {
+		opt.ApplyToDelete(options)
+	}
+	if options.GracePeriodSeconds != nil && *options.GracePeriodSeconds == 0 {
+		// A grace-0 delete removes the object without its kubelet's say,
+		// so the termination model's stand-in finalizer comes off first.
+		stored.Finalizers = removeString(stored.Finalizers, terminationFinalizer)
+		if err := cl.Update(ctx, stored); err != nil {
+			return err
+		}
+		delete(h.terminatingUntil, pod.Name)
+		return cl.Delete(ctx, stored, opts...)
+	}
 	if stored.DeletionTimestamp == nil {
 		grace := h.podGrace
-		options := &client.DeleteOptions{}
-		for _, opt := range opts {
-			opt.ApplyToDelete(options)
-		}
 		if options.GracePeriodSeconds != nil {
 			grace = time.Duration(*options.GracePeriodSeconds) * time.Second
 		}
@@ -1658,6 +1694,125 @@ func (h *recoveryHarness) finishTermination(pod *corev1.Pod) {
 		h.t.Fatalf("kubelet finish termination %s: %v", pod.Name, err)
 	}
 	delete(h.terminatingUntil, pod.Name)
+}
+
+// useNodes turns on the node model with the named nodes, each with a
+// live kubelet.
+func (h *recoveryHarness) useNodes(names ...string) {
+	h.t.Helper()
+	h.nodeNames = append([]string(nil), names...)
+	h.deadNodes = map[string]bool{}
+	for _, name := range names {
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		setNodeReady(node, corev1.ConditionTrue, h.clk.Now())
+		if err := h.c.Create(h.ctx, node); err != nil {
+			h.t.Fatalf("create node %s: %v", name, err)
+		}
+	}
+}
+
+// leastLoadedLiveNode is the node model's placement: the node with the
+// fewest pods bound to it among those whose kubelet is alive, earliest
+// declared first on a tie. A node with a stopped kubelet is never chosen,
+// as a scheduler honoring its unreachable taint would not.
+func (h *recoveryHarness) leastLoadedLiveNode(pods []corev1.Pod) string {
+	h.t.Helper()
+	bound := map[string]int{}
+	for i := range pods {
+		bound[pods[i].Spec.NodeName]++
+	}
+	chosen := ""
+	for _, name := range h.nodeNames {
+		if h.deadNodes[name] {
+			continue
+		}
+		if chosen == "" || bound[name] < bound[chosen] {
+			chosen = name
+		}
+	}
+	if chosen == "" {
+		h.t.Fatalf("no node with a live kubelet to place a pod on")
+	}
+	return chosen
+}
+
+// failNode stops the kubelet under name. The node model freezes every
+// pod bound to it, and the control plane's half follows: the node's
+// Ready condition goes Unknown with a fresh transition time, and PodReady
+// is withdrawn from the pods on it while their own last report still says
+// Ready — the shape the node lifecycle controller leaves behind.
+func (h *recoveryHarness) failNode(name string) {
+	h.t.Helper()
+	h.deadNodes[name] = true
+	h.setNodeCondition(name, corev1.ConditionUnknown)
+	for _, pod := range h.podsOnNode(name) {
+		for i := range pod.Status.Conditions {
+			cond := &pod.Status.Conditions[i]
+			if cond.Type != corev1.PodReady || cond.Status != corev1.ConditionTrue {
+				continue
+			}
+			cond.Status = corev1.ConditionFalse
+			cond.LastTransitionTime = metav1.NewTime(h.clk.Now())
+			if err := h.c.Status().Update(h.ctx, pod); err != nil {
+				h.t.Fatalf("withdraw PodReady from %s: %v", pod.Name, err)
+			}
+		}
+	}
+}
+
+// recoverNode starts the kubelet under name again: the node posts Ready
+// and the node model resumes reporting whatever pods it still holds.
+func (h *recoveryHarness) recoverNode(name string) {
+	h.t.Helper()
+	delete(h.deadNodes, name)
+	h.setNodeCondition(name, corev1.ConditionTrue)
+}
+
+func (h *recoveryHarness) setNodeCondition(name string, ready corev1.ConditionStatus) {
+	h.t.Helper()
+	node := &corev1.Node{}
+	if err := h.c.Get(h.ctx, types.NamespacedName{Name: name}, node); err != nil {
+		h.t.Fatalf("get node %s: %v", name, err)
+	}
+	setNodeReady(node, ready, h.clk.Now())
+	if err := h.c.Status().Update(h.ctx, node); err != nil {
+		h.t.Fatalf("update node %s: %v", name, err)
+	}
+}
+
+// setNodeReady writes the node's Ready condition with transition time now.
+func setNodeReady(node *corev1.Node, status corev1.ConditionStatus, now time.Time) {
+	node.Status.Conditions = []corev1.NodeCondition{{
+		Type: corev1.NodeReady, Status: status, LastTransitionTime: metav1.NewTime(now),
+	}}
+}
+
+// podsOnNode returns every pod object bound to name, Terminating ones
+// included.
+func (h *recoveryHarness) podsOnNode(name string) []*corev1.Pod {
+	h.t.Helper()
+	pods := &corev1.PodList{}
+	if err := h.c.List(h.ctx, pods, client.InNamespace(recoveryNS)); err != nil {
+		h.t.Fatalf("list pods: %v", err)
+	}
+	var out []*corev1.Pod
+	for i := range pods.Items {
+		if pods.Items[i].Spec.NodeName == name {
+			out = append(out, &pods.Items[i])
+		}
+	}
+	return out
+}
+
+// removeString returns list without every occurrence of value.
+func removeString(list []string, value string) []string {
+	out := list[:0]
+	for _, item := range list {
+		if item != value {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // livePodOnImage reports whether a live (not Terminating) pod runs image.
@@ -1758,6 +1913,7 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 		UpdateGate:        h.gate,
 		UpdateRetryPolicy: h.retryPolicy,
 		StuckPodGrace:     30 * time.Second,
+		ForceDelete:       h.forceDelete,
 		Requeue:           h.requeue,
 		Clock:             h.clk,
 
@@ -1823,10 +1979,10 @@ func (h *recoveryHarness) stepResult() (ctrl.Result, error) {
 	if status.RolloutComplete(h.irStatuses(), h.target.Name) {
 		h.currentRevision = h.target.Name
 	}
-	// A 30s floor keeps stuck-pod grace and Backoff windows crossing in
+	// The floor keeps stuck-pod grace and Backoff windows crossing in
 	// a handful of passes, and lets an 80-pass wedge run outlive the 30m
 	// Operation deadline — proving the deadline backstop is also inert.
-	advance := 30 * time.Second
+	advance := recoveryStepFloor
 	if res.RequeueAfter > advance {
 		advance = res.RequeueAfter
 	}
@@ -5159,4 +5315,264 @@ func TestCrashLoopBound_PeersKeepServingWhileTheTargetIsRetried(t *testing.T) {
 		h.dumpState("corrected revision")
 		t.Fatalf("both instances did not converge on the corrected revision")
 	}
+}
+
+// Node loss under a serving Instance. The kubelet under one of the
+// Component's nodes stops: the node model freezes the pods on it, the
+// node's Ready condition goes Unknown with a transition time, and the
+// control plane withdraws PodReady from those pods while their own last
+// report still says Ready. With the force-delete policy configured, the
+// Instance must be rebuilt on other nodes once the node has been
+// unreachable for the threshold and serve on its running revision, with
+// no graceful delete ever issued on the dead node (no kubelet is there to
+// honor one), and the pods the node held must be gone when its kubelet
+// returns. The peer Instance on a live node stays in rotation throughout.
+// Without the policy nothing is rebuilt: the Instance waits for its node.
+
+const (
+	nodeLossThreshold = 90 * time.Second
+	nodeLossSlack     = 30 * time.Second
+	nodeLossDeadNode  = "node-a"
+)
+
+// nodeLossStory is one shape of the node-loss story: the pod shape and the
+// restart policy, which together decide whether the rebuild is the
+// restart pass's whole-Instance repair or the Create pass's missing-pod
+// self-heal.
+type nodeLossStory struct {
+	name     string
+	multiPod bool
+	policy   workloadtypes.RestartPolicy
+}
+
+func nodeLossStories() []nodeLossStory {
+	return []nodeLossStory{
+		{"single pod under None", false, workloadtypes.RestartPolicyNone},
+		{"single pod under RecreateInstanceOnPodRestart", false, workloadtypes.RestartPolicyRecreateInstance},
+		{"gang under RecreateInstanceOnPodRestart", true, workloadtypes.RestartPolicyRecreateInstance},
+		{"gang under None", true, workloadtypes.RestartPolicyNone},
+	}
+}
+
+// newNodeLossHarness is the harness with two Instances converged on v1
+// over four nodes. The node model spreads pods one per node in creation
+// order, so Instance 0 sits on node-a (its gang spanning node-a and
+// node-b) and Instance 1 on nodes the failure never touches.
+func newNodeLossHarness(t *testing.T, story nodeLossStory, policy *workloadtypes.ForceDeletePolicy) *recoveryHarness {
+	t.Helper()
+	h := newRecoveryHarness(t, story.multiPod)
+	h.replicas = 2
+	restart := story.policy
+	h.lifecycle.RestartPolicy = &restart
+	h.podGrace = 30 * time.Second
+	h.forceDelete = policy
+	h.recorder = record.NewFakeRecorder(256)
+	h.useNodes(nodeLossDeadNode, "node-b", "node-c", "node-d")
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(30, func() bool { return h.settledOn(h.revV1, 2) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never converged on v1")
+	}
+	if on := h.podsOnNode(nodeLossDeadNode); len(on) != 1 || !strings.Contains(on[0].Name, "-engine-0-") {
+		h.dumpState("placement")
+		t.Fatalf("node model placed %d pod(s) on %s, want exactly one pod of Instance 0", len(on), nodeLossDeadNode)
+	}
+	return h
+}
+
+// podIdentities names pod objects across passes the way the kubelet model
+// tells a rebuilt pod from the one it replaced: name plus the creation
+// instant the model stamped.
+func podIdentities(pods []*corev1.Pod) map[string]bool {
+	out := make(map[string]bool, len(pods))
+	for _, pod := range pods {
+		out[wedgeKey(pod)] = true
+	}
+	return out
+}
+
+// requirePeerInRotation is the per-step invariant of every node-loss
+// story: Instance 1 keeps the very pods it had, each live, serving and
+// PodReady, and its row is untouched.
+func (h *recoveryHarness) requirePeerInRotation(peer map[string]bool, incarnation int64) {
+	h.t.Helper()
+	pods := h.podsOf(1)
+	if len(pods) != len(peer) {
+		h.dumpState("peer")
+		h.t.Fatalf("peer Instance 1 has %d live pod(s), want its original %d", len(pods), len(peer))
+	}
+	for _, pod := range pods {
+		if !peer[wedgeKey(pod)] {
+			h.t.Fatalf("peer pod %s was replaced; the untouched Instance must keep its pods", pod.Name)
+		}
+		if !podreadiness.IsServing(pod) || !podConditionTrue(pod, corev1.PodReady) {
+			h.t.Fatalf("peer pod %s left the rotation", pod.Name)
+		}
+	}
+	if s := h.instance(1); s == nil || s.Phase != workloadtypes.InstancePhaseReady || s.Operation != nil || s.Incarnation != incarnation {
+		h.t.Fatalf("peer Instance 1 changed: %+v", s)
+	}
+}
+
+// requireNoGracefulDeleteOn fails when a pod bound to node is Terminating:
+// a graceful delete issued there would wait on a kubelet that is gone.
+func (h *recoveryHarness) requireNoGracefulDeleteOn(node string) {
+	h.t.Helper()
+	for _, pod := range h.podsOnNode(node) {
+		if pod.DeletionTimestamp != nil {
+			h.t.Fatalf("pod %s was deleted gracefully on the dead node %s; only a force delete can free it", pod.Name, node)
+		}
+	}
+}
+
+// servingElsewhere reports whether Instance 0 is Ready with no operation on
+// its running revision, every pod of it live, serving and PodReady on a
+// node other than the dead one.
+func (h *recoveryHarness) servingElsewhere(deadNode string) bool {
+	s := h.instance(0)
+	if s == nil || s.Phase != workloadtypes.InstancePhaseReady || s.Operation != nil || s.RunningRevision != h.revV1.Name {
+		return false
+	}
+	pods := h.podsOf(0)
+	if len(pods) != len(h.desired.Runners) {
+		return false
+	}
+	for _, pod := range pods {
+		if pod.Spec.NodeName == deadNode || !podreadiness.IsServing(pod) || !podConditionTrue(pod, corev1.PodReady) {
+			return false
+		}
+	}
+	return true
+}
+
+// Cells: instance/Ready/pod.nodeLost[NodeNotReady]/before
+func TestNodeLoss_ServingInstanceIsRebuiltElsewhereUnderTheForceDeletePolicy(t *testing.T) {
+	for _, story := range nodeLossStories() {
+		t.Run(story.name, func(t *testing.T) {
+			h := newNodeLossHarness(t, story, &workloadtypes.ForceDeletePolicy{
+				NodeUnreachableThreshold: nodeLossThreshold,
+				OverdueSlack:             nodeLossSlack,
+			})
+			peer := podIdentities(h.podsOf(1))
+			peerIncarnation := h.instance(1).Incarnation
+			before := h.instance(0).Incarnation
+			invariant := func() {
+				h.requirePeerInRotation(peer, peerIncarnation)
+				h.requireNoGracefulDeleteOn(nodeLossDeadNode)
+			}
+
+			h.failNode(nodeLossDeadNode)
+			failedAt := h.clk.Now()
+
+			// The names are freed at the threshold: the pass that observes
+			// the withdrawn Ready requeues no later than the evidence
+			// boundary, and the pass at the boundary force-deletes.
+			freed := func() bool { return h.sawEvent(workloadtypes.EventReasonPodForceDeleted) }
+			if !h.runWithInvariant(10, freed, invariant) {
+				h.dumpState("node down past the threshold")
+				t.Fatalf("the pods on %s were never force-deleted after the node went silent under a configured policy", nodeLossDeadNode)
+			}
+			if elapsed := h.clk.Now().Sub(failedAt); elapsed > nodeLossThreshold+recoveryStepFloor {
+				t.Fatalf("stale pods freed %v after the node went silent, want within the %v threshold plus one pass", elapsed, nodeLossThreshold)
+			}
+			if on := h.podsOnNode(nodeLossDeadNode); len(on) != 0 {
+				t.Fatalf("%d pod object(s) still bound to %s after the force delete", len(on), nodeLossDeadNode)
+			}
+
+			if !h.runWithInvariant(40, func() bool { return h.servingElsewhere(nodeLossDeadNode) }, invariant) {
+				h.dumpState("rebuild off the dead node")
+				t.Fatalf("Instance 0 never came back Ready and serving on another node while the kubelet of %s was down", nodeLossDeadNode)
+			}
+			h.requirePodsRender(0, h.revV1, goodImage)
+			if s := h.instance(0); story.policy == workloadtypes.RestartPolicyRecreateInstance && s.Incarnation <= before {
+				t.Fatalf("RecreateInstanceOnPodRestart rebuilds the whole Instance under a bumped incarnation, got %d (was %d)", s.Incarnation, before)
+			} else if story.policy == workloadtypes.RestartPolicyNone && s.Incarnation != before {
+				t.Fatalf("policy None re-materializes the missing pod in place, got incarnation %d (was %d)", s.Incarnation, before)
+			}
+
+			// The kubelet returns: it finds nothing of this Component to run,
+			// and the rebuilt Instance stays where it is.
+			rebuilt := podIdentities(h.podsOf(0))
+			h.recoverNode(nodeLossDeadNode)
+			for i := 0; i < 3; i++ {
+				h.step()
+				invariant()
+			}
+			if on := h.podsOnNode(nodeLossDeadNode); len(on) != 0 {
+				t.Fatalf("%d stale pod object(s) on %s after its kubelet returned", len(on), nodeLossDeadNode)
+			}
+			if !h.settledOn(h.revV1, 2) {
+				h.dumpState("after the node returned")
+				t.Fatalf("the Component did not stay settled on v1 after the node returned")
+			}
+			for _, pod := range h.podsOf(0) {
+				if !rebuilt[wedgeKey(pod)] {
+					t.Fatalf("pod %s of the rebuilt Instance was replaced again after the node returned", pod.Name)
+				}
+			}
+		})
+	}
+}
+
+// Cells: instance/Ready/pod.nodeLost[NodeNotReady]/before
+func TestNodeLoss_WithoutTheForceDeletePolicyTheInstanceWaitsForItsNode(t *testing.T) {
+	for _, story := range nodeLossStories() {
+		t.Run(story.name, func(t *testing.T) {
+			h := newNodeLossHarness(t, story, nil)
+			peer := podIdentities(h.podsOf(1))
+			peerIncarnation := h.instance(1).Incarnation
+			stale := podIdentities(h.podsOf(0))
+			before := h.instance(0).Incarnation
+
+			h.failNode(nodeLossDeadNode)
+			failedAt := h.clk.Now()
+			// Long past any threshold a policy would carry.
+			for h.clk.Now().Sub(failedAt) < 10*nodeLossThreshold {
+				h.step()
+				h.requirePeerInRotation(peer, peerIncarnation)
+				h.requireNoGracefulDeleteOn(nodeLossDeadNode)
+			}
+			if h.sawEvent(workloadtypes.EventReasonPodForceDeleted) || h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+				t.Fatalf("without a force-delete policy nothing may free or rebuild the Instance; events: %v", h.events)
+			}
+			if s := h.instance(0); s == nil || s.Phase != workloadtypes.InstancePhaseReady || s.Operation != nil || s.Incarnation != before {
+				t.Fatalf("Instance 0 changed while parked on its dead node: %+v", s)
+			}
+			pods := h.podsOf(0)
+			if len(pods) != len(stale) {
+				t.Fatalf("Instance 0 has %d pod(s), want its original %d parked on the dead node", len(pods), len(stale))
+			}
+			for _, pod := range pods {
+				if !stale[wedgeKey(pod)] {
+					t.Fatalf("pod %s of the parked Instance was replaced", pod.Name)
+				}
+			}
+
+			// The kubelet returns and reports the parked pods again: the
+			// Instance is whole on the very pods it had.
+			h.recoverNode(nodeLossDeadNode)
+			if !h.run(5, func() bool { return h.settledOn(h.revV1, 2) && h.servingPodsOf(0) == len(h.desired.Runners) }) {
+				h.dumpState("after the node returned")
+				t.Fatalf("the parked Instance did not resume serving once its kubelet returned")
+			}
+			for _, pod := range h.podsOf(0) {
+				if !stale[wedgeKey(pod)] {
+					t.Fatalf("pod %s was replaced after the node returned; the parked Instance keeps its pods", pod.Name)
+				}
+			}
+			h.requirePeerInRotation(peer, peerIncarnation)
+		})
+	}
+}
+
+// servingPodsOf counts the live pods of Instance idx that are serving and
+// PodReady.
+func (h *recoveryHarness) servingPodsOf(idx int32) int {
+	n := 0
+	for _, pod := range h.podsOf(idx) {
+		if podreadiness.IsServing(pod) && podConditionTrue(pod, corev1.PodReady) {
+			n++
+		}
+	}
+	return n
 }

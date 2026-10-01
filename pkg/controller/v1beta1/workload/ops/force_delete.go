@@ -106,7 +106,8 @@ func escalateStuckTerminatingWithDeadline(ctx context.Context, deps workload.Dep
 // forceDeleteOnNodeDeath removes a pod that is NOT on its way out yet
 // but whose node has stopped reporting it, once the configured policy's
 // node-death evidence proves no kubelet is left to run its containers.
-// Reports whether the pod object is gone.
+// Reports the evidence it read: an actionable class means the pod object
+// is gone or a same-name successor already holds the name.
 //
 // The overdue-slack branch of the Terminating sweep does not apply: a
 // pod nobody has asked to delete has no graceful-shutdown window to
@@ -116,23 +117,24 @@ func escalateStuckTerminatingWithDeadline(ctx context.Context, deps workload.Dep
 //
 // A pod already carrying a DeletionTimestamp belongs to the
 // stuck-Terminating sweep, which owns the graceful-shutdown window, the
-// finalizer report and its dedup; callers route it there instead.
+// finalizer report and its dedup; callers route it there instead, and
+// this arm reports NotConfigured for it as it does with no policy.
 //
 // Also reports the next exact policy boundary, the same contract
 // escalateStuckTerminatingWithDeadline has: the evidence turns
 // actionable on a clock, and a node that has stopped reporting emits no
 // event to wake anyone on, so a caller without a poll must carry the
 // boundary into its requeue.
-func forceDeleteOnNodeDeath(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, pod *corev1.Pod, idx int32) (bool, time.Time, error) {
+func forceDeleteOnNodeDeath(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, pod *corev1.Pod, idx int32) (evidence.TerminatingClass, time.Time, error) {
 	if input.ForceDelete == nil || pod == nil || pod.DeletionTimestamp != nil {
-		return false, time.Time{}, nil
+		return evidence.NotConfigured, time.Time{}, nil
 	}
 	res := evidence.NodeDeath(ctx, deps.Reader(), pod, input.ForceDelete, input.Now(), 0)
 	if res.Kind == evidence.NodeReadError {
-		return false, time.Time{}, fmt.Errorf("node-death evidence for pod %s: node %s read: %w", pod.Name, res.NodeName, res.NodeReadErr)
+		return res.Kind, time.Time{}, fmt.Errorf("node-death evidence for pod %s: node %s read: %w", pod.Name, res.NodeName, res.NodeReadErr)
 	}
 	if !res.Kind.Actionable() {
-		return false, res.RequeueAt, nil
+		return res.Kind, res.RequeueAt, nil
 	}
 
 	uid := pod.UID
@@ -142,22 +144,19 @@ func forceDeleteOnNodeDeath(ctx context.Context, deps workload.Deps, input workl
 	); err != nil {
 		// NotFound: the object is already gone. Conflict: the UID
 		// precondition missed — a successor holds the name; never touch it.
-		if apierrors.IsNotFound(err) {
-			return true, time.Time{}, nil
+		if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+			return res.Kind, time.Time{}, nil
 		}
-		if apierrors.IsConflict(err) {
-			return false, time.Time{}, nil
-		}
-		return false, time.Time{}, fmt.Errorf("force-delete pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		return res.Kind, time.Time{}, fmt.Errorf("force-delete pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 
 	workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonPodForceDeleted,
-		"OMENative %s: force-deleted pod %s held in phase Unknown on node %s (evidence=%s)",
+		"OMENative %s: force-deleted pod %s on node %s, which its kubelet stopped reporting (evidence=%s)",
 		workload.InstanceKey(input.Key.Component, idx), pod.Name, pod.Spec.NodeName, res.Kind)
 	if err := recordForceDeleteLedgerEntry(ctx, deps, input, pod, idx, audit.OutcomeForceDeleteUnreachable); err != nil {
-		return true, time.Time{}, fmt.Errorf("record force-delete ledger entry (pod=%s): %w", pod.Name, err)
+		return res.Kind, time.Time{}, fmt.Errorf("record force-delete ledger entry (pod=%s): %w", pod.Name, err)
 	}
-	return true, time.Time{}, nil
+	return res.Kind, time.Time{}, nil
 }
 
 // reportFinalizerBlockedPod emits the once-per-pod-UID Warning for an
