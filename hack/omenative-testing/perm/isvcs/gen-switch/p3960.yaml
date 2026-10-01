@@ -1,4 +1,4 @@
-# p3960: [gen] switch settling pd-mn W1 N=2 RecreatePod to InPlaceOnly co rolling  Ne=2 Nd=2 Nr=2 ceil_e=2 ceil_d=2 ceil_r=2 co=rolling topo=pd-mn edit=strategy:InPlaceOnly during=settling
+# p3960: [gen] switch settling pd-mn W1 N=2 RecreatePod to InPlaceOnly co rolling  Ne=2 Nd=2 Nr=2 ceil_e=2 ceil_d=2 ceil_r=2 co=rolling topo=pd-mn during=settling edit=strategy:InPlaceOnly
 # reason: every bumped member's updateStrategy is patched from RecreatePod to InPlaceOnly right after the bump lands; a step already in flight finishes under RecreatePod and every step that starts afterwards runs under InPlaceOnly; the budget (maxSurge 0, maxUnavailable 1) is valid under both; neither side surges, so the ceiling is N; maxUnavailable 1 gives either side the one slot it needs to drain or patch, so the floor N-1 holds throughout; a gang runs either in-place variant as a whole-gang recreate; the group paces engine and decoder together and both carry the edit; every Instance ends on the new revision and the live spec carries InPlaceOnly
 apiVersion: ome.io/v1beta1
 kind: InferenceService

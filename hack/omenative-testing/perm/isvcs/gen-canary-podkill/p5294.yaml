@@ -1,0 +1,22 @@
+# p5294: [gen] canary podkill gate engine N=8 rp RecreateInstance  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 co=none topo=engine canary=manual bump=engine img=${OME_EVAL_NGINX_ALT_IMAGE} during=canary-serving@0 verb=podkill verbhold=30 victim=stable victimcomp=engine cell=canary/Serving/capacityDropped[stable]
+# reason: one old-revision engine pod is deleted by hand while the ladder waits at its first manual gate; its replacement comes back labelled as what it runs (the image its revision's pods ran, never the new template under the old label), and after the promote the roll finishes with every Instance on the final revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p5294 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "10%", traffic: 10, pause: {  } }
+              - { capacity: "30%", traffic: 30, pause: {  } }
+              - { capacity: "60%", traffic: 60, pause: {  } }
+              - { capacity: "100%", traffic: 100 }

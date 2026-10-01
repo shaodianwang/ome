@@ -1,4 +1,4 @@
-# p3887: [gen] switch rotating pd N=4 SurgeThenDrain rp RecreateInstance to None co rolling  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 co=rolling topo=pd edit=restartPolicy:None during=rotating
+# p3887: [gen] switch rotating pd N=4 SurgeThenDrain rp RecreateInstance to None co rolling  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 co=rolling topo=pd during=rotating edit=restartPolicy:None
 # reason: the roll runs under SurgeThenDrain (maxSurge 1, maxUnavailable 0) and every bumped member's restartPolicy is patched from RecreateInstanceOnPodRestart to None at the first updated pod; the policy decides what a pod restart rebuilds and nothing restarts here, so the roll surges within its ceiling N+1 with the floor at N and converges on the new revision; the group paces engine and decoder together and both carry the edit; the live spec carries None
 apiVersion: ome.io/v1beta1
 kind: InferenceService

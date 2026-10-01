@@ -688,8 +688,8 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         job_count = 0
         shard_counts = {}
         for feature, topology, variant, _env, cases in gp._eval_lanes():
-            pod_budget = 35 if feature == "canary" else 64
-            target_waves = 2 if feature == "canary" else 4
+            pod_budget = 35 if gp._eval_feature_is_canary(feature) else 64
+            target_waves = 2 if gp._eval_feature_is_canary(feature) else 4
             shards = gp._split_eval_cases(
                 cases,
                 {case_id: gp._eval_case_peak_pods(case_id) for case_id in cases},
@@ -746,7 +746,13 @@ class TestCheckedInTreeClassification(unittest.TestCase):
             self.assertEqual(shard_counts[("gen-node", topology, gp.EVAL_FORCE_DELETE_SLUG)], 1)
         for topology in ("engine", "pd", "engine-mn"):
             self.assertEqual(shard_counts[("gen-ctrlrestart", topology, "")], 1)
-        self.assertEqual(job_count, 189)
+        self.assertEqual(shard_counts[("gen-canary-crash", "engine", "")], 4)
+        self.assertEqual(shard_counts[("gen-canary-crash", "pd", "")], 12)
+        self.assertEqual(shard_counts[("gen-canary-second-rev", "engine", "")], 3)
+        self.assertEqual(shard_counts[("gen-canary-second-rev", "pd", "")], 8)
+        self.assertEqual(shard_counts[("gen-canary-podkill", "engine", "")], 2)
+        self.assertEqual(shard_counts[("gen-canary-podkill", "pd", "")], 4)
+        self.assertEqual(job_count, 222)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin
@@ -803,6 +809,12 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(len(keys), len(set(keys)))
         self.assertIn("canary / engine [1/21]", yaml_text)
         self.assertIn("canary / pd [13/13]", yaml_text)
+        self.assertIn("gen-canary-crash / pd [12/12]", yaml_text)
+        # The generated canary families are canary lanes: Prometheus for the
+        # analysis-gated cases and the canary pod budget.
+        crash_env = yaml_text[yaml_text.index('key: "omenative-e2e-gen-canary-second-rev-engine-1-of-3"'):]
+        self.assertIn('OME_KIND_PROMETHEUS_ENABLED: "true"', crash_env[:600])
+        self.assertIn('OME_EVAL_POD_BUDGET: "35"', crash_env[:600])
         commands = re.findall(
             r'command: "sh \.buildkite/run_omenative_eval_gke\.sh ([^"]+)"',
             yaml_text,

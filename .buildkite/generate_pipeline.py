@@ -1087,6 +1087,14 @@ def _package_kind_test_image_step() -> str:
     )
 
 
+def _eval_feature_is_canary(feature: str) -> bool:
+    """Whether an eval feature folder holds canary-mode cases: the hand-written
+    canary/ folder and the generated gen-canary-* families. They run a ladder
+    per case, so they get the canary pod budget and wave count, and Prometheus
+    for the analysis-gated cases among them."""
+    return feature == "canary" or feature.startswith("gen-canary-")
+
+
 def _eval_case_groups() -> list[tuple[str, str, list[str]]]:
     """Group every committed eval case by its stable feature/topology axes."""
     groups: dict[tuple[str, str], list[str]] = {}
@@ -1258,13 +1266,12 @@ def _gke_eval_group() -> str:
         if variant:
             slug += "-" + variant
         variant_part = f" [{variant}]" if variant else ""
-        prometheus = "true" if feature in ("canary", "reject") else "false"
-        pod_budget = configured_pod_budget or ("35" if feature == "canary" else "64")
-        if feature == "canary":
+        canary = _eval_feature_is_canary(feature)
+        prometheus = "true" if canary or feature == "reject" else "false"
+        pod_budget = configured_pod_budget or ("35" if canary else "64")
+        if canary:
             pod_budget = os.environ.get("GKE_EVAL_CANARY_POD_BUDGET", pod_budget)
-        target_waves = (
-            canary_target_waves if feature == "canary" else default_target_waves
-        )
+        target_waves = canary_target_waves if canary else default_target_waves
         peaks = {case_id: _eval_case_peak_pods(case_id) for case_id in cases}
         workers = None
         skipped: list[str] = []

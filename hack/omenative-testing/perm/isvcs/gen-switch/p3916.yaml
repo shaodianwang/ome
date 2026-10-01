@@ -1,4 +1,4 @@
-# p3916: [gen] switch settling engine-mn W1 N=2 SurgeThenDrain rp RecreateInstance to None  Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 co=none topo=engine-mn edit=restartPolicy:None during=settling
+# p3916: [gen] switch settling engine-mn W1 N=2 SurgeThenDrain rp RecreateInstance to None  Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 co=none topo=engine-mn during=settling edit=restartPolicy:None
 # reason: the roll runs under SurgeThenDrain (maxSurge 1, maxUnavailable 0) and every bumped member's restartPolicy is patched from RecreateInstanceOnPodRestart to None right after the bump lands; the policy decides what a pod restart rebuilds and nothing restarts here, so the roll surges within its ceiling N+1 with the floor at N and converges on the new revision; the live spec carries None
 apiVersion: ome.io/v1beta1
 kind: InferenceService

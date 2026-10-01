@@ -1,0 +1,22 @@
+# p5260: [gen] canary retarget rebump at serving engine N=8 s2  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=10 ceil_d=0 ceil_r=0 co=none topo=engine canary=auto during=canary-serving@0 verb=rebump cell=canary/Serving/newTarget[isvc]
+# reason: a second service revision lands while the first canary serves its first split; the second change wins: the run re-targets to it (a new canary hash follows), the run that was open closes as Superseded, no Instance is left on the intermediate revision after Stable, and traffic never names a revision with no serving pod
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p5260 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 2, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

@@ -1,4 +1,4 @@
-# p3920: [gen] switch settling pd-mn W1 N=2 SurgeThenDrain to RecreatePod  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=2 ceil_r=2 co=none topo=pd-mn edit=strategy:RecreatePod during=settling
+# p3920: [gen] switch settling pd-mn W1 N=2 SurgeThenDrain to RecreatePod  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=2 ceil_r=2 co=none topo=pd-mn during=settling edit=strategy:RecreatePod
 # reason: every bumped member's updateStrategy is patched from SurgeThenDrain to RecreatePod right after the bump lands; a step already in flight finishes under SurgeThenDrain and every step that starts afterwards runs under RecreatePod; the budget (maxSurge 1, maxUnavailable 1) is valid under both; the ceiling is N+1 because a surge step can be in flight on either side of the edit; maxUnavailable 1 gives either side the one slot it needs to drain or patch, so the floor N-1 holds throughout; every Instance ends on the new revision and the live spec carries RecreatePod
 apiVersion: ome.io/v1beta1
 kind: InferenceService

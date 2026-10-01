@@ -673,7 +673,7 @@ def _track_gang_and_floor(ctx, comps):
         # (mirrors run_case's Check 10 tracking).
         n = ctx["N"].get(c, 0)
         if n:
-            fl = n - resolve_max_unavailable(ctx["info"].get("max_unavail", {}).get(c, 0), n)
+            fl = n - resolve_max_unavailable(ctx["info"].get("max_unavail", {}).get(c, 0), n) - _floor_allowance(ctx, c)
             if rd < fl:
                 floor_since.setdefault(c, now)
                 span = now - floor_since[c]
@@ -741,21 +741,30 @@ def min_ready_checks(ctx, comps, verdict, notes, checks, label="capacity floor")
     for c in comps:
         if ctx["N"].get(c, 0) == 0:
             continue
-        floor = ctx["N"][c] - resolve_max_unavailable(mu.get(c, 0), ctx["N"][c])
+        broken = _floor_allowance(ctx, c)
+        floor = ctx["N"][c] - resolve_max_unavailable(mu.get(c, 0), ctx["N"][c]) - broken
+        basis = "N-maxUnavailable" + (f"-{broken}broken" if broken else "")
         mr = min_ready.get(c, ctx["N"][c])
         sust = floor_sust.get(c, 0.0)
         if mr >= floor:
-            checks.append(f"  ✓ {c} {label} held: min ready {mr} ≥ N-maxUnavailable={floor}")
+            checks.append(f"  ✓ {c} {label} held: min ready {mr} ≥ {basis}={floor}")
         elif floor_soft:
-            checks.append(f"  ⚠ {c} capacity dipped to {mr} ready Instance(s) (< N-maxUnavailable={floor}) — case opted out (floor_soft=1); informational")
+            checks.append(f"  ⚠ {c} capacity dipped to {mr} ready Instance(s) (< {basis}={floor}) — case opted out (floor_soft=1); informational")
         elif floor_hard or sust >= FLOOR_SUSTAIN_S:
             verdict = "FAIL"
             held = "" if floor_hard else f", dip held {sust:.0f}s ≥ {FLOOR_SUSTAIN_S:.0f}s"
-            notes.append(f"{c} {label} breached: min ready {mr} < N-maxUnavailable={floor}")
-            checks.append(f"  ✗ {c} {label} breached: min ready {mr} < N-maxUnavailable={floor}{held} — did NOT preserve capacity")
+            notes.append(f"{c} {label} breached: min ready {mr} < {basis}={floor}")
+            checks.append(f"  ✗ {c} {label} breached: min ready {mr} < {basis}={floor}{held} — did NOT preserve capacity")
         else:
-            checks.append(f"  ⚠ {c} capacity dipped to {mr} ready Instance(s) (< N-maxUnavailable={floor}) for <{FLOOR_SUSTAIN_S:.0f}s — debounced as a readiness flap (not failed)")
+            checks.append(f"  ⚠ {c} capacity dipped to {mr} ready Instance(s) (< {basis}={floor}) for <{FLOOR_SUSTAIN_S:.0f}s — debounced as a readiness flap (not failed)")
     return verdict
+
+
+def _floor_allowance(ctx, comp):
+    """Instances of comp the case itself broke (a break fault's victims):
+    their capacity is the fault's cost, so the floor the healthy Instances
+    must hold is lowered by that many."""
+    return int((ctx.get("floor_allowance") or {}).get(comp, 0))
 
 
 def fetch_status(case_id):
@@ -2015,9 +2024,16 @@ def _isvc_spec(case_id):
         return json.loads(r.stdout).get("spec", {}) or {}
     except Exception:
         return {}
-CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix",
+CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix", "rtedit",
                 "rollback", "timeout-clear", "timeout-set", "scale", "repin", "resume",
-                "planedit", "planedit-repin", "groupremove", "runlost", "pairing", "quotalift"}
+                "planedit", "planedit-repin", "groupremove", "runlost", "pairing", "quotalift", "podkill"}
+# Verbs that land a second revision on the bumped members while the first
+# canary is in flight: an ISVC re-bump, one that also drops the runner image
+# override, and an edit of the case's dedicated runtime (the shape of a sync
+# that applies the runtime after the service). A new canary hash must follow,
+# the run that was open closes as superseded, and nothing may stay on the
+# revision in between.
+REBUMP_VERBS = {"rebump", "rebump-fix", "rtedit"}
 # The step a plan edit inserts: a pinned run never visits it, the next run does.
 PLANEDIT_TRAFFIC = 75
 # Verbs a case may leave on the idle service before the bump (the grid's
@@ -2032,13 +2048,19 @@ PREARM_SPEC_EDITS = {"planedit", "groupremove", "scale", "planinvalid"}
 # How long a spec edit is given to reach the manager's informer before the
 # bump lands on top of it.
 PREARM_SETTLE_S = int(5 * TIMEOUT_MULT)
-# Verbs that end a case whose second verb leaves a pre-step hold in place.
-RELEASE_VERBS = {"promote", "resume"}
+# Verbs that end a case whose second verb leaves a hold in place: a promote
+# or resume lifts a pre-step hold; a fixed image lifts a capacity gate held
+# by an image that cannot start.
+RELEASE_VERBS = {"promote", "resume", "rebump-fix"}
 # Delay between the second verb and the release: the window the second
 # verb's own claim (the hold survived it) needs to be observed.
 RELEASE_AFTER_S = int(20 * TIMEOUT_MULT)
 # Verbs whose claim is a re-target: a new canary hash must follow them.
-RETARGET_VERBS = {"rebump", "rebump-fix", "pairing"}
+RETARGET_VERBS = REBUMP_VERBS | {"pairing"}
+# Status polls (2 s apart) a weighted traffic target may name a revision
+# with no serving pod before the gap counts: one reconcile of lag between
+# the pod view and the traffic write is not a gap.
+TRAFFIC_GAP_POLLS = 3
 # Hooks where a lost run holds the ladder in place; at the terminals the
 # loss is inert and the ladder still ends.
 RUNLOST_HOLD_HOOKS = {"canary-staging", "canary-serving", "canary-prehold", "canary-draining"}
@@ -2248,11 +2270,11 @@ def _release_due(release, verb2_fired, anchor_ts, released, now, after_s, awaiti
     return bool(release) and verb2_fired and not released and not awaiting_lift and now - anchor_ts >= after_s
 
 
-def _prehold_survived(step_at_verb2, hook_at_release, step_at_release):
-    """The second verb left the pre-step hold in place: when the release
-    fires the ladder still sits held at the step the verb found it on."""
+def _prehold_survived(step_at_verb2, hook_at_release, step_at_release, hook_at_verb2="canary-prehold"):
+    """The second verb left the hold in place: when the release fires the
+    ladder still sits held at the step, and in the state, the verb found it in."""
     return (step_at_verb2 is not None and step_at_release == step_at_verb2
-            and hook_at_release == "canary-prehold")
+            and hook_at_release == hook_at_verb2)
 
 
 def _runlost_hold_expected(during):
@@ -2524,7 +2546,9 @@ def _fault_ok(v):
     if kind == "cordon":
         return param in FAULT_TARGETS
     if kind in BREAK_FAULTS:
-        return param == CRASHLOOP_VICTIM
+        # A break names its victim revision (the one a rollout leaves behind)
+        # or, under a canary, the grid state it hits that revision in.
+        return param == CRASHLOOP_VICTIM or _canary_hook_ok(param)
     if kind == "configkey":
         return param == CONFIGKEY_PARAM
     if kind == "node":
@@ -2546,6 +2570,7 @@ def _fault_new(case_id, hdr):
             "during": str(hdr.get("during") or ""),
             "expect": str(hdr.get("expect") or ""),
             "lift": str(hdr.get("lift") or ""),
+            "victims": int(hdr.get("victims") or 1),
             "fired": False, "infra_fail": None, "notes": []}
 
 
@@ -2782,11 +2807,12 @@ def _fault_fire(f, pod_state, pods_per_inst, old_hashes, inv=None):
     print(f"    ⚡ {f['notes'][-1]}")
 
 
-def _crashloop_pick_pod(pod_state, old_hashes, comp=BREAK_DEFAULT_COMP):
-    """The break victim: among the live pods of `comp` still on an old
-    revision, the leader (or single) pod of the highest Instance index. The
-    highest index is what the roll reaches last, so the crash is observed on
-    a settled row for as long as the roll takes to get there."""
+def _crashloop_pick_pods(pod_state, old_hashes, comp=BREAK_DEFAULT_COMP, count=1):
+    """The break victims: among the live pods of `comp` still on an old
+    revision, the leader (or single) pods of the `count` highest Instance
+    indexes, one per Instance, highest first. The highest index is what the
+    roll reaches last, so the crash is observed on a settled row for as long
+    as the roll takes to get there; several at once are the storm shape."""
     def _idx(p):
         try:
             return int(p.get("inst", "0"))
@@ -2796,9 +2822,27 @@ def _crashloop_pick_pod(pod_state, old_hashes, comp=BREAK_DEFAULT_COMP):
             if p and p["alive"] and p.get("comp") == comp
             and p.get("hash") and (old_hashes is None or p["hash"] in old_hashes)
             and p.get("runner", "default") in ("default", "leader")]
-    if not live:
-        return None
-    return max(live, key=lambda x: (_idx(x[1]), x[0]))[0]
+    picked, seen = [], set()
+    for name, pod in sorted(live, key=lambda x: (-_idx(x[1]), x[0])):
+        if pod.get("inst", "0") in seen:
+            continue
+        seen.add(pod.get("inst", "0"))
+        picked.append(name)
+        if len(picked) >= count:
+            break
+    return picked
+
+
+def _crashloop_pick_pod(pod_state, old_hashes, comp=BREAK_DEFAULT_COMP):
+    """The single break victim (the highest old-revision Instance of comp)."""
+    picked = _crashloop_pick_pods(pod_state, old_hashes, comp, 1)
+    return picked[0] if picked else None
+
+
+def _break_victims(f):
+    """Every Instance a break hit: the fault record carries the first victim
+    itself, and the rest as records of the same shape."""
+    return [f] + list(f.get("extra_victims") or [])
 
 
 def _crashloop_image():
@@ -2862,34 +2906,39 @@ def _crashloop_stop(f):
 
 def _fault_crashloop_fire(f, pod_state, old_hashes, inv=None):
     comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
-    victim = _crashloop_pick_pod(pod_state, old_hashes, comp)
-    if not victim:
-        f["infra_fail"] = f"{f['kind']}: no live old-revision {comp} pod to break"
+    count = max(1, int(f.get("victims") or 1))
+    victims = _crashloop_pick_pods(pod_state, old_hashes, comp, count)
+    if len(victims) < count:
+        f["infra_fail"] = (f"{f['kind']}: {len(victims)} live old-revision {comp} pod(s) to break, {count} asked"
+                           if victims else f"{f['kind']}: no live old-revision {comp} pod to break")
         return
-    state = pod_state.get(victim) or {}
-    f["crash_pod"] = victim
-    f["crash_inst"] = str(state.get("inst", "0"))
-    f["crash_comp"] = state.get("comp", comp)
-    f["crash_hash"] = state.get("hash", "")
-    f["crash_uid"] = state.get("uid", "")
-    f["kills"] = 0
-    if f["kind"] != "crashloop" or f["form"] == "start":
-        image = _break_image(f["kind"])
-        patch = {"spec": {"containers": [{"name": MAIN_CONTAINER, "image": image}]}}
-        r = kubectl("-n", NS, "patch", "pod", victim, "--type=strategic", "-p", json.dumps(patch))
-        if r.returncode != 0:
-            f["infra_fail"] = f"{f['kind']}: point {victim} at {image} failed: {r.stderr.strip()[:120]}"
-            return
-        _pod_mutated_by_harness(inv, victim, f["crash_uid"])
-        f["notes"].append(f"fault fired: {f['kind']} form=start on {victim} (instance {f['crash_inst']}, image {image})")
-    else:
-        stop = threading.Event()
-        f["crash_stop"] = stop
-        f["crash_thread"] = threading.Thread(target=_crashloop_killer, args=(f, stop), daemon=True)
-        f["crash_thread"].start()
-        _FAULT_CLEANUPS.append(("crashloop", f))
-        f["notes"].append(f"fault fired: crashloop form=load on {victim} (instance {f['crash_inst']}, kill every {CRASH_KILL_INTERVAL_S:.0f}s)")
-    print(f"    ⚡ {f['notes'][-1]}")
+    records = []
+    for victim in victims:
+        state = pod_state.get(victim) or {}
+        records.append({"crash_pod": victim, "crash_inst": str(state.get("inst", "0")),
+                        "crash_comp": state.get("comp", comp), "crash_hash": state.get("hash", ""),
+                        "crash_uid": state.get("uid", ""), "kills": 0})
+    f.update(records[0])
+    f["extra_victims"] = records[1:]
+    for rec in _break_victims(f):
+        victim = rec["crash_pod"]
+        if f["kind"] != "crashloop" or f["form"] == "start":
+            image = _break_image(f["kind"])
+            patch = {"spec": {"containers": [{"name": MAIN_CONTAINER, "image": image}]}}
+            r = kubectl("-n", NS, "patch", "pod", victim, "--type=strategic", "-p", json.dumps(patch))
+            if r.returncode != 0:
+                f["infra_fail"] = f"{f['kind']}: point {victim} at {image} failed: {r.stderr.strip()[:120]}"
+                return
+            _pod_mutated_by_harness(inv, victim, rec["crash_uid"])
+            f["notes"].append(f"fault fired: {f['kind']} form=start on {victim} (instance {rec['crash_inst']}, image {image})")
+        else:
+            stop = threading.Event()
+            rec["crash_stop"] = stop
+            rec["crash_thread"] = threading.Thread(target=_crashloop_killer, args=(rec, stop), daemon=True)
+            rec["crash_thread"].start()
+            _FAULT_CLEANUPS.append(("crashloop", rec))
+            f["notes"].append(f"fault fired: crashloop form=load on {victim} (instance {rec['crash_inst']}, kill every {CRASH_KILL_INTERVAL_S:.0f}s)")
+        print(f"    ⚡ {f['notes'][-1]}")
 
 
 def _get_pod(name):
@@ -3308,8 +3357,15 @@ def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, chec
     the recorder drops an object's events past a burst, the rows do not."""
     if not f or f.get("kind") not in BREAK_FAULTS or not f.get("fired") or f.get("infra_fail"):
         return verdict
-    inst, comp, kind = f["crash_inst"], f["crash_comp"], f["kind"]
     events = _isvc_events_since(f["case_id"], trigger_ts or 0)
+    for rec in _break_victims(f):
+        verdict = _break_victim_checks(f, rec, pod_state, old_hashes, events, bumped, verdict, notes, checks, surges)
+    return verdict
+
+
+def _break_victim_checks(f, rec, pod_state, old_hashes, events, bumped, verdict, notes, checks, surges=None):
+    """The break verdict for one victim Instance (see _crashloop_checks)."""
+    inst, comp, kind = rec["crash_inst"], rec["crash_comp"], f["kind"]
     pairs = [(src, dst) for c, src, dst, _rev in (surges or []) if c == comp]
     pairs += [pair for pair in _gang_surge_replacements(events, comp) if pair not in pairs]
     chain = _follow_gang_surges(inst, pairs)
@@ -3322,7 +3378,7 @@ def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, chec
     down = [n for n, p in pods if not (p.get("ready") and p.get("serving"))]
     if bumped is not None and comp not in bumped:
         sibling = f"sibling {where}"
-        survivors = [n for n, p in pods if p.get("uid") and p["uid"] == f.get("crash_uid")]
+        survivors = [n for n, p in pods if p.get("uid") and p["uid"] == rec.get("crash_uid")]
         if not pods or survivors or down:
             verdict = "FAIL"
             notes.append(f"{kind} sibling Instance {comp}/{inst} was not rebuilt to serving "
@@ -3338,8 +3394,8 @@ def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, chec
             notes.append(f"{kind} sibling Instance {comp}/{inst}: no RestartTriggered event named it")
             checks.append(f"  ✗ {kind}: no RestartTriggered event named {sibling} "
                           f"(nothing bumped it, so only a repair can own its rebuild)")
-        if f.get("kills") is not None and f["form"] == "load":
-            checks.append(f"  ⓘ {kind}: runner killed {f['kills']} time(s) while the pod ran the old revision")
+        if rec.get("kills") is not None and f["form"] == "load":
+            checks.append(f"  ⓘ {kind}: runner killed {rec['kills']} time(s) while the pod ran the old revision")
         return verdict
     off = [n for n, p in pods if not p.get("hash") or p["hash"] in (old_hashes or set())]
     if not pods or off or down:
@@ -3357,8 +3413,8 @@ def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, chec
                       f"(its revision was not the roll target): {repairs[0][:160]}")
     else:
         checks.append(f"  ✓ {kind}: no RestartTriggered event named {where} after the bump")
-    if f.get("kills") is not None and f["form"] == "load":
-        checks.append(f"  ⓘ {kind}: runner killed {f['kills']} time(s) while the pod ran the old revision")
+    if rec.get("kills") is not None and f["form"] == "load":
+        checks.append(f"  ⓘ {kind}: runner killed {rec['kills']} time(s) while the pod ran the old revision")
     return verdict
 
 
@@ -3374,7 +3430,11 @@ def _fault_tick(ctx):
     if ctx.get("trigger_ts") is None or _fault_at_idle(f):
         return
     ph = f["param"]
-    if ph == "settling" or f["kind"] in BREAK_FAULTS:
+    if ph.partition("@")[0] in CANARY_HOOKS:
+        # Under a canary a fault (a break included) waits for the grid state
+        # it names, so the stable side breaks while the ladder is at a step.
+        due = _hook_due(ph, ctx.get("canary_hook"), ctx.get("canary_step"))
+    elif ph == "settling" or f["kind"] in BREAK_FAULTS:
         # A break hits its pod the moment the bump has landed, so the
         # Instance is off the target before the break is ever observed.
         due = True
@@ -3383,8 +3443,6 @@ def _fault_tick(ctx):
         due = old is not None and any(
             p and p["alive"] and ((p.get("hash") and p["hash"] not in old) or p.get("newanno"))
             for p in ctx["pod_state"].values())
-    elif ph.partition("@")[0] in CANARY_HOOKS:
-        due = _hook_due(ph, ctx.get("canary_hook"), ctx.get("canary_step"))
     else:   # migrating
         due = bool(ctx.get("fault_migrating"))
     if due:
@@ -4014,8 +4072,10 @@ HDR_VALIDATORS = {
     # park to the secondaries' pairing traffic-target check.
     "victimcomp": lambda v: v in COMPS,
     # form= is how a crashloop:old victim fails: at every start, or after it
-    # is up.
+    # is up. victims= is how many Instances a break hits at once (default 1;
+    # the storm shape under a canary).
     "form": lambda v: v in CRASHLOOP_FORMS,
+    "victims": lambda v: isinstance(v, int) and v >= 1,
     "imgcomp": lambda v: v in COMPS,
     "ratio_tol": lambda v: isinstance(v, int) and 0 <= v <= 100,
     "xcheck": lambda v: v == "sectraffic",
@@ -4197,23 +4257,30 @@ def validate_case_file(path):
     if "timeout" in fields and "timeout-set" not in (str(fields.get("verb", "")), str(fields.get("verb2", "")),
                                                      str(fields.get("prearm", ""))):
         errs.append(f"{path}:1: timeout= is the value verb=timeout-set (or prearm=timeout-set) writes")
-    if "victim" in fields and not str(fields.get("fault", "")).startswith("podkill:"):
-        errs.append(f"{path}:1: victim= aims a podkill (needs fault=podkill:<hook>)")
-    if "victimcomp" in fields and fault_kind != "podkill" and fault_kind not in BREAK_FAULTS:
+    hook_verbs = {str(fields.get(k, "")) for k in ("verb", "verb2")} - {""}
+    if "victim" in fields and not (str(fields.get("fault", "")).startswith("podkill:") or "podkill" in hook_verbs):
+        errs.append(f"{path}:1: victim= aims a podkill (needs fault=podkill:<hook> or verb=podkill)")
+    if "victimcomp" in fields and fault_kind != "podkill" and fault_kind not in BREAK_FAULTS and "podkill" not in hook_verbs:
         errs.append(f"{path}:1: victimcomp= aims a podkill or a break at one Component "
-                    f"(needs fault=podkill:<phase> or fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM})")
+                    f"(needs fault=podkill:<phase>, verb=podkill or fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM})")
     if fault_kind in BREAK_FAULTS and "victimcomp" in fields and str(fields["victimcomp"]) not in BREAK_VICTIM_COMPS:
         errs.append(f"{path}:1: victimcomp={fields['victimcomp']}: a break victim is a pod of "
                     f"{' or '.join(sorted(BREAK_VICTIM_COMPS))} (the Components a roll targets)")
-    crashloop = str(fields.get("fault", "")) == f"crashloop:{CRASHLOOP_VICTIM}"
+    break_param = str(fields.get("fault", "")).partition(":")[2] if fault_kind in BREAK_FAULTS else ""
     if "form" in fields and fault_kind not in BREAK_FAULTS:
         errs.append(f"{path}:1: form= says how a break victim fails (needs fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM})")
-    if crashloop and "form" not in fields:
-        errs.append(f"{path}:1: fault=crashloop:{CRASHLOOP_VICTIM} needs form=start|load")
+    if fault_kind == "crashloop" and "form" not in fields:
+        errs.append(f"{path}:1: fault=crashloop:{break_param} needs form=start|load")
     if fault_kind == "imagepull" and str(fields.get("form", "start")) not in IMAGEPULL_FORMS:
-        errs.append(f"{path}:1: fault=imagepull:{CRASHLOOP_VICTIM} has only form=start: an image that cannot be pulled never runs")
-    if fault_kind in BREAK_FAULTS and mode != "rollout":
-        errs.append(f"{path}:1: fault={fields.get('fault')} breaks a pod of the revision a rollout leaves behind (mode=rollout)")
+        errs.append(f"{path}:1: fault=imagepull:{break_param} has only form=start: an image that cannot be pulled never runs")
+    if fault_kind in BREAK_FAULTS and break_param == CRASHLOOP_VICTIM and mode != "rollout":
+        errs.append(f"{path}:1: fault={fields.get('fault')} breaks a pod of the revision a rollout leaves behind (mode=rollout); "
+                    f"under a canary name the grid state it breaks it in (fault={fault_kind}:canary-<state>)")
+    if fault_kind in BREAK_FAULTS and break_param != CRASHLOOP_VICTIM and mode != "canary":
+        errs.append(f"{path}:1: fault={fields.get('fault')} breaks the stable side at a canary hook (mode=canary)")
+    if "victims" in fields and fault_kind not in BREAK_FAULTS:
+        errs.append(f"{path}:1: victims= counts the Instances a break hits at once "
+                    f"(needs fault={'|'.join(sorted(BREAK_FAULTS))}:…)")
     if fault_kind in BREAK_FAULTS:
         victim_comp = str(fields.get("victimcomp") or BREAK_DEFAULT_COMP)
         count_key = {"engine": "Ne", "decoder": "Nd"}.get(victim_comp, "Ne")
@@ -4246,8 +4313,15 @@ def validate_case_file(path):
             errs.append(f"{path}:1: prearm=scale needs scale_e=/scale_d= (the fleet the arm counts)")
         if prearm == "planedit" and verbs & {"planedit", "planedit-repin"}:
             errs.append(f"{path}:1: prearm=planedit (the next run serves the inserted step) and a mid-run plan edit (it never does) assert opposite directions")
-        if "release" in fields and ("verb2" not in fields or str(fields.get("during2", "")).partition("@")[0] != "canary-prehold"):
-            errs.append(f"{path}:1: release= ends a case whose second verb leaves a pre-step hold in place (needs verb2= and during2=canary-prehold)")
+        release_fix = str(fields.get("release", "")) == "rebump-fix" and "img" in fields
+        if "release" in fields and ("verb2" not in fields or (
+                str(fields.get("during2", "")).partition("@")[0] != "canary-prehold" and not release_fix)):
+            errs.append(f"{path}:1: release= ends a case whose second verb leaves a hold in place "
+                        f"(needs verb2= and during2=canary-prehold, or release=rebump-fix with img= for a capacity gate held by a bad image)")
+        if "rtedit" in verbs and "rt" not in fields:
+            errs.append(f"{path}:1: verb=rtedit edits the case's dedicated runtime (needs rt=<dedicated CSR name>)")
+        if "rt" in fields and "rtedit" not in verbs:
+            errs.append(f"{path}:1: rt= in canary mode names the runtime verb=rtedit (or verb2=rtedit) edits")
         if "releaseafter" in fields and "release" not in fields:
             errs.append(f"{path}:1: releaseafter= is the delay before release= fires (needs release=)")
         if "quotalift" in verbs and not str(fields.get("fault", "")).startswith("quota:"):
@@ -7097,9 +7171,187 @@ def _canary_verb(ctx, verb, canary_hash, primary):
             ctx.setdefault("verb_errors", []).append(f"pairing patch denied: {msg[:120]}")
     elif verb == "quotalift":
         _lift_quota(cid)
+    elif verb == "rtedit":
+        _runtime_edit_verb(ctx)
+    elif verb == "podkill":
+        _podkill_verb(ctx)
     note = f"verb fired: {verb} at {ctx.get('canary_hook')} step={ctx.get('canary_step')}"
     ctx.setdefault("verb_notes", []).append(note)
     print(f"    ⚡ {note}")
+
+
+def _runtime_edit_verb(ctx):
+    """verb=rtedit: a material edit of the case's dedicated runtime (the
+    runner env the runtime-rev cases bump) on every bumped member's config,
+    the second change of a sync that applies the runtime after the service.
+    The bump's clock stays where the first change set it."""
+    csr = str(ctx.get("rt") or "")
+    trigger_ts = ctx["trigger_ts"]
+    ok = _bump_runtime(ctx, csr, sorted(ctx["bumped"]), True)
+    ctx["trigger_ts"] = trigger_ts
+    if not ok:
+        ctx.setdefault("verb_errors", []).append(f"rtedit: the runner env edit of runtime {csr} failed")
+
+
+def _retarget_record(st, revision, verb, hook, now_rel):
+    """The run a re-target verb must close: the one pinned when the verb
+    fired, named by when it opened and the revision it rolled toward."""
+    active = (st.get("rollout") or {}).get("activeRun") or {}
+    return {"verb": verb, "hook": hook, "opened_at": active.get("openedAt"), "revision": revision,
+            "outcome": None, "at": now_rel}
+
+
+def _retarget_closed(record, st):
+    """Fold the most recently closed run into the record once it is the run
+    the verb found open: its outcome is how the re-target closed it."""
+    if not record or record.get("outcome"):
+        return
+    last = (st.get("rollout") or {}).get("lastRun") or {}
+    if not last:
+        return
+    targets = {t.get("revision") for t in (last.get("targetRevisions") or []) if isinstance(t, dict)}
+    same_open = bool(record.get("opened_at")) and last.get("openedAt") == record["opened_at"]
+    same_target = bool(record.get("revision")) and record["revision"] in targets
+    if same_open or same_target:
+        record["outcome"] = str(last.get("outcome") or "")
+
+
+def _traffic_revision_hash(revision_name, known_hashes):
+    """The revision hash a traffic target names through its per-revision
+    Service (<service>-<component>-rev-<hash>, bounded to a DNS label)."""
+    _, sep, tail = str(revision_name or "").rpartition("-rev-")
+    if not sep:
+        return ""
+    if tail in known_hashes:
+        return tail
+    return next((h for h in sorted(known_hashes) if h.startswith(tail) or tail.startswith(h)), tail)
+
+
+def _traffic_gap_track(track, traffic, pod_state, primary, known_hashes, now_rel):
+    """Fold one status sample: a weighted target whose revision has no
+    serving pod of the primary extends that revision's streak, and a streak
+    of TRAFFIC_GAP_POLLS records a gap (traffic routed to no capacity)."""
+    serving = defaultdict(int)
+    for p in pod_state.values():
+        if p and p["alive"] and p.get("serving") and p.get("comp") == primary and p.get("hash"):
+            serving[p["hash"]] += 1
+    empty = set()
+    for t in traffic or []:
+        if not isinstance(t, dict) or int(t.get("percent") or 0) <= 0:
+            continue
+        rev = _traffic_revision_hash(t.get("revisionName"), known_hashes) or str(t.get("revisionName") or "")
+        if serving.get(rev, 0):
+            continue
+        empty.add(rev)
+        track["streak"][rev] = track["streak"].get(rev, 0) + 1
+        if track["streak"][rev] == TRAFFIC_GAP_POLLS:
+            track["gaps"].append(f"t={now_rel:.0f}s: {t.get('percent')}% to {t.get('revisionName')} "
+                                 f"with no serving {primary} pod across {TRAFFIC_GAP_POLLS} polls")
+    for rev in list(track["streak"]):
+        if rev not in empty:
+            track["streak"].pop(rev)
+
+
+def _pod_image(obj):
+    """The main container's image of a pod object: the template it runs."""
+    for c in ((obj or {}).get("spec") or {}).get("containers") or []:
+        if c.get("name") == MAIN_CONTAINER:
+            return str(c.get("image") or "")
+    return ""
+
+
+def _case_pod_images(case_id):
+    """{revision hash: images} over the case's live pods: what each revision
+    runs, read off the pods themselves."""
+    r = kubectl("-n", NS, "get", "pod", "-l", f"ome.io/inferenceservice={case_id}", "-o", "json")
+    if r.returncode != 0:
+        return {}
+    try:
+        items = json.loads(r.stdout).get("items", []) or []
+    except Exception:
+        return {}
+    out = {}
+    for obj in items:
+        rev = ((obj.get("metadata") or {}).get("labels") or {}).get(REV_LABEL, "")
+        image = _pod_image(obj)
+        if rev and image:
+            out.setdefault(rev, set()).add(image)
+    return {rev: sorted(images) for rev, images in out.items()}
+
+
+def _podkill_verb(ctx):
+    """verb=podkill: delete one pod by hand (victim=stable|canary and
+    victimcomp= aim it as they aim the fault) and remember what every
+    revision ran at that moment, so the pod that replaces it can be held to
+    the image its revision label names."""
+    victim = _fault_pick_pod(ctx["pod_state"], ctx["pods_per_inst"], ctx["old_hashes"],
+                             victim=ctx.get("victim") or "stable", comp=ctx.get("victimcomp") or None)
+    if not victim:
+        ctx.setdefault("verb_errors", []).append("podkill: no live pod to delete")
+        return
+    state = ctx["pod_state"].get(victim) or {}
+    record = {"pod": victim, "comp": state.get("comp", ""), "inst": str(state.get("inst", "0")),
+              "hash": state.get("hash", ""), "uid": state.get("uid", ""),
+              "image": _pod_image(_get_pod(victim)), "images_by_hash": _case_pod_images(ctx["case_id"]),
+              "replacement": None}
+    r = kubectl("-n", NS, "delete", "pod", victim, "--wait=false")
+    if r.returncode != 0:
+        ctx.setdefault("verb_errors", []).append(f"podkill: delete {victim} failed: {r.stderr.strip()[:120]}")
+        return
+    ctx["podkill"] = record
+    ctx.setdefault("verb_notes", []).append(
+        f"podkill: deleted {victim} ({record['comp']} Instance {record['inst']}, "
+        f"revision {record['hash']}, image {record['image']})")
+
+
+def _podkill_track(ctx, now_rel):
+    """Record the first pod that replaces the deleted one (same Instance, a
+    new UID) with the revision label and the image it came up with."""
+    record = ctx.get("podkill")
+    if not record or record.get("replacement") is not None:
+        return
+    for name, pod in _instance_pods(ctx["pod_state"], record["comp"], record["inst"]):
+        if pod.get("uid") and pod["uid"] != record["uid"] and pod.get("hash"):
+            record["replacement"] = {"pod": name, "uid": pod["uid"], "hash": pod["hash"],
+                                     "image": _pod_image(_get_pod(name)), "at": now_rel}
+            print(f"    podkill: {name} replaced {record['pod']} on revision {pod['hash']} "
+                  f"({record['replacement']['image']})")
+            return
+
+
+def _podkill_truth_checks(record, verdict, notes, checks):
+    """Label truth for the replacement: it runs the image the pods of its
+    revision ran when the pod was deleted. A pod rebuilt from a newer
+    template under the old label is what this verb exists to catch."""
+    if not record:
+        return verdict
+    rep = record.get("replacement")
+    where = f"{record['comp']} Instance {record['inst']}"
+    if not rep:
+        verdict = "FAIL"
+        notes.append(f"podkill: {where} never got a replacement pod")
+        checks.append(f"  ✗ podkill: nothing replaced {record['pod']} ({where}) within the budget")
+        return verdict
+    expected = (record.get("images_by_hash") or {}).get(rep["hash"])
+    if not expected:
+        checks.append(f"  ⓘ podkill: {rep['pod']} replaced {record['pod']} on revision {rep['hash']}, which no pod "
+                      f"carried at the deletion; it runs {rep['image']}")
+        return verdict
+    if rep["image"] in expected:
+        checks.append(f"  ✓ label truth: {rep['pod']} replaced {record['pod']} on revision {rep['hash']} running "
+                      f"{rep['image']}, the image that revision's pods ran")
+    else:
+        verdict = "FAIL"
+        notes.append(f"podkill: {rep['pod']} runs {rep['image']} under revision {rep['hash']} whose pods ran {expected}")
+        checks.append(f"  ✗ label truth: {rep['pod']} came back labelled revision {rep['hash']} but runs {rep['image']}; "
+                      f"that revision's pods ran {', '.join(expected)} when {record['pod']} was deleted")
+    return verdict
+
+
+def _promote_held_after_podkill(verb, verb_fired, verb_ts, hold_s, now):
+    """Under a manual gate the harness's promote waits hold_s after a podkill
+    verb, so the deleted pod's replacement comes up while the roll is paused."""
+    return verb == "podkill" and verb_fired and now - verb_ts < hold_s
 
 
 def _canary_pairing_surface(case_id, ctx, hdr, target, group, primary, xcheck, verdict, notes, checks):
@@ -7436,6 +7688,11 @@ def _canary(case_id, yaml_file, desc, hdr):
     release_after = int(hdr["releaseafter"]) if hdr.get("releaseafter") is not None else RELEASE_AFTER_S
     pairto_target = None if hdr.get("pairto") is None else ("" if str(hdr["pairto"]) == "clear" else str(hdr["pairto"]))
     ctx["pairto_target"] = pairto_target
+    # The dedicated runtime an rtedit verb edits; where a podkill verb aims;
+    # the traffic targets that named a revision with no serving pod.
+    ctx["rt"] = str(hdr.get("rt") or "")
+    ctx["victim"], ctx["victimcomp"] = str(hdr.get("victim") or ""), str(hdr.get("victimcomp") or "")
+    ctx["traffic_gap"] = {"streak": {}, "gaps": []}
     expect, expect_rollback = _canary_expect(terminal, analysis_mode, on_inconclusive, do_rollback)
     primary = _canary_primary(ctx, cgroup)
     if not primary:
@@ -7555,6 +7812,7 @@ def _canary(case_id, yaml_file, desc, hdr):
     released, step_at_release, hook_at_release = False, None, None
     # A pairing verb: the hashes that existed when it fired; a new one proves the re-target.
     hashes_at_verb, pairing_retargeted = None, False
+    retarget = None     # the run a re-target verb found open, and how it closed
     # A quota lift: the canary pods the parked step asks for must land.
     quota_verb = "quotalift" in (verb, verb2)
     capacity_landed, quota_need = False, 0
@@ -7599,6 +7857,9 @@ def _canary(case_id, yaml_file, desc, hdr):
             for t in (comp.get("traffic") or []):
                 if t.get("latestRevision"):
                     traffic_by_step[step] = t.get("percent", 0)
+        if phase:
+            _traffic_gap_track(ctx["traffic_gap"], comp.get("traffic"), ctx["pod_state"], primary,
+                               set(ctx["old_hashes"]) | set(ctx.get("seen_hashes", set())), now - ctx["trigger_ts"])
 
         # Canary-state hook: expose the grid state to the fault dispatcher and
         # fire the case's verb once, when the state (and step) it names arrives.
@@ -7628,10 +7889,17 @@ def _canary(case_id, yaml_file, desc, hdr):
             _canary_verb(ctx, verb2, canary_hash, primary)
         elif _release_due(release, verb2_fired, release_anchor_ts, released, now, release_after,
                           _awaiting_pause_lift(verb2, verb2_fired, verb2_lifted)):
-            released, step_at_release, hook_at_release = True, step, ctx["canary_hook"]
+            released, step_at_release, hook_at_release, fired_now = True, step, ctx["canary_hook"], release
             _canary_verb(ctx, release, canary_hash, primary)
         if fired_now == "planedit-repin" and nsteps > 1:
             nsteps -= 1   # the repin drops the first step: the ladder's end moves up by one
+        if fired_now in REBUMP_VERBS:
+            # Every revision that exists now is pre-re-target: nothing may stay
+            # on one, and the run that was open must close as superseded.
+            pre_final = set(ctx["old_hashes"]) | set(ctx.get("seen_hashes", set())) | ({canary_hash} if canary_hash else set())
+            retarget = _retarget_record(st, canary_hash, fired_now, ctx["canary_hook"], now - ctx["trigger_ts"])
+        _retarget_closed(retarget, st)
+        _podkill_track(ctx, now - ctx["trigger_ts"])
         if fired_now == "pairing":
             # The patch re-mints both pairing Components: the whole pair is
             # bumped from here, nothing may stay on a pre-re-target revision,
@@ -7651,9 +7919,13 @@ def _canary(case_id, yaml_file, desc, hdr):
             hook_fired_ts = now
         elif hook_fired_ts is not None and phase:
             after_hook_phases.add(phase)
+        if fault and fault.get("kind") in BREAK_FAULTS and fault.get("fired") and "floor_allowance" not in ctx:
+            # The broken Instances are the fault's cost; the healthy ones must
+            # hold the floor that remains.
+            ctx["floor_allowance"] = {fault["crash_comp"]: len(_break_victims(fault))}
         # Independent of the hook bookkeeping above: target_changed is true for
         # one sample only, and every sample after the verb lands in that chain.
-        if verb_fired and verb in ("rebump", "rebump-fix") and target_changed and previous_canary_hash:
+        if verb_fired and verb in REBUMP_VERBS and target_changed and previous_canary_hash:
             rebump_retargeted = True
         if verb_fired and verb in ("pause", "pause-freeze") and not verb_lifted and now - verb_ts >= verbhold:
             verb_lifted, step_at_lift = True, step
@@ -7737,7 +8009,8 @@ def _canary(case_id, yaml_file, desc, hdr):
         # before reusing the same target hash at another step.
         should_promote = (policy == "manual" and not do_rollback and phase == "Paused" and
                           canary_hash and promote_ready and step is not None and step > promoted_step and
-                          not (verb == "promote-stale" and stale_held is None))
+                          not (verb == "promote-stale" and stale_held is None) and
+                          not _promote_held_after_podkill(verb, verb_fired, verb_ts, verbhold, now))
         if should_promote:
             rr = kubectl("-n", NS, "annotate", "isvc", case_id,
                          f"{PROMOTE_ANNO}={canary_hash}", "--overwrite")
@@ -7838,10 +8111,13 @@ def _canary(case_id, yaml_file, desc, hdr):
     # asserted on the untouched Components and the dip is reported.
     fault = ctx.get("fault") or {}
     killed = fault.get("victim_comp") if fault.get("kind") == "podkill" and fault.get("fired") else None
+    killed = killed or (ctx.get("podkill") or {}).get("comp")
     verdict = min_ready_checks(ctx, sorted(ctx["configured"] - ({killed} if killed else set())), verdict, notes, checks)
     if killed:
         kmin = (ctx.get("min_ready") or {}).get(killed, N[killed])
         checks.append(f"  ⓘ {killed} capacity floor exempt (the case's podkill deleted its pod): min ready {kmin} during the induced repair window")
+    for c, broken in sorted((ctx.get("floor_allowance") or {}).items()):
+        checks.append(f"  ⓘ {c} capacity floor read with {broken} broken Instance(s) allowed for: the healthy Instances kept serving above it")
     verdict = index_collision_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
     verdict = gang_atomicity_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
 
@@ -7937,9 +8213,29 @@ def _canary(case_id, yaml_file, desc, hdr):
         good(released, f"release {release} fired {release_after}s after {verb2}",
              f"release {release} never fired: {verb2} did not fire or the budget ended first")
         if released:
-            good(_prehold_survived(step_at_verb2, hook_at_release, step_at_release),
-                 f"the pre-step hold survived {verb2}: still held at step {step_at_verb2} when {release} fired",
+            good(_prehold_survived(step_at_verb2, hook_at_release, step_at_release, hook_at_verb2),
+                 f"the hold survived {verb2}: still held at step {step_at_verb2} ({hook_at_verb2}) when {release} fired",
                  f"the hold did not survive {verb2}: step {step_at_verb2} → {step_at_release}, state {hook_at_release} at the release")
+    if "podkill" in (verb, verb2):
+        verdict = _podkill_truth_checks(ctx.get("podkill"), verdict, notes, checks)
+        if policy == "manual" and verb == "podkill" and verb_fired:
+            checks.append(f"  ⓘ the manual gate was held {verbhold}s after the deletion before the harness promoted")
+    if retarget is not None:
+        closed = retarget["outcome"]
+        if str(retarget["hook"] or "").partition("@")[0] in RUNLOST_HOLD_HOOKS:
+            good(closed == "Superseded",
+                 f"the run open at {retarget['hook']} closed as Superseded when {retarget['verb']} landed the second revision",
+                 f"the run open at {retarget['hook']} did not close as Superseded after {retarget['verb']} "
+                 f"(outcome {closed or 'never observed'})")
+        else:
+            checks.append(f"  ⓘ {retarget['verb']} at {retarget['hook']}: the run there closed as {closed or 'nothing observed'}")
+    gaps = ctx["traffic_gap"]["gaps"]
+    more = f" (+{len(gaps) - 1} more)" if len(gaps) > 1 else ""
+    if retarget is not None:
+        good(not gaps, "traffic never named a revision with no serving pod across the re-target",
+             f"traffic named a revision with no serving pod: {gaps[0]}{more}" if gaps else "")
+    elif gaps:
+        checks.append(f"  ⚠ traffic named a revision with no serving pod: {gaps[0]}{more} — informational outside a re-target")
     runlost = ctx.get("runlost")
     if runlost is not None:
         hook = runlost["hook"]
@@ -8179,6 +8475,11 @@ def _canary(case_id, yaml_file, desc, hdr):
         good(rolled == want[c],
              f"{c} fully rolled to canary revision ({rolled}/{want[c]})",
              f"{c} not fully on canary revision ({rolled}/{want[c]})")
+    # A stable-side break: every broken Instance ends on the canary revision
+    # serving, and nothing rebuilt the broken revision for it after the bump.
+    verdict = _crashloop_checks(ctx.get("fault"), ctx["pod_state"], ctx["old_hashes"], ctx["trigger_ts"],
+                                verdict, notes, checks, bumped=group,
+                                surges=(ctx.get("inv") or {}).get("surges"))
     if pre_final is not None:
         left = stranded()
         good(not left, "re-target: no Instance stranded on a pre-re-target revision",

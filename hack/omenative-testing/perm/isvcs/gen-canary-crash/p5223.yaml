@@ -1,0 +1,22 @@
+# p5223: [gen] canary crash storm imagepull engine N=8 s2 rp RecreateInstance victims 3  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=10 ceil_d=0 ceil_r=0 fault=imagepull:canary-serving@0 co=none topo=engine canary=auto victims=3 nophase=Failed cell=canary/Serving/stableBroken[imagePull]
+# reason: 3 old-revision engine Instance(s) sit in ImagePullBackOff from the first split on, under restart policy RecreateInstanceOnPodRestart; the canary walks all four steps to Stable inside its budgets, every broken Instance ends on the canary revision serving, no repair is recorded for one after the bump, and the healthy Instances keep serving above N-3
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p5223 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 2, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

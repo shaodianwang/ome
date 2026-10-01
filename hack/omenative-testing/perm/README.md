@@ -94,8 +94,9 @@ perm/
 ├── isvcs/                 — generated case YAMLs (committed; `topo=` in each header)
 │   ├── rollout/           — 96 rollout cases (topology × lifecycle × coordination)
 │   ├── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
-│   └── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/ gen-crashloop-idle/ gen-crashloop-sibling/
-│       gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/  — generated hot core (see isvcs/MANIFEST.md)
+│   ├── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/ gen-crashloop-idle/ gen-crashloop-sibling/
+│   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/  — generated hot core (see isvcs/MANIFEST.md)
+│   └── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/  — generated operator stories driven through a canary
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -313,18 +314,31 @@ such as the recovery half of a podkill, carries both ids.
   and fires once. **`verb2=` / `during2=`** fire a second verb at a second hook
   once the first has fired, which is how a case reaches PreHold (a
   `planedit-repin` at Serving, then the verb under test at `canary-prehold`).
-  **`release=promote|resume`** fires that verb `releaseafter=<s>` seconds
-  (default 20, `RELEASE_AFTER_S`) after the second verb, so a case whose
-  second verb leaves the pre-step hold in place can end (needs `verb2=` and
-  `during2=canary-prehold`); the verdict asserts the ladder was still held at
-  the same step when the release fired, and that it then completes.
+  **`release=promote|resume|rebump-fix`** fires that verb `releaseafter=<s>`
+  seconds (default 20, `RELEASE_AFTER_S`) after the second verb, so a case
+  whose second verb leaves a hold in place can end: a promote or resume lifts
+  a pre-step hold (needs `verb2=` and `during2=canary-prehold`), a
+  `rebump-fix` lifts a capacity gate held by an image that cannot start
+  (needs `verb2=` and `img=`); the verdict asserts the ladder was still held
+  at the same step, in the same state, when the release fired, and that it
+  then completes.
 - **`verb=`** — the operator verb to fire at the hook: `pause` / `pause-freeze`
   (lifted after `verbhold=<s>`, default 45; the step index must not move while
   held), `promote` (the matching hash; with `skipsoak=<s>` the case asserts it
   beat a timed step's soak), `promote-stale` (a real hash token naming the
   stable revision; the step must not move for 20 s), `rollback`, `rebump` (a
   second revision bump of the bumped members), `rebump-fix` (a bump that also
-  drops the runner image override), `timeout-clear` and `timeout-set` (writes
+  drops the runner image override), `rtedit` (a material edit, the runner env
+  the runtime-rev cases bump, of the case's dedicated runtime named by
+  `rt=<dedicated CSR name>` and shipped as the case file's first document:
+  the second change of a sync that applies the runtime after the service),
+  `podkill` (deletes one pod by hand, aimed like the fault with
+  `victim=stable|canary` and `victimcomp=`; the verdict waits for the pod that
+  replaces it and holds it to label truth: it must run the image the pods of
+  its revision ran when the deletion landed, never a newer template under the
+  old label; under `canary=manual` the harness holds its promote `verbhold=`
+  seconds after the deletion, so the replacement comes up while the roll is
+  paused), `timeout-clear` and `timeout-set` (writes
   `ome.io/rollout-ready-timeout=<timeout=>`), `repin` (`ome.io/rollout-repin=now`:
   the run keeps its identity and progress), `resume` (`ome.io/rollout-resume=<canary
   hash>`: a terminal canary re-enters the ladder at step 0), `planedit` (inserts
@@ -360,7 +374,20 @@ such as the recovery half of a podkill, carries both ids.
 - **`fault=<kind>:canary-<state>`** — the existing faults (`podkill`,
   `ctrlrestart`, `quota:<n>`, `cordon:source`) fired at a canary hook instead
   of `rotating`/`settling`; `victim=canary|stable` aims a podkill at the newest
-  canary pod or at an old-revision pod.
+  canary pod or at an old-revision pod. The break faults
+  (`crashloop:canary-<state>` with `form=start|load`, `imagepull:canary-<state>`)
+  break the stable side in that state: `victims=<n>` (default 1) breaks that
+  many old-revision Instances of `victimcomp=` at once, highest index first,
+  the storm shape. The verdict reads every victim as the rollout-mode break
+  does (each ends on the canary revision serving, no `RestartTriggered` event
+  names one after the bump), and the capacity floor is read with the victims
+  allowed for: the healthy Instances must hold `N - maxUnavailable - n`.
+  Every re-target verb (`rebump`, `rebump-fix`, `rtedit`) additionally
+  asserts, at a live hook, that the run open when it fired closed as
+  `Superseded`, that no Instance is left on a pre-re-target revision at
+  Stable, and that no weighted traffic target named a revision with no
+  serving pod of the primary for `TRAFFIC_GAP_POLLS` consecutive polls (the
+  same gap is reported, not failed, on every other canary case).
 - **`bump=<members>`** — bump only these group members (an engine-only or
   decoder-only change under a router unit); `img=<ref>` gives the bumped
   revision an image so the capacity gate never opens. Name the harness's
@@ -961,8 +988,15 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `isvcs/gen-restart/`, `isvcs/gen-crashloop/`, `isvcs/gen-switch/`,
   `isvcs/gen-crashloop-idle/`, `isvcs/gen-crashloop-sibling/`,
   `isvcs/gen-heal/`, `isvcs/gen-imagepull/`, `isvcs/gen-node/`,
-  `isvcs/gen-ctrlrestart/`, plus `isvcs/MANIFEST.md` (per-dimension
-  counts, constraint ledger, parked cells, missing-hook catalog).
+  `isvcs/gen-ctrlrestart/`, and the operator stories driven through a canary (`p5200`–`p5399`) →
+  `isvcs/gen-canary-crash/` (a canary rolls the fix while the running
+  revision breaks under it), `isvcs/gen-canary-second-rev/` (a second revision
+  lands while the first canary is staging or serving) and
+  `isvcs/gen-canary-podkill/` (a pod deleted by hand while the roll is paused
+  or held), plus `isvcs/MANIFEST.md` (per-dimension counts, constraint
+  ledger, missing-hook catalog). The story families are canary lanes in
+  CI: the pipeline gives every `gen-canary-*` folder the canary pod budget
+  and Prometheus.
 
 A generator owns exactly the case ids it mints. Hand-written cases share the
 feature folders with generated ones (`restart/`, `canary/`, `scale/` and

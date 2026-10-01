@@ -1,4 +1,4 @@
-# p3864: [gen] switch settling pd N=4 SurgeThenDrain to InPlaceOnly co rolling  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 co=rolling topo=pd edit=strategy:InPlaceOnly during=settling
+# p3864: [gen] switch settling pd N=4 SurgeThenDrain to InPlaceOnly co rolling  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 co=rolling topo=pd during=settling edit=strategy:InPlaceOnly
 # reason: every bumped member's updateStrategy is patched from SurgeThenDrain to InPlaceOnly right after the bump lands; a step already in flight finishes under SurgeThenDrain and every step that starts afterwards runs under InPlaceOnly; the budget (maxSurge 1, maxUnavailable 1) is valid under both; the ceiling is N+1 because a surge step can be in flight on either side of the edit; maxUnavailable 1 gives either side the one slot it needs to drain or patch, so the floor N-1 holds throughout; the group paces engine and decoder together and both carry the edit; every Instance ends on the new revision and the live spec carries InPlaceOnly
 apiVersion: ome.io/v1beta1
 kind: InferenceService

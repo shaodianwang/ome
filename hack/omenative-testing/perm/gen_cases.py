@@ -510,12 +510,16 @@ def _render_canary_step(s, ind="              "):
     return out
 
 
-def canary_block(steps, components=("engine",), prometheus=None):
+def canary_block(steps, components=("engine",), prometheus=None, ready_timeout=None):
     lines = ["  rollout:", "    groups:",
              f"        - components: [{', '.join(components)}]",
              "          canary:"]
     if prometheus is not None:
         lines.append(f"            prometheus: {flow(prometheus)}")
+    if ready_timeout is not None:
+        # The capacity-gate bound; a case that parks on purpose keeps it
+        # inside its own budget.
+        lines.append(f'            readyTimeout: "{ready_timeout}"')
     lines.append("            steps:")
     for s in steps:
         lines += _render_canary_step(s)

@@ -1,4 +1,4 @@
-# p3843: [gen] switch rotating pd N=4 InPlaceIfPossible to SurgeThenDrain  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 co=none topo=pd edit=strategy:SurgeThenDrain during=rotating
+# p3843: [gen] switch rotating pd N=4 InPlaceIfPossible to SurgeThenDrain  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 co=none topo=pd during=rotating edit=strategy:SurgeThenDrain
 # reason: every bumped member's updateStrategy is patched from InPlaceIfPossible to SurgeThenDrain at the first updated pod; a step already in flight finishes under InPlaceIfPossible and every step that starts afterwards runs under SurgeThenDrain; the budget (maxSurge 1, maxUnavailable 1) is valid under both; the ceiling is N+1 because a surge step can be in flight on either side of the edit; maxUnavailable 1 gives either side the one slot it needs to drain or patch, so the floor N-1 holds throughout; every Instance ends on the new revision and the live spec carries SurgeThenDrain
 apiVersion: ome.io/v1beta1
 kind: InferenceService

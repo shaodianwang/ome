@@ -154,7 +154,7 @@ COMPONENTS = ("engine", "decoder", "router")
 CANARY_HOOKS = {"canary-staging", "canary-serving", "canary-prehold", "canary-draining", "canary-done",
                 "canary-rollingback", "canary-rolledback", "canary-failed"}
 FAULT_PHASES = {"settling", "rotating", "migrating"}
-CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix",
+CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix", "rtedit", "podkill",
                 "rollback", "timeout-clear", "timeout-set", "scale", "repin", "resume",
                 "planedit", "planedit-repin", "groupremove", "runlost", "pairing", "quotalift"}
 PREARM_VERBS = {"rollback", "pause", "promote", "repin", "resume", "timeout-set",
@@ -192,7 +192,7 @@ HEADER_VALUES = {
     "verb": CANARY_VERBS,
     "verb2": CANARY_VERBS,
     "prearm": PREARM_VERBS,
-    "release": {"promote", "resume"},
+    "release": {"promote", "resume", "rebump-fix"},
     # The deployed controller config a cell is read against; the runner SKIPs
     # the cell where the config differs.
     "needs": {"forcedelete", "no-forcedelete"},
@@ -222,8 +222,10 @@ def _fault(v):
         return param.isdigit()
     if kind in ("podkill", "ctrlrestart"):
         return param in FAULT_PHASES or _hook(param) or (kind == "ctrlrestart" and param == "idle")
-    return {"cordon": "source", "crashloop": "old", "imagepull": "old",
-            "configkey": "missing", "node": "notready"}.get(kind) == param
+    if kind in ("crashloop", "imagepull"):
+        # the running revision breaks: from the bump (old) or at a canary hook
+        return param == "old" or _hook(param)
+    return {"cordon": "source", "configkey": "missing", "node": "notready"}.get(kind) == param
 
 
 def _edit(v):
@@ -270,7 +272,7 @@ HEADER_CHECKS = {
     "Ne": _count, "Nd": _count, "Nr": _count, "ceil_e": _count, "ceil_d": _count, "ceil_r": _count,
     "to_e": _count, "to_d": _count, "to_r": _count, "partition": _count, "failurelimit": _count,
     "minfails": _count, "verbhold": _count, "releaseafter": _count, "skipsoak": _count,
-    "ratio_tol": _count, "scale_e": _count, "scale_d": _count, "issue": _count,
+    "ratio_tol": _count, "scale_e": _count, "scale_d": _count, "issue": _count, "victims": _count,
     "rollback": _flag, "readd": _flag, "dup": _flag, "hint": _flag, "hold": _flag, "pkill": _flag,
     "blocked": _flag, "infeasible": _flag, "notimpl": _flag, "floor_hard": _flag, "floor_soft": _flag,
     "order_soft": _flag,
@@ -546,7 +548,7 @@ def canary_second_operation(h):
             return "pause"
         if verb == "pause-freeze":
             return "freeze"
-        if verb in ("rebump", "rebump-fix", "pairing"):
+        if verb in ("rebump", "rebump-fix", "rtedit", "pairing"):
             return "push"
     return ""
 
@@ -590,6 +592,9 @@ def classify_faults(h, mode, pods, strategy, verbs):
         faults.append((pod_delete_kind(pods), "one-shot", "running", "engine"))
     if h.get("pkill"):
         faults.append((pod_delete_kind(pods), "one-shot", "running", "decoder"))
+    if "podkill" in verbs:
+        # the canary verb deletes one old-revision engine pod by hand
+        faults.append((pod_delete_kind(pods), "one-shot", "running", "engine"))
     if kind == "podkill":
         component, side = podkill_victim(h, param.partition("@")[0], strategy, pods)
         faults.append((pod_delete_kind(pods), "one-shot", side, component))
@@ -708,7 +713,7 @@ def classify_overlap(h, mode, operation, second, faults, verbs):
         overlap.append("operation+fault")
     if second:
         overlap.append("operation+operation")
-    if mode == "rebump" or verbs & {"rebump", "rebump-fix"} or h.get("proto2"):
+    if mode == "rebump" or verbs & {"rebump", "rebump-fix", "rtedit"} or h.get("proto2"):
         overlap.append("two revisions in a row")
     return overlap
 
@@ -735,7 +740,7 @@ def classify_canary_steps(h, step_chunks, verbs):
     if (h.get("rollback") or "rollback" in verbs or h.get("analysis") == "breach"
             or h.get("oninconclusive") == "rollback"):
         kinds.add("rollback mid-ladder")
-    if verbs & {"rebump", "rebump-fix", "pairing"} or h.get("proto2"):
+    if verbs & {"rebump", "rebump-fix", "rtedit", "pairing"} or h.get("proto2"):
         kinds.add("re-target mid-ladder")
     if "resume" in verbs:
         kinds.add("resume")

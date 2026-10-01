@@ -1,0 +1,119 @@
+# p5279: [gen] canary retarget rtedit at staging pd N=8 s2 analysis  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=10 ceil_d=9 ceil_r=3 co=none topo=pd canary=auto during=canary-staging verb=rtedit rt=ome-coordtest-rt-p5279 analysis=pass failurelimit=1 cell=canary/Staging/newTarget[runtime]
+# reason: a runtime edit on the dedicated runtime lands before the first canary pod is Ready; the second change wins: the run re-targets to it (a new canary hash follows), the run that was open closes as Superseded, no Instance is left on the intermediate revision after Stable, and traffic never names a revision with no serving pod; every step before the cutover is gated on a passing analysis
+# Metrics-emitting ClusterServingRuntime for canary ANALYSIS tests (OEP-0015.2).
+# Same CPU-only shape + artificial startup delay as csr.yaml, but runs the
+# canary-metrics image and surfaces per-pod health knobs via the Downward API:
+#   perm.test/error-rate -> TEST_ERROR_RATE  (canary_error_rate gauge + failure fraction)
+#   perm.test/emit       -> TEST_EMIT_METRICS (false => no gate metric => inconclusive)
+# Cases set those annotations (plus the prometheus.io/scrape annotations) on the
+# ISVC engine; the harness bumps perm.test/error-rate, which BOTH rolls the
+# revision (template change) AND flips the new canary pods' emitted health.
+apiVersion: ome.io/v1beta1
+kind: ClusterServingRuntime
+metadata:
+  name: ome-coordtest-rt-p5279
+  labels:
+    ome-coordtest/managed: "true"
+spec:
+  schedulerName: ${OME_EVAL_SCHEDULER}
+  disabled: false
+  protocolVersions: [openAI]
+  supportedModelFormats:
+    - autoSelect: false
+      modelArchitecture: TestArchitecture
+      modelFormat:    { name: noop, operator: Equal, version: "1.0.0", weight: 1 }
+      modelFramework: { name: noop, operator: Equal,                  weight: 1 }
+      priority: 1
+
+  engineConfig: &metricsRunner
+    nodeSelector: { kubernetes.io/arch: ${OME_EVAL_NODE_ARCH} }
+    runner:
+      name:  ome-container
+      image: ${OME_EVAL_METRICS_IMAGE}
+      env:
+        - { name: TEST_REV,           value: "v1" }
+        - { name: TEST_STARTUP_DELAY, value: "15" }   # stretch Ready so the watcher catches peaks
+        - { name: TEST_RPS,           value: "20" }
+        # Per-pod health from the pod's OWN annotations (Downward API): one
+        # annotation bump rolls the revision AND changes the canary's metric.
+        - name: TEST_ERROR_RATE
+          valueFrom: { fieldRef: { fieldPath: "metadata.annotations['perm.test/error-rate']" } }
+        - name: TEST_EMIT_METRICS
+          valueFrom: { fieldRef: { fieldPath: "metadata.annotations['perm.test/emit']" } }
+        # Optional: error-rate decays to 0 after N seconds of serving (transient
+        # breach -> recovery, for the budget-non-exhaustion case).
+        - name: TEST_ERROR_RATE_DECAY_S
+          valueFrom: { fieldRef: { fieldPath: "metadata.annotations['perm.test/decay']" } }
+      ports: [ { containerPort: 8080, name: http, protocol: TCP } ]
+      # Startup probe absorbs the 15s startup delay (server doesn't listen until then).
+      startupProbe:   { httpGet: { path: /, port: 8080 }, periodSeconds: 2, failureThreshold: 30 }
+      readinessProbe: { httpGet: { path: /, port: 8080 }, periodSeconds: 2, failureThreshold: 2 }
+      livenessProbe:  { httpGet: { path: /, port: 8080 }, periodSeconds: 5, failureThreshold: 3 }
+      resources:
+        requests: { cpu: 50m,  memory: 64Mi }
+        limits:   { cpu: 200m, memory: 128Mi }
+
+  decoderConfig: *metricsRunner
+  routerConfig:  *metricsRunner
+
+---
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p5279 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-rt-p5279, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 2, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder, router]
+          canary:
+            steps:
+              - capacity: "10%"
+                traffic: 10
+                analysis:
+                  interval: "20s"
+                  failureLimit: 1
+                  initialDelay: "20s"
+                  metrics:
+                    - name: error_rate
+                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'
+                      operator: LTE
+                      threshold: "0.05"
+              - capacity: "30%"
+                traffic: 30
+                analysis:
+                  interval: "20s"
+                  failureLimit: 1
+                  initialDelay: "20s"
+                  metrics:
+                    - name: error_rate
+                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'
+                      operator: LTE
+                      threshold: "0.05"
+              - capacity: "60%"
+                traffic: 60
+                analysis:
+                  interval: "20s"
+                  failureLimit: 1
+                  initialDelay: "20s"
+                  metrics:
+                    - name: error_rate
+                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'
+                      operator: LTE
+                      threshold: "0.05"
+              - { capacity: "100%", traffic: 100 }

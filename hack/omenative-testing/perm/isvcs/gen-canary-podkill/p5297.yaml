@@ -1,0 +1,23 @@
+# p5297: [gen] canary podkill heldpaused engine N=8 rp RecreateInstance  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 co=none topo=engine canary=auto bump=engine img=example.com/canary-test/missing:none during=canary-staging verb=pause verbhold=45 verb2=podkill during2=canary-staging victim=stable victimcomp=engine release=rebump-fix releaseafter=60 terminal=Stable cell=canary/Staging/capacityDropped[stable]
+# reason: one old-revision engine pod is deleted by hand while the new revision is held by an image that cannot start and the operator has paused the roll; its replacement comes back labelled as what it runs (the image its revision's pods ran, never the new template under the old label), and after a fixed image under the pause and then its lift the roll finishes with every Instance on the final revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p5297 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            readyTimeout: "180s"
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

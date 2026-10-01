@@ -1,4 +1,4 @@
-# p3881: [gen] switch rotating pd N=4 InPlaceOnly to RecreatePod co rolling  Ne=4 Nd=4 Nr=2 ceil_e=4 ceil_d=4 ceil_r=2 co=rolling topo=pd edit=strategy:RecreatePod during=rotating
+# p3881: [gen] switch rotating pd N=4 InPlaceOnly to RecreatePod co rolling  Ne=4 Nd=4 Nr=2 ceil_e=4 ceil_d=4 ceil_r=2 co=rolling topo=pd during=rotating edit=strategy:RecreatePod
 # reason: every bumped member's updateStrategy is patched from InPlaceOnly to RecreatePod at the first updated pod; a step already in flight finishes under InPlaceOnly and every step that starts afterwards runs under RecreatePod; the budget (maxSurge 0, maxUnavailable 1) is valid under both; neither side surges, so the ceiling is N; maxUnavailable 1 gives either side the one slot it needs to drain or patch, so the floor N-1 holds throughout; the group paces engine and decoder together and both carry the edit; every Instance ends on the new revision and the live spec carries RecreatePod
 apiVersion: ome.io/v1beta1
 kind: InferenceService

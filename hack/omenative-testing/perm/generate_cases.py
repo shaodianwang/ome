@@ -4,7 +4,7 @@
 Emits the constraint-filtered cross product of
     topology x updateStrategy x failure verb x injection phase x
     restartPolicy x pause
-into eleven generator-owned folders, using ONLY verbs and hooks the runners
+into fourteen generator-owned folders, using ONLY verbs and hooks the runners
 (run.py + the KIND CI lane) already implement:
 
     gen-rollout/   p1000+  baseline revision-bump rollouts (failure=none)
@@ -63,6 +63,15 @@ into eleven generator-owned folders, using ONLY verbs and hooks the runners
                           mid-scale-down, crossed with topology x strategy
                           (x a rolling group on PD rolls); the operation
                           resumes from status and converges
+    gen-canary-crash/    p5200+  a canary rolls the fix while the running
+                          revision breaks under it (crashloop start|load,
+                          imagepull, one or several Instances at once)
+    gen-canary-second-rev/ p5250+  a second revision (an ISVC re-bump or a
+                          runtime edit) lands while the first canary is
+                          staging or serving, with and without analysis
+    gen-canary-podkill/  p5290+  a pod deleted by hand while the roll is
+                          paused or held; the replacement is labelled as
+                          what it runs and the roll finishes
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -170,6 +179,7 @@ import sys
 from pathlib import Path
 
 import gen_cases as lib   # single source of truth for YAML body rendering
+import runtime_fixtures
 
 HERE = Path(__file__).parent.resolve()
 ISVCS = HERE / "isvcs"
@@ -187,6 +197,9 @@ GEN_BLOCKS = {
     "gen-imagepull": (3400, 3800),
     "gen-node": (4200, 4600),
     "gen-ctrlrestart": (4600, 5000),
+    "gen-canary-crash": (5200, 5250),
+    "gen-canary-second-rev": (5250, 5290),
+    "gen-canary-podkill": (5290, 5400),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -463,9 +476,15 @@ def shape_tag(topo, w):
     return f"{topo} W{w}" if is_mn(topo) else topo
 
 
+# The keys the hot-core families emit come first, in their order; the canary
+# families' keys follow the closing co= topo= pair, so the hot-core headers
+# read as they always have.
 GEN_HDR_ORDER = ["mode", "Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r",
                  "restart", "kill", "pause", "fault", "floor_soft", "order_soft",
-                 "co", "topo"]
+                 "co", "topo",
+                 "canary", "bump", "img", "form", "victims", "during", "verb", "verbhold",
+                 "verb2", "during2", "victim", "victimcomp", "release", "releaseafter", "rt",
+                 "analysis", "failurelimit", "terminal", "nophase", "cell"]
 
 
 def header(name, desc, kv):
@@ -1240,6 +1259,210 @@ def emit_ctrlrestart(add):
                         case_comps if case_comps is not None else comps(topo, n, w, life, d_life=d_life),
                         _ctrl_reason(cond, strat, topo, co), meta,
                         cell=("ctrlrestart", cond, topo, w, strat, co), coord=coord)
+# ── gen-canary-*: operator stories driven through a canary ──────────────────
+# Every story family walks the same ladder: four steps of capacity ahead of
+# traffic with a timed soak in place of an analysis gate, on a
+# fleet of STORY_N single-pod Instances, the engine's surge budget at one
+# and two, on the engine-only and the prefill/decode shape.
+STORY_LADDER = [("10%", 10), ("30%", 30), ("60%", 60), ("100%", 100)]
+STORY_N = 8
+STORY_SURGES = [1, 2]
+STORY_TOPOS = ["engine", "pd"]
+# The stable side breaks while the canary walks: each break kind and form,
+# this many Instances at once, at the first step's split.
+STORM_BREAKS = [("crashloop", "start"), ("crashloop", "load"), ("imagepull", "start")]
+STORM_VICTIMS = [1, 3]
+STORM_HOOK = "canary-serving@0"
+# A second revision while the first canary is in flight: the change that
+# lands it and the state it lands in, with and without an analysis gate.
+RETARGET_CHANGES = ["rebump", "rtedit"]
+RETARGET_HOOKS = ["canary-staging", "canary-serving@0"]
+RETARGET_GATES = [None, "pass"]
+# A pod deleted by hand while the roll is paused or held: at a manual gate,
+# under the operator's pause, held by an image that cannot start, and held
+# that way under a pause.
+PODKILL_SHAPES = ["gate", "paused", "held", "heldpaused"]
+# The image a healthy second revision runs in the podkill family, so a
+# replacement rebuilt from the new template under the old label shows.
+ALT_IMAGE = "${OME_EVAL_NGINX_ALT_IMAGE}"
+# The capacity-gate bound where the podkill case wants the park (held) and
+# where the gate must outlast the pause and the fix (heldpaused); how long
+# the pause and the manual gate hold after the deletion, and the delay of
+# the fix after the deletion under the pause.
+HELD_READY_TIMEOUT, HELD_PAUSED_READY_TIMEOUT = "90s", "180s"
+PODKILL_PAUSE_HOLD_S, PODKILL_GATE_HOLD_S, PODKILL_RELEASE_AFTER_S = 45, 30, 60
+
+CSR_SINGLE_TEXT = (HERE / "runtime" / "csr.yaml").read_text()
+CSR_METRICS_TEXT = (HERE / "runtime" / "csr-metrics.yaml").read_text()
+METRICS_ENV_HEAD = '      env:\n        - { name: TEST_STARTUP_DELAY, value: "15" }'
+
+
+def dedicated_runtime(name, metrics):
+    """The fixture runtime under a per-case name, so a runtime edit touches
+    one case. The metrics runtime gets TEST_REV first in its env list: the
+    entry the runtime env edit rewrites."""
+    if not metrics:
+        return CSR_SINGLE_TEXT.replace("ome-coordtest-cpu", name)
+    text = CSR_METRICS_TEXT.replace("ome-coordtest-metrics", name)
+    if METRICS_ENV_HEAD not in text:
+        sys.exit("csr-metrics.yaml: the runner env list does not start as the generator expects")
+    return text.replace(METRICS_ENV_HEAD,
+                        '      env:\n        - { name: TEST_REV,           value: "v1" }\n'
+                        '        - { name: TEST_STARTUP_DELAY, value: "15" }', 1)
+
+
+def story_comps(topo, surge, rp, ann=None):
+    """The story fleet: STORY_N single-pod Instances per Component, the
+    engine surging `surge`, the restart policy on engine and decoder, the
+    router on the fixture default."""
+    e_life = lib.lifecycle(strat="SurgeThenDrain", surge=surge, unavail=0, restart=RP_FULL[rp])
+    d_life = lib.lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, restart=RP_FULL[rp]) if is_pd(topo) else None
+    cs = comps(topo, STORY_N, 0, e_life, d_life=d_life)
+    if ann:
+        for c in cs:
+            c["ann"] = dict(ann)
+    return cs
+
+
+def story_kv(topo, surge):
+    n = STORY_N
+    return dict(mode="canary", **counts(topo, n), ceil_e=n + surge,
+                ceil_d=(n + 1 if is_pd(topo) else 0), ceil_r=(lib.NR + 1 if is_pd(topo) else 0))
+
+
+def story_ladder(policy="auto", gate=None):
+    """The four-step ladder with timed soaks (auto), manual gates, or an
+    analysis gate on every step but the cutover."""
+    if gate:
+        return ([lib.astep(nc, tw, lib.analysis_spec()) for nc, tw in STORY_LADDER[:-1]]
+                + [lib.astep(*STORY_LADDER[-1])])
+    return lib.canary_steps(policy, *STORY_LADDER)
+
+
+def story_group(case_comps, steps, ready_timeout=None):
+    return lib.canary_block(steps, components=[c["comp"] for c in case_comps], ready_timeout=ready_timeout)
+
+
+def _storm_label(kind, form):
+    return kind if kind == "imagepull" else f"{kind}:{form}"
+
+
+def _storm_cell(kind, form):
+    return {("crashloop", "start"): "crashStart", ("crashloop", "load"): "crashLoad",
+            ("imagepull", "start"): "imagePull"}[(kind, form)]
+
+
+def _storm_reason(kind, form, victims, rp):
+    how = {("crashloop", "start"): "crash at every start",
+           ("crashloop", "load"): "die after Ready and come back between crashes",
+           ("imagepull", "start"): "sit in ImagePullBackOff"}[(kind, form)]
+    return (f"{victims} old-revision engine Instance(s) {how} from the first split on, under restart policy "
+            f"{RP_FULL[rp]}; the canary walks all four steps to Stable inside its budgets, every broken Instance "
+            f"ends on the canary revision serving, no repair is recorded for one after the bump, and the healthy "
+            f"Instances keep serving above N-{victims}")
+
+
+def emit_canary_crash(add):
+    for topo in STORY_TOPOS:
+        for surge in STORY_SURGES:
+            for kind, form in STORM_BREAKS:
+                for rp in RESTARTS:
+                    for victims in STORM_VICTIMS:
+                        kv = story_kv(topo, surge)
+                        kv.update(canary="auto", fault=f"{kind}:{STORM_HOOK}")
+                        if kind == "crashloop":
+                            kv["form"] = form
+                        kv.update(victims=victims, nophase="Failed",
+                                  cell=f"canary/Serving/stableBroken[{_storm_cell(kind, form)}]",
+                                  co="none", topo=topo)
+                        case_comps = story_comps(topo, surge, rp)
+                        desc = (f"{GEN_MARK} canary crash storm {_storm_label(kind, form)} {shape_tag(topo, 0)} "
+                                f"N={STORY_N} s{surge} rp {rp} victims {victims}")
+                        meta = dict(strat="SurgeThenDrain", verb=f"{_storm_label(kind, form)}@canary", rp=rp)
+                        add("gen-canary-crash", desc, kv, case_comps, _storm_reason(kind, form, victims, rp), meta,
+                            cell=("storm", kind, form, topo, surge, rp, victims),
+                            coord=story_group(case_comps, story_ladder("auto")))
+
+
+def _retarget_reason(change, hook, gate):
+    what = "a second service revision" if change == "rebump" else "a runtime edit on the dedicated runtime"
+    when = ("before the first canary pod is Ready" if hook.startswith("canary-staging")
+            else "while the first canary serves its first split")
+    out = (f"{what} lands {when}; the second change wins: the run re-targets to it (a new canary hash follows), "
+           f"the run that was open closes as Superseded, no Instance is left on the intermediate revision after "
+           f"Stable, and traffic never names a revision with no serving pod")
+    if gate:
+        out += "; every step before the cutover is gated on a passing analysis"
+    return out
+
+
+def emit_canary_retarget(add):
+    for topo in STORY_TOPOS:
+        for surge in STORY_SURGES:
+            for change in RETARGET_CHANGES:
+                for hook in RETARGET_HOOKS:
+                    for gate in RETARGET_GATES:
+                        kv = story_kv(topo, surge)
+                        state = "Staging" if hook.startswith("canary-staging") else "Serving"
+                        kv.update(canary="auto", during=hook, verb=change)
+                        if gate:
+                            kv.update(analysis=gate, failurelimit=1)
+                        kv.update(cell=f"canary/{state}/newTarget[{'isvc' if change == 'rebump' else 'runtime'}]",
+                                  co="none", topo=topo)
+                        case_comps = story_comps(topo, surge, "None", ann=(lib.METRICS_ANN if gate else None))
+                        desc = (f"{GEN_MARK} canary retarget {change} at {hook.partition('@')[0].removeprefix('canary-')} "
+                                f"{shape_tag(topo, 0)} N={STORY_N} s{surge}" + (" analysis" if gate else ""))
+                        meta = dict(strat="SurgeThenDrain", verb=f"{change}@{hook}", rp="None")
+                        add("gen-canary-second-rev", desc, kv, case_comps, _retarget_reason(change, hook, gate), meta,
+                            cell=("retarget", change, hook, topo, surge, gate),
+                            coord=story_group(case_comps, story_ladder("auto", gate)),
+                            runtime=(lib.CSR_METRICS if gate else None), dedicated=(change == "rtedit"))
+
+
+def _deleted_pod_reason(shape):
+    where = {"gate": "while the ladder waits at its first manual gate",
+             "paused": "while the operator's pause holds the first split",
+             "held": "while the new revision is held at the capacity gate by an image that cannot start",
+             "heldpaused": "while the new revision is held by an image that cannot start and the operator has paused the roll"}[shape]
+    resume = {"gate": "the promote", "paused": "the lift of the pause", "held": "a fixed image once the gate has parked",
+              "heldpaused": "a fixed image under the pause and then its lift"}[shape]
+    return (f"one old-revision engine pod is deleted by hand {where}; its replacement comes back labelled as what it "
+            f"runs (the image its revision's pods ran, never the new template under the old label), and after {resume} "
+            f"the roll finishes with every Instance on the final revision")
+
+
+def emit_canary_podkill(add):
+    for topo in STORY_TOPOS:
+        for rp in RESTARTS:
+            for shape in PODKILL_SHAPES:
+                kv = story_kv(topo, 1)
+                case_comps = story_comps(topo, 1, rp)
+                held = shape in ("held", "heldpaused")
+                kv.update(canary=("manual" if shape == "gate" else "auto"),
+                          bump=",".join(c["comp"] for c in case_comps),
+                          img=(runtime_fixtures.UNPULLABLE_IMAGE if held else ALT_IMAGE))
+                if shape == "gate":
+                    kv.update(during=STORM_HOOK, verb="podkill", verbhold=PODKILL_GATE_HOLD_S)
+                elif shape == "paused":
+                    kv.update(during=STORM_HOOK, verb="pause", verbhold=PODKILL_PAUSE_HOLD_S,
+                              verb2="podkill", during2="canary-serving")
+                elif shape == "held":
+                    kv.update(during="canary-staging", verb="podkill", verb2="rebump-fix", during2="canary-failed",
+                              terminal="Stable")
+                else:
+                    kv.update(during="canary-staging", verb="pause", verbhold=PODKILL_PAUSE_HOLD_S,
+                              verb2="podkill", during2="canary-staging",
+                              release="rebump-fix", releaseafter=PODKILL_RELEASE_AFTER_S, terminal="Stable")
+                kv.update(victim="stable", victimcomp="engine",
+                          cell=f"canary/{'Staging' if held else 'Serving'}/capacityDropped[stable]",
+                          co="none", topo=topo)
+                ready_timeout = {"held": HELD_READY_TIMEOUT, "heldpaused": HELD_PAUSED_READY_TIMEOUT}.get(shape)
+                desc = f"{GEN_MARK} canary podkill {shape} {shape_tag(topo, 0)} N={STORY_N} rp {rp}"
+                meta = dict(strat="SurgeThenDrain", verb=f"podkill@{shape}", rp=rp)
+                add("gen-canary-podkill", desc, kv, case_comps, _deleted_pod_reason(shape), meta,
+                    cell=("podkill", shape, topo, rp),
+                    coord=story_group(case_comps, story_ladder("manual" if shape == "gate" else "auto"),
+                                         ready_timeout=ready_timeout))
 
 
 # ── assembly ─────────────────────────────────────────────────────────────────
@@ -1250,9 +1473,12 @@ def build_outputs():
     rows = []   # (folder, case id, kv, meta) for the manifest
     parked_used = set()
 
-    def add(folder, desc, kv, case_comps, reason, meta, cell, coord=None, parked=None, body=None):
+    def add(folder, desc, kv, case_comps, reason, meta, cell, coord=None, parked=None, body=None,
+            runtime=None, dedicated=False):
         """body: the case body as a function of the minted name, for a family
-        whose fixtures carry the case id; the plain render otherwise."""
+        whose fixtures carry the case id; the plain render otherwise. A
+        dedicated case ships its own runtime under a per-case name, so a
+        runtime edit touches this case alone."""
         lo, hi = GEN_BLOCKS[folder]
         cid = counters[folder]
         if cid >= hi:
@@ -1270,7 +1496,15 @@ def build_outputs():
             if inv_scope:
                 kv["inv_xfail"] = inv_scope
             meta = dict(meta, parked=issue)
-        text = body(name) if body else lib.render(name, case_comps, coord=coord)
+        before = None
+        if dedicated:
+            rt_name = f"ome-coordtest-rt-{name}"
+            kv = dict(kv, rt=rt_name)
+            before = dedicated_runtime(rt_name, metrics=(runtime == lib.CSR_METRICS))
+            runtime = rt_name
+        text = body(name) if body else lib.render(name, case_comps, coord=coord, runtime=runtime)
+        if before:
+            text = before + "\n---\n" + text
         outputs[f"{folder}/{name}.yaml"] = case_yaml(name, desc, kv, reason, text)
         rows.append((folder, name, dict(kv), dict(meta)))
 
@@ -1286,6 +1520,9 @@ def build_outputs():
     emit_node(add)
     emit_node_relocation(add)
     emit_ctrlrestart(add)
+    emit_canary_crash(add)
+    emit_canary_retarget(add)
+    emit_canary_podkill(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -1448,6 +1685,25 @@ def manifest(rows):
         " for the two rollout conditions and dormant under a migration and a"
         " scale-down, where both strategies still run for the family's symmetry;"
         " a rolling group is crossed in on the PD rollout conditions only.",
+        "- The gen-canary-* families drive operator stories through a canary at small size:"
+        f" {STORY_N} single-pod Instances, SurgeThenDrain with the engine surge"
+        f" at {' and '.join(str(s) for s in STORY_SURGES)}, a four-step ladder"
+        f" ({'/'.join(str(tw) for _nc, tw in STORY_LADDER)} percent capacity and"
+        " traffic) with a timed soak in place of an analysis gate, on the"
+        " engine and prefill/decode shapes only (the stories run single-pod"
+        " Instances; the gang shapes are the crashloop family's).",
+        "- gen-canary-crash breaks the stable side at the first split"
+        f" ({STORM_HOOK}): every break kind and form, both restart policies,"
+        f" {' and '.join(str(v) for v in STORM_VICTIMS)} victim Instances at once."
+        " The floor is read with the victims allowed for, not waived.",
+        "- gen-canary-second-rev lands the second revision as an ISVC re-bump or a"
+        " runtime edit (a dedicated runtime per case), at staging and at the"
+        " first split, with and without an analysis gate on every step before"
+        " the cutover; the restart policy is None (a re-target repairs nothing).",
+        "- gen-canary-podkill deletes one old-revision engine pod at a manual"
+        " gate, under the operator's pause, under a capacity gate held by an"
+        " image that cannot start, and under that gate paused; the engine surge"
+        " is 1 (the budget is dormant while the roll is held).",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

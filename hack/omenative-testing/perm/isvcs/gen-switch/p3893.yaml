@@ -1,4 +1,4 @@
-# p3893: [gen] switch rotating engine-mn W1 N=2 SurgeThenDrain to InPlaceIfPossible  Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 co=none topo=engine-mn edit=strategy:InPlaceIfPossible during=rotating
+# p3893: [gen] switch rotating engine-mn W1 N=2 SurgeThenDrain to InPlaceIfPossible  Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 co=none topo=engine-mn during=rotating edit=strategy:InPlaceIfPossible
 # reason: every bumped member's updateStrategy is patched from SurgeThenDrain to InPlaceIfPossible at the first updated pod; a step already in flight finishes under SurgeThenDrain and every step that starts afterwards runs under InPlaceIfPossible; the budget (maxSurge 1, maxUnavailable 1) is valid under both; the ceiling is N+1 because a surge step can be in flight on either side of the edit; maxUnavailable 1 gives either side the one slot it needs to drain or patch, so the floor N-1 holds throughout; a gang runs either in-place variant as a whole-gang recreate; every Instance ends on the new revision and the live spec carries InPlaceIfPossible
 apiVersion: ome.io/v1beta1
 kind: InferenceService

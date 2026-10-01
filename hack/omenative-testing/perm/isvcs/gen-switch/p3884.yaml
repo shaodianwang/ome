@@ -1,4 +1,4 @@
-# p3884: [gen] switch settling pd N=4 SurgeThenDrain rp None to RecreateInstance co rolling  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 co=rolling topo=pd edit=restartPolicy:RecreateInstanceOnPodRestart during=settling
+# p3884: [gen] switch settling pd N=4 SurgeThenDrain rp None to RecreateInstance co rolling  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 co=rolling topo=pd during=settling edit=restartPolicy:RecreateInstanceOnPodRestart
 # reason: the roll runs under SurgeThenDrain (maxSurge 1, maxUnavailable 0) and every bumped member's restartPolicy is patched from None to RecreateInstanceOnPodRestart right after the bump lands; the policy decides what a pod restart rebuilds and nothing restarts here, so the roll surges within its ceiling N+1 with the floor at N and converges on the new revision; the group paces engine and decoder together and both carry the edit; the live spec carries RecreateInstanceOnPodRestart
 apiVersion: ome.io/v1beta1
 kind: InferenceService

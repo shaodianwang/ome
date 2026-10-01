@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **1307**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **1403**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -20,14 +20,17 @@ Total generated cases: **1307**. The whole-corpus per-PR cap (hand + generated) 
 | gen-imagepull | 56 | p3400..p3455 |
 | gen-node | 96 | p4200..p4295 |
 | gen-ctrlrestart | 34 | p4600..p4633 |
+| gen-canary-crash | 48 | p5200..p5247 |
+| gen-canary-second-rev | 32 | p5250..p5281 |
+| gen-canary-podkill | 16 | p5290..p5305 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 190 |
+| engine | 238 |
 | engine-mn | 341 |
-| pd | 334 |
+| pd | 382 |
 | pd-mn | 442 |
 
 ### By update strategy
@@ -38,7 +41,7 @@ Total generated cases: **1307**. The whole-corpus per-PR cap (hand + generated) 
 | InPlaceIfPossible | 236 |
 | InPlaceOnly | 236 |
 | RecreatePod | 275 |
-| SurgeThenDrain | 520 |
+| SurgeThenDrain | 616 |
 
 ### By failure verb / phase
 
@@ -47,10 +50,12 @@ Total generated cases: **1307**. The whole-corpus per-PR cap (hand + generated) 
 | configkey:after-failed | 16 |
 | configkey:after-settle | 16 |
 | crashloop:load | 108 |
+| crashloop:load@canary | 16 |
 | crashloop:load@idle | 28 |
 | crashloop:load@sibling | 10 |
 | crashloop:start | 108 |
 | crashloop:start+edit:rotating | 12 |
+| crashloop:start@canary | 16 |
 | crashloop:start@idle | 56 |
 | crashloop:start@sibling | 20 |
 | ctrlrestart:canary | 6 |
@@ -62,6 +67,7 @@ Total generated cases: **1307**. The whole-corpus per-PR cap (hand + generated) 
 | edit:settling | 84 |
 | imagepull:idle | 8 |
 | imagepull:settling | 48 |
+| imagepull@canary | 16 |
 | kill | 187 |
 | node:parked | 32 |
 | node:relocated | 32 |
@@ -69,21 +75,29 @@ Total generated cases: **1307**. The whole-corpus per-PR cap (hand + generated) 
 | none | 72 |
 | podkill:rotating | 160 |
 | podkill:settling | 160 |
+| podkill@gate | 4 |
+| podkill@held | 4 |
+| podkill@heldpaused | 4 |
+| podkill@paused | 4 |
+| rebump@canary-serving@0 | 8 |
+| rebump@canary-staging | 8 |
+| rtedit@canary-serving@0 | 8 |
+| rtedit@canary-staging | 8 |
 
 ### By restartPolicy
 
 | value | cases |
 |---|---|
 | (unset — baseline) | 262 |
-| None | 487 |
-| RecreateInstance | 558 |
+| None | 551 |
+| RecreateInstance | 590 |
 
 ### By pause
 
 | value | cases |
 |---|---|
 | freeze | 38 |
-| off | 1193 |
+| off | 1289 |
 | true | 76 |
 
 ### By coordination
@@ -92,7 +106,7 @@ Total generated cases: **1307**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 24 |
 | canary | 24 |
-| none | 1001 |
+| none | 1097 |
 | rolling | 240 |
 | seq | 18 |
 
@@ -135,7 +149,7 @@ Total generated cases: **1307**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 977 |
+| (no break) | 1073 |
 | decoder | 60 |
 | engine | 270 |
 
@@ -310,6 +324,10 @@ Total generated cases: **1307**. The whole-corpus per-PR cap (hand + generated) 
 - imagepull has one form (an image that never pulls has no after-Ready form) and runs each strategy at its canonical budget only; its idle half carries no group, since a grouped repair's hold is its own family.
 - node:notready reads the fate of a Ready Instance on a dead node under the deployed force-delete policy, a lane dimension: without `lifecycle.forceDelete` (the chart default) nothing frees the pod names a silent node holds, so the outcomes are `parked` (nothing rebuilds it while the node is down) and `repaired` (the kubelet returns and the pods it never stopped serve again), both at `lift=after-settle`; with the policy the names are freed once the node's unreachable evidence is older than the threshold and the Instance is rebuilt elsewhere while the node is down, `relocated` at `lift=after-recover`. `needs=` pins parked to the plain lane and relocated to the force-delete lane (the runner SKIPs where the controller config differs); repaired holds under both. The migration axis is Auto (the default) and Never — the API has no mode that admits explicit requests but not relocation, and neither mode moves a Ready Instance (Auto relocates on an expired attempt's deadline, which a Ready Instance never has); restart policy and an idle rolling group change nothing either, and each cell says why. The update strategy is dormant at idle (one canonical budget).
 - ctrlrestart has no hook inside a repair (one fault per case; the idle-break handler fires no second one), so a restart while a crash-loop repair is open is not emitted. The strategy axis is live for the two rollout conditions and dormant under a migration and a scale-down, where both strategies still run for the family's symmetry; a rolling group is crossed in on the PD rollout conditions only.
+- The gen-canary-* families drive operator stories through a canary at small size: 8 single-pod Instances, SurgeThenDrain with the engine surge at 1 and 2, a four-step ladder (10/30/60/100 percent capacity and traffic) with a timed soak in place of an analysis gate, on the engine and prefill/decode shapes only (the stories run single-pod Instances; the gang shapes are the crashloop family's).
+- gen-canary-crash breaks the stable side at the first split (canary-serving@0): every break kind and form, both restart policies, 1 and 3 victim Instances at once. The floor is read with the victims allowed for, not waived.
+- gen-canary-second-rev lands the second revision as an ISVC re-bump or a runtime edit (a dedicated runtime per case), at staging and at the first split, with and without an analysis gate on every step before the cutover; the restart policy is None (a re-target repairs nothing).
+- gen-canary-podkill deletes one old-revision engine pod at a manual gate, under the operator's pause, under a capacity gate held by an image that cannot start, and under that gate paused; the engine surge is 1 (the budget is dormant while the roll is held).
 - Kill-family cells pinned by hand-written restart/ cases are excluded:
 
   - p130: engine SurgeThenDrain rp=None

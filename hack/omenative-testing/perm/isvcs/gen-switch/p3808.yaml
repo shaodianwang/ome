@@ -1,4 +1,4 @@
-# p3808: [gen] switch settling engine N=4 RecreatePod to InPlaceIfPossible  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 co=none topo=engine edit=strategy:InPlaceIfPossible during=settling
+# p3808: [gen] switch settling engine N=4 RecreatePod to InPlaceIfPossible  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 co=none topo=engine during=settling edit=strategy:InPlaceIfPossible
 # reason: every bumped member's updateStrategy is patched from RecreatePod to InPlaceIfPossible right after the bump lands; a step already in flight finishes under RecreatePod and every step that starts afterwards runs under InPlaceIfPossible; the budget (maxSurge 0, maxUnavailable 1) is valid under both; neither side surges, so the ceiling is N; maxUnavailable 1 gives either side the one slot it needs to drain or patch, so the floor N-1 holds throughout; every Instance ends on the new revision and the live spec carries InPlaceIfPossible
 apiVersion: ome.io/v1beta1
 kind: InferenceService
