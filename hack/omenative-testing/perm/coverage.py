@@ -237,7 +237,8 @@ def _edit(v):
 
 
 def _during(v):
-    return v in {"rollout", "migrate", "idle", "settling", "rotating"} or _hook(v)
+    # the mid-roll hooks, the rollback's draining / last / held moments, or a canary hook
+    return v in {"rollout", "migrate", "idle", "settling", "rotating", "draining", "last", "held"} or _hook(v)
 
 
 def _lift(v):
@@ -526,6 +527,8 @@ def classify_operation(h, mode, size):
     edit = str(h.get("edit", ""))
     if edit.startswith(("strategy:", "restartPolicy:")):
         return "strategy or policy edit", f"{edit} at {during}", "push"
+    if h.get("rollback"):
+        return "rollback", f"the starting revision re-applied at {during}", "push"
     if during == "idle":
         return "steady state", "persistent fault at idle", ""
     return "push", "env edit" if edit == "env" else "annotation bump", ""
@@ -676,6 +679,7 @@ def hook_timing(hook, h, canary_steps):
     return {
         "settling": "settling", "rotating": "rotating", "migrating": "migrating",
         "rollout": "rotating", "migrate": "migrating", "idle": "steady state",
+        "draining": "draining", "last": "last Instance", "held": "held floor",
         "canary-staging": "canary staging", "canary-prehold": "canary pre-hold",
         "canary-draining": "canary draining", "canary-rollingback": "canary rolling back",
         "canary-rolledback": "canary rolled back", "canary-done": "canary done",

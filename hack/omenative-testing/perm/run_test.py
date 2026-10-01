@@ -4796,3 +4796,278 @@ class GeneratedCanaryFaultFamiliesTest(unittest.TestCase):
             sys.path.pop(0)
         self.assertTrue(gp._eval_feature_is_canary("gen-canary-fault-old"))
         self.assertTrue(gp._eval_feature_is_canary("gen-canary-fault-new"))
+
+
+class PlainRollbackTest(unittest.TestCase):
+    """rollback=1 on a rollout case: the header, the five hooks, the patch
+    that re-applies the starting revision, and the operator's end-state
+    verdict (back on the starting revision and serving, nothing of the new
+    revision left, rows settled, the grouped run superseded)."""
+
+    BASE = "# p999: x mode=rollout Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    @staticmethod
+    def _pod(comp, inst, hash_, ready=True, serving=True, newanno=False, uid=None, runner="default"):
+        return {"comp": comp, "inst": str(inst), "runner": runner, "alive": True, "ready": ready,
+                "serving": serving, "hash": hash_, "newanno": newanno, "uid": uid or f"{comp}{inst}{hash_}"}
+
+    def test_header_names_the_hook_and_the_break(self):
+        for hook in ("settling", "rotating", "draining", "last"):
+            self.assertEqual([], self._errs(self.BASE + f" rollback=1 during={hook}"), hook)
+        self.assertEqual([], self._errs(self.BASE + " rollback=1 during=held break=stuck"))
+        self.assertTrue(any("needs during=" in e for e in self._errs(self.BASE + " rollback=1")))
+        self.assertTrue(any("is a rollback's hook" in e for e in self._errs(self.BASE + " during=last")))
+        self.assertTrue(any("both or neither" in e for e in self._errs(self.BASE + " rollback=1 during=held")))
+        self.assertTrue(any("both or neither" in e for e in self._errs(self.BASE + " rollback=1 during=rotating break=stuck")))
+        self.assertTrue(any("needs rollback=1 during=held" in e for e in self._errs(self.BASE + " break=stuck")))
+        self.assertTrue(any("would both fire" in e for e in self._errs(self.BASE + " rollback=1 edit=strategy:RecreatePod during=rotating")))
+        kill = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
+        self.assertTrue(any("mode=rollout" in e for e in self._errs(kill + " rollback=1 during=last")))
+        canary = "# p999: x mode=canary canary=auto rollback=1 Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
+        self.assertEqual([], self._errs(canary), "the canary rollback probe keeps its meaning")
+        self.assertEqual([], self._errs(self.BASE + " fault=podkill:rotating rollback=1 during=last"),
+                         "a phase fault and a rollback may share a case")
+
+    def test_state_is_parsed_only_for_a_rollout_case(self):
+        self.assertIsNone(run._rollback_new({"mode": "canary", "rollback": 1, "during": "canary-serving"}))
+        self.assertIsNone(run._rollback_new({"during": "rotating"}))
+        rb = run._rollback_new({"rollback": 1, "during": "held", "break": "stuck"})
+        self.assertEqual(("held", True, False), (rb["hook"], rb["stuck"], rb["fired"]))
+        self.assertFalse(run._rollback_new({"rollback": 1, "during": "last"})["stuck"])
+
+    def test_break_patch_aims_the_fixture_probe_at_an_unserved_path(self):
+        probe = run._stuck_readiness()
+        self.assertEqual(run.STUCK_READINESS_PATH, probe["httpGet"]["path"])
+        self.assertEqual(run._GOOD_READINESS["httpGet"]["port"], probe["httpGet"]["port"])
+        patch = {"spec": {"engine": {"annotations": {}}, "decoder": {"annotations": {}}}}
+        run._rollback_break_patch(patch, {"engine", "decoder"}, {"engine": 1, "decoder": 2})
+        self.assertEqual(probe, patch["spec"]["engine"]["runner"]["readinessProbe"])
+        self.assertEqual({"name": run.MAIN_CONTAINER, "readinessProbe": probe}, patch["spec"]["decoder"]["leader"]["runner"])
+
+    def test_snapshot_keeps_every_bumped_member_as_it_was(self):
+        rb = run._rollback_new({"rollback": 1, "during": "settling"})
+        spec = {"engine": {"minReplicas": 4, "annotations": {"perm.test/rev": "v1"}}, "router": {"minReplicas": 2}}
+        self.assertTrue(run._rollback_snapshot(rb, spec, {"engine"}))
+        spec["engine"]["annotations"]["perm.test/rev"] = "v2"
+        self.assertEqual("v1", rb["snapshot"]["engine"]["annotations"]["perm.test/rev"], "a copy, not a view")
+        self.assertFalse(run._rollback_snapshot(run._rollback_new({"rollback": 1, "during": "settling"}), spec, {"decoder"}))
+
+    def test_each_hook_fires_at_its_moment(self):
+        olds, N, ppi, bumped = {"a"}, {"engine": 4}, {"engine": 1}, {"engine"}
+        settled = {f"e{i}": self._pod("engine", i, "a") for i in range(4)}
+        self.assertTrue(run._rollback_due(run._rollback_new({"rollback": 1, "during": "settling"}), settled, olds, ppi, N, bumped, 0.0))
+        rotating = run._rollback_new({"rollback": 1, "during": "rotating"})
+        self.assertFalse(run._rollback_due(rotating, settled, olds, ppi, N, bumped, 0.0))
+        first_new = dict(settled, e4=self._pod("engine", 0, "b", ready=False, serving=False))
+        self.assertTrue(run._rollback_due(rotating, first_new, olds, ppi, N, bumped, 0.0))
+        self.assertTrue(run._rollback_due(rotating, {"e0": self._pod("engine", 0, "a", newanno=True)}, olds, ppi, N, bumped, 0.0),
+                        "an in-place patch shows as the bumped annotation")
+        draining = run._rollback_new({"rollback": 1, "during": "draining"})
+        self.assertFalse(run._rollback_due(draining, first_new, olds, ppi, N, bumped, 0.0))
+        run._rollback_observe(draining, "engine", "b", True, bumped, olds, 5.0)
+        run._rollback_observe(draining, "decoder", "a", True, bumped, olds, 5.0)
+        run._rollback_observe(draining, "engine", "a", False, bumped, olds, 5.0)
+        self.assertIsNone(draining["first_drain_at"], "only a draining pod of the starting revision on a bumped member counts")
+        run._rollback_observe(draining, "engine", "a", True, bumped, olds, 6.0)
+        self.assertEqual(6.0, draining["first_drain_at"])
+        self.assertTrue(run._rollback_due(draining, first_new, olds, ppi, N, bumped, 0.0))
+
+    def test_last_waits_for_every_instance_but_one(self):
+        olds, N, ppi, bumped = {"a"}, {"engine": 4}, {"engine": 1}, {"engine"}
+        last = run._rollback_new({"rollback": 1, "during": "last"})
+
+        def fleet(promoted, tail=None):
+            pods = {f"e{i}": self._pod("engine", i, "b") for i in range(promoted)}
+            pods.update({f"e{i}": self._pod("engine", i, "a") for i in range(promoted, 4)})
+            pods.update(tail or {})
+            return pods
+        self.assertFalse(run._rollback_due(last, fleet(2), olds, ppi, N, bumped, 0.0))
+        self.assertTrue(run._rollback_due(last, fleet(3), olds, ppi, N, bumped, 0.0))
+        self.assertFalse(run._rollback_due(last, fleet(4), olds, ppi, N, bumped, 0.0), "the roll is complete: nothing is last")
+        self.assertFalse(run._rollback_due(last, fleet(2, {"e2": self._pod("engine", 2, "b", serving=False)}), olds, ppi, N, bumped, 0.0),
+                         "a new-revision Instance counts once it serves")
+        surging = fleet(3, {"e3b": self._pod("engine", 3, "b", ready=False, serving=False)})
+        self.assertTrue(run._rollback_due(last, surging, olds, ppi, N, bumped, 0.0),
+                        "the last Instance mid-surge is still off the new revision")
+        gang = {"l0": self._pod("engine", 0, "b", runner="leader"), "w0": self._pod("engine", 0, "a", runner="worker"),
+                "l1": self._pod("engine", 1, "a", runner="leader"), "w1": self._pod("engine", 1, "a", runner="worker")}
+        self.assertEqual(0, run._instances_on_new(gang, olds, {"engine": 2}, bumped), "a half-moved gang is not promoted")
+        gang["w0"] = self._pod("engine", 0, "b", runner="worker")
+        self.assertTrue(run._rollback_due(last, gang, olds, {"engine": 2}, {"engine": 2}, bumped, 0.0))
+
+    def test_held_needs_the_break_and_a_settled_wait(self):
+        olds, N, ppi, bumped = {"a"}, {"engine": 4}, {"engine": 1}, {"engine"}
+        stuck = {f"e{i}": self._pod("engine", i, "a") for i in range(4)}
+        stuck["e4"] = self._pod("engine", 0, "b", ready=False, serving=False)
+        unbroken = run._rollback_new({"rollback": 1, "during": "held"})
+        unbroken["first_new_at"] = 0.0
+        self.assertFalse(run._rollback_due(unbroken, stuck, olds, ppi, N, bumped, 10 * run.HELD_SETTLE_S))
+        held = run._rollback_new({"rollback": 1, "during": "held", "break": "stuck"})
+        self.assertFalse(run._rollback_due(held, stuck, olds, ppi, N, bumped, 10 * run.HELD_SETTLE_S), "no new pod seen yet")
+        run._rollback_tick(held, "p999", bumped, stuck, olds, ppi, N, 100.0, 1.0)
+        self.assertEqual(100.0, held["first_new_at"])
+        self.assertFalse(held["fired"])
+        self.assertFalse(run._rollback_due(held, stuck, olds, ppi, N, bumped, 100.0 + run.HELD_SETTLE_S - 1))
+        self.assertTrue(run._rollback_due(held, stuck, olds, ppi, N, bumped, 100.0 + run.HELD_SETTLE_S))
+        stuck["e4"] = self._pod("engine", 0, "b")
+        self.assertFalse(run._rollback_due(held, stuck, olds, ppi, N, bumped, 100.0 + run.HELD_SETTLE_S),
+                         "a Ready new-revision pod means the roll is not held")
+
+    def test_fire_replaces_each_member_with_its_snapshot_once(self):
+        olds, N, ppi, bumped = {"a"}, {"engine": 4}, {"engine": 1}, {"engine"}
+        rb = run._rollback_new({"rollback": 1, "during": "last"})
+        rb["snapshot"] = {"engine": {"minReplicas": 4, "annotations": {"perm.test/rev": "v1"}}}
+        pods = {"e0": self._pod("engine", 0, "b"), "e1": self._pod("engine", 1, "b"), "e2": self._pod("engine", 2, "b"),
+                "e3": self._pod("engine", 3, "a"), "e3b": self._pod("engine", 3, "b", ready=False, serving=False),
+                "d0": self._pod("decoder", 0, "a")}
+        calls = []
+        orig = run.kubectl
+        run.kubectl = lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0, "", "")
+        try:
+            run._rollback_tick(rb, "p999", bumped, pods, olds, ppi, N, 50.0, 40.0)
+            run._rollback_tick(rb, "p999", bumped, pods, olds, ppi, N, 51.0, 41.0)
+            self.assertEqual((True, 40.0, None), (rb["fired"], rb["fired_at"], rb["error"]))
+            self.assertEqual(1, len(calls))
+            self.assertEqual(("patch", "isvc", "p999", "--type=json"), calls[0][2:6])
+            self.assertEqual([{"op": "replace", "path": "/spec/engine", "value": rb["snapshot"]["engine"]}], json.loads(calls[0][-1]))
+            self.assertEqual({}, rb["on_start_at_fire"], "every Instance had moved or was mid-surge")
+            self.assertEqual([("engine", "0"), ("engine", "1"), ("engine", "2"), ("engine", "3")], sorted(rb["busy_at_fire"]))
+            self.assertEqual(4, rb["new_pods_at_fire"])
+            early = run._rollback_new({"rollback": 1, "during": "settling"})
+            early["snapshot"] = rb["snapshot"]
+            settled = {f"e{i}": self._pod("engine", i, "a") for i in range(4)}
+            run._rollback_tick(early, "p999", bumped, settled, olds, ppi, N, 1.0, 0.5)
+            self.assertEqual({("engine", str(i)): frozenset({f"engine{i}a"}) for i in range(4)}, early["on_start_at_fire"])
+            self.assertEqual(([], 0), (early["busy_at_fire"], early["new_pods_at_fire"]))
+            run.kubectl = lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "admission webhook denied the patch")
+            broken = run._rollback_new({"rollback": 1, "during": "settling"})
+            broken["snapshot"] = rb["snapshot"]
+            run._rollback_tick(broken, "p999", bumped, settled, olds, ppi, N, 1.0, 0.5)
+            self.assertTrue(broken["fired"])
+            self.assertIn("denied", broken["error"])
+        finally:
+            run.kubectl = orig
+
+    def test_rows_must_settle_on_the_starting_revision(self):
+        N, configured, bumped = {"engine": 2, "decoder": 0, "router": 0}, {"engine"}, {"engine"}
+        self.assertEqual("a", run._revision_hash("p999-engine-a"))
+        ok, why = run._rollback_ir_settled([inference_replica("engine", 2)], N, configured, bumped, {"a"})
+        self.assertTrue(ok, why)
+        ok, why = run._rollback_ir_settled([inference_replica("engine", 2, current="revision-b", update="revision-b")], N, configured, bumped, {"a"})
+        self.assertFalse(ok)
+        self.assertIn("not the starting revision", why)
+        ok, why = run._rollback_ir_settled([inference_replica("engine", 2, operation={"type": "Update"})], N, configured, bumped, {"a"})
+        self.assertFalse(ok)
+        self.assertIn("not settled", why)
+        self.assertFalse(run._rollback_ir_settled(None, N, configured, bumped, {"a"})[0])
+
+    def test_grouped_run_must_close_as_superseded(self):
+        orig = run._isvc_events_since
+        try:
+            run._isvc_events_since = lambda cid, since: []
+            checks = []
+            self.assertEqual("PASS", run._rollback_run_checks("p999", 1.0, False, "PASS", [], checks))
+            self.assertTrue(any("no rollout group" in c for c in checks))
+            checks = []
+            self.assertEqual("PASS", run._rollback_run_checks("p999", 1.0, True, "PASS", [], checks))
+            self.assertTrue(any("no run opened" in c for c in checks))
+            run._isvc_events_since = lambda cid, since: [
+                (run.RUN_OPENED_EVENT, "run r1 opened"),
+                (run.RUN_CLOSED_EVENT, "run r1 superseded by a new target revision; opening a fresh run"),
+                (run.RUN_OPENED_EVENT, "run r2 opened"), (run.RUN_CLOSED_EVENT, "run r2 closed: Completed")]
+            checks = []
+            self.assertEqual("PASS", run._rollback_run_checks("p999", 1.0, True, "PASS", [], checks))
+            self.assertTrue(any("closed as superseded" in c for c in checks))
+            run._isvc_events_since = lambda cid, since: [
+                (run.RUN_OPENED_EVENT, "run r1 opened"), (run.RUN_CLOSED_EVENT, "run r1 closed: Completed")]
+            notes = []
+            self.assertEqual("FAIL", run._rollback_run_checks("p999", 1.0, True, "PASS", notes, []))
+            self.assertTrue(any("superseded" in n for n in notes))
+        finally:
+            run._isvc_events_since = orig
+
+    def test_verdict_is_the_operators_end_state(self):
+        N, configured, bumped, ppi = {"engine": 2, "decoder": 0, "router": 0}, {"engine"}, {"engine"}, {"engine": 1}
+        rb = run._rollback_new({"rollback": 1, "during": "last"})
+        rb.update(fired=True, fired_at=30.0, new_pods_at_fire=1,
+                  on_start_at_fire={("engine", "0"): frozenset({"engine0a"}), ("engine", "1"): frozenset({"engine1a"})})
+        back = {"e0": self._pod("engine", 0, "a"), "e1": self._pod("engine", 1, "a", uid="rebuilt")}
+        orig_ir, orig_ev = run._fetch_initial_ir_items, run._isvc_events_since
+        try:
+            run._fetch_initial_ir_items = lambda cid: [inference_replica("engine", 2)]
+            run._isvc_events_since = lambda cid, since: []
+            notes, checks = [], []
+            self.assertEqual("PASS", run._rollback_checks(rb, "p999", "CONVERGED", 80.0, back, {"a"}, ppi, N, bumped,
+                                                          configured, False, 1.0, "PASS", notes, checks))
+            self.assertEqual([], notes)
+            self.assertTrue(any("ends on the starting revision and serving" in c for c in checks))
+            self.assertTrue(any("1 of 2 Instance(s)" in c and "rebuilt anyway" in c and "engine/1" in c for c in checks),
+                            "the needless rebuild is measured, not failed")
+            leftover = dict(back, e2=self._pod("engine", 0, "b", ready=False, serving=False))
+            notes = []
+            self.assertEqual("FAIL", run._rollback_checks(rb, "p999", "ROTATE_TIMEOUT", None, leftover, {"a"}, ppi, N, bumped,
+                                                          configured, False, 1.0, "PASS", notes, []))
+            self.assertTrue(any("new-revision pod" in n for n in notes))
+            run._fetch_initial_ir_items = lambda cid: [inference_replica("engine", 2, current="revision-b", update="revision-b")]
+            notes = []
+            self.assertEqual("FAIL", run._rollback_checks(rb, "p999", "CONVERGED", 80.0, back, {"a"}, ppi, N, bumped,
+                                                          configured, False, 1.0, "PASS", notes, []))
+            self.assertTrue(any("rows not settled" in n for n in notes))
+            run._fetch_initial_ir_items = lambda cid: [inference_replica("engine", 2)]
+            unfired = run._rollback_new({"rollback": 1, "during": "draining"})
+            notes = []
+            self.assertEqual("FAIL", run._rollback_checks(unfired, "p999", "HOOK_MISSED", None, back, {"a"}, ppi, N, bumped,
+                                                          configured, False, 1.0, "PASS", notes, []))
+            self.assertTrue(any("never fired" in n for n in notes))
+            broken = dict(rb, error="rollback at last failed: denied")
+            notes = []
+            self.assertEqual("INFRA-FAIL", run._rollback_checks(broken, "p999", "CONVERGED", 80.0, back, {"a"}, ppi, N, bumped,
+                                                                configured, False, 1.0, "PASS", notes, []))
+            self.assertTrue(any(n.startswith("INFRA-FAIL") for n in notes))
+        finally:
+            run._fetch_initial_ir_items, run._isvc_events_since = orig_ir, orig_ev
+
+    def test_generated_family_crosses_every_axis(self):
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-rollback"]
+        self.assertEqual(126, len(fam))
+        self.assertEqual(set(generate_cases.ROLLBACK_HOOKS), {m["hook"] for _n, _kv, m in fam})
+        self.assertEqual(set(generate_cases.ROLLBACK_BUDGETS), {m["strat"] for _n, _kv, m in fam})
+        self.assertEqual({"engine", "pd", "engine-mn", "pd-mn"}, {kv["topo"] for _n, kv, _m in fam})
+        self.assertEqual({"none", "rolling"}, {kv["co"] for _n, kv, _m in fam})
+        cells = {(kv["topo"], m["strat"], m["hook"], kv["co"]) for _n, kv, m in fam}
+        for topo in ("engine", "pd"):
+            for co in ("none", "rolling"):
+                self.assertNotIn((topo, "InPlaceIfPossible", "draining", co), cells,
+                                 "a single-pod in-place roll never drains")
+                self.assertIn((topo, "InPlaceIfPossible", "last", co), cells)
+                self.assertIn((f"{topo}-mn", "InPlaceIfPossible", "draining", co), cells, "a gang in-place roll recreates, so it drains")
+        for n, kv, m in fam:
+            self.assertEqual(1, kv["rollback"])
+            self.assertEqual(m["hook"], kv["during"])
+            self.assertEqual(m["hook"] == "held", kv.get("break") == "stuck", n)
+            self.assertNotIn("mode", kv)
+            surge = kv["ceil_e"] - kv["Ne"]
+            self.assertEqual(surge > 0, m["strat"] == "SurgeThenDrain", n)
+            self.assertIn(surge, (0, 1, 2))
+            if surge == 2:
+                self.assertEqual("engine", kv["topo"], "maxSurge 2 runs on the single-pod engine only")
+            if kv["topo"].startswith("pd"):
+                self.assertEqual(kv["ceil_e"] if kv["co"] == "rolling" else kv["Nd"], kv["ceil_d"], n)
+            text = outputs[f"gen-rollback/{n}.yaml"]
+            reason = text.splitlines()[1]
+            self.assertTrue(reason.startswith("# reason: the starting revision is re-applied at "), n)
+            self.assertIn("every Instance ends on it and serving", reason)
+            self.assertEqual(kv["co"] == "rolling", "closes as superseded" in reason, n)
+            self.assertIn('perm.test/rev: "v1"', text, "the starting revision carries the trigger annotation")
+            self.assertEqual(kv["co"] == "rolling", "rollingUpdate: {}" in text, n)
+            if kv["co"] == "rolling" and not kv["topo"].startswith("pd"):
+                self.assertIn("components: [engine]", text, "an engine-only group puts the roll under the run model")
+        self.assertEqual(sum(1 for _n, kv, _m in fam if kv["ceil_e"] - kv["Ne"] == 2), 10,
+                         "five hooks x two groups at maxSurge 2")

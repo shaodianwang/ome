@@ -95,7 +95,7 @@ perm/
 │   ├── rollout/           — 96 rollout cases (topology × lifecycle × coordination)
 │   ├── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
 │   ├── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/ gen-crashloop-idle/ gen-crashloop-sibling/
-│   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/  — generated hot core (see isvcs/MANIFEST.md)
+│   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/ gen-rollback/  — generated hot core (see isvcs/MANIFEST.md)
 │   └── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
@@ -698,6 +698,55 @@ strategy edit at `rotating`, so the crashing Instance, reached last, is
 fixed under the strategy the roll switched to (`floor_soft=1`, as on every
 crashloop case).
 
+### Rollback of a plain rollout (`rollback=1`, `during=`, `break=stuck`)
+
+`rollback=1` (rollout mode) re-applies the revision the run started from:
+every bumped member's spec as it was before the bump, put back with a JSON
+`replace` of `spec.<member>` at the named hook, so the controller sees the
+starting revision's hash again as the target. `during=` names the moment:
+
+- `settling` — the moment the bump has landed, before any Instance moved
+  (two pushes in a row, the shape of a GitOps sync that applies two objects);
+- `rotating` — the first pod of the new revision is observed;
+- `draining` — the first pod of the starting revision is seen draining (a
+  surge roll reaches it when its first Instance is promoted, a drain-first
+  roll at once; a single-pod in-place roll never does, it patches in place);
+- `last` — exactly one Instance of the bumped members is still off the new
+  revision: every other one is promoted (full pod set on it, Ready and
+  serving), read off the watcher so it is caught between two events;
+- `held` — the roll is parked at its budget. Only with `break=stuck`, which
+  gives the new revision a readiness probe it never passes (the fixture's
+  probe aimed at a path the runner does not serve, under `runner` or the
+  leader's runner), so its pods run, never turn Ready and never escalate;
+  the hook fires once a new-revision pod has been up for `HELD_SETTLE_S`
+  (30 s scaled) with none Ready. A probe is a diff beyond an in-place patch,
+  so under an in-place strategy both the new revision and its rollback
+  are recreated.
+
+The verdict is the operator's end state. Every Instance of the bumped
+members ends on the starting revision and serving (N/N, no pod of the new
+revision alive), the InferenceReplica rows are settled (every Instance
+Ready with no open operation, `currentRevision` and `updateRevision` both
+the starting revision), and on a grouped service the run that targeted the
+new revision closed as superseded (`RolloutRunClosed` … superseded; a
+rollback that lands before any run opened leaves nothing to close and is
+reported, an ungrouped service has no run model). The usual rollout checks
+still judge the whole case: peak ceilings, the capacity floor (which covers
+the roll back too), isolation, gang atomicity, index partition; an in-place
+single-pod roll must come back in place (UIDs stable). A roll that
+completes on the new revision before its hook is reached ends the case as
+`HOOK_MISSED` and fails. The verdict also records, as a measurement and not
+a failure, how many Instances that were still on the starting revision at
+the rollback were rebuilt anyway (an Instance that never left it should
+ideally be untouched); the counts decide whether it becomes an assertion.
+The generated `isvcs/gen-rollback/` family crosses the hooks with topology,
+strategy (budget 1, plus maxSurge 2 on the single-pod engine) and a
+`rollingUpdate` group (what puts the roll under the run model, so the
+engine-only shapes carry a single-member group); the starting revision
+carries `perm.test/rev: "v1"` so the rollback is an annotation update, not
+a removal. `rollback=1` in canary mode keeps its own meaning (the
+`ome.io/rollout-rollback` probe).
+
 ### Fault cases: quota isolation, cordon impact, leak remediation
 
 - **`fault=crashloop:old` with `form=start|load`** breaks one old-revision
@@ -1021,12 +1070,12 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `isvcs/rollout/` (`p500`+ is the continuation block: `p100`+ belongs to
   `gen_cases.py`'s feature counters).
 - `gen_runtime.py` — the runtime-triggered cases (`p400`+) → `isvcs/runtime-rev/`.
-- `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p2799`
-  and `p3000`–`p4999`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
+- `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p2799`,
+  `p3000`–`p4999` and `p5800`–`p5999`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
   `isvcs/gen-restart/`, `isvcs/gen-crashloop/`, `isvcs/gen-switch/`,
   `isvcs/gen-crashloop-idle/`, `isvcs/gen-crashloop-sibling/`,
   `isvcs/gen-heal/`, `isvcs/gen-imagepull/`, `isvcs/gen-node/`,
-  `isvcs/gen-ctrlrestart/`, and the operator stories driven through a canary (`p5200`–`p5399`) →
+  `isvcs/gen-ctrlrestart/`, `isvcs/gen-rollback/`, and the operator stories driven through a canary (`p5200`–`p5399`) →
   `isvcs/gen-canary-crash/` (a canary rolls the fix while the running
   revision breaks under it), `isvcs/gen-canary-second-rev/` (a second revision
   lands while the first canary is staging or serving) and

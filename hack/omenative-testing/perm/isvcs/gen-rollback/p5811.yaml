@@ -1,0 +1,17 @@
+# p5811: [gen] rollback at settling engine N=4 SurgeThenDrain s2 co rolling  Ne=4 Nd=0 Nr=0 ceil_e=6 ceil_d=0 ceil_r=0 co=rolling topo=engine during=settling rollback=1
+# reason: the starting revision is re-applied at the moment the bump has landed, before any Instance moved; every Instance ends on it and serving, no pod of the new revision remains, the capacity floor holds throughout and no Instance is left mid-operation; Instances already on the new revision come back under the surge budget; the run that targeted the new revision closes as superseded and a fresh run brings the group back
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p5811 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/rev: "v1" }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 2, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          rollingUpdate: {}

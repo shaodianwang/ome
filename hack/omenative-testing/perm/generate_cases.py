@@ -4,7 +4,7 @@
 Emits the constraint-filtered cross product of
     topology x updateStrategy x failure verb x injection phase x
     restartPolicy x pause
-into fourteen generator-owned folders, using ONLY verbs and hooks the runners
+into seventeen generator-owned folders, using ONLY verbs and hooks the runners
 (run.py + the KIND CI lane) already implement:
 
     gen-rollout/   p1000+  baseline revision-bump rollouts (failure=none)
@@ -82,6 +82,13 @@ into fourteen generator-owned folders, using ONLY verbs and hooks the runners
                           the soak, an image that cannot be pulled); the
                           ladder stops where it bites, says why, and a
                           rollback or a fix push lands
+    gen-rollback/  p5800+  rollouts rolled back: the starting revision is
+                          re-applied at a named moment of the new revision's
+                          roll (rollback=1 during=settling|rotating|draining|
+                          last|held; held breaks the new revision with
+                          break=stuck so the roll parks at its budget first),
+                          crossed with topology x strategy x hook x group;
+                          every Instance must end on the starting revision
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -176,6 +183,10 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     a crash-loop repair is open is not emitted (MISSING_HOOKS). The update
     strategy is dormant under a migration and a scale-down; those cells run
     under both strategies for the family's symmetry and say so.
+  - A rollback's draining hook is not emitted for an in-place strategy on a
+    single-pod topology: an annotation-only diff is patched in place, so no
+    pod of the starting revision ever drains and the hook never arrives (a
+    gang falls back to a whole-gang recreate, which drains).
 
 The t=3 covering fill over the deferred dimensions (coordination/rollout
 groups, canary promotion, budget x coordination interactions) is the --fill
@@ -212,6 +223,7 @@ GEN_BLOCKS = {
     "gen-canary-podkill": (5290, 5400),
     "gen-canary-fault-old": (6400, 6600),
     "gen-canary-fault-new": (6600, 6800),
+    "gen-rollback": (5800, 6000),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -362,6 +374,32 @@ CTRL_ROLL_CONDITIONS = {"surge", "drain"}
 CTRL_CANARY_STEPS = (("50%", 50), ("100%", 100))
 CTRL_CANARY_CELL = "canary/Serving/ctrlRestart[gen]"
 
+
+# The rollback family: revision A serves, B is pushed, and A's spec is
+# re-applied at a named moment of B's roll. One gang width per topology; the
+# budget is 1 throughout, plus maxSurge 2 on the single-pod engine; a
+# rollingUpdate group is what puts the roll under the run model, so the
+# engine-only shapes carry a single-member group on that axis. The starting
+# revision carries the trigger annotation at its first value, so the rollback
+# is an annotation update the in-place path can apply, not a removal.
+ROLLBACK_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1), ("pd-mn", 2, 1)]
+ROLLBACK_BUDGETS = {
+    "SurgeThenDrain": [(1, 0)],
+    "RecreatePod": [(0, 1)],
+    "InPlaceIfPossible": [(0, 1)],
+}
+ROLLBACK_ENGINE_BUDGETS = {"SurgeThenDrain": [(1, 0), (2, 0)]}
+ROLLBACK_HOOKS = ["settling", "rotating", "draining", "last", "held"]
+ROLLBACK_COORDS = ["none", "rolling"]
+ROLLBACK_START_ANN = {"perm.test/rev": "v1"}
+ROLLBACK_MOMENT = {
+    "settling": "the moment the bump has landed, before any Instance moved",
+    "rotating": "the first pod of the new revision",
+    "draining": "the first pod of the starting revision draining",
+    "last": "the last Instance, every other one already on the new revision",
+    "held": "the held floor: the new revision never turns Ready, so the roll parks at its budget",
+}
+
 # Canonical shapes: (topo, N, W). Gangs at N=2 with widths 1 and 2; singles at
 # N=4 (pd: engine+decoder N, router lib.NR). Percentage budgets additionally
 # run a mid-size variant (MID_SHAPE) so the ceil() rounding actually differs.
@@ -437,6 +475,7 @@ HAND_PINNED_KILL = {
 #   ("crashloop-sibling", form, topo, w, size, co, rp)
 #   ("heal", topo, w, rp, lift, co)
 #   ("imagepull", "settling", topo, w, strat, rp, co) / ("imagepull", "idle", topo, w, rp)
+#   ("rollback", hook, topo, w, strat, surge, unavail, co)
 # A park is added here as (key): (issue, reason, invariant scope) and
 # rendered into the header. The heal family's lift=after-failed cells are
 # parked on HEAL_ISSUE with a per-axis reason, filled in next to its emitter.
@@ -1651,6 +1690,79 @@ def emit_canary_fault_new(add):
                                 runtime=(lib.CSR_METRICS if gate else None))
 
 
+# ── gen-rollback: the starting revision re-applied mid-roll ─────────────────
+def _rollback_budgets(topo, strat):
+    if topo == "engine" and strat in ROLLBACK_ENGINE_BUDGETS:
+        return ROLLBACK_ENGINE_BUDGETS[strat]
+    return ROLLBACK_BUDGETS[strat]
+
+
+def _rollback_reachable(topo, strat, hook):
+    """draining never arrives for a single-pod in-place roll: an
+    annotation-only diff is patched in place and nothing drains."""
+    return not (hook == "draining" and strat in IN_PLACE and not is_mn(topo))
+
+
+def _rollback_comps(topo, n, w, life, co):
+    """The engine (and, under a group, the decoder) start on a revision that
+    carries the trigger annotation; a grouped decoder shares the engine's
+    strategy so the hooks and ceilings read the same on both members."""
+    cw = w if is_mn(topo) else 0
+    cs = [lib.comp("engine", n, cw, life, ann=ROLLBACK_START_ANN)]
+    if is_pd(topo):
+        d_life = life if co != "none" else lib.lifecycle()
+        cs.append(lib.comp("decoder", n, cw, d_life, ann=ROLLBACK_START_ANN))
+        cs.append(lib.comp("router", lib.NR, 0, lib.lifecycle()))
+    return cs
+
+
+def _rollback_reason(hook, strat, topo, co):
+    out = (f"the starting revision is re-applied at {ROLLBACK_MOMENT[hook]}; every Instance ends on it "
+           f"and serving, no pod of the new revision remains, the capacity floor holds throughout and "
+           f"no Instance is left mid-operation")
+    if hook == "held" and strat in IN_PLACE:
+        out += ("; the readiness probe is a diff beyond an in-place patch, so the new revision and its "
+                "rollback are recreated within the unavailable budget")
+    elif strat == "SurgeThenDrain":
+        out += "; Instances already on the new revision come back under the surge budget"
+    elif strat == "RecreatePod":
+        out += "; Instances already on the new revision come back drain-first within the unavailable budget"
+    elif is_mn(topo):
+        out += "; a gang in-place roll comes back as a whole-gang recreate within the unavailable budget"
+    else:
+        out += "; an in-place roll comes back in place (UIDs stable)"
+    if co != "none":
+        out += "; the run that targeted the new revision closes as superseded and a fresh run brings the group back"
+    return out
+
+
+def emit_rollback(add):
+    for topo, n, w in ROLLBACK_SHAPES:
+        for strat in ROLLBACK_BUDGETS:
+            for surge, unavail in _rollback_budgets(topo, strat):
+                for hook in ROLLBACK_HOOKS:
+                    if not _rollback_reachable(topo, strat, hook):
+                        continue
+                    for co in ROLLBACK_COORDS:
+                        kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge), co=co, topo=topo,
+                                  rollback=1, during=hook)
+                        if co != "none" and is_pd(topo):
+                            # The grouped decoder rolls under the engine's strategy and budget.
+                            kv["ceil_d"] = kv["ceil_e"]
+                        if hook == "held":
+                            kv["break"] = "stuck"
+                        meta = dict(strat=strat, verb=f"rollback:{hook}", hook=hook)
+                        desc = (f"{GEN_MARK} rollback at {hook} {shape_tag(topo, w)} N={n} {strat} "
+                                f"{budget_tag(strat, surge, unavail)} co {co}")
+                        life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+                        coord = None
+                        if co != "none":
+                            coord = lib.coord_for(co, comps=("engine", "decoder") if is_pd(topo) else ("engine",))
+                        add("gen-rollback", desc, kv, _rollback_comps(topo, n, w, life, co),
+                            _rollback_reason(hook, strat, topo, co), meta,
+                            cell=("rollback", hook, topo, w, strat, surge, unavail, co), coord=coord)
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 def build_outputs():
     """{relative path under isvcs/: file text} — the entire owned output set."""
@@ -1711,6 +1823,7 @@ def build_outputs():
     emit_canary_podkill(add)
     emit_canary_fault_old(add)
     emit_canary_fault_new(add)
+    emit_rollback(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -1928,6 +2041,10 @@ def manifest(rows):
         " ConfigMap key, which no verb arms on a template and whose bite is a"
         " container that never starts, the crash-at-start cell; and a manual"
         " policy, since a broken revision parks before any gate is reached.",
+        "- A rollback's `draining` hook is not emitted for an in-place strategy on a"
+        " single-pod topology: an annotation-only diff is patched in place, so no"
+        " pod of the starting revision ever drains and the hook never arrives (a"
+        " gang falls back to a whole-gang recreate, which drains).",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

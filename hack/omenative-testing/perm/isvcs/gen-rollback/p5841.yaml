@@ -1,0 +1,27 @@
+# p5841: [gen] rollback at rotating pd N=4 SurgeThenDrain s1 co rolling  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 co=rolling topo=pd during=rotating rollback=1
+# reason: the starting revision is re-applied at the first pod of the new revision; every Instance ends on it and serving, no pod of the new revision remains, the capacity floor holds throughout and no Instance is left mid-operation; Instances already on the new revision come back under the surge budget; the run that targeted the new revision closes as superseded and a fresh run brings the group back
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p5841 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/rev: "v1" }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/rev: "v1" }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          rollingUpdate: {}

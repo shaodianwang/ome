@@ -59,6 +59,14 @@ Architecture:
   7. Optional mid-roll edit (edit=strategy:<type> | edit=restartPolicy:<policy>
      at during=settling|rotating): every bumped member's lifecycle is patched
      at the hook, and the verdict adds that the edit was applied and landed.
+  8. Optional rollback (rollback=1 at during=settling|rotating|draining|last|
+     held): the revision the run started from is re-applied on every bumped
+     member at the hook (held: break=stuck gives the new revision a readiness
+     probe it never passes, so the roll parks at its budget first), and the
+     verdict is the operator's end state: every Instance back on the starting
+     revision and serving, no pod of the new revision left, the controller's
+     rows settled with no open operation, and on a grouped service the run
+     that targeted the new revision closed as superseded.
 
 Why bump ALL group members (the 2026-06-01 fix):
   OMENative coordination is a status-only layer + *restrictive* gates. It never
@@ -2043,6 +2051,268 @@ def _isvc_spec(case_id):
         return json.loads(r.stdout).get("spec", {}) or {}
     except Exception:
         return {}
+
+
+# ── Rollback of a plain rollout ──────────────────────────────────────────────
+# rollback=1 re-applies the revision the run started from — every bumped
+# member's spec as it was before the bump — at during=<hook>. settling and
+# rotating are the mid-roll edit's hooks; draining is the first pod of the
+# starting revision seen draining; last is the moment exactly one Instance of
+# the bumped members is still off the new revision; held is a roll parked at
+# its budget because break=stuck gave the new revision a readiness probe it
+# never passes (its pods run, never turn Ready, never escalate). The verdict
+# is the operator's end state: every Instance back on the starting revision
+# and serving, no pod of the new revision left, the controller's rows settled
+# with no open operation, and on a grouped service the run that targeted the
+# new revision closed as superseded.
+ROLLBACK_HOOKS = EDIT_HOOKS | {"draining", "last", "held"}
+ROLLBACK_BREAK = "stuck"
+# A path the fixture runner does not serve: a readiness probe aimed at it
+# fails while the startup and liveness probes keep passing on the served one.
+STUCK_READINESS_PATH = "/perm-test/never-ready"
+# How long the new revision's pods must have run without one turning Ready
+# before the roll is read as held at its budget.
+HELD_SETTLE_S = int(30 * TIMEOUT_MULT)
+# The run model's events: a run opens for a grouped service's roll, and a
+# retarget mid-run closes it as superseded before a fresh run opens.
+RUN_OPENED_EVENT = "RolloutRunOpened"
+RUN_CLOSED_EVENT = "RolloutRunClosed"
+
+
+def _stuck_readiness():
+    """The fixture's readiness probe aimed at a path the runner never serves."""
+    return dict(_GOOD_READINESS, httpGet=dict(_GOOD_READINESS["httpGet"], path=STUCK_READINESS_PATH))
+
+
+def _rollback_new(hdr):
+    """Parsed rollback state (or None): the hook, whether the new revision is
+    broken, and the bookkeeping the verdict reads."""
+    if hdr.get("mode", "rollout") != "rollout" or hdr.get("rollback") != 1:
+        return None
+    return {"hook": str(hdr.get("during") or ""), "stuck": hdr.get("break") == ROLLBACK_BREAK,
+            "snapshot": {}, "fired": False, "fired_at": None, "error": None,
+            "first_new_at": None, "first_drain_at": None,
+            "on_start_at_fire": {}, "busy_at_fire": [], "new_pods_at_fire": 0}
+
+
+def _rollback_snapshot(rb, spec, bumped):
+    """Keep every bumped member's spec as it is before the bump: the revision
+    the rollback re-applies."""
+    missing = [c for c in sorted(bumped) if not isinstance(spec.get(c), dict)]
+    if missing:
+        rb["error"] = f"no live spec to snapshot for {missing}"
+        return False
+    rb["snapshot"] = {c: json.loads(json.dumps(spec[c])) for c in sorted(bumped)}
+    return True
+
+
+def _rollback_break_patch(patch, bumped, pods_per_inst):
+    """Give the new revision a readiness probe it never passes, on each bumped
+    member's runner (the leader's on a multi-node member, which must name the
+    container it overrides)."""
+    probe = _stuck_readiness()
+    for c in sorted(bumped):
+        if pods_per_inst.get(c, 1) > 1:
+            patch["spec"][c]["leader"] = {"runner": {"name": MAIN_CONTAINER, "readinessProbe": probe}}
+        else:
+            patch["spec"][c]["runner"] = {"readinessProbe": probe}
+    return patch
+
+
+def _pod_on_new(p, old_hashes):
+    """A pod carries the new revision: a hash the starting fleet never had, or
+    the bumped annotation (an in-place patch may land either first)."""
+    return bool(p.get("hash") and p["hash"] not in (old_hashes or set())) or bool(p.get("newanno"))
+
+
+def _instances_by_index(pod_state, comps):
+    """Alive pods of the named Components, grouped by (Component, index)."""
+    by = defaultdict(list)
+    for p in pod_state.values():
+        if p and p["alive"] and p.get("comp") in comps:
+            by[(p["comp"], str(p.get("inst", "0")))].append(p)
+    return by
+
+
+def _instances_on_new(pod_state, old_hashes, pods_per_inst, comps):
+    """Instances promoted to the new revision: the full pod set, every pod on
+    it, Ready and serving."""
+    n = 0
+    for (c, _i), pods in _instances_by_index(pod_state, comps).items():
+        if len(pods) >= max(1, pods_per_inst.get(c, 1)) and all(
+                _pod_on_new(p, old_hashes) and p.get("ready") and p.get("serving") for p in pods):
+            n += 1
+    return n
+
+
+def _rollback_observe(rb, comp, rev, draining, bumped, old_hashes, now):
+    """Event-time bookkeeping: the first pod of the starting revision seen
+    draining on a bumped member (the draining hook)."""
+    if not rb or rb["first_drain_at"] is not None or old_hashes is None:
+        return
+    if comp in bumped and rev and rev in old_hashes and draining:
+        rb["first_drain_at"] = now
+
+
+def _rollback_due(rb, pod_state, old_hashes, pods_per_inst, N, bumped, now):
+    """Whether the rollback's hook has arrived."""
+    hook = rb["hook"]
+    if hook == "settling":
+        return True
+    if hook == "rotating":
+        return _midroll_due("rotating", pod_state, old_hashes)
+    if hook == "draining":
+        return rb["first_drain_at"] is not None
+    if hook == "last":
+        want = sum(N.get(c, 0) for c in bumped) - 1
+        return want >= 0 and _instances_on_new(pod_state, old_hashes, pods_per_inst, bumped) == want
+    if hook == "held":
+        if not rb["stuck"] or rb["first_new_at"] is None or now - rb["first_new_at"] < HELD_SETTLE_S:
+            return False
+        return not any(p and p["alive"] and p.get("ready") and _pod_on_new(p, old_hashes)
+                       for p in pod_state.values())
+    return False
+
+
+def _rollback_fire(rb, case_id, bumped, pod_state, old_hashes, pods_per_inst, now_rel):
+    """Re-apply the starting revision on every bumped member, recording what
+    each Instance was doing at that moment: still on the starting revision
+    (its pod UIDs, so a needless rebuild can be measured) or mid-operation."""
+    for key, pods in _instances_by_index(pod_state, bumped).items():
+        full = len(pods) >= max(1, pods_per_inst.get(key[0], 1))
+        if full and not any(_pod_on_new(p, old_hashes) for p in pods):
+            rb["on_start_at_fire"][key] = frozenset(p.get("uid") for p in pods)
+        else:
+            rb["busy_at_fire"].append(key)
+    rb["new_pods_at_fire"] = sum(1 for p in pod_state.values()
+                                 if p and p["alive"] and p.get("comp") in bumped and _pod_on_new(p, old_hashes))
+    rb["fired"] = True
+    ops = [{"op": "replace", "path": f"/spec/{c}", "value": rb["snapshot"][c]} for c in sorted(bumped)]
+    rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=json", "-p", json.dumps(ops))
+    if rr.returncode != 0:
+        rb["error"] = f"rollback at {rb['hook']} failed: {rr.stderr.strip()[:160]}"
+        print(f"    ✗ {rb['error']}")
+        return
+    rb["fired_at"] = now_rel
+    print(f"    ↶ rollback: re-applied the starting revision on {sorted(bumped)} at {rb['hook']} (t={now_rel:.0f}s): "
+          f"{len(rb['on_start_at_fire'])} Instance(s) still on it, {len(rb['busy_at_fire'])} mid-operation, "
+          f"{rb['new_pods_at_fire']} new-revision pod(s) alive")
+
+
+def _rollback_tick(rb, case_id, bumped, pod_state, old_hashes, pods_per_inst, N, now, now_rel):
+    """Latch the first new-revision pod, then fire the rollback once its hook
+    is due (latched)."""
+    if not rb or rb["error"] or old_hashes is None:
+        return
+    if rb["first_new_at"] is None and _midroll_due("rotating", pod_state, old_hashes):
+        rb["first_new_at"] = now
+    if rb["fired"] or not _rollback_due(rb, pod_state, old_hashes, pods_per_inst, N, bumped, now):
+        return
+    _rollback_fire(rb, case_id, bumped, pod_state, old_hashes, pods_per_inst, now_rel)
+
+
+def _revision_hash(name):
+    """The hash of a revision name (its last dash-separated token), as the
+    pods carry it."""
+    return str(name or "").rsplit("-", 1)[-1]
+
+
+def _rollback_ir_settled(items, N, configured, bumped, old_hashes):
+    """The controller's own view after the rollback: every row Ready with no
+    open operation, and the bumped members' current and update revisions
+    both the starting revision."""
+    ok, why = _initial_ir_settled(items or [], N, configured)
+    if not ok:
+        return False, why
+    for it in items or []:
+        c = (it.get("spec") or {}).get("component")
+        if c not in bumped:
+            continue
+        cur = _revision_hash((it.get("status") or {}).get("currentRevision"))
+        if cur not in (old_hashes or set()):
+            return False, f"{c}: currentRevision {cur or '(none)'} is not the starting revision"
+    return True, "settled on the starting revision"
+
+
+def _rollback_run_checks(case_id, since, grouped, verdict, notes, checks):
+    """On a grouped service the run that targeted the new revision must have
+    closed as superseded (a retarget closes the run and opens a fresh one); a
+    rollback that lands before any run opened leaves nothing to close."""
+    if not grouped:
+        checks.append("  ⓘ rollback: no rollout group, so no run to supersede")
+        return verdict
+    events = _isvc_events_since(case_id, since or 0)
+    superseded = [m for r, m in events if r == RUN_CLOSED_EVENT and "superseded" in m]
+    opened = [m for r, m in events if r == RUN_OPENED_EVENT]
+    if superseded:
+        checks.append(f"  ✓ rollback: the run that targeted the new revision closed as superseded: {superseded[0][:120]}")
+    elif not opened:
+        checks.append("  ⓘ rollback: no run opened before the rollback landed (nothing to supersede)")
+    else:
+        verdict = "FAIL" if verdict != "INFRA-FAIL" else verdict
+        notes.append("the run that targeted the new revision did not close as superseded")
+        checks.append(f"  ✗ rollback: {len(opened)} run(s) opened after the bump and none closed as superseded")
+    return verdict
+
+
+def _rollback_checks(rb, case_id, state, converged_at, pod_state, old_hashes, pods_per_inst,
+                     N, bumped, configured, grouped, trigger_ts, verdict, notes, checks):
+    """The operator's end state after a rollback: every Instance of the bumped
+    members back on the starting revision and serving, no pod of the new
+    revision left, the controller's rows settled with no open operation, and
+    on a grouped service the run that targeted the new revision closed as
+    superseded. How many Instances that never left the starting revision were
+    rebuilt anyway is measured, not asserted."""
+    if rb["error"]:
+        notes.append(f"INFRA-FAIL: {rb['error']}")
+        checks.append(f"  ✗ INFRA-FAIL (rollback apparatus): {rb['error']}")
+        return "INFRA-FAIL"
+    if not rb["fired"]:
+        verdict = "FAIL"
+        notes.append(f"rollback never fired: the {rb['hook']} hook was not reached (state={state})")
+        checks.append(f"  ✗ rollback at {rb['hook']}: the hook was never reached (state={state}), nothing was rolled back")
+        return verdict
+    checks.append(f"  ✓ rollback fired at {rb['hook']} (t={rb['fired_at']:.0f}s): {len(rb['on_start_at_fire'])} Instance(s) "
+                  f"still on the starting revision, {len(rb['busy_at_fire'])} mid-operation, "
+                  f"{rb['new_pods_at_fire']} new-revision pod(s) alive")
+    serving = _serving_instance_counts(pod_state, pods_per_inst)
+    served = " ".join(f"{c} {serving.get(c, 0)}/{N[c]}" for c in sorted(bumped))
+    leftover = sorted(n for n, p in pod_state.items()
+                      if p and p["alive"] and p.get("comp") in bumped and _pod_on_new(p, old_hashes))
+    short = [c for c in sorted(bumped) if serving.get(c, 0) != N[c]]
+    if state != "CONVERGED":
+        verdict = "FAIL"
+        notes.append(f"did not settle back on the starting revision (state={state}, serving {served}, "
+                     f"{len(leftover)} new-revision pod(s) alive)")
+        checks.append(f"  ✗ never settled back on the starting revision (state={state}; serving {served}; "
+                      f"{len(leftover)} pod(s) of the new revision alive)")
+    else:
+        checks.append(f"  ✓ converged back onto the starting revision at {converged_at:.1f}s post-trigger")
+    if leftover or short:
+        verdict = "FAIL"
+        notes.append(f"end state: serving {served}; new-revision pods left {len(leftover)}")
+        checks.append(f"  ✗ end state: {sorted(bumped)} must be fully on the starting revision and serving (serving {served}); "
+                      f"{len(leftover)} pod(s) of the new revision remain {leftover[:4]}")
+    else:
+        checks.append(f"  ✓ every Instance of {sorted(bumped)} ends on the starting revision and serving ({served}); "
+                      f"no pod of the new revision remains")
+    settled, why = _rollback_ir_settled(_fetch_initial_ir_items(case_id), N, configured, bumped, old_hashes)
+    if settled:
+        checks.append("  ✓ controller rows settled: every Instance Ready with no open operation; "
+                      "current and update revision are the starting revision")
+    else:
+        verdict = "FAIL"
+        notes.append(f"controller rows not settled after the rollback: {why}")
+        checks.append(f"  ✗ controller rows not settled after the rollback: {why}")
+    verdict = _rollback_run_checks(case_id, trigger_ts, grouped, verdict, notes, checks)
+    by = _instances_by_index(pod_state, bumped)
+    rebuilt = sorted(f"{c}/{i}" for (c, i), uids in rb["on_start_at_fire"].items()
+                     if {p.get("uid") for p in by.get((c, i), [])} != set(uids))
+    checks.append(f"  ⓘ rollback: {len(rebuilt)} of {len(rb['on_start_at_fire'])} Instance(s) that were on the starting "
+                  f"revision at the rollback were rebuilt anyway" + (f" ({', '.join(rebuilt[:6])})" if rebuilt else ""))
+    return verdict
+
+
 CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix", "rtedit",
                 "rollback", "timeout-clear", "timeout-set", "scale", "repin", "resume",
                 "planedit", "planedit-repin", "groupremove", "runlost", "pairing", "quotalift", "podkill"}
@@ -4215,7 +4485,7 @@ HDR_VALIDATORS = {
     # preempt the rollout); runtimerev edits the CSR mid-rotate. In rollout
     # mode during=idle fires a persistent fault on the settled service and
     # never bumps.
-    "during": lambda v: v in {"rollout", "migrate", IDLE_FAULT_PHASE} | EDIT_HOOKS or _canary_hook_ok(v),
+    "during": lambda v: v in {"rollout", "migrate", IDLE_FAULT_PHASE} | ROLLBACK_HOOKS or _canary_hook_ok(v),
     "remove": lambda v: v in {"decoder", "router"},   # compremove: component patched out
     "readd": lambda v: v == 1,    # compremove: re-apply the manifest, assert round-trip
     "dup": lambda v: v == 1,      # migrate: re-file the same request UUID (dedup contract)
@@ -4421,16 +4691,31 @@ def validate_case_file(path):
         if fault_kind not in IDLE_FAULTS:
             errs.append(f"{path}:1: during={IDLE_FAULT_PHASE} needs a persistent fault to fire "
                         f"(fault={'|'.join(sorted(IDLE_FAULTS))}:…)")
-    elif during in EDIT_HOOKS:
+    elif during in ROLLBACK_HOOKS:
         if mode != "rollout":
-            errs.append(f"{path}:1: during={during} is a mid-roll edit's hook on a rollout case (mode=rollout)")
-        if _midroll_edit(fields.get("edit")) is None:
-            errs.append(f"{path}:1: during={during} names a mid-roll edit's hook "
-                        f"(needs edit=strategy:<type> or edit=restartPolicy:<policy>)")
+            errs.append(f"{path}:1: during={during} is a mid-roll hook of a rollout case (mode=rollout)")
+        if _midroll_edit(fields.get("edit")) is None and fields.get("rollback") != 1:
+            if during in EDIT_HOOKS:
+                errs.append(f"{path}:1: during={during} names a mid-roll edit's hook or a rollback's "
+                            f"(needs edit=strategy:<type>, edit=restartPolicy:<policy> or rollback=1)")
+            else:
+                errs.append(f"{path}:1: during={during} is a rollback's hook (needs rollback=1)")
     elif during and during not in {"recreate": {"rollout", "migrate"},
                                    "migrate": {"rollout"},
                                    "runtimerev": {"rollout"}}.get(mode, set()):
         errs.append(f"{path}:1: during={during} not supported for mode={mode}")
+    if mode == "rollout" and fields.get("rollback") == 1:
+        if during not in ROLLBACK_HOOKS:
+            errs.append(f"{path}:1: rollback=1 on a rollout case needs during={'|'.join(sorted(ROLLBACK_HOOKS))} "
+                        f"(when the starting revision is re-applied)")
+        if _midroll_edit(fields.get("edit")) is not None:
+            errs.append(f"{path}:1: rollback=1 and edit={fields['edit']} would both fire at during=; a case carries one")
+        if (fields.get("break") == ROLLBACK_BREAK) != (during == "held"):
+            errs.append(f"{path}:1: during=held is a roll parked by break={ROLLBACK_BREAK} "
+                        f"(the new revision never turns Ready): both or neither")
+    elif mode == "rollout" and "break" in fields:
+        errs.append(f"{path}:1: break={fields['break']} on a rollout case breaks the revision a rollback leaves "
+                    f"(needs rollback=1 during=held)")
     expect = str(fields.get("expect", ""))
     outcomes = _idle_expects(fault_kind)
     if expect in IDLE_EXPECTS_ALL and (during != IDLE_FAULT_PHASE or expect not in outcomes):
@@ -9286,6 +9571,7 @@ def run_case(case_id):
     pacing, ratio_tol = info["pacing"], info["ratio_tol"]
     edit = hdr.get("edit")
     modes = update_modes(info, configured, edit)
+    rb = _rollback_new(hdr)          # optional rollback=1: re-apply the starting revision at during=<hook>
     # Pods per Instance: 1 ('default' single-pod runner) or 1 + worker.size
     # (multi-node leader + workers). The Instance-level counters use this to
     # know when a whole Instance is present/ready. N[c] stays the INSTANCE count
@@ -9325,6 +9611,9 @@ def run_case(case_id):
     # count for Sequential groups.
     if policy == "Sequential" and len(bumped) > 1:
         rotate_budget = min(MAX_BUDGET_S, rotate_budget + ROTATE_PER_POD_S * sum(N[c] * (1 + info["workers"].get(c, 0)) for c in bumped))
+    if rb:
+        # The roll back onto the starting revision is a second roll.
+        rotate_budget = min(MAX_BUDGET_S, rotate_budget + ROTATE_PER_POD_S * sum(N[c] for c in bumped))
 
     # Start watcher subprocess.
     print(f"  starting watcher (init≤{init_budget}s, rotate≤{rotate_budget}s)")
@@ -9335,6 +9624,8 @@ def run_case(case_id):
     inv = _inv_new(case_id, hdr)     # continuous invariants (status-truth + endpoints)
     fault = _fault_new(case_id, hdr)  # optional fault=<kind>:<param> plumbing
     medit = _midroll_new(hdr)        # optional edit=strategy:|restartPolicy: at during=settling|rotating
+    rb_wait = None                   # the controller-rows wait last printed after a rollback
+    new_done_since = None            # ts the roll completed on the new revision with the rollback unfired
     pod_state = {}                   # pod_name → {comp, alive, ready, hash, uid, newanno} | None
     peaks = {"engine": 0, "decoder": 0, "router": 0}
     last_counts = None
@@ -9408,6 +9699,10 @@ def run_case(case_id):
                             print(f"  ✗ FAULT SETUP FAILED: {fmsg}")
                             state = "INFRA-FAIL"
                             break
+                        if rb and not _rollback_snapshot(rb, _isvc_spec(case_id), bumped):
+                            print(f"  ✗ ROLLBACK SETUP FAILED: {rb['error']}")
+                            state = "INFRA-FAIL"
+                            break
                         patch = {"spec": {c: {"annotations": {TRIGGER_ANNO: TRIGGER_VAL,
                                                               "ome.io/deploymentMode": "OMENative"}}
                                           for c in sorted(bumped)}}
@@ -9423,8 +9718,12 @@ def run_case(case_id):
                                     patch["spec"][c]["leader"] = {"runner": {"name": MAIN_CONTAINER, "env": env}}
                                 else:
                                     patch["spec"][c]["runner"] = {"env": env}
+                        if rb and rb["stuck"]:
+                            _rollback_break_patch(patch, bumped, pods_per_inst)
                         print(f"\n  Phase 2: triggering rotation (bump {TRIGGER_ANNO}→{TRIGGER_VAL}"
-                              f"{' + runner env edit' if edit == 'env' else ''} on {sorted(bumped)})")
+                              f"{' + runner env edit' if edit == 'env' else ''}"
+                              f"{' + a readiness probe the new revision never passes' if rb and rb['stuck'] else ''}"
+                              f" on {sorted(bumped)})")
                         rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
                                      "-p", json.dumps(patch))
                         if rr.returncode != 0:
@@ -9433,17 +9732,36 @@ def run_case(case_id):
                             break
                         trigger_ts = time.time()
                         deadline_rotate = trigger_ts + rotate_budget
-                        print(f"\n  Phase 3: watching rotation (peak ≤ {ce}/{cd}/{cr}; bumped {sorted(bumped)} → all N on new revision)")
+                        goal = (f"rollback at {rb['hook']}, then all N back on the starting revision" if rb
+                                else "all N on new revision")
+                        print(f"\n  Phase 3: watching rotation (peak ≤ {ce}/{cd}/{cr}; bumped {sorted(bumped)} → {goal})")
                         state = "ROTATING"
 
                 # CONVERGED is gated on `progressed`: we must have OBSERVED the rollout
                 # perturb the pods first, else stable_since latches on the pre-rollout
                 # steady state and a slow controller reaction is mis-declared CONVERGED.
+                if state == "ROTATING" and rb:
+                    # The rollback's hooks are read between events too: settling
+                    # is due the moment the bump has landed, and a held roll
+                    # raises no pod event while it waits.
+                    _rollback_tick(rb, case_id, bumped, pod_state, old_hashes, pods_per_inst, N, now, now - trigger_ts)
+                    if rb["fired"]:
+                        progressed = True
+                    elif new_done_since is not None and now - new_done_since >= STABILITY_S:
+                        state = "HOOK_MISSED"
+                        print(f"  ✗ the roll completed on the new revision before the {rb['hook']} hook was reached")
+                        break
                 if state == "ROTATING" and progressed and stable_since is not None and now - stable_since >= STABILITY_S:
-                    state = "CONVERGED"
-                    converged_at = stable_since - trigger_ts
-                    print(f"\n  ✓ CONVERGED at {converged_at:.1f}s post-trigger (then stable for {STABILITY_S}s)")
-                    break
+                    settled_ir, why_ir = (True, "") if not rb else _rollback_ir_settled(
+                        _fetch_initial_ir_items(case_id), N, configured, bumped, old_hashes)
+                    if settled_ir:
+                        state = "CONVERGED"
+                        converged_at = stable_since - trigger_ts
+                        print(f"\n  ✓ CONVERGED at {converged_at:.1f}s post-trigger (then stable for {STABILITY_S}s)")
+                        break
+                    if why_ir != rb_wait:
+                        print(f"  … pods are back on the starting revision; waiting for the controller's rows ({why_ir})")
+                        rb_wait = why_ir
                 if state == "INIT" and now > deadline_init:
                     state = "INIT_TIMEOUT"
                     print(f"  ✗ INIT TIMEOUT after {init_budget}s — never reached initial settled state")
@@ -9505,6 +9823,8 @@ def run_case(case_id):
                 if breach > order_viol.get(comp, 0):
                     order_viol[comp] = breach
 
+            if rb and trigger_ts is not None:
+                _rollback_observe(rb, comp, rev, ev_type == "DELETED" or deletion is not None, bumped, old_hashes, now)
             if ev_type == "DELETED":
                 if uid:
                     inv["dead_uids"].add(uid)   # stale-endpoint invariant
@@ -9553,6 +9873,8 @@ def run_case(case_id):
                              "pod_state": pod_state, "pods_per_inst": pods_per_inst, "inv": inv})
                 # Mid-roll edit hook: same settling/rotating rule as the faults.
                 _midroll_tick(medit, case_id, bumped, pod_state, old_hashes, tnow)
+                # Rollback hook: read at every event (and between events, in the idle branch).
+                _rollback_tick(rb, case_id, bumped, pod_state, old_hashes, pods_per_inst, N, now, tnow)
                 # Per-Component timing for Sequential ordering/soak.
                 for c in bumped:
                     a, rd, up = agg.get(c, (0, 0, 0))
@@ -9647,10 +9969,15 @@ def run_case(case_id):
                     a, rd, up = agg.get(c, (0, 0, 0))
                     if a != N[c] or rd != N[c]:
                         return False
+                    if c in bumped and rb:
+                        # Back on the starting revision: nothing counts as
+                        # updated and no alive pod carries the new revision.
+                        return up == 0 and not any(p and p["alive"] and p["comp"] == c and _pod_on_new(p, old_hashes)
+                                                   for p in pod_state.values())
                     if c in bumped:
                         return up == N[c]
                     return True
-                target = all(comp_ok(c) for c in configured)
+                target = all(comp_ok(c) for c in configured) and (not rb or rb["fired"])
                 if target:
                     if stable_since is None:
                         stable_since = now
@@ -9662,6 +9989,11 @@ def run_case(case_id):
                     stable_since = None
                 if any(agg.get(c, (0, 0, 0))[2] > 0 for c in bumped):
                     progressed = True
+                if rb and not rb["fired"]:
+                    # A roll that completes on the new revision before the
+                    # hook arrives has nothing left to roll back.
+                    rolled = all(agg.get(c, (0, 0, 0)) == (N[c], N[c], N[c]) for c in bumped)
+                    new_done_since = (new_done_since or now) if rolled else None
     finally:
         watcher.terminate()
         try:
@@ -9702,7 +10034,11 @@ def run_case(case_id):
     # RetryBlock-style parking, not a create/delete loop. Entry-level parking
     # semantics are deliberately NOT asserted; only the observable contract
     # (no convergence, no churn, floor held via Check 10).
-    if blocked:
+    grouped = bool(policy) and bool(members)
+    if rb:
+        verdict = _rollback_checks(rb, case_id, state, converged_at, pod_state, old_hashes, pods_per_inst,
+                                   N, bumped, configured, grouped, trigger_ts, verdict, notes, checks)
+    elif blocked:
         if state == "CONVERGED":
             verdict = "FAIL"
             notes.append("blocked=1 but the rollout converged — fault never bound")
@@ -9767,6 +10103,11 @@ def run_case(case_id):
             # (ratio band, capacity floor) judge the roll.
             checks.append(f"  ⓘ {c} in-place on a pod-template env edit → recreate (UID rotation expected; the diff exceeds container images)")
             continue
+        if rb and rb["stuck"] and info["strat"].get(c) in IN_PLACE_TYPES:
+            # The readiness probe is a pod-template diff beyond container
+            # images: the new revision is recreated, and so is its rollback.
+            checks.append(f"  ⓘ {c} in-place on a readiness-probe edit → recreate (UID rotation expected; the diff exceeds container images)")
+            continue
         if modes.get(c) == "inplace":
             # Multi-node (gang) in-place legitimately RECREATES: in-place
             # eligibility compares only the leader's PodSpec, so the
@@ -9784,6 +10125,8 @@ def run_case(case_id):
                 verdict = "FAIL"
                 notes.append(f"{c} in-place but {len(recreated)} pod(s) recreated (UID rotated)")
                 checks.append(f"  ✗ {c} strategy is in-place but {len(recreated)} pod UID(s) rotated — recreated instead of patched in place")
+            elif new_final[c] == 0 and rb:
+                checks.append(f"  ✓ {c} rolled back in place ({len(cur_uids)} pod(s), UIDs stable, none carries the new revision)")
             elif new_final[c] == 0:
                 # No UID rotation AND nothing carries the new revision = nothing
                 # was patched (a stall), NOT an in-place success. Check 4 already
