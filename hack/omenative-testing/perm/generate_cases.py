@@ -13,8 +13,8 @@ into four generator-owned folders, using ONLY verbs and hooks the runners
     gen-crashloop/ p2000+  rollouts where one old-revision Instance crashes
                           (fault=crashloop:old, form=start|load) from the
                           moment the bump lands, crossed with topology x
-                          strategy x coordination at one budget per strategy;
-                          the fix must land on that Instance
+                          strategy x maxUnavailable x restartPolicy x
+                          coordination; the fix must land on that Instance
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -49,13 +49,13 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     (HAND_PINNED_KILL) so the corpus grows coverage instead of echoing pins.
   - crashloop breaks an engine pod, so its coordination axis rolls engine and
     decoder together only where a decoder exists (pd, pd-mn): co=none and
-    co=rolling. Each strategy runs at one budget (SurgeThenDrain under
-    maxUnavailable=0, which a drain-first strategy can never roll under; the
-    others under maxUnavailable=1), and each crash form runs under the restart
-    policy whose trigger path it exercises: a crash at start under None, a
-    crash after Ready under RecreateInstance. Budgets, policies and the rest
-    of the product are decided by the closed-loop matrix in the workload
-    package; the cluster adds the shapes and the real kubelet.
+    co=rolling. maxUnavailable=0 is a SurgeThenDrain budget only: a
+    drain-first strategy can never roll under it. Percent budgets run at the
+    mid size, where the ceil() rounding differs from the integer case. Both
+    restart policies run under both crash forms: a crash at start reaches the
+    crash-loop repair under every policy, a crash after Ready reaches the
+    runner-restart trigger only under RecreateInstance, and the roll must win
+    over each.
 
 The t=3 covering fill over the deferred dimensions (coordination/rollout
 groups, canary promotion, budget x coordination interactions) is the --fill
@@ -92,20 +92,16 @@ PHASES = ["settling", "rotating"]
 PAUSES = ["", "true", "freeze"]
 IN_PLACE = {"InPlaceIfPossible", "InPlaceOnly"}
 
-# The crashloop family: how the old-revision pod fails, paired with the
-# restart policy whose trigger path that form exercises (a crash at start is
-# the crash-loop repair under every policy; a crash after Ready is the
-# runner-restart trigger, which only RecreateInstance has), the one budget
-# each strategy runs at (maxSurge, maxUnavailable), the shapes (one gang width
-# per topology; the crash is on the leader, so the width adds nothing), and
-# the coordination axis per topology.
+# The crashloop family: how the old-revision pod fails, the budgets each
+# strategy is crossed with (maxSurge, maxUnavailable), both restart policies,
+# the shapes (one gang width per topology; the crash is on the leader, so the
+# width adds nothing), and the coordination axis per topology.
 CRASH_FORMS = ["start", "load"]
-CRASH_FORM_POLICIES = [("start", "None"), ("load", "RecreateInstance")]
 CRASH_BUDGETS = {
-    "SurgeThenDrain": [(1, 0)],
-    "RecreatePod": [(0, 1)],
-    "InPlaceIfPossible": [(0, 1)],
-    "InPlaceOnly": [(0, 1)],
+    "SurgeThenDrain": [(1, 0), (1, 1), (1, "25%")],
+    "RecreatePod": [(0, 1), (0, "25%")],
+    "InPlaceIfPossible": [(0, 1), (0, "25%")],
+    "InPlaceOnly": [(0, 1), (0, "25%")],
 }
 CRASH_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1), ("pd-mn", 2, 1)]
 CRASH_COORDS = {"engine": ["none"], "engine-mn": ["none"], "pd": ["none", "rolling"], "pd-mn": ["none", "rolling"]}
@@ -452,7 +448,7 @@ def emit_crashloop(add):
         for strat, budgets in CRASH_BUDGETS.items():
             for surge, unavail in budgets:
                 size = mid if (isinstance(unavail, str) and mid) else n
-                for form, rp in CRASH_FORM_POLICIES:
+                for rp, form in ((rp, form) for rp in RESTARTS for form in CRASH_FORMS):
                     for co in CRASH_COORDS[topo]:
                         kv = dict(**counts(topo, size), **ceilings(topo, size, strat, surge),
                                   fault="crashloop:old", form=form, floor_soft=1,
@@ -584,11 +580,10 @@ def manifest(rows):
         "- Update budgets are dormant under a steady-state kill: the kill family"
         " permutes strategies at their canonical budget only.",
         "- crashloop breaks an engine pod, so its coordination axis (co=none |"
-        " co=rolling) exists only on the PD topologies; each strategy runs at"
-        " one budget (SurgeThenDrain under maxUnavailable=0, the others under"
-        " maxUnavailable=1) and each crash form under the restart policy whose"
-        " trigger it exercises (start under None, load under RecreateInstance);"
-        " the workload package's closed-loop matrix decides the full product.",
+        " co=rolling) exists only on the PD topologies; maxUnavailable=0 is"
+        " emitted for SurgeThenDrain only, percent budgets run at the mid"
+        " size where the ceil() rounding differs from the integer case, and"
+        " both restart policies run under both crash forms.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

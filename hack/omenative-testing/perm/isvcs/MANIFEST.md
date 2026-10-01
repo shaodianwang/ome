@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **627**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **795**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -12,32 +12,32 @@ Total generated cases: **627**. The whole-corpus per-PR cap (hand + generated) i
 | gen-rollout | 72 | p1000..p1071 |
 | gen-fault | 320 | p1200..p1519 |
 | gen-restart | 187 | p1600..p1786 |
-| gen-crashloop | 48 | p2000..p2047 |
+| gen-crashloop | 216 | p2000..p2215 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 68 |
-| engine-mn | 219 |
-| pd | 109 |
-| pd-mn | 231 |
+| engine | 96 |
+| engine-mn | 247 |
+| pd | 165 |
+| pd-mn | 287 |
 
 ### By update strategy
 
 | value | cases |
 |---|---|
-| InPlaceIfPossible | 152 |
-| InPlaceOnly | 152 |
-| RecreatePod | 168 |
-| SurgeThenDrain | 155 |
+| InPlaceIfPossible | 188 |
+| InPlaceOnly | 188 |
+| RecreatePod | 204 |
+| SurgeThenDrain | 215 |
 
 ### By failure verb / phase
 
 | value | cases |
 |---|---|
-| crashloop:load | 24 |
-| crashloop:start | 24 |
+| crashloop:load | 108 |
+| crashloop:start | 108 |
 | kill | 187 |
 | none | 72 |
 | podkill:rotating | 160 |
@@ -48,23 +48,23 @@ Total generated cases: **627**. The whole-corpus per-PR cap (hand + generated) i
 | value | cases |
 |---|---|
 | (unset — baseline) | 72 |
-| None | 261 |
-| RecreateInstance | 294 |
+| None | 345 |
+| RecreateInstance | 378 |
 
 ### By pause
 
 | value | cases |
 |---|---|
 | freeze | 38 |
-| off | 513 |
+| off | 681 |
 | true | 76 |
 
 ### By coordination
 
 | value | cases |
 |---|---|
-| none | 611 |
-| rolling | 16 |
+| none | 723 |
+| rolling | 72 |
 
 ## Constraint ledger (tuples excluded during construction)
 
@@ -74,7 +74,7 @@ Total generated cases: **627**. The whole-corpus per-PR cap (hand + generated) i
 - `fault=podkill:migrating` needs `mode=migrate` — out of scope here.
 - Kill targets (`kill=leader|worker`) exist only on gang topologies.
 - Update budgets are dormant under a steady-state kill: the kill family permutes strategies at their canonical budget only.
-- crashloop breaks an engine pod, so its coordination axis (co=none | co=rolling) exists only on the PD topologies; each strategy runs at one budget (SurgeThenDrain under maxUnavailable=0, the others under maxUnavailable=1) and each crash form under the restart policy whose trigger it exercises (start under None, load under RecreateInstance); the workload package's closed-loop matrix decides the full product.
+- crashloop breaks an engine pod, so its coordination axis (co=none | co=rolling) exists only on the PD topologies; maxUnavailable=0 is emitted for SurgeThenDrain only, percent budgets run at the mid size where the ceil() rounding differs from the integer case, and both restart policies run under both crash forms.
 - Kill-family cells pinned by hand-written restart/ cases are excluded:
 
   - p130: engine SurgeThenDrain rp=None

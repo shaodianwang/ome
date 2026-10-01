@@ -1981,13 +1981,13 @@ class CrashloopFaultTest(unittest.TestCase):
     def test_generated_family_crosses_every_axis(self):
         _outputs, rows = generate_cases.build_outputs()
         fam = [(kv, m) for folder, _n, kv, m in rows if folder == "gen-crashloop"]
-        self.assertEqual(48, len(fam))
+        self.assertEqual(216, len(fam))
         self.assertEqual({"crashloop:start", "crashloop:load"}, {m["verb"] for _kv, m in fam})
         self.assertEqual(set(generate_cases.CRASH_BUDGETS), {m["strat"] for _kv, m in fam})
         self.assertEqual({"None", "RecreateInstance"}, {m["rp"] for _kv, m in fam})
-        self.assertEqual({("start", "None"), ("load", "RecreateInstance")},
+        self.assertEqual({(f, rp) for f in ("start", "load") for rp in ("None", "RecreateInstance")},
                          {(kv["form"], m["rp"]) for kv, m in fam},
-                         "each crash form runs under the policy whose trigger it exercises")
+                         "both crash forms run under both restart policies")
         self.assertEqual({"engine", "pd", "engine-mn", "pd-mn"}, {kv["topo"] for kv, _m in fam})
         for kv, _m in fam:
             self.assertEqual("crashloop:old", kv["fault"])

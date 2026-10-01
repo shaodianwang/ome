@@ -1,5 +1,5 @@
-# p2003: [gen] crashloop load engine N=4 RecreatePod u1 rp RecreateInstance co none  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 fault=crashloop:old floor_soft=1 co=none topo=engine form=load
-# reason: one old-revision engine pod has its runner killed every few seconds while it is up, so it dies after Ready and comes back between crashes; its Instance is off the target from that moment, so the roll owns it: the recreate drains it and rebuilds the Instance at the fixed revision, admitted within the same budget as its peers, and no repair is recorded for it after the bump; every Instance ends on the new revision; floor waived — the crash itself costs settled capacity for the length of the roll
+# p2003: [gen] crashloop load engine N=4 SurgeThenDrain s1 rp RecreateInstance co none  Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=crashloop:old floor_soft=1 co=none topo=engine form=load
+# reason: one old-revision engine pod has its runner killed every few seconds while it is up, so it dies after Ready and comes back between crashes; its Instance is off the target from that moment, so the roll owns it: the surge brings the fixed replacement up beside it and drains it, admitted within the same budget as its peers, and no repair is recorded for it after the bump; every Instance ends on the new revision; floor waived — the crash itself costs settled capacity for the length of the roll
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p2003 }
@@ -10,4 +10,4 @@ spec:
     minReplicas: 4
     maxReplicas: 4
     annotations: { ome.io/deploymentMode: OMENative }
-    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

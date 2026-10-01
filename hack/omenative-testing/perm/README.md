@@ -588,10 +588,9 @@ shared by its subprocesses, so a run's results land together under
   naming it after the bump: an Instance whose revision is not the roll target
   belongs to the roll, never to a repair on the revision it was running. The
   generated `isvcs/gen-crashloop/` family crosses the verb with topology,
-  strategy and (on PD) a rolling group, at one budget per strategy and with
-  each crash form under the restart policy whose trigger it exercises; the
-  closed-loop matrix in the workload package decides the full product of
-  budgets and policies, and the cluster adds the shapes and the real kubelet.
+  strategy, maxUnavailable, restart policy and (on PD) a rolling group, so
+  every path the closed-loop matrix in the workload package decides is also
+  driven against a real kubelet.
 
 - **`fault=quota` cases run serially.** A quota case creates a *namespace-wide*
   ResourceQuota sized from a live usage snapshot, so run concurrently it both

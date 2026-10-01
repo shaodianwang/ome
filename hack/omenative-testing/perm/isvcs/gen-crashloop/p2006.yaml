@@ -1,5 +1,5 @@
-# p2006: [gen] crashloop start engine N=4 InPlaceOnly u1 rp None co none  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 fault=crashloop:old floor_soft=1 co=none topo=engine form=start
-# reason: one old-revision engine pod is pointed at an image with no shell as the bump lands, so it crashes at every start and is never Ready again; its Instance is off the target from that moment, so the roll owns it: the patch lands the fixed image in place, admitted within the same budget as its peers, and no repair is recorded for it after the bump; every Instance ends on the new revision; floor waived — the crash itself costs settled capacity for the length of the roll
+# p2006: [gen] crashloop start engine N=4 SurgeThenDrain s1 rp RecreateInstance co none  Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=crashloop:old floor_soft=1 co=none topo=engine form=start
+# reason: one old-revision engine pod is pointed at an image with no shell as the bump lands, so it crashes at every start and is never Ready again; its Instance is off the target from that moment, so the roll owns it: the surge brings the fixed replacement up beside it and drains it, admitted within the same budget as its peers, and no repair is recorded for it after the bump; every Instance ends on the new revision; floor waived — the crash itself costs settled capacity for the length of the roll
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p2006 }
@@ -10,4 +10,4 @@ spec:
     minReplicas: 4
     maxReplicas: 4
     annotations: { ome.io/deploymentMode: OMENative }
-    lifecycle: { restartPolicy: "None", updateStrategy: { type: "InPlaceOnly", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
