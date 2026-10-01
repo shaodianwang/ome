@@ -1,0 +1,15 @@
+# p3903: [gen] switch rotating engine-mn W1 N=2 InPlaceIfPossible to SurgeThenDrain  Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 co=none topo=engine-mn edit=strategy:SurgeThenDrain during=rotating
+# reason: every bumped member's updateStrategy is patched from InPlaceIfPossible to SurgeThenDrain at the first updated pod; a step already in flight finishes under InPlaceIfPossible and every step that starts afterwards runs under SurgeThenDrain; the budget (maxSurge 1, maxUnavailable 1) is valid under both; the ceiling is N+1 because a surge step can be in flight on either side of the edit; maxUnavailable 1 gives either side the one slot it needs to drain or patch, so the floor N-1 holds throughout; a gang runs either in-place variant as a whole-gang recreate; every Instance ends on the new revision and the live spec carries SurgeThenDrain
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p3903 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }

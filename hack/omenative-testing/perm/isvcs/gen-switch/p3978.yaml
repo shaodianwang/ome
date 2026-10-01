@@ -1,0 +1,31 @@
+# p3978: [gen] switch rotating crashloop start pd-mn W1 N=2 SurgeThenDrain to RecreatePod co rolling  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=3 ceil_r=2 fault=crashloop:old floor_soft=1 co=rolling topo=pd-mn edit=strategy:RecreatePod during=rotating form=start
+# reason: one old-revision engine pod is pointed at an image with no shell as the bump lands, so it crashes at every start and is never Ready again; every bumped member's updateStrategy is patched from SurgeThenDrain to RecreatePod at the first updated pod, so the crashing Instance, which the roll reaches last, is handled under RecreatePod: the recreate drains it and rebuilds the Instance at the fixed revision, admitted within the budget both strategies share (maxSurge 1, maxUnavailable 1); it ends on the new revision serving with no repair recorded for it after the bump, and every other Instance ends on the new revision; the group paces engine and decoder together and both carry the edit; floor waived — the crash itself costs settled capacity for the length of the roll
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p3978 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          rollingUpdate: {}

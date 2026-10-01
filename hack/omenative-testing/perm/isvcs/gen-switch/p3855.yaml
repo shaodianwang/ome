@@ -1,0 +1,23 @@
+# p3855: [gen] switch rotating pd N=4 SurgeThenDrain rp None to RecreateInstance  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 co=none topo=pd edit=restartPolicy:RecreateInstanceOnPodRestart during=rotating
+# reason: the roll runs under SurgeThenDrain (maxSurge 1, maxUnavailable 0) and every bumped member's restartPolicy is patched from None to RecreateInstanceOnPodRestart at the first updated pod; the policy decides what a pod restart rebuilds and nothing restarts here, so the roll surges within its ceiling N+1 with the floor at N and converges on the new revision; the live spec carries RecreateInstanceOnPodRestart
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p3855 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

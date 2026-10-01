@@ -75,7 +75,7 @@ perm/
 ├── isvcs/                 — generated case YAMLs (committed; `topo=` in each header)
 │   ├── rollout/           — 96 rollout cases (topology × lifecycle × coordination)
 │   ├── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
-│   └── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/  — generated hot core (see isvcs/MANIFEST.md)
+│   └── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/  — generated hot core (see isvcs/MANIFEST.md)
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -590,6 +590,26 @@ legitimately breaks the first one's shape; convergence onto the new revision,
 isolation, gang atomicity, index partition and the capacity floor stay hard.
 A phase fault (`fault=podkill:rotating`) may share the case.
 
+The generated `isvcs/gen-switch/` family (`p3800`+, `generate_cases.py`)
+crosses the edit with the four topologies at one gang width: every ordered
+pair of distinct strategies at both hooks, both restart-policy flips
+(`None` to `RecreateInstanceOnPodRestart` and back) at both hooks under the
+canonical surge budget, and on the PD topologies each cell again under a
+`rollingUpdate` group, where the decoder carries the same start lifecycle
+as the engine so the edit is valid on it too. One budget per pair serves
+both strategies: `maxSurge: 1, maxUnavailable: 1` whenever `SurgeThenDrain`
+is on either side, `maxSurge: 0, maxUnavailable: 1` otherwise; the ceiling
+is N+1 whenever a surge step can be in flight on either side of the edit
+and N otherwise, and the floor N-1 is the one the drain-first side needs,
+asserted hard. No pair is skipped: the bump is an annotation diff, which
+both in-place variants apply, and a gang runs either variant as a
+whole-gang recreate. The family also carries the broken-while-switching
+shape for the surge and recreate pair in both directions:
+`fault=crashloop:old form=start` on the engine from the bump plus the
+strategy edit at `rotating`, so the crashing Instance, reached last, is
+fixed under the strategy the roll switched to (`floor_soft=1`, as on every
+crashloop case).
+
 ### Fault cases: quota isolation, cordon impact, leak remediation
 
 - **`fault=crashloop:old` with `form=start|load`** breaks one old-revision
@@ -766,10 +786,11 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `isvcs/rollout/` (`p500`+ is the continuation block: `p100`+ belongs to
   `gen_cases.py`'s feature counters).
 - `gen_runtime.py` — the runtime-triggered cases (`p400`+) → `isvcs/runtime-rev/`.
-- `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p2399`) →
-  `isvcs/gen-rollout/`, `isvcs/gen-fault/`, `isvcs/gen-restart/`,
-  `isvcs/gen-crashloop/`, plus `isvcs/MANIFEST.md` (per-dimension counts,
-  constraint ledger, missing-hook catalog).
+- `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p2399`
+  and `p3800`–`p4199`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
+  `isvcs/gen-restart/`, `isvcs/gen-crashloop/`, `isvcs/gen-switch/`, plus
+  `isvcs/MANIFEST.md` (per-dimension counts, constraint ledger,
+  missing-hook catalog).
 
 A generator owns exactly the case ids it mints. Hand-written cases share the
 feature folders with generated ones (`restart/`, `canary/`, `scale/` and

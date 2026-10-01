@@ -2616,3 +2616,111 @@ class MidRollEditTest(unittest.TestCase):
         self.assertEqual("FAIL", run._midroll_checks(unfired, spec, {"engine"}, "FAIL", [], checks))
         self.assertTrue(any("never reached" in c for c in checks))
         self.assertEqual("PASS", run._midroll_checks(None, spec, {"engine"}, "PASS", [], []))
+
+
+class StrategySwitchFamilyTest(unittest.TestCase):
+    """The generated gen-switch family: every ordered pair of distinct
+    strategies and both restart-policy flips at both hooks on every shape, a
+    rolling group on PD, one budget per pair valid under both strategies, the
+    header stated for the worse of the two shapes, and the crashing variants
+    on the surge and recreate pair."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-switch"]
+
+    @staticmethod
+    def _lifecycle(text, comp):
+        """(type, maxSurge, maxUnavailable, restartPolicy) of a Component's
+        rendered lifecycle line."""
+        block = re.search(rf"(?ms)^  {comp}:\n(.*?)(?=^  [a-z]+:|\Z)", text).group(1)
+        life = re.search(r"^    lifecycle: (.*)$", block, re.M).group(1)
+        rp = re.search(r'restartPolicy: "([A-Za-z]+)"', life)
+        return (re.search(r'type: "([A-Za-z]+)"', life).group(1),
+                int(re.search(r"maxSurge: (\d+)", life).group(1)),
+                int(re.search(r"maxUnavailable: (\d+)", life).group(1)),
+                rp.group(1) if rp else None)
+
+    def _cell(self, n, kv):
+        """(kind, topo, co, from, to, hook) the case drives, read from the
+        rendered body and the header it will run under."""
+        kind, value = run._midroll_edit(kv["edit"])
+        start, _s, _u, rp = self._lifecycle(self.outputs[f"gen-switch/{n}.yaml"], "engine")
+        if "fault" in kv:
+            return ("crash", kv["topo"], kv["co"], start, value, kv["during"])
+        if kind == "strategy":
+            return ("strategy", kv["topo"], kv["co"], start, value, kv["during"])
+        short = {full: rp_ for rp_, full in generate_cases.RP_FULL.items()}
+        return ("restartPolicy", kv["topo"], kv["co"], short[rp], short[value], kv["during"])
+
+    def test_family_crosses_every_axis(self):
+        strats, hooks = generate_cases.SWITCH_STRATS, generate_cases.SWITCH_HOOKS
+        expected = set()
+        for topo, _n, _w in generate_cases.SWITCH_SHAPES:
+            for co in generate_cases.SWITCH_COORDS[topo]:
+                expected |= {("strategy", topo, co, a, b, h) for a in strats for b in strats if a != b for h in hooks}
+                expected |= {("restartPolicy", topo, co, a, b, h)
+                             for a in generate_cases.RESTARTS for b in generate_cases.RESTARTS if a != b for h in hooks}
+                expected |= {("crash", topo, co, a, b, generate_cases.SWITCH_CRASH_HOOK)
+                             for a, b in generate_cases.SWITCH_CRASH_PAIRS}
+        got = [self._cell(n, kv) for n, kv, _m in self.fam]
+        self.assertEqual(180, len(self.fam))
+        self.assertEqual(len(got), len(set(got)), "every case is a distinct cell")
+        self.assertEqual(expected, set(got))
+        self.assertEqual({"engine", "pd", "engine-mn", "pd-mn"}, {kv["topo"] for _n, kv, _m in self.fam})
+        self.assertEqual({"rolling"}, {kv["co"] for _n, kv, _m in self.fam if kv["co"] != "none"})
+        self.assertTrue(all(kv["topo"].startswith("pd") for _n, kv, _m in self.fam if kv["co"] != "none"),
+                        "a rolling group exists only where a decoder does")
+
+    def test_budget_and_header_are_the_worse_of_the_two_strategies(self):
+        for n, kv, _m in self.fam:
+            text = self.outputs[f"gen-switch/{n}.yaml"]
+            kind, value = run._midroll_edit(kv["edit"])
+            start, surge, unavail, rp = self._lifecycle(text, "engine")
+            self.assertIn(kv["during"], run.EDIT_HOOKS, n)
+            self.assertIsNotNone(run._midroll_new(kv), n)
+            if kind == "strategy":
+                self.assertNotEqual(start, value, f"{n}: the edit changes the strategy")
+                surge_side = "SurgeThenDrain" in (start, value)
+                self.assertEqual((1 if surge_side else 0, 1), (surge, unavail),
+                                 f"{n}: one budget valid under both strategies of the pair")
+                self.assertEqual(kv["Ne"] + surge, kv["ceil_e"],
+                                 f"{n}: the ceiling is the surge one exactly when a side surges")
+                self.assertIsNone(rp, f"{n}: a strategy flip carries no restart policy")
+            else:
+                self.assertNotEqual(rp, value, f"{n}: the edit changes the policy")
+                self.assertEqual((generate_cases.SWITCH_POLICY_STRAT,) + generate_cases.SWITCH_POLICY_BUDGET,
+                                 (start, surge, unavail), f"{n}: policy flips roll under the canonical surge budget")
+                self.assertEqual(kv["Ne"] + 1, kv["ceil_e"], n)
+            if "fault" in kv:
+                self.assertEqual(("crashloop:old", "start", 1, "strategy", generate_cases.SWITCH_CRASH_HOOK),
+                                 (kv["fault"], kv["form"], kv["floor_soft"], kind, kv["during"]), n)
+                self.assertIn((start, value), generate_cases.SWITCH_CRASH_PAIRS, n)
+            else:
+                self.assertNotIn("floor_soft", kv, f"{n}: the floor is asserted hard across a pure edit")
+                self.assertNotIn("order_soft", kv, n)
+            self.assertEqual(kv["Nr"], kv["ceil_r"], f"{n}: the router is never bumped")
+            if not kv["topo"].startswith("pd"):
+                self.assertEqual("none", kv["co"], n)
+                continue
+            decoder = self._lifecycle(text, "decoder")
+            if kv["co"] == "rolling":
+                self.assertEqual((start, surge, unavail, rp), decoder,
+                                 f"{n}: a grouped decoder carries the engine's start lifecycle so the edit is valid on it")
+                self.assertEqual(kv["Nd"] + surge, kv["ceil_d"], f"{n}: a grouped decoder surges with the engine")
+            else:
+                self.assertEqual(kv["Nd"], kv["ceil_d"], f"{n}: an ungrouped decoder is a negative control")
+                self.assertEqual(("SurgeThenDrain", 1, 0), decoder[:3], n)
+
+    def test_every_case_validates_and_the_manifest_states_the_rule(self):
+        with tempfile.TemporaryDirectory() as d:
+            for n, _kv, _m in self.fam:
+                p = Path(d) / f"{n}.yaml"
+                p.write_text(self.outputs[f"gen-switch/{n}.yaml"])
+                self.assertEqual([], run.validate_case_file(p), n)
+        manifest = self.outputs[generate_cases.MANIFEST_REL]
+        self.assertIn("### By mid-roll edit (gen-switch)", manifest)
+        self.assertIn("| strategy SurgeThenDrain to RecreatePod at settling | 6 |", manifest)
+        self.assertIn("| restartPolicy None to RecreateInstance at rotating | 6 |", manifest)
+        self.assertIn("No strategy pair is skipped in gen-switch", manifest)

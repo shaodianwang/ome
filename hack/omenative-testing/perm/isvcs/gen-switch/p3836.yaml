@@ -1,0 +1,23 @@
+# p3836: [gen] switch settling pd N=4 RecreatePod to SurgeThenDrain  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 co=none topo=pd edit=strategy:SurgeThenDrain during=settling
+# reason: every bumped member's updateStrategy is patched from RecreatePod to SurgeThenDrain right after the bump lands; a step already in flight finishes under RecreatePod and every step that starts afterwards runs under SurgeThenDrain; the budget (maxSurge 1, maxUnavailable 1) is valid under both; the ceiling is N+1 because a surge step can be in flight on either side of the edit; maxUnavailable 1 gives either side the one slot it needs to drain or patch, so the floor N-1 holds throughout; every Instance ends on the new revision and the live spec carries SurgeThenDrain
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p3836 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
