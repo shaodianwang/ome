@@ -622,6 +622,70 @@ class TestEvalSubsharding(unittest.TestCase):
             sorted(case_id for shard in first for case_id in shard), cases
         )
 
+    def test_exclusive_cases_take_their_own_waves_within_the_minutes_budget(self):
+        """A case batch.py runs on its own is a wave of its own: shards carry
+        such cases up to the minutes budget (at least one each) on top of
+        their pool waves, whatever the cases' peak pods."""
+        cases = [f"p{i:02d}" for i in range(1, 11)]
+        peaks = {case_id: 4 for case_id in cases}
+        # Without the rule ten 4-pod cases are two waves of four and one of two.
+        self.assertEqual(
+            [len(s) for s in gp._split_eval_cases(cases, peaks, 4, 64, 4)], [10]
+        )
+        nine_minutes = {case_id: 9 for case_id in cases[:6]}
+        shards = gp._split_eval_cases(
+            cases, peaks, 4, 64, 4, exclusive_minutes=nine_minutes, exclusive_budget=20
+        )
+        # Two nine-minute cases fit a twenty-minute budget, three do not; the
+        # last exclusive shard also carries the four pool cases (one wave).
+        self.assertEqual(shards, [["p01", "p02"], ["p03", "p04"], ["p05", "p06", "p07", "p08", "p09", "p10"]])
+        twelve_minutes = {case_id: 12 for case_id in cases[:3]}
+        shards = gp._split_eval_cases(
+            cases, peaks, 4, 64, 4, exclusive_minutes=twelve_minutes, exclusive_budget=20
+        )
+        self.assertEqual([s[:1] for s in shards[:3]], [["p01"], ["p02"], ["p03"]])
+        # A case rated above the budget still runs, alone.
+        shards = gp._split_eval_cases(
+            cases[:2], peaks, 4, 64, 4, exclusive_minutes={"p01": 30}, exclusive_budget=20
+        )
+        self.assertEqual(shards, [["p01", "p02"]])
+        with self.assertRaises(RuntimeError):
+            gp._split_eval_cases(cases, peaks, 4, 64, 4, exclusive_minutes=nine_minutes)
+
+    def test_exclusive_rule_matches_the_batch_runner(self):
+        """The generator plans a case as exclusive exactly when batch.py runs it
+        on its own, over every committed case."""
+        perm_dir = gp.REPO_ROOT / "hack" / "omenative-testing" / "perm"
+        sys.path.insert(0, str(perm_dir))
+        try:
+            spec = importlib.util.spec_from_file_location("batch_under_test", perm_dir / "batch.py")
+            batch = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(batch)
+        finally:
+            sys.path.remove(str(perm_dir))
+        checked = 0
+        for _feature, _topology, cases in gp._eval_case_groups():
+            for case_id in cases:
+                fields = gp._eval_case_header_fields(case_id)
+                self.assertEqual(
+                    gp._eval_case_runs_exclusively(fields),
+                    batch.cluster_wide_fault(batch.case_header_fields(case_id)),
+                    case_id,
+                )
+                checked += 1
+        self.assertGreater(checked, 0)
+
+    def test_every_listed_exclusive_family_is_a_corpus_family_with_exclusive_cases(self):
+        """A family rated in EVAL_EXCLUSIVE_CASE_MINUTES exists and has cases the
+        rule applies to, so a renamed family does not keep a stale figure."""
+        groups = gp._eval_case_groups()
+        known = {feature for feature, _, _ in groups}
+        for feature, minutes in gp.EVAL_EXCLUSIVE_CASE_MINUTES.items():
+            self.assertIn(feature, known)
+            self.assertGreater(minutes, 0)
+            cases = [c for f, _, cs in groups if f == feature for c in cs]
+            self.assertTrue(gp._eval_exclusive_case_minutes(feature, cases), feature)
+
     def test_peak_pods_includes_multinode_workers(self):
         with tempfile.TemporaryDirectory() as tmp:
             case_dir = Path(tmp) / "canary"
@@ -687,28 +751,41 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         assignments = {}
         job_count = 0
         shard_counts = {}
+        exclusive_budget = 20
         for feature, topology, variant, _env, cases in gp._eval_lanes():
             pod_budget = 35 if gp._eval_feature_is_canary(feature) else 64
             target_waves = 2 if gp._eval_feature_is_canary(feature) else 4
+            exclusive = gp._eval_exclusive_case_minutes(feature, cases)
             shards = gp._split_eval_cases(
                 cases,
                 {case_id: gp._eval_case_peak_pods(case_id) for case_id in cases},
                 concurrency=4,
                 pod_budget=pod_budget,
                 target_waves=target_waves,
+                exclusive_minutes=exclusive,
+                exclusive_budget=exclusive_budget,
             )
             shard_counts[(feature, topology, variant)] = len(shards)
             job_count += len(shards)
             for shard_index, shard in enumerate(shards):
                 self.assertTrue(shard)
+                # The pool part of a shard runs in at most target_waves waves;
+                # its exclusive part is within the minutes budget unless it is
+                # a single case rated above it.
+                pool = [case_id for case_id in shard if case_id not in exclusive]
                 waves = gp._split_eval_cases(
-                    shard,
-                    {case_id: gp._eval_case_peak_pods(case_id) for case_id in shard},
+                    pool,
+                    {case_id: gp._eval_case_peak_pods(case_id) for case_id in pool},
                     concurrency=4,
                     pod_budget=pod_budget,
                     target_waves=1,
                 )
                 self.assertLessEqual(len(waves), target_waves)
+                serial = [case_id for case_id in shard if case_id in exclusive]
+                self.assertTrue(
+                    len(serial) <= 1 or sum(exclusive[c] for c in serial) <= exclusive_budget,
+                    (feature, topology, variant, shard_index, serial),
+                )
                 for case_id in shard:
                     self.assertNotIn(case_id, assignments)
                     assignments[case_id] = (feature, topology, variant, shard_index)
@@ -720,7 +797,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         }
         self.assertEqual(set(assignments), committed)
         self.assertEqual(shard_counts[("canary", "engine", "")], 21)
-        self.assertEqual(shard_counts[("canary", "pd", "")], 13)
+        self.assertEqual(shard_counts[("canary", "pd", "")], 12)
         self.assertEqual(shard_counts[("gen-crashloop", "engine", "")], 3)
         self.assertEqual(shard_counts[("gen-crashloop", "engine-mn", "")], 3)
         self.assertEqual(shard_counts[("gen-crashloop", "pd", "")], 5)
@@ -741,11 +818,14 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-imagepull", "engine-mn", "")], 1)
         self.assertEqual(shard_counts[("gen-imagepull", "pd", "")], 2)
         self.assertEqual(shard_counts[("gen-imagepull", "pd-mn", "")], 2)
+        # Node losses run one at a time at 6-11 minutes each: two per shard.
         for topology in ("engine", "pd", "engine-mn", "pd-mn"):
-            self.assertEqual(shard_counts[("gen-node", topology, "")], 1)
-            self.assertEqual(shard_counts[("gen-node", topology, gp.EVAL_FORCE_DELETE_SLUG)], 1)
-        for topology in ("engine", "pd", "engine-mn"):
-            self.assertEqual(shard_counts[("gen-ctrlrestart", topology, "")], 1)
+            self.assertEqual(shard_counts[("gen-node", topology, "")], 8)
+            self.assertEqual(shard_counts[("gen-node", topology, gp.EVAL_FORCE_DELETE_SLUG)], 4)
+        # Manager restarts run one at a time at 2-3 minutes each: six per shard.
+        self.assertEqual(shard_counts[("gen-ctrlrestart", "engine", "")], 2)
+        self.assertEqual(shard_counts[("gen-ctrlrestart", "engine-mn", "")], 2)
+        self.assertEqual(shard_counts[("gen-ctrlrestart", "pd", "")], 3)
         self.assertEqual(shard_counts[("gen-canary-crash", "engine", "")], 4)
         self.assertEqual(shard_counts[("gen-canary-crash", "pd", "")], 12)
         self.assertEqual(shard_counts[("gen-canary-second-rev", "engine", "")], 3)
@@ -787,12 +867,14 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-readiness", "engine-mn", "")], 1)
         self.assertEqual(shard_counts[("gen-gang-member", "engine-mn", "")], 3)
         self.assertEqual(shard_counts[("gen-gang-member", "pd-mn", "")], 2)
-        self.assertEqual(shard_counts[("gen-tight", "engine-mn", "")], 1)
-        self.assertEqual(shard_counts[("gen-tight", "pd-mn", "")], 1)
+        # A squeezed roll runs one at a time and may take its whole convergence
+        # budget: one per shard. Evictions run in the pool.
+        self.assertEqual(shard_counts[("gen-tight", "engine-mn", "")], 14)
+        self.assertEqual(shard_counts[("gen-tight", "pd-mn", "")], 14)
         for topology in ("engine", "pd", "engine-mn"):
             self.assertEqual(shard_counts[("gen-evict", topology, "")], 1)
-            self.assertEqual(shard_counts[("gen-preempt", topology, "")], 1)
-            self.assertEqual(shard_counts[("gen-pending", topology, "")], 2)
+            self.assertEqual(shard_counts[("gen-preempt", topology, "")], 4)
+            self.assertEqual(shard_counts[("gen-pending", topology, "")], 8)
         self.assertEqual(shard_counts[("gen-budget", "engine", "")], 3)
         self.assertEqual(shard_counts[("gen-budget", "engine-mn", "")], 2)
         self.assertEqual(shard_counts[("gen-budget", "pd", "")], 3)
@@ -806,11 +888,11 @@ class TestCheckedInTreeClassification(unittest.TestCase):
             self.assertEqual(shard_counts[("gen-fault-delete", topology, "")], 1)
         for topology in ("engine", "engine-mn", "pd"):
             self.assertEqual(shard_counts[("gen-fault-move", topology, "")], 2)
-            self.assertEqual(shard_counts[("gen-fault-move", topology, gp.EVAL_FORCE_DELETE_SLUG)], 1)
+            self.assertEqual(shard_counts[("gen-fault-move", topology, gp.EVAL_FORCE_DELETE_SLUG)], 2)
         self.assertEqual(shard_counts[("gen-fault-edit", "engine", "")], 2)
         self.assertEqual(shard_counts[("gen-fault-edit", "engine-mn", "")], 1)
         self.assertEqual(shard_counts[("gen-fault-edit", "pd", "")], 2)
-        self.assertEqual(job_count, 423)
+        self.assertEqual(job_count, 524)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin
@@ -851,9 +933,11 @@ class TestCheckedInTreeClassification(unittest.TestCase):
                 plain_cases |= cases
         self.assertEqual(twin_cases, needing)
         self.assertFalse(plain_cases & needing)
-        self.assertIn("gen-node / engine [forcedelete]", yaml_text)
-        self.assertIn("gen-node / engine [ome-scheduler] [forcedelete]", yaml_text)
-        self.assertIn('key: "omenative-e2e-gen-node-engine-ome-scheduler-forcedelete"', yaml_text)
+        # The twin's node losses run one at a time, so it is sharded like
+        # the plain lane: the variant names the label and the key.
+        self.assertIn("gen-node / engine [1/4] [forcedelete]", yaml_text)
+        self.assertIn("gen-node / engine [1/4] [ome-scheduler] [forcedelete]", yaml_text)
+        self.assertIn('key: "omenative-e2e-gen-node-engine-ome-scheduler-forcedelete-1-of-4"', yaml_text)
 
     def test_eval_group_emits_unique_subshard_keys_and_readable_labels(self):
         with mock.patch.dict(
@@ -868,7 +952,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         keys = re.findall(r'key: "(omenative-e2e-[^"]+)"', yaml_text)
         self.assertEqual(len(keys), len(set(keys)))
         self.assertIn("canary / engine [1/21]", yaml_text)
-        self.assertIn("canary / pd [13/13]", yaml_text)
+        self.assertIn("canary / pd [12/12]", yaml_text)
         self.assertIn("gen-canary-crash / pd [12/12]", yaml_text)
         # The generated canary families are canary lanes: Prometheus for the
         # analysis-gated cases and the canary pod budget.

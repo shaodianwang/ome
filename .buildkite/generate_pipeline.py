@@ -394,6 +394,42 @@ EVAL_SCHEDULERS = [""] + ([EVAL_GANG_SCHEDULER] if GKE_EVAL_SCHEDULER_ENABLED el
 EVAL_FORCE_DELETE_NEED = "forcedelete"
 EVAL_FORCE_DELETE_ENV = "OME_EVAL_FORCE_DELETE"
 EVAL_FORCE_DELETE_SLUG = "forcedelete"
+# batch.py runs a case whose fault apparatus reaches past its own pods (a
+# namespace-wide quota, a cordoned or stopped node, a manager restart, every
+# node tainted or filled) on its own after the concurrent pool drains, so the
+# planner gives such a case a wave of its own instead of packing it by its
+# peak pods. The kinds mirror batch.py's cluster_wide_fault; the test suite
+# keeps the two rules in step over the committed corpus.
+EVAL_EXCLUSIVE_FAULT_KINDS = frozenset({"quota", "cordon", "ctrlrestart", "node", "taint", "preempt"})
+EVAL_EXCLUSIVE_VIA = "preempt"
+# Wall-clock minutes one exclusive case of a family takes on the GKE agents,
+# the figure that sizes the serial part of its shards: measured from the main
+# builds where the family has run, expected from the runner's budgets where
+# it has not yet. An unlisted family gets the default.
+EVAL_EXCLUSIVE_CASE_MINUTES: dict[str, float] = {
+    # measured 6-11: the node is stopped or made NotReady, the pod-eviction
+    # toleration runs out, then the repair or relocation converges
+    "gen-node": 9,
+    # the node family's loss landing at the moment of a move
+    "gen-fault-move": 9,
+    # measured 2-3.5: the manager restarts at a hook and the roll completes
+    "gen-ctrlrestart": 3,
+    # expected: a squeezed roll waits on capacity through its hold window,
+    # then gets the roll's whole convergence budget
+    "gen-tight": 12,
+    # expected: a placement or admission wait, its lift, the roll's completion
+    "gen-pending": 6,
+    # expected: fillers take every node, the scheduler preempts the victim,
+    # the fillers are dropped
+    "gen-preempt": 6,
+    # measured: quota waits of 7 minutes among restart and cordon cells of 1-2
+    "fault": 4,
+    # measured: manager restarts at canary hooks of 2 minutes, two quota
+    # waits of 7
+    "canary": 3,
+}
+# A quota wait, the longest exclusive cell the hand-written families carry.
+EVAL_EXCLUSIVE_CASE_MINUTES_DEFAULT = 7
 # Kill switch for the deployed-mode operator-upgrade identity gate (see
 # _gke_upgrade_identity_step). The step resolves its own previous-image
 # reference at run time, so this only needs to gate whether the step exists.
@@ -1214,6 +1250,23 @@ def _eval_case_header_fields(case_id: str) -> dict[str, str]:
     return dict(token.split("=", 1) for token in header.split() if "=" in token)
 
 
+def _eval_case_runs_exclusively(fields: dict[str, str]) -> bool:
+    """batch.py's rule for a case it runs on its own after the pool drains."""
+    fault = fields.get("fault", "").split(":", 1)[0]
+    return fault in EVAL_EXCLUSIVE_FAULT_KINDS or fields.get("via") == EVAL_EXCLUSIVE_VIA
+
+
+def _eval_exclusive_case_minutes(feature: str, cases: list[str]) -> dict[str, float]:
+    """{case: expected minutes} for the cases of a lane that batch.py runs on
+    their own, at the family's figure from EVAL_EXCLUSIVE_CASE_MINUTES."""
+    minutes = EVAL_EXCLUSIVE_CASE_MINUTES.get(feature, EVAL_EXCLUSIVE_CASE_MINUTES_DEFAULT)
+    return {
+        case_id: minutes
+        for case_id in cases
+        if _eval_case_runs_exclusively(_eval_case_header_fields(case_id))
+    }
+
+
 def _eval_lane_variants(cases: list[str]) -> list[tuple[str, dict[str, str], list[str]]]:
     """[(variant slug, extra env, cases)] for one feature/topology group: the
     plain lane with every case that reads the default deploy, and, when any
@@ -1283,20 +1336,32 @@ def _split_eval_cases(
     concurrency: int,
     pod_budget: int,
     target_waves: int,
+    exclusive_minutes: dict[str, float] | None = None,
+    exclusive_budget: float | None = None,
 ) -> list[list[str]]:
-    """Pack cases into feasible scheduler waves, then bound waves per job."""
+    """Pack cases into feasible scheduler waves, then bound waves per job.
+
+    A case in `exclusive_minutes` is one batch.py runs on its own after the
+    pool drains, so it is a wave of its own and counts against the shard's
+    `exclusive_budget` of minutes instead of its `target_waves` of pool
+    waves; a shard always carries at least one such case, so a case rated
+    above the budget still runs, alone."""
     if concurrency < 1 or pod_budget < 1 or target_waves < 1:
         raise RuntimeError(
             "OMENative eval concurrency, pod budget, and target waves must be positive"
         )
+    exclusive_minutes = exclusive_minutes or {}
+    if exclusive_minutes and (exclusive_budget is None or exclusive_budget <= 0):
+        raise RuntimeError("OMENative eval exclusive-case minutes per shard must be positive")
     if not cases:
         return []
 
     # batch.py runs an unknown or over-budget case exclusively, so either shape
-    # consumes one full pod-capacity wave for planning purposes.
+    # consumes one full pod-capacity wave for planning purposes, as does a
+    # case it runs exclusively by its fault.
     def wave_weight(case_id: str) -> int:
         peak = case_peaks.get(case_id)
-        if peak is None:
+        if peak is None or case_id in exclusive_minutes:
             return pod_budget
         return min(max(peak, 0), pod_budget)
 
@@ -1321,10 +1386,28 @@ def _split_eval_cases(
         waves[wave].append(case_id)
         pod_loads[wave] += weights[case_id]
 
-    shards = [
-        [case_id for wave in waves[start : start + target_waves] for case_id in wave]
-        for start in range(0, len(waves), target_waves)
-    ]
+    shards: list[list[str]] = []
+    pool_waves = 0
+    used_minutes = 0.0
+    for wave in waves:
+        # An exclusive case fills its wave, so the wave's first member says
+        # which bound the wave counts against.
+        minutes = exclusive_minutes.get(wave[0])
+        if minutes is None:
+            fits = bool(shards) and pool_waves < target_waves
+        else:
+            fits = bool(shards) and (
+                used_minutes == 0 or used_minutes + minutes <= exclusive_budget
+            )
+        if not fits:
+            shards.append([])
+            pool_waves = 0
+            used_minutes = 0.0
+        shards[-1].extend(wave)
+        if minutes is None:
+            pool_waves += 1
+        else:
+            used_minutes += minutes
     for shard in shards:
         shard.sort(key=order.get)
     return shards
@@ -1340,6 +1423,11 @@ def _gke_eval_group() -> str:
     concurrency = int(os.environ.get("GKE_EVAL_CASE_CONCURRENCY", "4"))
     default_target_waves = int(os.environ.get("GKE_EVAL_TARGET_WAVES", "4"))
     canary_target_waves = int(os.environ.get("GKE_EVAL_CANARY_TARGET_WAVES", "2"))
+    # The expected minutes of exclusive cases one shard runs back to back
+    # after its pool: with the bring-up and the pool waves this keeps every
+    # lane expected well under the hour, and two cases of ten minutes or
+    # more never share a shard.
+    exclusive_budget = float(os.environ.get("GKE_EVAL_EXCLUSIVE_MINUTES", "20"))
     soft = _eval_scheduler_soft_topologies()
     soft_features = _eval_soft_features()
     children = []
@@ -1385,6 +1473,8 @@ def _gke_eval_group() -> str:
             concurrency,
             int(pod_budget),
             target_waves,
+            _eval_exclusive_case_minutes(feature, cases),
+            exclusive_budget,
         )
         for index, shard_cases in enumerate(subshards, start=1):
             part = f" [{index}/{len(subshards)}]" if len(subshards) > 1 else ""
