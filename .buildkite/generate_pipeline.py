@@ -292,6 +292,48 @@ EVAL_SCHEDULER_SOFT_TOPOLOGIES: list[dict[str, str]] = [
     },
 ]
 
+# Eval-feature soft list: the escape hatch for whole families. A family that
+# landed this week is run on every main build so its findings are classified,
+# but it stays advisory while those findings are turned into issues and fixes,
+# so a release gates on the lanes that were green before the family existed.
+# Same rules as the other lists: a feature the corpus does not carry, an empty
+# owner or reason, or an entry past `expires` fails generation. To promote a
+# family, delete its entry in the PR that makes its first main round green.
+EVAL_SOFT_FEATURES: list[dict[str, str]] = [
+    {
+        "feature": feature,
+        "owner": "slin1237",
+        "expires": "2026-10-15",
+        "reason": (
+            "marathon family: its first main rounds are classified into "
+            "issues and fixes; advisory until they are green"
+        ),
+    }
+    for feature in (
+        "gen-switch",
+        "gen-crashloop",
+        "gen-crashloop-idle",
+        "gen-crashloop-sibling",
+        "gen-heal",
+        "gen-imagepull",
+        "gen-node",
+        "gen-ctrlrestart",
+        "gen-canary-crash",
+        "gen-canary-second-rev",
+        "gen-canary-podkill",
+        "gen-canary-fault-old",
+        "gen-canary-fault-new",
+        "gen-rollback",
+        "gen-crashloop-new",
+        "gen-crashloop-group",
+        "gen-pause-repair",
+        "gen-size",
+        "gen-router-gang",
+        "gen-ops-held",
+        "gen-runtime-edit-repair",
+    )
+]
+
 
 def _truthy(val: str) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
@@ -717,6 +759,33 @@ def _kind_scheduler_soft_groups() -> dict[str, str]:
             expired=lambda raw, owner: (
                 f"KIND scheduler twin {group} was soft until {raw} (owner {owner}): "
                 "fix it under the gang scheduler, or extend the entry with a reason"
+            ),
+        )
+    return soft
+
+
+def _eval_soft_features() -> dict[str, str]:
+    """Validate EVAL_SOFT_FEATURES; return {feature: expiry}.
+
+    Same rejections as the scheduler soft list: an entry that names no feature
+    the corpus carries, that nobody owns or explains, or whose time is up has
+    stopped carrying information.
+    """
+    known = {feature for feature, _, _ in _eval_case_groups()}
+    soft: dict[str, str] = {}
+    for entry in EVAL_SOFT_FEATURES:
+        feature = str(entry.get("feature", "")).strip()
+        if not feature:
+            raise RuntimeError("eval soft-list entry without a feature")
+        if feature not in known:
+            raise RuntimeError(f"soft-listed eval feature is not a corpus feature: {feature}")
+        if feature in soft:
+            raise RuntimeError(f"duplicate eval soft-list entry: {feature}")
+        soft[feature] = _owned_until(
+            entry, f"eval soft-list entry for {feature}",
+            expired=lambda raw, owner: (
+                f"eval lanes of {feature} were soft until {raw} (owner {owner}): "
+                "make the family green, or extend the entry with a reason"
             ),
         )
     return soft
@@ -1258,6 +1327,7 @@ def _gke_eval_group() -> str:
     default_target_waves = int(os.environ.get("GKE_EVAL_TARGET_WAVES", "4"))
     canary_target_waves = int(os.environ.get("GKE_EVAL_CANARY_TARGET_WAVES", "2"))
     soft = _eval_scheduler_soft_topologies()
+    soft_features = _eval_soft_features()
     children = []
     for scheduler in EVAL_SCHEDULERS:
       for feature, topology, variant, variant_env, cases in _eval_lanes():
@@ -1335,9 +1405,13 @@ def _gke_eval_group() -> str:
                 "retry": {"automatic": _infra_retry_automatic()},
                 "plugins": plugins,
             }
-            if scheduler and topology in soft:
+            if feature in soft_features:
+                child["label"] += f" (advisory until {soft_features[feature]})"
+            elif scheduler and topology in soft:
                 child["label"] += f" (advisory until {soft[topology]})"
-            if scheduler and (topology in soft or not GKE_EVAL_SCHEDULER_HARD_FAIL):
+            if feature in soft_features or (
+                scheduler and (topology in soft or not GKE_EVAL_SCHEDULER_HARD_FAIL)
+            ):
                 child["soft_fail"] = True
             children.append(child)
     group = {

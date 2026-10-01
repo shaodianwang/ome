@@ -1199,3 +1199,45 @@ class TestEvalClusterName(unittest.TestCase):
             capture_output=True, text=True,
         )
         self.assertEqual(bad.returncode, 2)
+
+
+class TestEvalSoftFeatures(unittest.TestCase):
+    """A family on the eval soft list runs on every main build and stays advisory
+    on both schedulers until its expiry; every other family gates the build."""
+
+    def test_every_listed_feature_is_a_corpus_feature_with_an_owner_and_expiry(self):
+        soft = gp._eval_soft_features()
+        known = {feature for feature, _, _ in gp._eval_case_groups()}
+        self.assertTrue(soft, "the soft list is empty; delete this test with the list")
+        for feature, expiry in soft.items():
+            self.assertIn(feature, known)
+            self.assertRegex(expiry, r"^\d{4}-\d{2}-\d{2}$")
+
+    def test_listed_features_are_advisory_on_both_schedulers_and_others_gate(self):
+        soft = gp._eval_soft_features()
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GKE_EVAL_CASE_CONCURRENCY": "4",
+                "GKE_EVAL_TARGET_WAVES": "4",
+                "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+            },
+        ):
+            yaml_text = gp._gke_eval_group()
+        seen_soft = seen_hard = 0
+        for match in re.finditer(r'- label: "([^"]*)"(.*?)(?=\n\s*- label: "|\Z)', yaml_text, re.S):
+            label, body = match.group(1), match.group(2)
+            command = re.search(r'run_omenative_eval_gke\.sh ([^"]+)"', body)
+            if command is None:
+                continue
+            feature = command.group(1).split()[0]
+            twin = "ome-scheduler" in label
+            if feature in soft:
+                self.assertIn("soft_fail: true", body, label)
+                self.assertIn("advisory until", label)
+                seen_soft += 1
+            elif not twin:
+                self.assertNotIn("soft_fail", body, label)
+                seen_hard += 1
+        self.assertGreater(seen_soft, 0)
+        self.assertGreater(seen_hard, 0)
