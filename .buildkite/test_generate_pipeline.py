@@ -20,6 +20,8 @@ import itertools
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +31,15 @@ _MODULE_PATH = Path(__file__).resolve().parent / "generate_pipeline.py"
 _spec = importlib.util.spec_from_file_location("generate_pipeline_under_test", _MODULE_PATH)
 gp = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gp)
+
+# The eval runner's cluster-name helper, shared so the derivation it runs is
+# the one these tests check against every generated lane.
+_CLUSTER_NAME_PATH = Path(__file__).resolve().parent / "eval_cluster_name.py"
+_cluster_name_spec = importlib.util.spec_from_file_location(
+    "eval_cluster_name_under_test", _CLUSTER_NAME_PATH
+)
+ecn = importlib.util.module_from_spec(_cluster_name_spec)
+_cluster_name_spec.loader.exec_module(ecn)
 
 # Minimal file bodies: discovery counts a file only if it declares a
 # ginkgo suite entry, so helpers sharing the suffix stay unowned.
@@ -1037,3 +1048,116 @@ class TestRetiredPipelineMode(unittest.TestCase):
         with mock.patch.dict(os.environ, {"OME_PIPELINE_MODE": "daily"}):
             with self.assertRaisesRegex(SystemExit, "2"):
                 gp.main()
+
+
+class TestEvalClusterName(unittest.TestCase):
+    """run_omenative_eval_gke.sh names its KIND cluster after the lane, and
+    KIND names every node after the cluster, so the longest node of every
+    emitted lane must fit the hostname limit."""
+
+    EVAL_RUNNER = gp.REPO_ROOT / ".buildkite" / "run_omenative_eval_gke.sh"
+    OVERFLOWING_LANE = "gen-crashloop-idle-engine-mn-ome-scheduler"
+
+    def default_workers(self) -> int:
+        """The worker count the runner uses when the step sets none."""
+        match = re.search(
+            r'workers="\$\{OME_EVAL_KIND_WORKERS:-(\d+)\}"', self.EVAL_RUNNER.read_text()
+        )
+        self.assertIsNotNone(match, "the runner must default OME_EVAL_KIND_WORKERS")
+        return int(match.group(1))
+
+    def emitted_lanes(self) -> dict[str, int]:
+        """{lane: workers} for every job the eval group emits, the lane built
+        the way the runner builds it from its arguments and env."""
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GKE_EVAL_CASE_CONCURRENCY": "4",
+                "GKE_EVAL_TARGET_WAVES": "4",
+                "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+            },
+        ):
+            yaml_text = gp._gke_eval_group()
+        default_workers = self.default_workers()
+        lanes: dict[str, int] = {}
+        for block in yaml_text.split("- label:")[1:]:
+            command = re.search(
+                r'command: "sh \.buildkite/run_omenative_eval_gke\.sh (\S+) (\S+)', block
+            )
+            if not command:
+                continue
+            lane = "-".join(command.groups())
+            scheduler = re.search(r'OME_EVAL_SCHEDULER: "([^"]+)"', block)
+            if scheduler:
+                lane += "-" + scheduler.group(1)
+            if f'{gp.EVAL_FORCE_DELETE_ENV}: "1"' in block:
+                lane += "-" + gp.EVAL_FORCE_DELETE_SLUG
+            workers = re.search(r'OME_EVAL_KIND_WORKERS: "(\d+)"', block)
+            lanes[lane] = int(workers.group(1)) if workers else default_workers
+        return lanes
+
+    def test_every_emitted_lane_gets_a_cluster_whose_nodes_fit(self):
+        lanes = self.emitted_lanes()
+        self.assertIn(self.OVERFLOWING_LANE, lanes)
+        names = {}
+        for lane, workers in lanes.items():
+            name = ecn.cluster_name(lane, workers)
+            names[lane] = name
+            for node in ecn.node_names(name, workers):
+                self.assertLessEqual(len(node), ecn.HOSTNAME_MAX, f"{lane}: {node}")
+                self.assertRegex(node, r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+            plain = ecn.plain_cluster_name(lane)
+            if all(len(node) <= ecn.HOSTNAME_MAX for node in ecn.node_names(plain, workers)):
+                # A lane that fits keeps its name, so its clusters and logs
+                # read as before.
+                self.assertEqual(name, plain, lane)
+            else:
+                head = name[: -(ecn.HASH_LENGTH + 1)]
+                self.assertTrue(plain.startswith(head), f"{lane}: {name} is not a prefix of {plain}")
+                self.assertRegex(name, rf"-[0-9a-f]{{{ecn.HASH_LENGTH}}}$")
+        self.assertEqual(len(set(names.values())), len(names), "one cluster name per lane")
+
+    def test_overflowing_lane_is_shortened_deterministically(self):
+        plain = ecn.plain_cluster_name(self.OVERFLOWING_LANE)
+        self.assertGreater(len(plain + ecn.CONTROL_PLANE_SUFFIX), ecn.HOSTNAME_MAX)
+        name = ecn.cluster_name(self.OVERFLOWING_LANE, 4)
+        self.assertEqual(name, "ome-eval-gen-crashloop-idle-engine-mn-ome-d45678")
+        self.assertEqual(name, ecn.cluster_name(self.OVERFLOWING_LANE, 4))
+        self.assertLessEqual(len(name + ecn.CONTROL_PLANE_SUFFIX), ecn.HOSTNAME_MAX)
+        self.assertNotIn("--", name)
+        # A longer lane with the same readable head gets its own hash.
+        twin = ecn.cluster_name(self.OVERFLOWING_LANE + "-" + gp.EVAL_FORCE_DELETE_SLUG, 4)
+        self.assertEqual(twin[: -ecn.HASH_LENGTH], name[: -ecn.HASH_LENGTH])
+        self.assertNotEqual(twin, name)
+
+    def test_short_lane_keeps_its_plain_name(self):
+        self.assertEqual(ecn.cluster_name("canary-engine", 2), "ome-eval-canary-engine")
+        self.assertEqual(ecn.cluster_name("gen_fault-pd_mn", 12), "ome-eval-gen-fault-pd-mn")
+
+    def test_node_names_follow_kind(self):
+        self.assertEqual(
+            ecn.node_names("c", 3), ["c-control-plane", "c-worker", "c-worker2", "c-worker3"]
+        )
+        with self.assertRaises(ValueError):
+            ecn.node_names("c", 0)
+
+    def test_runner_names_the_cluster_through_the_helper(self):
+        script = self.EVAL_RUNNER.read_text()
+        self.assertIn('eval_cluster_name.py" "$lane" "$workers"', script)
+        self.assertNotIn("printf 'ome-eval-%s'", script)
+        self.assertLess(
+            script.index('workers="${OME_EVAL_KIND_WORKERS'),
+            script.index("eval_cluster_name.py"),
+            "the worker count sizes the name budget, so it is parsed first",
+        )
+        # The command line the runner uses prints what the library computes.
+        out = subprocess.run(
+            [sys.executable, str(_CLUSTER_NAME_PATH), self.OVERFLOWING_LANE, "4"],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(out.stdout.strip(), ecn.cluster_name(self.OVERFLOWING_LANE, 4))
+        bad = subprocess.run(
+            [sys.executable, str(_CLUSTER_NAME_PATH), self.OVERFLOWING_LANE, "0"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(bad.returncode, 2)

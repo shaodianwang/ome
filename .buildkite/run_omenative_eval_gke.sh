@@ -26,7 +26,20 @@ case "${OME_EVAL_FORCE_DELETE:-}" in
   *) force_delete="" ;;
 esac
 lane="${feature}-${topology}${scheduler:+-${scheduler}}${force_delete:+-${force_delete}}"
-cluster=$(printf 'ome-eval-%s' "$lane" | tr '_' '-')
+# Worker count: two by default; the gang scheduler places one gang member per
+# node, so a multi-node twin arrives with OME_EVAL_KIND_WORKERS sized to its
+# shard's peak pods.
+workers="${OME_EVAL_KIND_WORKERS:-2}"
+case "$workers" in
+  ''|*[!0-9]*) echo "OME_EVAL_KIND_WORKERS must be a positive integer, got '$workers'" >&2; exit 2 ;;
+esac
+[ "$workers" -ge 1 ] || { echo "OME_EVAL_KIND_WORKERS must be at least 1" >&2; exit 2; }
+# KIND names each node <cluster>-<role> and docker sets that as its hostname,
+# so the helper keeps the plain ome-eval-<lane> name while the longest node
+# fits the hostname limit and otherwise hashes the lane's tail. Only the
+# cluster name shortens; the lane keys the label, the results and the JUnit.
+cluster=$(python3 "$(dirname "$0")/eval_cluster_name.py" "$lane" "$workers")
+[ -n "$cluster" ] || { echo "could not name the KIND cluster for lane ${lane}" >&2; exit 2; }
 images_dir="${OME_KIND_IMAGES_DIR:-/images}"
 repo="${PROD_ECR_REGISTRY:-168653207203.dkr.ecr.us-east-2.amazonaws.com}/msl_infra"
 run_stamp="${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_ID:-$$}"
@@ -137,14 +150,6 @@ docker run --rm --privileged busybox sh -c '
 
 mkdir -p /ome-eval-model
 chmod 0777 /ome-eval-model
-# Worker count: two by default; the gang scheduler places one gang member per
-# node, so a multi-node twin arrives with OME_EVAL_KIND_WORKERS sized to its
-# shard's peak pods.
-workers="${OME_EVAL_KIND_WORKERS:-2}"
-case "$workers" in
-  ''|*[!0-9]*) echo "OME_EVAL_KIND_WORKERS must be a positive integer, got '$workers'" >&2; exit 2 ;;
-esac
-[ "$workers" -ge 1 ] || { echo "OME_EVAL_KIND_WORKERS must be at least 1" >&2; exit 2; }
 {
   cat <<'KINDEOF'
 kind: Cluster
@@ -169,7 +174,7 @@ KINDEOF
 if [ -n "${OME_EVAL_SCHEDULER_SKIPPED:-}" ]; then
   echo "--- cases above the whole-node cap, not run in this scheduler twin: ${OME_EVAL_SCHEDULER_SKIPPED} ---"
 fi
-stage="create KIND cluster: 1 control-plane + ${workers} worker(s)"
+stage="create KIND cluster ${cluster}: 1 control-plane + ${workers} worker(s)"
 echo "--- ${stage} ---"
 kind create cluster --name "$cluster" --image "$node_image" \
   --config "${tmp_dir}/kind.yaml" --wait 180s
