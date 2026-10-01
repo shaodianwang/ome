@@ -19,6 +19,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
+	ometesting "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 )
 
 type publicationActivity struct {
@@ -43,6 +44,10 @@ func (c *publicationActivity) Update(ctx context.Context, obj client.Object, opt
 }
 
 var _ = ginkgo.Describe("TrafficMap publication convergence", func() {
+	ginkgo.BeforeEach(func() {
+		ometesting.SetDefaultEventually()
+	})
+
 	ginkgo.It("quiesces with API defaulting and repairs external drift on resync", func() {
 		namespace := uniqueName("publication-convergence")
 		gomega.Expect(k8sClient.Create(suiteCtx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}})).To(gomega.Succeed())
@@ -95,26 +100,27 @@ var _ = ginkgo.Describe("TrafficMap publication convergence", func() {
 		ctx, cancel := context.WithCancel(suiteCtx)
 		stopped := make(chan error, 1)
 		go func() { stopped <- mgr.Start(ctx) }()
-		ginkgo.DeferCleanup(func() { cancel(); gomega.Eventually(stopped, 15*time.Second).Should(gomega.Receive(gomega.Succeed())) })
+		ginkgo.DeferCleanup(func() { cancel(); gomega.Eventually(stopped).Should(gomega.Receive(gomega.Succeed())) })
 		gomega.Eventually(func(g gomega.Gomega) {
 			tm := getTrafficMap(g, namespace, isvc.Name)
 			g.Expect(tm.Status.Published).To(gomega.BeTrue())
 			g.Expect(tm.Status.GatewayRef).NotTo(gomega.BeNil())
 		}).Should(gomega.Succeed())
 
+		// Quiet windows are kept well under RequeueAfter: they assert the publisher is idle between resyncs.
 		ginkgo.By("observing a quiet interval with unchanged routing and publication status")
 		var stableVersion string
 		gomega.Eventually(func(g gomega.Gomega) {
 			tm := getTrafficMap(g, namespace, isvc.Name)
 			stableVersion = tm.ResourceVersion
 			g.Consistently(func() string { return getTrafficMap(gomega.Default, namespace, isvc.Name).ResourceVersion }, time.Second, 50*time.Millisecond).Should(gomega.Equal(stableVersion))
-		}, 15*time.Second).Should(gomega.Succeed())
+		}).Should(gomega.Succeed())
 		reads, updates := activity.reads.Load(), activity.updates.Load()
 		gomega.Consistently(func() int64 { return activity.reads.Load() }, time.Second, 50*time.Millisecond).Should(gomega.Equal(reads))
 		gomega.Expect(updates).To(gomega.BeZero(), "API defaults must not cause no-op PUTs")
 
 		ginkgo.By("reapplying the plan without updating API-defaulted Services or HTTPRoutes")
-		gomega.Eventually(func() int64 { return activity.reads.Load() }, 10*time.Second).Should(gomega.BeNumerically(">", reads))
+		gomega.Eventually(func() int64 { return activity.reads.Load() }).Should(gomega.BeNumerically(">", reads))
 		gomega.Consistently(func() int64 { return activity.updates.Load() }, time.Second, 50*time.Millisecond).Should(gomega.BeZero())
 
 		ginkgo.By("repairing a backend changed outside the publisher")
@@ -128,7 +134,7 @@ var _ = ginkgo.Describe("TrafficMap publication convergence", func() {
 			live := &corev1.Service{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(backend), live)).To(gomega.Succeed())
 			g.Expect(live.Spec.ExternalName).To(gomega.Equal(wantedHost))
-		}, 15*time.Second).Should(gomega.Succeed())
+		}).Should(gomega.Succeed())
 		gomega.Expect(activity.updates.Load()).To(gomega.Equal(int64(1)))
 		liveSource := &v1beta1.InferenceService{}
 		gomega.Expect(k8sClient.Get(suiteCtx, key, liveSource)).To(gomega.Succeed())
