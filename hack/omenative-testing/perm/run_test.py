@@ -2987,3 +2987,140 @@ class StrategySwitchFamilyTest(unittest.TestCase):
         self.assertIn("| strategy SurgeThenDrain to RecreatePod at settling | 6 |", manifest)
         self.assertIn("| restartPolicy None to RecreateInstance at rotating | 6 |", manifest)
         self.assertIn("No strategy pair is skipped in gen-switch", manifest)
+
+
+class GeneratedHealAndImagepullFamiliesTest(unittest.TestCase):
+    """The configkey heal family (gen-heal) and the imagepull family
+    (gen-imagepull): every axis is crossed, each heal case carries its
+    ConfigMap and the victim's env reference, exactly the after-failed half of
+    the heal family is parked, and nothing in the imagepull family is."""
+
+    TOPOS = ("engine", "pd", "engine-mn", "pd-mn")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, cls.rows = generate_cases.build_outputs()
+
+    def _family(self, folder):
+        return [(n, kv, m) for f, n, kv, m in self.rows if f == folder]
+
+    @staticmethod
+    def _component_block(isvc, comp):
+        lines = isvc.split("\n")
+        out = []
+        for line in lines[lines.index(f"  {comp}:") + 1:]:
+            if line.startswith("  ") and not line.startswith("    "):
+                break
+            out.append(line)
+        return "\n".join(out)
+
+    def test_heal_family_crosses_every_axis(self):
+        fam = self._family("gen-heal")
+        self.assertEqual(32, len(fam))
+        self.assertEqual({(t, rp, lift, co) for t in self.TOPOS for rp in generate_cases.RESTARTS
+                          for lift in generate_cases.HEAL_LIFTS for co in generate_cases.HEAL_COORDS},
+                         {(kv["topo"], m["rp"], kv["lift"], kv["co"]) for _n, kv, m in fam})
+        for _n, kv, _m in fam:
+            self.assertEqual("configkey:missing", kv["fault"])
+            self.assertEqual("idle", kv["during"])
+            self.assertEqual("heals", kv["expect"])
+            self.assertNotIn("mode", kv)
+            # A repair rebuilds in place: nothing may surge on a service nobody bumped.
+            self.assertEqual((kv["Ne"], kv["Nd"], kv["Nr"]), (kv["ceil_e"], kv["ceil_d"], kv["ceil_r"]))
+
+    def test_heal_cases_carry_their_configmap_and_the_victims_env(self):
+        g = generate_cases
+        for n, kv, _m in self._family("gen-heal"):
+            docs = self.outputs[f"gen-heal/{n}.yaml"].split("\n---\n")
+            self.assertEqual(2, len(docs), n)
+            cm = f"{n}{g.HEAL_CONFIG_SUFFIX}"
+            self.assertEqual(f"apiVersion: v1\nkind: ConfigMap\nmetadata: {{ name: {cm} }}\n"
+                             f"data: {{ {g.HEAL_CONFIG_KEY}: \"{g.HEAL_CONFIG_VALUE}\" }}\n", docs[1])
+            ref = (f'{{ name: "{g.HEAL_CONFIG_VAR}", valueFrom: {{ configMapKeyRef: '
+                   f'{{ name: "{cm}", key: "{g.HEAL_CONFIG_KEY}" }} }} }}')
+            engine = self._component_block(docs[0], "engine")
+            if kv["topo"].endswith("-mn"):
+                self.assertIn(f'    leader: {{ runner: {{ name: "{gen_cases.MAIN_CONTAINER}", env: [{ref}] }} }}',
+                              engine, n)
+            else:
+                self.assertIn(f"    runner: {{ env: [{ref}] }}", engine, n)
+                self.assertNotIn("leader:", engine)
+            if kv["topo"].startswith("pd"):
+                self.assertNotIn("runner", self._component_block(docs[0], "decoder"), n)
+                self.assertNotIn("runner", self._component_block(docs[0], "router"), n)
+            if kv["co"] == "rolling":
+                members = "[engine, decoder]" if kv["topo"].startswith("pd") else "[engine]"
+                self.assertIn(f"        - components: {members}\n          rollingUpdate: {{}}", docs[0], n)
+            else:
+                self.assertNotIn("rollout:", docs[0], n)
+
+    def test_heal_parks_exactly_the_after_failed_half(self):
+        g = generate_cases
+        fam = self._family("gen-heal")
+        parked = {n for n, _kv, m in fam if "parked" in m}
+        self.assertEqual({n for n, kv, _m in fam if kv["lift"] == "after-failed"}, parked)
+        self.assertEqual(16, len(parked))
+        for n, kv, m in fam:
+            text = self.outputs[f"gen-heal/{n}.yaml"]
+            engine = self._component_block(text.split("\n---\n")[0], "engine")
+            if kv["lift"] == "after-failed":
+                self.assertEqual((1, g.HEAL_ISSUE), (kv["notimpl"], kv["issue"]), n)
+                self.assertNotIn("inv_xfail", kv)
+                self.assertIn(f'instanceReadyTimeout: "{g.HEAL_FAILED_READY_TIMEOUT}"', engine, n)
+                self.assertTrue(text.splitlines()[1].startswith("# reason: parked:"), n)
+            else:
+                self.assertNotIn("notimpl", kv, n)
+                self.assertNotIn("instanceReadyTimeout", text, n)
+        heal_parked = {k for k in g.PARKED if k[0] == "heal"}
+        self.assertEqual(16, len(heal_parked))
+        self.assertEqual({"after-failed"}, {k[4] for k in heal_parked})
+
+    def test_imagepull_family_crosses_every_axis(self):
+        g = generate_cases
+        fam = self._family("gen-imagepull")
+        self.assertEqual(56, len(fam))
+        settling = [(n, kv, m) for n, kv, m in fam if m["verb"] == "imagepull:settling"]
+        idle = [(n, kv, m) for n, kv, m in fam if m["verb"] == "imagepull:idle"]
+        self.assertEqual((48, 8), (len(settling), len(idle)))
+        self.assertFalse(any("parked" in m for _n, _kv, m in fam), "nothing in the imagepull family is parked")
+        self.assertEqual({(t, s, rp, co) for t, cos in g.CRASH_COORDS.items() for s, _b in g.STRATS
+                          for rp in g.RESTARTS for co in cos},
+                         {(kv["topo"], m["strat"], m["rp"], kv["co"]) for _n, kv, m in settling})
+        for n, kv, m in settling:
+            self.assertEqual(("imagepull:old", 1), (kv["fault"], kv["floor_soft"]), n)
+            self.assertNotIn("during", kv)
+            self.assertNotIn("form", kv)
+            surge = kv["Ne"] + 1 if m["strat"] == "SurgeThenDrain" else kv["Ne"]
+            self.assertEqual(surge, kv["ceil_e"], n)
+            self.assertEqual(kv["Nd"] + (1 if kv["co"] == "rolling" else 0), kv["ceil_d"],
+                             "a rolling group surges the decoder too")
+        self.assertEqual({(t, rp) for t in self.TOPOS for rp in g.RESTARTS},
+                         {(kv["topo"], m["rp"]) for _n, kv, m in idle})
+        for n, kv, _m in idle:
+            self.assertEqual(("idle", "repaired", "none"), (kv["during"], kv["expect"], kv["co"]), n)
+            self.assertEqual((kv["Ne"], kv["Nd"]), (kv["ceil_e"], kv["ceil_d"]), n)
+            self.assertNotIn("floor_soft", kv)
+            self.assertNotIn("rollout:", self.outputs[f"gen-imagepull/{n}.yaml"])
+
+    def test_generated_blocks_are_disjoint_and_own_their_ids(self):
+        blocks = sorted(generate_cases.GEN_BLOCKS.items(), key=lambda item: item[1])
+        for (fa, (_lo_a, hi_a)), (fb, (lo_b, _hi_b)) in zip(blocks, blocks[1:]):
+            self.assertLessEqual(hi_a, lo_b, f"{fa} and {fb} overlap")
+        for folder, (lo, hi) in generate_cases.GEN_BLOCKS.items():
+            ids = [int(n[1:]) for f, n, _kv, _m in self.rows if f == folder]
+            self.assertTrue(ids, folder)
+            self.assertTrue(lo <= min(ids) and max(ids) < hi, folder)
+        owned = {Path(rel).stem for rel in self.outputs if rel.endswith(".yaml")}
+        for f in (HERE / "isvcs").glob("**/*.yaml"):
+            if f.parent.name not in generate_cases.GEN_BLOCKS:
+                self.assertNotIn(f.stem, owned, f"{f} uses a generated id")
+
+    def test_renderer_helpers(self):
+        self.assertEqual('[{ name: "a", value: "1" }, 2]', gen_cases.flow([{"name": "a", "value": "1"}, 2]))
+        env = [{"name": "V", "valueFrom": {"configMapKeyRef": {"name": "cm", "key": "k"}}}]
+        self.assertEqual({"env": env}, gen_cases.configmap_env("cm", "k", "V"))
+        self.assertEqual({"name": gen_cases.MAIN_CONTAINER, "env": env}, gen_cases.configmap_env("cm", "k", "V", gang=True))
+        text = gen_cases.render("p1", [gen_cases.comp("engine", 1)], docs=[gen_cases.configmap_doc("p1-config", {"k": "v"})])
+        self.assertTrue(text.endswith('---\napiVersion: v1\nkind: ConfigMap\nmetadata: { name: p1-config }\ndata: { k: "v" }\n'))
+        self.assertIn('instanceReadyTimeout: "90s"', gen_cases.lifecycle(ready_timeout="90s"))
+        self.assertNotIn("instanceReadyTimeout", gen_cases.lifecycle())

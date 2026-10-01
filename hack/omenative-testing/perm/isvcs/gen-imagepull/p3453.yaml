@@ -1,0 +1,15 @@
+# p3453: [gen] imagepull idle engine-mn W1 N=2 rp RecreateInstance  Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 fault=imagepull:old co=none topo=engine-mn during=idle expect=repaired
+# reason: one engine pod of the idle service is pointed at an image that cannot be pulled, so the kubelet parks it in ImagePullBackOff; nothing bumps the service, so the crash-loop repair owns it under either restart policy: once the pod has sat past the stuck-pod grace the Instance is rebuilt in place (the whole gang, every pod new, Ready and serving on the running revision) and a RestartTriggered event names it; no Component ever exceeds N alive
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p3453 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

@@ -724,7 +724,13 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-crashloop-idle", "pd-mn")], 2)
         self.assertEqual(shard_counts[("gen-crashloop-sibling", "pd")], 1)
         self.assertEqual(shard_counts[("gen-crashloop-sibling", "pd-mn")], 1)
-        self.assertEqual(job_count, 168)
+        for topology in ("engine", "engine-mn", "pd", "pd-mn"):
+            self.assertEqual(shard_counts[("gen-heal", topology)], 1)
+        self.assertEqual(shard_counts[("gen-imagepull", "engine")], 1)
+        self.assertEqual(shard_counts[("gen-imagepull", "engine-mn")], 1)
+        self.assertEqual(shard_counts[("gen-imagepull", "pd")], 2)
+        self.assertEqual(shard_counts[("gen-imagepull", "pd-mn")], 2)
+        self.assertEqual(job_count, 178)
 
     def test_eval_group_emits_unique_subshard_keys_and_readable_labels(self):
         with mock.patch.dict(

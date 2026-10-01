@@ -40,6 +40,7 @@ import casefiles
 HERE = Path(__file__).parent.resolve()
 ISVCS = HERE / "isvcs"
 CBM, CSR, CSR_MN = "ome-coordtest-noop", "ome-coordtest-cpu", "ome-coordtest-multinode"
+MAIN_CONTAINER = "ome-container"   # the runtime container a runner override merges into
 N = 8    # default replica Instances (scaled up from 4 so most cases stress >=8)
 NR = 2   # router replicas (router is single-pod, never the bumped member here)
 TOPOS = ["engine", "pd", "engine-mn", "pd-mn"]
@@ -49,6 +50,8 @@ PD_TOPOS = ["pd", "pd-mn"]
 def flow(v):
     if isinstance(v, dict):
         return "{ " + ", ".join(f"{k}: {flow(x)}" for k, x in v.items()) + " }"
+    if isinstance(v, list):
+        return "[" + ", ".join(flow(x) for x in v) + "]"
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, str):
@@ -57,7 +60,7 @@ def flow(v):
 
 
 def lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, partition=None,
-              restart=None, ready=None, marknr=None, mig=None):
+              restart=None, ready=None, marknr=None, mig=None, ready_timeout=None):
     us = {"type": strat}
     ru = {}
     if surge is not None:
@@ -76,6 +79,8 @@ def lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, partition=None,
     life = {}
     if restart:
         life["restartPolicy"] = restart
+    if ready_timeout:
+        life["instanceReadyTimeout"] = ready_timeout
     if ready:
         life["readyPolicy"] = ready
     if mig is not None:
@@ -95,10 +100,27 @@ def strat_ceil(strat, n):
     return n + 1 if strat == "SurgeThenDrain" else n
 
 
-def comp(name, n, w=0, life=None, ann=None):
+def comp(name, n, w=0, life=None, ann=None, runner=None):
     # ann: extra pod annotations merged after ome.io/deploymentMode (analysis
     # cases use it for the Downward-API health knobs + prometheus.io/scrape).
-    return {"comp": name, "n": n, "w": w, "life": life if life is not None else lifecycle(), "ann": ann}
+    # runner: an inline runner override, merged into the runtime container by
+    # env name; on a gang it rides under leader.runner.
+    return {"comp": name, "n": n, "w": w, "life": life if life is not None else lifecycle(), "ann": ann,
+            "runner": runner}
+
+
+def configmap_env(cm_name, key, var, gang=False):
+    """A runner override whose env reads one ConfigMap key. The leader form
+    names the container, which the CRD requires under leader.runner."""
+    env = [{"name": var, "valueFrom": {"configMapKeyRef": {"name": cm_name, "key": key}}}]
+    return {"name": MAIN_CONTAINER, "env": env} if gang else {"env": env}
+
+
+def configmap_doc(name, data):
+    """A ConfigMap document a case carries beside its InferenceService, so the
+    apply creates it and the teardown removes it with the case."""
+    return "\n".join(["apiVersion: v1", "kind: ConfigMap", f"metadata: {{ name: {name} }}",
+                      f"data: {flow(data)}"]) + "\n"
 
 
 def _group(components, *, blue_green=False, rolling=None, maintain_ratio=None,
@@ -175,7 +197,8 @@ def coord_for(kind, comps=("engine", "decoder")):
     raise ValueError(kind)
 
 
-def render(name, comps, coord=None, runtime=None, meta_ann=None):
+def render(name, comps, coord=None, runtime=None, meta_ann=None, docs=()):
+    # docs: further documents appended after the InferenceService.
     if runtime is None:
         runtime = CSR_MN if any(c["w"] > 0 for c in comps) else CSR
     if meta_ann:
@@ -196,13 +219,20 @@ def render(name, comps, coord=None, runtime=None, meta_ann=None):
             ann_str = "{ ome.io/deploymentMode: OMENative }"
         out += [f"  {c['comp']}:", f"    minReplicas: {c['n']}", f"    maxReplicas: {c['n']}",
                 f"    annotations: {ann_str}"]
+        runner = c.get("runner")
         if c["w"] > 0:
-            out += ["    leader: {}", f"    worker: {{ size: {c['w']} }}"]
+            leader = f"    leader: {flow({'runner': runner})}" if runner else "    leader: {}"
+            out += [leader, f"    worker: {{ size: {c['w']} }}"]
+        elif runner:
+            out.append(f"    runner: {flow(runner)}")
         if c["life"]:
             out.append(f"    lifecycle: {c['life']}")
     if coord:
         out.append(coord)
-    return "\n".join(out) + "\n"
+    text = "\n".join(out) + "\n"
+    for doc in docs:
+        text += "---\n" + doc
+    return text
 
 
 # ── topology helpers ─────────────────────────────────────────────────────────

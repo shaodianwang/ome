@@ -1,0 +1,33 @@
+# p3015: [gen] heal configkey pd N=4 rp RecreateInstance lift after-failed co rolling  Ne=4 Nd=4 Nr=2 ceil_e=4 ceil_d=4 ceil_r=2 fault=configkey:missing co=rolling topo=pd during=idle lift=after-failed expect=heals notimpl=1 issue=1978
+# reason: parked: the repair that rebuilt the Instance keeps its operation when the row escalates to Failed, and a Failed row with an operation has no exit once its pods are runtime-ready, so the key's return starts the pods while the row stays Failed with nothing serving until the reset mailbox
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p3015 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    runner: { env: [{ name: "TEST_CONFIG_VALUE", valueFrom: { configMapKeyRef: { name: "p3015-config", key: "value" } } }] }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", instanceReadyTimeout: "90s", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          rollingUpdate: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: p3015-config }
+data: { value: "1" }

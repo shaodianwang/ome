@@ -4,7 +4,7 @@
 Emits the constraint-filtered cross product of
     topology x updateStrategy x failure verb x injection phase x
     restartPolicy x pause
-into seven generator-owned folders, using ONLY verbs and hooks the runners
+into nine generator-owned folders, using ONLY verbs and hooks the runners
 (run.py + the KIND CI lane) already implement:
 
     gen-rollout/   p1000+  baseline revision-bump rollouts (failure=none)
@@ -33,6 +33,20 @@ into seven generator-owned folders, using ONLY verbs and hooks the runners
                           decoder), crossed with the PD topologies x group
                           kind x crash form x restartPolicy; the engine roll
                           converges and the decoder is repaired
+    gen-heal/      p3000+  a cause that disappears: the engine runner's
+                          ConfigMap key is removed on the idle service and
+                          put back at lift=after-settle|after-failed
+                          (fault=configkey:missing), crossed with topology x
+                          restartPolicy x lift x coordination; the Instance
+                          must be Ready and serving again on its running
+                          revision with no bump and no reset mailbox
+    gen-imagepull/ p3400+  a running revision whose image stops pulling
+                          (fault=imagepull:old): fired as the bump
+                          lands, crossed with topology x strategy x
+                          restartPolicy x coordination, the fix must land on
+                          that Instance; and fired on the idle service
+                          (during=idle), crossed with topology x restartPolicy,
+                          the repair must rebuild it
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -99,12 +113,22 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     are replaced. The grouped cells of both families state the intended repair
     and are parked, through issue=, on the issue that tracks it; the no-group
     cells run live.
+  - heal breaks the engine runner, so its coordination axis is a rollingUpdate
+    group over the engine alone or, where a decoder exists, over engine and
+    decoder: the hold a group keeps on repairs while no run is open. Nothing
+    rolls, so the update strategy stays canonical and is not an axis.
+    lift=after-failed waits for the row to escalate, so those cases carry a
+    short instanceReadyTimeout on the victim (HEAL_FAILED_READY_TIMEOUT).
+  - imagepull has one form (an image that never pulls has no after-Ready
+    form) and runs each strategy at its canonical budget only; the idle half
+    carries no group, since a grouped repair's hold is its own family.
 
 The t=3 covering fill over the deferred dimensions (coordination/rollout
 groups, canary promotion, budget x coordination interactions) is the --fill
 knob: documented, deliberately not emitted until this lane has baked in.
 """
 import argparse
+import functools
 import math
 import subprocess
 import sys
@@ -124,6 +148,8 @@ GEN_BLOCKS = {
     "gen-switch": (3800, 4200),
     "gen-crashloop-idle": (2400, 2600),
     "gen-crashloop-sibling": (2600, 2800),
+    "gen-heal": (3000, 3400),
+    "gen-imagepull": (3400, 3800),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -174,6 +200,8 @@ def switch_budget(a, b):
     surge step needs headroom above N, a drain-first or in-place step needs
     headroom below it, and the merge patch keeps the budget as declared."""
     return (1 if "SurgeThenDrain" in (a, b) else 0, 1)
+
+
 # The steady-state and sibling crash-loop families. A service carries no group
 # or one of the four group kinds, Sequential and canary as the other generators
 # express them (one single-Component blueGreen group per member; a two-step
@@ -190,6 +218,34 @@ IDLE_PHASE = "idle"
 # The grouped cells of both families assert the intended repair and are parked,
 # through the issue= header key, on the issue that tracks it.
 GROUPED_REPAIR_ISSUE = 1977
+
+# The heal family: the engine runner's ConfigMap key is removed on the idle
+# service and put back at the lift. Shapes as the crashloop family; nothing
+# rolls, so the strategy stays canonical; the coordination axis is a
+# rollingUpdate group over the victim engine (with the decoder where one
+# exists), the hold a group keeps on repairs while no run is open.
+HEAL_LIFTS = ["after-settle", "after-failed"]
+HEAL_COORDS = ["none", "rolling"]
+# The ConfigMap each heal case carries beside its InferenceService: named
+# after the case, one key, read by the engine runner through this env var.
+HEAL_CONFIG_SUFFIX = "-config"
+HEAL_CONFIG_KEY = "value"
+HEAL_CONFIG_VALUE = "1"
+HEAL_CONFIG_VAR = "TEST_CONFIG_VALUE"
+# lift=after-failed waits for the victim's row to escalate, which the open
+# repair does at StartedAt + instanceReadyTimeout (or at the stuck-pod grace
+# where the deployment configures one). run.py watches the whole case inside
+# the rotate budget, ROTATE_BASE_S + ROTATE_PER_POD_S per pod (180 s + 100 s
+# per pod before OME_TEST_TIMEOUT_MULT scales it), so the smallest shape here
+# has 580 s: 90 s, the readyTimeout the canary failure cases park under, puts
+# the escalation well inside that and leaves the heal watch after the lift
+# its own full budget.
+HEAL_FAILED_READY_TIMEOUT = "90s"
+# The issue the self-heal of a Failed row is tracked under: a repair that
+# escalates keeps its operation, and a Failed row with an operation has no
+# exit once its pods are runtime-ready, so the key's return starts the pods
+# but the row stays Failed. Every lift=after-failed cell is parked on it.
+HEAL_ISSUE = 1978
 
 # Canonical shapes: (topo, N, W). Gangs at N=2 with widths 1 and 2; singles at
 # N=4 (pd: engine+decoder N, router lib.NR). Percentage budgets additionally
@@ -213,6 +269,14 @@ STRATS = [
     ("InPlaceIfPossible", [(0, 1), (0, 2), (0, "50%")]),
     ("InPlaceOnly", [(0, 1), (0, 2), (0, "50%")]),
 ]
+
+# The imagepull family: as the bump lands, one old-revision engine pod is
+# pointed at the harness's unpullable image (one form: an image that never
+# pulls has no after-Ready form), at each strategy's canonical budget, under
+# both restart policies, with the crashloop coordination axis; and on the
+# idle service under both restart policies with no group, where the
+# crash-loop repair must rebuild it.
+IMAGEPULL_BUDGETS = [(strat, budgets[0]) for strat, budgets in STRATS]
 
 # Kill-family cells already pinned by hand-written restart/ cases (size-agnostic:
 # the recreate-scope contract does not depend on N). Key:
@@ -256,8 +320,11 @@ HAND_PINNED_KILL = {
 #   ("switch-crash", hook, topo, w, n, from, to, co)
 #   ("crashloop-idle", form, topo, w, size, co, victim, rp)
 #   ("crashloop-sibling", form, topo, w, size, co, rp)
+#   ("heal", topo, w, rp, lift, co)
+#   ("imagepull", "settling", topo, w, strat, rp, co) / ("imagepull", "idle", topo, w, rp)
 # A park is added here as (key): (issue, reason, invariant scope) and
-# rendered into the header.
+# rendered into the header. The heal family's lift=after-failed cells are
+# parked on HEAL_ISSUE with a per-axis reason, filled in next to its emitter.
 PARKED = {}
 
 # Runner verbs/hooks this corpus needs but the runners do not implement yet.
@@ -336,9 +403,9 @@ def comps(topo, n, w, e_life, d_life=None, r_life=None):
     return cs
 
 
-def case_yaml(name, desc, kv, case_comps, reason, coord=None):
+def case_yaml(name, desc, kv, reason, body):
     lines = [header(name, desc, kv), f"# reason: {reason}"]
-    return "\n".join(lines) + "\n" + lib.render(name, case_comps, coord=coord)
+    return "\n".join(lines) + "\n" + body
 
 
 # ── gen-rollout: failure=none baselines ─────────────────────────────────────
@@ -688,6 +755,8 @@ def emit_switch(add):
                 add("gen-switch", desc, kv, comps(topo, n, w, life, d_life=d_life),
                     _switch_crash_reason(from_, to, co), meta,
                     cell=("switch-crash", SWITCH_CRASH_HOOK, topo, w, n, from_, to, co), coord=coord)
+
+
 # ── gen-crashloop-idle / gen-crashloop-sibling: a break under a rollout group ─
 def group_for(co, topo):
     """The spec.rollout.groups block a crash-loop family case carries: the
@@ -787,6 +856,144 @@ def emit_crashloop_sibling(add):
                         parked=(GROUPED_REPAIR_ISSUE, ""))
 
 
+# ── gen-heal: a cause that disappears ───────────────────────────────────────
+def _heal_coord(topo, co):
+    if co == "none":
+        return None
+    return lib.coord_for(co, comps=("engine", "decoder") if is_pd(topo) else ("engine",))
+
+
+def _heal_body(name, topo, n, w, life, d_life, co):
+    """The case body: the engine runner reads one key of a ConfigMap named
+    after the case, and that ConfigMap rides in the file as a second document,
+    so the apply creates it and the teardown removes it with the case."""
+    cm = f"{name}{HEAL_CONFIG_SUFFIX}"
+    cs = comps(topo, n, w, life, d_life=d_life)
+    cs[0]["runner"] = lib.configmap_env(cm, HEAL_CONFIG_KEY, HEAL_CONFIG_VAR, gang=is_mn(topo))
+    return lib.render(name, cs, coord=_heal_coord(topo, co),
+                      docs=[lib.configmap_doc(cm, {HEAL_CONFIG_KEY: HEAL_CONFIG_VALUE})])
+
+
+def _heal_reason(rp, co, topo):
+    where = "gang leader" if is_mn(topo) else "pod"
+    out = (f"the engine runner's ConfigMap key is removed on the highest Instance's {where} and the "
+           f"runner restarted, so its next start waits in CreateContainerConfigError; the key is put "
+           f"back once that wait has held for the settle window, before any attempt escalates, and "
+           f"the kubelet's own retry starts the container")
+    if rp == "None" and co == "none":
+        out += (" on that pod, or on the one the crash-loop repair rebuilt when it opened first (the "
+                "stuck-pod clock counts from the pod's creation, and the victim is older than the grace)")
+    elif rp == "None":
+        out += (" on that pod: the group holds the crash-loop repair while no run is open, which "
+                "leaves the pod to the kubelet")
+    else:
+        out += " on the pod the runner-restart repair rebuilt, and the open repair promotes it"
+        if co != "none":
+            out += ("; the group holds only a fresh crash-loop repair, and the runner-restart repair "
+                    "is not put to it, so it opens as with no group")
+    out += ("; the Instance is Ready and serving again on its running revision with no new revision "
+            "and no reset mailbox")
+    return out
+
+
+def _heal_parked_reason(rp, co):
+    out = ("parked: the repair that rebuilt the Instance keeps its operation when the row escalates "
+           "to Failed, and a Failed row with an operation has no exit once its pods are runtime-ready, "
+           "so the key's return starts the pods while the row stays Failed with nothing serving until "
+           "the reset mailbox")
+    if rp == "None" and co != "none":
+        out += ("; under a group with no run open the row does not even escalate: the only repair a "
+                "None policy opens is the crash-loop one, which the group holds, so the lift never "
+                "arrives and the park covers both rules")
+    return out
+
+
+PARKED.update({
+    ("heal", topo, w, rp, "after-failed", co): (HEAL_ISSUE, _heal_parked_reason(rp, co), "")
+    for topo, _n, w in CRASH_SHAPES for rp in RESTARTS for co in HEAL_COORDS
+})
+
+
+def emit_heal(add):
+    for topo, n, w in CRASH_SHAPES:
+        for rp in RESTARTS:
+            for lift in HEAL_LIFTS:
+                for co in HEAL_COORDS:
+                    kv = dict(**counts(topo, n), ceil_e=n, ceil_d=(n if is_pd(topo) else 0),
+                              ceil_r=(lib.NR if is_pd(topo) else 0),
+                              fault="configkey:missing", co=co, topo=topo,
+                              during="idle", lift=lift, expect="heals")
+                    meta = dict(strat="(dormant: nothing rolls)", verb=f"configkey:{lift}", rp=rp)
+                    desc = (f"{GEN_MARK} heal configkey {shape_tag(topo, w)} N={n} rp {rp} "
+                            f"lift {lift} co {co}")
+                    timeout = HEAL_FAILED_READY_TIMEOUT if lift == "after-failed" else None
+                    life = lib.lifecycle(restart=RP_FULL[rp], ready_timeout=timeout)
+                    d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+                    add("gen-heal", desc, kv, None, _heal_reason(rp, co, topo), meta,
+                        cell=("heal", topo, w, rp, lift, co),
+                        body=functools.partial(_heal_body, topo=topo, n=n, w=w, life=life,
+                                               d_life=d_life, co=co))
+
+
+# ── gen-imagepull: a running revision whose image stops pulling ───
+def _imagepull_reason(strat, co):
+    lands = {"SurgeThenDrain": "the surge brings the fixed replacement up beside it and drains it",
+             "RecreatePod": "the recreate drains it and rebuilds the Instance at the fixed revision",
+             "InPlaceIfPossible": "the patch lands the fixed image in place",
+             "InPlaceOnly": "the patch lands the fixed image in place"}[strat]
+    out = ("one old-revision engine pod is pointed at an image that cannot be pulled as the bump lands, "
+           "so the kubelet parks it in ImagePullBackOff and it is never Ready again; its Instance is off "
+           f"the target from that moment, so the roll owns it: {lands}, admitted within the same budget "
+           "as its peers, and no repair is recorded for it after the bump; every Instance ends on the "
+           "new revision")
+    if co != "none":
+        out += "; the group paces engine and decoder together as on any coordinated roll"
+    out += "; floor waived — the broken pod costs settled capacity for the length of the roll"
+    return out
+
+
+def _imagepull_idle_reason(topo):
+    scope = "the whole gang" if is_mn(topo) else "the pod"
+    return ("one engine pod of the idle service is pointed at an image that cannot be pulled, so the "
+            "kubelet parks it in ImagePullBackOff; nothing bumps the service, so the crash-loop repair "
+            "owns it under either restart policy: once the pod has sat past the stuck-pod grace the "
+            f"Instance is rebuilt in place ({scope}, every pod new, Ready and serving on the running "
+            "revision) and a RestartTriggered event names it; no Component ever exceeds N alive")
+
+
+def emit_imagepull(add):
+    for topo, n, w in CRASH_SHAPES:
+        for strat, (surge, unavail) in IMAGEPULL_BUDGETS:
+            for rp in RESTARTS:
+                for co in CRASH_COORDS[topo]:
+                    kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge),
+                              fault="imagepull:old", floor_soft=1, co=co, topo=topo)
+                    if co != "none":
+                        # The group rolls the decoder too, on its own surge.
+                        kv["ceil_d"] = n + 1
+                    meta = dict(strat=strat, verb="imagepull:settling", rp=rp)
+                    desc = (f"{GEN_MARK} imagepull {shape_tag(topo, w)} N={n} {strat} "
+                            f"{budget_tag(strat, surge, unavail)} rp {rp} co {co}")
+                    life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                    d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+                    add("gen-imagepull", desc, kv, comps(topo, n, w, life, d_life=d_life),
+                        _imagepull_reason(strat, co), meta,
+                        cell=("imagepull", "settling", topo, w, strat, rp, co),
+                        coord=lib.coord_for(co) if co != "none" else None)
+    for topo, n, w in CRASH_SHAPES:
+        for rp in RESTARTS:
+            kv = dict(**counts(topo, n), ceil_e=n, ceil_d=(n if is_pd(topo) else 0),
+                      ceil_r=(lib.NR if is_pd(topo) else 0),
+                      fault="imagepull:old", co="none", topo=topo,
+                      during="idle", expect="repaired")
+            meta = dict(strat="(dormant: nothing rolls)", verb="imagepull:idle", rp=rp)
+            desc = f"{GEN_MARK} imagepull idle {shape_tag(topo, w)} N={n} rp {rp}"
+            life = lib.lifecycle(restart=RP_FULL[rp])
+            d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+            add("gen-imagepull", desc, kv, comps(topo, n, w, life, d_life=d_life),
+                _imagepull_idle_reason(topo), meta, cell=("imagepull", "idle", topo, w, rp))
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 def build_outputs():
     """{relative path under isvcs/: file text} — the entire owned output set."""
@@ -795,7 +1002,9 @@ def build_outputs():
     rows = []   # (folder, case id, kv, meta) for the manifest
     parked_used = set()
 
-    def add(folder, desc, kv, case_comps, reason, meta, cell, coord=None, parked=None):
+    def add(folder, desc, kv, case_comps, reason, meta, cell, coord=None, parked=None, body=None):
+        """body: the case body as a function of the minted name, for a family
+        whose fixtures carry the case id; the plain render otherwise."""
         lo, hi = GEN_BLOCKS[folder]
         cid = counters[folder]
         if cid >= hi:
@@ -813,7 +1022,8 @@ def build_outputs():
             if inv_scope:
                 kv["inv_xfail"] = inv_scope
             meta = dict(meta, parked=issue)
-        outputs[f"{folder}/{name}.yaml"] = case_yaml(name, desc, kv, case_comps, reason, coord)
+        text = body(name) if body else lib.render(name, case_comps, coord=coord)
+        outputs[f"{folder}/{name}.yaml"] = case_yaml(name, desc, kv, reason, text)
         rows.append((folder, name, dict(kv), dict(meta)))
 
     emit_rollout(add)
@@ -823,6 +1033,8 @@ def build_outputs():
     emit_switch(add)
     emit_crashloop_idle(add)
     emit_crashloop_sibling(add)
+    emit_heal(add)
+    emit_imagepull(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -946,6 +1158,16 @@ def manifest(rows):
         " (`expect=repaired`; the engine converges and the decoder is repaired)"
         " and are parked, through `issue=`, on the issue that tracks it; the"
         " no-group cells run live.",
+        "- heal breaks the engine runner, so its coordination axis is a"
+        " rollingUpdate group over the engine alone or, where a decoder"
+        " exists, over engine and decoder; nothing rolls, so the update"
+        " strategy stays canonical and is not an axis. `lift=after-failed`"
+        f" carries `instanceReadyTimeout: {HEAL_FAILED_READY_TIMEOUT}` on the"
+        " victim so the row escalates inside the case budget.",
+        "- imagepull has one form (an image that never pulls has no after-Ready"
+        " form) and runs each strategy at its canonical budget only; its idle"
+        " half carries no group, since a grouped repair's hold is its own"
+        " family.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]
@@ -955,6 +1177,7 @@ def manifest(rows):
         lines.append(f"  - {pin}: {cell} {strat} rp={rp}"
                      + (f" pause={pause}" if pause else "")
                      + (f" target={target}" if target else ""))
+    lines += heal_notes()
     lines += [
         "",
         "## Missing runner verbs/hooks (future coverage, not emitted)",
@@ -972,6 +1195,43 @@ def manifest(rows):
         "",
     ]
     return "\n".join(lines)
+
+
+def heal_notes():
+    """Why each half of gen-heal is asserted or parked, read off the controller
+    (the restart trigger, the stuck-pod evidence and the escalation pass)."""
+    return [
+        "",
+        "## gen-heal: which cells heal without the missing rule",
+        "",
+        "The family asserts the intended behaviour, `expect=heals`, on every"
+        " cell; the cells whose heal needs the exit a Failed row lacks are"
+        f" parked on #{HEAL_ISSUE} and listed above.",
+        "",
+        "- `lift=after-settle` (asserted): the key returns once the"
+        " CreateContainerConfigError wait has held for the settle window,"
+        " before any attempt escalates. Under `None` the crash-loop repair"
+        " opens as soon as the wait is seen (the stuck-pod clock counts from"
+        " the pod's creation and the victim is older than the grace), rebuilds"
+        " the pod, and the rebuilt pod waits on the same key; under"
+        " `RecreateInstanceOnPodRestart` the runner-restart repair does the"
+        " same. Either way the kubelet starts the container once the key is"
+        " back and the open repair promotes the Instance; where a group holds"
+        " the crash-loop repair (`None` with `co=rolling`), the kubelet's retry"
+        " on the untouched pod is the whole heal. The settle window"
+        " (`LIFT_SETTLE_S`, 20 s before `OME_TEST_TIMEOUT_MULT`) has to stay"
+        " inside the deployment's `stuckPodGracePeriod` (60 s in the chart): a"
+        " multiplier of 3 or more turns these cells into the after-failed"
+        " shape.",
+        f"- `lift=after-failed` (parked on #{HEAL_ISSUE}): the repair keeps its"
+        " operation when the row escalates, and a Failed row with an operation"
+        " has no exit once its pods are runtime-ready, so the key's return"
+        " starts the pods while the row stays Failed. The `None` x `co=rolling`"
+        " cells additionally never escalate: the only repair a `None` policy"
+        " opens is the crash-loop one, which the group holds while no run is"
+        " open, so those four flip only when the grouped-repair hold is lifted"
+        " as well.",
+    ]
 
 
 # ── modes ────────────────────────────────────────────────────────────────────

@@ -1,0 +1,13 @@
+# p3404: [gen] imagepull engine N=4 InPlaceIfPossible u1 rp None co none  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 fault=imagepull:old floor_soft=1 co=none topo=engine
+# reason: one old-revision engine pod is pointed at an image that cannot be pulled as the bump lands, so the kubelet parks it in ImagePullBackOff and it is never Ready again; its Instance is off the target from that moment, so the roll owns it: the patch lands the fixed image in place, admitted within the same budget as its peers, and no repair is recorded for it after the bump; every Instance ends on the new revision; floor waived — the broken pod costs settled capacity for the length of the roll
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p3404 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

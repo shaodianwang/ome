@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **1089**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **1177**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -16,29 +16,34 @@ Total generated cases: **1089**. The whole-corpus per-PR cap (hand + generated) 
 | gen-switch | 180 | p3800..p3979 |
 | gen-crashloop-idle | 84 | p2400..p2483 |
 | gen-crashloop-sibling | 30 | p2600..p2629 |
+| gen-heal | 32 | p3000..p3031 |
+| gen-imagepull | 56 | p3400..p3455 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 138 |
-| engine-mn | 289 |
-| pd | 270 |
-| pd-mn | 392 |
+| engine | 156 |
+| engine-mn | 307 |
+| pd | 296 |
+| pd-mn | 418 |
 
 ### By update strategy
 
 | value | cases |
 |---|---|
-| InPlaceIfPossible | 224 |
-| InPlaceOnly | 224 |
-| RecreatePod | 246 |
-| SurgeThenDrain | 395 |
+| (dormant: nothing rolls) | 40 |
+| InPlaceIfPossible | 236 |
+| InPlaceOnly | 236 |
+| RecreatePod | 258 |
+| SurgeThenDrain | 407 |
 
 ### By failure verb / phase
 
 | value | cases |
 |---|---|
+| configkey:after-failed | 16 |
+| configkey:after-settle | 16 |
 | crashloop:load | 108 |
 | crashloop:load@idle | 28 |
 | crashloop:load@sibling | 10 |
@@ -48,6 +53,8 @@ Total generated cases: **1089**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:start@sibling | 20 |
 | edit:rotating | 84 |
 | edit:settling | 84 |
+| imagepull:idle | 8 |
+| imagepull:settling | 48 |
 | kill | 187 |
 | none | 72 |
 | podkill:rotating | 160 |
@@ -58,15 +65,15 @@ Total generated cases: **1089**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (unset — baseline) | 228 |
-| None | 395 |
-| RecreateInstance | 466 |
+| None | 439 |
+| RecreateInstance | 510 |
 
 ### By pause
 
 | value | cases |
 |---|---|
 | freeze | 38 |
-| off | 975 |
+| off | 1063 |
 | true | 76 |
 
 ### By coordination
@@ -75,8 +82,8 @@ Total generated cases: **1089**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 24 |
 | canary | 24 |
-| none | 867 |
-| rolling | 156 |
+| none | 923 |
+| rolling | 188 |
 | seq | 18 |
 
 ### By mid-roll edit (gen-switch)
@@ -118,7 +125,7 @@ Total generated cases: **1089**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 759 |
+| (no break) | 847 |
 | decoder | 60 |
 | engine | 270 |
 
@@ -240,6 +247,22 @@ Total generated cases: **1089**. The whole-corpus per-PR cap (hand + generated) 
 | p2627 | gen-crashloop-sibling | #1977 |
 | p2628 | gen-crashloop-sibling | #1977 |
 | p2629 | gen-crashloop-sibling | #1977 |
+| p3002 | gen-heal | #1978 |
+| p3003 | gen-heal | #1978 |
+| p3006 | gen-heal | #1978 |
+| p3007 | gen-heal | #1978 |
+| p3010 | gen-heal | #1978 |
+| p3011 | gen-heal | #1978 |
+| p3014 | gen-heal | #1978 |
+| p3015 | gen-heal | #1978 |
+| p3018 | gen-heal | #1978 |
+| p3019 | gen-heal | #1978 |
+| p3022 | gen-heal | #1978 |
+| p3023 | gen-heal | #1978 |
+| p3026 | gen-heal | #1978 |
+| p3027 | gen-heal | #1978 |
+| p3030 | gen-heal | #1978 |
+| p3031 | gen-heal | #1978 |
 
 ## Constraint ledger (tuples excluded during construction)
 
@@ -256,6 +279,8 @@ Total generated cases: **1089**. The whole-corpus per-PR cap (hand + generated) 
 - On the engine-only topologies a Sequential group as the generators express it (one single-Component blueGreen group per member) is one blueGreen group over the engine, so the steady-state family emits it as `co=bluegreen` only.
 - The sibling family rolls the engine under the default strategy at its canonical budget: the sibling's break is independent of how the engine's own pods are replaced.
 - The grouped cells of both families state the intended repair (`expect=repaired`; the engine converges and the decoder is repaired) and are parked, through `issue=`, on the issue that tracks it; the no-group cells run live.
+- heal breaks the engine runner, so its coordination axis is a rollingUpdate group over the engine alone or, where a decoder exists, over engine and decoder; nothing rolls, so the update strategy stays canonical and is not an axis. `lift=after-failed` carries `instanceReadyTimeout: 90s` on the victim so the row escalates inside the case budget.
+- imagepull has one form (an image that never pulls has no after-Ready form) and runs each strategy at its canonical budget only; its idle half carries no group, since a grouped repair's hold is its own family.
 - Kill-family cells pinned by hand-written restart/ cases are excluded:
 
   - p130: engine SurgeThenDrain rp=None
@@ -271,6 +296,13 @@ Total generated cases: **1089**. The whole-corpus per-PR cap (hand + generated) 
   - p151: engine-mn W1 SurgeThenDrain rp=RecreateInstance pause=freeze target=worker
   - p152: pd SurgeThenDrain rp=RecreateInstance pause=true
   - p153: pd-mn W1 SurgeThenDrain rp=RecreateInstance pause=freeze target=leader
+
+## gen-heal: which cells heal without the missing rule
+
+The family asserts the intended behaviour, `expect=heals`, on every cell; the cells whose heal needs the exit a Failed row lacks are parked on #1978 and listed above.
+
+- `lift=after-settle` (asserted): the key returns once the CreateContainerConfigError wait has held for the settle window, before any attempt escalates. Under `None` the crash-loop repair opens as soon as the wait is seen (the stuck-pod clock counts from the pod's creation and the victim is older than the grace), rebuilds the pod, and the rebuilt pod waits on the same key; under `RecreateInstanceOnPodRestart` the runner-restart repair does the same. Either way the kubelet starts the container once the key is back and the open repair promotes the Instance; where a group holds the crash-loop repair (`None` with `co=rolling`), the kubelet's retry on the untouched pod is the whole heal. The settle window (`LIFT_SETTLE_S`, 20 s before `OME_TEST_TIMEOUT_MULT`) has to stay inside the deployment's `stuckPodGracePeriod` (60 s in the chart): a multiplier of 3 or more turns these cells into the after-failed shape.
+- `lift=after-failed` (parked on #1978): the repair keeps its operation when the row escalates, and a Failed row with an operation has no exit once its pods are runtime-ready, so the key's return starts the pods while the row stays Failed. The `None` x `co=rolling` cells additionally never escalate: the only repair a `None` policy opens is the crash-loop one, which the group holds while no run is open, so those four flip only when the grouped-repair hold is lifted as well.
 
 ## Missing runner verbs/hooks (future coverage, not emitted)
 

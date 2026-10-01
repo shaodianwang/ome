@@ -76,7 +76,7 @@ perm/
 │   ├── rollout/           — 96 rollout cases (topology × lifecycle × coordination)
 │   ├── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
 │   └── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/ gen-crashloop-idle/ gen-crashloop-sibling/
-│                           — generated hot core (see isvcs/MANIFEST.md)
+│       gen-heal/ gen-imagepull/  — generated hot core (see isvcs/MANIFEST.md)
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -672,7 +672,10 @@ crashloop case).
   the same verdict: after a bump the Instance ends on the new revision
   serving with no repair recorded for it; at idle, `expect=repaired|held`.
   Nothing outlives the case: the patched pod belongs to the case's ISVC and
-  goes with it at teardown.
+  goes with it at teardown. The generated `isvcs/gen-imagepull/` family
+  fires it as the bump lands across topology, strategy, restart policy and
+  (on PD) a rolling group, and on the idle service under both restart
+  policies with `expect=repaired`.
 
 - **`fault=configkey:missing` with `lift=after-settle|after-failed` and
   `expect=heals|parked`** (rollout mode, `during=idle` only) takes a cause
@@ -713,7 +716,12 @@ crashloop case).
   `expect=heals` is forced the day the rule lands. `batch.py` lists
   `expect=parked` cases in its PARKED DEBT table. The restore also runs from
   the end-of-case cleanup (a no-op after the lift, harmless once the case's
-  ConfigMap is gone with the case).
+  ConfigMap is gone with the case). The generated `isvcs/gen-heal/` family
+  crosses the fault with topology, restart policy, lift phase and a rolling
+  group; every case states the intended `expect=heals`, and the
+  `lift=after-failed` half is parked (`notimpl=1` on the issue the headers
+  name) until a Failed row gets its exit — `isvcs/MANIFEST.md` states per
+  axis why the `after-settle` half heals as the controller stands.
 
 - **`fault=node:notready` with `lift=<phase>` and
   `expect=relocated|repaired|parked`** (rollout mode, `during=idle` only)
@@ -812,11 +820,12 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `gen_cases.py`'s feature counters).
 - `gen_runtime.py` — the runtime-triggered cases (`p400`+) → `isvcs/runtime-rev/`.
 - `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p2799`
-  and `p3800`–`p4199`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
+  and `p3000`–`p4199`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
   `isvcs/gen-restart/`, `isvcs/gen-crashloop/`, `isvcs/gen-switch/`,
-  `isvcs/gen-crashloop-idle/`, `isvcs/gen-crashloop-sibling/`, plus
-  `isvcs/MANIFEST.md` (per-dimension counts, constraint ledger,
-  missing-hook catalog).
+  `isvcs/gen-crashloop-idle/`, `isvcs/gen-crashloop-sibling/`,
+  `isvcs/gen-heal/`, `isvcs/gen-imagepull/`, plus `isvcs/MANIFEST.md`
+  (per-dimension counts, constraint ledger, parked cells, missing-hook
+  catalog).
 
 A generator owns exactly the case ids it mints. Hand-written cases share the
 feature folders with generated ones (`restart/`, `canary/`, `scale/` and
