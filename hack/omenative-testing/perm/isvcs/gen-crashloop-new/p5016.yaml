@@ -1,0 +1,23 @@
+# p5016: [gen] crashloop:new start pd N=4 SurgeThenDrain s1 rp RecreateInstance co none  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 fault=crashloop:new co=none topo=pd form=start
+# reason: the pushed engine revision dies at every start (its runner image has no shell for the fixture command); the surge replacement never joins rotation, so no source is drained: at most 1 Instance is off the running revision, which keeps serving at N-1; status says why (a rolloutHold or a Failed row, and a RetryHeld or InstanceFailed event) and no further attempt at that revision follows; the fix push then lands on every Instance, serving, and nothing rebuilds the crashing revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p5016 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

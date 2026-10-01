@@ -4207,7 +4207,9 @@ class CanaryStepBreakTest(unittest.TestCase):
         self.assertEqual([], self._errs(self.BASE + " fault=imagepull:new during=canary-failed verb=rollback terminal=RolledBack"))
         self.assertEqual([], self._errs(self.BASE + " fault=crashloop:idle form=start victims=3 nophase=Failed"))
         self.assertEqual([], self._errs(self.PD + " fault=crashloop:new form=start bump=engine,decoder victimcomp=decoder during=canary-failed verb=rollback terminal=RolledBack"))
-        self.assertTrue(any("mode=canary" in e for e in self._errs(self.ROLLOUT + " fault=crashloop:new form=start")))
+        self.assertEqual([], self._errs(self.ROLLOUT + " fault=crashloop:new form=start"),
+                         "a crash loop the push brings is the new-side family's rollout case")
+        self.assertTrue(any("mode=canary" in e for e in self._errs(self.ROLLOUT + " fault=imagepull:new")))
         self.assertTrue(any("mode=canary" in e for e in self._errs(self.ROLLOUT + " fault=crashloop:idle form=start")))
         self.assertTrue(any("img= does not apply" in e for e in self._errs(
             self.BASE + " fault=crashloop:new form=start bump=engine img=example.com/canary-test/missing:none")))
@@ -5071,3 +5073,354 @@ class PlainRollbackTest(unittest.TestCase):
                 self.assertIn("components: [engine]", text, "an engine-only group puts the roll under the run model")
         self.assertEqual(sum(1 for _n, kv, _m in fam if kv["ceil_e"] - kv["Ne"] == 2), 10,
                          "five hooks x two groups at maxSurge 2")
+
+
+class CrashloopNewFaultTest(unittest.TestCase):
+    """fault=crashloop:new: the push carries the crash. The header, the arm
+    the push lands with, the budget allowance, the Instance tally, the status
+    and events that say why, and the verdict that states the operator's end
+    state."""
+
+    BASE = "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
+    PD = "# p999: x mode=rollout Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 topo=pd"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_fault_verb_accepts_the_new_side(self):
+        self.assertTrue(run._fault_ok("crashloop:new"))
+        self.assertTrue(run._fault_ok("crashloop:old"))
+        self.assertFalse(run._fault_ok("crashloop:newer"))
+        self.assertTrue(run._fault_ok("imagepull:new"), "the canary fault-new family pushes an unpullable image")
+
+    def test_header_needs_a_form_a_bumped_victim_and_no_hook(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:new form=start"))
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:new form=load"))
+        self.assertTrue(any("form=start|load" in e for e in self._errs(self.BASE + " fault=crashloop:new")))
+        self.assertTrue(any("armed by the push" in e for e in self._errs(self.BASE + " fault=crashloop:new form=start during=idle")))
+        self.assertTrue(any("names a member the push bumps" in e
+                            for e in self._errs(self.PD + " fault=crashloop:new form=start victimcomp=decoder co=none")))
+        self.assertEqual([], self._errs(self.PD + " fault=crashloop:new form=start victimcomp=decoder co=rolling"))
+        kill = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
+        self.assertTrue(any("mode=rollout" in e for e in self._errs(kill + " fault=crashloop:new form=start")))
+
+    def test_fixfirst_reads_a_running_revision_break_after_a_bump(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=start fixfirst=1"))
+        self.assertEqual([], self._errs(self.BASE + " fault=imagepull:old fixfirst=1"))
+        for bad in (" fault=crashloop:new form=start fixfirst=1",
+                    " fault=crashloop:old form=start during=idle fixfirst=1",
+                    " fault=podkill:settling fixfirst=1",
+                    " fixfirst=1"):
+            self.assertTrue(any("fixfirst=1" in e for e in self._errs(self.BASE + bad)), bad)
+        self.assertTrue(any("malformed header value fixfirst" in e
+                            for e in self._errs(self.BASE + " fault=crashloop:old form=start fixfirst=2")))
+
+    def test_phase_hooks_leave_the_pushed_crash_alone(self):
+        f = run._fault_new("p999", {"fault": "crashloop:new", "form": "start"})
+        self.assertTrue(run._fault_on_new(f))
+        self.assertFalse(run._fault_on_new(run._fault_new("p999", {"fault": "crashloop:old", "form": "start"})))
+        self.assertFalse(run._fault_on_new(None))
+        fired = []
+        orig = run._fault_fire
+        run._fault_fire = lambda *a, **k: fired.append(a)
+        try:
+            run._fault_tick({"fault": f, "trigger_ts": 1.0, "pod_state": {}, "pods_per_inst": {}, "old_hashes": {"old"}})
+            self.assertEqual([], fired, "the push armed the crash; no hook injects one")
+        finally:
+            run._fault_fire = orig
+
+    def _patches(self, fn):
+        patches = []
+        orig_kubectl, orig_image = run.kubectl, run._crashloop_image
+        run.kubectl = lambda *a, **k: patches.append(json.loads(a[-1])) or subprocess.CompletedProcess(a, 0, "", "")
+        run._crashloop_image = lambda: "metrics:img"
+        try:
+            fn()
+        finally:
+            run.kubectl, run._crashloop_image = orig_kubectl, orig_image
+        return patches
+
+    def test_push_arms_the_victim_member_only(self):
+        ctx = {"case_id": "p999", "pods_per_inst": {"engine": 1, "decoder": 1, "router": 1}, "trigger_ts": None}
+        out = []
+        patches = self._patches(lambda: out.append(run._crash_new_arm(ctx, {"engine", "decoder"}, "engine", "start")))
+        self.assertEqual((True, "image metrics:img"), out[0])
+        spec = patches[0]["spec"]
+        self.assertEqual("metrics:img", spec["engine"]["runner"]["image"])
+        self.assertNotIn("runner", spec["decoder"], "the sound member rolls on the fixture image")
+        for c in ("engine", "decoder"):
+            self.assertEqual(run.TRIGGER_VAL, spec[c]["annotations"][run.TRIGGER_ANNO])
+        self.assertIsNotNone(ctx["trigger_ts"])
+        out, ctx["trigger_ts"] = [], None
+        patches = self._patches(lambda: out.append(run._crash_new_arm(ctx, {"engine"}, "engine", "load")))
+        self.assertEqual((True, f"{run.CRASH_EXIT_ENV}={run.CRASH_EXIT_AFTER_S}"), out[0])
+        spec = patches[0]["spec"]
+        self.assertEqual([{"name": run.CRASH_EXIT_ENV, "value": str(run.CRASH_EXIT_AFTER_S)}], spec["engine"]["runner"]["env"])
+        self.assertNotIn("image", spec["engine"]["runner"])
+        gang = dict(ctx, pods_per_inst={"engine": 2, "decoder": 1, "router": 1}, trigger_ts=None)
+        patches = self._patches(lambda: run._crash_new_arm(gang, {"engine"}, "engine", "load"))
+        leader = patches[0]["spec"]["engine"]["leader"]["runner"]
+        self.assertEqual(run.MAIN_CONTAINER, leader["name"], "a leader runner names the container it overrides")
+        self.assertEqual(run.CRASH_EXIT_ENV, leader["env"][0]["name"])
+        self.assertNotIn("runner", patches[0]["spec"]["engine"])
+
+    def test_fix_push_drops_the_runner_override(self):
+        ctx = {"case_id": "p999", "pods_per_inst": {"engine": 1, "decoder": 1, "router": 1}, "trigger_ts": None}
+        patches = self._patches(lambda: run._bump_rev(ctx, {"engine", "decoder"}, val="v3", image=""))
+        spec = patches[0]["spec"]
+        for c in ("engine", "decoder"):
+            self.assertIn("runner", spec[c])
+            self.assertIsNone(spec[c]["runner"], "a null runner deletes the image and env the push armed")
+            self.assertEqual("v3", spec[c]["annotations"][run.TRIGGER_ANNO])
+
+    def test_allowance_is_the_larger_of_the_two_budgets(self):
+        def spec(surge, unavail):
+            return {"engine": {"lifecycle": {"updateStrategy": {"rollingUpdate": {"maxSurge": surge, "maxUnavailable": unavail}}}}}
+        self.assertEqual(1, run._crash_new_allowance(spec(1, 0), "engine", 4))
+        self.assertEqual(1, run._crash_new_allowance(spec(0, 1), "engine", 4))
+        self.assertEqual(2, run._crash_new_allowance(spec("25%", 0), "engine", 8), "surge percent rounds up")
+        self.assertEqual(1, run._crash_new_allowance(spec("25%", 0), "engine", 2))
+        self.assertEqual(2, run._crash_new_allowance(spec(0, "25%"), "engine", 8), "unavailable percent rounds down")
+        self.assertEqual(2, run._crash_new_allowance(spec(2, 1), "engine", 4))
+        self.assertEqual(0, run._crash_new_allowance({}, "engine", 4))
+
+    def test_tally_splits_instances_by_what_they_run(self):
+        old, crash = {"old"}, {"bad"}
+        pods = {
+            "e0": {"alive": True, "comp": "engine", "inst": "0", "hash": "old", "ready": True, "serving": True},
+            "e1": {"alive": True, "comp": "engine", "inst": "1", "hash": "bad", "ready": False, "serving": False},
+            "e2": {"alive": True, "comp": "engine", "inst": "2", "hash": "fixed", "ready": True, "serving": True},
+            "e3": {"alive": True, "comp": "engine", "inst": "3", "hash": "old", "ready": False, "serving": False},
+            "e3s": {"alive": True, "comp": "engine", "inst": "3", "hash": "bad", "ready": False, "serving": False},
+            "d0": {"alive": True, "comp": "decoder", "inst": "0", "hash": "old", "ready": True, "serving": True},
+            "gone": None,
+        }
+        self.assertEqual((1, 2, 1), run._crash_new_tally(pods, {"engine": 1}, "engine", old, crash),
+                         "an Instance with a crash pod beside its old one is off the running revision")
+        gang = {
+            "l0": {"alive": True, "comp": "engine", "inst": "0", "hash": "old", "ready": True, "serving": True},
+            "w0": {"alive": True, "comp": "engine", "inst": "0", "hash": "old", "ready": True, "serving": True},
+            "l1": {"alive": True, "comp": "engine", "inst": "1", "hash": "old", "ready": True, "serving": True},
+        }
+        self.assertEqual((1, 0, 0), run._crash_new_tally(gang, {"engine": 2}, "engine", old, crash),
+                         "a gang short a pod is not serving on the running revision")
+
+    def test_why_reads_the_hold_the_failed_row_and_the_events(self):
+        held = {"engine": {"hold": {"gate": "Held", "target": "p999-engine-abc", "reason": "CrashLoopBackOff"}, "rows": []}}
+        events = [("RetryHeld", "InferenceReplica ns/p999-engine component=engine update to revision x held after 3 failed attempt(s)"),
+                  ("InstanceFailed", "InferenceReplica ns/p999-decoder component=decoder instance=0 escalated to Phase=Failed"),
+                  ("RecreateUpdateStarted", "component=engine instance=0")]
+        status, said = run._crash_new_why(held, events, "engine")
+        self.assertTrue(status.startswith("rolloutHold gate=Held"))
+        self.assertEqual(1, len(said))
+        self.assertTrue(said[0].startswith("RetryHeld:"))
+        failed = {"engine": {"hold": None, "rows": [{"index": 0, "phase": "Ready"}, {"index": 3, "phase": "Failed", "lastFailure": "CrashLoopBackOff"}]}}
+        status, said = run._crash_new_why(failed, [], "engine")
+        self.assertEqual("Instance 3 row Failed (CrashLoopBackOff)", status)
+        self.assertEqual([], said)
+        self.assertEqual((None, []), run._crash_new_why({"engine": {"hold": None, "rows": [{"index": 0, "phase": "Updating"}]}}, [], "engine"))
+        self.assertEqual((None, []), run._crash_new_why({}, [], "engine"))
+
+    def test_peer_state_is_converged_held_or_rolling(self):
+        ctx = {"old_hashes": {"old"}, "N": {"decoder": 2}, "agg": {"decoder": (2, 2, 2)},
+               "pod_state": {"d0": {"alive": True, "comp": "decoder", "hash": "new", "serving": True},
+                             "d1": {"alive": True, "comp": "decoder", "hash": "new", "serving": True}}}
+        self.assertEqual("converged", run._crash_new_peer_state(ctx, "decoder", {}))
+        ctx["pod_state"]["d1"]["hash"] = "old"
+        self.assertEqual("rolling", run._crash_new_peer_state(ctx, "decoder", {}))
+        snap = {"decoder": {"hold": {"gate": "Budget", "reason": "surge budget exhausted"}, "rows": []}}
+        self.assertEqual("held: gate=Budget reason=surge budget exhausted", run._crash_new_peer_state(ctx, "decoder", snap))
+
+    @staticmethod
+    def _good_out():
+        return {"hold": {"budget": 580, "bitten_at": 30.0, "status_at": 200.0, "status": "rolloutHold gate=Held reason=CrashLoopBackOff",
+                         "event_at": 205.0, "event": "RetryHeld: component=engine held", "peak_off": 0, "off_span": 0.0,
+                         "min_running": 4, "peak_crash": 1, "attempts_at_status": 3, "attempts_after_status": [],
+                         "attempts": 3, "peer": {}, "believed": True},
+                "fix": {"state": "CONVERGED", "converged_at": 60.0, "budget": 580, "rebuilt": [], "holds_left": {}}}
+
+    def test_verdict_states_the_operators_end_state(self):
+        ctx = {"N": {"engine": 4, "decoder": 0, "router": 0}}
+        f = {"form": "start", "infra_fail": None}
+
+        def judge(mutate):
+            out = self._good_out()
+            mutate(out)
+            notes, checks = [], []
+            v = run._crash_new_checks(ctx, dict(f), out, "engine", {"engine"}, 1, "PASS", notes, checks)
+            return v, notes, checks
+
+        v, notes, checks = judge(lambda o: None)
+        self.assertEqual("PASS", v, notes)
+        self.assertTrue(all(c.startswith("  ✓") or c.startswith("  ⓘ") for c in checks), checks)
+        self.assertTrue(any("budget" in c and "kept 4/4 serving" in c for c in checks))
+        v, notes, _ = judge(lambda o: o["hold"].update(peak_off=2, off_span=run.FLOOR_SUSTAIN_S + 1, min_running=2))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("off the running revision" in n for n in notes))
+        v, _, checks = judge(lambda o: o["hold"].update(peak_off=2, off_span=1.0))
+        self.assertEqual("PASS", v, "a dip shorter than the floor debounce is a readiness flap")
+        self.assertTrue(any(c.startswith("  ⚠ budget") for c in checks))
+        v, notes, _ = judge(lambda o: o["hold"].update(peak_crash=2))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("alive at once" in n for n in notes))
+        v, notes, _ = judge(lambda o: o["hold"].update(status_at=None, status=""))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("never said why" in n for n in notes))
+        v, notes, _ = judge(lambda o: o["hold"].update(event_at=None, event=""))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("InstanceFailed/RetryHeld event" in n for n in notes))
+        v, notes, _ = judge(lambda o: o["hold"].update(attempts_after_status=["u9"]))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("after the hold was reported" in n for n in notes))
+        v, notes, _ = judge(lambda o: o["hold"].update(peer={"decoder": "rolling"}))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("neither converged nor held" in n for n in notes))
+        v, _, checks = judge(lambda o: o["hold"].update(peer={"decoder": "held: gate=Budget reason=x"}))
+        self.assertEqual("PASS", v, "a peer that holds with a reason is not a wedge")
+        self.assertTrue(any("held with a reason" in c for c in checks))
+        v, _, _ = judge(lambda o: o["hold"].update(peer={"decoder": "converged"}))
+        self.assertEqual("PASS", v)
+        v, notes, _ = judge(lambda o: o["fix"].update(state="ROTATING", converged_at=None))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("did not land on every Instance" in n for n in notes))
+        v, notes, _ = judge(lambda o: o["fix"].update(rebuilt=["p999-engine-3-x"]))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("rebuilt after the fix" in n for n in notes))
+        v, notes, _ = judge(lambda o: o["fix"].update(holds_left={"engine": {"gate": "Held", "reason": "stale"}}))
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("rolloutHold left" in n for n in notes))
+        out = self._good_out()
+        out["hold"]["bitten_at"] = None
+        fault = dict(f)
+        self.assertEqual("PASS", run._crash_new_checks(ctx, fault, out, "engine", {"engine"}, 1, "PASS", [], []))
+        self.assertIn("never", fault["infra_fail"], "a revision that never crashed is the apparatus, not the product")
+
+    def test_fleet_checks_cover_peaks_isolation_and_gangs(self):
+        hdr = {"ceil_e": 3, "ceil_d": 2, "ceil_r": 2}
+        ctx = {"N": {"engine": 2, "decoder": 2, "router": 2}, "configured": {"engine", "decoder", "router"},
+               "old_hashes": {"old"}, "peaks": {"engine": 3, "decoder": 2, "router": 2},
+               "pods_per_inst": {"engine": 2, "decoder": 1, "router": 1}, "gang_worst": {},
+               "pod_state": {"r0": {"alive": True, "comp": "router", "hash": "old"}}}
+        notes, checks = [], []
+        self.assertEqual("PASS", run._crash_new_fleet_checks(ctx, hdr, {"engine"}, "PASS", notes, checks))
+        self.assertTrue(any("gang atomicity held" in c for c in checks))
+        self.assertTrue(any("decoder (not bumped) stayed put" in c for c in checks))
+        notes = []
+        self.assertEqual("FAIL", run._crash_new_fleet_checks(dict(ctx, peaks={"engine": 4, "decoder": 2, "router": 2}), hdr, {"engine"}, "PASS", notes, []))
+        self.assertTrue(any("engine peak 4 > ceiling 3" in n for n in notes))
+        notes = []
+        rotated = dict(ctx, pod_state={"r0": {"alive": True, "comp": "router", "hash": "new"}})
+        self.assertEqual("FAIL", run._crash_new_fleet_checks(rotated, hdr, {"engine"}, "PASS", notes, []))
+        self.assertTrue(any("router (not bumped) changed" in n for n in notes))
+        notes = []
+        split = dict(ctx, gang_worst={("engine", "1"): run.GANG_TOL_S + 1})
+        self.assertEqual("FAIL", run._crash_new_fleet_checks(split, hdr, {"engine"}, "PASS", notes, []))
+        self.assertTrue(any("gang atomicity violated" in n for n in notes))
+
+    def test_fix_order_claim_reads_pod_creation_times(self):
+        f = {"kind": "crashloop", "crash_inst": "3", "crash_comp": "engine", "fixfirst": True}
+        first = {"e0": {"alive": True, "comp": "engine", "inst": "0", "hash": "new", "created": "2026-10-02T10:00:30Z"},
+                 "e1": {"alive": True, "comp": "engine", "inst": "1", "hash": "new", "created": "2026-10-02T10:01:00Z"},
+                 "e3": {"alive": True, "comp": "engine", "inst": "3", "hash": "new", "created": "2026-10-02T10:00:00Z"},
+                 "e3old": {"alive": False, "comp": "engine", "inst": "3", "hash": "old", "created": "2026-10-02T09:00:00Z"}}
+        notes, checks = [], []
+        self.assertEqual("PASS", run._crashloop_fix_order(f, first, {"old"}, "PASS", notes, checks))
+        self.assertTrue(any("not after the last of its peers" in c for c in checks))
+        last = dict(first)
+        last["e3"] = dict(first["e3"], created="2026-10-02T10:02:00Z")
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._crashloop_fix_order(f, last, {"old"}, "PASS", notes, checks))
+        self.assertTrue(any("last to land the fix" in n for n in notes))
+        tied = dict(first)
+        tied["e3"] = dict(first["e3"], created="2026-10-02T10:01:00Z")
+        self.assertEqual("PASS", run._crashloop_fix_order(f, tied, {"old"}, "PASS", [], []),
+                         "landing together with the last peer is not landing after it")
+        alone = {"e3": first["e3"]}
+        checks = []
+        self.assertEqual("PASS", run._crashloop_fix_order(f, alone, {"old"}, "PASS", [], checks))
+        self.assertTrue(any("not measurable" in c for c in checks))
+        # The old-side verdict wires the claim in only when the header asks.
+        full = dict(f, fired=True, infra_fail=None, form="start", case_id="p999", crash_hash="old", kills=0)
+        healed = {n: dict(p, ready=True, serving=True) for n, p in last.items() if p["alive"]}
+        orig = run._isvc_events_since
+        try:
+            run._isvc_events_since = lambda case_id, since: []
+            notes = []
+            self.assertEqual("FAIL", run._crashloop_checks(full, healed, {"old"}, 1.0, "PASS", notes, []))
+            self.assertTrue(any("last to land the fix" in n for n in notes))
+            self.assertEqual("PASS", run._crashloop_checks(dict(full, fixfirst=False), healed, {"old"}, 1.0, "PASS", [], []))
+        finally:
+            run._isvc_events_since = orig
+
+    def test_generated_new_family_crosses_every_axis(self):
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-crashloop-new"]
+        self.assertEqual(72, len(fam))
+        self.assertEqual({"crashloop:new:start", "crashloop:new:load"}, {m["verb"] for _n, _kv, m in fam})
+        self.assertEqual({s for s, _su, _un in generate_cases.NEW_CRASH_STRATS}, {m["strat"] for _n, _kv, m in fam})
+        self.assertEqual({"None", "RecreateInstance"}, {m["rp"] for _n, _kv, m in fam})
+        self.assertEqual({"engine", "pd", "engine-mn", "pd-mn"}, {kv["topo"] for _n, kv, _m in fam})
+        self.assertEqual({(f, rp, s) for f in ("start", "load") for rp in ("None", "RecreateInstance")
+                          for s, _su, _un in generate_cases.NEW_CRASH_STRATS},
+                         {(kv["form"], m["rp"], m["strat"]) for _n, kv, m in fam},
+                         "both forms run under both restart policies and every strategy")
+        for name, kv, m in fam:
+            self.assertEqual("crashloop:new", kv["fault"])
+            self.assertNotIn("floor_soft", kv, "the new-side verdict reads its own floor: N minus the budget")
+            self.assertNotIn("fixfirst", kv)
+            self.assertNotIn("during", kv)
+            if kv["topo"].startswith("pd"):
+                self.assertIn(kv["co"], {"none", "rolling"})
+                self.assertEqual(kv["Nd"] + (1 if kv["co"] == "rolling" else 0), kv["ceil_d"])
+            else:
+                self.assertEqual("none", kv["co"])
+            text = outputs[f"gen-crashloop-new/{name}.yaml"]
+            reason = text.splitlines()[1]
+            self.assertTrue(reason.startswith("# reason: "))
+            self.assertIn("status says why", reason)
+            self.assertIn("fix push", reason)
+            if kv["form"] == "load":
+                self.assertIn("promoted, then crashed", reason, "a crash after Ready says what Ready meant for the budget")
+            if m["strat"] == "InPlaceIfPossible" and kv["form"] == "load":
+                self.assertIn("resolves to a recreate", reason)
+
+    def test_generated_group_family_crosses_every_axis(self):
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-crashloop-group"]
+        self.assertEqual(72, len(fam))
+        self.assertEqual({"crashloop:start", "crashloop:load"}, {m["verb"] for _n, _kv, m in fam})
+        self.assertEqual({"SurgeThenDrain", "RecreatePod"}, {m["strat"] for _n, _kv, m in fam})
+        self.assertEqual({"None", "RecreateInstance"}, {m["rp"] for _n, _kv, m in fam})
+        self.assertEqual({"engine", "pd", "pd-mn"}, {kv["topo"] for _n, kv, _m in fam})
+        by_topo = {}
+        for _n, kv, _m in fam:
+            by_topo.setdefault(kv["topo"], set()).add(kv["co"])
+        self.assertEqual({"bluegreen", "rolling"}, by_topo["engine"], "one-member sequences and ratios have no peer")
+        self.assertEqual({"bluegreen", "seq", "ratio", "rolling"}, by_topo["pd"])
+        self.assertEqual({"bluegreen", "seq", "ratio"}, by_topo["pd-mn"], "the zero-budget cells run on the single-pod shapes")
+        for name, kv, m in fam:
+            self.assertEqual("crashloop:old", kv["fault"])
+            self.assertEqual(1, kv["fixfirst"], "the fix lands on the broken Instance first or never last")
+            self.assertEqual(1, kv["floor_soft"])
+            text = outputs[f"gen-crashloop-group/{name}.yaml"]
+            reason = text.splitlines()[1]
+            self.assertRegex(reason, r"never (the )?last", "the order claim is stated on line 2")
+            if kv["co"] == "bluegreen":
+                self.assertIn("flip cannot replace it ahead of the set", reason, "the contradiction and what the case asserts instead")
+            if kv["co"] == "seq":
+                self.assertIn("engine to completion before the decoder", reason)
+            if kv["co"] == "ratio":
+                tol = generate_cases.RATIO_TOL_BY_N[kv["Ne"]]
+                self.assertIn(f"within {tol}%", reason)
+                self.assertIn(f"tolerance: {tol}", text)
+            if kv["co"] == "rolling":
+                self.assertIn("zero budget", reason)
+                self.assertIn(kv["topo"], {"engine", "pd"})
+            if kv["topo"].startswith("pd"):
+                self.assertEqual(kv["Nd"] + (1 if m["strat"] == "SurgeThenDrain" else 0), kv["ceil_d"],
+                                 "the group rolls the decoder under the same strategy")
+                self.assertIn("- components: [engine, decoder]" if kv["co"] in ("bluegreen", "ratio", "rolling")
+                              else "- components: [engine]", text)

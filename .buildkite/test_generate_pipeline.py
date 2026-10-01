@@ -760,7 +760,14 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-rollback", "engine-mn", "")], 2)
         self.assertEqual(shard_counts[("gen-rollback", "pd", "")], 2)
         self.assertEqual(shard_counts[("gen-rollback", "pd-mn", "")], 2)
-        self.assertEqual(job_count, 312)
+        self.assertEqual(shard_counts[("gen-crashloop-new", "engine", "")], 1)
+        self.assertEqual(shard_counts[("gen-crashloop-new", "engine-mn", "")], 1)
+        self.assertEqual(shard_counts[("gen-crashloop-new", "pd", "")], 2)
+        self.assertEqual(shard_counts[("gen-crashloop-new", "pd-mn", "")], 2)
+        self.assertEqual(shard_counts[("gen-crashloop-group", "engine", "")], 1)
+        self.assertEqual(shard_counts[("gen-crashloop-group", "pd", "")], 2)
+        self.assertEqual(shard_counts[("gen-crashloop-group", "pd-mn", "")], 2)
+        self.assertEqual(job_count, 323)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin

@@ -276,7 +276,7 @@ HEADER_CHECKS = {
     "minfails": _count, "verbhold": _count, "releaseafter": _count, "skipsoak": _count,
     "ratio_tol": _count, "scale_e": _count, "scale_d": _count, "issue": _count, "victims": _count,
     "exitafter": _count,
-    "rollback": _flag, "readd": _flag, "dup": _flag, "hint": _flag, "hold": _flag, "pkill": _flag,
+    "rollback": _flag, "readd": _flag, "dup": _flag, "hint": _flag, "hold": _flag, "pkill": _flag, "fixfirst": _flag,
     "blocked": _flag, "infeasible": _flag, "notimpl": _flag, "floor_hard": _flag, "floor_soft": _flag,
     "order_soft": _flag,
     "fault": _fault, "during": _during, "during2": _hook, "edit": _edit, "lift": _lift,

@@ -1,0 +1,17 @@
+# p5405: [gen] crashloop load group bluegreen engine N=4 RecreatePod u1 rp None  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 fault=crashloop:old floor_soft=1 co=bluegreen topo=engine form=load fixfirst=1
+# reason: one old-revision engine pod has its runner killed every few seconds while it is up, so it dies after Ready and comes back between crashes; the bump is the fix and lands on every Instance within the group's own rule: blueGreen flips traffic only once every member's new set is complete, and the broken Instance is rebuilt as part of that set within the per-member budget; the flip cannot replace it ahead of the set, so the case asserts the per-budget roll and that the broken Instance is never the last one rebuilt, and reads the traffic flip as status only; the healthy peers never leave rotation beyond the budget, no repair is recorded for the broken Instance, and it ends on the new revision serving; floor waived — the crash itself costs settled capacity for the length of the roll
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p5405 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          blueGreen: {}

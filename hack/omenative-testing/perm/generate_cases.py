@@ -4,7 +4,7 @@
 Emits the constraint-filtered cross product of
     topology x updateStrategy x failure verb x injection phase x
     restartPolicy x pause
-into seventeen generator-owned folders, using ONLY verbs and hooks the runners
+into nineteen generator-owned folders, using ONLY verbs and hooks the runners
 (run.py + the KIND CI lane) already implement:
 
     gen-rollout/   p1000+  baseline revision-bump rollouts (failure=none)
@@ -89,6 +89,16 @@ into seventeen generator-owned folders, using ONLY verbs and hooks the runners
                           break=stuck so the roll parks at its budget first),
                           crossed with topology x strategy x hook x group;
                           every Instance must end on the starting revision
+    gen-crashloop-new/ p5000+  the push brings a revision whose pods crash
+                          (fault=crashloop:new, form=start|load), crossed
+                          with topology x strategy x restartPolicy x group;
+                          the roll must stop within its budget, say why, and
+                          land the fix push on every Instance
+    gen-crashloop-group/ p5400+  one old-revision Instance crashes under a
+                          group policy (blueGreen, Sequential, maintainRatio)
+                          and under the zero budgets of a rolling group; the
+                          fix lands within the policy's own rule and never
+                          last on the broken Instance (fixfirst=1)
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -187,6 +197,18 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     single-pod topology: an annotation-only diff is patched in place, so no
     pod of the starting revision ever drains and the hook never arrives (a
     gang falls back to a whole-gang recreate, which drains).
+  - crashloop:new arms the engine's new revision (victimcomp defaults to
+    engine), so its group axis exists only where a sound member rolls beside
+    it (pd, pd-mn: co=rolling); InPlaceOnly is left out, since form=load's
+    exit switch is a pod-template env diff that in-place cannot carry (the
+    InPlaceIfPossible cell documents the fallback instead) and form=start's
+    image patch lands the same way under either in-place type; canonical
+    budgets only (the budget axis is the running-revision family's).
+  - the group family runs every policy on the PD shapes only where the
+    policy has a peer to speak of: a one-member sequence is a blueGreen
+    group and a ratio needs two Components, so engine-only runs blueGreen
+    and the zero-budget rolling group alone. maintainRatio's tolerance is 50
+    at N=2 (a crashing Instance alone is half the fleet) and 25 at N=4.
 
 The t=3 covering fill over the deferred dimensions (coordination/rollout
 groups, canary promotion, budget x coordination interactions) is the --fill
@@ -224,6 +246,8 @@ GEN_BLOCKS = {
     "gen-canary-fault-old": (6400, 6600),
     "gen-canary-fault-new": (6600, 6800),
     "gen-rollback": (5800, 6000),
+    "gen-crashloop-new": (5000, 5200),
+    "gen-crashloop-group": (5400, 5800),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -399,6 +423,23 @@ ROLLBACK_MOMENT = {
     "last": "the last Instance, every other one already on the new revision",
     "held": "the held floor: the new revision never turns Ready, so the roll parks at its budget",
 }
+
+# The new-revision crash family: the push itself carries the crash, under
+# each strategy at its canonical budget (maxSurge, maxUnavailable), both
+# restart policies, both forms, the crash shapes and their group axis.
+NEW_CRASH_STRATS = [("SurgeThenDrain", 1, 0), ("RecreatePod", 0, 1), ("InPlaceIfPossible", 0, 1)]
+
+# The group family: a running-revision crash under each group policy on the
+# shapes that have a peer for it, the two drain orders, and the zero-budget
+# cells of a plain rolling group (maxUnavailable 0 with maxSurge 1, maxSurge
+# 0 with maxUnavailable 1) on the single-pod shapes.
+GROUP_CRASH_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("pd-mn", 2, 1)]
+GROUP_CRASH_POLICIES = {"engine": ["bluegreen"], "pd": ["bluegreen", "seq", "ratio"], "pd-mn": ["bluegreen", "seq", "ratio"]}
+GROUP_CRASH_STRATS = [("SurgeThenDrain", 1, 0), ("RecreatePod", 0, 1)]
+BUDGET_ZERO_SHAPES = [("engine", 4, 0), ("pd", 4, 0)]
+# maintainRatio tolerance by fleet size: at N=2 one crashing Instance is
+# already half the engine, so the band must admit 1:2.
+RATIO_TOL_BY_N = {2: 50, 4: 25}
 
 # Canonical shapes: (topo, N, W). Gangs at N=2 with widths 1 and 2; singles at
 # N=4 (pd: engine+decoder N, router lib.NR). Percentage budgets additionally
@@ -1763,6 +1804,119 @@ def emit_rollback(add):
                             cell=("rollback", hook, topo, w, strat, surge, unavail, co), coord=coord)
 
 
+# ── gen-crashloop-new: the push brings a revision whose pods crash ──────────
+def _crash_new_reason(form, strat, co, allowance):
+    how = ("the pushed engine revision dies at every start (its runner image has no shell for the fixture command)"
+           if form == "start" else
+           "the pushed engine revision passes readiness, is promoted, and exits a few seconds later, "
+           "every time the kubelet restarts it (Ready counted for the budget: the new pod was promoted, then crashed)")
+    lands = {"SurgeThenDrain": ("the surge replacement never joins rotation, so no source is drained"
+                                if form == "start" else
+                                "the promoted Instance crashes, so no further source is drained"),
+             "RecreatePod": "the first Instance drained is rebuilt on the crashing revision and stays the only one off",
+             "InPlaceIfPossible": ("the image patches the first Instance's pod in place and it crash-loops there"
+                                   if form == "start" else
+                                   "the exit switch is a pod-template env diff, so in-place resolves to a recreate "
+                                   "of the first Instance")}[strat]
+    out = (f"{how}; {lands}: at most {allowance} Instance is off the running revision, which keeps serving at "
+           f"N-{allowance}; status says why (a rolloutHold or a Failed row, and a RetryHeld or InstanceFailed event) "
+           f"and no further attempt at that revision follows; the fix push then lands on every Instance, serving, "
+           f"and nothing rebuilds the crashing revision")
+    if co != "none":
+        out += "; the decoder rolls to its own sound revision meanwhile (converges, or holds with a reason)"
+    return out
+
+
+def emit_crashloop_new(add):
+    for topo, n, w in CRASH_SHAPES:
+        for strat, surge, unavail in NEW_CRASH_STRATS:
+            for rp, form in ((rp, form) for rp in RESTARTS for form in CRASH_FORMS):
+                for co in CRASH_COORDS[topo]:
+                    kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge),
+                              fault="crashloop:new", form=form, co=co, topo=topo)
+                    if co != "none":
+                        # The group rolls the decoder too, on its own surge.
+                        kv["ceil_d"] = n + 1
+                    meta = dict(strat=strat, verb=f"crashloop:new:{form}", rp=rp)
+                    desc = (f"{GEN_MARK} crashloop:new {form} {shape_tag(topo, w)} N={n} {strat} "
+                            f"{budget_tag(strat, surge, unavail)} rp {rp} co {co}")
+                    life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                    d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+                    add("gen-crashloop-new", desc, kv, comps(topo, n, w, life, d_life=d_life),
+                        _crash_new_reason(form, strat, co, max(surge, unavail)), meta,
+                        cell=("crashloop-new", form, topo, w, n, strat, surge, unavail, rp, co),
+                        coord=lib.coord_for(co) if co != "none" else None)
+
+
+# ── gen-crashloop-group: a running-revision crash under the group policies ──
+def _group_rule(co, strat, tol):
+    if co == "bluegreen":
+        return ("blueGreen flips traffic only once every member's new set is complete, and the broken Instance "
+                "is rebuilt as part of that set within the per-member budget; the flip cannot replace it ahead of "
+                "the set, so the case asserts the per-budget roll and that the broken Instance is never the last "
+                "one rebuilt, and reads the traffic flip as status only")
+    if co == "seq":
+        return ("Sequential rolls the engine to completion before the decoder starts (the ordering check), and "
+                "inside the engine the broken Instance lands first or at least never last")
+    if co == "ratio":
+        return (f"maintainRatio keeps engine:decoder serving within {tol}% (the ratio check); the broken Instance "
+                f"is already out of the serving count, so it comes back first or at least never last")
+    zero = ("maxUnavailable 0 with maxSurge 1: every drain follows a Ready surge replacement"
+            if strat == "SurgeThenDrain" else
+            "maxSurge 0 with maxUnavailable 1: one Instance down at a time")
+    return f"a rolling group under the zero budget ({zero}), and the broken Instance, already down, is rebuilt first or at least never last"
+
+
+def _group_reason(form, co, strat, tol):
+    how = ("one old-revision engine pod is pointed at an image with no shell as the bump lands, so it crashes at "
+           "every start and is never Ready again"
+           if form == "start" else
+           "one old-revision engine pod has its runner killed every few seconds while it is up, so it dies after "
+           "Ready and comes back between crashes")
+    return (f"{how}; the bump is the fix and lands on every Instance within the group's own rule: {_group_rule(co, strat, tol)}; "
+            f"the healthy peers never leave rotation beyond the budget, no repair is recorded for the broken Instance, "
+            f"and it ends on the new revision serving; floor waived — the crash itself costs settled capacity "
+            f"for the length of the roll")
+
+
+def _group_for(co, n):
+    members = ["engine", "decoder"]
+    if co == "ratio":
+        return lib.coord_group(members, "RollingUpdate",
+                               {"type": "RatioBalanced", "ratioTolerancePercent": RATIO_TOL_BY_N[n]})
+    return lib.coord_for(co, comps=members)
+
+
+def _emit_group_cell(add, topo, n, w, strat, surge, unavail, rp, form, co):
+    members = ["engine", "decoder"] if is_pd(topo) else ["engine"]
+    kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge),
+              fault="crashloop:old", form=form, floor_soft=1, fixfirst=1, co=co, topo=topo)
+    if is_pd(topo):
+        # The group rolls the decoder under the same strategy.
+        kv["ceil_d"] = n + surge_count(n, surge)
+    tol = RATIO_TOL_BY_N[n] if co == "ratio" else None
+    meta = dict(strat=strat, verb=f"crashloop:{form}", rp=rp)
+    desc = (f"{GEN_MARK} crashloop {form} group {co} {shape_tag(topo, w)} N={n} {strat} "
+            f"{budget_tag(strat, surge, unavail)} rp {rp}")
+    life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+    coord = _group_for(co, n) if is_pd(topo) else lib.coord_for(co, comps=tuple(members))
+    add("gen-crashloop-group", desc, kv, comps(topo, n, w, life, d_life=life if is_pd(topo) else None),
+        _group_reason(form, co, strat, tol), meta,
+        cell=("crashloop-group", form, topo, w, n, strat, surge, unavail, rp, co), coord=coord)
+
+
+def emit_crashloop_group(add):
+    for topo, n, w in GROUP_CRASH_SHAPES:
+        for co in GROUP_CRASH_POLICIES[topo]:
+            for strat, surge, unavail in GROUP_CRASH_STRATS:
+                for rp, form in ((rp, form) for rp in RESTARTS for form in CRASH_FORMS):
+                    _emit_group_cell(add, topo, n, w, strat, surge, unavail, rp, form, co)
+    for topo, n, w in BUDGET_ZERO_SHAPES:
+        for strat, surge, unavail in GROUP_CRASH_STRATS:
+            for rp, form in ((rp, form) for rp in RESTARTS for form in CRASH_FORMS):
+                _emit_group_cell(add, topo, n, w, strat, surge, unavail, rp, form, "rolling")
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 def build_outputs():
     """{relative path under isvcs/: file text} — the entire owned output set."""
@@ -1824,6 +1978,8 @@ def build_outputs():
     emit_canary_fault_old(add)
     emit_canary_fault_new(add)
     emit_rollback(add)
+    emit_crashloop_new(add)
+    emit_crashloop_group(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -2045,6 +2201,18 @@ def manifest(rows):
         " single-pod topology: an annotation-only diff is patched in place, so no"
         " pod of the starting revision ever drains and the hook never arrives (a"
         " gang falls back to a whole-gang recreate, which drains).",
+        "- crashloop:new arms the engine's new revision, so its group axis"
+        " (co=none | co=rolling) exists only on the PD topologies; it runs"
+        " each strategy at its canonical budget and leaves InPlaceOnly out:"
+        " form=load's exit switch is a pod-template env diff in-place cannot"
+        " carry (the InPlaceIfPossible cell documents the fallback) and"
+        " form=start's image patch lands the same way under either in-place"
+        " type.",
+        "- The group family runs a policy only where it has a peer: a"
+        " one-member sequence is a blueGreen group and a ratio needs two"
+        " Components, so engine-only runs blueGreen and the zero-budget"
+        " rolling group alone; maintainRatio's tolerance is 50 at N=2 and 25"
+        " at N=4.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

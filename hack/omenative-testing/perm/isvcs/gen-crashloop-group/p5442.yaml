@@ -1,0 +1,33 @@
+# p5442: [gen] crashloop start group seq pd-mn W1 N=2 SurgeThenDrain s1 rp RecreateInstance  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=3 ceil_r=2 fault=crashloop:old floor_soft=1 co=seq topo=pd-mn form=start fixfirst=1
+# reason: one old-revision engine pod is pointed at an image with no shell as the bump lands, so it crashes at every start and is never Ready again; the bump is the fix and lands on every Instance within the group's own rule: Sequential rolls the engine to completion before the decoder starts (the ordering check), and inside the engine the broken Instance lands first or at least never last; the healthy peers never leave rotation beyond the budget, no repair is recorded for the broken Instance, and it ends on the new revision serving; floor waived — the crash itself costs settled capacity for the length of the roll
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p5442 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          blueGreen: {}
+        - components: [decoder]
+          blueGreen: {}

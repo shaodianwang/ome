@@ -95,7 +95,7 @@ perm/
 │   ├── rollout/           — 96 rollout cases (topology × lifecycle × coordination)
 │   ├── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
 │   ├── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/ gen-crashloop-idle/ gen-crashloop-sibling/
-│   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/ gen-rollback/  — generated hot core (see isvcs/MANIFEST.md)
+│   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/ gen-rollback/ gen-crashloop-new/ gen-crashloop-group/  — generated hot core (see isvcs/MANIFEST.md)
 │   └── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
@@ -800,6 +800,55 @@ a removal. `rollback=1` in canary mode keeps its own meaning (the
   after Ready is a container restart the kubelet owns under that policy, not
   a wedge, so no repair is promised there.
 
+- **`fixfirst=1`** (with a break on the running revision after a bump) adds
+  the order claim to that verdict: the broken Instance is never the last of
+  its Component to land the fix, read from the creation time of each
+  Instance's first new-revision pod (so it judges the strategies that
+  rebuild pods). Its capacity is already lost, so a roll that reaches it
+  last leaves the operator short for the whole roll. The generated
+  `isvcs/gen-crashloop-group/` family carries it: the running-revision crash
+  under each group policy (blueGreen, Sequential, maintainRatio) on the
+  shapes that have a peer for it, and under the zero budgets of a plain
+  rolling group (maxUnavailable 0 with maxSurge 1, maxSurge 0 with
+  maxUnavailable 1), crossed with both forms, both drain orders and both
+  restart policies. Each case's second line says what the policy's own rule
+  lets it assert: blueGreen flips traffic only once the whole new set is
+  complete and cannot replace the broken Instance ahead of the set, so those
+  cases assert the per-budget roll and the order, and read the flip as
+  status only; Sequential's component order and maintainRatio's band are
+  the ordinary ordering and ratio checks.
+
+- **`fault=crashloop:new` with `form=start|load`** is the other side: the
+  push itself brings a revision whose pods crash. The crash is armed on the
+  bumped member's runner before the push lands, never injected into a
+  running pod (`victimcomp=`, default engine, names a member the push
+  bumps): `form=start` gives it the fixture's shell-less metrics image, so
+  the fixture command dies at every start (an image-only diff, so an
+  in-place strategy really patches in place); `form=load` sets the fixture
+  runtime's `TEST_EXIT_AFTER` switch (`OME_TEST_CRASH_EXIT_AFTER_S`, default
+  20), so the pod passes readiness, is promoted, and exits that many seconds
+  later, every time the kubelet restarts it — a pod-template env diff, so an
+  in-place strategy resolves to a recreate. The verdict is the operator's
+  end state. While the crashing revision is in flight: no more Instances
+  than the larger of maxSurge and maxUnavailable are off the running
+  revision, which therefore keeps serving at that floor (debounced like the
+  capacity floor), never more than that many Instances carry the crashing
+  revision at once, status says why the roll stopped — a `rolloutHold` on
+  the victim Component or one of its Instance rows at `Failed`, and a
+  `RetryHeld` or `InstanceFailed` event naming it — within the rotate
+  budget, and once it has, no further pod of the crashing revision appears
+  across `IDLE_HOLD_S`; a sound group member converges on its own new
+  revision meanwhile, or holds with a reason. Then the harness pushes
+  `rebump-fix` (a `v3` bump that drops the runner override) and every bumped
+  Instance must end on the fixed revision and serving within the rotate
+  budget, with nothing rebuilding the crashing revision after the fix landed
+  and no `rolloutHold` left in status. Peaks, isolation of the untouched
+  Components and gang atomicity hold throughout. A pushed revision that
+  never crashes is `INFRA-FAIL` (the arm failed, not the product). The
+  generated `isvcs/gen-crashloop-new/` family crosses both forms with
+  topology, strategy (SurgeThenDrain, RecreatePod and InPlaceIfPossible at
+  their canonical budgets), restart policy and, on PD, a rolling group.
+
 - **`fault=imagepull:old`** is the same break with an image that cannot be
   pulled: the victim's live pod is pointed at the harness's unpullable
   reference (`runtime_fixtures.UNPULLABLE_IMAGE`, the one image no deploy
@@ -1071,11 +1120,11 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `gen_cases.py`'s feature counters).
 - `gen_runtime.py` — the runtime-triggered cases (`p400`+) → `isvcs/runtime-rev/`.
 - `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p2799`,
-  `p3000`–`p4999` and `p5800`–`p5999`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
+  `p3000`–`p4999`, `p5000`–`p5799` and `p5800`–`p5999`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
   `isvcs/gen-restart/`, `isvcs/gen-crashloop/`, `isvcs/gen-switch/`,
   `isvcs/gen-crashloop-idle/`, `isvcs/gen-crashloop-sibling/`,
   `isvcs/gen-heal/`, `isvcs/gen-imagepull/`, `isvcs/gen-node/`,
-  `isvcs/gen-ctrlrestart/`, `isvcs/gen-rollback/`, and the operator stories driven through a canary (`p5200`–`p5399`) →
+  `isvcs/gen-ctrlrestart/`, `isvcs/gen-rollback/`, `isvcs/gen-crashloop-new/`, `isvcs/gen-crashloop-group/`, and the operator stories driven through a canary (`p5200`–`p5399`) →
   `isvcs/gen-canary-crash/` (a canary rolls the fix while the running
   revision breaks under it), `isvcs/gen-canary-second-rev/` (a second revision
   lands while the first canary is staging or serving) and

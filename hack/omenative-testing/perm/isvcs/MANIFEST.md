@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **1769**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **1913**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -26,25 +26,27 @@ Total generated cases: **1769**. The whole-corpus per-PR cap (hand + generated) 
 | gen-canary-fault-old | 188 | p6400..p6587 |
 | gen-canary-fault-new | 52 | p6600..p6651 |
 | gen-rollback | 126 | p5800..p5925 |
+| gen-crashloop-new | 72 | p5000..p5071 |
+| gen-crashloop-group | 72 | p5400..p5471 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 396 |
-| engine-mn | 371 |
-| pd | 530 |
-| pd-mn | 472 |
+| engine | 424 |
+| engine-mn | 383 |
+| pd | 586 |
+| pd-mn | 520 |
 
 ### By update strategy
 
 | value | cases |
 |---|---|
 | (dormant: nothing rolls) | 40 |
-| InPlaceIfPossible | 272 |
+| InPlaceIfPossible | 296 |
 | InPlaceOnly | 236 |
-| RecreatePod | 315 |
-| SurgeThenDrain | 906 |
+| RecreatePod | 375 |
+| SurgeThenDrain | 966 |
 
 ### By failure verb / phase
 
@@ -52,7 +54,7 @@ Total generated cases: **1769**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | configkey:after-failed | 16 |
 | configkey:after-settle | 16 |
-| crashloop:load | 108 |
+| crashloop:load | 144 |
 | crashloop:load@canary | 16 |
 | crashloop:load@capacity | 16 |
 | crashloop:load@gate | 4 |
@@ -64,7 +66,9 @@ Total generated cases: **1769**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:new:crashAfterSoak | 16 |
 | crashloop:new:crashInSoak | 16 |
 | crashloop:new:crashStart | 8 |
-| crashloop:start | 108 |
+| crashloop:new:load | 36 |
+| crashloop:new:start | 36 |
+| crashloop:start | 144 |
 | crashloop:start+edit:rotating | 12 |
 | crashloop:start@canary | 16 |
 | crashloop:start@capacity | 16 |
@@ -117,26 +121,27 @@ Total generated cases: **1769**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (unset — baseline) | 388 |
-| None | 671 |
-| RecreateInstance | 710 |
+| None | 743 |
+| RecreateInstance | 782 |
 
 ### By pause
 
 | value | cases |
 |---|---|
 | freeze | 38 |
-| off | 1655 |
+| off | 1799 |
 | true | 76 |
 
 ### By coordination
 
 | value | cases |
 |---|---|
-| bluegreen | 24 |
+| bluegreen | 48 |
 | canary | 24 |
-| none | 1400 |
-| rolling | 303 |
-| seq | 18 |
+| none | 1448 |
+| ratio | 16 |
+| rolling | 343 |
+| seq | 34 |
 
 ### By mid-roll edit (gen-switch)
 
@@ -177,7 +182,7 @@ Total generated cases: **1769**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 1439 |
+| (no break) | 1583 |
 | decoder | 60 |
 | engine | 270 |
 
@@ -359,6 +364,8 @@ Total generated cases: **1769**. The whole-corpus per-PR cap (hand + generated) 
 - gen-canary-fault-old breaks the stable side at the step kinds that differ in mechanism: before the push (the push meets a broken fleet), the capacity step ahead of traffic, the second step's timed soak, the same step at a manual gate (promoted 30s after the break), the same step at an analysis gate, and the last gate before the cutover. Left out, with the reason: the first split, which gen-canary-crash drives with the same faults, victims and policies; the cutover itself (Promoting), where at most the surge budget of stable Instances is left and already draining, so a break has no settled row to land on (the last gate carries that claim); a traffic step apart from its soak, since every traffic step of the story ladder but the cutover soaks; the surge budget at the gates, where no capacity builds while they hold (surge 1 only); three victims at the manual gate, whose storm is the first split's under another release; the crash forms under the analysis gate, since the metrics image is a static binary with no shell to exec a kill into and no fixture image fails to start under its entrypoint (the pull failure alone breaks it); the analysis gate crossed with the other step kinds, since the gate changes only what ends a hold, not how a break meets it; and a missing ConfigMap key, whose reference both revisions share, so a push is never its fix (the idle configkey family lifts the cause instead).
 - gen-canary-fault-new arms the break on the pushed engine revision and crosses where it bites (a crash at start and a pull failure at staging; a crash after Ready inside the first soak and past it) with the exit at the park (a rollback, or a fix push that drops the broken runner), both shapes and both restart policies. Left out, with the reason: the surge budget where the ladder parks at its first capacity step, which asks one Instance (surge 1 only); the crash forms under the analysis gate (the metrics image carries no shell and no exit switch); the rollback exit under the analysis gate, whose terminal verdict requires an analysis sample a park before the first gate never yields (the fix exit walks the gated ladder); a missing ConfigMap key, which no verb arms on a template and whose bite is a container that never starts, the crash-at-start cell; and a manual policy, since a broken revision parks before any gate is reached.
 - A rollback's `draining` hook is not emitted for an in-place strategy on a single-pod topology: an annotation-only diff is patched in place, so no pod of the starting revision ever drains and the hook never arrives (a gang falls back to a whole-gang recreate, which drains).
+- crashloop:new arms the engine's new revision, so its group axis (co=none | co=rolling) exists only on the PD topologies; it runs each strategy at its canonical budget and leaves InPlaceOnly out: form=load's exit switch is a pod-template env diff in-place cannot carry (the InPlaceIfPossible cell documents the fallback) and form=start's image patch lands the same way under either in-place type.
+- The group family runs a policy only where it has a peer: a one-member sequence is a blueGreen group and a ratio needs two Components, so engine-only runs blueGreen and the zero-budget rolling group alone; maintainRatio's tolerance is 50 at N=2 and 25 at N=4.
 - Kill-family cells pinned by hand-written restart/ cases are excluded:
 
   - p130: engine SurgeThenDrain rp=None
