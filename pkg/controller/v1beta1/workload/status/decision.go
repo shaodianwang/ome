@@ -298,6 +298,23 @@ func StampRestarting(ctx context.Context, input types.ReconcileInput, idx int32,
 	return observedIncarnation, err
 }
 
+// StampRestartRevision records rev as the revision an open repair rebuilds
+// at: RunningRevision on a Restarting row, written before the first pod of
+// the rebuild is created, so the row's revision names the pod set the
+// repair builds and every later pass renders and promotes that revision.
+// Any other row is left alone: the repair ended, or another pass owns the
+// row.
+func StampRestartRevision(ctx context.Context, input types.ReconcileInput, idx int32, rev string) error {
+	return input.MutateInstance(ctx, idx, func(s *types.InstanceStatus) bool {
+		if s.Phase != types.InstancePhaseRestarting || s.Operation == nil ||
+			s.Operation.Type != types.InstanceOperationRestart || s.RunningRevision == rev {
+			return false
+		}
+		s.RunningRevision = rev
+		return true
+	})
+}
+
 // StampRecreateFromInPlace converts an in-flight in-place roll into
 // the recreate roll for the same target: Incarnation bumped so the
 // rebuilt pod is distinguishable, Step moved to Drain so the recreate's

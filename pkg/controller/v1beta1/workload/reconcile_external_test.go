@@ -5055,23 +5055,6 @@ func (h *recoveryHarness) loseRunner(idx int32, runner string) {
 	h.t.Fatalf("no pod of instance %d runner %q to lose", idx, runner)
 }
 
-// terminatingPods counts the pods the kubelet model still holds as
-// Terminating.
-func (h *recoveryHarness) terminatingPods() int {
-	h.t.Helper()
-	pods := &corev1.PodList{}
-	if err := h.c.List(h.ctx, pods, client.InNamespace(recoveryNS)); err != nil {
-		h.t.Fatalf("list pods: %v", err)
-	}
-	n := 0
-	for i := range pods.Items {
-		if pods.Items[i].DeletionTimestamp != nil {
-			n++
-		}
-	}
-	return n
-}
-
 // instanceIdentity is the row's incarnation and its live pod set by name
 // and creation instant, so a rebuild under a reused name is as visible as
 // a delete; empty when the row is gone.
@@ -5226,45 +5209,6 @@ func TestRepair_RebuildsTheRevisionItStamps_HeldTarget(t *testing.T) {
 		t.Fatalf("repaired row records %q, want %s", s.RunningRevision, h.revV1.Name)
 	}
 	h.requirePodsRender(0, h.revV1, goodImage)
-}
-
-// TestRepair_OpenRepairRendersTheRevisionItStartedFrom: an open repair is
-// driven to completion whatever the target says, and the pods it
-// rebuilds come back on the revision the repair started from. The
-// template moves while the drained pod is still Terminating, so the
-// rebuild runs on a pass whose current template is the new revision's;
-// it must still render the running revision's stored template. The roll
-// takes the row once the repair promotes it.
-//
-// Cells: instance/Restart/Drain/spec.revision/before
-func TestRepair_OpenRepairRendersTheRevisionItStartedFrom(t *testing.T) {
-	h := newRecoveryHarness(t, false)
-	h.podGrace = 10 * time.Minute
-	policy := workloadtypes.RestartPolicyRecreateInstance
-	h.lifecycle.RestartPolicy = &policy
-	h.driveToReadyOnV1()
-	before := h.instance(0).Incarnation
-
-	h.crashPod(0, "", crashStartImage)
-	if !h.run(10, func() bool { return h.repairInFlight() && len(h.livePods()) == 0 && h.terminatingPods() == 1 }) {
-		h.dumpState("repair opening")
-		t.Fatalf("the repair never drained the crashed pod")
-	}
-
-	h.setTarget(h.revFixed, fixedImage)
-	if !h.run(60, func() bool { return h.repairedAbove(0, before) }) {
-		h.dumpState("open repair after the retarget")
-		t.Fatalf("the open repair did not finish after the template moved")
-	}
-	if s := h.instance(0); s.RunningRevision != h.revV1.Name {
-		t.Fatalf("repaired row records %q, want %s", s.RunningRevision, h.revV1.Name)
-	}
-	h.requirePodsRender(0, h.revV1, goodImage)
-
-	if !h.run(80, func() bool { return h.settledOn(h.revFixed, 1) }) {
-		h.dumpState("roll after the repair")
-		t.Fatalf("the roll did not take the repaired Instance to the new revision")
-	}
 }
 
 // TestRepair_HoldsWhenTheStampedRevisionIsGone: a repair whose stamped

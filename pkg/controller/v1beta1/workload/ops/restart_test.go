@@ -88,7 +88,7 @@ func TestRestart_NilClient(t *testing.T) {
 	resetExpectations(t)
 	plan := workload.ComponentPlan{Component: workload.ComponentEngine}
 	inst := workload.InstancePlan{Index: 0, Incarnation: 1}
-	if _, err := ops.Restart(context.Background(), workload.Deps{}, workload.ReconcileInput{}, plan, inst, ""); err == nil {
+	if _, err := ops.Restart(context.Background(), workload.Deps{}, workload.ReconcileInput{}, plan, inst, nil, ""); err == nil {
 		t.Fatal("expected error for nil client")
 	}
 }
@@ -101,7 +101,7 @@ func TestRestart_FirstPassBumpsIncarnationAndPatchesStatus(t *testing.T) {
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
-	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "test trigger")
+	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, "test trigger")
 	if err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestRestart_DrainOldPod_FlipsServingFalse(t *testing.T) {
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
-	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
+	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, "trigger")
 	if err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestRestart_DeletesOldPodOnceDrained(t *testing.T) {
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
-	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
+	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, "trigger")
 	if err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestRestart_RefusesToDeleteOrphanPod(t *testing.T) {
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
-	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
+	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, "trigger")
 	if err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestRestart_CreatesNewPodAtBumpedIncarnation(t *testing.T) {
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
-	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
+	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, "trigger")
 	if err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestRestart_ConvergesAcrossPasses(t *testing.T) {
 		// previous pass created — the fake client doesn't run kubelet.
 		makeNewPodReady(t, c, "prod", "llama-70b-engine-0-default-0", plan.Instances[0].Incarnation)
 
-		done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod Failed")
+		done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, "pod Failed")
 		if err != nil {
 			t.Fatalf("pass %d: %v", pass, err)
 		}
@@ -389,7 +389,7 @@ func TestRestart_CapturesLastFailureBeforeDrain(t *testing.T) {
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
-	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod Failed"); err != nil {
+	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, "pod Failed"); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 
@@ -430,7 +430,7 @@ func TestRestart_PodVanished_PreservesPriorLastFailure(t *testing.T) {
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
-	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod count 0 below desired 1"); err != nil {
+	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, "pod count 0 below desired 1"); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 
@@ -481,7 +481,7 @@ func TestRestart_EmitsRichRestartTriggeredEvent(t *testing.T) {
 
 	// Pass the rich reason (as the dispatcher would, via DetectRestartTrigger).
 	_, reason, _ := ops.DetectRestartTrigger(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0])
-	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c, Recorder: rec}, input, plan, plan.Instances[0], reason); err != nil {
+	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c, Recorder: rec}, input, plan, plan.Instances[0], nil, reason); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 
@@ -1000,7 +1000,7 @@ func TestRestart_PromotionWaitsForPodReadyAndWindow(t *testing.T) {
 		input.Clock = clk
 		window := &workload.PromoteWindow{}
 		input.PromoteWindow = window
-		done, err := ops.Restart(context.Background(), workload.Deps{Client: c, Clock: clk}, input, plan, plan.Instances[0], "pod Failed")
+		done, err := ops.Restart(context.Background(), workload.Deps{Client: c, Clock: clk}, input, plan, plan.Instances[0], nil, "pod Failed")
 		if err != nil {
 			t.Fatalf("Restart: %v", err)
 		}
@@ -1080,7 +1080,7 @@ func TestRestart_DeadlineFailedRowResumesItsPromote(t *testing.T) {
 	if !needs || reason != "" {
 		t.Fatalf("restart trigger: got (%v, %q) want a resume with no new reason", needs, reason)
 	}
-	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], reason)
+	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, reason)
 	if err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
@@ -1185,7 +1185,7 @@ func TestDetectRestartTrigger_SpentRepairReArmsWhenTheLadderIsDue(t *testing.T) 
 	if !strings.Contains(reason, "repair re-armed (attempt 1)") || !strings.Contains(reason, "CreateContainerConfigError") {
 		t.Errorf("reason = %q, want the attempt number and the failure that parked the last one", reason)
 	}
-	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], reason); err != nil {
+	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, reason); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
@@ -1254,7 +1254,7 @@ func TestDetectRestartTrigger_SpentRepairWithoutALadderStaysParked(t *testing.T)
 	if got := input.PassWake.Pending(); got != 0 {
 		t.Errorf("wake-up = %v, want none: nothing is coming due", got)
 	}
-	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "")
+	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, "")
 	if err != nil || done {
 		t.Fatalf("Restart on a parked row: done=%v err=%v, want (false, nil)", done, err)
 	}
@@ -1378,7 +1378,7 @@ func TestRestart_OperatorConfigChangesDoNotChangeWhatItDecides(t *testing.T) {
 			change(&input, &plan)
 		}
 
-		done, err := ops.Restart(context.Background(), workload.Deps{Client: c, Clock: clk}, input, plan, plan.Instances[0], "pod lost")
+		done, err := ops.Restart(context.Background(), workload.Deps{Client: c, Clock: clk}, input, plan, plan.Instances[0], nil, "pod lost")
 		if err != nil {
 			t.Fatalf("Restart: %v", err)
 		}
@@ -1700,7 +1700,7 @@ func TestRestart_ReObservedCrashLoopArmsNothingASecondTime(t *testing.T) {
 	plan.RestartPolicy = workload.RestartPolicyNone
 
 	// The stamp lands: the row leaves Ready at a bumped incarnation.
-	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod CrashLoopBackOff"); err != nil {
+	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, "pod CrashLoopBackOff"); err != nil {
 		t.Fatalf("Restart (stamp): %v", err)
 	}
 	armed := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
@@ -1715,7 +1715,7 @@ func TestRestart_ReObservedCrashLoopArmsNothingASecondTime(t *testing.T) {
 	input.ObservedState.CurrentRevision = crashLoopRevision
 	plan = buildPlanSinglePodEngineForRestart(c, isvc)
 	plan.RestartPolicy = workload.RestartPolicyNone
-	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod CrashLoopBackOff"); err != nil {
+	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, "pod CrashLoopBackOff"); err != nil {
 		t.Fatalf("Restart (re-observation): %v", err)
 	}
 
@@ -1752,7 +1752,7 @@ func TestRestart_PodLostAsTheRepairStampCommitsStillDrains(t *testing.T) {
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 	plan.RestartPolicy = workload.RestartPolicyNone
 
-	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod CrashLoopBackOff"); err != nil {
+	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, "pod CrashLoopBackOff"); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 
@@ -1775,7 +1775,7 @@ func TestRestart_PodLostAsTheRepairStampCommitsStillDrains(t *testing.T) {
 	input.ObservedState.CurrentRevision = crashLoopRevision
 	plan = buildPlanSinglePodEngineForRestart(c, isvc)
 	plan.RestartPolicy = workload.RestartPolicyNone
-	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod CrashLoopBackOff"); err != nil {
+	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, "pod CrashLoopBackOff"); err != nil {
 		t.Fatalf("Restart (rebuild): %v", err)
 	}
 
@@ -2064,7 +2064,8 @@ func TestDetectRestartTrigger_DemotedRowRepairsAtRunningRevision(t *testing.T) {
 
 // The repair of a demoted row is the ordinary Restart: the incarnation is
 // bumped, the row moves to Restarting, and the pod set is recreated at the
-// revision the row records rather than at the Component's target.
+// revision the row records rather than at the Component's target, which
+// the pause withholds.
 //
 // Cells: instance/Pending/spec.unpause/boundary@T-pending-restart
 func TestRestart_DemotedRowRebuildsAtRunningRevision(t *testing.T) {
@@ -2075,10 +2076,14 @@ func TestRestart_DemotedRowRebuildsAtRunningRevision(t *testing.T) {
 	ir.Status.InstanceStatuses[0].RunningRevision = running
 	c := newFakeClient(t, isvc, ir, fixtureRevision(t, isvc))
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
-	input.ObservedState.UpdateRevision = "llama-70b-engine-0000target"
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-0000target", Namespace: "prod"}}
+	input.ObservedState.UpdateRevision = target.Name
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
+	// A demoted row off an open target is the Create pass's; the repair
+	// reaches it under a pause, which withholds the roll.
+	plan.Paused = true
 
-	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod count 0 below desired 1")
+	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], target, "pod count 0 below desired 1")
 	if err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
@@ -2212,10 +2217,11 @@ func restartingRow(t *testing.T, c client.Client, isvc *v1beta1.InferenceService
 // TestRestart_RendersTheStampedRevisionTemplate: the rebuild renders the
 // template the stamped revision stores, not the Component's current one.
 // The running revision was minted with one image and the desired
-// template has moved to another, so a pod rendered from the wrong source
-// is visible by its image: it must carry the running revision's image
-// under the running revision's label, for a single pod and for both
-// members of a gang.
+// template has moved to another under a pause, which withholds the roll
+// the rebuild would otherwise follow, so a pod rendered from the wrong
+// source is visible by its image: it must carry the running revision's
+// image under the running revision's label, for a single pod and for
+// both members of a gang.
 //
 // Cells: instance/Restart/Drain/spec.revision/before
 func TestRestart_RendersTheStampedRevisionTemplate(t *testing.T) {
@@ -2246,7 +2252,6 @@ func TestRestart_RendersTheStampedRevisionTemplate(t *testing.T) {
 
 			input := buildTestInput(isvc, c, workload.ComponentEngine)
 			input.DesiredSpec.PodSpec = &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: movedImage}}}
-			input.ObservedState.UpdateRevision = "llama-70b-engine-0000next"
 			var plan workload.ComponentPlan
 			if tc.gang {
 				input.DesiredSpec.WorkerPodSpec = &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: movedWorkerImage}}}
@@ -2254,8 +2259,11 @@ func TestRestart_RendersTheStampedRevisionTemplate(t *testing.T) {
 			} else {
 				plan = buildPlanSinglePodEngineForRestart(c, isvc)
 			}
+			target := mintEngineRevision(t, c, isvc, input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec)
+			input.ObservedState.UpdateRevision = target.Name
+			plan.Paused = true
 
-			done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod count 0 below desired 1")
+			done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], target, "pod count 0 below desired 1")
 			if err != nil {
 				t.Fatalf("Restart: %v", err)
 			}
@@ -2289,6 +2297,107 @@ func TestRestart_RendersTheStampedRevisionTemplate(t *testing.T) {
 	}
 }
 
+// TestRestart_RebuildWithNoPodYetFollowsTheTarget: an open repair whose
+// rebuild has created no pod yet renders the roll target when the row is
+// off it, and the row records the target first: the pods come back on the
+// target's image under the target's label and the row's running revision
+// names it, for a single pod and for both members of a gang. The rebuild
+// keeps the revision it stamped once a pod of its own exists, and when the
+// RetryBlock holds the target.
+//
+// Cells: instance/Restart/Drain/spec.revision/before
+func TestRestart_RebuildWithNoPodYetFollowsTheTarget(t *testing.T) {
+	const (
+		runningImage = "registry.example.com/runtime:v1"
+		movedImage   = "registry.example.com/runtime:v2"
+	)
+	cases := []struct {
+		name string
+		gang bool
+		// leaderRebuilt seeds a pod of the rebuild before the pass.
+		leaderRebuilt bool
+		// held puts the target under a Held RetryBlock.
+		held    bool
+		follows bool
+	}{
+		{name: "single pod", follows: true},
+		{name: "gang", gang: true, follows: true},
+		{name: "gang whose leader is already rebuilt", gang: true, leaderRebuilt: true},
+		{name: "target the RetryBlock holds", held: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetExpectations(t)
+			isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+			c := newFakeClient(t, isvc, ir)
+			spec := func(image string) *corev1.PodSpec {
+				return &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: image}}}
+			}
+			var runningWorker, movedWorker *corev1.PodSpec
+			if tc.gang {
+				runningWorker, movedWorker = spec(runningImage), spec(movedImage)
+			}
+			running := mintEngineRevision(t, c, isvc, spec(runningImage), runningWorker)
+			target := mintEngineRevision(t, c, isvc, spec(movedImage), movedWorker)
+			restartingRow(t, c, isvc, running.Name)
+			if tc.leaderRebuilt {
+				leader := gangPod(isvc, 0, "leader", 0, 2, false, false)
+				leader.Labels[query.LabelRevisionHash] = query.RevisionOf(running).Hash()
+				if err := c.Create(context.Background(), leader); err != nil {
+					t.Fatalf("seed the rebuilt leader: %v", err)
+				}
+			}
+
+			input := buildTestInput(isvc, c, workload.ComponentEngine)
+			input.DesiredSpec.PodSpec = spec(movedImage)
+			input.DesiredSpec.WorkerPodSpec = movedWorker
+			input.ObservedState.UpdateRevision = target.Name
+			if tc.held {
+				input.ObservedState.RetryBlocks = []workload.RetryBlock{{TargetRevision: target.Name, State: workload.RetryBlockHeld}}
+			}
+			plan := buildPlanSinglePodEngineForRestart(c, isvc)
+			if tc.gang {
+				plan = buildPlanGangEngine(workload.RestartPolicyRecreateInstance)
+			}
+
+			done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], target, "pod count 0 below desired 1")
+			if err != nil {
+				t.Fatalf("Restart: %v", err)
+			}
+			if done {
+				t.Fatalf("expected done=false while the rebuilt pods are not yet Ready")
+			}
+
+			wantRevision, wantImage := running, runningImage
+			if tc.follows {
+				wantRevision, wantImage = target, movedImage
+			}
+			pods := &corev1.PodList{}
+			if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+				t.Fatalf("list pods: %v", err)
+			}
+			if want := len(plan.Instances[0].Runners); len(pods.Items) != want {
+				t.Fatalf("pods: got %d want %d", len(pods.Items), want)
+			}
+			for _, pod := range pods.Items {
+				if tc.leaderRebuilt && pod.Labels[query.LabelRunner] == "leader" {
+					continue
+				}
+				if got := pod.Labels[query.LabelRevisionHash]; got != query.RevisionOf(wantRevision).Hash() {
+					t.Errorf("pod %s revision label = %q, want %s", pod.Name, got, wantRevision.Name)
+				}
+				if got := pod.Spec.Containers[0].Image; got != wantImage {
+					t.Errorf("pod %s image = %q, want %q", pod.Name, got, wantImage)
+				}
+			}
+			row := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+			if row == nil || row.Phase != v1beta1.OMENativeInstanceRestarting || row.RunningRevision != wantRevision.Name {
+				t.Fatalf("row = %+v, want Restarting recording %s", row, wantRevision.Name)
+			}
+		})
+	}
+}
+
 // TestRestart_HoldsWhenTheStampedRevisionIsGone: a rebuild whose stamped
 // revision has no ControllerRevision left creates nothing rather than
 // rendering the current template under that revision's label. It says so
@@ -2311,7 +2420,7 @@ func TestRestart_HoldsWhenTheStampedRevisionIsGone(t *testing.T) {
 			t.Fatalf("get isvc: %v", err)
 		}
 		input := buildTestInput(fresh, c, workload.ComponentEngine)
-		done, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "pod count 0 below desired 1")
+		done, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], nil, "pod count 0 below desired 1")
 		if err != nil {
 			t.Fatalf("pass %d: Restart: %v", pass, err)
 		}

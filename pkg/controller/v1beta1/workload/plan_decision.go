@@ -300,10 +300,11 @@ func Plan(ctx context.Context, input types.ReconcileInput, plan types.ComponentP
 
 	// Paused is an operator circuit breaker over WHAT MAY BEGIN:
 	// scale-down above still releases capacity, the restart pass below
-	// keeps repairing existing Instances at their current revision
-	// (RunningRevision — repair can never advance a rollout, and an
-	// Instance whose revision is not the roll target is the roll's), and an
-	// attempt already in flight still runs the step it is on to that
+	// keeps repairing existing Instances at their current revision (the
+	// pause withholds the roll, so a rebuild under it never follows the
+	// target, and an Instance whose revision is not the roll target is the
+	// roll's), and an attempt already in flight still runs the step it is
+	// on to that
 	// step's boundary. What a pause withholds is the next operation and
 	// the next step, so a pause never leaves an Instance mid-step — dark
 	// between a delete and its recreate, or half-materialized — for the
@@ -464,14 +465,14 @@ func restartContinuations(input types.ReconcileInput, restarts []RestartSelectio
 // evaluated against the LIVE pod read — restart is destructive and must
 // not select from a stale cache.
 //
-// A repair rebuilds the revision the Instance already runs, so it is
-// selected only while that revision is still the Component's target. An
-// Instance off the target belongs to the pass that rebuilds it AT the
-// target (workloadops.RepairYieldsToTarget): its outage is one the roll
-// crosses anyway, and a repair would rebuild what the roll is about to
-// tear down. An open Restart is driven on regardless, and a paused
-// Component keeps every repair, because the roll it would yield to is
-// the very thing the pause withholds.
+// A repair is opened only while the revision the Instance runs is still
+// the Component's target. An Instance off the target belongs to the pass
+// that rebuilds it AT the target (workloadops.RepairYieldsToTarget): its
+// outage is one the roll crosses anyway, and a repair would rebuild what
+// the roll is about to tear down. An open Restart is driven on regardless
+// — a rebuild that has created no pod yet follows the target itself — and
+// a paused Component keeps every repair, because the roll it would yield
+// to is the very thing the pause withholds.
 //
 // The live read is unconditional only under the policy whose triggers
 // fire on ordinary pod churn. The two policy-independent triggers are

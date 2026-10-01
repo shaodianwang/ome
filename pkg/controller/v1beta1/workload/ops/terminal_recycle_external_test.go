@@ -251,7 +251,7 @@ func assertRestartRecyclesDeadPod(t *testing.T, kill func(*corev1.Pod) *corev1.P
 
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
-	done, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "trigger")
+	done, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], nil, "trigger")
 	if err != nil {
 		t.Fatalf("Restart pass 1: %v", err)
 	}
@@ -267,7 +267,7 @@ func assertRestartRecyclesDeadPod(t *testing.T, kill func(*corev1.Pod) *corev1.P
 	workload.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentEngine, 0)
 	input = buildTestInput(isvc, c, workload.ComponentEngine)
 	plan = buildPlanSinglePodEngineForRestart(c, isvc)
-	if _, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "trigger"); err != nil {
+	if _, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], nil, "trigger"); err != nil {
 		t.Fatalf("Restart pass 2: %v", err)
 	}
 	got := listPods(t, c, "prod")
@@ -519,7 +519,7 @@ func TestRestart_RecyclesTerminalNewIncarnationPod(t *testing.T) {
 
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
-	done, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "trigger")
+	done, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], nil, "trigger")
 	if err != nil {
 		t.Fatalf("Restart pass 1: %v", err)
 	}
@@ -540,7 +540,7 @@ func TestRestart_RecyclesTerminalNewIncarnationPod(t *testing.T) {
 	workload.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentEngine, 0)
 	input = buildTestInput(isvc, c, workload.ComponentEngine)
 	plan = buildPlanSinglePodEngineForRestart(c, isvc)
-	if _, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "trigger"); err != nil {
+	if _, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], nil, "trigger"); err != nil {
 		t.Fatalf("Restart pass 2: %v", err)
 	}
 	got := listPods(t, c, "prod")
@@ -680,7 +680,7 @@ func TestRestart_TerminalPodReobservedKeepsPhaseAndStep(t *testing.T) {
 
 			input := buildTestInput(isvc, c, workload.ComponentEngine)
 			plan := buildPlanSinglePodEngineForRestart(c, isvc)
-			if _, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "trigger"); err != nil {
+			if _, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], nil, "trigger"); err != nil {
 				t.Fatalf("Restart pass 1: %v", err)
 			}
 			recycled := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
@@ -693,7 +693,7 @@ func TestRestart_TerminalPodReobservedKeepsPhaseAndStep(t *testing.T) {
 			workload.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentEngine, 0)
 			input = buildTestInput(isvc, c, workload.ComponentEngine)
 			plan = buildPlanSinglePodEngineForRestart(c, isvc)
-			done, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "trigger")
+			done, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], nil, "trigger")
 			if err != nil {
 				t.Fatalf("Restart pass 2: %v", err)
 			}
@@ -917,7 +917,7 @@ func TestRestart_TerminalNewIncarnationPodIsNotPromoted(t *testing.T) {
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
-	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "trigger")
+	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, "trigger")
 	if err != nil {
 		t.Fatalf("Restart: %v", err)
 	}

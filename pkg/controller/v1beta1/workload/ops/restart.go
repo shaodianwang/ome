@@ -269,10 +269,15 @@ func restartDrainKey(idx int32, incarnation int64) string {
 // Returns done=true once the Instance is back at Phase=Ready with
 // Operation=nil; done=false means the caller should requeue and resume.
 //
+// target is the Component's roll target, nil when it has none. A rebuild
+// that has created no pod yet follows it when the row is off it
+// (rebuildFollowsTarget); every other rebuild renders the revision its
+// row records.
+//
 // Source-agnostic: callers construct workload.ReconcileInput from their
 // own source-of-truth types — today the InferenceReplica adapter
 // (inferencereplica.buildReconcileInput) wires this entry point.
-func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, reason string) (bool, error) {
+func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, reason string) (bool, error) {
 	if deps.Client == nil {
 		return false, fmt.Errorf("Restart: nil client")
 	}
@@ -448,14 +453,27 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
 			return false, nil
 		}
-		// The rebuild renders the revision it stamps. The Component's
-		// current template is that revision's only while the Instance runs
-		// the roll target; a repair under a pause, a Held target or a
-		// retarget that landed after the repair opened stamps another
-		// revision, whose template is the one its ControllerRevision stores.
-		tmpl, found, err := rebuildTemplate(ctx, deps, input, plan, inst.Index)
-		if err != nil {
-			return false, fmt.Errorf("Restart: resolve rebuild template (instance=%d): %w", inst.Index, err)
+		// The rebuild renders the revision it stamps. A rebuild that has
+		// created no pod yet follows a roll target the row is off: the row
+		// records that revision before the first create, so a pass
+		// interrupted between the two still renders what the row says, and
+		// the update trigger reads the Instance as on target once it is
+		// Ready. Every other rebuild renders the stored template of the
+		// revision its row records: a repair under a pause or a Held
+		// target, and one whose pods already exist, which the roll replaces
+		// from Ready.
+		var tmpl podTemplate
+		found := true
+		if rebuildFollowsTarget(input, plan, inst.Index, target, newPods) {
+			if err := status.StampRestartRevision(ctx, input, inst.Index, target.Name); err != nil {
+				return false, fmt.Errorf("Restart: record rebuild revision (instance=%d): %w", inst.Index, err)
+			}
+			tmpl = desiredTemplate(input, plan, query.RevisionOf(target))
+		} else {
+			tmpl, found, err = rebuildTemplate(ctx, deps, input, plan, inst.Index)
+			if err != nil {
+				return false, fmt.Errorf("Restart: resolve rebuild template (instance=%d): %w", inst.Index, err)
+			}
 		}
 		if !found {
 			return false, announceRevisionGone(ctx, deps, input, inst.Index, rebuildRevision(input.ObservedState.Instance(inst.Index)))
@@ -574,22 +592,20 @@ func rebuildRevision(s *workload.InstanceStatus) string {
 // first materialization pinned to a superseded revision and materializes
 // a demoted row that has no pod left.
 //
-// Three rows are never yielded: an open Restart, which is driven to
-// completion whatever the target says; a Migrate-owned row, which its
-// record owns; and a row demoted for losing every pod that holds pods
-// again, which no update trigger reads, so its repair rebuilds the
-// revision it records and the roll follows once it is Ready. A row that
-// records no revision, or a pass with no target, has nothing to compare.
+// Three rows are never yielded: an open Restart, which is driven on — its
+// rebuild follows the target itself while it has created no pod
+// (rebuildFollowsTarget); a Migrate-owned row, which its record owns; and
+// a row demoted for losing every pod that holds pods again, which no
+// update trigger reads, so its repair rebuilds the revision it records and
+// the roll follows once it is Ready. A row that records no revision, or a
+// pass with no target, has nothing to compare.
 //
-// The roll the row is left to must be one that can start. A paused
-// Component yields nothing: the pause withholds the roll, and an Instance
-// kept dark for the length of the pause is worse than one rebuilt at the
-// revision the roll is held on. A target the RetryBlock holds admits no
-// fresh attempt until an operator releases it, so it keeps the repair the
-// same way; a Backoff block merely paces the start and yields. The roll
-// takes the row once the pause or the hold clears.
+// The roll the row is left to must be one that can start (rollTargetOpen):
+// an Instance kept dark for the length of a pause or a hold is worse than
+// one rebuilt at the revision the roll is held on. The roll takes the row
+// once the pause or the hold clears.
 func RepairYieldsToTarget(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, instancePods []*corev1.Pod) bool {
-	if target == nil || plan.Paused {
+	if !rollTargetOpen(input, plan, target) {
 		return false
 	}
 	s := input.ObservedState.Instance(inst.Index)
@@ -600,13 +616,38 @@ func RepairYieldsToTarget(input workload.ReconcileInput, plan workload.Component
 	if rev == "" || rev == target.Name {
 		return false
 	}
-	if b := workload.FindRetryBlock(input.ObservedState.RetryBlocks, target.Name); b != nil && b.State == workload.RetryBlockHeld {
-		return false
-	}
 	if workload.DemotedReady(s) && len(query.ExcludeTerminalPods(instancePods)) > 0 {
 		return false
 	}
 	return true
+}
+
+// rollTargetOpen reports whether target is a roll target the roll could
+// start on: the Component has one, is not paused, and the RetryBlock does
+// not hold it. A pause withholds the roll, and a Held target admits no
+// fresh attempt until an operator releases it; a Backoff block merely
+// paces the start.
+func rollTargetOpen(input workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision) bool {
+	if target == nil || plan.Paused {
+		return false
+	}
+	block := workload.FindRetryBlock(input.ObservedState.RetryBlocks, target.Name)
+	return block == nil || block.State != workload.RetryBlockHeld
+}
+
+// rebuildFollowsTarget reports whether the rebuild of an open repair
+// renders the roll target instead of the revision its row records: no pod
+// of the rebuild exists yet and the row is off a target the roll could
+// start on. The Instance serves nothing, so the rebuild is the pass that
+// puts it on the target and no pod set is torn down for it. A rebuild
+// whose pods exist finishes on the revision they carry: replacing a
+// starting pod set is the roll's job, under its budget.
+func rebuildFollowsTarget(input workload.ReconcileInput, plan workload.ComponentPlan, idx int32, target *appsv1.ControllerRevision, rebuiltPods []*corev1.Pod) bool {
+	if len(query.ExcludeTerminalPods(rebuiltPods)) > 0 || !rollTargetOpen(input, plan, target) {
+		return false
+	}
+	rev := rebuildRevision(input.ObservedState.Instance(idx))
+	return rev != "" && rev != target.Name
 }
 
 // runnerRestartedSinceReady reports whether pod's runner container carries

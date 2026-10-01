@@ -197,3 +197,47 @@ func TestStampRestarting_ContinuesASpentRepairsRetryCount(t *testing.T) {
 		}
 	}
 }
+
+// TestStampRestartRevision_OnlyAnOpenRepairRecordsIt: the stamp moves the
+// running revision of a Restarting row and leaves every other row as it
+// is, so a repair that ended, or a row another pass owns, never has its
+// revision moved under it; recording the revision the row already carries
+// writes nothing.
+func TestStampRestartRevision_OnlyAnOpenRepairRecordsIt(t *testing.T) {
+	openRepair := func() *types.InstanceOperation {
+		return &types.InstanceOperation{ID: "restart-0-1", Type: types.InstanceOperationRestart, Step: types.RestartStepDrain}
+	}
+	rows := map[int32]*types.InstanceStatus{
+		0: {Index: 0, Incarnation: 2, Phase: types.InstancePhaseRestarting, RunningRevision: "rev-a", Operation: openRepair()},
+		1: {Index: 1, Incarnation: 2, Phase: types.InstancePhaseReady, RunningRevision: "rev-a"},
+		2: {Index: 2, Incarnation: 2, Phase: types.InstancePhaseFailed, RunningRevision: "rev-a", Operation: openRepair()},
+		3: {Index: 3, Incarnation: 2, Phase: types.InstancePhaseUpdating, RunningRevision: "rev-a", TargetRevision: "rev-b",
+			Operation: &types.InstanceOperation{ID: "update-3-1", Type: types.InstanceOperationUpdate, Step: types.UpdateStepDrain, TargetRevision: "rev-b"}},
+	}
+	writes := 0
+	input := types.ReconcileInput{
+		MutateInstance: func(_ context.Context, idx int32, mutate func(*types.InstanceStatus) bool) error {
+			if mutate(rows[idx]) {
+				writes++
+			}
+			return nil
+		},
+	}
+	for idx, want := range map[int32]string{0: "rev-b", 1: "rev-a", 2: "rev-a", 3: "rev-a"} {
+		if err := StampRestartRevision(context.Background(), input, idx, "rev-b"); err != nil {
+			t.Fatalf("row %d: %v", idx, err)
+		}
+		if got := rows[idx].RunningRevision; got != want {
+			t.Errorf("row %d: RunningRevision = %q, want %q", idx, got, want)
+		}
+	}
+	if writes != 1 {
+		t.Errorf("writes = %d, want 1: only the open repair's row is written", writes)
+	}
+	if err := StampRestartRevision(context.Background(), input, 0, "rev-b"); err != nil {
+		t.Fatalf("second stamp: %v", err)
+	}
+	if writes != 1 {
+		t.Errorf("writes = %d after stamping the revision the row already carries, want 1", writes)
+	}
+}

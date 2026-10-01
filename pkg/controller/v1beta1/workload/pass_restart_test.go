@@ -1712,50 +1712,133 @@ func (h *recoveryHarness) restartsRecorded() int {
 	return n
 }
 
-// TestReconcile_CrashLoop_RepairInFlightWhenTheTargetMoves pins the
-// hand-over between a dark repair and a roll. Under a budget of zero the
-// wedged Instance's repair opens at steady state; the target then moves
-// while the rebuild is in flight. The repair is driven to its boundary on
-// the revision it stamped, the roll takes the Instance from there within
-// its surge budget, and no second repair opens: the Component settles on
-// the fixed revision with every Instance on the fixed image.
+// rollStaysWithinBudget fails the test when the roll of the peers exceeds
+// the budget it runs under: one surge in flight under SurgeThenDrain, one
+// Instance offline otherwise.
+func rollStaysWithinBudget(t *testing.T, h *recoveryHarness, strategy workloadtypes.UpdateStrategyType, surge, unavail int32) {
+	t.Helper()
+	statuses := h.irStatuses()
+	if strategy == workloadtypes.UpdateStrategySurgeThenDrain {
+		if n := escalation.CurrentSurgeInFlight(statuses); n > surge {
+			t.Fatalf("%d surges in flight, budget %d", n, surge)
+		}
+		return
+	}
+	if n := escalation.CurrentUnavailableInFlight(statuses); n > unavail {
+		t.Fatalf("%d Instances offline for the roll, budget %d", n, unavail)
+	}
+}
+
+// TestReconcile_OpenRepair_TargetMovesBeforeTheCreate: an Instance
+// crash-loops on the running revision and its repair opens; the pods are
+// deleted and the rebuild has created none of its own when the fix is
+// pushed. The rebuild renders the pushed revision: the Instance comes back
+// once, on the fix, with the row's revision and the pods' labels naming it;
+// no pod of the broken revision is created after the push, no roll opens on
+// the Instance afterwards, and every peer is rolled within the budget.
+// Single pod and gang, both restart policies, SurgeThenDrain and
+// RecreatePod.
 //
-// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/before, instance/Ready/spec.revision/boundary@T-ready-crashloop-restart
-func TestReconcile_CrashLoop_RepairInFlightWhenTheTargetMoves(t *testing.T) {
-	const replicas = 2
+// Cells: instance/Restart/Drain/spec.revision/before, instance/Ready/spec.revision/after@T-ready-crashloop-restart, instance/Ready/spec.revision/after@T-ready-restart-crash
+func TestReconcile_OpenRepair_TargetMovesBeforeTheCreate(t *testing.T) {
+	const replicas = 3
+	for _, gang := range []bool{false, true} {
+		shape := "single"
+		if gang {
+			shape = "gang"
+		}
+		for _, sc := range offTargetStrategies[:2] {
+			for _, policy := range []workloadtypes.RestartPolicy{workloadtypes.RestartPolicyNone, workloadtypes.RestartPolicyRecreateInstance} {
+				t.Run(fmt.Sprintf("%s/%s/%s", shape, sc.strategy, policy), func(t *testing.T) {
+					h := offTargetCrashHarness(t, gang, sc.strategy, sc.surge, sc.unavail, policy, replicas)
+					victim := int32(replicas - 1)
+					before := h.instance(victim).Incarnation
+					breakWholeInstance(t, h, victim, crashAtStart)
+					h.events = nil
+					podsDeleted := func() bool {
+						return h.repairInFlight() && len(h.podsOf(victim)) == 0
+					}
+					if !h.run(5, podsDeleted) {
+						h.dumpState("after the crash")
+						t.Fatalf("the repair never opened and deleted the crash-looping pods")
+					}
+
+					h.setTarget(h.revFixed, fixedImage)
+					brokenHash := query.RevisionOf(h.revV1).Hash()
+					rebuiltOnceOnTheFix := func() {
+						for _, pod := range h.podsOf(victim) {
+							if pod.Labels[query.LabelRevisionHash] == brokenHash {
+								h.dumpState("broken revision rebuilt")
+								t.Fatalf("pod %s was created on the broken revision after the fix was pushed", pod.Name)
+							}
+						}
+						if s := h.instance(victim); s != nil && s.Operation != nil && s.Operation.Type == workloadtypes.InstanceOperationUpdate {
+							h.dumpState("roll on the rebuilt Instance")
+							t.Fatalf("a roll opened on the Instance the repair rebuilt: %+v", s.Operation)
+						}
+						rollStaysWithinBudget(t, h, sc.strategy, sc.surge, sc.unavail)
+					}
+					if !h.runWithInvariant(100, func() bool { return h.settledOn(h.revFixed, replicas) }, rebuiltOnceOnTheFix) {
+						h.dumpState("after the push")
+						t.Fatalf("the Component never settled on the fixed revision")
+					}
+					if s := h.instance(victim); s.Incarnation != before+1 {
+						t.Fatalf("instance %d incarnation = %d, want %d: the Instance is rebuilt once", victim, s.Incarnation, before+1)
+					}
+					h.requirePodsRender(victim, h.revFixed, fixedImage)
+					if n := h.restartsRecorded(); n != 1 {
+						t.Fatalf("restarts recorded = %d, want exactly the repair that was already open: %v", n, h.events)
+					}
+					if h.sawEvent(workloadtypes.EventReasonRepairHeld) {
+						t.Fatalf("a repair was announced held: %v", h.events)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestReconcile_OpenRepair_TargetMovesAfterThePodsExist: the repair has
+// created its pods on the running revision when the fix is pushed. The
+// repair finishes on the revision those pods carry and the roll replaces
+// the Instance at the fix from Ready: tearing down a starting pod set is
+// the roll's job, under its budget. Single pod and gang.
+//
+// Cells: instance/Restart/Drain/spec.revision/before
+func TestReconcile_OpenRepair_TargetMovesAfterThePodsExist(t *testing.T) {
 	for _, gang := range []bool{false, true} {
 		shape := "single"
 		if gang {
 			shape = "gang"
 		}
 		t.Run(shape, func(t *testing.T) {
-			h := offTargetCrashHarness(t, gang, workloadtypes.UpdateStrategySurgeThenDrain, 1, 0, workloadtypes.RestartPolicyNone, replicas)
-			victim := int32(replicas - 1)
-			breakWholeInstance(t, h, victim, crashAtStart)
+			h := offTargetCrashHarness(t, gang, workloadtypes.UpdateStrategySurgeThenDrain, 1, 0, workloadtypes.RestartPolicyRecreateInstance, 1)
+			before := h.instance(0).Incarnation
+			breakWholeInstance(t, h, 0, crashAtStart)
 			h.events = nil
-			repairOpen := func() bool {
-				s := h.instance(victim)
-				return s != nil && s.Phase == workloadtypes.InstancePhaseRestarting
+			podsRebuilt := func() bool {
+				return h.repairInFlight() && len(h.podsOf(0)) == len(h.desired.Runners)
 			}
-			if !h.run(3, repairOpen) {
+			if !h.run(6, podsRebuilt) {
 				h.dumpState("after the crash")
-				t.Fatalf("the dark Instance's repair must open under a budget of zero")
+				t.Fatalf("the repair never rebuilt the pod set")
 			}
+
 			h.setTarget(h.revFixed, fixedImage)
-			withinSurgeBudget := func() {
-				if n := escalation.CurrentSurgeInFlight(h.irStatuses()); n > 1 {
-					t.Fatalf("%d surges in flight, budget 1", n)
-				}
+			if !h.run(20, func() bool { return h.repairedAbove(0, before) }) {
+				h.dumpState("open repair after the push")
+				t.Fatalf("the repair did not finish on the pods it had created")
 			}
-			if !h.runWithInvariant(80, func() bool { return h.settledOn(h.revFixed, replicas) }, withinSurgeBudget) {
-				h.dumpState("after the bump")
-				t.Fatalf("the Component never settled on the fixed revision after the repair handed the Instance to the roll")
+			if s := h.instance(0); s.RunningRevision != h.revV1.Name {
+				t.Fatalf("repaired row records %q, want %s: the repair finishes on the revision its pods carry", s.RunningRevision, h.revV1.Name)
+			}
+			h.requirePodsRender(0, h.revV1, goodImage)
+			if !h.run(80, func() bool { return h.settledOn(h.revFixed, 1) }) {
+				h.dumpState("roll after the repair")
+				t.Fatalf("the roll did not replace the repaired Instance at the fix")
 			}
 			if n := h.restartsRecorded(); n != 1 {
 				t.Fatalf("restarts recorded = %d, want exactly the repair that was already open: %v", n, h.events)
-			}
-			if h.sawEvent(workloadtypes.EventReasonRepairHeld) {
-				t.Fatalf("a repair was announced held: %v", h.events)
 			}
 		})
 	}

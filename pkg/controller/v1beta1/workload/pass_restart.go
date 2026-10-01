@@ -62,7 +62,7 @@ func executeRestartPass(ctx context.Context, deps types.Deps, input types.Reconc
 		if selection.OpensRepair {
 			opened++
 		}
-		done, restartErr := workloadops.Restart(ctx, deps, input, plan, selection.Instance, selection.Reason)
+		done, restartErr := workloadops.Restart(ctx, deps, input, plan, selection.Instance, target, selection.Reason)
 		if restartErr != nil {
 			logf.FromContext(ctx).Error(restartErr, "restart pass: instance failed",
 				"component", plan.Component, "instance", selection.Instance.Index)

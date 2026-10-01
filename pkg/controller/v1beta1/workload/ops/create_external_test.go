@@ -4173,7 +4173,7 @@ func TestRestart_UnknownPhasePodHoldsWithoutForceDeletePolicy(t *testing.T) {
 
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
-	done, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "pod lost")
+	done, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], nil, "pod lost")
 	if err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
@@ -4210,7 +4210,7 @@ func TestRestart_UnknownPhasePodForceDeletedOnProvenNodeDeath(t *testing.T) {
 		NodeUnreachableThreshold: 5 * time.Minute,
 	}
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
-	if _, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "pod lost"); err != nil {
+	if _, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], nil, "pod lost"); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	if podExists(c, quiet) {
@@ -4223,7 +4223,7 @@ func TestRestart_UnknownPhasePodForceDeletedOnProvenNodeDeath(t *testing.T) {
 	workload.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentEngine, 0)
 	input = buildTestInput(isvc, c, workload.ComponentEngine)
 	plan = buildPlanSinglePodEngineForRestart(c, isvc)
-	if _, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "pod lost"); err != nil {
+	if _, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], nil, "pod lost"); err != nil {
 		t.Fatalf("Restart pass 2: %v", err)
 	}
 	got := listPods(t, c, "prod")
@@ -4252,7 +4252,7 @@ func TestRestart_UnknownPhasePodOnLiveNodeIsNeverDeleted(t *testing.T) {
 		NodeUnreachableThreshold: 5 * time.Minute,
 	}
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
-	if _, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "pod lost"); err != nil {
+	if _, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], nil, "pod lost"); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	if !podExists(c, quiet) {

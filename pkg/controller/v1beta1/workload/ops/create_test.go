@@ -737,7 +737,7 @@ func TestRestartPhaseB_QuotaExceeded_WaitsWithoutFailing(t *testing.T) {
 	input := legacyTestInput(isvc, base, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 
-	done, err := Restart(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], "pod lost")
+	done, err := Restart(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], nil, "pod lost")
 	if err != nil {
 		t.Fatalf("Restart: %v (a quota refusal is a wait, not an error)", err)
 	}
@@ -1231,7 +1231,7 @@ func TestRestartPhaseB_RejectionDispositions(t *testing.T) {
 			}
 			plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 
-			if _, err := Restart(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], "pod lost"); err != nil {
+			if _, err := Restart(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], nil, "pod lost"); err != nil {
 				t.Fatalf("Restart: %v (a classified rejection is disposed, not returned)", err)
 			}
 
