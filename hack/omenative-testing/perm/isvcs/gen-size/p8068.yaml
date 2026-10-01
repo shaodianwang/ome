@@ -1,0 +1,13 @@
+# p8068: [gen] size scale engine 1->2 SurgeThenDrain  mode=scaledown Ne=1 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 co=none topo=engine to_e=2
+# reason: the fleet is scaled from 1 to 2 Instances per Component: only index 1 is added; index 0 keeps its pod (same UID) and serves throughout, so capacity never drops below min(start, target) = 1 and nothing surges above 2; the update strategy (SurgeThenDrain) is dormant under a scale and rebuilds nothing
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8068 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

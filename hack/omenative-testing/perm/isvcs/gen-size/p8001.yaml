@@ -1,0 +1,13 @@
+# p8001: [gen] size N=1 push engine SurgeThenDrain s25pct  Ne=1 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 floor_hard=1 co=none topo=engine
+# reason: a plain push on one Instance per Component with maxSurge 25% (25 percent of 1 rounds up to 1): the new revision comes up beside the running one (peak 2) and the single Instance is drained only once its replacement serves, so capacity never drops below 1 and the service is never left with zero serving; every Instance ends on the new revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8001 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: "25%", maxUnavailable: 0 } } }

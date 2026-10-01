@@ -346,15 +346,17 @@ def parse_duration(v):
 
 
 def resolve_max_unavailable(mu, n):
-    """maxUnavailable → absolute Instance count against n. Ints pass through;
-    k8s-style percent strings round DOWN (Deployment maxUnavailable semantics),
-    so '100%' of 8 = 8 (floor 0) and '25%' of 8 = 2. Anything unparsable = 0."""
+    """maxUnavailable → absolute Instance count against n, resolved as the
+    engine resolves a per-Component budget: ints pass through; percent
+    strings are ceil(n * percent / 100), clamped to n, so '25%' of 8 = 2,
+    '100%' of 8 = 8, and at the small sizes '50%' of 1 and '25%' of 2 are
+    both 1 (a positive percent never rounds to zero). Anything unparsable = 0."""
     if isinstance(mu, int):
         return mu
     s = str(mu).strip()
     if s.endswith("%"):
         try:
-            return (n * int(float(s[:-1]))) // 100
+            return min(n, -(-n * int(float(s[:-1])) // 100))
         except ValueError:
             return 0
     try:

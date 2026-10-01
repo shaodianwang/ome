@@ -1,0 +1,21 @@
+# p8082: [gen] size N=2 canary auto engine RecreatePod u1  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 co=none topo=engine canary=auto cell=canary/Idle/newTarget[twoInstances]
+# reason: a canary ladder on 2 Instances per member (the engine): the 10 percent step asks ceil(0.2) = 1 new Instance; the 50 percent step asks ceil(1.0) = 1, the same Instance, so it moves traffic and adds no capacity; the stable revision keeps one Instance until the cutover's traffic write lands, then the last Instance rolls; traffic steps 10/50/100 on the canary revision; each stepped Instance is rebuilt in place (no surge above 2; one Instance always serving); each gate is a timed soak; every member ends on the canary revision serving with nothing left on the stable one
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8082 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

@@ -358,6 +358,33 @@ class CanaryUnitTest(unittest.TestCase):
         self.assertEqual({}, run._canary_run({"components": {}}, "engine"))
 
 
+class MaxUnavailableResolutionTest(unittest.TestCase):
+    """The capacity floor is N minus the budget the engine resolves: an
+    integer as it is, a percent rounded up and clamped to the fleet, the
+    per-Component budget's documented rule."""
+
+    def test_integers_pass_through(self):
+        self.assertEqual(2, run.resolve_max_unavailable(2, 8))
+        self.assertEqual(1, run.resolve_max_unavailable("1", 8))
+        self.assertEqual(0, run.resolve_max_unavailable(0, 1))
+
+    def test_percent_rounds_up_like_the_engine(self):
+        self.assertEqual(2, run.resolve_max_unavailable("25%", 8))
+        self.assertEqual(8, run.resolve_max_unavailable("100%", 8))
+        self.assertEqual(1, run.resolve_max_unavailable("50%", 1))
+        self.assertEqual(1, run.resolve_max_unavailable("25%", 2))
+        self.assertEqual(1, run.resolve_max_unavailable("50%", 2))
+        self.assertEqual(0, run.resolve_max_unavailable("0%", 4))
+
+    def test_percent_is_clamped_to_the_fleet(self):
+        self.assertEqual(1, run.resolve_max_unavailable("100%", 1))
+        self.assertEqual(0, run.resolve_max_unavailable("50%", 0))
+
+    def test_unparsable_is_zero(self):
+        self.assertEqual(0, run.resolve_max_unavailable("lots", 8))
+        self.assertEqual(0, run.resolve_max_unavailable(None, 8))
+
+
 class GeneratedCorpusTest(unittest.TestCase):
     def test_regeneration_is_byte_stable(self):
         """The gen-* corpus is a pure function of generate_cases.py: a hand
@@ -1236,6 +1263,205 @@ class LabelTruthInvariantTest(unittest.TestCase):
     def test_settle_window_scales_with_the_timeout_multiplier(self):
         self.assertEqual(run.INV_SETTLE_S, 15.0 * run.TIMEOUT_MULT)
         self.assertGreaterEqual((run.INV_SUSTAIN_SETTLE - 1) * run.INV_TICK_S, run.INV_SETTLE_S)
+
+
+class GeneratedSizeFamiliesTest(unittest.TestCase):
+    """The small-size and router-gang families generate_cases.py mints: one
+    and two Instances per Component under every strategy and budget, and the
+    engine as a gang behind a router. Every percent budget is resolved as the
+    engine resolves it, every case states the operator's end state on line
+    two, and the router is never bumped."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.rows = {folder: [(n, kv, m) for f, n, kv, m in rows if f == folder]
+                    for folder in ("gen-size", "gen-router-gang")}
+
+    def _line1(self, folder, name):
+        return self.outputs[f"{folder}/{name}.yaml"].splitlines()[0]
+
+    def _line2(self, folder, name):
+        return self.outputs[f"{folder}/{name}.yaml"].splitlines()[1]
+
+    def _by_verb(self, folder, prefix):
+        return [(n, kv, m) for n, kv, m in self.rows[folder] if m["verb"].startswith(prefix)]
+
+    def test_blocks_sit_in_the_reserved_range(self):
+        for folder in ("gen-size", "gen-router-gang"):
+            lo, hi = generate_cases.GEN_BLOCKS[folder]
+            self.assertTrue(8000 <= lo < hi <= 8200, folder)
+
+    def test_percent_budgets_resolve_as_the_engine_does(self):
+        """ceil(replicas * percent / 100), clamped to replicas: at one and two
+        Instances 25 and 50 percent are one, never zero, and the harness floor
+        reads the same count."""
+        g = generate_cases
+        self.assertEqual(1, g.resolved_budget("25%", 1))
+        self.assertEqual(1, g.resolved_budget("50%", 1))
+        self.assertEqual(1, g.resolved_budget("25%", 2))
+        self.assertEqual(1, g.resolved_budget("50%", 2))
+        self.assertEqual(2, g.resolved_budget("100%", 2))
+        self.assertEqual(1, g.resolved_budget(1, 1))
+        for value, n in (("25%", 1), ("50%", 1), ("25%", 2), ("50%", 2), ("25%", 8)):
+            self.assertEqual(run.resolve_max_unavailable(value, n), g.resolved_budget(value, n), (value, n))
+        self.assertIn("rounds up to 1", g.budget_phrase("maxUnavailable", "50%", 1))
+        self.assertEqual("maxSurge 1", g.budget_phrase("maxSurge", 1, 1))
+
+    def test_every_case_sizes_the_whole_fleet_and_names_an_end_state(self):
+        fam = self.rows["gen-size"]
+        self.assertEqual(86, len(fam))
+        for name, kv, _m in fam:
+            self.assertIn(kv["Ne"], generate_cases.SIZE_NS, name)
+            self.assertIn(kv["topo"], generate_cases.SIZE_TOPOS, name)
+            if kv["topo"] == "pd":
+                self.assertEqual((kv["Ne"], kv["Ne"]), (kv["Nd"], kv["Nr"]), f"{name}: the router is sized with the fleet")
+            else:
+                self.assertEqual((0, 0), (kv["Nd"], kv["Nr"]), name)
+            self.assertEqual("none", kv["co"], name)
+            self.assertNotIn("notimpl", kv, f"{name}: nothing is parked")
+            self.assertTrue(self._line2("gen-size", name).startswith("# reason: "), name)
+
+    def test_pushes_cross_size_shape_strategy_and_budget(self):
+        pushes = self._by_verb("gen-size", "none")
+        self.assertEqual(20, len(pushes))
+        self.assertEqual(20, len({(kv["Ne"], kv["topo"], m["strat"], self._line1("gen-size", n).split("  ")[0])
+                                  for n, kv, m in pushes}))
+        self.assertEqual(set(generate_cases.SIZE_BUDGETS), {m["strat"] for _n, _kv, m in pushes})
+        for name, kv, m in pushes:
+            line1, line2 = self._line1("gen-size", name), self._line2("gen-size", name)
+            percent = "pct" in line1.split("  ")[0]
+            if m["strat"] == "SurgeThenDrain":
+                self.assertEqual(1, kv.get("floor_hard"), f"{name}: never below N, instantaneously")
+                self.assertEqual(kv["Ne"] + 1, kv["ceil_e"], f"{name}: both surge budgets resolve to one")
+                self.assertIn("never" if kv["Ne"] == 1 else "always serves", line2, name)
+            else:
+                self.assertNotIn("floor_hard", kv, name)
+                self.assertEqual(kv["Ne"], kv["ceil_e"], name)
+            if m["strat"] == "RecreatePod" and kv["Ne"] == 1:
+                self.assertIn("zero serving", line2, f"{name}: the configured outcome is said")
+            if m["strat"] == "InPlaceIfPossible":
+                self.assertIn("same UID", line2, name)
+            self.assertEqual(percent, "rounds up to 1" in line2, f"{name}: a percent budget states its resolution")
+            self.assertIn("on the new revision", line2, f"{name}: the end state names the revision the fleet ends on")
+
+    def test_crash_loops_cross_size_shape_strategy_form_and_policy(self):
+        crashes = self._by_verb("gen-size", "crashloop:")
+        self.assertEqual(48, len(crashes))
+        self.assertEqual(48, len({(kv["Ne"], kv["topo"], m["strat"], kv["form"], m["rp"]) for _n, kv, m in crashes}))
+        self.assertEqual(set(generate_cases.SIZE_BUDGETS), {m["strat"] for _n, _kv, m in crashes})
+        self.assertEqual(set(generate_cases.CRASH_FORMS), {kv["form"] for _n, kv, _m in crashes})
+        self.assertEqual(set(generate_cases.RESTARTS), {m["rp"] for _n, _kv, m in crashes})
+        for name, kv, m in crashes:
+            self.assertEqual(("crashloop:old", 1), (kv["fault"], kv["floor_soft"]), name)
+            self.assertNotIn("%", self.outputs[f"gen-size/{name}.yaml"].split("\n", 2)[2],
+                             f"{name}: the crash runs under the integer budget the percent resolves to")
+            line2 = self._line2("gen-size", name)
+            self.assertIn("no repair is recorded", line2, name)
+            self.assertIn("ends on the new revision serving", line2, name)
+            if kv["Ne"] == 1:
+                self.assertIn("both the first and the last", line2, name)
+                if m["strat"] != "SurgeThenDrain":
+                    self.assertIn("serves nothing from the break", line2, name)
+
+    def test_scales_run_between_one_and_two_under_every_strategy(self):
+        scales = self._by_verb("gen-size", "scale:")
+        self.assertEqual(12, len(scales))
+        self.assertEqual(set(generate_cases.SIZE_SCALES), {(kv["Ne"], kv["to_e"]) for _n, kv, _m in scales})
+        self.assertEqual(set(generate_cases.SIZE_BUDGETS), {m["strat"] for _n, _kv, m in scales})
+        for name, kv, m in scales:
+            self.assertEqual("scaledown", kv["mode"], name)
+            self.assertEqual(max(kv["Ne"], kv["to_e"]), kv["ceil_e"], name)
+            self.assertEqual("scale:up" if kv["to_e"] > kv["Ne"] else "scale:down", m["verb"], name)
+            if kv["topo"] == "pd":
+                self.assertEqual((kv["to_e"], kv["Nr"]), (kv["to_d"], kv["to_r"]), f"{name}: the router holds")
+            line2 = self._line2("gen-size", name)
+            self.assertIn("min(start, target)", line2, name)
+            self.assertIn("same UID", line2, name)
+
+    def test_canaries_walk_the_small_ladder_on_two_instances(self):
+        canaries = self._by_verb("gen-size", "canary:")
+        self.assertEqual(6, len(canaries))
+        self.assertEqual(set(generate_cases.SIZE_CANARIES), {(m["strat"], kv["canary"]) for _n, kv, m in canaries})
+        for name, kv, m in canaries:
+            self.assertEqual(("canary", generate_cases.SIZE_CANARY_N), (kv["mode"], kv["Ne"]), name)
+            self.assertEqual(generate_cases.SIZE_CANARY_CELL, kv["cell"], name)
+            self.assertTrue(run._cell_ok(kv["cell"]), name)
+            text = self.outputs[f"gen-size/{name}.yaml"]
+            for nc, tw in generate_cases.SIZE_LADDER:
+                self.assertIn(f'capacity: "{nc}"', text, name)
+                self.assertIn(f"traffic: {tw}", text, name)
+            members = "[engine, decoder, router]" if kv["topo"] == "pd" else "[engine]"
+            self.assertIn(f"- components: {members}\n", text, f"{name}: the whole fleet is the group")
+            surge = 1 if m["strat"] == "SurgeThenDrain" else 0
+            self.assertEqual(kv["Ne"] + surge, kv["ceil_e"], name)
+            if kv["topo"] == "pd":
+                self.assertEqual((kv["Nd"] + surge, kv["Nr"] + surge), (kv["ceil_d"], kv["ceil_r"]), name)
+            line2 = self._line2("gen-size", name)
+            self.assertIn("the same Instance", line2, f"{name}: the 50 percent step adds no capacity")
+            self.assertIn("ends on the canary revision", line2, name)
+
+    def test_router_gang_family_keeps_the_router_out_of_the_roll(self):
+        g = generate_cases
+        fam = self.rows["gen-router-gang"]
+        self.assertEqual(30, len(fam))
+        width = {}
+        for name, kv, _m in fam:
+            text = self.outputs[f"gen-router-gang/{name}.yaml"]
+            self.assertEqual((g.ROUTER_GANG_TOPO, g.ROUTER_GANG_N, 0, gen_cases.NR),
+                             (kv["topo"], kv["Ne"], kv["Nd"], kv["Nr"]), name)
+            self.assertEqual(kv["Nr"], kv["ceil_r"], f"{name}: the router never surges")
+            self.assertEqual("none", kv["co"], name)
+            self.assertNotIn("bump", kv, f"{name}: the engine is the default bump and the router a negative control")
+            self.assertNotIn("notimpl", kv, f"{name}: nothing is parked")
+            width[name] = int(re.search(r"worker: \{ size: (\d+) \}", text).group(1))
+            line2 = self._line2("gen-router-gang", name)
+            self.assertIn("router", line2, name)
+            self.assertRegex(line2, "stays in rotation|is idle")
+        self.assertEqual(set(g.ROUTER_GANG_WIDTHS), set(width.values()))
+        pushes = self._by_verb("gen-router-gang", "none")
+        self.assertEqual(6, len(pushes))
+        self.assertEqual({(s, w) for s, *_ in g.ROUTER_GANG_STRATS for w in g.ROUTER_GANG_WIDTHS},
+                         {(m["strat"], width[n]) for n, _kv, m in pushes})
+        for name, kv, m in pushes:
+            self.assertEqual(kv["Ne"] + (1 if m["strat"] == "SurgeThenDrain" else 0), kv["ceil_e"], name)
+            self.assertIn("no gang is ever split", self._line2("gen-router-gang", name), name)
+        crashes = self._by_verb("gen-router-gang", "crashloop:")
+        self.assertEqual(16, len(crashes))
+        self.assertEqual(16, len({(m["strat"], kv["form"], m["rp"], width[n]) for n, kv, m in crashes}))
+        self.assertEqual({s for s, *_ in g.ROUTER_GANG_CRASH_STRATS}, {m["strat"] for _n, _kv, m in crashes})
+        for name, kv, _m in crashes:
+            self.assertEqual(("crashloop:old", 1), (kv["fault"], kv["floor_soft"]), name)
+            self.assertIn("leader pod", self._line2("gen-router-gang", name), name)
+        scales = self._by_verb("gen-router-gang", "scale:")
+        self.assertEqual(4, len(scales))
+        self.assertEqual({(t, w) for t in g.ROUTER_GANG_SCALES for w in g.ROUTER_GANG_WIDTHS},
+                         {(kv["to_e"], width[n]) for n, kv, _m in scales})
+        for name, kv, _m in scales:
+            self.assertEqual(("scaledown", gen_cases.NR, max(g.ROUTER_GANG_N, kv["to_e"])),
+                             (kv["mode"], kv["to_r"], kv["ceil_e"]), name)
+            self.assertIn("no gang is left partial", self._line2("gen-router-gang", name), name)
+        canaries = self._by_verb("gen-router-gang", "canary:")
+        self.assertEqual(4, len(canaries))
+        self.assertEqual({(p, w) for p in g.ROUTER_GANG_CANARIES for w in g.ROUTER_GANG_WIDTHS},
+                         {(kv["canary"], width[n]) for n, kv, _m in canaries})
+        for name, kv, _m in canaries:
+            text = self.outputs[f"gen-router-gang/{name}.yaml"]
+            self.assertIn("- components: [engine]\n", text, f"{name}: the group names the engine alone")
+            self.assertEqual(g.ROUTER_GANG_CANARY_CELL, kv["cell"], name)
+            for nc, _tw in g.SIZE_LADDER:
+                self.assertIn(f'capacity: "{nc}"', text, name)
+            self.assertIn("the same gang", self._line2("gen-router-gang", name), name)
+
+    def test_generated_headers_validate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for folder, fam in self.rows.items():
+                for name, _kv, _m in fam:
+                    path = root / folder / f"{name}.yaml"
+                    path.parent.mkdir(exist_ok=True)
+                    path.write_text(self.outputs[f"{folder}/{name}.yaml"])
+                    self.assertEqual([], run.validate_case_file(path), name)
 
 
 if __name__ == "__main__":

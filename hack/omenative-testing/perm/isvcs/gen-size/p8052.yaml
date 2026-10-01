@@ -1,0 +1,23 @@
+# p8052: [gen] size N=2 push pd SurgeThenDrain s25pct  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=2 ceil_r=2 floor_hard=1 co=none topo=pd
+# reason: a plain push on 2 Instances per Component with maxSurge 25% (25 percent of 2 rounds up to 1): the new revision comes up beside the running ones (peak 3) and each Instance is drained only once its replacement serves, so capacity never drops below 2 and at least one Instance always serves; every Instance ends on the new revision; decoder and router are negative controls (co=none), sized with the fleet
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8052 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: "25%", maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

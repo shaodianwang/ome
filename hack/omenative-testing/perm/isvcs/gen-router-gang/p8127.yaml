@@ -1,0 +1,20 @@
+# p8127: [gen] router gang scale engine-mn W2 2->3 SurgeThenDrain  mode=scaledown Ne=2 Nd=0 Nr=2 ceil_e=3 ceil_d=0 ceil_r=2 co=none topo=engine-mn to_e=3 to_r=2
+# reason: the engine is scaled from 2 to 3 gangs of 1 leader + 2 workers: only index 2 is added, whole; the surviving gangs keep their pods (same UIDs) and serve throughout, so capacity never drops below min(start, target) = 2 and nothing surges above 3; no gang is left partial; the router holds at 2 and stays in rotation
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8127 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 2 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

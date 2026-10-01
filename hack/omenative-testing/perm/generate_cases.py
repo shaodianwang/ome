@@ -107,6 +107,18 @@ into twenty generator-owned folders, using ONLY verbs and hooks the runners
                           with shape x crash form x restartPolicy x group;
                           nothing but the repair in flight moves while paused
                           and the fix lands on every Instance afterwards
+    gen-size/      p8000+  one and two Instances per Component, where a
+                          budget of one is the whole fleet, a percent rounds
+                          up to one and a single Instance is both the first
+                          and the last the roll reaches: the plain push under
+                          each strategy and budget, the push with the running
+                          revision crash-looping, a scale between one and two,
+                          and a canary ladder on two (engine and prefill/decode)
+    gen-router-gang/ p8100+ the engine as a gang (widths 1 and 2) behind a
+                          router at two Instances: a push, a crash loop on the
+                          running revision, a scale and a canary ladder; the
+                          router is never rolled by an engine push and stays
+                          in rotation, and the gang rules hold throughout
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -228,6 +240,22 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     maxUnavailable 0 the repair the pause is timed against never opens. The
     grouped cells run live: a repair of an Instance that serves nothing is admitted without the budget or the gate,
     so the group changes nothing.
+  - The engine resolves a percent budget as ceil(replicas * percent / 100),
+    clamped to replicas (the per-Component budget's documented rule, which
+    the canary step capacity shares), so at one and two Instances 25 and 50
+    percent both resolve to one and no budget rounds to zero. gen-size drives
+    the percent budgets on the plain push, where the resolved budget is read
+    off the peak and the floor, and runs the crash loop, the scale and the
+    canary under the integer budgets they resolve to. Its canary runs on two
+    Instances only: a canary on one Instance has no Instance to hold on the
+    stable revision and stages in place, a shape with its own verdict to
+    write. Group policies are left out: the group pacing budget rounds the
+    same way and the group axis belongs to the crashloop family.
+  - gen-router-gang crosses the crash loop with the surge and recreate
+    strategies only (a gang runs the in-place variants as a whole-gang
+    recreate, the recreate cell) and runs the scale and the canary under the
+    surge strategy: the strategy is dormant under a scale, and the gang
+    canary under a recreate is the controller-restart family's shape.
 
 The t=3 covering fill over the deferred dimensions (coordination/rollout
 groups, canary promotion, budget x coordination interactions) is the --fill
@@ -268,6 +296,8 @@ GEN_BLOCKS = {
     "gen-crashloop-new": (5000, 5200),
     "gen-crashloop-group": (5400, 5800),
     "gen-pause-repair": (6000, 6200),
+    "gen-size": (8000, 8100),
+    "gen-router-gang": (8100, 8200),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -609,7 +639,7 @@ def shape_tag(topo, w):
 # families' keys follow the closing co= topo= pair, so the hot-core headers
 # read as they always have.
 GEN_HDR_ORDER = ["mode", "Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r",
-                 "restart", "kill", "pause", "fault", "floor_soft", "order_soft",
+                 "restart", "kill", "pause", "fault", "floor_soft", "floor_hard", "order_soft",
                  "co", "topo",
                  "canary", "bump", "img", "form", "victims", "exitafter", "during", "verb", "verbhold",
                  "verb2", "during2", "victim", "victimcomp", "release", "releaseafter", "rt",
@@ -825,12 +855,12 @@ def emit_restart(add):
 
 
 # ── gen-crashloop: one old-revision Instance crashes while the roll lands ───
-def _crash_how(form):
+def _crash_how(form, pod="one old-revision engine pod"):
     """How the crashloop verb breaks the old-revision pod, per form."""
-    return ("one old-revision engine pod is pointed at an image with no shell as the bump "
+    return (f"{pod} is pointed at an image with no shell as the bump "
             "lands, so it crashes at every start and is never Ready again"
             if form == "start" else
-            "one old-revision engine pod has its runner killed every few seconds while it "
+            f"{pod} has its runner killed every few seconds while it "
             "is up, so it dies after Ready and comes back between crashes")
 
 
@@ -2041,6 +2071,331 @@ def emit_crashloop_group(add):
                 _emit_group_cell(add, topo, n, w, strat, surge, unavail, rp, form, "rolling")
 
 
+# ── gen-size: one and two Instances per Component ────────────────────────────
+# A budget of one is the whole fleet, a percent rounds up to one, and a
+# single Instance is both the first and the last the roll reaches. The
+# engine resolves a percent budget as ceil(replicas * percent / 100), clamped
+# to replicas, so at these sizes 25 and 50 percent both resolve to one and no
+# budget rounds to zero: the percent budgets are driven on the plain push,
+# where the resolved budget is read off the peak and the floor, and the crash
+# loop, the scale and the canary run under the integer budget they resolve
+# to. The router is sized with the fleet, so a stray router rotation shows.
+SIZE_NS = [1, 2]
+SIZE_TOPOS = ["engine", "pd"]
+SIZE_BUDGETS = {
+    "SurgeThenDrain": [(1, 0), ("25%", 0)],
+    "RecreatePod": [(0, 1), (0, "50%")],
+    "InPlaceIfPossible": [(0, 1)],
+}
+SIZE_SCALES = [(1, 2), (2, 1)]
+# The ladder on two Instances: the first two steps resolve to the same single
+# Instance, so the second moves traffic and adds no capacity.
+SIZE_LADDER = [("10%", 10), ("50%", 50), ("100%", 100)]
+SIZE_CANARY_N = 2
+SIZE_CANARIES = [("SurgeThenDrain", "auto"), ("SurgeThenDrain", "manual"), ("RecreatePod", "auto")]
+SIZE_CANARY_CELL = "canary/Idle/newTarget[twoInstances]"
+
+
+def resolved_budget(value, n):
+    """The Instance count the engine resolves a budget to against n: an
+    integer as it is, a percent rounded up and clamped to the fleet."""
+    if isinstance(value, str) and value.endswith("%"):
+        return min(n, surge_count(n, value))
+    return value
+
+
+def instances(n):
+    """A count of Instances in words: one Instance, 2 Instances."""
+    return "one Instance" if n == 1 else f"{n} Instances"
+
+
+def budget_phrase(name, value, n):
+    """A budget as the case's reason states it, with its resolution at n."""
+    if isinstance(value, str) and value.endswith("%"):
+        return f"{name} {value} ({value[:-1]} percent of {n} rounds up to {resolved_budget(value, n)})"
+    return f"{name} {value}"
+
+
+def size_counts(topo, n):
+    """Every Component of the shape at n Instances, the router included."""
+    return dict(Ne=n, Nd=n, Nr=n) if is_pd(topo) else dict(Ne=n, Nd=0, Nr=0)
+
+
+def size_ceilings(topo, n, strat, surge):
+    """Ceilings in Instances: n plus the resolved surge under SurgeThenDrain,
+    n otherwise; the decoder and the router hold at n."""
+    ce = n + resolved_budget(surge, n) if strat == "SurgeThenDrain" else n
+    return dict(ceil_e=ce, ceil_d=(n if is_pd(topo) else 0), ceil_r=(n if is_pd(topo) else 0))
+
+
+def size_comps(topo, n, e_life, d_life=None, r_life=None):
+    cs = [lib.comp("engine", n, 0, e_life)]
+    if is_pd(topo):
+        cs.append(lib.comp("decoder", n, 0, d_life if d_life is not None else lib.lifecycle()))
+        cs.append(lib.comp("router", n, 0, r_life if r_life is not None else lib.lifecycle()))
+    return cs
+
+
+def _size_push_reason(topo, n, strat, surge, unavail):
+    one = n == 1
+    if strat == "SurgeThenDrain":
+        s = resolved_budget(surge, n)
+        out = (f"a plain push on {instances(n)} per Component with {budget_phrase('maxSurge', surge, n)}: the new "
+               f"revision comes up beside the running {'one' if one else 'ones'} (peak {n + s}) and "
+               f"{'the single Instance' if one else 'each Instance'} is drained only once its replacement serves, so "
+               f"capacity never drops below {n} and "
+               f"{'the service is never left with zero serving' if one else 'at least one Instance always serves'}; "
+               f"every Instance ends on the new revision")
+    elif strat == "RecreatePod":
+        u = resolved_budget(unavail, n)
+        if one:
+            out = (f"a plain push on one Instance with {budget_phrase('maxUnavailable', unavail, n)}: the single Instance "
+                   f"is drained and rebuilt at the new revision, so zero serving while it is down is the configured "
+                   f"outcome of this budget at this size; it comes back Ready and serving on the new revision with no "
+                   f"surge above 1")
+        else:
+            out = (f"a plain push on {n} Instances with {budget_phrase('maxUnavailable', unavail, n)}: one Instance is "
+                   f"drained and rebuilt while the other keeps serving (never below {n - u} ready), then the other "
+                   f"follows; every Instance ends on the new revision with no surge above {n}")
+    else:
+        out = (f"a plain push on {instances(n)} with maxUnavailable {unavail}: the bump is an annotation diff, so the "
+               f"engine patches {'the pod' if one else 'each pod'} in place (same UID, no surge above {n}); the budget "
+               f"lets {'the single Instance' if one else 'one Instance at a time'} be out of rotation while it is "
+               f"patched, and {'it' if one else 'every Instance'} ends Ready on the new revision")
+    if is_pd(topo):
+        out += "; decoder and router are negative controls (co=none), sized with the fleet"
+    return out
+
+
+def _size_crash_reason(topo, n, strat, form, rp):
+    where = ("its Instance is the only one, so it is both the first and the last the roll reaches"
+             if n == 1 else "its Instance is the highest index, the last the roll reaches")
+    out = (f"{_crash_how(form)}; {where}, and the roll owns it from that moment: {CRASH_LANDS[strat]}, no repair is "
+           f"recorded for it after the bump under restart policy {RP_FULL[rp]}, and "
+           f"{'it' if n == 1 else 'every Instance'} ends on the new revision serving")
+    if n == 1 and strat == "SurgeThenDrain":
+        out += "; the service serves again as soon as the fix is Ready, before the broken Instance is drained"
+    elif n == 1:
+        out += ("; the single Instance serves nothing from the break until its rebuild is Ready, the configured "
+                "outcome at this size")
+    if is_pd(topo):
+        out += "; decoder and router are negative controls (co=none)"
+    out += "; floor waived — the crash itself costs settled capacity for the length of the roll"
+    return out
+
+
+def _size_scale_reason(topo, start, target, strat):
+    out = (f"the fleet is scaled from {start} to {target} Instances per Component: only index "
+           f"{max(start, target) - 1} is {'added' if target > start else 'removed'}; index 0 keeps its pod (same UID) "
+           f"and serves throughout, so capacity never drops below min(start, target) = {min(start, target)} and "
+           f"nothing surges above {max(start, target)}; the update strategy ({strat}) is dormant under a scale and "
+           f"rebuilds nothing")
+    if is_pd(topo):
+        out += "; engine and decoder scale together and the router holds at its count"
+    return out
+
+
+def _size_canary_reason(topo, strat, policy):
+    n = SIZE_CANARY_N
+    members = "engine, decoder and router" if is_pd(topo) else "the engine"
+    out = (f"a canary ladder on {n} Instances per member ({members}): the 10 percent step asks ceil(0.2) = 1 new "
+           f"Instance; the 50 percent step asks ceil(1.0) = 1, the same Instance, so it moves traffic and adds no "
+           f"capacity; the stable revision keeps one Instance until the cutover's traffic write lands, then the last "
+           f"Instance rolls; traffic steps 10/50/100 on the canary revision")
+    out += (f"; capacity steps surge one Instance beside the stable one (peak {n + 1}) and the floor stays at {n}"
+            if strat == "SurgeThenDrain" else
+            f"; each stepped Instance is rebuilt in place (no surge above {n}; one Instance always serving)")
+    out += ("; the operator promotes at each of the two gates" if policy == "manual" else "; each gate is a timed soak")
+    out += "; every member ends on the canary revision serving with nothing left on the stable one"
+    return out
+
+
+def emit_size(add):
+    for n in SIZE_NS:
+        for topo in SIZE_TOPOS:
+            for strat, budgets in SIZE_BUDGETS.items():
+                for surge, unavail in budgets:
+                    kv = dict(**size_counts(topo, n), **size_ceilings(topo, n, strat, surge), co="none", topo=topo)
+                    if strat == "SurgeThenDrain":
+                        kv["floor_hard"] = 1   # never below N, instantaneously: the promise at this size
+                    meta = dict(strat=strat, verb="none", size=n)
+                    desc = f"{GEN_MARK} size N={n} push {topo} {strat} {budget_tag(strat, surge, unavail)}"
+                    life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+                    add("gen-size", desc, kv, size_comps(topo, n, life),
+                        _size_push_reason(topo, n, strat, surge, unavail), meta,
+                        cell=("size-push", topo, n, strat, surge, unavail))
+            for strat, budgets in SIZE_BUDGETS.items():
+                surge, unavail = budgets[0]
+                for form in CRASH_FORMS:
+                    for rp in RESTARTS:
+                        kv = dict(**size_counts(topo, n), **size_ceilings(topo, n, strat, surge),
+                                  fault="crashloop:old", form=form, floor_soft=1, co="none", topo=topo)
+                        meta = dict(strat=strat, verb=f"crashloop:{form}", rp=rp, victim="engine", size=n)
+                        desc = (f"{GEN_MARK} size N={n} crashloop {form} {topo} {strat} "
+                                f"{budget_tag(strat, surge, unavail)} rp {rp}")
+                        life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                        d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+                        add("gen-size", desc, kv, size_comps(topo, n, life, d_life=d_life),
+                            _size_crash_reason(topo, n, strat, form, rp), meta,
+                            cell=("size-crash", topo, n, strat, form, rp))
+    for start, target in SIZE_SCALES:
+        for topo in SIZE_TOPOS:
+            for strat, budgets in SIZE_BUDGETS.items():
+                surge, unavail = budgets[0]
+                peak = max(start, target)
+                kv = dict(mode="scaledown", **size_counts(topo, start), ceil_e=peak,
+                          ceil_d=(peak if is_pd(topo) else 0), ceil_r=(start if is_pd(topo) else 0),
+                          co="none", topo=topo, to_e=target)
+                if is_pd(topo):
+                    kv.update(to_d=target, to_r=start)
+                meta = dict(strat=strat, verb=f"scale:{'up' if target > start else 'down'}", size=start)
+                desc = f"{GEN_MARK} size scale {topo} {start}->{target} {strat}"
+                life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+                add("gen-size", desc, kv, size_comps(topo, start, life),
+                    _size_scale_reason(topo, start, target, strat), meta,
+                    cell=("size-scale", topo, start, target, strat))
+    for topo in SIZE_TOPOS:
+        for strat, policy in SIZE_CANARIES:
+            n = SIZE_CANARY_N
+            surge, unavail = SIZE_BUDGETS[strat][0]
+            life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+            case_comps = size_comps(topo, n, life, d_life=life, r_life=life)
+            kv = dict(mode="canary", **size_counts(topo, n), **size_ceilings(topo, n, strat, surge),
+                      canary=policy, cell=SIZE_CANARY_CELL, co="none", topo=topo)
+            if is_pd(topo) and strat == "SurgeThenDrain":
+                kv.update(ceil_d=n + 1, ceil_r=n + 1)   # every group member surges one
+            meta = dict(strat=strat, verb=f"canary:{policy}", size=n)
+            desc = f"{GEN_MARK} size N={n} canary {policy} {topo} {strat} {budget_tag(strat, surge, unavail)}"
+            add("gen-size", desc, kv, case_comps, _size_canary_reason(topo, strat, policy), meta,
+                cell=("size-canary", topo, strat, policy),
+                coord=lib.canary_block(lib.canary_steps(policy, *SIZE_LADDER),
+                                       components=[c["comp"] for c in case_comps]))
+
+
+# ── gen-router-gang: the engine as a gang behind a router ────────────────────
+# Two gang Instances (one leader and W workers each) fronted by a single-pod
+# router. An engine push never rolls the router: it stays in rotation on the
+# same pods, and the gang rules (a gang moves whole, no two gangs share an
+# index) hold through a push, a crash loop on the running revision, a scale
+# and a canary ladder.
+ROUTER_GANG_N = 2
+ROUTER_GANG_WIDTHS = [1, 2]
+ROUTER_GANG_TOPO = "engine-mn"
+ROUTER_GANG_STRATS = [("SurgeThenDrain", 1, 0), ("RecreatePod", 0, 1), ("InPlaceIfPossible", 0, 1)]
+ROUTER_GANG_CRASH_STRATS = ROUTER_GANG_STRATS[:2]
+ROUTER_GANG_SCALES = [1, 3]
+ROUTER_GANG_CANARIES = ["auto", "manual"]
+ROUTER_GANG_CANARY_CELL = "canary/Idle/newTarget[routerIdleGang]"
+ROUTER_HOLDS = f"the router is not bumped: it never rolls (peak {lib.NR}, the same pods) and stays in rotation throughout"
+GANG_RULES = "no gang is ever split across revisions and no two gangs share an index"
+GANG_LANDS = {
+    "SurgeThenDrain": "each gang surges whole at a fresh index and its source gang is drained once the new one serves",
+    "RecreatePod": "each gang is drained and rebuilt whole at the new revision, one gang at a time",
+    "InPlaceIfPossible": ("a gang cannot be patched in place, so each gang is rebuilt whole at the new revision, "
+                          "one gang at a time"),
+}
+
+
+def router_gang_counts():
+    return dict(Ne=ROUTER_GANG_N, Nd=0, Nr=lib.NR)
+
+
+def router_gang_ceilings(strat, surge, peak=None):
+    n = ROUTER_GANG_N
+    ce = peak if peak is not None else (n + surge if strat == "SurgeThenDrain" else n)
+    return dict(ceil_e=ce, ceil_d=0, ceil_r=lib.NR)
+
+
+def router_gang_comps(w, e_life, r_life=None):
+    return [lib.comp("engine", ROUTER_GANG_N, w, e_life),
+            lib.comp("router", lib.NR, 0, r_life if r_life is not None else lib.lifecycle())]
+
+
+def _gang_words(w):
+    return f"{ROUTER_GANG_N} gangs of 1 leader + {w} worker{'s' if w > 1 else ''}"
+
+
+def _router_gang_push_reason(w, strat, surge):
+    peak = ROUTER_GANG_N + surge if strat == "SurgeThenDrain" else ROUTER_GANG_N
+    return (f"the engine ({_gang_words(w)}) is bumped alone; {GANG_LANDS[strat]} within its budget (peak {peak} "
+            f"gangs); {GANG_RULES}; {ROUTER_HOLDS}; every engine Instance ends on the new revision")
+
+
+def _router_gang_crash_reason(w, strat, form, rp):
+    leader = "the highest gang's old-revision leader pod"
+    return (f"{_crash_how(form, leader)}; its gang is the last the roll "
+            f"reaches, and the roll owns it: {GANG_LANDS[strat]}, no repair is recorded for it after the bump under "
+            f"restart policy {RP_FULL[rp]}, and every engine Instance ({_gang_words(w)}) ends on the new revision "
+            f"serving; {GANG_RULES}; {ROUTER_HOLDS}; floor waived — the crash itself costs settled capacity for the "
+            f"length of the roll")
+
+
+def _router_gang_scale_reason(w, target):
+    n = ROUTER_GANG_N
+    return (f"the engine is scaled from {n} to {target} gang{'s' if target > 1 else ''} of 1 leader + {w} "
+            f"worker{'s' if w > 1 else ''}: only index {max(n, target) - 1} is {'added' if target > n else 'removed'}, "
+            f"whole; the surviving gang{'s keep their' if target > 2 else ' keeps its'} pods (same UIDs) and "
+            f"{'serve' if target > 2 else 'serves'} throughout, so capacity never drops below min(start, target) = "
+            f"{min(n, target)} and nothing surges above {max(n, target)}; no gang is left partial; the router holds "
+            f"at {lib.NR} and stays in rotation")
+
+
+def _router_gang_canary_reason(w, policy):
+    n = ROUTER_GANG_N
+    return (f"an engine-only ladder behind a router on {_gang_words(w)}: the group names the engine alone, so the "
+            f"router is idle (no run of its own, every router pod on its revision, peak {lib.NR}) and stays in "
+            f"rotation; the 10 percent step asks ceil(0.2) = 1 new gang, the 50 percent step asks ceil(1.0) = 1, the "
+            f"same gang, so it moves traffic and adds no capacity; the stable revision keeps one gang until the "
+            f"cutover's traffic write lands, then the last gang rolls; each step's gang surges whole beside the "
+            f"stable one (peak {n + 1}); "
+            f"{'the operator promotes at each of the two gates' if policy == 'manual' else 'each gate is a timed soak'}; "
+            f"every engine Instance ends on the canary revision serving with nothing left on the stable one")
+
+
+def emit_router_gang(add):
+    topo, n = ROUTER_GANG_TOPO, ROUTER_GANG_N
+    for w in ROUTER_GANG_WIDTHS:
+        for strat, surge, unavail in ROUTER_GANG_STRATS:
+            kv = dict(**router_gang_counts(), **router_gang_ceilings(strat, surge), co="none", topo=topo)
+            meta = dict(strat=strat, verb="none", size=n)
+            desc = f"{GEN_MARK} router gang push {shape_tag(topo, w)} N={n} {strat} {budget_tag(strat, surge, unavail)}"
+            life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+            add("gen-router-gang", desc, kv, router_gang_comps(w, life), _router_gang_push_reason(w, strat, surge),
+                meta, cell=("router-gang-push", w, strat))
+        for strat, surge, unavail in ROUTER_GANG_CRASH_STRATS:
+            for form in CRASH_FORMS:
+                for rp in RESTARTS:
+                    kv = dict(**router_gang_counts(), **router_gang_ceilings(strat, surge), fault="crashloop:old",
+                              form=form, floor_soft=1, co="none", topo=topo)
+                    meta = dict(strat=strat, verb=f"crashloop:{form}", rp=rp, victim="engine", size=n)
+                    desc = (f"{GEN_MARK} router gang crashloop {form} {shape_tag(topo, w)} N={n} {strat} "
+                            f"{budget_tag(strat, surge, unavail)} rp {rp}")
+                    life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                    add("gen-router-gang", desc, kv,
+                        router_gang_comps(w, life, r_life=lib.lifecycle(restart=RP_FULL[rp])),
+                        _router_gang_crash_reason(w, strat, form, rp), meta,
+                        cell=("router-gang-crash", w, strat, form, rp))
+        strat, surge, unavail = ROUTER_GANG_STRATS[0]
+        life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+        for target in ROUTER_GANG_SCALES:
+            kv = dict(mode="scaledown", **router_gang_counts(),
+                      **router_gang_ceilings(strat, surge, peak=max(n, target)),
+                      co="none", topo=topo, to_e=target, to_r=lib.NR)
+            meta = dict(strat=strat, verb=f"scale:{'up' if target > n else 'down'}", size=n)
+            desc = f"{GEN_MARK} router gang scale {shape_tag(topo, w)} {n}->{target} {strat}"
+            add("gen-router-gang", desc, kv, router_gang_comps(w, life), _router_gang_scale_reason(w, target),
+                meta, cell=("router-gang-scale", w, target))
+        for policy in ROUTER_GANG_CANARIES:
+            kv = dict(mode="canary", **router_gang_counts(), **router_gang_ceilings(strat, surge), canary=policy,
+                      cell=ROUTER_GANG_CANARY_CELL, co="none", topo=topo)
+            meta = dict(strat=strat, verb=f"canary:{policy}", size=n)
+            desc = (f"{GEN_MARK} router gang canary {policy} {shape_tag(topo, w)} N={n} {strat} "
+                    f"{budget_tag(strat, surge, unavail)}")
+            add("gen-router-gang", desc, kv, router_gang_comps(w, life), _router_gang_canary_reason(w, policy),
+                meta, cell=("router-gang-canary", w, policy),
+                coord=lib.canary_block(lib.canary_steps(policy, *SIZE_LADDER), components=["engine"]))
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 def build_outputs():
     """{relative path under isvcs/: file text} — the entire owned output set."""
@@ -2103,6 +2458,8 @@ def build_outputs():
     emit_crashloop_new(add)
     emit_crashloop_group(add)
     emit_pause_repair(add)
+    emit_size(add)
+    emit_router_gang(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -2175,6 +2532,8 @@ def manifest(rows):
                    tally(lambda kv, m: m["mig"], where=lambda kv, m: "mig" in m))
     lines += table("By controller-restart condition",
                    tally(lambda kv, m: m["cond"], where=lambda kv, m: "cond" in m))
+    lines += table("By Instances per Component (size and router-gang families)",
+                   tally(lambda kv, m: m["size"], where=lambda kv, m: "size" in m))
     parked_rows = [(f, n, m["parked"]) for f, n, _kv, m in rows if "parked" in m]
     if parked_rows:
         lines += ["### Parked cells (XFAIL on a tracked issue)", "",
@@ -2351,6 +2710,30 @@ def manifest(rows):
         " repair the pause is timed against never opens.",
         "- The grouped pause-and-repair cells run live: a repair of an Instance that serves nothing is admitted without the budget or the gate,"
         " so the rollingUpdate group changes nothing.",
+        "- The engine resolves a percent budget as ceil(replicas * percent / 100),"
+        " clamped to replicas (the per-Component budget's documented rule, which"
+        " the canary step capacity shares), so at one and two Instances 25 and"
+        " 50 percent both resolve to one and no budget rounds to zero. gen-size"
+        f" ({' and '.join(str(n) for n in SIZE_NS)} Instances per Component, the router sized with the fleet)"
+        " drives the percent budgets on the plain push, where the resolved budget"
+        " is read off the peak and the floor, and runs the crash loop (both forms,"
+        " both restart policies), the scale (one to two and two to one) and the"
+        f" canary ({'/'.join(str(tw) for _nc, tw in SIZE_LADDER)} percent capacity and traffic, on"
+        f" {SIZE_CANARY_N} Instances) under the integer budgets they resolve to. The"
+        " canary runs on two Instances only: a canary on one Instance has no"
+        " Instance to hold on the stable revision and stages in place, a shape"
+        " with its own verdict to write; on two the first two steps resolve to"
+        " the same single Instance, so the second moves traffic and adds no"
+        " capacity. Group policies are left out: the group pacing budget rounds"
+        " the same way and the group axis belongs to the crashloop family.",
+        f"- gen-router-gang runs the engine as a gang ({' and '.join(f'W{w}' for w in ROUTER_GANG_WIDTHS)})"
+        f" behind a single-pod router at {ROUTER_GANG_N} Instances: the push under each"
+        " strategy, the crash loop under the surge and recreate strategies only"
+        " (a gang runs the in-place variants as a whole-gang recreate, the"
+        " recreate cell), and the scale and the canary under the surge strategy"
+        " (the strategy is dormant under a scale; the gang canary under a"
+        " recreate is the controller-restart family's shape). The router is"
+        " never bumped: every cell asserts it stays in rotation on the same pods.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

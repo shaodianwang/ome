@@ -1,0 +1,13 @@
+# p8037: [gen] size N=2 push engine RecreatePod u50pct  Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 co=none topo=engine
+# reason: a plain push on 2 Instances with maxUnavailable 50% (50 percent of 2 rounds up to 1): one Instance is drained and rebuilt while the other keeps serving (never below 1 ready), then the other follows; every Instance ends on the new revision with no surge above 2
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8037 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: "50%" } } }

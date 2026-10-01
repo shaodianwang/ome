@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **2093**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **2209**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -29,14 +29,16 @@ Total generated cases: **2093**. The whole-corpus per-PR cap (hand + generated) 
 | gen-crashloop-new | 72 | p5000..p5071 |
 | gen-crashloop-group | 72 | p5400..p5471 |
 | gen-pause-repair | 180 | p6000..p6179 |
+| gen-size | 86 | p8000..p8085 |
+| gen-router-gang | 30 | p8100..p8129 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 484 |
-| engine-mn | 443 |
-| pd | 646 |
+| engine | 527 |
+| engine-mn | 473 |
+| pd | 689 |
 | pd-mn | 520 |
 
 ### By update strategy
@@ -44,18 +46,20 @@ Total generated cases: **2093**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (dormant: nothing rolls) | 40 |
-| InPlaceIfPossible | 296 |
+| InPlaceIfPossible | 322 |
 | InPlaceOnly | 236 |
-| RecreatePod | 375 |
-| SurgeThenDrain | 1146 |
+| RecreatePod | 415 |
+| SurgeThenDrain | 1196 |
 
 ### By failure verb / phase
 
 | value | cases |
 |---|---|
+| canary:auto | 6 |
+| canary:manual | 4 |
 | configkey:after-failed | 16 |
 | configkey:after-settle | 16 |
-| crashloop:load | 144 |
+| crashloop:load | 176 |
 | crashloop:load@canary | 16 |
 | crashloop:load@capacity | 16 |
 | crashloop:load@gate | 4 |
@@ -69,7 +73,7 @@ Total generated cases: **2093**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:new:crashStart | 8 |
 | crashloop:new:load | 36 |
 | crashloop:new:start | 36 |
-| crashloop:start | 144 |
+| crashloop:start | 176 |
 | crashloop:start+edit:rotating | 12 |
 | crashloop:start@canary | 16 |
 | crashloop:start@capacity | 16 |
@@ -100,7 +104,7 @@ Total generated cases: **2093**. The whole-corpus per-PR cap (hand + generated) 
 | node:parked | 32 |
 | node:relocated | 32 |
 | node:repaired | 32 |
-| none | 72 |
+| none | 98 |
 | podkill:rotating | 160 |
 | podkill:settling | 160 |
 | podkill@gate | 4 |
@@ -116,28 +120,30 @@ Total generated cases: **2093**. The whole-corpus per-PR cap (hand + generated) 
 | rollback:settling | 26 |
 | rtedit@canary-serving@0 | 8 |
 | rtedit@canary-staging | 8 |
+| scale:down | 8 |
+| scale:up | 8 |
 
 ### By restartPolicy
 
 | value | cases |
 |---|---|
-| (unset — baseline) | 388 |
-| None | 803 |
-| RecreateInstance | 902 |
+| (unset — baseline) | 440 |
+| None | 835 |
+| RecreateInstance | 934 |
 
 ### By pause
 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 1799 |
+| off | 1915 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 1913 |
+| (no pause around a repair) | 2029 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -146,7 +152,7 @@ Total generated cases: **2093**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 1913 |
+| (no pause around a repair) | 2029 |
 | fix | 90 |
 | none | 90 |
 
@@ -156,7 +162,7 @@ Total generated cases: **2093**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 48 |
 | canary | 24 |
-| none | 1538 |
+| none | 1654 |
 | ratio | 16 |
 | rolling | 433 |
 | seq | 34 |
@@ -200,9 +206,9 @@ Total generated cases: **2093**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 1583 |
+| (no break) | 1635 |
 | decoder | 60 |
-| engine | 450 |
+| engine | 514 |
 
 ### By migration mode (node family)
 
@@ -220,6 +226,13 @@ Total generated cases: **2093**. The whole-corpus per-PR cap (hand + generated) 
 | migration | 6 |
 | scaledown | 6 |
 | surge | 8 |
+
+### By Instances per Component (size and router-gang families)
+
+| value | cases |
+|---|---|
+| 1 | 40 |
+| 2 | 76 |
 
 ### Parked cells (XFAIL on a tracked issue)
 
@@ -274,6 +287,8 @@ Total generated cases: **2093**. The whole-corpus per-PR cap (hand + generated) 
 - A freeze after the repair has finished holds nothing a pause does not, so the family emits only `pause=true` at `pauseat=after`.
 - The pause-and-repair family runs the engine under SurgeThenDrain maxSurge 1 maxUnavailable 1: a fresh crash-loop repair is charged against the unavailability budget, so under maxUnavailable 0 the repair the pause is timed against never opens.
 - The grouped pause-and-repair cells run live: a repair of an Instance that serves nothing is admitted without the budget or the gate, so the rollingUpdate group changes nothing.
+- The engine resolves a percent budget as ceil(replicas * percent / 100), clamped to replicas (the per-Component budget's documented rule, which the canary step capacity shares), so at one and two Instances 25 and 50 percent both resolve to one and no budget rounds to zero. gen-size (1 and 2 Instances per Component, the router sized with the fleet) drives the percent budgets on the plain push, where the resolved budget is read off the peak and the floor, and runs the crash loop (both forms, both restart policies), the scale (one to two and two to one) and the canary (10/50/100 percent capacity and traffic, on 2 Instances) under the integer budgets they resolve to. The canary runs on two Instances only: a canary on one Instance has no Instance to hold on the stable revision and stages in place, a shape with its own verdict to write; on two the first two steps resolve to the same single Instance, so the second moves traffic and adds no capacity. Group policies are left out: the group pacing budget rounds the same way and the group axis belongs to the crashloop family.
+- gen-router-gang runs the engine as a gang (W1 and W2) behind a single-pod router at 2 Instances: the push under each strategy, the crash loop under the surge and recreate strategies only (a gang runs the in-place variants as a whole-gang recreate, the recreate cell), and the scale and the canary under the surge strategy (the strategy is dormant under a scale; the gang canary under a recreate is the controller-restart family's shape). The router is never bumped: every cell asserts it stays in rotation on the same pods.
 - Kill-family cells pinned by hand-written restart/ cases are excluded:
 
   - p130: engine SurgeThenDrain rp=None

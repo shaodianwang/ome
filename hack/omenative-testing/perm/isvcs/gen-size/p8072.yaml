@@ -1,0 +1,23 @@
+# p8072: [gen] size scale pd 1->2 RecreatePod  mode=scaledown Ne=1 Nd=1 Nr=1 ceil_e=2 ceil_d=2 ceil_r=1 co=none topo=pd to_e=2 to_d=2 to_r=1
+# reason: the fleet is scaled from 1 to 2 Instances per Component: only index 1 is added; index 0 keeps its pod (same UID) and serves throughout, so capacity never drops below min(start, target) = 1 and nothing surges above 2; the update strategy (RecreatePod) is dormant under a scale and rebuilds nothing; engine and decoder scale together and the router holds at its count
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8072 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 1
+    maxReplicas: 1
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 1
+    maxReplicas: 1
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

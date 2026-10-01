@@ -1,0 +1,13 @@
+# p8004: [gen] size N=1 push engine InPlaceIfPossible u1  Ne=1 Nd=0 Nr=0 ceil_e=1 ceil_d=0 ceil_r=0 co=none topo=engine
+# reason: a plain push on one Instance with maxUnavailable 1: the bump is an annotation diff, so the engine patches the pod in place (same UID, no surge above 1); the budget lets the single Instance be out of rotation while it is patched, and it ends Ready on the new revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8004 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

@@ -131,6 +131,12 @@ class ShapeTest(unittest.TestCase):
         self.assertEqual(("engine gang", 2), (case.shape_family, case.gang_width))
         self.assertEqual(0, self.corpus.write(topo="engine").gang_width)
 
+    def test_a_gang_engine_behind_a_router_is_the_engine_router_gang_family(self):
+        comps = [gen_cases.comp("engine", 2, 1, gen_cases.lifecycle()),
+                 gen_cases.comp("router", 2, 0, gen_cases.lifecycle())]
+        case = self.corpus.write(comps=comps, topo="engine-mn", **counts(2, 0, 2))
+        self.assertEqual(("engine+router gang", 1, "2"), (case.shape_family, case.gang_width, case.size_class))
+
     def test_size_class_follows_the_engine_count(self):
         self.assertEqual("1", self.corpus.write(topo="engine", **counts(1)).size_class)
         self.assertEqual("2", self.corpus.write(topo="engine", **counts(2)).size_class)
@@ -513,11 +519,23 @@ class CommittedCorpusTest(unittest.TestCase):
             self.assertEqual(("persistent", "running"), (case.fault_form, case.fault_side), case.id)
         for case in self.by_folder["canary"]:
             self.assertIn(case.operation, ("canary", "admission reject"), case.id)
+        sizes = self.by_folder["gen-size"]
+        self.assertEqual({"1", "2"}, {c.size_class for c in sizes})
+        self.assertEqual({"engine single", "engine+decoder+router single"}, {c.shape_family for c in sizes})
+        self.assertEqual({"push", "scale up", "scale down", "canary"}, {c.operation for c in sizes})
+        self.assertEqual({"1", "percent"}, {c.budget for c in sizes if c.operation == "push"})
+        gang = self.by_folder["gen-router-gang"]
+        self.assertEqual({"engine+router gang"}, {c.shape_family for c in gang})
+        self.assertEqual({1, 2}, {c.gang_width for c in gang})
+        self.assertEqual({"push", "scale up", "scale down", "canary"}, {c.operation for c in gang})
+        for case in sizes + gang:
+            self.assertEqual("", case.parked, f"{case.id}: nothing is parked")
 
     def test_the_corpus_markdown_renders(self):
         text = coverage.render_markdown(self.cases)
         self.assertIn("stories with no cell: none", text)
         self.assertIn("## Empty cells, biggest holes first", text)
+        self.assertIn("### Size class x shape family", text)
 
 
 if __name__ == "__main__":

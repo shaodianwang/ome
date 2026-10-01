@@ -96,7 +96,8 @@ perm/
 │   ├── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
 │   ├── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/ gen-crashloop-idle/ gen-crashloop-sibling/
 │   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/ gen-rollback/ gen-crashloop-new/ gen-crashloop-group/ gen-pause-repair/  — generated hot core (see isvcs/MANIFEST.md)
-│   └── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary
+│   ├── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary
+│   └── gen-size/ gen-router-gang/  — generated small fleets (one and two Instances per Component) and the engine gang behind a router
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -154,6 +155,12 @@ topology *or* both) without deep nesting. Four values:
 | `pd`        | PD (engine+decoder[+router]), single-pod |
 | `engine-mn` | engine-only, multi-node gang             |
 | `pd-mn`     | PD, multi-node gang                      |
+
+An engine-only shape may carry a single-pod router in front of it (`Nr>0`
+with `Nd=0`, `topo=engine` or `engine-mn`); the router is never a bumped
+member there, so the rollout mode holds it as a negative control and the
+canary mode asserts it idle. The coverage ledger reads that as the
+`engine+router` family.
 
 `rollout/` today: **27 `engine` · 38 `pd` · 13 `engine-mn` · 18 `pd-mn`** (96).
 The case-id (`pNN`, the filename stem) stays globally unique and is the result
@@ -747,6 +754,53 @@ carries `perm.test/rev: "v1"` so the rollback is an annotation update, not
 a removal. `rollback=1` in canary mode keeps its own meaning (the
 `ome.io/rollout-rollback` probe).
 
+### Small fleets and the engine behind a router (`gen-size/`, `gen-router-gang/`)
+
+The engine resolves a percent budget as `ceil(replicas * percent / 100)`,
+clamped to the replica count — the rule the `RollingUpdate.maxSurge` and
+`maxUnavailable` fields document, which the canary step capacity shares —
+so on one or two Instances `25%` and `50%` both resolve to one, and no
+positive percent ever rounds to zero: a roll always starts. The capacity
+floor the harness reads (`N - maxUnavailable`) resolves a percent the same
+way, so a `50%` budget on one Instance reads as a floor of zero, the
+configured outcome, not a breach.
+
+The generated `isvcs/gen-size/` family (`p8000`+) runs one and two
+Instances per Component (the router sized with the fleet) on the engine
+and prefill/decode shapes:
+
+- the plain push under each strategy and budget (`SurgeThenDrain` at
+  `maxSurge` 1 and `25%`, `RecreatePod` at `maxUnavailable` 1 and `50%`,
+  `InPlaceIfPossible` at 1). The surge pushes assert the floor
+  instantaneously (`floor_hard=1`): one Instance surges to two and is never
+  left with zero serving. Under `RecreatePod` the single Instance goes down
+  and comes back, zero serving being the configured outcome, which the case
+  says on line two;
+- the push with the running revision crash-looping (`fault=crashloop:old`,
+  both forms, both restart policies) under the integer budgets, where on one
+  Instance the broken Instance is both the first and the last the roll
+  reaches;
+- a scale from one to two and from two to one under each strategy
+  (`mode=scaledown`): index 0 keeps its pod and the floor is
+  `min(start, target)`;
+- a canary ladder on two Instances (`10/50/100` percent capacity and
+  traffic, timed and manual gates, under the surge and the recreate
+  strategy): the 10 percent step asks `ceil(0.2) = 1` Instance and the 50
+  percent step asks the same one, so it moves traffic and adds no capacity;
+  the stable revision keeps one Instance until the cutover's traffic write
+  lands. A canary on a single Instance has no Instance to hold on the stable
+  revision and stages in place; that shape waits for its own verdict.
+
+`isvcs/gen-router-gang/` (`p8100`+) runs the engine as a gang (one leader
+plus one or two workers, two Instances) behind a single-pod router — the
+`engine+router gang` family of the coverage ledger, `topo=engine-mn` with
+`Nr>0` — through a push under each strategy, a crash loop on the running
+revision under the surge and recreate strategies, a scale to one and to
+three gangs, and an engine-only canary ladder (the group names the engine
+alone, as `p316` does without a decoder). The router is never bumped: every
+cell holds it at its count on the same pods, and the gang invariants
+(atomicity, index partition) judge the engine.
+
 ### Fault cases: quota isolation, cordon impact, leak remediation
 
 - **`fault=crashloop:old` with `form=start|load`** breaks one old-revision
@@ -1176,7 +1230,9 @@ Four generators write into `isvcs/`; re-run one after editing it:
   broken Instance) and `isvcs/gen-canary-fault-new/` (the push brings a
   revision that crashes at start, crashes after Ready inside or past the first
   soak, or cannot be pulled; the ladder parks where it bites and a rollback or
-  a fix push lands), plus `isvcs/MANIFEST.md` (per-dimension counts, the
+  a fix push lands), the small fleets and the engine gang behind a router
+  (`p8000`–`p8199`) → `isvcs/gen-size/` and `isvcs/gen-router-gang/`, plus
+  `isvcs/MANIFEST.md` (per-dimension counts, the
   constraint ledger with every omitted cell and its reason, missing-hook
   catalog). The story families are canary lanes in CI: the pipeline gives
   every `gen-canary-*` folder the canary pod budget and Prometheus.

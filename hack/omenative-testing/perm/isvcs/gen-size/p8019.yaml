@@ -1,0 +1,23 @@
+# p8019: [gen] size N=1 push pd RecreatePod u1  Ne=1 Nd=1 Nr=1 ceil_e=1 ceil_d=1 ceil_r=1 co=none topo=pd
+# reason: a plain push on one Instance with maxUnavailable 1: the single Instance is drained and rebuilt at the new revision, so zero serving while it is down is the configured outcome of this budget at this size; it comes back Ready and serving on the new revision with no surge above 1; decoder and router are negative controls (co=none), sized with the fleet
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8019 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 1
+    maxReplicas: 1
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 1
+    maxReplicas: 1
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

@@ -1,0 +1,13 @@
+# p8016: [gen] size N=1 crashloop load engine InPlaceIfPossible u1 rp RecreateInstance  Ne=1 Nd=0 Nr=0 ceil_e=1 ceil_d=0 ceil_r=0 fault=crashloop:old floor_soft=1 co=none topo=engine form=load
+# reason: one old-revision engine pod has its runner killed every few seconds while it is up, so it dies after Ready and comes back between crashes; its Instance is the only one, so it is both the first and the last the roll reaches, and the roll owns it from that moment: the patch lands the fixed image in place, no repair is recorded for it after the bump under restart policy RecreateInstanceOnPodRestart, and it ends on the new revision serving; the single Instance serves nothing from the break until its rebuild is Ready, the configured outcome at this size; floor waived — the crash itself costs settled capacity for the length of the roll
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8016 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

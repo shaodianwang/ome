@@ -1022,6 +1022,7 @@ def render_crossings(cases):
     out += ["### Fault x group policy", ""] + fault_crossing(cases, "group", GROUPS, "fault")
     out += ["### Timing x operation", ""] + crossing(cases, "timing", TIMINGS, "operation", OPERATIONS, "timing")
     out += ["### Size class x operation", ""] + crossing(cases, "size_class", SIZE_CLASSES, "operation", OPERATIONS, "Instances")
+    out += ["### Size class x shape family", ""] + crossing(cases, "size_class", SIZE_CLASSES, "shape_family", SHAPE_FAMILIES, "Instances")
     overlaps = Counter(kind for c in cases for kind in c.overlap)
     out += ["### Overlap", ""] + table(["overlap", "cases"], [[k, overlaps.get(k, 0)] for k in OVERLAPS])
     seconds = Counter((c.operation, c.second_operation) for c in cases if c.second_operation)
