@@ -1637,10 +1637,14 @@ shapes.
   was already done; after the unpause, with the fix pushed, every bumped
   Instance ends Ready and serving on the new revision within the roll's
   budget and the broken one is never repaired again on the revision it was
-  running (the roll owns it); with nothing pushed, a freeze that landed first
+  running (the roll owns it; a gang's roll replaces it at a fresh index and
+  retires its own, so the Instance is followed through its gang surges and
+  read where they left it); with nothing pushed, a freeze that landed first
   releases exactly one repair, recorded by its event, and every other cell
   moves nothing; in every cell the InferenceReplica rows end Ready with no
-  operation open and peaks stay under the header ceilings. A repair that
+  operation open, waited for up to `ROWS_SETTLE_S` and held to the indexes
+  0..N-1 only when nothing was pushed (a repair rebuilds in place), and
+  peaks stay under the header ceilings. A repair that
   never opens, or never finishes, leaves the pause nothing to land on and
   fails the case; a repair the product announces it is holding (a
   `RepairHeld` event naming the Instance) ends that wait at once, with the

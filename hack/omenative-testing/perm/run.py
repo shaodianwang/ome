@@ -5313,6 +5313,16 @@ def _node_bite_held(node, pods):
     return not any(p.get("ready") and p.get("serving") for _n, p in pods if p.get("node") == node)
 
 
+def _event_window_start(since_epoch):
+    """The earliest event stamp inside a window opened at since_epoch.
+    Event stamps carry whole seconds, so an event recorded later in the
+    second the window opened in is at or after the opening at the
+    resolution the stamps have; held to the fractional opening, such an
+    event would read as before it and a reaction the engine has inside
+    that second would go unseen."""
+    return math.floor(since_epoch)
+
+
 def _isvc_events_since(case_id, since_epoch):
     """(reason, message) of every event recorded on the case's
     InferenceService whose latest occurrence is at or after since_epoch,
@@ -5325,6 +5335,7 @@ def _isvc_events_since(case_id, since_epoch):
         items = json.loads(r.stdout).get("items", []) or []
     except Exception:
         return []
+    window_start = _event_window_start(since_epoch)
     found = []
     for it in items:
         stamp = it.get("lastTimestamp") or it.get("eventTime") or (it.get("metadata") or {}).get("creationTimestamp") or ""
@@ -5332,7 +5343,7 @@ def _isvc_events_since(case_id, since_epoch):
             when = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
         except ValueError:
             continue
-        if when < since_epoch:
+        if when < window_start:
             continue
         # The apiserver folds a repeat of an identical event into the
         # first one's count; one entry per occurrence keeps a tally of
@@ -8262,6 +8273,38 @@ def _pause_repair_checks(f, contract, out, verdict, notes, checks):
     return verdict
 
 
+def _victim_index_now(comp, inst, surges, events):
+    """The index the broken Instance stands at now: its own, or the one the
+    gang surges that replaced it left it at, read from the status rows'
+    surge claims first and from the ISVC events second (the recorder drops
+    an object's events past a burst; the rows do not)."""
+    pairs = [(src, dst) for c, src, dst, _rev in (surges or []) if c == comp]
+    pairs += [pair for pair in _gang_surge_replacements(events, comp) if pair not in pairs]
+    return _follow_gang_surges(inst, pairs)[-1]
+
+
+def _pause_repair_end_state(agg, pod_state, ppi, N, configured, bumped, comp, inst, final, pre_uids, expected, old_hashes, push):
+    """(converged, why) after the unpause: every configured Component at N
+    alive, Ready and serving, the bumped ones on the new revision, and the
+    broken Instance rebuilt whole and serving at final, the index its gang
+    surge left it at (its own when nothing moved it), off the old revision
+    when the fix was pushed."""
+    serving = _serving_instance_counts(pod_state, ppi)
+    for c in configured:
+        alive, ready, updated = agg.get(c, (0, 0, 0))
+        if alive != N[c] or ready != N[c] or serving.get(c, 0) != N[c]:
+            return False, f"{c} {alive} alive/{ready} ready/{serving.get(c, 0)} serving of {N[c]}"
+        if updated != (N[c] if c in bumped else 0):
+            return False, f"{c} {updated} Instance(s) on a new revision, want {N[c] if c in bumped else 0}"
+    where = f"{comp} Instance {inst}" + (f" (replaced at Instance {final} by its gang surge)" if final != inst else "")
+    pods = _instance_pods(pod_state, comp, final)
+    if not _instance_rebuilt_whole(pods, pre_uids, expected):
+        return False, f"{where} not rebuilt to serving ({len(pods)} pod(s))"
+    if push == "fix" and any(p.get("hash") in old_hashes for _n, p in pods):
+        return False, f"{where} still on the old revision"
+    return True, ""
+
+
 def _pause_repair_ceiling_checks(ctx, verdict, notes, checks):
     """Peak alive Instances against the header ceilings: with the fix
     pushed, the roll's surge after the unpause; with nothing pushed, N
@@ -8413,25 +8456,26 @@ def _pause_repair(case_id, yaml_file, desc, hdr):
     unpause_ts = time.time()
     _pause_annotation(case_id, "")
 
+    # A pushed fix rolls a gang by replacing it at a fresh index and
+    # retiring its own, so the end state follows the broken Instance to
+    # the index its surge left it at: the status rows' claims every tick,
+    # the ISVC events on the same cadence as the hold check below.
+    surge_events = []
+
     def converged():
-        agg, serving = ctx["agg"], _serving_instance_counts(ctx["pod_state"], ppi)
-        for c in configured:
-            alive, ready, updated = agg.get(c, (0, 0, 0))
-            if alive != N[c] or ready != N[c] or serving.get(c, 0) != N[c]:
-                return False, f"{c} {alive} alive/{ready} ready/{serving.get(c, 0)} serving of {N[c]}"
-            if updated != (N[c] if c in bumped else 0):
-                return False, f"{c} {updated} Instance(s) on a new revision, want {N[c] if c in bumped else 0}"
-        pods = victim_pods()
-        if not _instance_rebuilt_whole(pods, pre_uids, expected_pods):
-            return False, f"{comp} Instance {inst} not rebuilt to serving ({len(pods)} pod(s))"
-        if push == "fix" and any(p.get("hash") in ctx["old_hashes"] for _n, p in pods):
-            return False, f"{comp} Instance {inst} still on the old revision"
-        return True, ""
+        final = inst
+        if push == "fix":
+            final = _victim_index_now(comp, inst, (ctx.get("inv") or {}).get("surges"), surge_events)
+        return _pause_repair_end_state(ctx["agg"], ctx["pod_state"], ppi, N, configured, bumped, comp, inst, final,
+                                       pre_uids, expected_pods, ctx["old_hashes"], push)
 
     print(f"  Phase 9: watching the end state after the unpause (≤{budget}s)")
     stable, detail, last_read = None, "", 0.0
     while time.time() - unpause_ts < budget and not ctx["closed"]:
         _read_one(ctx)
+        if push == "fix" and time.time() - last_read >= 2.0:
+            last_read = time.time()
+            surge_events = _isvc_events_since(case_id, unpause_ts)
         ok, detail = converged()
         if ok:
             stable = stable or time.time()
@@ -8451,7 +8495,10 @@ def _pause_repair(case_id, yaml_file, desc, hdr):
                 break
     out["end_detail"] = detail
     out["repairs_after_unpause"] = _victim_repairs(case_id, unpause_ts, comp, inst)
-    out["ir_settled"], out["ir_detail"] = _initial_ir_settled(_fetch_initial_ir_items(case_id) or [], N, configured)
+    # The rows settle a little behind the pods. A repair rebuilds in place,
+    # so with nothing pushed the fresh indexes still hold; a pushed fix
+    # leaves a gang at whatever index its surge took.
+    out["ir_settled"], out["ir_detail"] = _wait_rows_settled(case_id, N, configured, ROWS_SETTLE_S, fresh_indexes=push != "fix")
     out["pause_left"] = _isvc_pause_value(case_id)
     verdict, notes, checks = "PASS", [], []
     verdict = _pause_repair_checks(f, contract, out, verdict, notes, checks)
@@ -9783,18 +9830,19 @@ def _object_events(kind, name, since_epoch):
         items = json.loads(r.stdout).get("items", []) or []
     except Exception:
         return []
+    window_start = _event_window_start(since_epoch)
     out = []
     for it in items:
         last = _event_epoch(it.get("lastTimestamp") or it.get("eventTime")
                             or (it.get("metadata") or {}).get("creationTimestamp"))
-        if last is None or last < since_epoch:
+        if last is None or last < window_start:
             continue
         first = _event_epoch(it.get("firstTimestamp") or it.get("eventTime"))
         try:
             count = max(1, int(it.get("count") or 1))
         except (TypeError, ValueError):
             count = 1
-        inside = count if (first is not None and first >= since_epoch) else 1
+        inside = count if (first is not None and first >= window_start) else 1
         out.append((last, str(it.get("reason") or ""), str(it.get("message") or ""), inside))
     out.sort(key=lambda x: x[0])
     return out
@@ -12878,15 +12926,16 @@ def _rebuild_count_checks(f, rebuilt_after, ppi, verdict, notes, checks):
     return verdict
 
 
-def _wait_rows_settled(case_id, N, configured, budget_s):
+def _wait_rows_settled(case_id, N, configured, budget_s, fresh_indexes=False):
     """Poll the InferenceReplicas after a roll until every configured
     Component has N rows, each Ready with no operation open, at whichever
-    indexes the roll left them, and the counters agree, or the budget ends.
-    Returns (settled, the last reason it was not)."""
+    indexes the roll left them (at the indexes 0..N-1 with fresh_indexes,
+    for a fleet nothing rolled), and the counters agree, or the budget
+    ends. Returns (settled, the last reason it was not)."""
     deadline = time.time() + budget_s
     while True:
         items = _fetch_initial_ir_items(case_id)
-        settled, why = _rolled_ir_settled(items or [], N, configured)
+        settled, why = _ir_settled(items or [], N, configured, fresh_indexes)
         if settled or time.time() >= deadline:
             return settled, why
         time.sleep(2.0)

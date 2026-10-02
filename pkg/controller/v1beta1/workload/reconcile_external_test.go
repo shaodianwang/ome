@@ -6450,3 +6450,162 @@ func TestNodeLoss_ServingFollowsThePodReadyCondition(t *testing.T) {
 		})
 	}
 }
+
+// restartEvents counts the RestartTriggered events the harness has
+// recorded so far.
+func (h *recoveryHarness) restartEvents() int {
+	n := 0
+	for _, e := range h.events {
+		if strings.Contains(e, string(workloadtypes.EventReasonRestartTriggered)) {
+			n++
+		}
+	}
+	return n
+}
+
+// A freeze that lands before a crash loop opens no repair, and lifting
+// the freeze is what opens it: the pass after the lift reads the same
+// crash evidence the frozen passes declined, records the repair's event
+// and rebuilds the Instance at its running revision. The pod's own
+// kubelet evidence dates the wedge, so no fresh pod change is needed for
+// the repair to open once the freeze is gone. Single pod under
+// RestartPolicy None, the policy whose only repair is the crash-loop one.
+//
+// Cells: instance/Ready/spec.pauseFreeze/before, instance/Ready/pod.waiting[CrashLoopBackOff]/before, instance/Ready/spec.unpause/boundary@T-ready-crashloop-restart
+func TestPauseFreeze_LiftedOverACrashLoop_OpensTheRepairAtOnce(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.recorder = record.NewFakeRecorder(64)
+	h.driveToReadyOnV1()
+	beforeIncarnation := h.instance(0).Incarnation
+	crashed := h.podsOf(0)[0].UID
+
+	h.desired.Paused, h.desired.PauseFreeze = true, true
+	h.crashPod(0, "", crashStartImage)
+	// The frozen passes outlive the stuck-pod grace, so the wedge is one
+	// the restart pass would act on and the freeze is all that withholds it.
+	for i := 0; i < 4; i++ {
+		h.step()
+	}
+	if h.restartEvents() != 0 {
+		t.Fatalf("a frozen pass opened a repair: events = %v", h.events)
+	}
+	if pods := h.podsOf(0); len(pods) != 1 || pods[0].UID != crashed {
+		t.Fatalf("the frozen passes touched the crash-looping pod: %d live pod(s)", len(pods))
+	}
+	if s := h.instance(0); s == nil || s.Operation != nil || s.Incarnation != beforeIncarnation {
+		t.Fatalf("the frozen passes changed the row: %+v", s)
+	}
+
+	h.desired.Paused, h.desired.PauseFreeze = false, false
+	h.step()
+	if h.restartEvents() != 1 {
+		t.Fatalf("the first pass after the lift recorded %d RestartTriggered event(s), want 1; events = %v", h.restartEvents(), h.events)
+	}
+	if !h.run(20, func() bool { return h.repairedAbove(0, beforeIncarnation) }) {
+		h.dumpState("after the lift")
+		t.Fatalf("the repair the lift opened never rebuilt the Instance to Ready")
+	}
+	if s := h.instance(0); s.RunningRevision != h.revV1.Name {
+		t.Fatalf("repaired row records %q, want the running revision %s", s.RunningRevision, h.revV1.Name)
+	}
+	h.requirePodsRender(0, h.revV1, goodImage)
+	if h.restartEvents() != 1 {
+		t.Fatalf("the Instance was repaired %d times, want once; events = %v", h.restartEvents(), h.events)
+	}
+}
+
+// A freeze that lands on a gang whose Restart is already open does not
+// strand the gang: the open repair runs on under the freeze until the
+// gang is rebuilt, Ready and serving at its running revision, and lifting
+// the freeze afterwards changes nothing — no second repair, the same
+// incarnation.
+//
+// Cells: instance/Restart/Drain/spec.pauseFreeze/before, instance/Restart/Drain/spec.unpause/before
+func TestPauseFreeze_LandsOnAnOpenGangRestart_TheRepairFinishesUnderIt(t *testing.T) {
+	h := newRecoveryHarness(t, true)
+	h.recorder = record.NewFakeRecorder(64)
+	policy := workloadtypes.RestartPolicyRecreateInstance
+	h.lifecycle.RestartPolicy = &policy
+	h.driveToReadyOnV1()
+	beforeIncarnation := h.instance(0).Incarnation
+
+	h.loseRunner(0, "worker")
+	if !h.run(5, h.repairInFlight) {
+		h.dumpState("after the loss")
+		t.Fatalf("the lost member opened no repair")
+	}
+	h.desired.Paused, h.desired.PauseFreeze = true, true
+	if !h.run(20, func() bool { return h.repairedAbove(0, beforeIncarnation) }) {
+		h.dumpState("frozen with the repair open")
+		t.Fatalf("the repair that was open when the freeze landed never finished under it")
+	}
+	h.requirePodsRender(0, h.revV1, goodImage)
+	repairedIncarnation := h.instance(0).Incarnation
+	if h.restartEvents() != 1 {
+		t.Fatalf("%d RestartTriggered event(s) under the freeze, want the one that was open; events = %v", h.restartEvents(), h.events)
+	}
+
+	h.desired.Paused, h.desired.PauseFreeze = false, false
+	h.settle(4)
+	if s := h.instance(0); s == nil || s.Phase != workloadtypes.InstancePhaseReady || s.Operation != nil || s.Incarnation != repairedIncarnation {
+		t.Fatalf("the lift moved the repaired gang: %+v", s)
+	}
+	if !h.settledOn(h.revV1, 1) {
+		h.dumpState("after the lift")
+		t.Fatalf("the gang did not stay settled on its running revision after the lift")
+	}
+	if h.restartEvents() != 1 {
+		t.Fatalf("the lift opened another repair; events = %v", h.events)
+	}
+}
+
+// A pause that lands on a gang whose Restart is open, with a fix pushed
+// during the hold: the repair finishes under the pause at the revision
+// the gang was running, the pushed revision reaches no pod until the
+// unpause, and the unpause rolls the repaired gang to the fix with no
+// second repair of the revision it was running.
+//
+// Cells: instance/Restart/Drain/spec.pauseTrue/before, instance/Restart/Drain/spec.revision/before, instance/Ready/spec.unpause/boundary@T-ready-surge
+func TestPause_LandsOnAnOpenGangRestart_APushDuringTheHoldRollsItAfterTheUnpause(t *testing.T) {
+	h := newRecoveryHarness(t, true)
+	h.recorder = record.NewFakeRecorder(64)
+	policy := workloadtypes.RestartPolicyRecreateInstance
+	h.lifecycle.RestartPolicy = &policy
+	one := intstr.FromInt32(1)
+	h.lifecycle.UpdateStrategy = &workloadtypes.UpdateStrategy{
+		Type:          workloadtypes.UpdateStrategySurgeThenDrain,
+		RollingUpdate: &workloadtypes.RollingUpdate{MaxSurge: &one, MaxUnavailable: &one},
+	}
+	h.driveToReadyOnV1()
+	beforeIncarnation := h.instance(0).Incarnation
+
+	h.loseRunner(0, "worker")
+	if !h.run(5, h.repairInFlight) {
+		h.dumpState("after the loss")
+		t.Fatalf("the lost member opened no repair")
+	}
+	h.desired.Paused = true
+	h.setTarget(h.revFixed, fixedImage)
+	h.desired.Paused = true
+	if !h.run(20, func() bool { return h.repairedAbove(0, beforeIncarnation) }) {
+		h.dumpState("paused with the repair open and the fix pushed")
+		t.Fatalf("the repair that was open when the pause landed never finished under it")
+	}
+	h.requirePodsRender(0, h.revV1, goodImage)
+	h.settle(3)
+	if h.livePodOnImage(fixedImage) {
+		t.Fatalf("the fix pushed under the pause reached a pod before the unpause")
+	}
+	if h.restartEvents() != 1 {
+		t.Fatalf("%d RestartTriggered event(s) under the pause, want the one that was open; events = %v", h.restartEvents(), h.events)
+	}
+
+	h.desired.Paused = false
+	if !h.run(80, func() bool { return h.settledOn(h.revFixed, 1) }) {
+		h.dumpState("after the unpause")
+		t.Fatalf("the unpause did not roll the repaired gang to the pushed revision")
+	}
+	if h.restartEvents() != 1 {
+		t.Fatalf("the roll after the unpause repaired the gang again; events = %v", h.events)
+	}
+}

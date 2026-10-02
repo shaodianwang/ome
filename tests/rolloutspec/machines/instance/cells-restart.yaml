@@ -287,21 +287,21 @@ cells:
     outcome: ignore
     note: a standard pause plans scale-down and repair only, so the restart keeps converging at the running revision while updates and creates are held. Repair is not what an ordinary pause holds, so the attempt takes no Paused token and its clock keeps running with it; a pause suspends the escalation pass, so the elapsed deadline is consumed once the pause is cleared, while the hold pass that runs before it goes on recording and releasing what the authorities observe throughout
     placement: perm
-    coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot], kind: []}
+    coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot, TestPause_LandsOnAnOpenGangRestart_APushDuringTheHoldRollsItAfterTheUnpause], kind: []}
     status: decided
   - state: Restart/Drain
     event: spec.pauseFreeze
     outcome: defer
     note: freeze suspends the repair pass, but the step already under way still runs to its boundary — pods the repair deleted are recreated at the bumped incarnation — so no Instance is left with nothing serving; the hold lands after that, carrying Operation.Waiting=Paused with its deadline parked
     placement: perm
-    coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot], kind: []}
+    coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot, TestPauseFreeze_LandsOnAnOpenGangRestart_TheRepairFinishesUnderIt], kind: []}
     status: decided
   - state: Restart/Drain
     event: spec.unpause
     outcome: ignore
     note: the restart pass is planned again and resumes at the same step from its durable operation; a Paused token, which only a freeze puts on a repair, is released and the deadline it parked re-arms with a full window measured from the unpause
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestPauseFreeze_LandsOnAnOpenGangRestart_TheRepairFinishesUnderIt], kind: []}
     status: current
   - state: Restart/Drain
     event: spec.teardown

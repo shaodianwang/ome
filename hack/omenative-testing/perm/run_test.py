@@ -1889,6 +1889,21 @@ class WindowReadersTest(unittest.TestCase):
         with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(EVENTS), "")):
             self.assertEqual((1, {"RecreateUpdateStarted": 1}), run._controller_event_tally("p999", [], T0, T0 + 25))
 
+    def test_a_window_opened_inside_a_second_keeps_that_seconds_events(self):
+        """Event stamps carry whole seconds: an event recorded later in the
+        second a window opened in is at or after the opening at the
+        resolution the stamps have, and belongs to the window."""
+        message = "OMENative component=engine instance=3 restart triggered: pod e3 wedged"
+        events = {"items": [{"reason": "RestartTriggered", "message": message, "count": 1,
+                             "firstTimestamp": "2026-10-01T10:00:00Z", "lastTimestamp": "2026-10-01T10:00:00Z"}]}
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(events), "")):
+            self.assertEqual([("RestartTriggered", message)], run._isvc_events_since("p999", T0 + 0.6))
+            self.assertEqual([message], run._victim_repairs("p999", T0 + 0.6, "engine", "3"))
+            self.assertEqual([], run._isvc_events_since("p999", T0 + 1.0), "the next second is outside the window")
+            found = run._object_events("InferenceService", "p999", T0 + 0.6)
+            self.assertEqual([("RestartTriggered", 1)], [(r, n) for _w, r, _m, n in found])
+            self.assertEqual([], run._object_events("InferenceService", "p999", T0 + 1.0))
+
     def test_write_blocked_reason_reads_events_then_rows_then_conditions(self):
         with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(EVENTS), "")):
             where, text = run._write_blocked_reason("p999", [], T0)
@@ -7296,6 +7311,49 @@ class PauseRepairTest(unittest.TestCase):
         self.assertTrue(run._repair_declared_held([], ["held"]))
         self.assertFalse(run._repair_declared_held(["ran"], ["held"]), "a repair that ran outranks a hold before it")
         self.assertFalse(run._repair_declared_held([], []))
+
+    def test_end_state_follows_the_broken_instance_through_its_gang_surge(self):
+        """A gang's roll replaces the broken Instance at a fresh index and
+        retires its own; the end state reads the Instance where its surge
+        left it, and the rows settle at the indexes the roll left."""
+        N, configured, bumped, ppi = {"engine": 2}, {"engine"}, {"engine"}, {"engine": 2}
+        agg, pre_uids, old_hashes = {"engine": (2, 2, 2)}, {"o1-l", "o1-w"}, {"old"}
+
+        def gang(idx, hash_, uid):
+            pod = {"alive": True, "ready": True, "serving": True, "comp": "engine", "inst": idx, "hash": hash_}
+            return {f"e{idx}l": dict(pod, uid=f"{uid}-l"), f"e{idx}w": dict(pod, uid=f"{uid}-w")}
+
+        state = {**gang("0", "new", "n0"), **gang("2", "new", "n2")}
+        self.assertEqual((True, ""), run._pause_repair_end_state(agg, state, ppi, N, configured, bumped, "engine", "1", "2",
+                                                                 pre_uids, 2, old_hashes, "fix"))
+        ok, why = run._pause_repair_end_state(agg, state, ppi, N, configured, bumped, "engine", "1", "1", pre_uids, 2, old_hashes, "fix")
+        self.assertFalse(ok)
+        self.assertIn("engine Instance 1 not rebuilt to serving (0 pod(s))", why)
+        stale = {**gang("0", "new", "n0"), **gang("2", "old", "n2")}
+        ok, why = run._pause_repair_end_state(agg, stale, ppi, N, configured, bumped, "engine", "1", "2", pre_uids, 2, old_hashes, "fix")
+        self.assertFalse(ok)
+        self.assertIn("replaced at Instance 2 by its gang surge) still on the old revision", why)
+        ok, why = run._pause_repair_end_state({"engine": (2, 1, 2)}, state, ppi, N, configured, bumped, "engine", "1", "2",
+                                              pre_uids, 2, old_hashes, "fix")
+        self.assertFalse(ok)
+        self.assertIn("2 alive/1 ready", why)
+
+        self.assertEqual("1", run._victim_index_now("engine", "1", [], []), "nothing moved it")
+        self.assertEqual("2", run._victim_index_now("engine", "1", [("engine", "1", "2", "rev-a")], []), "the rows' claim")
+        self.assertEqual("1", run._victim_index_now("engine", "1", [("decoder", "1", "2", "rev-a")], []),
+                         "another Component's surge moves nothing")
+        events = [("RecreateUpdateStarted", "OMENative component=engine instance=0 gang surge to revision r (surge-index=2)"),
+                  ("RecreateUpdateStarted", "OMENative component=engine instance=1 gang surge to revision r (surge-index=0)")]
+        self.assertEqual("0", run._victim_index_now("engine", "1", [], events), "a freed index the later surge reused")
+
+        rolled = [inference_replica("engine", 2, current="rev-b", update="rev-b")]
+        rolled[0]["status"]["instanceStatuses"] = [{"index": 0, "phase": "Ready", "operation": None},
+                                                   {"index": 2, "phase": "Ready", "operation": None}]
+        with mock.patch.object(run, "_fetch_initial_ir_items", return_value=rolled):
+            self.assertTrue(run._wait_rows_settled("p999", N, configured, 1)[0], "a pushed fix leaves the roll's indexes")
+            settled, why = run._wait_rows_settled("p999", N, configured, 1, fresh_indexes=True)
+        self.assertFalse(settled, "with nothing pushed a repair rebuilds in place, so the fresh indexes hold")
+        self.assertIn("Instance indexes have not converged", why)
 
     def test_ceilings_read_the_header(self):
         ctx = {"hdr": {"ceil_e": 3, "ceil_d": 0, "ceil_r": 0}, "N": {"engine": 2, "decoder": 0, "router": 0},
