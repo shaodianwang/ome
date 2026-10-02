@@ -494,7 +494,9 @@ such as the recovery half of a podkill, carries both ids.
   pushed revision that never breaks is `INFRA-FAIL`), the ladder parked at the
   step where it bit with the unit's `canary.failed.reason` set, no traffic
   named the broken revision at the park while the stable side kept serving
-  every Instance the broken revision had not replaced, nothing reached
+  every Instance the broken revision had not replaced (an Instance the
+  broken revision reached that has no pod of either revision at the park
+  is mid-repair on it, not a stable Instance that stopped), nothing reached
   `Promoting` before the exit landed, and then the exit's own terminal checks
   (drained back with the rejected revision recorded, or every Instance on the
   fixed revision with nothing left on the broken one). The capacity floor is
@@ -1265,17 +1267,25 @@ shapes.
   revision is not the roll target belongs to the roll, never to a repair on
   the revision it was running. A gang under SurgeThenDrain is replaced at a
   fresh Instance index and its source index retired, so the verdict follows
-  the Instance across the gang surges and reads the index it ended at. Two
-  records name the pairs. The InferenceReplica's status rows: a source row
-  carries its replacement index from the claim until the row is removed as
-  the surge completes, and the invariant poll, which reads the rows every
-  few seconds, keeps every pair it sees claimed (a source seen again on its
-  running revision without the claim was reset, and its pair is dropped).
-  Then the ISVC's events: a `RecreateUpdateStarted` names the replacement
-  index, a `GangSurgeAbandoned` retires one, and the starts the abandons do
-  not cancel out are where the Instance went. The rows are read first
-  because the Kubernetes event recorder drops an object's events past a
-  burst, which a many-Instance fleet reaches before its surges start. A
+  the Instance across the gang surges and reads the index it ended at. Every
+  record that names a pair is read. The InferenceReplica's status rows: a
+  source row carries its replacement index from the claim until the row is
+  removed as the surge completes, the invariant poll, which reads the rows
+  every few seconds, keeps every pair it sees claimed (a source seen again
+  on its running revision without the claim was reset, and its pair is
+  dropped), and the rows are read once more at the verdict. The ISVC's
+  events: a `RecreateUpdateStarted` names the replacement index, a
+  `RecreateUpdateCompleted` names it again as the surge completes (a
+  completion is a surge that stood whether or not the recorder kept its
+  start), a `GangSurgeAbandoned` retires one, a `MigrationRequestAccepted`
+  names the index a move surges to, and the starts the abandons do not
+  cancel out are where the Instance went. The migration ledger: a move's
+  row names its replacement index once allocated. No one record is enough
+  — the Kubernetes event recorder drops an object's events past a burst,
+  which a many-Instance fleet reaches before its surges start, and a claim
+  can land after the pods have converged — so while the chain ends at an
+  index with no pod the records are re-read every `ROW_POLL_S` for up to
+  `ROWS_SETTLE_S` before the verdict fails. A
   repair on any index of that chain fails the verdict. A victim on a Component the bump
   never touches (`victimcomp=decoder` with no group) has no new revision to
   reach, so the repair owns it instead: it must be rebuilt — no pod the fault
@@ -1347,14 +1357,28 @@ shapes.
   later, every time the kubelet restarts it — a pod-template env diff, so an
   in-place strategy resolves to a recreate. The verdict is the operator's
   end state. While the crashing revision is in flight: no more Instances
-  than the larger of maxSurge and maxUnavailable are off the running
-  revision, which therefore keeps serving at that floor (debounced like the
-  capacity floor), never more than that many Instances carry the crashing
-  revision at once, status says why the roll stopped — a `rolloutHold` on
-  the victim Component or one of its Instance rows at `Failed`, and a
+  than the case's allowance are off the running revision, which therefore
+  keeps serving at that floor (debounced like the capacity floor), and
+  never more than that many Instances carry the crashing revision at once
+  — the allowance is the larger of maxSurge and maxUnavailable, plus one
+  under a drain-first strategy (RecreatePod, or in-place resolving to a
+  recreate) with `form=load`: the promoted crashing Instance admits the
+  next start before it crashes (minReadySeconds is zero), so two are off
+  at once at the floor, as a Deployment reaches too, while the surge
+  strategy keeps the strict budget; status says why the roll stopped — a `rolloutHold` on
+  the victim Component from the retry ladder (`RetryBlock`, `Held`) or the
+  budget (`Budget`), or one of its Instance rows at `Failed`, and a
   `RetryHeld` or `InstanceFailed` event naming it — within the rotate
-  budget, and once it has, no further pod of the crashing revision appears
-  across `IDLE_HOLD_S`; a sound group member converges on its own new
+  budget (a coordination gate's hold — `Plan`, `Pairing`, `Ratio`,
+  `Sequential` — is the group opening or pacing its run, not the crash),
+  and once it has, every further pod of the crashing revision is a retry
+  the ladder announced: a `RetryBlock` backoff names its next attempt's
+  time in the retry block (`nextRetryAt`), one attempt is expected at each
+  announced time, and none once the ladder reached its bound (`Held`); the
+  watch follows the ladder to that bound within the rotate budget, exits
+  once status has said why and the story has been quiet for `IDLE_HOLD_S`
+  with no retry pending, and a pod created outside those windows fails the
+  case; a sound group member converges on its own new
   revision meanwhile, or holds with a reason. Then the harness pushes
   `rebump-fix` (a `v3` bump that drops the runner override) and every bumped
   Instance must end on the fixed revision and serving within the rotate

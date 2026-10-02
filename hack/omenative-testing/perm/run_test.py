@@ -3781,17 +3781,29 @@ class CrashloopFaultTest(unittest.TestCase):
                           "ready": ready, "serving": serving},
         }
 
-    def _verdict(self, pod_state, events, surges=None):
+    def _verdict(self, pod_state, events, surges=None, ledger=None, snapshot=None, settle_s=0):
+        """The break verdict over fixed records: the events every read
+        returns (a list per read when the reads differ), the status rows'
+        claims seen during the roll, the migration ledger and the rows at
+        the read, with the re-read budget settle_s (0: one read)."""
         f = {"kind": "crashloop", "fired": True, "infra_fail": None, "form": "start", "case_id": "p999",
              "crash_inst": "1", "crash_comp": "engine", "crash_hash": "old", "kills": 0}
-        orig = run._isvc_events_since
-        try:
-            run._isvc_events_since = lambda case_id, since: events
+        reads = list(events) if events and isinstance(events[0], list) else [events]
+        clock = [0.0]
+
+        def events_since(case_id, since):
+            return reads[min(len(reads) - 1, int(clock[0]))]
+
+        def tick(seconds):
+            clock[0] += seconds
+        with mock.patch.object(run, "_isvc_events_since", events_since), \
+                mock.patch.object(run, "_inv_fetch_ledger", lambda case_id: ledger or []), \
+                mock.patch.object(run, "_ir_snapshot", lambda case_id: snapshot or {}), \
+                mock.patch.object(run, "ROWS_SETTLE_S", settle_s), mock.patch.object(run, "ROW_POLL_S", 1.0), \
+                mock.patch.object(run.time, "time", lambda: clock[0]), mock.patch.object(run.time, "sleep", tick):
             notes, checks = [], []
             return (run._crashloop_checks(f, pod_state, {"old"}, 1.0, "PASS", notes, checks, surges=surges),
                     notes, checks)
-        finally:
-            run._isvc_events_since = orig
 
     def test_gang_surge_replacements_follow_the_surge_index(self):
         events = self.SURGED + [
@@ -3867,6 +3879,63 @@ class CrashloopFaultTest(unittest.TestCase):
         verdict, notes, checks = self._verdict(healed, twice)
         self.assertEqual("PASS", verdict, notes)
         self.assertTrue(any("replaced at Instance 3" in c for c in checks), checks)
+
+    COMPLETED = [
+        ("RecreateUpdateCompleted", "OMENative component=engine instance=1 gang surge complete: instance 2 promoted to revision engine-new"),
+    ]
+    MOVED = [
+        ("MigrationRequestAccepted", "OMENative component=engine instance=1 migration accepted (uuid=abc, source-node=node-a, surge-index=2)"),
+    ]
+
+    def test_the_pair_is_read_from_every_record_that_names_it(self):
+        # The surge's completion names the pair the recorder may have
+        # dropped the start of; a migration's acceptance names the move.
+        self.assertEqual([("1", "2")], run._gang_surge_replacements(self.COMPLETED, "engine"))
+        self.assertEqual([("1", "2")], run._gang_surge_replacements(self.SURGED + self.COMPLETED, "engine"),
+                         "a start and its completion are one surge")
+        self.assertEqual([("1", "2")], run._gang_surge_replacements(self.MOVED, "engine"))
+        abandoned_then_done = self.SURGED + [
+            ("GangSurgeAbandoned", "OMENative component=engine instance=1 abandoned failed gang surge (surge-index=2); resetting to revision engine-old for a fresh rollout")
+        ] + self.COMPLETED
+        self.assertEqual([("1", "2")], run._gang_surge_replacements(abandoned_then_done, "engine"),
+                         "a completion is a surge that stood whatever the start count says")
+        # The migration ledger names the move with its replacement index
+        # once allocated; a failed move and one without an index are not
+        # where the Instance went.
+        ledger = [{"component": "engine", "sourceInstance": 1, "surgeInstance": 2, "phase": "Completed"},
+                  {"component": "engine", "sourceInstance": 0, "surgeInstance": 3, "phase": "Failed"},
+                  {"component": "engine", "sourceInstance": 0, "surgeInstance": -1, "phase": "Started"},
+                  {"component": "decoder", "sourceInstance": 1, "surgeInstance": 4, "phase": "Completed"}]
+        self.assertEqual([("1", "2")], run._ledger_surge_moves(ledger, "engine"))
+        self.assertEqual([("1", "4")], run._ledger_surge_moves(ledger, "decoder"))
+        self.assertEqual([], run._ledger_surge_moves(None, "engine"))
+        # The rows at the read, while a source still claims its replacement.
+        surge = {"type": "Update", "step": "SurgeDrain", "surgeIndex": 2, "targetRevision": "engine-new"}
+        snapshot = {"engine": {"hold": None, "rows": [{"index": 0, "phase": "Ready"},
+                                                      {"index": 1, "phase": "Updating", "operation": surge}]}}
+        self.assertEqual([("1", "2")], run._row_surge_claims(snapshot, "engine"))
+        self.assertEqual([], run._row_surge_claims(snapshot, "decoder"))
+        healed = {**self._gang(0, "new"), **self._gang(2, "new")}
+        for source, kwargs in (("completion", dict(events=self.COMPLETED)), ("move", dict(events=self.MOVED)),
+                               ("ledger", dict(events=[], ledger=ledger, settle_s=5)),
+                               ("rows", dict(events=[], snapshot=snapshot, settle_s=5))):
+            verdict, notes, checks = self._verdict(healed, **kwargs)
+            self.assertEqual("PASS", verdict, (source, notes))
+            self.assertTrue(any("replaced at Instance 2" in c for c in checks), (source, checks))
+
+    def test_the_chain_is_reread_within_the_settle_budget_before_the_verdict_fails(self):
+        # The start the first read did not see lands on the second: the
+        # recorder is behind the pods, so the verdict re-reads its records
+        # until the chain reaches an index with pods or the budget is out.
+        healed = {**self._gang(0, "new"), **self._gang(2, "new")}
+        verdict, notes, checks = self._verdict(healed, [[], [], self.SURGED], settle_s=10)
+        self.assertEqual("PASS", verdict, notes)
+        self.assertTrue(any("replaced at Instance 2" in c for c in checks), checks)
+        verdict, notes, _checks = self._verdict(healed, [[], [], self.SURGED], settle_s=1)
+        self.assertEqual("FAIL", verdict, "the re-read stops at the budget")
+        self.assertTrue(any("read at Instance 1: pods=0" in n and "no record named a replacement" in n for n in notes), notes)
+        verdict, _notes, _checks = self._verdict({**self._gang(0, "new"), **self._gang(1, "new")}, [[], self.SURGED], settle_s=10)
+        self.assertEqual("PASS", verdict, "an Instance with pods where the chain ends is read at once, nothing re-read")
 
     def test_events_since_counts_a_folded_repeat_once_per_occurrence(self):
         import subprocess
@@ -5837,6 +5906,41 @@ class CanaryStepBreakTest(unittest.TestCase):
                 track[k] = v
         return track
 
+    def test_an_instance_mid_repair_on_the_broken_revision_counts_as_broken_at_the_park(self):
+        # At the park the repaired canary Instance has no pod of either
+        # revision (its broken pod was deleted for the rebuild): it is on
+        # the broken revision, not a stable Instance that stopped serving,
+        # so the stable side is held to the Instances it still has.
+        def pod(i, hash_, ready):
+            return {"alive": True, "comp": "engine", "inst": str(i), "hash": hash_, "uid": f"{hash_}{i}",
+                    "ready": ready, "serving": ready}
+        pods = {f"e{i}": pod(i, "old", True) for i in range(6)}
+        pods["e6"], pods["e7"] = pod(6, "new", False), pod(7, "new", False)
+        ctx = {"N": {"engine": 8}, "pods_per_inst": {"engine": 1}, "old_hashes": {"old"}, "pod_state": pods,
+               "canary_hook": "canary-serving"}
+        f = {"kind": "crashloop", "form": "load", "crash_comp": "engine", "infra_fail": None}
+        track = self._track(park=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            run._new_break_track(ctx, f, track, {}, {"rolloutPhase": "Canarying"}, 0, 100.0, False)
+            del pods["e7"]   # its rebuild deleted the broken pod; the replacement is not up yet
+            ctx["canary_hook"] = "canary-failed"
+            run._new_break_track(ctx, f, track, {"failed": {"reason": "CapacityTimeout"}},
+                                 {"rolloutPhase": "Failed", "traffic": [{"percent": 100, "tag": "stable"}]}, 0, 110.0, False)
+        self.assertEqual(2, track["park"]["crash_instances"], "the Instance mid-repair is on the broken revision")
+        self.assertEqual(6, track["park"]["stable_serving"])
+        self.assertEqual(2, track["peak_crash"])
+        notes, checks = [], []
+        self.assertEqual("PASS", run._new_break_checks({"N": {"engine": 8}}, f, track, {"Failed"}, "PASS", notes, checks), notes)
+        self.assertTrue(any("6/8 serving, 2 on the broken revision" in c for c in checks), checks)
+        # A stable Instance with no pod is not the broken revision's.
+        del pods["e5"]
+        track = self._track(park=None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            run._new_break_track(ctx, f, track, {"failed": {"reason": "CapacityTimeout"}}, {"rolloutPhase": "Failed"},
+                                 0, 120.0, False)
+        self.assertEqual(1, track["park"]["crash_instances"])
+        self.assertEqual("FAIL", run._new_break_checks({"N": {"engine": 8}}, f, track, {"Failed"}, "PASS", [], []))
+
     def test_a_broken_new_revision_is_judged_on_the_operators_end_state(self):
         ctx = {"N": {"engine": 8}}
         f = {"kind": "crashloop", "form": "start", "crash_comp": "engine", "infra_fail": None}
@@ -6754,6 +6858,26 @@ class CrashloopNewFaultTest(unittest.TestCase):
         self.assertEqual(2, run._crash_new_allowance(spec(2, 1), "engine", 4))
         self.assertEqual(0, run._crash_new_allowance({}, "engine", 4))
 
+    def test_a_drain_first_load_form_allows_the_start_admitted_beside_the_promoted_crash(self):
+        # form=load: the crashing pod passes readiness and is promoted, and
+        # with minReadySeconds at zero the roll admits the next Instance's
+        # start while the promoted one is still healthy; when it crashes two
+        # Instances are off at once, the floor a Deployment reaches too. The
+        # surge strategy promotes the replacement beside its source and keeps
+        # the strict budget; form=start never promotes anything.
+        def spec(strat, surge, unavail):
+            return {"engine": {"lifecycle": {"updateStrategy": {
+                "type": strat, "rollingUpdate": {"maxSurge": surge, "maxUnavailable": unavail}}}}}
+        self.assertEqual(2, run._crash_new_allowance(spec("RecreatePod", 0, 1), "engine", 4, form="load"))
+        self.assertEqual(2, run._crash_new_allowance(spec("InPlaceIfPossible", 0, 1), "engine", 4, form="load"))
+        self.assertEqual(2, run._crash_new_allowance(spec("InPlaceOnly", 0, 1), "engine", 4, form="load"))
+        self.assertEqual(3, run._crash_new_allowance(spec("RecreatePod", 0, 2), "engine", 4, form="load"))
+        self.assertEqual(1, run._crash_new_allowance(spec("RecreatePod", 0, 1), "engine", 4, form="start"))
+        self.assertEqual(1, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0), "engine", 4, form="load"))
+        self.assertEqual(1, run._crash_new_allowance(spec("", 0, 1), "engine", 4, form="load"),
+                         "a strategy the spec does not name keeps the strict budget")
+        self.assertEqual(1, run._crash_new_allowance(spec("RecreatePod", 0, 1), "engine", 4))
+
     def test_tally_splits_instances_by_what_they_run(self):
         old, crash = {"old"}, {"bad"}
         pods = {
@@ -6791,6 +6915,25 @@ class CrashloopNewFaultTest(unittest.TestCase):
         self.assertEqual((None, []), run._crash_new_why({"engine": {"hold": None, "rows": [{"index": 0, "phase": "Updating"}]}}, [], "engine"))
         self.assertEqual((None, []), run._crash_new_why({}, [], "engine"))
 
+    def test_why_is_the_ladder_a_budget_hold_or_a_failed_row_not_a_coordination_gate(self):
+        # The group's opening hold (gate=Plan, "no active run for this
+        # rollout group") is the run opening, not the crash; so is any
+        # pacing gate. The retry ladder's backoff and its bound, and a
+        # budget hold, say why the crashing revision stopped.
+        def snap(gate):
+            return {"engine": {"hold": {"gate": gate, "target": "p999-engine-abc",
+                                        "reason": "rollout plan not pinned: no active run for this rollout group"},
+                               "rows": [{"index": 0, "phase": "Updating"}]}}
+        for gate in ("Plan", "Pairing", "Ratio", "Sequential"):
+            self.assertEqual((None, []), run._crash_new_why(snap(gate), [], "engine"), gate)
+        for gate in ("RetryBlock", "Held", "Budget"):
+            status, _said = run._crash_new_why(snap(gate), [], "engine")
+            self.assertTrue(status and status.startswith(f"rolloutHold gate={gate}"), (gate, status))
+        # A Failed row beside the opening hold still says why.
+        plan = snap("Plan")
+        plan["engine"]["rows"] = [{"index": 0, "phase": "Failed", "lastFailure": "CrashLoopBackOff"}]
+        self.assertEqual("Instance 0 row Failed (CrashLoopBackOff)", run._crash_new_why(plan, [], "engine")[0])
+
     def test_peer_state_is_converged_held_or_rolling(self):
         ctx = {"old_hashes": {"old"}, "N": {"decoder": 2}, "agg": {"decoder": (2, 2, 2)},
                "pod_state": {"d0": {"alive": True, "comp": "decoder", "hash": "new", "serving": True},
@@ -6805,8 +6948,8 @@ class CrashloopNewFaultTest(unittest.TestCase):
     def _good_out():
         return {"hold": {"budget": 580, "bitten_at": 30.0, "status_at": 200.0, "status": "rolloutHold gate=Held reason=CrashLoopBackOff",
                          "event_at": 205.0, "event": "RetryHeld: component=engine held", "peak_off": 0, "off_span": 0.0,
-                         "min_running": 4, "peak_crash": 1, "attempts_at_status": 3, "attempts_after_status": [],
-                         "attempts": 3, "peer": {}, "believed": True},
+                         "min_running": 4, "peak_crash": 1, "attempts_at_status": 3, "attempts_unannounced": [],
+                         "windows": [], "held_at": 200.0, "attempts": 3, "peer": {}, "believed": True},
                 "fix": {"state": "CONVERGED", "converged_at": 60.0, "budget": 580, "rebuilt": [], "holds_left": {}}}
 
     def test_verdict_states_the_operators_end_state(self):
@@ -6839,9 +6982,12 @@ class CrashloopNewFaultTest(unittest.TestCase):
         v, notes, _ = judge(lambda o: o["hold"].update(event_at=None, event=""))
         self.assertEqual("FAIL", v)
         self.assertTrue(any("InstanceFailed/RetryHeld event" in n for n in notes))
-        v, notes, _ = judge(lambda o: o["hold"].update(attempts_after_status=["u9"]))
+        v, notes, _ = judge(lambda o: o["hold"].update(attempts_unannounced=["u9"]))
         self.assertEqual("FAIL", v)
-        self.assertTrue(any("after the hold was reported" in n for n in notes))
+        self.assertTrue(any("outside any retry it announced" in n for n in notes))
+        v, _, checks = judge(lambda o: o["hold"].update(windows=[260.0], held_at=None))
+        self.assertEqual("PASS", v, "a ladder that announced its retries and had not held yet is not a failure")
+        self.assertTrue(any(c.startswith("  ⚠ stopped") and "had not reached its bound" in c for c in checks), checks)
         v, notes, _ = judge(lambda o: o["hold"].update(peer={"decoder": "rolling"}))
         self.assertEqual("FAIL", v)
         self.assertTrue(any("neither converged nor held" in n for n in notes))
@@ -7012,6 +7158,155 @@ class CrashloopNewFaultTest(unittest.TestCase):
                                  "the group rolls the decoder under the same strategy")
                 self.assertIn("- components: [engine, decoder]" if kv["co"] in ("bluegreen", "ratio", "rolling")
                               else "- components: [engine]", text)
+
+
+class CrashloopNewLadderTest(unittest.TestCase):
+    """The crashloop:new watch replayed against a scripted timeline: the
+    clock advances one second per watcher read, and the pods, the
+    InferenceReplica snapshot and the ISVC events at each second come from
+    the script. The ladder replayed is the chart's updateRetry: a backoff
+    of a minute that doubles, held after three attempts."""
+
+    TARGET = "p999-engine-crash"
+    FAILED_EVENT = ("InstanceFailed", "InferenceReplica sandbox/p999-engine component=engine instance=0 "
+                                      "escalated to Phase=Failed (pod=\"\"): CrashLoopBackOff")
+
+    @staticmethod
+    def _stamp(t):
+        return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _pod(self, name, inst, hash_, uid, created, ready=True):
+        return {name: {"alive": True, "comp": "engine", "inst": str(inst), "hash": hash_, "uid": uid,
+                       "ready": ready, "serving": ready, "created": self._stamp(created)}}
+
+    def _snapshot(self, hold=None, retry=None, failed=()):
+        rows = [{"index": i, "phase": "Failed" if i in failed else "Ready"} for i in range(4)]
+        return {"engine": {"hold": hold, "rows": rows, "retry": retry or []}}
+
+    def _backoff(self, attempts, next_at):
+        hold = {"gate": "RetryBlock", "target": self.TARGET,
+                "reason": f"update to {self.TARGET} in backoff after {attempts} failed attempt(s): CrashLoopBackOff"}
+        block = {"targetRevision": self.TARGET, "state": "Backoff", "attemptsStarted": attempts,
+                 "nextRetryAt": self._stamp(next_at)}
+        return {"hold": hold, "retry": [block], "failed": (0,)}
+
+    def _held(self, attempts):
+        hold = {"gate": "Held", "target": self.TARGET,
+                "reason": f"update to {self.TARGET} held after {attempts} failed attempt(s): CrashLoopBackOff"}
+        return {"hold": hold, "retry": [{"targetRevision": self.TARGET, "state": "Held", "attemptsStarted": attempts}],
+                "failed": (0,)}
+
+    def _fleet(self, attempt_uid, attempt_at):
+        """Three Instances serving the running revision and the attempt's
+        pod, on the crashing revision and not Ready, at Instance 0."""
+        return {**self._pod("e1", 1, "old", "o1", 0), **self._pod("e2", 2, "old", "o2", 0),
+                **self._pod("e3", 3, "old", "o3", 0),
+                **self._pod("e0", 0, "crash", attempt_uid, attempt_at, ready=False)}
+
+    def _replay(self, script):
+        """Run the watch over the script ({second: {"pods": …, "snapshot":
+        …, "events": …}}, each key holding until a later second sets it).
+        Returns the hold record and the clock when the watch returned."""
+        clock = [0.0]
+        state = {"pods": {}, "snapshot": self._snapshot(), "events": []}
+
+        def read_one(ctx, timeout=1.0):
+            clock[0] += 1.0
+            for key, value in (script.get(int(clock[0])) or {}).items():
+                state[key] = value
+            ctx["pod_state"] = dict(state["pods"])
+
+        waiting = {"status": {"containerStatuses": [{"name": run.MAIN_CONTAINER,
+                                                     "state": {"waiting": {"reason": "CrashLoopBackOff"}}}]}}
+        ctx = {"N": {"engine": 4, "decoder": 0, "router": 0}, "pods_per_inst": {"engine": 1}, "old_hashes": {"old"},
+               "configured": {"engine"}, "fault": {"form": "start"}, "case_id": "p999", "trigger_ts": 0.0,
+               "closed": False, "pod_state": {}, "agg": {}}
+        with mock.patch.object(run.time, "time", lambda: clock[0]), mock.patch.object(run, "_read_one", read_one), \
+                mock.patch.object(run, "_ir_snapshot", lambda case_id: state["snapshot"]), \
+                mock.patch.object(run, "_isvc_events_since", lambda case_id, since: list(state["events"])), \
+                mock.patch.object(run, "_get_pod", lambda name: waiting), \
+                contextlib.redirect_stdout(io.StringIO()):
+            hold = run._crash_new_watch_hold(ctx, "engine", {"engine"}, 1, set(), {})
+        return hold, clock[0]
+
+    def _judge(self, hold):
+        ctx = {"N": {"engine": 4, "decoder": 0, "router": 0}}
+        out = {"hold": hold, "fix": {"state": "CONVERGED", "converged_at": 60.0, "budget": 580, "rebuilt": [], "holds_left": {}}}
+        notes, checks = [], []
+        verdict = run._crash_new_checks(ctx, {"form": "start", "infra_fail": None}, out, "engine", {"engine"}, 1,
+                                        "PASS", notes, checks)
+        return verdict, notes, checks
+
+    def _ladder_script(self):
+        """The chart's ladder as the product walks it: the first attempt
+        fails and backs off a minute, the retry comes at the announced
+        time and fails into a two-minute backoff, the third attempt fails
+        and the ladder holds. The coordination gate's opening hold at the
+        first second is not the why."""
+        plan = {"gate": "Plan", "target": self.TARGET,
+                "reason": "rollout plan not pinned: no active run for this rollout group (run opening)"}
+        return {
+            1: {"pods": self._fleet("u1", 1), "snapshot": self._snapshot(hold=plan)},
+            64: {"snapshot": self._snapshot(**self._backoff(1, 124)), "events": [self.FAILED_EVENT]},
+            124: {"pods": self._fleet("u2", 124), "snapshot": self._snapshot()},
+            185: {"snapshot": self._snapshot(**self._backoff(2, 305))},
+            305: {"pods": self._fleet("u3", 305), "snapshot": self._snapshot()},
+            365: {"snapshot": self._snapshot(**self._held(3)),
+                  "events": [self.FAILED_EVENT, ("RetryHeld", f"InferenceReplica sandbox/p999-engine component=engine "
+                                                              f"update to {self.TARGET} held after 3 failed attempt(s)")]},
+        }
+
+    def test_retries_at_the_announced_times_up_to_the_ladders_bound_are_not_further_attempts(self):
+        hold, ended = self._replay(self._ladder_script())
+        poll = run.CRASH_NEW_POLL_S
+        self.assertAlmostEqual(64, hold["status_at"], delta=poll, msg="the opening Plan hold is not the why")
+        self.assertEqual(1, hold["attempts_at_status"])
+        self.assertEqual(3, hold["attempts"])
+        self.assertEqual([], hold["attempts_unannounced"],
+                         "a retry at the time the backoff announced is the ladder, not the roll going on")
+        self.assertEqual([124.0, 305.0], hold.get("windows"))
+        self.assertAlmostEqual(365, hold.get("held_at") or 0, delta=poll)
+        self.assertTrue(hold["believed"])
+        self.assertGreaterEqual(ended, 365 + run.IDLE_HOLD_S, "the watch waits for the ladder's bound, then believes it")
+        self.assertLess(ended, 365 + run.IDLE_HOLD_S + 2 * poll + 1)
+        verdict, notes, checks = self._judge(hold)
+        self.assertEqual("PASS", verdict, notes)
+        self.assertTrue(any(c.startswith("  ✓ stopped") and "2 retry time(s) announced" in c
+                            and f"held at {hold['held_at']:.0f}s" in c for c in checks), checks)
+
+    def test_an_attempt_before_the_announced_retry_or_past_the_bound_fails(self):
+        early = self._ladder_script()
+        early[90] = {"pods": self._fleet("u9", 90)}
+        hold, _ended = self._replay(early)
+        self.assertEqual(["u9"], hold.get("attempts_unannounced"))
+        verdict, notes, _checks = self._judge(hold)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("outside any retry it announced" in n for n in notes), notes)
+        late = self._ladder_script()
+        late[400] = {"pods": self._fleet("u4", 400)}
+        hold, _ended = self._replay(late)
+        self.assertEqual(["u4"], hold.get("attempts_unannounced"), "nothing is expected past the ladder's bound")
+        self.assertEqual("FAIL", self._judge(hold)[0])
+        # Two pods at one announced time: the retry is one attempt.
+        twice = self._ladder_script()
+        twice[126] = {"pods": {**self._fleet("u2", 124), **self._pod("e4", 4, "crash", "u5", 126, ready=False)}}
+        hold, _ended = self._replay(twice)
+        self.assertEqual(["u5"], hold.get("attempts_unannounced"))
+
+    def test_a_failed_row_with_no_retry_announced_is_believed_after_the_quiet_window(self):
+        script = {1: {"pods": self._fleet("u1", 1)},
+                  76: {"snapshot": self._snapshot(failed=(0,)), "events": [self.FAILED_EVENT]}}
+        hold, ended = self._replay(script)
+        self.assertEqual(76, round(hold["status_at"]))
+        self.assertTrue(hold["believed"])
+        self.assertLess(ended, 76 + run.IDLE_HOLD_S + 5)
+        verdict, _notes, checks = self._judge(hold)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any(c.startswith("  ✓ stopped: no further engine pod") for c in checks), checks)
+        script[100] = {"pods": self._fleet("u2", 100)}
+        hold, _ended = self._replay(script)
+        self.assertEqual(["u2"], hold.get("attempts_unannounced"), "a pod with no retry announced is the roll going on")
+        self.assertEqual("FAIL", self._judge(hold)[0])
 
 
 class RatioBandTest(unittest.TestCase):

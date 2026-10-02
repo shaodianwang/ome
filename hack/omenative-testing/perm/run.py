@@ -1198,11 +1198,7 @@ def _note_gang_surges(inv, comp, rows):
     surge complete."""
     pairs = inv.setdefault("surges", [])
     by_index = {str(r.get("index")): r for r in rows}
-    claims = {}
-    for idx, r in by_index.items():
-        op = r.get("operation") or {}
-        if op.get("type") == "Update" and op.get("surgeIndex") is not None:
-            claims[idx] = str(op["surgeIndex"])
+    claims = {idx: _row_surge_claim(r) for idx, r in by_index.items() if _row_surge_claim(r) is not None}
 
     def reset(pair):
         c, src, dst, rev = pair
@@ -2057,6 +2053,14 @@ CRASHLOOP_PARAMS = {CRASHLOOP_VICTIM, CRASHLOOP_NEW}
 # The events that say why a roll toward a crashing revision stopped: the
 # retry ladder's hold, or an Instance escalated to Failed.
 CRASH_NEW_WHY_EVENTS = {"RetryHeld", "InstanceFailed"}
+# The rolloutHold gates that say it in status: the retry ladder's backoff
+# (its retry block names the next attempt's time) and its bound, and a
+# budget hold. A coordination gate's hold (Plan, Pairing, Ratio,
+# Sequential) is the group opening or pacing its run, not the crash.
+RETRY_BLOCK_GATE, HELD_GATE, BUDGET_GATE = "RetryBlock", "Held", "Budget"
+CRASH_NEW_WHY_GATES = {RETRY_BLOCK_GATE, HELD_GATE, BUDGET_GATE}
+# The retry block state whose nextRetryAt is an attempt still to come.
+RETRY_BLOCK_BACKOFF = "Backoff"
 # form=load kills the runner this often while it is up; the kubelet's own
 # back-off then holds each restart longer than the last.
 CRASH_KILL_INTERVAL_S = float(os.environ.get("OME_TEST_CRASH_KILL_INTERVAL_S", "15"))
@@ -5359,44 +5363,122 @@ def _isvc_events_since(case_id, since_epoch):
     return [ev for _when, evs in found for ev in evs]
 
 
-# The events a gang surge records on the ISVC: the start names the fresh
-# index the replacement is created at, and an abandon names a replacement
-# the source retired instead (a failed one, or one a newer revision
-# superseded).
+# The events that name an Instance's replacement index on the ISVC: a gang
+# surge's start and its completion name the fresh index the replacement
+# stands at, an abandon names a replacement the source retired instead (a
+# failed one, or one a newer revision superseded), and a migration's
+# acceptance names the index the move surges to.
 GANG_SURGE_START_RE = re.compile(
     r"component=(?P<comp>\S+) instance=(?P<src>\d+) gang surge to revision \S+ \(surge-index=(?P<dst>\d+)\)")
+GANG_SURGE_COMPLETE_RE = re.compile(
+    r"component=(?P<comp>\S+) instance=(?P<src>\d+) gang surge complete: instance (?P<dst>\d+) promoted")
 GANG_SURGE_ABANDON_RE = re.compile(
     r"component=(?P<comp>\S+) instance=(?P<src>\d+) abandoned (?:failed|superseded) gang surge \(surge-index=(?P<dst>\d+)\)")
+MIGRATION_SURGE_RE = re.compile(
+    r"component=(?P<comp>\S+) instance=(?P<src>\d+) migration accepted \(.*surge-index=(?P<dst>\d+)\)")
+SURGE_PAIR_EVENTS = {"RecreateUpdateStarted": GANG_SURGE_START_RE, "RecreateUpdateCompleted": GANG_SURGE_COMPLETE_RE,
+                     "GangSurgeAbandoned": GANG_SURGE_ABANDON_RE, "MigrationRequestAccepted": MIGRATION_SURGE_RE}
+
+
+def _surge_pair_named(reason, message, comp):
+    """The (source index, replacement index) an event names for comp, or
+    None when it names no replacement of comp."""
+    pattern = SURGE_PAIR_EVENTS.get(reason)
+    mm = pattern.search(message) if pattern else None
+    if mm and mm.group("comp") == comp:
+        return mm.group("src"), mm.group("dst")
+    return None
 
 
 def _gang_surge_replacements(events, comp):
-    """(source index, replacement index) for every gang surge of comp whose
-    replacement stood, oldest first: the surge starts the abandons do not
-    cancel out, a pair's last starts being the ones that stand. A gang under
-    SurgeThenDrain is replaced at a fresh Instance index and its source index
-    retired, so the Instance a verdict follows moves. The start is the record
-    to read because the source row is removed as the surge completes, so the
-    completion leaves no row behind to name the pair. events must be oldest
-    first (_isvc_events_since)."""
-    starts, abandoned = [], {}
-    for reason, m in events:
-        if reason == "RecreateUpdateStarted":
-            mm = GANG_SURGE_START_RE.search(m)
-            if mm and mm.group("comp") == comp:
-                starts.append((mm.group("src"), mm.group("dst")))
-        elif reason == "GangSurgeAbandoned":
-            mm = GANG_SURGE_ABANDON_RE.search(m)
-            if mm and mm.group("comp") == comp:
-                pair = (mm.group("src"), mm.group("dst"))
-                abandoned[pair] = abandoned.get(pair, 0) + 1
-    standing = {pair: starts.count(pair) - abandoned.get(pair, 0) for pair in set(starts)}
+    """(source index, replacement index) for every gang surge or move of
+    comp whose replacement stood, oldest first: a pair stands as many times
+    as its starts outnumber its abandons, or as its completions say — a
+    completion is a surge that stood whether or not the recorder kept its
+    start. A gang under SurgeThenDrain is replaced at a fresh Instance
+    index and its source index retired, so the Instance a verdict follows
+    moves. events must be oldest first (_isvc_events_since); a pair is
+    placed by its last standing start, else by its completion."""
+    starts, completions, abandoned, placed = [], [], defaultdict(int), {}
+    for position, (reason, message) in enumerate(events):
+        pair = _surge_pair_named(reason, message, comp)
+        if pair is None:
+            continue
+        if reason == "GangSurgeAbandoned":
+            abandoned[pair] += 1
+        elif reason == "RecreateUpdateCompleted":
+            completions.append(pair)
+            placed.setdefault(pair, position)
+        else:
+            starts.append(pair)
+            placed[pair] = position
+    standing = {pair: max(starts.count(pair) - abandoned[pair], completions.count(pair))
+                for pair in set(starts) | set(completions)}
+    return [pair for pair, _position in sorted(placed.items(), key=lambda kv: kv[1]) if standing[pair] > 0]
+
+
+def _ledger_surge_moves(ledger, comp):
+    """(source index, replacement index) of every move of comp the
+    migration ledger records with its replacement index allocated and the
+    move not failed, oldest first."""
     out = []
-    for pair in reversed(starts):
-        if standing[pair] > 0:
-            standing[pair] -= 1
+    for entry in ledger or []:
+        if str(entry.get("component") or "") != comp or str(entry.get("phase") or "") == "Failed":
+            continue
+        replacement = _surge_index_allocated(entry)
+        pair = (str(entry.get("sourceInstance")), str(replacement))
+        if replacement is not None and pair not in out:
             out.append(pair)
-    out.reverse()
     return out
+
+
+def _row_surge_claim(row):
+    """The replacement index a status row's update claims, or None."""
+    op = row.get("operation") or {}
+    if op.get("type") == "Update" and op.get("surgeIndex") is not None:
+        return str(op["surgeIndex"])
+    return None
+
+
+def _row_surge_claims(snapshot, comp):
+    """(source index, replacement index) the status rows of comp claim at
+    this read (_ir_snapshot), by index."""
+    out = []
+    for row in ((snapshot or {}).get(comp) or {}).get("rows") or []:
+        replacement = _row_surge_claim(row)
+        if replacement is not None:
+            out.append((str(row.get("index")), replacement))
+    return out
+
+
+def _victim_surge_pairs(comp, events, surges=None, ledger=None, snapshot=None):
+    """The replacement pairs of comp from every record that names one,
+    oldest claim first: the status rows' claims seen during the roll
+    (surges), the rows at this read, the ISVC events and the migration
+    ledger. The recorder drops an object's events past a burst and a
+    source row goes as its surge completes, so no one record is enough."""
+    pairs = [(src, dst) for c, src, dst, _rev in (surges or []) if c == comp]
+    for pair in (_row_surge_claims(snapshot, comp) + _gang_surge_replacements(events, comp)
+                 + _ledger_surge_moves(ledger, comp)):
+        if pair not in pairs:
+            pairs.append(pair)
+    return pairs
+
+
+def _victim_chain(f, rec, pod_state, since, events, surges):
+    """The Instance indices the victim passed through, and the events the
+    chain was read with. While the chain ends at an index with no alive
+    pod, the records are re-read every ROW_POLL_S for up to ROWS_SETTLE_S:
+    a claim can land after the pods have converged."""
+    comp, inst, case_id = rec["crash_comp"], rec["crash_inst"], f["case_id"]
+    chain = _follow_gang_surges(inst, _victim_surge_pairs(comp, events, surges))
+    deadline = time.time() + ROWS_SETTLE_S
+    while not _instance_pods(pod_state, comp, chain[-1]) and time.time() < deadline:
+        time.sleep(ROW_POLL_S)
+        events = _isvc_events_since(case_id, since)
+        pairs = _victim_surge_pairs(comp, events, surges, _inv_fetch_ledger(case_id), _ir_snapshot(case_id))
+        chain = _follow_gang_surges(inst, pairs)
+    return chain, events
 
 
 def _instance_pods(pod_state, comp, inst):
@@ -5445,27 +5527,29 @@ def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, chec
     its running revision, with the repair recorded. Either way the Instance
     is followed through the gang surges that replaced it at a fresh index:
     the pods are read at the index it ended at, and a repair on any index of
-    the chain counts. The surges are the pairs the status rows were seen to
-    claim (surges, oldest claim first), then the ones the ISVC events kept:
-    the recorder drops an object's events past a burst, the rows do not."""
+    the chain counts. The surges come from every record that names a pair
+    (_victim_surge_pairs), re-read within ROWS_SETTLE_S while the chain
+    ends at an index with no pod (_victim_chain)."""
     if not f or f.get("kind") not in BREAK_FAULTS or not f.get("fired") or f.get("infra_fail"):
         return verdict
     if _fault_once(f):
         return verdict   # a crash that happens once is judged by _once_checks
     if _fault_on_new(f):
         return verdict   # a break on the pushed revision is judged by _new_break_checks
-    events = _isvc_events_since(f["case_id"], trigger_ts or 0)
+    since = trigger_ts or 0
+    events = _isvc_events_since(f["case_id"], since)
     for rec in _break_victims(f):
-        verdict = _break_victim_checks(f, rec, pod_state, old_hashes, events, bumped, verdict, notes, checks, surges)
+        chain, events = _victim_chain(f, rec, pod_state, since, events, surges)
+        verdict = _break_victim_checks(f, rec, pod_state, old_hashes, events, bumped, verdict, notes, checks, chain)
     return verdict
 
 
-def _break_victim_checks(f, rec, pod_state, old_hashes, events, bumped, verdict, notes, checks, surges=None):
-    """The break verdict for one victim Instance (see _crashloop_checks)."""
+def _break_victim_checks(f, rec, pod_state, old_hashes, events, bumped, verdict, notes, checks, chain=None):
+    """The break verdict for one victim Instance (see _crashloop_checks),
+    followed through the index chain its replacements made (read from the
+    events alone when the caller read none)."""
     inst, comp, kind = rec["crash_inst"], rec["crash_comp"], f["kind"]
-    pairs = [(src, dst) for c, src, dst, _rev in (surges or []) if c == comp]
-    pairs += [pair for pair in _gang_surge_replacements(events, comp) if pair not in pairs]
-    chain = _follow_gang_surges(inst, pairs)
+    chain = chain or _follow_gang_surges(inst, _gang_surge_replacements(events, comp))
     final = chain[-1]
     moved = f" (replaced at Instance {final} by its gang surge)" if final != inst else ""
     where = f"{comp} Instance {inst}{moved}"
@@ -5515,8 +5599,9 @@ def _break_victim_checks(f, rec, pod_state, old_hashes, events, bumped, verdict,
     off = [n for n, p in pods if not p.get("hash") or p["hash"] in (old_hashes or set())]
     if not pods or off or down:
         verdict = "FAIL"
+        unmoved = "; no record named a replacement for it" if not pods and final == inst else ""
         notes.append(f"{kind} Instance {comp}/{inst} did not end on the new revision serving "
-                     f"(read at Instance {final}: pods={len(pods)} old-revision={off} not-serving={down})")
+                     f"(read at Instance {final}: pods={len(pods)} old-revision={off} not-serving={down}{unmoved})")
         checks.append(f"  ✗ {kind}: {where} must end on the new revision and serving; "
                       f"pods={len(pods)} still old-revision={off} not-serving={down}")
     else:
@@ -6142,7 +6227,13 @@ def _new_break_track(ctx, f, track, can, comp_status, step, now_rel, exit_fired)
         if pod.get("ready"):
             track["ready_seen"].add(name)
     crash_instances = {str(p.get("inst", "0")) for _n, p in canary_pods}
-    track["peak_crash"] = max(track["peak_crash"], len(crash_instances))
+    # An Instance the broken revision reached that has no pod of either
+    # revision is mid-repair on it (its pod deleted for the rebuild), not a
+    # stable Instance that stopped serving.
+    reached = track.setdefault("crash_indices", set())
+    reached |= crash_instances
+    broken = crash_instances | {idx for idx in reached if not _instance_pods(ctx["pod_state"], comp, idx)}
+    track["peak_crash"] = max(track["peak_crash"], len(broken))
     if track["bite"] is None:
         track["bite"] = _new_break_bite(f, ctx["pod_state"], canary_pods, track["ready_seen"], ctx["canary_hook"], step, now_rel)
         if track["bite"]:
@@ -6154,7 +6245,7 @@ def _new_break_track(ctx, f, track, can, comp_status, step, now_rel, exit_fired)
         pct = next((tr.get("percent", 0) for tr in (comp_status.get("traffic") or []) if tr.get("latestRevision")), 0)
         track["park"] = {"at": now_rel, "step": step, "reason": str((can.get("failed") or {}).get("reason") or ""),
                          "canary_traffic": pct, "stable_serving": _stable_serving(ctx, comp),
-                         "crash_instances": len(crash_instances)}
+                         "crash_instances": len(broken)}
         print(f"    park: step={step} reason={track['park']['reason'] or 'none'} canary traffic {pct}% "
               f"stable serving {track['park']['stable_serving']}/{ctx['N'][comp]}")
 
@@ -6841,13 +6932,39 @@ def _surge_count(n, surge):
         return 0
 
 
-def _crash_new_allowance(spec, comp, n):
-    """How many Instances of a Component its budget lets off the running
-    revision at once: the larger of its surge and unavailability budgets,
-    resolved against n."""
-    ru = (((((spec or {}).get(comp) or {}).get("lifecycle") or {}).get("updateStrategy") or {})
-          .get("rollingUpdate") or {})
-    return max(_surge_count(n, ru.get("maxSurge", 0)), resolve_max_unavailable(ru.get("maxUnavailable", 0), n))
+# The strategies that drain an Instance before its replacement is up. Under
+# form=load the replacement passes readiness and is promoted, and with
+# minReadySeconds at zero the roll admits the next Instance's start while
+# the promoted one is still healthy; when it crashes two Instances are off
+# at once, the floor a Deployment reaches too. The surge strategy promotes
+# the replacement beside its source and keeps the strict budget.
+DRAIN_FIRST_STRATEGIES = {"RecreatePod", "InPlaceIfPossible", "InPlaceOnly"}
+
+
+def _crash_new_allowance(spec, comp, n, form=None):
+    """How many Instances of a Component may be off the running revision at
+    once while a push whose revision crashes rolls: the larger of its surge
+    and unavailability budgets, resolved against n, plus the one start a
+    drain-first strategy admits beside the promoted crash under form=load
+    (DRAIN_FIRST_STRATEGIES)."""
+    strategy = ((((spec or {}).get(comp) or {}).get("lifecycle") or {}).get("updateStrategy") or {})
+    ru = strategy.get("rollingUpdate") or {}
+    budget = max(_surge_count(n, ru.get("maxSurge", 0)), resolve_max_unavailable(ru.get("maxUnavailable", 0), n))
+    if form == "load" and str(strategy.get("type") or "") in DRAIN_FIRST_STRATEGIES:
+        return budget + 1
+    return budget
+
+
+def _crash_new_case_allowance(ctx, f, victim):
+    """The case's allowance for the victim Component (_crash_new_allowance
+    against the live spec), noted on the fault when it exceeds the budget
+    so the verdict says where the extra Instance comes from."""
+    spec, n = _isvc_spec(ctx["case_id"]), ctx["N"][victim]
+    budget, allowance = _crash_new_allowance(spec, victim, n), _crash_new_allowance(spec, victim, n, f["form"])
+    if allowance > budget:
+        f["notes"].append(f"allowance {allowance} = budget {budget} + the start a drain-first strategy admits while "
+                          f"the promoted crashing Instance is still healthy (form={f['form']}, minReadySeconds 0)")
+    return allowance
 
 
 def _crash_new_tally(pod_state, pods_per_inst, comp, old_hashes, crash_hashes):
@@ -6888,22 +7005,23 @@ def _ir_snapshot(case_id):
         comp = (it.get("spec") or {}).get("component")
         st = it.get("status") or {}
         if comp:
-            out[comp] = {"hold": st.get("rolloutHold"), "rows": _instance_rows(st)}
+            out[comp] = {"hold": st.get("rolloutHold"), "rows": _instance_rows(st), "retry": st.get("retryBlocks") or []}
     return out
 
 
 def _crash_new_why(snapshot, events, victim):
     """(status, events) of what the product says about the crashing
-    revision: the victim Component's rolloutHold or a victim Instance row at
-    Failed (None when neither), and the hold or escalation events naming the
-    victim Component."""
+    revision: the victim Component's rolloutHold from a gate that says why
+    (CRASH_NEW_WHY_GATES) or a victim Instance row at Failed (None when
+    neither), and the hold or escalation events naming the victim
+    Component."""
     comp = snapshot.get(victim) or {}
     hold = comp.get("hold")
     failed = [row for row in comp.get("rows", []) if str(row.get("phase")) == "Failed"]
     said = [f"{reason}: {msg}" for reason, msg in events
             if reason in CRASH_NEW_WHY_EVENTS and f"component={victim}" in msg]
     status = None
-    if hold:
+    if hold and str(hold.get("gate")) in CRASH_NEW_WHY_GATES:
         status = f"rolloutHold gate={hold.get('gate')} target={str(hold.get('target'))[-12:]} reason={str(hold.get('reason'))[:120]}"
     elif failed:
         row = failed[0]
@@ -6927,23 +7045,84 @@ def _crash_new_peer_state(ctx, comp, snapshot):
     return "rolling"
 
 
+def _crash_new_ladder(snapshot, victim):
+    """What the retry ladder reports for the victim Component: {"gate": its
+    rolloutHold's gate, "next_retry_at": the epoch of the attempt a backoff
+    announces (its retry block's nextRetryAt), None when no attempt is
+    pending}; None when the Component reports no hold that says why."""
+    comp = snapshot.get(victim) or {}
+    hold = comp.get("hold") or {}
+    gate = str(hold.get("gate") or "")
+    if gate not in CRASH_NEW_WHY_GATES:
+        return None
+    next_retry_at = None
+    if gate == RETRY_BLOCK_GATE:
+        for block in comp.get("retry") or []:
+            if block.get("targetRevision") == hold.get("target") and block.get("state") == RETRY_BLOCK_BACKOFF:
+                next_retry_at = _event_epoch(block.get("nextRetryAt"))
+    return {"gate": gate, "next_retry_at": next_retry_at}
+
+
+def _crash_new_note_ladder(hold, ladder, now, push_ts, moves):
+    """Record what the ladder says this poll — a retry time newly
+    announced, or its bound reached — as the story moving. True while an
+    announced attempt is still to come."""
+    if not ladder:
+        return False
+    at = ladder["next_retry_at"]
+    if at is not None and at not in hold["windows"]:
+        hold["windows"].append(at)
+        moves.extend((now, at))
+        print(f"    retry announced: the ladder's next attempt at {at - push_ts:.0f}s")
+    if ladder["gate"] == HELD_GATE and hold["held_at"] is None:
+        hold["held_at"] = now - push_ts
+        moves.append(now)
+        print(f"    held: the ladder reached its bound ({hold['held_at']:.0f}s); quiet for {IDLE_HOLD_S}s to believe it")
+    return at is not None and at > now
+
+
+def _crash_new_unannounced(created, windows, why_at, held_at, per_attempt):
+    """The crash-revision pods created after status first said why that no
+    announced retry explains, oldest first. A backoff's next-retry time
+    explains one attempt: per_attempt pods created at or after it and
+    before the next announced time; nothing is explained once the ladder
+    reached its bound. created is {pod uid: creation epoch}; a pod in the
+    poll that saw the why predates it."""
+    out, used = [], defaultdict(int)
+    for uid, at in sorted(created.items(), key=lambda kv: (kv[1], kv[0])):
+        if at <= why_at + CRASH_NEW_POLL_S:
+            continue
+        window = max((w for w in windows if w - CRASH_NEW_POLL_S <= at), default=None)
+        past_bound = held_at is not None and at > held_at + CRASH_NEW_POLL_S
+        if window is None or past_bound or used[window] >= per_attempt:
+            out.append(uid)
+        else:
+            used[window] += 1
+    return out
+
+
 def _crash_new_watch_hold(ctx, victim, bumped, allowance, crash_hashes, uid_seen):
-    """Watch the roll toward the crashing revision until the product says why
-    it stopped and the hold has held for IDLE_HOLD_S, or the budget runs out.
-    Records the crash (bite), the budget claim (Instances off the running
-    revision, with the capacity floor's debounce), the attempts (distinct
-    crash-revision pods), the status and event that say why, and what each
-    sound bumped member did meanwhile."""
+    """Watch the roll toward the crashing revision until status has said
+    why it stopped and the story has then been quiet for IDLE_HOLD_S with
+    no attempt pending — the retry ladder announces each attempt's time in
+    a backoff and reaches its bound (Held) after its last — or the budget
+    runs out. Records the crash (bite), the budget claim (Instances off the
+    running revision, with the capacity floor's debounce), the attempts
+    (distinct crash-revision pods, with when each was created), the status
+    and event that say why, the retry times the ladder announced, when it
+    reached its bound, and what each sound bumped member did meanwhile."""
     N, ppi, old = ctx["N"], ctx["pods_per_inst"], set(ctx["old_hashes"])
     form, case_id, push_ts = ctx["fault"]["form"], ctx["case_id"], ctx["trigger_ts"]
     budget = _idle_budget(ctx)
     peers = sorted(bumped - {victim})
     hold = {"budget": budget, "bitten_at": None, "status_at": None, "status": "", "event_at": None, "event": "",
             "peak_off": 0, "off_span": 0.0, "min_running": N[victim], "peak_crash": 0,
-            "attempts_at_status": None, "peer": {c: "rolling" for c in peers}, "believed": False}
+            "attempts_at_status": None, "peer": {c: "rolling" for c in peers}, "believed": False,
+            "windows": [], "held_at": None}
     print(f"  Phase 3: watching the roll toward the crashing revision (budget {allowance} Instance(s) off "
-          f"the running revision; hold must be reported within {budget}s, then hold {IDLE_HOLD_S}s)")
-    ready_seen, off_since, last_poll, believe_until = set(), None, 0.0, None
+          f"the running revision; status must say why within {budget}s, every further attempt at a time the "
+          f"ladder announced, then quiet for {IDLE_HOLD_S}s)")
+    ready_seen, off_since, last_poll, created, moves = set(), None, 0.0, {}, []
     while time.time() - push_ts < budget and not ctx["closed"]:
         _read_one(ctx)
         now = time.time()
@@ -6951,8 +7130,12 @@ def _crash_new_watch_hold(ctx, victim, bumped, allowance, crash_hashes, uid_seen
         for name, p in pod_state.items():
             if p and p["alive"] and p.get("comp") == victim and p.get("hash") and p["hash"] not in old:
                 crash_hashes.add(p["hash"])
-                if p.get("uid"):
-                    uid_seen.setdefault(p["uid"], now)
+                if p.get("uid") and p["uid"] not in uid_seen:
+                    uid_seen[p["uid"]] = now
+                    created[p["uid"]] = _event_epoch(p.get("created")) or now
+                    moves.append(now)
+                    if hold["status_at"] is not None:
+                        print(f"    attempt: {name} on the crashing revision ({now - push_ts:.0f}s)")
                 if p.get("ready"):
                     ready_seen.add(name)
         if hold["bitten_at"] is None and form == "load":
@@ -6987,24 +7170,26 @@ def _crash_new_watch_hold(ctx, victim, bumped, allowance, crash_hashes, uid_seen
         if status and hold["status_at"] is None:
             hold["status_at"], hold["status"] = now - push_ts, status
             hold["attempts_at_status"] = len(uid_seen)
-            believe_until = now + IDLE_HOLD_S
-            print(f"    why: {status} ({hold['status_at']:.0f}s); holding {IDLE_HOLD_S}s to believe it")
+            moves.append(now)
+            print(f"    why: {status} ({hold['status_at']:.0f}s)")
         if said and hold["event_at"] is None:
             hold["event_at"], hold["event"] = now - push_ts, said[0]
+        pending = _crash_new_note_ladder(hold, _crash_new_ladder(snapshot, victim), now, push_ts, moves)
         for c in peers:
             state = _crash_new_peer_state(ctx, c, snapshot)
             if state != hold["peer"][c]:
                 print(f"    peer {c}: {state} ({now - push_ts:.0f}s)")
             hold["peer"][c] = state
-        if believe_until is not None and now >= believe_until:
+        quiet_since = max((m for m in moves if m <= now), default=now)
+        if hold["status_at"] is not None and not pending and now - quiet_since >= IDLE_HOLD_S:
             hold["believed"] = True
             break
     hold["attempts"] = len(uid_seen)
+    hold["attempts_unannounced"] = []
     if hold["status_at"] is not None:
-        after = push_ts + hold["status_at"] + CRASH_NEW_POLL_S
-        hold["attempts_after_status"] = sorted(uid for uid, t in uid_seen.items() if t > after)
-    else:
-        hold["attempts_after_status"] = []
+        bound = None if hold["held_at"] is None else push_ts + hold["held_at"]
+        hold["attempts_unannounced"] = _crash_new_unannounced(created, hold["windows"], push_ts + hold["status_at"],
+                                                              bound, max(1, ppi.get(victim, 1)))
     return hold
 
 
@@ -7105,15 +7290,28 @@ def _crash_new_checks(ctx, f, out, victim, bumped, allowance, verdict, notes, ch
     else:
         checks.append(f"  ✓ why: {hold['event'][:200]} ({hold['event_at']:.0f}s)")
     if hold["status_at"] is not None:
-        if hold["attempts_after_status"]:
+        windows, bound = hold.get("windows") or [], hold.get("held_at")
+        ladder = (f"{len(windows)} retry time(s) announced; "
+                  + (f"the ladder held at {bound:.0f}s" if bound is not None else "the ladder's bound was not reached"))
+        if hold["attempts_unannounced"]:
             verdict = "FAIL"
-            notes.append(f"{len(hold['attempts_after_status'])} crash-revision pod(s) created after the hold was reported")
-            checks.append(f"  ✗ stopped: {len(hold['attempts_after_status'])} new {victim} pod(s) on the crashing revision "
-                          f"appeared after status said why ({hold['attempts_at_status']} attempt(s) before it) — the roll did not stop")
+            notes.append(f"{len(hold['attempts_unannounced'])} crash-revision pod(s) created after status said why, "
+                         f"outside any retry it announced")
+            checks.append(f"  ✗ stopped: {len(hold['attempts_unannounced'])} new {victim} pod(s) on the crashing revision "
+                          f"appeared after status said why and outside the retries it announced ({ladder}; "
+                          f"{hold['attempts_at_status']} attempt(s) before status said why) — the roll did not stop")
         else:
-            window = f"the {IDLE_HOLD_S}s hold" if hold["believed"] else "the hold (cut short by the budget)"
-            checks.append(f"  ✓ stopped: no further {victim} pod on the crashing revision across {window} "
-                          f"({hold['attempts_at_status']} attempt(s) before status said why)")
+            window = f"the {IDLE_HOLD_S}s quiet" if hold["believed"] else "the watch (cut short by the budget)"
+            if windows:
+                checks.append(f"  ✓ stopped: every further {victim} pod on the crashing revision came at a retry status "
+                              f"had announced ({ladder}; {hold['attempts_at_status']} attempt(s) before status said why) "
+                              f"across {window}")
+            else:
+                checks.append(f"  ✓ stopped: no further {victim} pod on the crashing revision across {window} "
+                              f"({hold['attempts_at_status']} attempt(s) before status said why)")
+            if windows and bound is None:
+                checks.append(f"  ⚠ stopped: the ladder announced {len(windows)} retry time(s) but had not reached its "
+                              f"bound (Held) when the watch ended")
     for c, state in sorted(hold["peer"].items()):
         if state == "converged":
             checks.append(f"  ✓ peer: {c} converged on its own sound revision while {victim} held")
@@ -7204,7 +7402,7 @@ def _crashloop_new(case_id, yaml_file, desc, hdr):
         delete_case(yaml_file)
         return _write_fail(case_id, desc, hdr, "CASE_ERROR",
                            f"victimcomp={victim} is not a member the push bumps ({sorted(bumped)})")
-    allowance = _crash_new_allowance(_isvc_spec(case_id), victim, ctx["N"][victim])
+    allowance = _crash_new_case_allowance(ctx, f, victim)
     ctx["track_comps"] = sorted(bumped)
     crash_hashes, uid_seen = set(), {}
     print(f"  Phase 2: push a revision whose {victim} pods crash ({f['form']}) on {sorted(bumped)}")
@@ -7332,7 +7530,7 @@ def _packed_bad_push(ctx, story, bumped):
     """The bad push, its hold and the good push, as the crashloop:new handler
     drives them, with the story sampled on every read. (state, out, err)."""
     f, victim = ctx["fault"], story["victim"]
-    allowance = _crash_new_allowance(_isvc_spec(ctx["case_id"]), victim, ctx["N"][victim])
+    allowance = _crash_new_case_allowance(ctx, f, victim)
     uid_seen = {}
     print(f"  Phase 3: push a revision whose {victim} pods crash ({f['form']}) on {sorted(bumped)}")
     ok, armed = _crash_new_arm(ctx, bumped, victim, f["form"])

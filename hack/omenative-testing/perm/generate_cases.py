@@ -2840,22 +2840,41 @@ def emit_rollback(add):
 
 
 # ── gen-crashloop-new: the push brings a revision whose pods crash ──────────
-def _crash_new_reason(form, strat, co, allowance):
+# The strategies that drain an Instance before its replacement is up: under
+# form=load the roll admits the next start while the promoted crashing
+# Instance is still healthy (minReadySeconds is zero), so the case allows
+# one Instance beyond the budget, as a Deployment would reach too.
+DRAIN_FIRST_STRATS = {"RecreatePod", "InPlaceIfPossible"}
+
+
+def _crash_new_allowance(form, strat, budget):
+    return budget + 1 if form == "load" and strat in DRAIN_FIRST_STRATS else budget
+
+
+def _crash_new_reason(form, strat, co, budget):
+    allowance = _crash_new_allowance(form, strat, budget)
     how = ("the pushed engine revision dies at every start (its runner image has no shell for the fixture command)"
            if form == "start" else
            "the pushed engine revision passes readiness, is promoted, and exits a few seconds later, "
            "every time the kubelet restarts it (Ready counted for the budget: the new pod was promoted, then crashed)")
+    admitted = ("; promoted, it admits the next Instance's start before it crashes (minReadySeconds is zero), so "
+                "two Instances are off at once at the floor, as a Deployment would have it, and the start after "
+                "that waits for a promotion that holds")
     lands = {"SurgeThenDrain": ("the surge replacement never joins rotation, so no source is drained"
                                 if form == "start" else
                                 "the promoted Instance crashes, so no further source is drained"),
-             "RecreatePod": "the first Instance drained is rebuilt on the crashing revision and stays the only one off",
+             "RecreatePod": ("the first Instance drained is rebuilt on the crashing revision and stays the only one off"
+                             if form == "start" else
+                             "the first Instance drained is rebuilt on the crashing revision" + admitted),
              "InPlaceIfPossible": ("the image patches the first Instance's pod in place and it crash-loops there"
                                    if form == "start" else
                                    "the exit switch is a pod-template env diff, so in-place resolves to a recreate "
-                                   "of the first Instance")}[strat]
-    out = (f"{how}; {lands}: at most {allowance} Instance is off the running revision, which keeps serving at "
-           f"N-{allowance}; status says why (a rolloutHold or a Failed row, and a RetryHeld or InstanceFailed event) "
-           f"and no further attempt at that revision follows; the fix push then lands on every Instance, serving, "
+                                   "of the first Instance" + admitted)}[strat]
+    plural = "Instances are" if allowance != 1 else "Instance is"
+    out = (f"{how}; {lands}: at most {allowance} {plural} off the running revision, which keeps serving at "
+           f"N-{allowance}; status says why (a rolloutHold from the retry ladder or the budget, or a Failed row, and a "
+           f"RetryHeld or InstanceFailed event) and every further attempt at that revision is a retry the ladder "
+           f"announced, none once it has held; the fix push then lands on every Instance, serving, "
            f"and nothing rebuilds the crashing revision")
     if co != "none":
         out += "; the decoder rolls to its own sound revision meanwhile (converges, or holds with a reason)"
