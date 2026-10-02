@@ -474,8 +474,11 @@ class TestChartImageOrdering(unittest.TestCase):
 class TestReleaseMarkerEmission(unittest.TestCase):
     def test_marker_is_the_last_step_and_names_every_other_top_level_key(self):
         # Off main there is no eval lane, so the single document carries the
-        # marker itself, after every step it gates on.
-        yaml_text = gp.generate_pipeline()
+        # marker itself, after every step it gates on. The branch is pinned:
+        # the unit lane itself runs on main, where the marker travels in the
+        # last upload instead.
+        with mock.patch.object(gp, "BRANCH", "feature"):
+            yaml_text = gp.generate_pipeline()
         self.assertEqual(yaml_text.count('key: "chart-ome-release"'), 1)
         keys = gp._top_level_keys(yaml_text)
         self.assertEqual(keys[-1], "chart-ome-release")
@@ -484,6 +487,20 @@ class TestReleaseMarkerEmission(unittest.TestCase):
         gates = re.findall(r'^      - "([^"]+)"$', marker.split("secrets:")[0], re.M)
         self.assertEqual(gates, keys[:-1])
         self.assertNotIn(gp.UPLOAD_STEP_KEY, keys)
+
+    def test_on_main_the_marker_closes_the_last_upload_and_names_every_key(self):
+        # On main the eval lanes follow in their own uploads and the marker is
+        # the one job of the last upload, gating every key of every upload.
+        with mock.patch.object(gp, "BRANCH", "main"):
+            batches = gp.generate_pipeline_batches()
+        self.assertGreater(len(batches), 1)
+        self.assertNotIn('key: "chart-ome-release"', batches[0])
+        self.assertIn(gp.UPLOAD_STEP_KEY, gp._top_level_keys(batches[0]))
+        self.assertEqual(batches[-1].count('key: "chart-ome-release"'), 1)
+        keys_before = [k for b in batches[:-1] for k in gp._top_level_keys(b)]
+        marker = batches[-1][batches[-1].index('key: "chart-ome-release"'):]
+        gates = re.findall(r'^      - "([^"]+)"$', marker.split("secrets:")[0], re.M)
+        self.assertEqual(sorted(gates), sorted(keys_before))
 
     def test_marker_refuses_an_empty_gate(self):
         with self.assertRaisesRegex(RuntimeError, "keys it gates on"):
