@@ -1,24 +1,29 @@
-# A single-pod surge whose replacement wedges on a node other than the
-# source's. No stuck-pod grace is configured, so the fast escalator is off
-# and the operation deadline is what ends the attempt. The source keeps
-# serving on node-0; the disposition reads the suspect node off the
-# replacement alone and records a relocation directive against node-1 —
-# the source it shares the Instance index with neither names the node nor,
-# by sitting on a second one, turns the reading empty.
+# Two Instances surge to a new revision. Instance 1's replacement serves
+# and promotes, so the revision is known to work; Instance 0's replacement
+# wedges on a node other than its source's. No stuck-pod grace is
+# configured, so the fast escalator is off and the operation deadline is
+# what ends the attempt. The source keeps serving on node-0; the
+# disposition reads the suspect node off the replacement alone and
+# records a relocation directive against node-1 — the source it shares
+# the Instance index with neither names the node nor, by sitting on a
+# second one, turns the reading empty.
 scenario: surge-target-stuck-relocates
 arrows:
   - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
   - T-surge-deadline
 cells:
   - instance/Update/Surge/timer.operationDeadline/before
   - instance/Update/Surge/pod.waiting[CrashLoopBackOff]/before
 intentional: >-
-  the relocation directive names the replacement's node; the serving
-  source shares the Instance index but not the attempt, so its node is
-  neither blamed nor a veto on the reading
+  a node is blamed only for a revision some Instance has served; here the
+  sibling promoted on it, so the directive names the replacement's node,
+  while the serving source shares the Instance index but not the attempt
+  and is neither blamed nor a veto on the reading
 initial:
   spec:
-    replicas: 1
+    replicas: 2
     strategy: SurgeThenDrain
     image: registry.example.com/runtime:v1
     instanceReadyTimeout: 30m
@@ -27,21 +32,32 @@ initial:
     requeueOperation: 5s
     requeueGate: 3s
     autoMigrateBudget: 3
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+    - {index: 1, ready: true, serving: true, routed: true}
 timeline:
   - tick: 1
-    note: cold start
-  - tick: 2
-    note: the source is bound to node-0, becomes Ready and enters rotation
+    note: both sources are bound to node-0, then the pod template changes, so both Instances surge a replacement
     events:
       - pod.scheduled[source]: {pod: {index: 0, ordinal: 0}, message: node-0}
-      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
-      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
-  - tick: 3
-    note: the pod template changes, so the rollout surges a replacement
-    events:
+      - pod.scheduled[source]: {pod: {index: 1, ordinal: 0}, message: node-0}
       - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 2
+    note: Instance 1's replacement is bound to node-2, serves and enters rotation, so the new revision is known to work
+    events:
+      - pod.scheduled[target]: {pod: {index: 1, ordinal: 1}, message: node-2}
+      - pod.ready[target]: {pod: {index: 1, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, ordinal: 1}}
+  - tick: 3
+    note: Instance 1's source leaves rotation and is deleted, so Instance 1 promotes on the new revision
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1, ordinal: 0}}
+      - pod.deleted[source]: {pod: {index: 1, ordinal: 0}}
   - tick: 4
-    note: the replacement is bound to node-1 and wedges there; with no stuck-pod grace configured nothing escalates yet
+    note: Instance 0's replacement is bound to node-1 and wedges there; with no stuck-pod grace configured nothing escalates yet
     events:
       - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}, message: node-1}
       - pod.waiting[CrashLoopBackOff]: {pod: {index: 0, ordinal: 1}, message: "back-off restarting failed container"}

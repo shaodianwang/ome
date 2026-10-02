@@ -2712,7 +2712,9 @@ func newFailedCreateContainerSurgeFixture(t *testing.T, excludedNodes []string) 
 		Reason:  createContainerErrorReason,
 	}
 	plan := surgePlan()
-	plan.Instances[0].ExcludedNodes = append([]string(nil), excludedNodes...)
+	for _, node := range excludedNodes {
+		plan.Instances[0].ExcludedNodes = append(plan.Instances[0].ExcludedNodes, workload.NodeExclusion{Node: node, Revision: targetRevision})
+	}
 
 	return failedCreateContainerSurgeFixture{
 		isvc:         isvc,

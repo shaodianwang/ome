@@ -2565,6 +2565,10 @@ func TestReconcile_GangMigrationCompletesAfterSourcePlanRelease(t *testing.T) {
 	}
 }
 
+// directiveRevision is the revision the test directives were recorded
+// for; an exclusion binds rebuilds at that revision only.
+const directiveRevision = "llama-engine-rev1"
+
 // directiveEntry builds one terminal relocation-directive ledger row.
 func directiveEntry(uid, component string, idx int32, node string) audit.Entry {
 	return audit.Entry{
@@ -2575,8 +2579,18 @@ func directiveEntry(uid, component string, idx int32, node string) audit.Entry {
 		Reason:         audit.ReasonAutoRecover,
 		Outcome:        audit.OutcomeRelocateRecreate,
 		FromNode:       node,
+		Revision:       directiveRevision,
 		StartedAt:      time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC).Format(time.RFC3339),
 	}
+}
+
+// excludedNodeNames flattens a projected exclusion list to its node names.
+func excludedNodeNames(exclusions []workloadtypes.NodeExclusion) []string {
+	var nodes []string
+	for _, exclusion := range exclusions {
+		nodes = append(nodes, exclusion.Node)
+	}
+	return nodes
 }
 
 // reconcileRelocationDirectives projects the exclusion map from the
@@ -2611,9 +2625,14 @@ func TestReconcileRelocationDirectives_BuildsBoundedExclusionMap(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("map: got %v want exactly instance 0", got)
 	}
-	nodes := got[0]
+	nodes := excludedNodeNames(got[0])
 	if len(nodes) != 3 || nodes[0] != "n2" || nodes[1] != "n3" || nodes[2] != "n4" {
 		t.Errorf("instance 0 exclusions: got %v want [n2 n3 n4] (last 3 distinct nodes)", nodes)
+	}
+	for _, exclusion := range got[0] {
+		if exclusion.Revision != directiveRevision {
+			t.Errorf("exclusion %v: want the directive's revision %q", exclusion, directiveRevision)
+		}
 	}
 
 	// Budget 0 (unconfigured) → no exclusions at all.
@@ -2643,7 +2662,7 @@ func TestReconcileRelocationDirectives_PrunesOnReady(t *testing.T) {
 	}
 
 	got := r.reconcileRelocationDirectives(context.Background(), logf.Log.WithName("test"), ir, nil, 3)
-	if len(got) != 1 || len(got[1]) != 1 || got[1][0] != "n2" {
+	if len(got) != 1 || len(got[1]) != 1 || got[1][0].Node != "n2" {
 		t.Fatalf("map: got %v want only instance 1 → [n2] (instance 0 pruned on Ready)", got)
 	}
 
@@ -2692,7 +2711,7 @@ func TestReconcileRelocationDirectives_PrunePersistsFromLiveSnapshot(t *testing.
 	r.APIReader = readerClient
 
 	got := r.reconcileRelocationDirectives(context.Background(), logf.Log.WithName("test"), ir, nil, 3)
-	if len(got) != 1 || len(got[1]) != 1 || got[1][0] != "n2" {
+	if len(got) != 1 || len(got[1]) != 1 || got[1][0].Node != "n2" {
 		t.Fatalf("map: got %v want only instance 1 → [n2]", got)
 	}
 
@@ -2740,7 +2759,7 @@ func TestReconcileRelocationDirectives_LiveReloadFailureSkipsPersist(t *testing.
 	r.APIReader = failingGetReader{}
 
 	got := r.reconcileRelocationDirectives(context.Background(), logf.Log.WithName("test"), ir, nil, 3)
-	if len(got) != 1 || len(got[1]) != 1 || got[1][0] != "n2" {
+	if len(got) != 1 || len(got[1]) != 1 || got[1][0].Node != "n2" {
 		t.Fatalf("map: got %v want only instance 1 → [n2] (cache-pruned view)", got)
 	}
 
@@ -2802,7 +2821,7 @@ func TestReconcileRelocationDirectives_SuccessTouchStampsNewestAutoRecord(t *tes
 	}
 
 	got := r.reconcileRelocationDirectives(context.Background(), logf.Log.WithName("test"), ir, nil, 3)
-	if len(got) != 1 || len(got[1]) != 1 || got[1][0] != "n3" {
+	if len(got) != 1 || len(got[1]) != 1 || got[1][0].Node != "n3" {
 		t.Fatalf("exclusion map: got %v want only instance 1 → [n3]", got)
 	}
 
@@ -2919,8 +2938,71 @@ func TestReconcileRelocationDirectives_ReadyWithOpNotPruned(t *testing.T) {
 	}
 
 	got := r.reconcileRelocationDirectives(context.Background(), logf.Log.WithName("test"), ir, nil, 3)
-	if len(got) != 1 || len(got[0]) != 1 || got[0][0] != "n1" {
+	if len(got) != 1 || len(got[0]) != 1 || got[0][0].Node != "n1" {
 		t.Fatalf("map: got %v want instance 0 → [n1] (no prune while op in flight)", got)
+	}
+}
+
+// A directive recorded before revision scoping carries no revision. It
+// still counts on the Instance's relocation budget but projects no
+// exclusion: a rebuild at any revision is free to land where there is
+// room, which is what unwedges a fleet whose only exclusion blocked its
+// only placement.
+func TestReconcileRelocationDirectives_RevisionlessDirectiveExcludesNothing(t *testing.T) {
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating,
+			Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate}},
+	}
+	r, c := newReconciler(t, ir)
+	ledger := &audit.Ledger{}
+	legacy := directiveEntry("u0", "engine", 0, "n1")
+	legacy.Revision = ""
+	ledger.UpsertEntry(legacy)
+	if err := audit.PersistLedgerForOwner(context.Background(), c, ir, irGVK, ledger); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	if got := r.reconcileRelocationDirectives(context.Background(), logf.Log.WithName("test"), ir, nil, 3); got != nil {
+		t.Fatalf("map: got %v want nil (a directive with no revision excludes nothing)", got)
+	}
+	after, err := audit.LoadLedgerForOwner(context.Background(), c, ir)
+	if err != nil {
+		t.Fatalf("reload ledger: %v", err)
+	}
+	if audit.CountAutoRecoverAttempts(after, "engine", 0) != 1 {
+		t.Errorf("budget: got %d want 1 (the directive still counts)", audit.CountAutoRecoverAttempts(after, "engine", 0))
+	}
+}
+
+// A released directive — its rebuild found no node with room — projects
+// no exclusion, while the budget it spent stays spent.
+func TestReconcileRelocationDirectives_ReleasedDirectiveExcludesNothing(t *testing.T) {
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceCreating,
+			Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationCreate}},
+	}
+	r, c := newReconciler(t, ir)
+	ledger := &audit.Ledger{}
+	ledger.UpsertEntry(directiveEntry("u0", "engine", 0, "n1"))
+	ledger.UpsertEntry(directiveEntry("u1", "engine", 0, "n2"))
+	if released := audit.ReleaseAutoRecoverExclusions(ledger, "engine", 0, directiveRevision); len(released) != 2 {
+		t.Fatalf("release: got %v want both nodes", released)
+	}
+	if err := audit.PersistLedgerForOwner(context.Background(), c, ir, irGVK, ledger); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	if got := r.reconcileRelocationDirectives(context.Background(), logf.Log.WithName("test"), ir, nil, 3); got != nil {
+		t.Fatalf("map: got %v want nil (released directives exclude nothing)", got)
+	}
+	after, err := audit.LoadLedgerForOwner(context.Background(), c, ir)
+	if err != nil {
+		t.Fatalf("reload ledger: %v", err)
+	}
+	if audit.CountAutoRecoverAttempts(after, "engine", 0) != 2 {
+		t.Errorf("budget: got %d want 2 (released directives still count)", audit.CountAutoRecoverAttempts(after, "engine", 0))
 	}
 }
 

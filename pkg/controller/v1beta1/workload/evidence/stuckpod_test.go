@@ -180,3 +180,66 @@ func TestFirstStuckPodForInstance_SkipsDeletingPods(t *testing.T) {
 		t.Errorf("no stuck pods: got (%v, %q) want (nil, '')", none, noneReason)
 	}
 }
+
+// TestFirstCrashLoopingPod_ReadsBothFacesOfTheLoop pins the crash-loop
+// reader on the shapes a pass can catch a looping container in: parked
+// in CrashLoopBackOff, Running again between two crashes with the
+// restarts and a non-zero last termination on its status, or just
+// exited non-zero and awaiting the restart. A container that restarted
+// and is Ready again has recovered; a clean restart proves nothing; a
+// pod of another revision is not the attempt's.
+func TestFirstCrashLoopingPod_ReadsBothFacesOfTheLoop(t *testing.T) {
+	crashed := &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}
+	clean := &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}
+	podWith := func(name string, cs corev1.ContainerStatus) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{cs}},
+		}
+	}
+	running := corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	for _, tc := range []struct {
+		name string
+		pod  *corev1.Pod
+		want bool
+	}{
+		{"parked in CrashLoopBackOff", podWith("a", corev1.ContainerStatus{Name: "main",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}}), true},
+		{"running between two crashes", podWith("b", corev1.ContainerStatus{Name: "main",
+			State: running, RestartCount: 2, LastTerminationState: corev1.ContainerState{Terminated: crashed}}), true},
+		{"exited non-zero, restart pending", podWith("c", corev1.ContainerStatus{Name: "main",
+			State: corev1.ContainerState{Terminated: crashed}}), true},
+		{"restarted and ready again", podWith("d", corev1.ContainerStatus{Name: "main", Ready: true,
+			State: running, RestartCount: 2, LastTerminationState: corev1.ContainerState{Terminated: crashed}}), false},
+		{"clean restart", podWith("e", corev1.ContainerStatus{Name: "main",
+			State: running, RestartCount: 1, LastTerminationState: corev1.ContainerState{Terminated: clean}}), false},
+		{"running, never restarted", podWith("f", corev1.ContainerStatus{Name: "main", State: running}), false},
+		{"waiting on an image pull", podWith("g", corev1.ContainerStatus{Name: "main",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}}), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod, reason := evidence.FirstCrashLoopingPod([]*corev1.Pod{tc.pod}, "")
+			if (pod != nil) != tc.want {
+				t.Fatalf("crash-looping: got pod=%v reason=%q want found=%v", pod != nil, reason, tc.want)
+			}
+			if tc.want && reason != evidence.ReasonCrashLoop {
+				t.Errorf("reason: got %q want %q", reason, evidence.ReasonCrashLoop)
+			}
+		})
+	}
+
+	// The attempt's scope: a crash on another revision is not its own.
+	other := podWith("h", corev1.ContainerStatus{Name: "main",
+		State: running, RestartCount: 2, LastTerminationState: corev1.ContainerState{Terminated: crashed}})
+	other.Labels = map[string]string{"ome.io/revision-hash": "oldhash"}
+	if pod, _ := evidence.FirstCrashLoopingPod([]*corev1.Pod{other}, "own-engine-newhash"); pod != nil {
+		t.Errorf("a crash on another revision must not be read as the attempt's: got %s", pod.Name)
+	}
+	deleting := podWith("i", corev1.ContainerStatus{Name: "main",
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}})
+	now := metav1.NewTime(time.Now())
+	deleting.DeletionTimestamp = &now
+	if pod, _ := evidence.FirstCrashLoopingPod([]*corev1.Pod{deleting}, ""); pod != nil {
+		t.Errorf("a pod on its way out is not evidence: got %s", pod.Name)
+	}
+}

@@ -482,7 +482,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	// The surge mirrors the source's Runner layout: a single "default"
 	// pod, or leader + workers for a gang.
 	surgeRunners := []workload.RunnerPlan{{Name: "default", Size: 1}}
-	var sourceExcludedNodes []string
+	var sourceExcludedNodes []workload.NodeExclusion
 	if gang {
 		mirrored := false
 		for i := range plan.Instances {

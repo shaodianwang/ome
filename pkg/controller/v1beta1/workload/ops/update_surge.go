@@ -3,7 +3,6 @@ package ops
 import (
 	"context"
 	"fmt"
-	"slices"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -16,6 +15,18 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
+
+// exclusionCoversPod reports whether one of the Instance's recorded
+// exclusions names the node pod sits on, for the revision pod carries.
+func exclusionCoversPod(exclusions []workload.NodeExclusion, pod *corev1.Pod) bool {
+	podRev := query.RevisionFromPod(pod)
+	for _, exclusion := range exclusions {
+		if exclusion.Node == pod.Spec.NodeName && query.RevisionFromName(exclusion.Revision).Same(podRev) {
+			return true
+		}
+	}
+	return false
+}
 
 // surgeDrainKey identifies a SurgeThenDrain drain writer entry on the
 // old pod's ome.io/serving gate. Indexed by (instance, surge ordinal)
@@ -103,10 +114,11 @@ func recycleFailedCreateContainerTarget(
 	}
 
 	// ExcludedNodes is projected from persisted AutoRecover directives. The
-	// failed pod's node appearing here proves that disposition authorized this
-	// relocation attempt. Once the configured budget is exhausted, a new node is
-	// not recorded and this branch parks the Instance instead of churning pods.
-	if pod.Spec.NodeName == "" || !slices.Contains(inst.ExcludedNodes, pod.Spec.NodeName) {
+	// failed pod's node appearing here, recorded for the pod's own revision,
+	// proves that disposition authorized this relocation attempt. Once the
+	// configured budget is exhausted, a new node is not recorded and this
+	// branch parks the Instance instead of churning pods.
+	if pod.Spec.NodeName == "" || !exclusionCoversPod(inst.ExcludedNodes, pod) {
 		return true, nil
 	}
 	if pod.UID == "" {

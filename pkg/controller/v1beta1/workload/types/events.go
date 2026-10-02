@@ -129,6 +129,14 @@ const (
 	// before relocation resumes.
 	EventReasonAutoMigrationCapReached EventReason = "AutoMigrationCapReached"
 
+	// EventReasonNodeExclusionReleased fires when the deadline disposition
+	// lets go of an Instance's recorded node exclusions because the rebuild
+	// rendered with them found no node with room: the scheduler's own
+	// Unschedulable verdict outlasted the operator's grace. The next
+	// rebuild may land on the blamed node again; the relocation budget the
+	// directives spent stays spent.
+	EventReasonNodeExclusionReleased EventReason = "NodeExclusionReleased"
+
 	// EventReasonInstanceFailed fires when an escalation backstop (the
 	// stuck-pod fast path or the deadline disposition) stamps an
 	// Instance Phase=Failed. Emitted by adapters through

@@ -2668,7 +2668,7 @@ func TestDetectUpdate_StuckPodOnTargetRelocates(t *testing.T) {
 	pod.Spec.NodeName = suspectNode
 	pod.Labels[query.LabelInstanceIncarnation] = "1"
 	plan.UpdateStrategy.Type = workload.UpdateStrategyRecreatePod
-	plan.Instances[0].ExcludedNodes = []string{suspectNode}
+	plan.Instances[0].ExcludedNodes = []workload.NodeExclusion{{Node: suspectNode, Revision: tcr.Name}}
 
 	ctx := context.Background()
 	trigger, _, err := DetectUpdateTriggerWithPods(ctx, legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, []*corev1.Pod{pod})

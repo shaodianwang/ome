@@ -70,7 +70,8 @@ const (
 //     the terminal branch rather than report a held revision with no
 //     block.
 //  2. RELOCATABLE — no workload-caused reason, MigrationMode=Auto,
-//     relocation budget (operator config) not exhausted, and the
+//     relocation budget (operator config) not exhausted, the target
+//     revision has served on some Instance (revisionHasServed), and the
 //     attempt's OWN pods occupy exactly ONE resolvable node (single-pod
 //     instances and single-host gangs; multi-node attempts fall
 //     through). A live pod of another revision in the same bucket — the
@@ -175,10 +176,23 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 	// is not the attempt's to record. The directive is written below,
 	// once the evidence the backstop derives is available to travel with
 	// it.
+	//
+	// The node is blamed only when the revision is known to work: some
+	// Instance has run the target revision to Ready — a sibling serving
+	// it now, or this Instance before the attempt — and the failure is
+	// one a node can cause (a crash loop, a runtime start rejection, a pod
+	// that never reports ready; the workload-caused reasons took branch 1
+	// and an unplaced pod names no node). A crash loop or a never-Ready
+	// pod on a revision nobody has served is the revision's own failure
+	// until proven otherwise: it takes the ladder below with no node
+	// blame, so a bad push leaves no exclusion behind for its fix to
+	// inherit.
 	relocationNode := ""
+	targetRev := attemptTargetRevision(input, inst)
 	if causePod == nil &&
-		migrationModeAllowsRelocation(dd.MigrationMode) && dd.AutoMigrateMaxAttempts > 0 {
-		relocationNode = evidence.AttemptSuspectNode(pods, attemptTargetRevision(input, inst))
+		migrationModeAllowsRelocation(dd.MigrationMode) && dd.AutoMigrateMaxAttempts > 0 &&
+		revisionHasServed(input.ObservedState.InstanceStatuses, inst, targetRev) {
+		relocationNode = evidence.AttemptSuspectNode(pods, targetRev)
 	}
 
 	// Terminal backstop (branches 2 and 3): clear the Operation + stamp
@@ -189,6 +203,18 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 	shortReason := reason
 	if i := strings.IndexByte(reason, ':'); i > 0 {
 		shortReason = reason[:i]
+	}
+	// A rebuild the scheduler could not place outlasted the operator's
+	// grace. If this Instance holds node exclusions for the revision it
+	// rendered, they are what stands between the pod and the room the
+	// cluster has: let them go, so the next rebuild lands wherever it can
+	// — the blamed node included — rather than wait forever on a node
+	// that is not coming. The scheduler's verdict is the capacity signal;
+	// no cluster inventory is consulted.
+	if causePod == nil && shortReason == types.WaitingReasonUnschedulable {
+		if err := releaseNodeExclusions(ctx, deps, input, inst, targetRev); err != nil {
+			return DispositionTerminal, err
+		}
 	}
 	termination := &types.InstanceTermination{
 		Reason:  shortReason,
@@ -207,14 +233,20 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 		// pod so operation-specific cleanup can remove only that object.
 		termination = types.PodTerminationWithReason(pod, shortReason, now)
 		evidencePod = pod
-	} else if pod, _ := evidence.FirstRunningNotReadyPod(pods, attemptTargetRevision(input, inst)); pod != nil {
+	} else if pod, crash := evidence.FirstCrashLoopingPod(pods, targetRev); pod != nil {
+		// A crash loop the deadline caught under either face — parked in
+		// CrashLoopBackOff, or Running for the moment between two crashes.
+		// The record names the crash and its exit, not a readiness limbo.
+		termination = types.PodTerminationWithReason(pod, crash, now)
+		evidencePod = pod
+	} else if pod, _ := evidence.FirstRunningNotReadyPod(pods, targetRev); pod != nil {
 		// Readiness limbo: the branch above chose the disposition, this
 		// only says what an operator will read. Without it the record is
 		// the bare elapsed timeout and says nothing about the probe.
 		termination = evidence.ContainersNotReadyTermination(pod, now)
 		limboDetail = termination.Message
 		evidencePod = pod
-	} else if pod := evidence.FirstGateNotFoldedPod(pods, attemptTargetRevision(input, inst)); pod != nil {
+	} else if pod := evidence.FirstGateNotFoldedPod(pods, targetRev); pod != nil {
 		// Gate limbo: the probes passed but a readiness gate keeps the pod
 		// out of its Service, so no promote can fire. Same standing as the
 		// limbo above — evidence, not a branch.
@@ -225,7 +257,7 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 
 	directiveRecorded := false
 	if relocationNode != "" {
-		recorded, rerr := recordRelocationDirective(ctx, deps, input, dd, inst, relocationNode, limboDetail)
+		recorded, rerr := recordRelocationDirective(ctx, deps, input, dd, inst, targetRev, relocationNode, limboDetail)
 		if rerr != nil {
 			return DispositionTerminal, rerr
 		}
@@ -313,6 +345,25 @@ func migrationModeAllowsRelocation(mode types.MigrationMode) bool {
 	return mode == types.MigrationModeAuto || mode == types.MigrationModeSurge
 }
 
+// revisionHasServed reports whether rev has run to Ready on some
+// Instance. A row's RunningRevision is written only by a promote, so a
+// row carrying rev — a sibling serving it now, or the attempt's own row
+// from before this attempt — is proof the revision works somewhere.
+func revisionHasServed(rows []types.InstanceStatus, own types.InstanceStatus, rev string) bool {
+	if rev == "" {
+		return false
+	}
+	if own.RunningRevision == rev {
+		return true
+	}
+	for i := range rows {
+		if rows[i].RunningRevision == rev {
+			return true
+		}
+	}
+	return false
+}
+
 // attemptTargetRevision resolves the revision an attempt is converging
 // toward: the pin its operation carries, else the owner's current
 // UpdateRevision (an unpinned Create renders from that).
@@ -325,7 +376,8 @@ func attemptTargetRevision(input types.ReconcileInput, inst types.InstanceStatus
 
 // recordRelocationDirective writes the relocation directive: a TERMINAL
 // AutoRecover ledger entry (Phase=Completed, Outcome=relocate-recreate,
-// FromNode = the suspect node). It is a record — budget accounting,
+// FromNode = the suspect node, Revision = the attempt's target, which is
+// the only revision the exclusion binds). It is a record — budget accounting,
 // node-exclusion memory, audit evidence — NOT a migration work order:
 // Auto records are born terminal and the work loop selects only
 // non-terminal Manual entries, so the Ready-source copier machinery is
@@ -362,7 +414,7 @@ func attemptTargetRevision(input types.ReconcileInput, inst types.InstanceStatus
 // never selects it. Best-effort: a nil closure or a failed write is
 // V(1)-logged and never fails the disposition — the relocation itself
 // is ledger-driven.
-func recordRelocationDirective(ctx context.Context, deps types.Deps, input types.ReconcileInput, dd types.DispositionDeps, inst types.InstanceStatus, fromNode, detail string) (recorded bool, err error) {
+func recordRelocationDirective(ctx context.Context, deps types.Deps, input types.ReconcileInput, dd types.DispositionDeps, inst types.InstanceStatus, revision, fromNode, detail string) (recorded bool, err error) {
 	owner := dispositionLedgerOwner(input)
 	ledger, err := audit.LoadLedgerForOwner(ctx, deps.Reader(), owner)
 	if err != nil {
@@ -383,9 +435,10 @@ func recordRelocationDirective(ctx context.Context, deps types.Deps, input types
 
 	// Guard 2: an unsatisfiable exclusion set disposes terminal instead.
 	// Evaluate exactly the set the post-record rebuild will render: the
-	// overlay keeps the newest maxAttempts distinct nodes, which after
-	// this write is fromNode plus the newest maxAttempts-1 prior ones.
-	exclusions := append(audit.RecentAutoRecoverFromNodes(ledger, component, inst.Index, dd.AutoMigrateMaxAttempts-1), fromNode)
+	// overlay keeps the newest maxAttempts distinct nodes recorded for
+	// this revision, which after this write is fromNode plus the newest
+	// maxAttempts-1 prior ones.
+	exclusions := append(audit.NodesExcludedForRevision(audit.RecentAutoRecoverExclusions(ledger, component, inst.Index, dd.AutoMigrateMaxAttempts-1), revision), fromNode)
 	if workloadops.WouldExclusionsConflictWithNodeAffinity(dd.PodSpec, exclusions) ||
 		workloadops.WouldExclusionsConflictWithNodeAffinity(dd.WorkerPodSpec, exclusions) {
 		return false, nil
@@ -408,6 +461,7 @@ func recordRelocationDirective(ctx context.Context, deps types.Deps, input types
 		Reason:         audit.ReasonAutoRecover,
 		Outcome:        audit.OutcomeRelocateRecreate,
 		FromNode:       fromNode,
+		Revision:       revision,
 		StartedAt:      now,
 		CompletedAt:    now,
 	})
@@ -455,6 +509,38 @@ func recordRelocationDirective(ctx context.Context, deps types.Deps, input types
 		dd.OnRelocationDirective(component)
 	}
 	return true, nil
+}
+
+// releaseNodeExclusions lets go of the exclusions this Instance holds
+// for revision, persisting the ledger ahead of the status write and
+// announcing the release once, with the nodes it frees. Nothing held →
+// no write, no event. A persist conflict surfaces as the error the
+// reconcile retries on; the hold is still in place next pass.
+func releaseNodeExclusions(ctx context.Context, deps types.Deps, input types.ReconcileInput, inst types.InstanceStatus, revision string) error {
+	owner := dispositionLedgerOwner(input)
+	if deps.Client == nil || owner == nil || revision == "" {
+		return nil
+	}
+	ledger, err := audit.LoadLedgerForOwner(ctx, deps.Reader(), owner)
+	if err != nil {
+		return fmt.Errorf("load audit ledger (instance=%d): %w", inst.Index, err)
+	}
+	component := string(input.Key.Component)
+	released := audit.ReleaseAutoRecoverExclusions(ledger, component, inst.Index, revision)
+	if len(released) == 0 {
+		return nil
+	}
+	if err := audit.PersistLedgerForOwner(ctx, deps.Client, owner, dispositionLedgerOwnerGVK(input), ledger); err != nil {
+		return fmt.Errorf("persist audit ledger (instance=%d): %w", inst.Index, err)
+	}
+	if deps.Recorder != nil {
+		if target := types.EventTarget(input); target != nil {
+			deps.Recorder.Eventf(target, corev1.EventTypeNormal, string(types.EventReasonNodeExclusionReleased),
+				"OMENative component=%s instance=%d node exclusion released for revision %s: no other node had room for the rebuild; it may land on %s again",
+				component, inst.Index, revision, strings.Join(released, ", "))
+		}
+	}
+	return nil
 }
 
 // dispositionLedgerOwner / dispositionLedgerOwnerGVK mirror the ops

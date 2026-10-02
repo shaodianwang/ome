@@ -212,6 +212,8 @@ func TestEscalation_StuckPodNotServing_IdenticalDispositionOutcome(t *testing.T)
 func TestEscalation_SinglePodSurgeRelocatesTheFailedTarget(t *testing.T) {
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(now)
+	// The target revision serves on Instance 1, so the replacement's
+	// failure may be its node's.
 	insts := []workloadtypes.InstanceStatus{{
 		Index:    0,
 		Phase:    workloadtypes.InstancePhaseUpdating,
@@ -223,7 +225,7 @@ func TestEscalation_SinglePodSurgeRelocatesTheFailedTarget(t *testing.T) {
 			StartedAt:      metav1.NewTime(now.Add(-time.Minute)),
 			Deadline:       metav1.NewTime(now.Add(30 * time.Minute)),
 		},
-	}}
+	}, servingRowOn(1, "own-engine-targethash")}
 	c := fakeLedgerClient(t)
 	input, rec := dispositionFixtureInput(fc, &insts, "own-engine-targethash", nil, ledgerOwnerCM())
 	input.ObservedState.InstanceStatuses = append([]workloadtypes.InstanceStatus(nil), insts...)
@@ -301,7 +303,7 @@ func TestEscalation_SinglePodSurgeDeadlineRelocatesOffTheTargetNode(t *testing.T
 					StartedAt:      metav1.NewTime(now.Add(-2 * time.Hour)),
 					Deadline:       metav1.NewTime(now.Add(-time.Hour)),
 				},
-			}}
+			}, servingRowOn(1, targetRev)}
 			c := fakeLedgerClient(t)
 			input, rec := dispositionFixtureInput(fc, &insts, targetRev, nil, ledgerOwnerCM())
 			input.ObservedState.InstanceStatuses = append([]workloadtypes.InstanceStatus(nil), insts...)

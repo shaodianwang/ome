@@ -175,6 +175,51 @@ func FirstWorkloadCausedPod(pods []*corev1.Pod) (*corev1.Pod, string) {
 	return nil, ""
 }
 
+// ReasonCrashLoop is the reason a crash loop is read under whichever face
+// the pass sees it in: the kubelet's own CrashLoopBackOff waiting reason,
+// so a record that names it matches `kubectl describe pod`.
+const ReasonCrashLoop = "CrashLoopBackOff"
+
+// FirstCrashLoopingPod returns the first live pod of the attempt whose
+// container keeps exiting, plus ReasonCrashLoop. A crash loop has two
+// faces and the pass may catch either: the container parked in
+// CrashLoopBackOff between the kubelet's backoff retries, or Running
+// again for the moment after a restart, with the restart count and a
+// non-zero last termination as the only trace. Both read as the same
+// crash — a restarted container that is Ready again has recovered and
+// is not one. Scoped to attemptRev like the readiness readers, so a
+// surge never reads its source's crash as its own.
+func FirstCrashLoopingPod(pods []*corev1.Pod, attemptRev string) (*corev1.Pod, string) {
+	for _, pod := range pods {
+		if pod == nil || pod.DeletionTimestamp != nil || !podOnAttemptRevision(pod, attemptRev) {
+			continue
+		}
+		for _, statuses := range [][]corev1.ContainerStatus{pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses} {
+			for _, cs := range statuses {
+				if containerCrashLooping(cs) {
+					return pod, ReasonCrashLoop
+				}
+			}
+		}
+	}
+	return nil, ""
+}
+
+// containerCrashLooping reports whether a container status shows either
+// face of a crash loop.
+func containerCrashLooping(cs corev1.ContainerStatus) bool {
+	if cs.State.Waiting != nil {
+		return cs.State.Waiting.Reason == ReasonCrashLoop
+	}
+	if cs.Ready {
+		return false
+	}
+	if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
+		return true
+	}
+	return cs.RestartCount > 0 && cs.LastTerminationState.Terminated != nil && cs.LastTerminationState.Terminated.ExitCode != 0
+}
+
 // FirstPodWaitingForReason returns the first live pod with a container —
 // regular or init — parked in the named waiting reason. It answers "which
 // pod is the one the caller already classified", so the caller's cleanup

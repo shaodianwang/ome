@@ -47,7 +47,7 @@ func BuildPlan(component types.ComponentType, desired types.WorkloadDesiredSpec,
 			// per-instance node-exclusion list from the audit ledger;
 			// Render turns it into a required NotIn hostname term so
 			// the rebuild lands off the recorded suspect node(s).
-			ExcludedNodes: append([]string(nil), observed.ExcludedNodesByInstance[idx]...),
+			ExcludedNodes: append([]types.NodeExclusion(nil), observed.ExcludedNodesByInstance[idx]...),
 		}
 	}
 

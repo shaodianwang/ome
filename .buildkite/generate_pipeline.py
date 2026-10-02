@@ -218,6 +218,7 @@ KIND_SPEC_GROUPS = (
     )),
     ("migration-relocation", "Migration and relocation", (
         "auto_migrate", "auto_migrate_multiinstance", "migrate", "interleave_extra",
+        "packed_pool_bad_push",
     )),
     ("migration-lifecycle", "Migration gang lifecycle", (
         "migration_gang",

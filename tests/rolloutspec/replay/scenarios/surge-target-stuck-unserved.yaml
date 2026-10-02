@@ -1,0 +1,52 @@
+# A single-pod surge whose replacement wedges on a node other than the
+# source's, on a revision no Instance has ever served. No stuck-pod grace
+# is configured, so the operation deadline ends the attempt. Nothing says
+# the node is at fault — the revision is the suspect until it has served
+# somewhere — so no relocation directive is recorded, the rebuild carries
+# no node exclusion, and the wave counts on the revision's retry ladder
+# with the crash loop as its reason. A fix the operator pushes next
+# inherits no exclusion and lands wherever there is room.
+scenario: surge-target-stuck-unserved
+arrows:
+  - T-ready-surge
+  - T-surge-deadline
+cells:
+  - instance/Update/Surge/timer.operationDeadline/before
+  - instance/Update/Surge/pod.waiting[CrashLoopBackOff]/before
+intentional: >-
+  a crash loop on a revision nobody serves blames no node; the attempt
+  counts on the revision's ladder and leaves no exclusion behind
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    migrationMode: Auto
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    autoMigrateBudget: 3
+    updateRetry: {maxAttempts: 2, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source is bound to node-0, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, ordinal: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is bound to node-1 and wedges there; with no stuck-pod grace configured nothing escalates yet
+    events:
+      - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}, message: node-1}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0, ordinal: 1}, message: "back-off restarting failed container"}
+  - tick: 5
+    note: the operation deadline elapses; the revision has served nowhere, so the attempt is disposed terminal with no directive and counts on the revision's ladder, while the source keeps serving on node-0
+    events:
+      - timer.operationDeadline: {slack: 1s}

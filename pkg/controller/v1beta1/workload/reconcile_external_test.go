@@ -4251,7 +4251,7 @@ func TestExecuteErroredSiblingKeepsRelocationFirstTry(t *testing.T) {
 				Deadline:       metav1.NewTime(now.Add(-time.Minute)),
 			},
 		},
-		{Index: 1, Incarnation: 1, PodCount: 1, Phase: workloadtypes.InstancePhaseReady},
+		{Index: 1, Incarnation: 1, PodCount: 1, Phase: workloadtypes.InstancePhaseReady, RunningRevision: "llama-70b-engine-abcde"},
 	}
 	in.Disposition = workloadtypes.DispositionDeps{AutoMigrateMaxAttempts: 3}
 	store := installTestAtomicMutationStore(&in)

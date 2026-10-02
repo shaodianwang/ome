@@ -719,7 +719,10 @@ func TestGangSurge_InheritsExcludedNodes(t *testing.T) {
 
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
-	plan.Instances[0].ExcludedNodes = []string{"node-bad-1", "node-bad-2"}
+	plan.Instances[0].ExcludedNodes = []workload.NodeExclusion{
+		{Node: "node-bad-1", Revision: tcr.Name},
+		{Node: "node-bad-2", Revision: tcr.Name},
+	}
 
 	done, err := gangSurgeUpdate(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr)
 	if err != nil {
@@ -792,7 +795,13 @@ func TestMigrateSurge_InheritsExcludedNodes(t *testing.T) {
 		return nil
 	}
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
-	plan.Instances[0].ExcludedNodes = []string{"node-bad-1", "node-bad-2"}
+	// A migration surge renders the source's running revision, which is
+	// the revision the exclusions were recorded for.
+	runningRevision := ir.Status.InstanceStatuses[0].RunningRevision
+	plan.Instances[0].ExcludedNodes = []workload.NodeExclusion{
+		{Node: "node-bad-1", Revision: runningRevision},
+		{Node: "node-bad-2", Revision: runningRevision},
+	}
 	req := &audit.MigrationRequest{
 		Component: string(workload.ComponentEngine),
 		Instance:  0,

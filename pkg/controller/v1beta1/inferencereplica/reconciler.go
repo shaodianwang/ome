@@ -1313,11 +1313,12 @@ func (r *Reconciler) resolveTeardownDeadline(log logr.Logger) (*time.Duration, s
 //     the live reader is touched only when a prune must persist).
 //  2. Projection: build the Instance-index → excluded-nodes map from
 //     the remaining AutoRecover entries, each list bounded to the most
-//     recent autoMigrateBudget entries.
+//     recent autoMigrateBudget entries and each node tagged with the
+//     revision its directive was recorded for.
 //
 // All errors fail open with a V(1) log: the overlay is a placement
 // steer, not a correctness gate, and the next pass re-derives it.
-func (r *Reconciler) reconcileRelocationDirectives(ctx context.Context, log logr.Logger, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, autoMigrateBudget int32) map[int32][]string {
+func (r *Reconciler) reconcileRelocationDirectives(ctx context.Context, log logr.Logger, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, autoMigrateBudget int32) map[int32][]workloadtypes.NodeExclusion {
 	if r.Client == nil || ir == nil {
 		return nil
 	}
@@ -1388,17 +1389,17 @@ func (r *Reconciler) reconcileRelocationDirectives(ctx context.Context, log logr
 	if autoMigrateBudget <= 0 {
 		return nil
 	}
-	var out map[int32][]string
+	var out map[int32][]workloadtypes.NodeExclusion
 	for i := range ir.Status.InstanceStatuses {
 		idx := ir.Status.InstanceStatuses[i].Index
-		nodes := audit.RecentAutoRecoverFromNodes(ledger, component, idx, autoMigrateBudget)
-		if len(nodes) == 0 {
+		exclusions := audit.RecentAutoRecoverExclusions(ledger, component, idx, autoMigrateBudget)
+		if len(exclusions) == 0 {
 			continue
 		}
 		if out == nil {
-			out = map[int32][]string{}
+			out = map[int32][]workloadtypes.NodeExclusion{}
 		}
-		out[idx] = nodes
+		out[idx] = exclusions
 	}
 	return out
 }
