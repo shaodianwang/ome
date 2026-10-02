@@ -383,11 +383,14 @@ def control_plane():
         target(f'sum(increase(ome_tpu_slice_created_total{{{job}}}[1h]))', "created"),
         target(f'sum(increase(ome_tpu_slice_released_total{{{job}}}[1h]))', "released"),
         target(f'sum(increase(ome_tpu_slice_release_deferred_total{{{job}}}[1h]))', "release deferred"),
+        target(f'sum(increase(ome_tpu_slice_lost_total{{{job}}}[1h]))', "lost"),
     ], (0, y + 8, 12, 7), minv=0,
         desc="Over the trailing hour, counted by the leader. released counts a slice "
              "when the API server removes it, whoever deleted it. release deferred "
              "counts each attempt to release a slice kept back because pods of "
-             "another workload hold chips on its hosts."))
+             "another workload hold chips on its hosts. lost counts a slice deleted "
+             "from outside while pods ran on it; their Instance is rebuilt on a new "
+             "slice."))
     p.append(panel("timeseries", "Slice create failures per hour", [target(
         f'sum by (reason) (increase(ome_tpu_slice_create_failures_total{{{job}}}[1h]))',
         "{{reason}}")], (12, y + 8, 12, 7), minv=0,

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -153,6 +154,47 @@ func (s *slicePass) sweep(ctx context.Context, input workloadtypes.ReconcileInpu
 		return s.placer.Sweep(ctx, input, plan)
 	}
 	return s.p.Sweep(ctx, nil, s.pinned)
+}
+
+// recoverLostSlices deletes ir's pods that run on a slice deleted from
+// outside, so that their Instance is rebuilt on a new slice. A cached read
+// of the pods finds them and a live read confirms them before any is
+// deleted. A nil pass recovers nothing.
+func (r *Reconciler) recoverLostSlices(ctx context.Context, ir *v1beta1.InferenceReplica, input workloadtypes.ReconcileInput, s *slicePass) error {
+	if s == nil {
+		return nil
+	}
+	cached, err := query.ListOMENativePodsByName(ctx, r.Client, ir.Namespace, ir.NamePrefix(),
+		v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), true)
+	if err != nil {
+		return err
+	}
+	if lost, err := s.p.Lost(ctx, cached); err != nil || len(lost) == 0 {
+		return err
+	}
+	pods, err := r.componentPods(ir)(ctx)
+	if err != nil {
+		return err
+	}
+	lost, err := s.p.Lost(ctx, pods)
+	if err != nil {
+		return err
+	}
+	for _, l := range lost {
+		names := make([]string, 0, len(l.Pods))
+		for _, pod := range l.Pods {
+			uid := pod.UID
+			if err := r.Client.Delete(ctx, pod, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+				return fmt.Errorf("delete pod %s on lost slice %s: %w", pod.Name, l.Name, err)
+			}
+			names = append(names, pod.Name)
+		}
+		s.p.Recovered(l)
+		workloadtypes.RecordWarning(r.Recorder, workloadtypes.EventTarget(input), sliceprovision.EventReasonSliceLost,
+			"TPU slice %s was deleted under pods %s; they are deleted so that their Instance is rebuilt on a new slice",
+			l.Name, strings.Join(names, ", "))
+	}
+	return nil
 }
 
 // releaseSlicesPastDeadline releases every slice ir holds, pods or not. Once

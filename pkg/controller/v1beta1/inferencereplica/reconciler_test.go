@@ -3426,6 +3426,173 @@ func TestReconcile_TPUSlices_ReleasesUnusedSlicesOfAnOptedOutOwner(t *testing.T)
 	}
 }
 
+// TestReconcile_TPUSlices_RebuildsAnInstanceWhoseSliceIsLost pins the
+// recovery from a slice deleted under a running pod: the pod is deleted and
+// reported, its Instance is rebuilt on a new slice of the same name, and the
+// other Instance keeps its pod.
+func TestReconcile_TPUSlices_RebuildsAnInstanceWhoseSliceIsLost(t *testing.T) {
+	ctx := context.Background()
+	ir := optedInIR("llama-engine", "prod", 2)
+	r, c := newSliceReconciler(t, ir)
+	rec := &capturingRecorder{}
+	r.Recorder = rec
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+	reconcile := func(stage string, passes int) {
+		t.Helper()
+		for pass := 0; pass < passes; pass++ {
+			// The pod watch observes every create and delete.
+			r.Expectations = workloadtypes.NewExpectations()
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Fatalf("%s pass %d: %v", stage, pass, err)
+			}
+		}
+	}
+	// run reports every pod running and serving.
+	run := func() {
+		t.Helper()
+		for _, pod := range listPods(t, c, ir.Namespace) {
+			now := metav1.Now()
+			pod.Status.Phase = corev1.PodRunning
+			pod.Status.Conditions = []corev1.PodCondition{
+				{Type: corev1.ContainersReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
+				{Type: query.ServingConditionType, Status: corev1.ConditionTrue, LastTransitionTime: now},
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
+			}
+			if err := c.Status().Update(ctx, &pod); err != nil {
+				t.Fatalf("report pod %s running: %v", pod.Name, err)
+			}
+		}
+	}
+	p, err := r.sliceProvisioner(ir)
+	if err != nil {
+		t.Fatalf("sliceProvisioner: %v", err)
+	}
+	lost, kept := p.Name(sliceprovision.Slot{Instance: 0}), p.Name(sliceprovision.Slot{Instance: 1})
+	// podOn returns the pod confined to slice, or nil when there is none.
+	podOn := func(slice string) *corev1.Pod {
+		t.Helper()
+		var found *corev1.Pod
+		for _, pod := range listPods(t, c, ir.Namespace) {
+			if pod.Spec.NodeSelector[sliceKeySlice] == slice {
+				if found != nil {
+					t.Fatalf("pods %s and %s are both confined to slice %s", found.Name, pod.Name, slice)
+				}
+				found = pod.DeepCopy()
+			}
+		}
+		return found
+	}
+
+	reconcile("provision", 2)
+	// The provider labels each slice's host as it activates the slice.
+	for i, name := range []string{lost, kept} {
+		host := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("slice-host-%d", i), Labels: map[string]string{sliceKeySlice: name}},
+			Status:     corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}},
+		}
+		if err := c.Create(ctx, host); err != nil {
+			t.Fatalf("create slice host: %v", err)
+		}
+		setSliceState(t, c, name, sliceStateReady)
+	}
+	reconcile("ready", 2)
+	lostPod, keptPod := podOn(lost), podOn(kept)
+	if lostPod == nil || keptPod == nil {
+		t.Fatalf("pods = %v, want one on each slice", podNames(listPods(t, c, ir.Namespace)))
+	}
+	run()
+	reconcile("running", 2)
+	got := &v1beta1.InferenceReplica{}
+	if err := c.Get(ctx, req.NamespacedName, got); err != nil {
+		t.Fatalf("get IR: %v", err)
+	}
+	for _, idx := range []int32{0, 1} {
+		if row := instanceStatusAt(t, got, idx); row.Phase != v1beta1.OMENativeInstanceReady {
+			t.Fatalf("Instance %d phase = %s, want %s", idx, row.Phase, v1beta1.OMENativeInstanceReady)
+		}
+	}
+	lostSlice := getSlice(t, c, lost)
+
+	// The slice is deleted from outside while its pod runs on it.
+	if err := c.Delete(ctx, lostSlice); err != nil {
+		t.Fatalf("delete slice: %v", err)
+	}
+	reconcile("lost", 1)
+	if err := c.Get(ctx, client.ObjectKeyFromObject(lostPod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("get the pod on the lost slice: %v; want it deleted", err)
+	}
+	if got := podOn(kept); got == nil || got.UID != keptPod.UID {
+		t.Fatalf("pod on the intact slice = %+v, want %s kept", got, keptPod.Name)
+	}
+	var reported []capturedEvent
+	for _, e := range rec.events {
+		if e.reason == string(sliceprovision.EventReasonSliceLost) {
+			reported = append(reported, e)
+		}
+	}
+	if len(reported) != 1 || reported[0].kind != corev1.EventTypeWarning ||
+		!strings.Contains(reported[0].message, lost) || !strings.Contains(reported[0].message, lostPod.Name) {
+		t.Fatalf("%s events = %+v, want one warning naming %s and %s", sliceprovision.EventReasonSliceLost, reported, lost, lostPod.Name)
+	}
+
+	reconcile("rebuild", 3)
+	rebuilt := getSlice(t, c, lost)
+	if rebuilt == nil || rebuilt.GetUID() == lostSlice.GetUID() {
+		t.Fatalf("slices = %v, want a new slice named %s", sliceNames(t, c), lost)
+	}
+	if got := podOn(lost); got != nil {
+		t.Fatalf("pod %s must wait for the new slice", got.Name)
+	}
+	if err := c.Get(ctx, req.NamespacedName, got); err != nil {
+		t.Fatalf("get IR: %v", err)
+	}
+	if row := instanceStatusAt(t, got, 0); row.Operation == nil || row.Operation.Waiting != workloadtypes.WaitingReasonCapacityProvisioning {
+		t.Fatalf("Instance 0 operation = %+v, want it waiting on %s", row.Operation, workloadtypes.WaitingReasonCapacityProvisioning)
+	}
+
+	setSliceState(t, c, lost, sliceStateReady)
+	reconcile("rebuilt", 2)
+	if got := podOn(lost); got == nil || got.UID == lostPod.UID {
+		t.Fatalf("pods = %v, want a new pod on the new slice", podNames(listPods(t, c, ir.Namespace)))
+	}
+	if len(reported) != 1 {
+		t.Fatalf("the lost slice must be reported once; events %+v", rec.events)
+	}
+}
+
+// TestReconcile_TPUSlices_FailedRecoveryFailsThePass pins that a pod on a
+// lost slice that cannot be deleted fails the pass.
+func TestReconcile_TPUSlices_FailedRecoveryFailsThePass(t *testing.T) {
+	ctx := context.Background()
+	ir := optedInIR("llama-engine", "prod", 1)
+	r, c := newSliceReconciler(t, ir)
+	name := seedSlice(t, r, c, ir, sliceprovision.Slot{Instance: 0}, sliceStateReady)
+	pod := podForIR(ir, 0, string(v1beta1.RunnerNameDefault), 0, true, true)
+	pod.Spec.NodeSelector = map[string]string{sliceKeyAccelerator: "tpu-a", sliceKeyTopology: "2x2x1", sliceKeySlice: name}
+	if err := c.Create(ctx, pod); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+	if err := c.Delete(ctx, getSlice(t, c, name)); err != nil {
+		t.Fatalf("delete slice: %v", err)
+	}
+	r.Client = interceptor.NewClient(c, interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, ok := obj.(*corev1.Pod); ok {
+				return errors.New("injected pod delete failure")
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)})
+	if err == nil || !strings.Contains(err.Error(), "recover lost TPU slices") || !strings.Contains(err.Error(), "injected") {
+		t.Fatalf("Reconcile error = %v, want the recovery failure", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{}); err != nil {
+		t.Fatalf("get pod: %v; want it kept", err)
+	}
+}
+
 // TestReconcile_TPUSlices_FailuresFailThePass pins that a failed slice
 // read or release is the pass's error, and that a provisioning failure is
 // raised before any pod is created.

@@ -754,7 +754,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 	result, err = workload.Reconcile(ctx, deps, input, plan, rollTarget)
 	if err == nil {
-		if sweepErr := slices.sweep(ctx, input, plan); sweepErr != nil {
+		if lostErr := r.recoverLostSlices(ctx, ir, input, slices); lostErr != nil {
+			result = ctrl.Result{}
+			err = fmt.Errorf("InferenceReplica reconciler: recover lost TPU slices (component=%s): %w", ir.Spec.Component, lostErr)
+		} else if sweepErr := slices.sweep(ctx, input, plan); sweepErr != nil {
 			result = ctrl.Result{}
 			err = fmt.Errorf("InferenceReplica reconciler: sweep TPU slices (component=%s): %w", ir.Spec.Component, sweepErr)
 		}

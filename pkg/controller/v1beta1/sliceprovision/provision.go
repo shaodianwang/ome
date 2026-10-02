@@ -55,6 +55,11 @@ const hashLength = 8
 // pods of another workload hold chips on its hosts.
 const EventReasonSliceReleaseDeferred workload.EventReason = "SliceReleaseDeferred"
 
+// EventReasonSliceLost is recorded when a slice is deleted from outside
+// while pods run on it, and the pods are deleted so their Instance is
+// rebuilt on a new slice.
+const EventReasonSliceLost workload.EventReason = "SliceLost"
+
 // podNodeNameField selects pods by the node they are bound to.
 const podNodeNameField = "spec.nodeName"
 
@@ -331,6 +336,118 @@ func (p *Provisioner) Held(pods []*corev1.Pod) map[string]struct{} {
 		}
 	}
 	return held
+}
+
+// LostSlice is one of the owner's slices deleted under its pods.
+type LostSlice struct {
+	Name string
+	// Pods are the pods, not being deleted, that ran on the deleted slice.
+	Pods []*corev1.Pod
+}
+
+// Lost returns, sorted by name, the owner's slices that were deleted under
+// pods not being deleted: the slice is gone, is being deleted, or was
+// created after the pod. The owner releases a slice only once no pod holds
+// it and creates a pod only once its slice is ready, so each case is a
+// deletion from outside. Pods confined to a name the owner does not give its
+// slices are ignored. A cached read that finds a pod's slice intact is
+// trusted; any other is confirmed live, since the cache may lag.
+func (p *Provisioner) Lost(ctx context.Context, pods []*corev1.Pod) ([]LostSlice, error) {
+	held := map[string][]*corev1.Pod{}
+	for _, pod := range pods {
+		if pod == nil || pod.DeletionTimestamp != nil || query.IsTerminalPod(pod) {
+			continue
+		}
+		if name := pod.Spec.NodeSelector[p.cfg.NodeLabels.Slice]; p.names(name) {
+			held[name] = append(held[name], pod)
+		}
+	}
+	names := make([]string, 0, len(held))
+	for name := range held {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var lost []LostSlice
+	for _, name := range names {
+		stale, err := p.deletedUnder(ctx, p.cached, name, held[name])
+		if err != nil {
+			return nil, err
+		}
+		if len(stale) == 0 {
+			continue
+		}
+		if stale, err = p.deletedUnder(ctx, p.live, name, held[name]); err != nil {
+			return nil, err
+		}
+		if len(stale) > 0 {
+			lost = append(lost, LostSlice{Name: name, Pods: stale})
+		}
+	}
+	return lost, nil
+}
+
+// deletedUnder returns the pods, all confined to the slice name, whose slice
+// c finds deleted under them. A slice at the name the owner does not hold is
+// left alone.
+func (p *Provisioner) deletedUnder(ctx context.Context, c *gke.Client, name string, pods []*corev1.Pod) ([]*corev1.Pod, error) {
+	s, found, err := c.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if !found || s.Terminating {
+		return pods, nil
+	}
+	if !s.OwnedBy(p.ownerLabels) {
+		return nil, nil
+	}
+	var stale []*corev1.Pod
+	for _, pod := range pods {
+		if s.Created.After(pod.CreationTimestamp.Time) {
+			stale = append(stale, pod)
+		}
+	}
+	return stale, nil
+}
+
+// names reports whether name is the name of one of the owner's slots.
+func (p *Provisioner) names(name string) bool {
+	rest, ok := strings.CutSuffix(name, "-"+p.hash)
+	if !ok {
+		return false
+	}
+	rest, ordinal, ok := cutIndex(rest)
+	if !ok {
+		return false
+	}
+	_, instance, ok := cutIndex(rest)
+	return ok && p.Name(Slot{Instance: instance, Ordinal: ordinal}) == name
+}
+
+// cutIndex cuts a trailing "-<n>" from s.
+func cutIndex(s string) (string, int32, bool) {
+	i := strings.LastIndex(s, "-")
+	if i < 0 {
+		return "", 0, false
+	}
+	n, err := strconv.ParseInt(s[i+1:], 10, 32)
+	if err != nil || n < 0 {
+		return "", 0, false
+	}
+	return s[:i], int32(n), true
+}
+
+// Recovered counts l under the slice type and topology its pods select. The
+// caller calls it once it has deleted l's pods.
+func (p *Provisioner) Recovered(l LostSlice) {
+	if len(l.Pods) == 0 {
+		return
+	}
+	shape, found, err := tpuslice.FromNodeSelector(l.Pods[0].Spec.NodeSelector, p.cfg.ShapeKeys())
+	acc, configured := p.cfg.Accelerators[shape.Accelerator]
+	if err != nil || !found || !configured {
+		return
+	}
+	slicesLost.WithLabelValues(acc.SliceType, shape.Topology.String()).Inc()
 }
 
 // Fits reports whether s is the slice Ensure places slot's pods on for d.

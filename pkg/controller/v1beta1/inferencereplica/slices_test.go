@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -17,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache/informertest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
@@ -636,5 +638,126 @@ func TestSliceReleaseDeferredIsReported(t *testing.T) {
 	if len(rec.events) != 1 || rec.events[0].reason != string(sliceprovision.EventReasonSliceReleaseDeferred) ||
 		rec.events[0].kind != corev1.EventTypeWarning || !strings.Contains(rec.events[0].message, "other/holder") || rec.events[0].object != ir {
 		t.Fatalf("events = %+v, want one %s warning on the InferenceReplica naming other/holder", rec.events, sliceprovision.EventReasonSliceReleaseDeferred)
+	}
+}
+
+// TestRecoverLostSlices pins the recovery of pods on a slice deleted from
+// outside: they are deleted and reported once a live read confirms the
+// cached one, a pod already gone is not an error, and a failed delete is.
+func TestRecoverLostSlices(t *testing.T) {
+	ctx := context.Background()
+	if err := (&Reconciler{}).recoverLostSlices(ctx, nil, workloadtypes.ReconcileInput{}, nil); err != nil {
+		t.Fatalf("a nil pass must recover nothing: %v", err)
+	}
+	failPodDeletes := func(err error) func(*Reconciler, client.WithWatch) {
+		return func(r *Reconciler, c client.WithWatch) {
+			r.Client = interceptor.NewClient(c, interceptor.Funcs{
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					if _, ok := obj.(*corev1.Pod); ok {
+						return err
+					}
+					return c.Delete(ctx, obj, opts...)
+				},
+			})
+		}
+	}
+	lostSeries := map[string]string{"slice_type": "type-a", "topology": "2x2x1"}
+	for _, tc := range []struct {
+		name string
+		// lose deletes the slice from outside.
+		lose bool
+		// wire adapts the reconciler, whose reads and writes all serve c.
+		wire      func(*Reconciler, client.WithWatch)
+		wantErr   string
+		wantGone  bool
+		wantEvent bool
+	}{
+		{name: "slice intact"},
+		{name: "slice lost", lose: true, wantGone: true, wantEvent: true},
+		{
+			name: "cache lags the live slice",
+			wire: func(r *Reconciler, _ client.WithWatch) { r.sliceReader = fake.NewClientBuilder().Build() },
+		},
+		{
+			name: "pod being deleted per the live read",
+			lose: true,
+			wire: func(r *Reconciler, c client.WithWatch) {
+				r.APIReader = interceptor.NewClient(c, interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if err := c.List(ctx, list, opts...); err != nil {
+							return err
+						}
+						if pods, ok := list.(*corev1.PodList); ok {
+							for i := range pods.Items {
+								pods.Items[i].DeletionTimestamp = &metav1.Time{Time: time.Now()}
+							}
+						}
+						return nil
+					},
+				})
+			},
+		},
+		{
+			name:      "pod already gone",
+			lose:      true,
+			wire:      failPodDeletes(apierrors.NewNotFound(corev1.Resource("pods"), "gone")),
+			wantEvent: true,
+		},
+		{
+			name:    "pod delete fails",
+			lose:    true,
+			wire:    failPodDeletes(errors.New("injected pod delete failure")),
+			wantErr: "injected pod delete failure",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ir := optedInIR("llama-engine", "prod", 1)
+			r, c := newSliceReconciler(t, ir)
+			rec := &capturingRecorder{}
+			r.Recorder = rec
+			name := seedSlice(t, r, c, ir, sliceprovision.Slot{Instance: 0}, sliceStateReady)
+			pod := podForIR(ir, 0, "default", 0, true, true)
+			pod.Spec.NodeSelector = map[string]string{sliceKeyAccelerator: "tpu-a", sliceKeyTopology: "2x2x1", sliceKeySlice: name}
+			if err := c.Create(ctx, pod); err != nil {
+				t.Fatalf("create pod: %v", err)
+			}
+			if tc.lose {
+				if err := c.Delete(ctx, getSlice(t, c, name)); err != nil {
+					t.Fatalf("delete slice: %v", err)
+				}
+			}
+			if tc.wire != nil {
+				tc.wire(r, c)
+			}
+			p, err := r.sliceProvisioner(ir)
+			if err != nil {
+				t.Fatalf("sliceProvisioner: %v", err)
+			}
+			before := irStatusMetric(t, "ome_tpu_slice_lost_total", lostSeries)
+
+			err = r.recoverLostSlices(ctx, ir, workloadtypes.ReconcileInput{OwnerObject: ir}, &slicePass{p: p})
+			if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("recoverLostSlices error = %v, want %q", err, tc.wantErr)
+			}
+			getErr := c.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})
+			if gone := apierrors.IsNotFound(getErr); gone != tc.wantGone {
+				t.Fatalf("pod gone = %v (get error %v), want %v", gone, getErr, tc.wantGone)
+			}
+			wantCount := 0.0
+			if tc.wantEvent {
+				wantCount = 1
+				if len(rec.events) != 1 || rec.events[0].reason != string(sliceprovision.EventReasonSliceLost) ||
+					rec.events[0].kind != corev1.EventTypeWarning || rec.events[0].object != ir ||
+					!strings.Contains(rec.events[0].message, name) || !strings.Contains(rec.events[0].message, pod.Name) {
+					t.Fatalf("events = %+v, want one %s warning on the InferenceReplica naming %s and %s",
+						rec.events, sliceprovision.EventReasonSliceLost, name, pod.Name)
+				}
+			} else if len(rec.events) != 0 {
+				t.Fatalf("events = %+v, want none", rec.events)
+			}
+			if got := irStatusMetric(t, "ome_tpu_slice_lost_total", lostSeries) - before; got != wantCount {
+				t.Fatalf("lost slices counted = %v, want %v", got, wantCount)
+			}
+		})
 	}
 }

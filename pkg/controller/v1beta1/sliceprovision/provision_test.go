@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -671,6 +672,190 @@ func TestHeld(t *testing.T) {
 	want := map[string]struct{}{"s-running": {}, "s-pending": {}}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("Held mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// confined is a running pod, created at created, of a 2x2x1 slice it is
+// confined to.
+func confined(name, slice string, created time.Time) *corev1.Pod {
+	p := pod(name, map[string]string{keyAccelerator: "tpu-a", keyTopology: "2x2x1", keySlice: slice}, corev1.PodRunning)
+	p.UID = types.UID("uid-" + name)
+	p.CreationTimestamp = metav1.NewTime(created)
+	return p
+}
+
+func withCreated(at time.Time) func(*unstructured.Unstructured) {
+	return func(u *unstructured.Unstructured) { u.SetCreationTimestamp(metav1.NewTime(at)) }
+}
+
+// lostPods lists the lost slices, in order, each with its pods' names.
+func lostPods(lost []LostSlice) [][]string {
+	got := [][]string{}
+	for _, l := range lost {
+		names := []string{l.Name}
+		for _, p := range l.Pods {
+			names = append(names, p.Name)
+		}
+		got = append(got, names)
+	}
+	return got
+}
+
+func TestLost(t *testing.T) {
+	d := demand(t, "2x2x1")
+	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	earlier, later := created.Add(-time.Minute), created.Add(time.Minute)
+	build := newProvisioner(t, newFakeClient(), testOwner)
+	other := newProvisioner(t, newFakeClient(), Owner{Kind: "Replica", Namespace: "ns", Name: "svc-engine", UID: "uid-b"})
+	a, b := build.Name(Slot{Instance: 0}), build.Name(Slot{Instance: 1})
+	deletingPod := confined("deleting", a, created)
+	deletingPod.DeletionTimestamp = &metav1.Time{Time: later}
+	failedPod := confined("failed", a, created)
+	failedPod.Status.Phase = corev1.PodFailed
+
+	for _, tc := range []struct {
+		name   string
+		slices []*unstructured.Unstructured
+		pods   []*corev1.Pod
+		want   [][]string
+	}{
+		{
+			name:   "slice intact",
+			slices: []*unstructured.Unstructured{stored(t, build, d, Slot{}, withCreated(earlier))},
+			pods:   []*corev1.Pod{confined("p", a, created)},
+			want:   [][]string{},
+		},
+		{
+			name: "slice gone",
+			pods: []*corev1.Pod{confined("leader", a, created), confined("worker", a, created)},
+			want: [][]string{{a, "leader", "worker"}},
+		},
+		{
+			name:   "slice being deleted",
+			slices: []*unstructured.Unstructured{stored(t, build, d, Slot{}, withCreated(earlier), withFinalizer, deleting)},
+			pods:   []*corev1.Pod{confined("p", a, created)},
+			want:   [][]string{{a, "p"}},
+		},
+		{
+			name:   "slice newer than a pod",
+			slices: []*unstructured.Unstructured{stored(t, build, d, Slot{}, withCreated(created))},
+			pods:   []*corev1.Pod{confined("old", a, earlier), confined("same-second", a, created), confined("new", a, later)},
+			want:   [][]string{{a, "old"}},
+		},
+		{
+			name: "pods being deleted or done",
+			pods: []*corev1.Pod{deletingPod, failedPod, nil},
+			want: [][]string{},
+		},
+		{
+			name: "slice the owner does not name",
+			pods: []*corev1.Pod{confined("static", "static-slice", created), confined("foreign", other.Name(Slot{}), created)},
+			want: [][]string{},
+		},
+		{
+			name:   "another owner's slice at the owner's name",
+			slices: []*unstructured.Unstructured{stored(t, other, d, Slot{}, withName(a), withCreated(later))},
+			pods:   []*corev1.Pod{confined("p", a, created)},
+			want:   [][]string{},
+		},
+		{
+			name:   "each slice by name",
+			slices: []*unstructured.Unstructured{stored(t, build, d, Slot{Instance: 2}, withCreated(earlier))},
+			pods: []*corev1.Pod{
+				confined("on-b", b, created), confined("on-a", a, created), confined("intact", build.Name(Slot{Instance: 2}), created),
+			},
+			want: [][]string{{a, "on-a"}, {b, "on-b"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := make([]client.Object, 0, len(tc.slices))
+			for _, s := range tc.slices {
+				objs = append(objs, s)
+			}
+			p := newProvisioner(t, newFakeClient(objs...), testOwner)
+			lost, err := p.Lost(context.Background(), tc.pods)
+			if err != nil {
+				t.Fatalf("Lost: %v", err)
+			}
+			if diff := cmp.Diff(tc.want, lostPods(lost)); diff != "" {
+				t.Fatalf("lost slices (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestLostConfirmsLive pins the reads: a cached read that finds the slice
+// intact is trusted, and any other is confirmed live.
+func TestLostConfirmsLive(t *testing.T) {
+	d := demand(t, "2x2x1")
+	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	build := newProvisioner(t, newFakeClient(), testOwner)
+	pods := []*corev1.Pod{confined("p", build.Name(Slot{}), created)}
+	intact := func() client.Object { return stored(t, build, d, Slot{}, withCreated(created.Add(-time.Minute))) }
+	boom := errors.New("boom")
+	failing := fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return boom
+		},
+	}).Build()
+
+	for _, tc := range []struct {
+		name         string
+		cached, live client.Client
+		wantLost     bool
+		wantErr      error
+	}{
+		{name: "cache lags the live slice", cached: newFakeClient(), live: newFakeClient(intact())},
+		{name: "gone from both", cached: newFakeClient(), live: newFakeClient(), wantLost: true},
+		{name: "intact in the cache", cached: newFakeClient(intact()), live: failing},
+		{name: "cached read fails", cached: failing, live: newFakeClient(), wantErr: boom},
+		{name: "live read fails", cached: newFakeClient(), live: failing, wantErr: boom},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := New(testConfig(), tc.cached, tc.live, tc.live, testOwner)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			lost, err := p.Lost(context.Background(), pods)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Lost error = %v, want %v", err, tc.wantErr)
+			}
+			if got := len(lost) > 0; got != tc.wantLost {
+				t.Fatalf("Lost = %v, want lost: %v", lostPods(lost), tc.wantLost)
+			}
+		})
+	}
+}
+
+func TestNames(t *testing.T) {
+	for _, ownerName := range []string{testOwner.Name, "svc.engine", strings.Repeat("a.b-", 62) + "c", strings.Repeat("a", 49) + "-b"} {
+		owner := testOwner
+		owner.Name = ownerName
+		p := newProvisioner(t, newFakeClient(), owner)
+		for _, slot := range []Slot{{}, {Instance: 3, Ordinal: 1}, {Instance: 2147483647, Ordinal: 1}} {
+			if name := p.Name(slot); !p.names(name) {
+				t.Errorf("owner %q: names(%q) = false, want the name of slot %+v", ownerName, name, slot)
+			}
+		}
+	}
+	p := newProvisioner(t, newFakeClient(), testOwner)
+	other := newProvisioner(t, newFakeClient(), Owner{Kind: "Replica", Namespace: "ns", Name: "svc-engine", UID: "uid-b"})
+	for _, name := range []string{
+		"",
+		"static-slice",
+		other.Name(Slot{}),
+		"svc-decode-0-0-" + p.hash,
+		"svc-engine-00-0-" + p.hash,
+		"svc-engine-0-" + p.hash,
+		"svc-engine-0--1-" + p.hash,
+		"svc-engine-x-0-" + p.hash,
+		"svc-engine-2147483648-0-" + p.hash,
+		"0-0-" + p.hash,
+		p.Name(Slot{}) + "x",
+	} {
+		if p.names(name) {
+			t.Errorf("names(%q) = true, want it not the owner's", name)
+		}
 	}
 }
 

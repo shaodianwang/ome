@@ -56,6 +56,11 @@ var (
 		Name: "ome_tpu_slice_release_deferred_total",
 		Help: "Releases of TPU slices the controller provisioned that it kept back because pods of another workload hold chips on the slice's hosts, by slice type and topology. The owner's reconcile retries, and each deferred attempt counts.",
 	}, sliceLabels)
+
+	slicesLost = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ome_tpu_slice_lost_total",
+		Help: "TPU slices the controller provisioned that were deleted from outside while its pods ran on them, by slice type and topology. Counted once the controller deletes the pods so that their Instance is rebuilt on a new slice.",
+	}, sliceLabels)
 	sliceProvisionSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "ome_tpu_slice_provision_duration_seconds",
 		Help: "Seconds from the controller creating a TPU slice to its watch first seeing the slice in a ready state, by slice type and topology. Only slices the current leader created are timed, and a slice released before it is ready is not observed.",
@@ -71,7 +76,7 @@ var (
 )
 
 func init() {
-	ctrlmetrics.Registry.MustRegister(slicesCreated, slicesReleased, sliceCreateFailures, sliceReleasesDeferred, sliceProvisionSeconds, sliceStates)
+	ctrlmetrics.Registry.MustRegister(slicesCreated, slicesReleased, sliceCreateFailures, sliceReleasesDeferred, slicesLost, sliceProvisionSeconds, sliceStates)
 }
 
 // InitSeries exports the created, released and provision duration series of
@@ -87,6 +92,7 @@ func InitSeries(cfg *controllerconfig.TPUSliceProvisioningConfig) {
 			slicesCreated.WithLabelValues(a.SliceType, topology)
 			slicesReleased.WithLabelValues(a.SliceType, topology)
 			sliceReleasesDeferred.WithLabelValues(a.SliceType, topology)
+			slicesLost.WithLabelValues(a.SliceType, topology)
 			sliceProvisionSeconds.WithLabelValues(a.SliceType, topology)
 		}
 	}

@@ -451,6 +451,44 @@ var _ = ginkgo.Describe("InferenceReplica TPU slice provisioning", func() {
 		}).WithTimeout(waitTimeout).WithPolling(pollInterval).Should(Succeed())
 	})
 
+	ginkgo.It("rebuilds an Instance on a new slice when its slice is deleted under its pod", func() {
+		ns := createNamespace("tpuslice-lost")
+		ir := sliceIR("granite", ns, onDemandAccelerator, "2x2x1", 4, 0)
+		Expect(k8sClient.Create(suiteCtx, ir)).To(Succeed())
+		name := awaitOwnedSlices(ir, 1)[0]
+		reportSliceState(name, stateActive, "")
+		pod := awaitPods(ns, 1)[0]
+		expectConfinedTo(pod, name, "2x2x1")
+		lost := getSlice(Default, name)
+
+		ginkgo.By("deleting the slice from outside while the pod is on it")
+		Expect(k8sClient.Delete(suiteCtx, lost)).To(Succeed())
+		Eventually(func(g Gomega) {
+			err := k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(&pod), &corev1.Pod{})
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the pod on the lost slice must be deleted, got %v", err)
+			events := &corev1.EventList{}
+			g.Expect(k8sClient.List(suiteCtx, events, client.InNamespace(ns))).To(Succeed())
+			g.Expect(slices.ContainsFunc(events.Items, func(e corev1.Event) bool {
+				return e.Reason == string(sliceprovision.EventReasonSliceLost) && strings.Contains(e.Message, name)
+			})).To(BeTrue(), "the lost slice must be reported")
+		}).WithTimeout(waitTimeout).WithPolling(pollInterval).Should(Succeed())
+
+		ginkgo.By("provisioning a new slice of the same name and withholding the new pod until it is ready")
+		Eventually(func(g Gomega) {
+			owned := ownedSlices(g, ir)
+			g.Expect(owned).To(HaveLen(1))
+			g.Expect(owned[0].GetName()).To(Equal(name))
+			g.Expect(owned[0].GetUID()).NotTo(Equal(lost.GetUID()), "the slice must be provisioned again")
+		}).WithTimeout(waitTimeout).WithPolling(pollInterval).Should(Succeed())
+		awaitWithheld(ir, name)
+		Expect(listPods(Default, ns)).To(BeEmpty())
+
+		reportSliceState(name, stateActive, "")
+		rebuilt := awaitPods(ns, 1)[0]
+		Expect(rebuilt.UID).NotTo(Equal(pod.UID))
+		expectConfinedTo(rebuilt, name, "2x2x1")
+	})
+
 	ginkgo.It("provisions no slice for pods on a static pool", func() {
 		ns := createNamespace("tpuslice-static")
 		ir := sliceIR("phi", ns, staticAccelerator, "2x2", 4, 0)

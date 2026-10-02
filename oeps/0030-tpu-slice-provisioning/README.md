@@ -240,6 +240,12 @@ Common to both options (under Option 1 all of this lives in `ome-controller`):
   that goes bad after the slice is `ACTIVE` leaves the pods `Pending`, a
   recreated pod lands on the same slice, and a slice that never activates
   parks its Instance with no deadline.
+- **Lost slice.** A slice deleted from outside while pods run on it (gone,
+  being deleted, or replaced by a newer slice of the same name) has its pods
+  deleted with a `SliceLost` warning, counted by `ome_tpu_slice_lost_total`.
+  Their Instance is rebuilt on a new slice of the same name. *Failure mode if
+  skipped:* the pods stay bound and `Ready` on chips that are no longer
+  theirs, and nothing reacts.
 
 Deferred deliberately: retry/backoff policy on a failed create, and behavior when
 the cube has free chips but no free *partition* of the requested shape. Both need
