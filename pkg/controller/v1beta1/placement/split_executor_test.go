@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"knative.dev/pkg/apis"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -752,7 +753,9 @@ func TestReconcileSplitConflictDoesNotHideWriteFailure(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if diff := cmp.Diff(2, attempts); diff != "" {
+			// The conflicting member's write is retried from a fresh read; the
+			// failing member's is not.
+			if diff := cmp.Diff(1+retry.DefaultRetry.Steps, attempts); diff != "" {
 				t.Fatalf("member attempts (-want +got):\n%s", diff)
 			}
 			if diff := cmp.Diff(time.Second, result.RequeueAfter); diff != "" {

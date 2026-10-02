@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -585,63 +586,124 @@ func (r *Reconciler) derivedFor(src *v1beta1.InferenceService) (*v1beta1.Inferen
 }
 
 // applyDerived create-or-updates the derived ISVC `desired` on the target
-// cluster.
-func (r *Reconciler) applyDerived(ctx context.Context, cluster string, cl client.Client, src, desired *v1beta1.InferenceService, existingOnly bool) error {
+// cluster through direct, the member's uncached client. The remote input checks
+// run once, before the write window; the write itself re-reads the member and
+// repeats its ownership checks on every conflict.
+func (r *Reconciler) applyDerived(ctx context.Context, cluster string, direct client.Client, src, desired *v1beta1.InferenceService, existingOnly bool) error {
 	policy, err := protocol.FromDerived(desired)
 	if err != nil {
 		return err
 	}
-	target := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: desired.Namespace}}
-	_, err = controllerutil.CreateOrUpdate(ctx, cl, target, func() error {
-		// A sticky refresh cannot recreate a winner before its absence grace.
-		if existingOnly && target.ResourceVersion == "" {
-			return errMemberAbsent
-		}
-		// A same-named local service or another source's copy cannot be adopted.
-		if target.ResourceVersion != "" && !isOurDerived(target, src) {
-			return fmt.Errorf("refusing to overwrite non-derived InferenceService %s/%s on candidate cluster: not a placement derived of control plane %q",
-				target.Namespace, target.Name, r.ControlPlaneID)
-		}
-		backend, err := r.resolveMemberBackend(ctx, cl, src, desired)
-		if err != nil {
+	standing, err := getMemberService(ctx, direct, client.ObjectKeyFromObject(desired))
+	if err != nil {
+		return err
+	}
+	if err := r.authorizeMemberWrite(src, standing, policy, existingOnly); err != nil {
+		return err
+	}
+	backend, err := r.resolveStandingBackend(ctx, direct, desired, standing)
+	if err != nil {
+		return err
+	}
+	if policy != nil {
+		if err := r.checkPlanCurrent(ctx, src); err != nil {
 			return err
 		}
-		current, err := protocol.FromDerived(target)
-		if err != nil {
-			return err
-		}
-		if err := protocol.Authorize(current, policy); err != nil {
-			return err
-		}
+	}
+	if err := backend.Check(ctx); err != nil {
+		return err
+	}
+	if err := r.checkSourceSnapshot(ctx, src); err != nil {
+		return err
+	}
+	if err := r.checkBackendTransport(ctx, cluster); err != nil {
+		return err
+	}
+	// Before the wholesale re-stamp overwrites it, the live remote spec is the
+	// evidence for the FieldPruned detector: a member apiserver that pruned a
+	// stamped autoscalerPolicyRef reverts it here every pass.
+	if standing != nil {
+		r.observePolicyRefStamp(src, cluster, standing, desired)
+	}
+	return retry.OnError(retry.DefaultRetry, isMemberWriteRace, func() error {
+		return r.writeDerived(ctx, direct, src, desired, standing, policy, existingOnly)
+	})
+}
+
+// writeDerived is one live read-check-write of the member service. The write's
+// resourceVersion precondition binds the ownership decision to the exact object
+// it replaces; verified is the instance the backend checks resolved against.
+func (r *Reconciler) writeDerived(ctx context.Context, direct client.Client, src, desired, verified *v1beta1.InferenceService, policy *v1beta1.PlacementExecutionPolicy, existingOnly bool) error {
+	key := client.ObjectKeyFromObject(desired)
+	target, err := getMemberService(ctx, direct, key)
+	if err != nil {
+		return err
+	}
+	if err := r.authorizeMemberWrite(src, target, policy, existingOnly); err != nil {
+		return err
+	}
+	if (target == nil) != (verified == nil) || (target != nil && target.UID != verified.UID) {
+		return fmt.Errorf("member InferenceService %s was replaced after backend verification", key)
+	}
+	if target == nil {
 		if policy != nil {
-			if target.ResourceVersion == "" {
-				if err := requireEmptyMemberInventory(ctx, cl, src); err != nil {
-					return err
-				}
-			}
-			if err := r.checkPlanCurrent(ctx, src); err != nil {
+			if err := requireEmptyMemberInventory(ctx, direct, src); err != nil {
 				return err
 			}
 		}
-		if err := backend.Check(ctx); err != nil {
-			return err
-		}
-		if err := r.checkSourceSnapshot(ctx, src); err != nil {
-			return err
-		}
-		if err := r.checkBackendTransport(ctx, cluster); err != nil {
-			return err
-		}
-		// Before the wholesale re-stamp below overwrites it, the live remote
-		// spec is the evidence for the FieldPruned detector: a member apiserver
-		// that pruned a stamped autoscalerPolicyRef reverts it here every pass.
-		r.observePolicyRefStamp(src, cluster, target, desired)
-		target.Labels = mergeOwnedKeys(target.Labels, desired.Labels)
-		target.Annotations = mergeOwnedKeys(target.Annotations, desired.Annotations)
-		target.Spec = desired.Spec
+		target = &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}}
+		stampDerived(target, desired)
+		return direct.Create(ctx, target)
+	}
+	live := target.DeepCopy()
+	stampDerived(target, desired)
+	if equality.Semantic.DeepEqual(live, target) {
 		return nil
-	})
-	return err
+	}
+	return direct.Update(ctx, target)
+}
+
+// authorizeMemberWrite gates a write on the member service read just before it;
+// nil means the service is absent.
+func (r *Reconciler) authorizeMemberWrite(src, target *v1beta1.InferenceService, policy *v1beta1.PlacementExecutionPolicy, existingOnly bool) error {
+	// A sticky refresh cannot recreate a winner before its absence grace.
+	if existingOnly && target == nil {
+		return errMemberAbsent
+	}
+	// A same-named local service or another source's copy cannot be adopted.
+	if target != nil && !isOurDerived(target, src) {
+		return fmt.Errorf("refusing to overwrite non-derived InferenceService %s/%s on candidate cluster: not a placement derived of control plane %q",
+			target.Namespace, target.Name, r.ControlPlaneID)
+	}
+	current, err := protocol.FromDerived(target)
+	if err != nil {
+		return err
+	}
+	return protocol.Authorize(current, policy)
+}
+
+// stampDerived sets the control-plane-owned metadata keys and replaces the spec.
+func stampDerived(target, desired *v1beta1.InferenceService) {
+	target.Labels = mergeOwnedKeys(target.Labels, desired.Labels)
+	target.Annotations = mergeOwnedKeys(target.Annotations, desired.Annotations)
+	target.Spec = desired.Spec
+}
+
+// isMemberWriteRace reports a write that lost to a concurrent member change and
+// is retried from a fresh read.
+func isMemberWriteRace(err error) bool {
+	return apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err)
+}
+
+// getMemberService reads the member service; nil means it is absent.
+func getMemberService(ctx context.Context, reader client.Reader, key client.ObjectKey) (*v1beta1.InferenceService, error) {
+	service := &v1beta1.InferenceService{}
+	if err := reader.Get(ctx, key, service); apierrors.IsNotFound(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	return service, nil
 }
 
 // mergeOwnedKeys overlays the control-plane-owned keys (from desired) onto the
