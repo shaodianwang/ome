@@ -196,6 +196,18 @@ class OperationTest(unittest.TestCase):
                          self.op(fault="crashloop:old", form="start", during="idle", expect="repaired", topo="engine"))
         self.assertEqual(("admission reject", ""), self.op(mode="canary", expect="reject", topo="engine"))
 
+    def test_window_faults_sit_on_the_operation_they_hold(self):
+        idle = self.corpus.write(fault="webhook:idle", during="idle", lift="after-hold", topo="engine")
+        self.assertEqual(("steady state", "window fault at idle", "steady state"), (idle.operation, idle.operation_detail, idle.timing))
+        push = self.corpus.write(fault="conflict:settling", form="persist", target="isvc", topo="engine")
+        self.assertEqual(("push", "settling", ["operation+fault"]), (push.operation, push.timing, push.overlap))
+        up = self.corpus.write(mode="scaledown", to_e=3, fault="webhook:settling", lift="after-window", topo="engine")
+        self.assertEqual(("scale up", "settling"), (up.operation, up.timing))
+        router = [gen_cases.comp("engine", 2, 0, gen_cases.lifecycle()), gen_cases.comp("router", 2, 0, gen_cases.lifecycle())]
+        behind = self.corpus.write(fault="webhook:settling", lift="after-hold", comps=router, topo="engine", **counts(2, 0, 2))
+        self.assertEqual("engine+router single", behind.shape_family)
+        self.assertEqual([("webhook unavailable", "one-shot", "-")], behind.fault_rows())
+
     def test_a_scale_or_a_delete_on_a_broken_instance_keeps_its_operation(self):
         """A break fired before a scale or a delete (during=idle in those modes)
         is the operation plus a fault on the running revision, landing at
@@ -323,6 +335,17 @@ class FaultTest(unittest.TestCase):
                          (case.operation, case.timing, case.fault_rows()))
         case = self.corpus.write(mode="scaledown", to_e=3, fault="podkill:settling", floor_slack=1, repeat=3, topo="engine")
         self.assertEqual(("scale up", "settling"), (case.operation, case.timing))
+    def test_webhook_outage_form_follows_its_lift(self):
+        self.assertEqual([("webhook unavailable", "one-shot", "-", "admission webhook")],
+                         self.fault(fault="webhook:settling", lift="after-hold", topo="engine"))
+        self.assertEqual([("webhook unavailable", "persistent", "-", "admission webhook")],
+                         self.fault(fault="webhook:idle", during="idle", lift="after-window", topo="engine"))
+
+    def test_competing_writer_form_follows_its_writes(self):
+        self.assertEqual([("apiserver conflict", "one-shot", "-", "competing writer on the isvc")],
+                         self.fault(fault="conflict:settling", form="once", target="isvc", topo="engine"))
+        self.assertEqual([("apiserver conflict", "persistent", "-", "competing writer on the ir")],
+                         self.fault(mode="scaledown", to_e=3, fault="conflict:settling", form="persist", target="ir", topo="engine"))
 
     def test_canary_breaks_of_the_new_revision(self):
         self.assertEqual([("image pull", "persistent", "new", "engine")],
@@ -586,6 +609,13 @@ class CommittedCorpusTest(unittest.TestCase):
             self.assertEqual(("persistent", "running"), (case.fault_form, case.fault_side), case.id)
         for case in self.by_folder["canary"]:
             self.assertIn(case.operation, ("canary", "admission reject"), case.id)
+        rows = {(c.shape_family, c.operation, r) for c in self.by_folder["gen-webhook"] + self.by_folder["gen-conflict"]
+                for r in c.fault_rows()}
+        for kind in ("webhook unavailable", "apiserver conflict"):
+            for form in ("one-shot", "persistent"):
+                for family in coverage.SHAPE_FAMILIES:
+                    for operation in ("steady state", "push", "scale up"):
+                        self.assertIn((family, operation, (kind, form, "-")), rows, (kind, form, family, operation))
         sizes = self.by_folder["gen-size"]
         self.assertEqual({"1", "2"}, {c.size_class for c in sizes})
         self.assertEqual({"engine single", "engine+decoder+router single"}, {c.shape_family for c in sizes})

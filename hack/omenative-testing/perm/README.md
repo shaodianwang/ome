@@ -103,7 +103,8 @@ perm/
 │   ├── gen-budget/ gen-inplaceonly/  — percent budgets as the engine resolves them; the strict in-place strategy on its own terms
 │   ├── gen-fault-scale/ gen-fault-delete/  — generated: a scale or a delete on a service with a broken Instance
 │   ├── gen-fault-move/ gen-fault-edit/  — generated faults crossed with a move and with a runtime edit
-│   └── gen-repeat/            — generated: faults that keep repeating until they are lifted (`repeat=<n>`)
+│   ├── gen-repeat/            — generated: faults that keep repeating until they are lifted (`repeat=<n>`)
+│   └── gen-webhook/ gen-conflict/  — generated window faults: the admission webhook unreachable, a competing writer
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -1655,7 +1656,67 @@ shapes.
   restart policy, lift and (under the roll) strategy, with the quota sized
   per cell as above.
 
-- **`fault=quota`, `fault=taint`, `fault=preempt`, `via=preempt` and
+- **`fault=webhook:idle|settling` with `lift=after-hold|after-window`**
+  (rollout mode with `during=idle`, rollout mode as a push lands, or
+  `mode=scaledown` as a scale lands) makes the admission webhook
+  unreachable. The manager pod serves admission itself, so the verb points
+  the webhook Service (`ome-webhook-server-service` in the manager's
+  namespace; `OME_TEST_WEBHOOK_SERVICE`, `OME_TEST_CTRL_NS`) at a selector no
+  pod carries and leaves the manager running: every write the webhook
+  configurations intercept with `failurePolicy: Fail` (an InferenceService
+  or InferenceReplica spec write, the create of an InferenceService pod) is
+  refused with the apiserver's own words until the selector is put back,
+  while status writes pass. The selector it had rides the Service's
+  `perm.test/webhook-outage` annotation, so the end-of-case cleanup and
+  `batch.py`'s end-of-run sweep both restore it. `idle` starts the outage on
+  the settled service (nothing follows); `settling` starts it right after
+  the push or the scale has landed. `lift=after-hold` points the Service
+  back once the status has said why a write waits (held `LIFT_SETTLE_S`; or
+  after `HOLD_REASON_WAIT_S` with nothing said; at idle after
+  `LIFT_SETTLE_S`), `lift=after-window` keeps the webhook unreachable across
+  `IDLE_HOLD_S` first. The verdict: admission was refused (a server-side
+  dry-run patch of the ISVC, read every `INV_TICK_S`; still answering is
+  `INFRA-FAIL`); under a push or a scale the status said why in the
+  webhook's own words — an event on the ISVC or one of its
+  InferenceReplicas, a Component's rollout hold, a row's recorded failure
+  or wait, or an ISVC condition naming the webhook (an operation that
+  neither completes nor says why fails); no pod was created while
+  admission refused (reported, since the deployed mutator decides it);
+  nothing running left at idle or under a scale; the capacity floor held;
+  the InferenceReplica rows followed every change of the pods in rotation
+  within `STATUS_STALL_REQUEUES` of the controller's configured
+  `lifecycle.requeue.operation` (never under `STATUS_STALL_MIN_S`); the
+  controller's events on the ISVC and its InferenceReplicas stayed under
+  `EVENT_RATE_CAP_PER_MIN` and its reconciles (the
+  `controller_runtime_reconcile_total` counters of the OMENative
+  controllers, read through the apiserver proxy of
+  `OME_TEST_CTRL_METRICS_SERVICE`) under `RECONCILE_RATE_CAP_PER_MIN`, a
+  rate judged over windows of `RATE_MIN_WINDOW_S` or more and reported
+  otherwise; the webhook answered again once pointed back; then the push
+  or the scale completed within the rotate budget with each pod slot
+  created once (more is a double apply; the pods that appeared are counted
+  against the slots the operation owns), the rows settled with no
+  operation open, and no rollout hold, Held retry block or Failed row was
+  left. The generated `isvcs/gen-webhook/` family runs the steady state,
+  the push (surge and drain-first) and a scale-up by one on every shape
+  family of the coverage ledger. The outage is cluster-wide (every ISVC
+  write is refused while it holds), so `batch.py` runs these cases alone.
+- **`fault=conflict:idle|settling` with `form=once|persist` and
+  `target=isvc|ir`** (the same modes and phases) runs a competing writer:
+  a merge patch of the `perm.test/conflict-writer` annotation on the ISVC
+  or on every InferenceReplica of the case, once at the phase, or every
+  `1/OME_TEST_CONFLICT_RATE_HZ` seconds (default 2 per second) until the
+  operation completes (at idle, across `IDLE_HOLD_S`), so the controller's
+  next status write carries a stale resourceVersion and conflicts. The
+  verdict is the window verdict above without the admission half: the
+  writes were taken (none taken is `INFRA-FAIL`), nothing moved at idle,
+  the rows followed the pods in rotation, the events stayed bounded (the
+  reconcile counters are cluster-wide, so they are read on the webhook
+  cases alone), the operation completed with each slot created once and
+  nothing left held. The generated `isvcs/gen-conflict/` family crosses the
+  form and the target with the same operations and shapes; the writer is
+  per service, so these cases run in the concurrent pool.
+- **`fault=quota`, `fault=taint`, `fault=preempt`, `fault=webhook`, `via=preempt` and
   `pool=packed` cases run serially.** A quota case creates a *namespace-wide*
   ResourceQuota sized from a live usage snapshot, so run concurrently it both
   blocks other cases' pod admissions and mis-sizes its own headroom.
@@ -1677,6 +1738,9 @@ shapes.
   kubectl -n $OME_TEST_NS delete pod -l perm.test/filler --ignore-not-found
   kubectl delete priorityclass -l perm.test/fault --ignore-not-found
   kubectl get nodes -o name | xargs -r -n1 kubectl taint nodes perm.test/pending:NoSchedule- 2>/dev/null
+  # a webhook Service left pointed away carries perm.test/webhook-outage with the selector it had;
+  # batch.py's sweep restores it, or put that selector back by hand
+  kubectl -n "${OME_TEST_CTRL_NS:-ome}" get service ome-webhook-server-service -o jsonpath='{.metadata.annotations.perm\.test/webhook-outage}'
   ```
 
 ## Verdicts
@@ -1862,6 +1926,11 @@ Four generators write into `isvcs/`; re-run one after editing it:
   place with stable pod identities, an env, resources or probe change is
   refused on a single-pod Instance and rebuilt whole on a gang, and a crash
   loop under each is repaired or fixed the way the strategy allows), and the
+  window faults (`p8900`–`p9049`) → `isvcs/gen-webhook/` (the admission
+  webhook unreachable on the settled service, as a push lands and as a
+  scale-up lands, for a bounded time or across the hold window) and
+  `isvcs/gen-conflict/` (a competing writer on the ISVC or the
+  InferenceReplicas, once or until the operation completes), the
   faults crossed with a move and with a runtime edit (`p7800`–`p7999`) →
   `isvcs/gen-fault-move/` (a break, or the loss of the source node, at accept,
   at surge or at drain of a move, on the moved Instance, a peer or the decoder)
@@ -2000,7 +2069,7 @@ so a header value the ledger cannot classify (a new verb, a new fault kind)
 fails CI until it is mapped to an axis there. What no header can express is
 listed under "Not derivable from the headers" in the report (the scheduler
 lane, production profiles, the `last Instance` and `held floor` timings,
-auto versus manual migration, the webhook, apiserver and eviction faults).
+auto versus manual migration).
 
 ## Future knobs
 

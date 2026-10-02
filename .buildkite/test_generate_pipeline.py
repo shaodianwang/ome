@@ -1198,7 +1198,17 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-repeat", "engine-mn", "")], 7)
         self.assertEqual(shard_counts[("gen-repeat", "pd", "")], 3)
         self.assertEqual(shard_counts[("gen-repeat", "pd-mn", "")], 3)
-        self.assertEqual(job_count, 591)
+        # A webhook outage runs alone at about six minutes: three per shard.
+        # A competing writer stays in the pool.
+        self.assertEqual(shard_counts[("gen-webhook", "engine", "")], 6)
+        self.assertEqual(shard_counts[("gen-webhook", "engine-mn", "")], 6)
+        self.assertEqual(shard_counts[("gen-webhook", "pd", "")], 3)
+        self.assertEqual(shard_counts[("gen-webhook", "pd-mn", "")], 3)
+        self.assertEqual(shard_counts[("gen-conflict", "engine", "")], 2)
+        self.assertEqual(shard_counts[("gen-conflict", "engine-mn", "")], 2)
+        self.assertEqual(shard_counts[("gen-conflict", "pd", "")], 1)
+        self.assertEqual(shard_counts[("gen-conflict", "pd-mn", "")], 1)
+        self.assertEqual(job_count, 615)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin

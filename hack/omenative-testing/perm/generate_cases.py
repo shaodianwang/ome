@@ -243,6 +243,23 @@ runners (run.py + the KIND CI lane) already implement:
                           never passes): it holds within budget with a
                           reason, the old revision keeps serving, and a
                           corrective edit lands
+    gen-webhook/   p8900+  the admission webhook made unreachable
+                          (fault=webhook:idle|settling: its Service pointed at
+                          no pod) on the settled service, as a push lands and
+                          as a scale-up lands, for a bounded time
+                          (lift=after-hold) or across the hold window
+                          (lift=after-window), on every shape family: the
+                          controller keeps the floor, says why a write waits,
+                          creates nothing twice, and completes once the
+                          webhook is back
+    gen-conflict/  p8960+  a competing writer bumping the resourceVersion of
+                          the ISVC or of the service's InferenceReplicas
+                          (fault=conflict:idle|settling target=isvc|ir), once
+                          (form=once) or until the operation completes
+                          (form=persist), over the same three operations and
+                          shapes: the controller's status writes conflict and
+                          are retried without a lost decision, a double apply
+                          or a hot loop
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -467,6 +484,18 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     competes with the roll. The bad-edit cells run under None: a revision
     that never becomes Ready restarts no runner. One gang width, no pd-mn,
     no group, no readiness loss on the running side, as in fault-move.
+  - The window families (webhook, conflict) run every shape family of the
+    coverage ledger at one gang width: a webhook outage and a competing
+    writer act on the controller's writes, not on a gang's members, so a
+    second width adds nothing. The push runs under the surge and the
+    drain-first strategies for the webhook (the outage refuses the pod a
+    surge creates before anything is torn down, and the one a drain-first
+    roll creates after a pod is gone) and under the surge strategy alone
+    for the writer (a status write conflicts the same way under every
+    strategy); the steady state and the scale are dormant to the strategy
+    and run under the canonical surge budget. No rollout group: the engine
+    is the only bumped member and the decoder and router are negative
+    controls, so a group's gate has nothing to pace.
 
   - The packed-pool family runs the strategies that add no pod: RecreatePod
     and InPlaceIfPossible at maxSurge 0, maxUnavailable 1 (a surge needs
@@ -545,6 +574,8 @@ GEN_BLOCKS = {
     "gen-fault-edit": (7900, 8000),
     "gen-packed-pool": (8600, 8700),
     "gen-repeat": (8700, 8900),
+    "gen-webhook": (8900, 8960),
+    "gen-conflict": (8960, 9050),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -1001,6 +1032,9 @@ MISSING_HOOKS = [
     "a pending cause armed mid-roll (a taint or a quota at the rotating hook) — "
     "taint:all and quota:<n> are armed before the bump; only preempt fires at a "
     "hook",
+    "a webhook outage or a competing writer at the rotating or draining hook, "
+    "under a canary step or over a migration — the window faults start on the "
+    "settled service (idle) or as a push or a scale lands (settling) only",
 ]
 
 
@@ -4202,6 +4236,202 @@ def emit_fault_move(add):
                     cell=("fault-move", "node", None, at, "moved", topo, w, rp))
 
 
+# ── gen-webhook / gen-conflict: the admission webhook unreachable, a competing writer ──
+# A window fault holds a cluster condition over the settled service, a push
+# or a scale-up: the admission webhook unreachable (its Service pointed at no
+# pod, so every write the webhooks intercept is refused until it is pointed
+# back) or a competing writer bumping the resourceVersion the controller's
+# status writes carry. Every shape family of the coverage ledger at one gang
+# width: the engine alone, the engine behind a router, the prefill/decode
+# pair, each single-pod and as gangs. (topo, N, W, routers on an engine-only
+# shape.)
+WINDOW_SHAPES = [("engine", 4, 0, 0), ("engine-mn", 2, 1, 0), ("engine", 4, 0, lib.NR), ("engine-mn", 2, 1, lib.NR),
+                 ("pd", 4, 0, 0), ("pd-mn", 2, 1, 0)]
+WINDOW_OPS = ["steady", "push", "scale"]
+# The push under the webhook runs both pod-rebuilding strategies: the outage
+# refuses the pod a surge creates before anything is torn down, and the one
+# a drain-first roll creates after a pod is gone. The writer's push, the
+# steady state and the scale run under the canonical surge budget.
+WEBHOOK_PUSH_STRATS = [("SurgeThenDrain", 1, 0), ("RecreatePod", 0, 1)]
+WINDOW_STRAT = ("SurgeThenDrain", 1, 0)
+WEBHOOK_LIFTS = ["after-hold", "after-window"]
+CONFLICT_FORMS = ["once", "persist"]
+CONFLICT_TARGETS = ["isvc", "ir"]
+WINDOW_SCALE_UP = 1
+
+
+def _window_counts(topo, n, nr):
+    c = counts(topo, n)
+    if nr and not is_pd(topo):
+        c["Nr"] = nr
+    return c
+
+
+def _window_ceilings(topo, n, nr, strat, surge, peak_e=None):
+    c = _window_counts(topo, n, nr)
+    ce = peak_e if peak_e is not None else (n + surge_count(n, surge) if strat == "SurgeThenDrain" else n)
+    return dict(ceil_e=ce, ceil_d=c["Nd"], ceil_r=c["Nr"])
+
+
+def _window_comps(topo, n, w, nr, life):
+    cs = comps(topo, n, w, life)
+    if nr and not is_pd(topo):
+        cs.append(lib.comp("router", nr, 0, lib.lifecycle()))
+    return cs
+
+
+def _window_shape(topo, w, nr):
+    """The shape family in words, for the reason."""
+    base = "prefill/decode" if is_pd(topo) else ("engine behind a router" if nr else "engine alone")
+    return base + (f" as gangs of 1 leader + {w} worker{'s' if w > 1 else ''}" if is_mn(topo) else ", single-pod")
+
+
+def _window_tag(topo, w, nr):
+    return shape_tag(topo, w) + ("+router" if nr and not is_pd(topo) else "")
+
+
+def _window_controls(topo, nr):
+    if is_pd(topo):
+        return "; decoder and router are negative controls (co=none)"
+    if nr:
+        return "; the router is a negative control (co=none)"
+    return ""
+
+
+def _window_claims(op):
+    """What every window case asserts of the controller while the fault holds."""
+    if op == "steady":
+        return ("nothing may move: no pod created or taken down, every Instance keeps serving at N, the rows follow "
+                "every change of the pods in rotation within the configured requeues and the manager's events "
+                "stay bounded")
+    if op == "push":
+        return ("the capacity floor (N minus maxUnavailable) holds, the rows follow every change of the pods in "
+                "rotation within the configured requeues, and the manager's events stay bounded")
+    return ("nothing running may be taken down, the N Instances keep serving, the rows follow every change of the "
+            "pods in rotation within the configured requeues, and the manager's events stay bounded")
+
+
+def _window_end(op):
+    """What every window case asserts once the fault is gone."""
+    if op == "steady":
+        return "the rows still read Ready with no operation open and no hold, retry block or Failed row left"
+    if op == "push":
+        return ("the roll completes with every Instance on the new revision, each pod slot created once (more is "
+                "a double apply), the rows settled with no hold, retry block or Failed row left")
+    return ("the new Instance comes up whole and serving, created once, the survivors keep their pods, and the rows "
+            "settle with no hold, retry block or Failed row left")
+
+
+def _webhook_window(op, lift):
+    if lift == "after-window":
+        return "the webhook stays unreachable across the hold window, then its Service is pointed back"
+    if op == "steady":
+        return "the webhook is pointed back after the settle window"
+    return "the webhook is pointed back once the status has said why (or the reason wait has run out)"
+
+
+def _webhook_reason(op, lift, topo, w, nr, strat):
+    shape = _window_shape(topo, w, nr)
+    if op == "steady":
+        out = (f"the admission webhook is made unreachable on the settled service ({shape}): its Service is pointed "
+               f"at no pod, so every write the webhooks intercept is refused while status writes pass; "
+               f"{_window_claims(op)}; the manager's reconciles stay bounded; {_webhook_window(op, lift)}, it must answer "
+               f"again and {_window_end(op)}")
+    elif op == "push":
+        pod = ("the surge beside a running Instance" if strat == "SurgeThenDrain"
+               else "the replacement of the drained Instance")
+        out = (f"the bump lands under {strat} on {shape}, then the admission webhook is made unreachable: the next pod "
+               f"the roll creates ({pod}) is refused by admission, so the roll must wait and the status must say why in "
+               f"the webhook's own words (an event on the ISVC or an InferenceReplica, a row failure or wait, a hold or "
+               f"a condition) while {_window_claims(op)}; the manager's reconciles stay bounded; {_webhook_window(op, lift)}, "
+               f"and {_window_end(op)}")
+    else:
+        out = (f"the engine ({shape}) is scaled from N to N+{WINDOW_SCALE_UP}, then the admission webhook is made "
+               f"unreachable: the new Instance's pod is refused by admission, so the scale must wait with the reason "
+               f"stated in the webhook's own words while {_window_claims(op)}; the manager's reconciles stay bounded; "
+               f"{_webhook_window(op, lift)}, and {_window_end(op)}")
+    return out + _window_controls(topo, nr)
+
+
+def _conflict_writes(op, form, target):
+    what = "the ISVC" if target == "isvc" else "every InferenceReplica of the service"
+    when = {"steady": "on the settled service", "push": "as the bump lands", "scale": "as the scale lands"}[op]
+    if form == "once":
+        return f"a competing writer patches an annotation of {what} once {when}"
+    if op == "steady":
+        return f"a competing writer patches an annotation of {what} every few hundred milliseconds across the hold window"
+    return f"a competing writer patches an annotation of {what} every few hundred milliseconds from the moment the operation lands until it completes"
+
+
+def _conflict_reason(op, form, target, topo, w, nr):
+    shape = _window_shape(topo, w, nr)
+    lead = (f"{_conflict_writes(op, form, target)} ({shape}), so the controller's next status write carries a stale "
+            f"resourceVersion and conflicts; the conflict must be retried without a lost decision")
+    if op == "steady":
+        out = f"{lead}: {_window_claims(op)} (a conflict storm is a hot loop); once the writer stops, {_window_end(op)}"
+    elif op == "push":
+        out = (f"{lead}: {_window_claims(op)} (a lost write is a stale row, a conflict retried as a fresh decision is a "
+               f"double apply, a conflict storm is a hot loop); {_window_end(op)}")
+    else:
+        out = f"{lead}: {_window_claims(op)}; {_window_end(op)}"
+    return out + _window_controls(topo, nr)
+
+
+def _window_kv(kind, op, topo, n, nr, strat, surge, knobs):
+    """The header of one window case: the counts and ceilings of its
+    operation, the fault at its phase, and the kind's own knobs."""
+    if op == "steady":
+        kv = dict(**_window_counts(topo, n, nr), **_window_ceilings(topo, n, nr, strat, 0, peak_e=n))
+        kv.update(fault=f"{kind}:idle", co="none", topo=topo, during="idle")
+    elif op == "push":
+        kv = dict(**_window_counts(topo, n, nr), **_window_ceilings(topo, n, nr, strat, surge))
+        kv.update(fault=f"{kind}:settling", co="none", topo=topo)
+    else:
+        kv = dict(mode="scaledown", **_window_counts(topo, n, nr),
+                  **_window_ceilings(topo, n, nr, strat, 0, peak_e=n + WINDOW_SCALE_UP))
+        kv.update(fault=f"{kind}:settling", co="none", topo=topo, to_e=n + WINDOW_SCALE_UP)
+    kv.update(knobs)
+    return kv
+
+
+def emit_webhook(add):
+    for topo, n, w, nr in WINDOW_SHAPES:
+        for op in WINDOW_OPS:
+            strats = WEBHOOK_PUSH_STRATS if op == "push" else [WINDOW_STRAT]
+            for strat, surge, unavail in strats:
+                for lift in WEBHOOK_LIFTS:
+                    kv = _window_kv("webhook", op, topo, n, nr, strat, surge, dict(lift=lift))
+                    meta = dict(strat=strat if op == "push" else "(dormant: nothing rolls)",
+                                verb=f"webhook:{'idle' if op == 'steady' else 'settling'}", winop=f"webhook {op}",
+                                lift=lift, op=op)
+                    desc = (f"{GEN_MARK} webhook {op} {_window_tag(topo, w, nr)} N={n}"
+                            + (f" {strat} {budget_tag(strat, surge, unavail)}" if op == "push" else "")
+                            + f" lift {lift}")
+                    life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+                    add("gen-webhook", desc, kv, _window_comps(topo, n, w, nr, life),
+                        _webhook_reason(op, lift, topo, w, nr, strat), meta,
+                        cell=("webhook", op, topo, w, nr, strat, lift))
+
+
+def emit_conflict(add):
+    strat, surge, unavail = WINDOW_STRAT
+    life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+    for topo, n, w, nr in WINDOW_SHAPES:
+        for op in WINDOW_OPS:
+            for target in CONFLICT_TARGETS:
+                for form in CONFLICT_FORMS:
+                    kv = _window_kv("conflict", op, topo, n, nr, strat, surge, dict(form=form, target=target))
+                    meta = dict(strat=strat if op == "push" else "(dormant: nothing rolls)",
+                                verb=f"conflict:{'idle' if op == 'steady' else 'settling'}", winop=f"conflict {op}",
+                                cform=form, target=target, op=op)
+                    desc = (f"{GEN_MARK} conflict {op} {_window_tag(topo, w, nr)} N={n}"
+                            + (f" {strat} {budget_tag(strat, surge, unavail)}" if op == "push" else "")
+                            + f" {form} on {target}")
+                    add("gen-conflict", desc, kv, _window_comps(topo, n, w, nr, life),
+                        _conflict_reason(op, form, target, topo, w, nr), meta,
+                        cell=("conflict", op, topo, w, nr, form, target))
+
+
 # ── gen-fault-edit: a fault during a runtime edit ────────────────────────────
 # The runtime every Component inherits is edited, so engine, decoder and
 # router each roll onto their own new revision. As the edit lands a pod of
@@ -4401,6 +4631,8 @@ def build_outputs():
     emit_fault_edit(add)
     emit_packed_pool(add)
     emit_repeat(add)
+    emit_webhook(add)
+    emit_conflict(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -4489,8 +4721,11 @@ def manifest(rows):
     lines += table_if("By overlap order (runtime-edit-repair)", "order")
     lines += table("By runtime edit (runtime-edit-repair and fault-edit families)",
                    tally(lambda kv, m: m["edit"], where=lambda kv, m: "edit" in m and kv.get("mode") == "runtimerev"))
-    lines += table("By lift (preempt and pending families)",
+    lines += table("By lift (preempt, pending and webhook families)",
                    tally(lambda kv, m: m["lift"], where=lambda kv, m: "lift" in m))
+    lines += table_if("By window operation (webhook and conflict families)", "winop")
+    lines += table_if("By competing-writer form (conflict)", "cform")
+    lines += table_if("By competing-writer target (conflict)", "target")
     lines += table("By percent budget (gen-budget)",
                    tally(lambda kv, m: m["budget"], where=lambda kv, m: "budget" in m))
     lines += table("By operation on a service with a broken Instance",
@@ -4894,6 +5129,31 @@ def manifest(rows):
         " restarting while a repair is open, as in the one-shot family. The"
         " cluster-wide forms (the manager restarts, the preemptions) run one at a"
         " time after the pool, as every such case does.",
+        "- gen-webhook points the admission webhook's Service at no pod on the"
+        " settled service, as a push lands and as a scale-up lands, for a"
+        " bounded time (lift=after-hold: pointed back once the status has said"
+        " why a write waits, or after the settle window at idle) or across the"
+        " hold window (lift=after-window), on every shape family of the"
+        " coverage ledger at one gang width (the outage acts on the"
+        " controller's writes, not on a gang's members). The push runs under"
+        " the surge and the drain-first strategies: the outage refuses the pod"
+        " a surge creates before anything is torn down, and the one a"
+        " drain-first roll creates after a pod is gone; the steady state and"
+        " the scale are dormant to the strategy. No rollout group: the engine"
+        " is the only bumped member. The in-place strategies are left out: an"
+        " annotation-only diff is patched onto the live pod and creates"
+        " nothing for admission to refuse. A webhook case runs alone (the"
+        " outage is cluster-wide: every ISVC write in the cluster is refused"
+        " while it holds).",
+        "- gen-conflict runs a competing writer (an annotation patch of the"
+        " ISVC or of every InferenceReplica of the service; target=isvc|ir)"
+        " once or until the operation completes (form=once|persist) over the"
+        " same operations and shapes, under the canonical surge budget alone:"
+        " a status write conflicts the same way under every strategy. The"
+        " writer is per service, so its cases run in the concurrent pool. The"
+        " reconcile counters are read on the webhook cases only (they run"
+        " alone); a conflict case bounds the controller's events on its own"
+        " objects.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

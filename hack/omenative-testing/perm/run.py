@@ -1947,6 +1947,16 @@ def invariant_checks(inv, verdict, notes, checks):
 #                        mode ctrlrestart:idle fires before the bump and waits
 #                        for the manager, and its webhook, to come back, so
 #                        the arm is the restarted manager's.
+#   webhook:<phase>    — at idle (with during=idle) or as the operation lands
+#                        (settling): point the admission webhook's Service at
+#                        no pod until lift=after-hold|after-window, then put
+#                        it back; every write the webhooks intercept is
+#                        refused meanwhile, status writes pass.
+#   conflict:<phase>   — at the same phases: a competing writer patches an
+#                        annotation of target=isvc|ir once (form=once) or at
+#                        CONFLICT_RATE_HZ until the operation completes
+#                        (form=persist), so the controller's status writes
+#                        carry a stale resourceVersion.
 #   cordon:source      — pre-trigger: cordon the node hosting the source pod;
 #                        ALWAYS uncordoned in cleanup (failure-path safe).
 #   crashloop:old      — at the settling hook, right after the bump: make one
@@ -2217,10 +2227,61 @@ PENDING_LIFTS = {"after-settle", "never"}
 PENDING_TOKENS = {"preempt": {"Unschedulable"}, "taint": {"Unschedulable"},
                   "quota": {"QuotaExceeded", "Unschedulable"}}
 ROW_POLL_S = 2.0
-# Persistent faults a rollout case may fire on the idle service (during=idle)
-# instead of at the settling hook after the bump; no bump follows, and the
-# verdict reads what the product does about the fault on its own.
-IDLE_FAULTS = BREAK_FAULTS | LIFT_FAULTS | {READINESS_FAULT}
+# A window fault holds a cluster condition over an operation for a bounded
+# time: the admission webhook unreachable (webhook:<phase>) or a competing
+# writer bumping the resourceVersion of the ISVC or of the case's
+# InferenceReplicas (conflict:<phase>). The phase is when it starts: on the
+# settled service (idle, with during=idle: no operation follows) or right
+# after a push or a scale lands (settling).
+WEBHOOK_FAULT = "webhook"
+CONFLICT_FAULT = "conflict"
+WINDOW_FAULTS = {WEBHOOK_FAULT, CONFLICT_FAULT}
+WINDOW_PHASES = {IDLE_FAULT_PHASE, "settling"}
+WINDOW_MODES = {"rollout", "scaledown"}
+# webhook: after-hold points the Service back once the status has said why
+# a write waits (or the reason wait has run out; at idle, after the settle
+# window); after-window keeps the webhook unreachable across the hold window
+# first. Both then require the operation to complete.
+WEBHOOK_LIFTS = {"after-hold", "after-window"}
+# conflict: once is a single competing write at the phase; persist keeps
+# writing at CONFLICT_RATE_HZ until the operation completes (at idle, across
+# the hold window). target= names what the writer patches: the ISVC, or
+# every InferenceReplica of the case.
+CONFLICT_FORMS = {"once", "persist"}
+CONFLICT_TARGETS = {"isvc", "ir"}
+CONFLICT_ANNO = "perm.test/conflict-writer"
+CONFLICT_RATE_HZ = float(os.environ.get("OME_TEST_CONFLICT_RATE_HZ", "2"))
+# The webhook Service the chart installs beside the manager, in the
+# manager's namespace. The manager pod serves admission itself, so the
+# outage points the Service at a selector no pod carries and leaves the
+# manager running; the selector it had rides the Service's outage
+# annotation, where the end-of-case cleanup and batch.py's end-of-run sweep
+# both find it.
+WEBHOOK_SERVICE = os.environ.get("OME_TEST_WEBHOOK_SERVICE", "ome-webhook-server-service")
+WEBHOOK_OUTAGE_ANNO = "perm.test/webhook-outage"
+WEBHOOK_OUTAGE_LABEL = "perm.test/webhook-outage"
+# The manager's metrics Service and port name, read through the apiserver's
+# service proxy for the reconcile counters a webhook case reports.
+CTRL_METRICS_SERVICE = os.environ.get("OME_TEST_CTRL_METRICS_SERVICE", "ome-controller-manager-service:metrics")
+# What a window case holds the manager to: events it records on the case's
+# ISVC and InferenceReplicas per minute, and reconciles of the OMENative
+# controllers per minute (the counters are cluster-wide, so the reconcile
+# rate is judged on the webhook cases, which run alone).
+EVENT_RATE_CAP_PER_MIN = float(os.environ.get("OME_TEST_EVENT_RATE_CAP_PER_MIN", "60"))
+RECONCILE_RATE_CAP_PER_MIN = float(os.environ.get("OME_TEST_RECONCILE_RATE_CAP_PER_MIN", "300"))
+# How many of the controller's configured operation requeues (the
+# lifecycle.requeue.operation of its ConfigMap, REQUEUE_FALLBACK_S when it
+# is not set) a change of the pods in rotation may go unreflected by the
+# InferenceReplica rows before the status counts as stalled, never under
+# STATUS_STALL_MIN_S.
+STATUS_STALL_REQUEUES = 6
+REQUEUE_FALLBACK_S = 5.0
+STATUS_STALL_MIN_S = 30.0
+# Faults a rollout case may fire on the idle service (during=idle) instead
+# of at the settling hook after the bump; no bump follows, and the verdict
+# reads what the product does about the fault on its own (a window fault:
+# that nothing moves while it holds and once it is gone).
+IDLE_FAULTS = BREAK_FAULTS | LIFT_FAULTS | {READINESS_FAULT} | WINDOW_FAULTS
 # What a break at idle comes to: a repair that rebuilds the Instance, or a
 # hold the header states. The break wedges the victim Instance's single or
 # leader pod, so the Instance serves nothing and its repair is admitted
@@ -3599,7 +3660,7 @@ _FAULT_CLEANUPS = []
 def _run_fault_cleanups():
     """Idempotent failure-path-safe fault teardown (quota delete, uncordon,
     killer stop, ConfigMap key restore, kubelet start, readiness switch
-    lift)."""
+    lift, webhook Service restore, competing writer stop)."""
     while _FAULT_CLEANUPS:
         kind, arg = _FAULT_CLEANUPS.pop()
         if kind == "quota":
@@ -3619,6 +3680,10 @@ def _run_fault_cleanups():
             _preempt_cleanup(arg)
         elif kind == "taint":
             _taint_lift(arg)
+        elif kind == WEBHOOK_FAULT:
+            _webhook_outage_lift(arg)
+        elif kind == CONFLICT_FAULT:
+            _conflict_writer_stop(arg)
 
 
 def _lift_quota(case_id):
@@ -3680,6 +3745,8 @@ def _fault_ok(v):
             return False
     if kind == "taint":
         return param in TAINT_TARGETS
+    if kind in WINDOW_FAULTS:
+        return param in WINDOW_PHASES
     if kind == "ctrlrestart" and param == IDLE_FAULT_PHASE:
         return True
     if kind in ("podkill", "ctrlrestart", "evict", "preempt"):
@@ -3719,6 +3786,7 @@ def _fault_new(case_id, hdr):
             "exitafter": int(hdr.get("exitafter") or 0),
             "fixfirst": bool(hdr.get("fixfirst")),
             "member": str(hdr.get("kill") or ""),
+            "target": str(hdr.get("target") or ""),
             "at": str(hdr.get("at") or ""),
             "repeat": int(hdr.get("repeat") or 0), "fired_count": 0, "cycles": [], "victim_insts": set(),
             "fleet": {"engine": int(hdr.get("Ne") or 0), "decoder": int(hdr.get("Nd") or 0),
@@ -4041,6 +4109,8 @@ def _fault_capability(kind):
         return _taint_capability()
     if kind == "node":
         return _node_fault_capability()
+    if kind == WEBHOOK_FAULT:
+        return _webhook_capability()
     return None
 
 
@@ -4148,6 +4218,12 @@ def _fault_fire_once(f, pod_state, pods_per_inst, old_hashes, inv=None):
         return
     if f["kind"] == "node":
         _fault_node_fire(f, pod_state, old_hashes)
+        return
+    if f["kind"] == WEBHOOK_FAULT:
+        _webhook_outage_start(f)
+        return
+    if f["kind"] == CONFLICT_FAULT:
+        _conflict_writer_start(f)
         return
     if f["kind"] == READINESS_FAULT:
         _fault_readiness_fire(f, pod_state, old_hashes)
@@ -6808,11 +6884,12 @@ def _idle_fault(case_id, yaml_file, desc, hdr):
     fault is judged on what the Instance does once its cause is lifted. A
     fault whose apparatus this cluster lacks records SKIP with the reason."""
     lifecycle = {}
-    if str(hdr.get("fault", "")).partition(":")[0] == "node":
-        reason = _node_fault_capability()
-        if reason:
-            print(f"  ⓘ node fault unavailable here: {reason}")
-            return _write_fail(case_id, desc, hdr, "SKIP", f"node fault unavailable here: {reason}")
+    fault_kind = str(hdr.get("fault", "")).partition(":")[0]
+    reason = _fault_capability(fault_kind)
+    if reason:
+        print(f"  ⓘ {fault_kind} fault unavailable here: {reason}")
+        return _write_fail(case_id, desc, hdr, "SKIP", f"{fault_kind} fault unavailable here: {reason}")
+    if fault_kind == "node":
         if hdr.get("needs"):
             lifecycle, read_err = _controller_lifecycle_config()
             reason = _needs_unmet(str(hdr["needs"]), lifecycle, read_err)
@@ -6827,6 +6904,8 @@ def _idle_fault(case_id, yaml_file, desc, hdr):
     N, configured, ppi = ctx["N"], ctx["configured"], ctx["pods_per_inst"]
     if f["kind"] == "ctrlrestart":
         return _finish(case_id, desc, hdr, ctx, *_idle_ctrl_loop(ctx, f, hdr))
+    if f["kind"] in WINDOW_FAULTS:
+        return _finish(case_id, desc, hdr, ctx, *_idle_window(ctx, f, hdr))
     if f["kind"] == READINESS_FAULT:
         expect = f"readiness lost, {f['form']}"
     elif f["kind"] in LIFT_FAULTS:
@@ -8177,6 +8256,880 @@ def _pending_roll(case_id, yaml_file, desc, hdr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
+# ── Window faults: the admission webhook unreachable, a competing writer ─────
+# A window fault holds a cluster condition over the settled service, a push
+# or a scale-up for a bounded time and reads how the controller behaves under
+# it and once it is gone. The admission webhook is the manager's own listener
+# behind WEBHOOK_SERVICE, so the outage points that Service at a selector no
+# pod carries and leaves the manager running: every write the webhook
+# configurations intercept with failurePolicy Fail (an InferenceService or
+# InferenceReplica spec write, the create of an InferenceService pod) is
+# refused with the apiserver's own words until the selector is put back,
+# while status writes pass. The competing writer patches an annotation of
+# the ISVC or of the case's InferenceReplicas, so the controller's next
+# status write carries a stale resourceVersion and has to be retried.
+WRITE_BLOCKED_WORDS = ("webhook", "admission")
+# The counters controller-runtime exports per controller, and the part of a
+# controller's name that marks it as one of the OMENative ones.
+RECONCILE_TOTAL_RE = re.compile(r'^controller_runtime_reconcile_total\{([^}]*)\}\s+([0-9.eE+-]+)')
+RECONCILE_ERRORS_RE = re.compile(r'^controller_runtime_reconcile_errors_total\{([^}]*)\}\s+([0-9.eE+-]+)')
+METRIC_LABEL_RE = re.compile(r'(\w+)="([^"]*)"')
+RECONCILE_CONTROLLER_MATCH = "inference"
+# A window shorter than this says nothing about a rate: the count is reported.
+RATE_MIN_WINDOW_S = 30.0
+# How often a window reads admission and what the status says about a
+# blocked write (the rows are read every ROW_POLL_S).
+WINDOW_REASON_POLL_S = INV_TICK_S
+
+
+def _webhook_service():
+    """(the webhook Service object, "") or (None, why it cannot be read)."""
+    r = kubectl("-n", CTRL_NS, "get", "service", WEBHOOK_SERVICE, "-o", "json")
+    if r.returncode != 0:
+        lines = (r.stderr or "").strip().splitlines()
+        return None, (lines[-1] if lines else "not found")[:160]
+    try:
+        return json.loads(r.stdout), ""
+    except Exception as e:
+        return None, f"not JSON: {e}"
+
+
+def _webhook_capability():
+    """None when the webhook Service can be pointed away here, else why not."""
+    svc, err = _webhook_service()
+    if svc is None:
+        return f"the webhook Service {CTRL_NS}/{WEBHOOK_SERVICE} cannot be read: {err}"
+    if not ((svc.get("spec") or {}).get("selector") or {}):
+        return f"the webhook Service {CTRL_NS}/{WEBHOOK_SERVICE} has no selector to point away"
+    return None
+
+
+def _webhook_outage_patch(case_id, selector):
+    """The merge patch that points the Service at a label no pod carries:
+    every key of the selector it had dropped, the marker key added, and the
+    selector it had kept in the outage annotation."""
+    kept = json.dumps({"case": case_id, "selector": selector}, sort_keys=True)
+    return {"metadata": {"annotations": {WEBHOOK_OUTAGE_ANNO: kept}},
+            "spec": {"selector": {**{k: None for k in selector}, WEBHOOK_OUTAGE_LABEL: case_id}}}
+
+
+def _webhook_restore_patch(selector):
+    """The merge patch that puts the selector back and drops the marker key
+    and the outage annotation."""
+    return {"metadata": {"annotations": {WEBHOOK_OUTAGE_ANNO: None}},
+            "spec": {"selector": {WEBHOOK_OUTAGE_LABEL: None, **selector}}}
+
+
+def _webhook_outage_start(f):
+    """Make the admission webhook unreachable: point its Service at a
+    selector no pod carries. The restore is registered before the Service
+    changes, and a Service another case left pointed away is an apparatus
+    error, never pointed away twice."""
+    svc, err = _webhook_service()
+    if svc is None:
+        f["infra_fail"] = f"webhook: the Service {CTRL_NS}/{WEBHOOK_SERVICE} cannot be read: {err}"
+        return
+    kept = ((svc.get("metadata") or {}).get("annotations") or {}).get(WEBHOOK_OUTAGE_ANNO)
+    if kept:
+        f["infra_fail"] = (f"webhook: {CTRL_NS}/{WEBHOOK_SERVICE} is already pointed away ({str(kept)[:120]}); "
+                           f"the end-of-run sweep restores it")
+        return
+    selector = (svc.get("spec") or {}).get("selector") or {}
+    if not selector:
+        f["infra_fail"] = f"webhook: the Service {CTRL_NS}/{WEBHOOK_SERVICE} has no selector to point away"
+        return
+    f.update(webhook_selector=dict(selector), webhook_restored=False,
+             cause=f"the admission webhook unreachable ({CTRL_NS}/{WEBHOOK_SERVICE} pointed at no pod)")
+    _FAULT_CLEANUPS.append((WEBHOOK_FAULT, f))   # registered BEFORE the Service changes
+    r = kubectl("-n", CTRL_NS, "patch", "service", WEBHOOK_SERVICE, "--type=merge",
+                "-p", json.dumps(_webhook_outage_patch(f["case_id"], selector)))
+    if r.returncode != 0:
+        f["infra_fail"] = f"webhook: pointing {CTRL_NS}/{WEBHOOK_SERVICE} away failed: {(r.stderr or '').strip()[:160]}"
+        return
+    f["outage_ts"] = time.time()
+    f["notes"].append(f"fault fired: webhook outage — {CTRL_NS}/{WEBHOOK_SERVICE} selector "
+                      f"{json.dumps(selector, sort_keys=True)} replaced by {WEBHOOK_OUTAGE_LABEL}={f['case_id']}")
+    print(f"    ⚡ {f['notes'][-1]}")
+
+
+def _webhook_outage_lift(f):
+    """Point the webhook Service back at the manager: the selector it had,
+    the marker key and the outage annotation dropped. Idempotent; True once
+    restored."""
+    if f.get("webhook_restored"):
+        return True
+    selector = f.get("webhook_selector") or {}
+    if not selector:
+        return False
+    r = kubectl("-n", CTRL_NS, "patch", "service", WEBHOOK_SERVICE, "--type=merge",
+                "-p", json.dumps(_webhook_restore_patch(selector)))
+    if r.returncode == 0:
+        f["webhook_restored"] = True
+        f["lift_ts"] = time.time()
+    return r.returncode == 0
+
+
+def restore_webhook_service():
+    """Put the webhook Service back when a case left it pointed away (the
+    outage annotation holds the selector it had): batch.py's end-of-run
+    sweep. Returns what was done, "" when nothing was left to do."""
+    svc, _err = _webhook_service()
+    if svc is None:
+        return ""
+    kept = ((svc.get("metadata") or {}).get("annotations") or {}).get(WEBHOOK_OUTAGE_ANNO)
+    if not kept:
+        return ""
+    try:
+        selector = json.loads(kept).get("selector") or {}
+    except Exception:
+        selector = {}
+    if not selector:
+        return (f"{CTRL_NS}/{WEBHOOK_SERVICE} carries {WEBHOOK_OUTAGE_ANNO} with no selector to restore; "
+                f"left for a hand")
+    r = kubectl("-n", CTRL_NS, "patch", "service", WEBHOOK_SERVICE, "--type=merge",
+                "-p", json.dumps(_webhook_restore_patch(selector)))
+    if r.returncode != 0:
+        return f"restoring {CTRL_NS}/{WEBHOOK_SERVICE} failed: {(r.stderr or '').strip()[:160]}"
+    return f"restored {CTRL_NS}/{WEBHOOK_SERVICE} selector {json.dumps(selector, sort_keys=True)}"
+
+
+def _webhook_probe(case_id):
+    """(admission answers, the apiserver's words when it does not): a
+    server-side dry-run patch of the case's ISVC runs admission without
+    changing the object."""
+    probe = json.dumps({"metadata": {"annotations": {"perm.test/webhook-probe": "1"}}})
+    r = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge", "-p", probe, "--dry-run=server")
+    if r.returncode == 0:
+        return True, ""
+    lines = (r.stderr or "").strip().splitlines()
+    return False, (lines[-1] if lines else "refused")[:200]
+
+
+def _case_ir_names(case_id):
+    """The names of the case's InferenceReplicas, sorted; [] when unreadable."""
+    r = kubectl("-n", NS, "get", "inferencereplicas", "-l", f"ome.io/inferenceservice={case_id}", "-o", "name")
+    if r.returncode != 0:
+        return []
+    return sorted(x.split("/")[-1] for x in (r.stdout or "").split() if x)
+
+
+def _conflict_targets(f):
+    """What the writer patches: ("isvc", <case>) or every InferenceReplica
+    of the case as ("inferencereplica", <name>)."""
+    if f["target"] == "isvc":
+        return [("isvc", f["case_id"])]
+    return [("inferencereplica", name) for name in _case_ir_names(f["case_id"])]
+
+
+def _conflict_write(f, n):
+    """One round of competing writes: the writer's annotation set to n on
+    every target. Counts what the apiserver took and what it refused."""
+    for kind, name in f["targets"]:
+        patch = json.dumps({"metadata": {"annotations": {CONFLICT_ANNO: str(n)}}})
+        r = kubectl("-n", NS, "patch", kind, name, "--type=merge", "-p", patch)
+        if r.returncode == 0:
+            f["writes"] += 1
+        else:
+            f["refused_writes"] += 1
+            f["last_refusal"] = (r.stderr or "").strip()[-200:]
+
+
+def _conflict_writer_start(f):
+    """Start the competing writer: one write now (form=once), or a thread
+    writing every 1/CONFLICT_RATE_HZ seconds until it is stopped
+    (form=persist). The stop is registered before the first write."""
+    targets = _conflict_targets(f)
+    if not targets:
+        f["infra_fail"] = f"conflict: no {f['target']} of the case to write to"
+        return
+    what = ", ".join(f"{k}/{n}" for k, n in targets)
+    f.update(targets=targets, writes=0, refused_writes=0, last_refusal="", writer=None,
+             stop=threading.Event(), cause=f"a competing writer bumping the resourceVersion of {what}")
+    _FAULT_CLEANUPS.append((CONFLICT_FAULT, f))   # registered BEFORE the first write
+    if f["form"] == "once":
+        _conflict_write(f, 1)
+        f["stop"].set()
+        f["notes"].append(f"fault fired: conflict once — one competing write on {what} "
+                          f"({f['writes']} taken, {f['refused_writes']} refused)")
+        print(f"    ⚡ {f['notes'][-1]}")
+        return
+    period = 1.0 / max(CONFLICT_RATE_HZ, 0.01)
+
+    def loop():
+        n = 0
+        while not f["stop"].is_set():
+            n += 1
+            _conflict_write(f, n)
+            f["stop"].wait(period)
+
+    f["writer"] = threading.Thread(target=loop, name=f"conflict-writer-{f['case_id']}", daemon=True)
+    f["writer"].start()
+    f["notes"].append(f"fault fired: conflict persist — competing writes at {CONFLICT_RATE_HZ:g}/s on {what}")
+    print(f"    ⚡ {f['notes'][-1]}")
+
+
+def _conflict_writer_stop(f):
+    """Stop the writer. Idempotent; True once no more writes are issued."""
+    stop = f.get("stop")
+    if stop is None:
+        return True
+    stop.set()
+    writer = f.get("writer")
+    if writer is not None and writer.is_alive():
+        writer.join(timeout=15)
+    f.setdefault("stop_ts", time.time())
+    return writer is None or not writer.is_alive()
+
+
+def _event_epoch(stamp):
+    try:
+        return datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _object_events(kind, name, since_epoch):
+    """(when, reason, message, occurrences in the window) of every event
+    recorded on one object whose latest occurrence is at or after
+    since_epoch, oldest first. A folded repeat counts every occurrence when
+    its first one is inside the window, else the latest one alone."""
+    r = kubectl("-n", NS, "get", "events", "--field-selector",
+                f"involvedObject.kind={kind},involvedObject.name={name}", "-o", "json")
+    if r.returncode != 0:
+        return []
+    try:
+        items = json.loads(r.stdout).get("items", []) or []
+    except Exception:
+        return []
+    out = []
+    for it in items:
+        last = _event_epoch(it.get("lastTimestamp") or it.get("eventTime")
+                            or (it.get("metadata") or {}).get("creationTimestamp"))
+        if last is None or last < since_epoch:
+            continue
+        first = _event_epoch(it.get("firstTimestamp") or it.get("eventTime"))
+        try:
+            count = max(1, int(it.get("count") or 1))
+        except (TypeError, ValueError):
+            count = 1
+        inside = count if (first is not None and first >= since_epoch) else 1
+        out.append((last, str(it.get("reason") or ""), str(it.get("message") or ""), inside))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _names_admission(text):
+    """Whether a message names the admission webhook."""
+    low = str(text or "").lower()
+    return any(word in low for word in WRITE_BLOCKED_WORDS)
+
+
+def _write_blocked_reason(case_id, ir_names, since):
+    """What says a write of the controller waits on admission, in the
+    webhook's own words: an event on the ISVC or one of its
+    InferenceReplicas, a Component's rollout hold, an InferenceReplica row's
+    recorded failure or wait, or an ISVC condition. (where, text) or None."""
+    objects = [("InferenceService", case_id)] + [("InferenceReplica", n) for n in ir_names]
+    for kind, name in objects:
+        for _when, reason, msg, _n in _object_events(kind, name, since):
+            if _names_admission(msg) or _names_admission(reason):
+                return f"{kind} {name} event {reason}", msg[:200]
+    for comp, snap in sorted(_ir_snapshot(case_id).items()):
+        hold = snap.get("hold") or {}
+        if _names_admission(hold.get("reason")):
+            return f"{comp} rolloutHold", str(hold.get("reason"))[:200]
+        for row in snap.get("rows", []):
+            fail, op = row.get("lastFailure") or {}, row.get("operation") or {}
+            for text in (fail.get("message"), fail.get("reason"), op.get("reason"), op.get("waiting")):
+                if _names_admission(text):
+                    return f"{comp} Instance {row.get('index')} row", str(text)[:200]
+    for cond in (fetch_status(case_id).get("conditions") or []):
+        if _names_admission(cond.get("message")) or _names_admission(cond.get("reason")):
+            return f"ISVC condition {cond.get('type')}", str(cond.get("message") or cond.get("reason"))[:200]
+    return None
+
+
+def _controller_event_tally(case_id, ir_names, since, until):
+    """(occurrences, {reason: occurrences}) of the events recorded on the
+    case's ISVC and InferenceReplicas with a latest occurrence inside
+    [since, until]."""
+    total, reasons = 0, {}
+    for kind, name in [("InferenceService", case_id)] + [("InferenceReplica", n) for n in ir_names]:
+        for when, reason, _msg, n in _object_events(kind, name, since):
+            if when <= until:
+                total += n
+                reasons[reason] = reasons.get(reason, 0) + n
+    return total, reasons
+
+
+def _manager_metrics():
+    """The manager's Prometheus text through the apiserver's service proxy;
+    "" when it cannot be read."""
+    r = kubectl("get", "--raw", f"/api/v1/namespaces/{CTRL_NS}/services/{CTRL_METRICS_SERVICE}/proxy/metrics")
+    return r.stdout if r.returncode == 0 else ""
+
+
+def _reconcile_counts(text):
+    """{controller: (reconciles, errors)} summed over the result labels for
+    the controllers whose name carries RECONCILE_CONTROLLER_MATCH; {} when
+    the text carries no such counter."""
+    out = {}
+    for line in text.splitlines():
+        for pattern, slot in ((RECONCILE_TOTAL_RE, 0), (RECONCILE_ERRORS_RE, 1)):
+            m = pattern.match(line)
+            if not m:
+                continue
+            ctrl = dict(METRIC_LABEL_RE.findall(m.group(1))).get("controller", "")
+            if RECONCILE_CONTROLLER_MATCH not in ctrl:
+                continue
+            cur = out.setdefault(ctrl, [0.0, 0.0])
+            cur[slot] += float(m.group(2))
+    return {ctrl: (int(v[0]), int(v[1])) for ctrl, v in out.items()}
+
+
+def _reconcile_delta(before, after):
+    """{controller: (reconciles, errors)} between two readings; a counter
+    that went backwards (a restarted manager) counts from zero."""
+    out = {}
+    for ctrl, (total, errors) in after.items():
+        b_total, b_errors = before.get(ctrl, (0, 0))
+        out[ctrl] = (total - b_total if total >= b_total else total,
+                     errors - b_errors if errors >= b_errors else errors)
+    return out
+
+
+def _controller_requeue_s():
+    """The controller's configured operation requeue in seconds (the
+    lifecycle.requeue.operation of its ConfigMap), REQUEUE_FALLBACK_S when
+    the block is absent or unreadable."""
+    block, _err = _controller_lifecycle_config()
+    value = ((block or {}).get("requeue") or {}).get("operation")
+    secs = parse_duration(value) if value else 0
+    return float(secs) if secs > 0 else REQUEUE_FALLBACK_S
+
+
+def _status_stall_budget(requeue_s):
+    """How long a change of the pods in rotation may go unreflected by the
+    InferenceReplica rows: STATUS_STALL_REQUEUES configured requeues, never
+    under STATUS_STALL_MIN_S, scaled like every budget."""
+    return int(max(STATUS_STALL_MIN_S, STATUS_STALL_REQUEUES * requeue_s) * TIMEOUT_MULT)
+
+
+def _rows_fingerprint(rows_by_comp):
+    """What the rows say, without their clocks: a change here is the status
+    moving."""
+    out = []
+    for comp, rows in sorted(rows_by_comp.items()):
+        for row in rows:
+            op = {k: v for k, v in (row.get("operation") or {}).items()
+                  if not (str(k).endswith("At") or str(k).endswith("Time"))}
+            out.append((comp, str(row.get("index")), str(row.get("phase")), str(row.get("podCount")),
+                        str(row.get("servingPodCount")), str(row.get("runningRevision")),
+                        json.dumps(op, sort_keys=True)))
+    return tuple(sorted(out))
+
+
+def _serving_fingerprint(pod_state):
+    """The pods in rotation: what the rows must reflect when it changes."""
+    return frozenset(p["uid"] for p in pod_state.values()
+                     if p and p["alive"] and p.get("ready") and p.get("serving") and p.get("uid"))
+
+
+def _window_new(f, hdr, op):
+    """The bookkeeping of one window: when it began, what admission and the
+    status said, which pods appeared or left, how far the rows lagged the
+    pods in rotation, the event and reconcile tallies, the lift and the
+    completion."""
+    requeue = _controller_requeue_s()
+    return {"op": op, "kind": f["kind"], "lift": str(hdr.get("lift") or ""), "form": str(hdr.get("form") or ""),
+            "fault_ts": None, "ir_names": [], "refused_at": None, "refusal": "", "answered_at": None,
+            "said_at": None, "said_where": "", "said": "", "escaped_at": None,
+            "uids_seen": {}, "created_in_window": {}, "torn_in_window": {}, "created": {}, "expected_created": {},
+            "requeue_s": requeue, "stall_budget": _status_stall_budget(requeue), "stall_worst": 0.0,
+            "rows_fp": None, "rows_changed_at": None, "serving_fp": None, "serving_changed_at": None,
+            "last_rows_poll": 0.0, "last_reason_poll": 0.0,
+            "events": None, "event_reasons": {}, "window_s": None, "window_end_ts": None,
+            "metrics_before": None, "reconciles": None,
+            "lifted_at": None, "converged_at": None, "rows_settled": None, "rows_why": "", "leftover_hold": None}
+
+
+def _window_tick(ctx, f, win, now):
+    """One poll of the window: which pods exist, whether the rows have
+    caught up with the pods in rotation and, less often, whether admission
+    answers and what the status says about a blocked write."""
+    for p in ctx["pod_state"].values():
+        if p and p["alive"] and p.get("uid"):
+            win["uids_seen"].setdefault(p["comp"], set()).add(p["uid"])
+    serving = _serving_fingerprint(ctx["pod_state"])
+    if serving != win["serving_fp"]:
+        win["serving_fp"], win["serving_changed_at"] = serving, now
+    if now - win["last_rows_poll"] >= ROW_POLL_S:
+        win["last_rows_poll"] = now
+        rows = _rows_fingerprint(_ir_rows(ctx["case_id"]))
+        if rows != win["rows_fp"]:
+            win["rows_fp"], win["rows_changed_at"] = rows, now
+        if win["serving_changed_at"] is not None and (win["rows_changed_at"] is None
+                                                     or win["rows_changed_at"] < win["serving_changed_at"]):
+            win["stall_worst"] = max(win["stall_worst"], now - win["serving_changed_at"])
+    if win["kind"] != WEBHOOK_FAULT or now - win["last_reason_poll"] < WINDOW_REASON_POLL_S:
+        return
+    win["last_reason_poll"] = now
+    if win["lifted_at"] is None and win["refused_at"] is None:
+        answers, words = _webhook_probe(ctx["case_id"])
+        if not answers:
+            win["refused_at"], win["refusal"] = now - win["fault_ts"], words
+            print(f"    admission refused {win['refused_at']:.0f}s in: {words[:120]}")
+    if win["op"] != "idle" and win["said_at"] is None:
+        said = _write_blocked_reason(ctx["case_id"], win["ir_names"], win["fault_ts"])
+        if said:
+            win["said_at"], (win["said_where"], win["said"]) = now - win["fault_ts"], said
+            print(f"    status says why {win['said_at']:.0f}s in ({said[0]}): {said[1][:120]}")
+
+
+def _window_lift_due(win, now):
+    """Whether the webhook is due back: after-window once IDLE_HOLD_S has
+    passed since the outage began; after-hold once the status has said why
+    for LIFT_SETTLE_S, or once HOLD_REASON_WAIT_S passed with nothing said
+    (the silence is the verdict's), or at idle, where nothing is to be said,
+    after LIFT_SETTLE_S."""
+    since = now - win["fault_ts"]
+    if win["lift"] == "after-window":
+        return since >= IDLE_HOLD_S
+    if win["op"] == "idle":
+        return since >= LIFT_SETTLE_S
+    if win["said_at"] is not None:
+        return since - win["said_at"] >= LIFT_SETTLE_S
+    return since >= HOLD_REASON_WAIT_S
+
+
+def _window_span(win):
+    """How long a window is held at most: the webhook's lift rule, or the
+    hold window for a persistent writer at idle and the settle window for a
+    single write there."""
+    if win["kind"] == WEBHOOK_FAULT:
+        if win["lift"] == "after-window":
+            return IDLE_HOLD_S
+        return LIFT_SETTLE_S if win["op"] == "idle" else HOLD_REASON_WAIT_S + LIFT_SETTLE_S
+    return IDLE_HOLD_S if win["form"] == "persist" else LIFT_SETTLE_S
+
+
+def _window_close(ctx, f, win):
+    """End the window: point the webhook back and wait for admission to
+    answer, or stop the writer; then tally what the window saw (pods that
+    appeared or left, the controller's events, the reconcile counters)."""
+    t0 = win["fault_ts"]
+    if win["kind"] == WEBHOOK_FAULT:
+        print(f"  Phase 4: lift — {CTRL_NS}/{WEBHOOK_SERVICE} pointed back at the manager")
+        if not _webhook_outage_lift(f):
+            f["infra_fail"] = f"webhook: {CTRL_NS}/{WEBHOOK_SERVICE} could not be restored"
+        else:
+            win["lifted_at"] = time.time() - t0
+            if _wait_webhook_admits(ctx["case_id"], CTRL_READY_S):
+                win["answered_at"] = time.time() - t0
+            else:
+                f["infra_fail"] = f"webhook: admission did not answer within {CTRL_READY_S}s of the Service being restored"
+    else:
+        if win["form"] == "persist":
+            print("  Phase 4: the competing writer stops")
+        _conflict_writer_stop(f)
+        win["lifted_at"] = time.time() - t0
+    win["window_end_ts"] = time.time()
+    win["window_s"] = win["window_end_ts"] - t0
+    old = ctx["old_uids"]
+    win["created_in_window"] = {c: len(win["uids_seen"].get(c, set()) - old.get(c, set())) for c in ctx["configured"]}
+    alive = {p["uid"] for p in ctx["pod_state"].values() if p and p["alive"] and p.get("uid")}
+    win["torn_in_window"] = {c: len(old.get(c, set()) - alive) for c in ctx["configured"]}
+    win["events"], win["event_reasons"] = _controller_event_tally(ctx["case_id"], win["ir_names"], t0, win["window_end_ts"])
+    if win["metrics_before"] is not None:
+        after = _reconcile_counts(_manager_metrics())
+        win["reconciles"] = _reconcile_delta(win["metrics_before"], after) if after else None
+
+
+def _window_end_tally(ctx, win):
+    """Pods created over the whole case, per Component: what the operation
+    made, counted against what it should have."""
+    old = ctx["old_uids"]
+    win["created"] = {c: len(win["uids_seen"].get(c, set()) - old.get(c, set())) for c in ctx["configured"]}
+
+
+def _expected_creations(ctx, acting, target=None):
+    """Pods the operation should create, per Component: a scale-up's new
+    Instances, a push's replacement of every pod slot under a strategy that
+    rebuilds pods, nothing under an in-place strategy or on a Component the
+    operation leaves alone."""
+    N, ppi = ctx["N"], ctx["pods_per_inst"]
+    out = {}
+    for c in ctx["configured"]:
+        if c not in acting:
+            out[c] = 0
+        elif target is not None:
+            out[c] = max(0, target[c] - N[c]) * ppi.get(c, 1)
+        elif ctx["modes"].get(c) == "inplace":
+            out[c] = 0
+        else:
+            out[c] = N[c] * ppi.get(c, 1)
+    return out
+
+
+def _leftover_hold(case_id):
+    """What the status still holds once the operation is done: a
+    Component's rollout hold, a retry block still Held, a row at Failed.
+    "" when nothing is left."""
+    for comp, item in sorted(_ir_by_component(case_id).items()):
+        status = item.get("status") or {}
+        hold = status.get("rolloutHold")
+        if hold:
+            return f"{comp} rolloutHold gate={hold.get('gate')} reason={str(hold.get('reason'))[:100]}"
+        for block in _retry_blocks(item):
+            if block.get("state") == RETRY_BLOCK_HELD:
+                return f"{comp} retry block for {block.get('targetRevision', '?')} still {RETRY_BLOCK_HELD}"
+        for row in _instance_rows(status):
+            if str(row.get("phase")) == "Failed":
+                return f"{comp} Instance {row.get('index')} row Failed"
+    return ""
+
+
+def _window_hold(ctx, f, win, done):
+    """Phase 3 of a webhook outage: watch under it until the lift is due; an
+    operation completing meanwhile is recorded (nothing of the controller's
+    was refused, then)."""
+    t0 = win["fault_ts"]
+    deadline = t0 + _window_span(win) + ROW_POLL_S
+    while time.time() < deadline and not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        _window_tick(ctx, f, win, now)
+        if win["op"] != "idle" and win["escaped_at"] is None and done():
+            win["escaped_at"] = now - t0
+            print(f"    the operation completed {win['escaped_at']:.0f}s in with the webhook still unreachable")
+        if _window_lift_due(win, now):
+            break
+
+
+def _window_complete(ctx, f, win, done, budget):
+    """Watch the operation complete, the window still ticking (a competing
+    writer runs through it; after a webhook outage the rows must keep
+    following the pods). Returns the state the watch ended in."""
+    t0, stable = time.time(), None
+    while time.time() - t0 < budget and not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        _window_tick(ctx, f, win, now)
+        if done():
+            stable = stable or now
+            if now - stable >= STABILITY_S:
+                win["converged_at"] = stable - win["fault_ts"]
+                ctx["converged_at"] = stable - ctx["trigger_ts"]
+                return "CONVERGED"
+        else:
+            stable = None
+    return "ROTATE_TIMEOUT"
+
+
+def _window_op(case_id, yaml_file, desc, hdr):
+    """A push or a scale with a window fault fired as it lands
+    (fault=webhook:settling | conflict:settling). Under the webhook outage
+    the operation must wait with the reason in the webhook's own words while
+    the floor holds and the rows keep following the pods in rotation; once
+    the webhook is back (after-hold | after-window) it must complete with
+    every pod slot created once and nothing left held. Under the competing
+    writer it must complete the same way while its status writes conflict."""
+    kind = str(hdr.get("fault", "")).partition(":")[0]
+    reason = _fault_capability(kind)
+    if reason:
+        print(f"  ⓘ {kind} fault unavailable here: {reason}")
+        return _write_fail(case_id, desc, hdr, "SKIP", f"{kind} fault unavailable here: {reason}")
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    f, N, configured, ppi = ctx["fault"], ctx["N"], ctx["configured"], ctx["pods_per_inst"]
+    scale = hdr.get("mode") == "scaledown"
+    target = {c: int(hdr.get(TO_KEYS[c], N[c])) for c in COMPS}
+    acting = {c for c in configured if target[c] != N[c]} if scale else _bumped(ctx)
+    controls = configured - acting
+    ctx["track_comps"] = sorted(configured)
+    win = _window_new(f, hdr, "scale" if scale else "push")
+    win["expected_created"] = _expected_creations(ctx, acting, target if scale else None)
+    knob = f"lift={win['lift']}" if kind == WEBHOOK_FAULT else f"form={win['form']} target={f['target']}"
+    goal = (" ".join(f"{c} {N[c]}->{target[c]}" for c in sorted(acting)) if scale else f"bump {sorted(acting)}")
+    print(f"  Phase 2: {goal}, then {kind}:{f['param']} as it lands ({knob})")
+    if scale:
+        ok, msg = _scale_patch(case_id, {c: target[c] for c in acting})
+        ctx["trigger_ts"] = time.time()
+    else:
+        ok, msg = _bump_rev(ctx, acting), ctx.get("trigger_error", "bump failed")
+    if not ok:
+        return _finish(case_id, desc, hdr, ctx, "TRIGGER_FAIL", "FAIL",
+                       [f"trigger failed: {msg}"], [f"  ✗ trigger failed: {msg}"])
+    win["ir_names"] = _case_ir_names(case_id)
+    if kind == WEBHOOK_FAULT:
+        win["metrics_before"] = _reconcile_counts(_manager_metrics()) or None
+    _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
+    win["fault_ts"] = time.time()
+    if f["infra_fail"]:
+        return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
+
+    def done():
+        agg = ctx.get("agg") or {}
+        for c in configured:
+            alive, ready, updated = agg.get(c, (0, 0, 0))
+            want = target[c] if scale else N[c]
+            if alive != want or ready != want:
+                return False
+            if not scale and c in acting and updated != want:
+                return False
+        return True
+
+    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(max(N[c], target[c]) * ppi[c] for c in acting))
+    if kind == WEBHOOK_FAULT:
+        print(f"  Phase 3: watching under the outage until the lift is due (≤{_window_span(win)}s)")
+        _window_hold(ctx, f, win, done)
+        _window_close(ctx, f, win)
+        if f["infra_fail"]:
+            state = "LIFT_FAILED"
+        else:
+            print(f"  Phase 5: watching {'the scale' if scale else 'the roll'} complete (≤{budget}s)")
+            state = _window_complete(ctx, f, win, done, budget)
+    else:
+        print(f"  Phase 3: watching {'the scale' if scale else 'the roll'} complete under the writer (≤{budget}s)")
+        state = _window_complete(ctx, f, win, done, budget)
+        _window_close(ctx, f, win)
+    if state == "CONVERGED":
+        want = {c: (target[c] if scale else N[c]) for c in COMPS}
+        win["rows_settled"], win["rows_why"] = _wait_rows_settled(case_id, want, configured, ROWS_SETTLE_S)
+        win["leftover_hold"] = _leftover_hold(case_id)
+    _window_end_tally(ctx, win)
+    verdict, notes, checks = "PASS", [], []
+    verdict = _window_checks(f, win, state, verdict, notes, checks)
+    verdict = _ceiling_checks(ctx, verdict, notes, checks)
+    verdict = min_ready_checks(ctx, sorted(configured if scale else acting), verdict, notes, checks)
+    verdict = gang_atomicity_checks(ctx, sorted(acting), verdict, notes, checks)
+    if state == "CONVERGED":
+        verdict = index_collision_checks(ctx, sorted(acting), verdict, notes, checks)
+    if not scale:
+        verdict = surge_before_drain_checks(ctx, sorted(acting), verdict, notes, checks)
+    verdict = _window_control_checks(ctx, win, controls, verdict, notes, checks)
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
+def _idle_window(ctx, f, hdr):
+    """A window fault on the settled service: nothing may move while it
+    holds or once it is gone, the rows must keep following the pods, and
+    the manager must not spin. Returns (state, verdict, notes, checks)."""
+    case_id, N, configured, ppi = ctx["case_id"], ctx["N"], ctx["configured"], ctx["pods_per_inst"]
+    win = _window_new(f, hdr, "idle")
+    win["expected_created"] = {c: 0 for c in configured}
+    win["ir_names"] = _case_ir_names(case_id)
+    if f["kind"] == WEBHOOK_FAULT:
+        win["metrics_before"] = _reconcile_counts(_manager_metrics()) or None
+    knob = f"lift={win['lift']}" if f["kind"] == WEBHOOK_FAULT else f"form={win['form']} target={f['target']}"
+    print(f"  Phase 2: {f['kind']}:{f['param']} on the settled service ({knob}; no operation follows)")
+    _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
+    ctx["trigger_ts"] = win["fault_ts"] = time.time()
+    if f["infra_fail"]:
+        return "INFRA-FAIL", "INFRA-FAIL", [], []
+    span = _window_span(win)
+    print(f"  Phase 3: holding {span}s under {f.get('cause', 'the fault')} — nothing may move")
+    deadline = win["fault_ts"] + span
+    while time.time() < deadline and not ctx["closed"]:
+        _read_one(ctx)
+        _window_tick(ctx, f, win, time.time())
+    _window_close(ctx, f, win)
+    state = "HELD"
+    if not f["infra_fail"]:
+        print(f"  Phase 5: holding {LIFT_SETTLE_S}s more with the fault gone — still nothing may move")
+        after = time.time() + LIFT_SETTLE_S
+        while time.time() < after and not ctx["closed"]:
+            _read_one(ctx)
+            _window_tick(ctx, f, win, time.time())
+        win["rows_settled"], win["rows_why"] = _wait_rows_settled(case_id, N, configured, ROWS_SETTLE_S)
+        win["leftover_hold"] = _leftover_hold(case_id)
+    else:
+        state = "LIFT_FAILED"
+    _window_end_tally(ctx, win)
+    verdict, notes, checks = "PASS", [], []
+    verdict = _window_checks(f, win, state, verdict, notes, checks)
+    verdict = _idle_peak_checks(ctx, verdict, notes, checks)
+    min_ready = ctx.get("min_ready") or {}
+    for c in sorted(configured):
+        held = min_ready.get(c, N[c])
+        if held < N[c]:
+            verdict = "FAIL"
+            notes.append(f"{c} dropped to {held} serving Instance(s) on the steady service")
+            checks.append(f"  ✗ {c} dropped to {held} serving Instance(s) (N={N[c]}) while nothing was asked of it")
+        else:
+            checks.append(f"  ✓ {c} kept {N[c]} serving Instance(s) throughout")
+    return state, verdict, notes, checks
+
+
+def _window_control_checks(ctx, win, controls, verdict, notes, checks):
+    """The Components the operation leaves alone keep their pods."""
+    for c in sorted(controls):
+        made = win["created"].get(c, 0)
+        if made or ctx["peaks"][c] > ctx["N"][c]:
+            verdict = "FAIL"
+            notes.append(f"{c} (not acted on) changed: {made} new pod(s), peak {ctx['peaks'][c]}")
+            checks.append(f"  ✗ {c} was not acted on but got {made} new pod(s) (peak {ctx['peaks'][c]}, N={ctx['N'][c]}) — isolation violated")
+        else:
+            checks.append(f"  ✓ {c} (not acted on) kept its pods (peak {ctx['peaks'][c]}=N, nothing created) — isolation held")
+    return verdict
+
+
+def _rate_check(label, what, count, window_s, cap, detail, verdict, notes, checks):
+    """A per-minute rate against its cap: failed over a window long enough to
+    mean something, reported otherwise."""
+    minutes = max(window_s or 0.0, 1.0) / 60.0
+    rate = count / minutes
+    tail = f" ({detail})" if detail else ""
+    if rate > cap and (window_s or 0.0) >= RATE_MIN_WINDOW_S:
+        verdict = "FAIL"
+        notes.append(f"{label}: {what} ran at {rate:.0f}/min (cap {cap:g}/min)")
+        checks.append(f"  ✗ {label}: {count} {what} in {window_s:.0f}s ({rate:.0f}/min, cap {cap:g}/min) — a hot loop{tail}")
+    elif rate > cap:
+        checks.append(f"  ⚠ {label}: {count} {what} in {window_s:.0f}s ({rate:.0f}/min over a window under "
+                      f"{RATE_MIN_WINDOW_S:.0f}s; cap {cap:g}/min not judged){tail}")
+    else:
+        checks.append(f"  ✓ {label}: {count} {what} in {window_s:.0f}s ({rate:.0f}/min ≤ {cap:g}/min){tail}")
+    return verdict
+
+
+def _window_checks(f, win, state, verdict, notes, checks):
+    """The window verdict (see _window_op and _idle_window): the fault bit;
+    under a webhook outage the status said why the operation waited; nothing
+    was created while admission refused, nothing taken down at idle or under
+    a scale; the rows followed every serving change within the stall budget;
+    the manager's events (and, for a webhook case, its reconciles) stayed
+    bounded; the lift; the operation completed with each pod slot created
+    once; the rows settled with nothing left held."""
+    kind, op = win["kind"], win["op"]
+    label = f"{kind}:{f['param']}"
+    what = {"push": "the push", "scale": "the scale", "idle": "the steady service"}[op]
+    if kind == WEBHOOK_FAULT:
+        if win["refused_at"] is None:
+            f["infra_fail"] = (f"{label}: admission kept answering with {CTRL_NS}/{WEBHOOK_SERVICE} pointed away "
+                               f"for {win['window_s'] or 0:.0f}s — the outage never bit")
+            return verdict
+        checks.append(f"  ✓ {label}: admission refused {win['refused_at']:.0f}s after the Service was pointed away: {win['refusal'][:120]}")
+    else:
+        if not f.get("writes"):
+            f["infra_fail"] = (f"{label}: the competing writer wrote nothing ({f.get('refused_writes', 0)} refused"
+                               f"{': ' + f['last_refusal'][:100] if f.get('last_refusal') else ''})")
+            return verdict
+        targets = ", ".join(f"{k}/{n}" for k, n in f.get("targets", []))
+        refused = f", {f['refused_writes']} refused" if f.get("refused_writes") else ""
+        checks.append(f"  ✓ {label}: {f['writes']} competing write(s) on {targets} taken by the apiserver{refused}")
+    if kind == WEBHOOK_FAULT and op != "idle":
+        if win["said_at"] is not None:
+            checks.append(f"  ✓ {label}: the status said why {what} waited, {win['said_at']:.0f}s into the outage "
+                          f"({win['said_where']}): {win['said'][:160]}")
+        elif win["escaped_at"] is not None:
+            checks.append(f"  ⓘ {label}: {what} completed {win['escaped_at']:.0f}s into the outage with nothing said — "
+                          f"no write of the controller was refused")
+        else:
+            verdict = "FAIL"
+            notes.append(f"{label}: nothing said why {what} waited under the outage")
+            checks.append(f"  ✗ {label}: {what} did not complete under the outage and nothing named the webhook within "
+                          f"{HOLD_REASON_WAIT_S}s (no event on the ISVC or its InferenceReplicas, no row failure or wait, "
+                          f"no rollout hold, no ISVC condition) — a wait with no reason")
+    elif kind == WEBHOOK_FAULT and win["said_at"] is not None:
+        checks.append(f"  ⓘ {label}: the steady service reported a blocked write ({win['said_where']}): {win['said'][:160]}")
+    if kind == WEBHOOK_FAULT and op != "idle":
+        made = {c: n for c, n in win["created_in_window"].items() if n}
+        if made:
+            checks.append(f"  ⚠ {label}: pod(s) created while the webhook was unreachable "
+                          f"({', '.join(f'{c}+{n}' for c, n in sorted(made.items()))}) — the deployed pod mutator "
+                          f"did not gate them; informational")
+        else:
+            checks.append(f"  ✓ {label}: no pod was created while the webhook was unreachable ({win['window_s'] or 0:.0f}s)")
+    if op in ("idle", "scale"):
+        torn = {c: n for c, n in win["torn_in_window"].items() if n}
+        if torn:
+            verdict = "FAIL"
+            notes.append(f"{label}: running pod(s) left during the window: "
+                         + ", ".join(f"{c}-{n}" for c, n in sorted(torn.items())))
+            checks.append(f"  ✗ {label}: {sum(torn.values())} running pod(s) left during the window "
+                          f"({', '.join(f'{c}-{n}' for c, n in sorted(torn.items()))}) — nothing may be taken down under "
+                          f"{f.get('cause', 'the fault')}")
+        else:
+            checks.append(f"  ✓ {label}: no running pod left during the window")
+    if op == "idle":
+        made = {c: n for c, n in win["created"].items() if n}
+        if made:
+            verdict = "FAIL"
+            notes.append(f"{label}: pod(s) created on the steady service: "
+                         + ", ".join(f"{c}+{n}" for c, n in sorted(made.items())))
+            checks.append(f"  ✗ {label}: {sum(made.values())} pod(s) created on a service nobody touched "
+                          f"({', '.join(f'{c}+{n}' for c, n in sorted(made.items()))})")
+        else:
+            checks.append(f"  ✓ {label}: the steady service kept its pods across the window and after it")
+    if win["stall_worst"] > win["stall_budget"]:
+        verdict = "FAIL"
+        notes.append(f"{label}: the rows lagged a serving change by {win['stall_worst']:.0f}s")
+        checks.append(f"  ✗ {label}: the InferenceReplica rows went {win['stall_worst']:.0f}s without reflecting a change "
+                      f"of the pods in rotation (budget {win['stall_budget']}s = {STATUS_STALL_REQUEUES} requeues of "
+                      f"{win['requeue_s']:g}s) — the status stopped updating")
+    else:
+        checks.append(f"  ✓ {label}: the rows followed every serving change within {win['stall_worst']:.0f}s "
+                      f"(budget {win['stall_budget']}s)")
+    if win["events"] is None:
+        checks.append(f"  ⓘ {label}: the controller's events over the window could not be read")
+    else:
+        top = ", ".join(f"{r}×{n}" for r, n in sorted(win["event_reasons"].items(), key=lambda x: (-x[1], x[0]))[:4])
+        verdict = _rate_check(label, "controller event(s) on the ISVC and its InferenceReplicas", win["events"],
+                              win["window_s"], EVENT_RATE_CAP_PER_MIN, top, verdict, notes, checks)
+    if kind == WEBHOOK_FAULT:
+        if not win["reconciles"]:
+            checks.append(f"  ⓘ {label}: the manager's reconcile counters were not readable through "
+                          f"{CTRL_NS}/{CTRL_METRICS_SERVICE}")
+        else:
+            total = sum(r for r, _e in win["reconciles"].values())
+            detail = ", ".join(f"{c} {r} reconcile(s) {e} error(s)" for c, (r, e) in sorted(win["reconciles"].items()))
+            verdict = _rate_check(label, "reconcile(s) of the OMENative controllers", total, win["window_s"],
+                                  RECONCILE_RATE_CAP_PER_MIN, detail, verdict, notes, checks)
+    if win["lifted_at"] is None:
+        return verdict   # the apparatus failure is recorded on the fault
+    if kind == WEBHOOK_FAULT:
+        answered = f" and answered {win['answered_at'] - win['lifted_at']:.0f}s later" if win["answered_at"] is not None else ""
+        checks.append(f"  ✓ {label}: the webhook was pointed back {win['lifted_at']:.0f}s in{answered}")
+    elif win["form"] == "persist":
+        checks.append(f"  ✓ {label}: the writer stopped {win['lifted_at']:.0f}s in")
+    if op != "idle":
+        back = "the webhook returned" if kind == WEBHOOK_FAULT else "the writer started"
+        if state == "CONVERGED":
+            after = win["converged_at"] - (win["lifted_at"] if kind == WEBHOOK_FAULT else 0.0)
+            checks.append(f"  ✓ {label}: {what} completed {after:.0f}s after {back}")
+        else:
+            verdict = "FAIL"
+            notes.append(f"{label}: {what} did not complete after {back} ({state})")
+            checks.append(f"  ✗ {label}: {what} did not complete within budget after {back} ({state})")
+        if state == "CONVERGED":
+            for c in sorted(win["expected_created"]):
+                want, got = win["expected_created"][c], win["created"].get(c, 0)
+                if got > want:
+                    verdict = "FAIL"
+                    notes.append(f"{c}: {got} pod(s) created for {want} slot(s)")
+                    checks.append(f"  ✗ {label}: {c} got {got} new pod(s) for {want} pod slot(s) — something was applied twice")
+                elif got < want:
+                    checks.append(f"  ⚠ {label}: {c} got {got} new pod(s) for {want} pod slot(s) (fewer than a rebuild of each)")
+                elif want:
+                    checks.append(f"  ✓ {label}: {c}: each of its {want} pod slot(s) was created once")
+    if win["rows_settled"] is not None:
+        if win["rows_settled"]:
+            checks.append(f"  ✓ {label}: every InferenceReplica row ended Ready with no operation open")
+        else:
+            verdict = "FAIL"
+            notes.append(f"{label}: rows not settled: {win['rows_why']}")
+            checks.append(f"  ✗ {label}: the InferenceReplica rows did not settle within {ROWS_SETTLE_S}s ({win['rows_why']})")
+    if win["leftover_hold"] is not None:
+        if win["leftover_hold"]:
+            verdict = "FAIL"
+            notes.append(f"{label}: a hold is left: {win['leftover_hold']}")
+            checks.append(f"  ✗ {label}: the status still holds something after {what} ended: {win['leftover_hold']}")
+        else:
+            checks.append(f"  ✓ {label}: no hold, no Held retry block and no Failed row left in the status")
+    return verdict
+
+
 def write_result(case_id, desc, Ne, Nd, Nr, ce, cd, cr, peaks, final,
                  converged_at, policy, verdict, note, new_final):
     ts = int(time.time())
@@ -8420,8 +9373,12 @@ HDR_VALIDATORS = {
     # up. victims= is how many Instances a break hits at once (default 1;
     # the storm shape under a canary). exitafter= is how many seconds a
     # pushed runner serves before it exits (fault=crashloop:new form=load).
-    # form= is also how a readiness:old victim's switch ends: kept or lifted.
-    "form": lambda v: v in CRASHLOOP_FORMS | READINESS_FORMS,
+    # form= is also how a readiness:old victim's switch ends: kept or lifted,
+    # and how a competing writer writes: once, or until the operation completes.
+    "form": lambda v: v in CRASHLOOP_FORMS | READINESS_FORMS | CONFLICT_FORMS,
+    # target= is what a competing writer patches: the ISVC, or every
+    # InferenceReplica of the case.
+    "target": lambda v: v in CONFLICT_TARGETS,
     "victims": lambda v: isinstance(v, int) and v >= 1,
     "exitafter": lambda v: isinstance(v, int) and v >= 1,
     # fixfirst=1 (a break on the running revision, after a bump): the broken
@@ -8479,7 +9436,8 @@ HDR_VALIDATORS = {
     # cordon:<target ∈ FAULT_TARGETS>, crashloop|imagepull:old (with form=),
     # and under a canary crashloop|imagepull:canary-<state> (the stable side
     # breaks in that state), :idle (broken before the push) or :new (the
-    # push itself brings the broken revision).
+    # push itself brings the broken revision); webhook|conflict:idle|settling
+    # (a window fault on the settled service or as the operation lands).
     "fault": _fault_ok,
     # Fault-case contract knobs. blocked=1 (rollout/scaledown): the fault is
     # expected to HOLD the operation — assert parked-no-churn + capacity floor
@@ -8494,7 +9452,10 @@ HDR_VALIDATORS = {
     # lift=after-hold|never (rollout + fault=quota:<n>|cordon:all): lift the
     # squeeze once the roll has visibly waited on it, or keep it and judge
     # the wait.
-    "lift": lambda v: v == 1 or v in LIFT_PHASES or v in TIGHT_LIFTS or v in PENDING_LIFTS,
+    # lift=after-hold|after-window (fault=webhook:<phase>): point the webhook
+    # back once the status has said why a write waits, or only after the
+    # hold window.
+    "lift": lambda v: v == 1 or v in LIFT_PHASES or v in TIGHT_LIFTS or v in PENDING_LIFTS or v in WEBHOOK_LIFTS,
     # needs=<policy> (fault=node): the deployed force-delete policy the
     # outcome is read against; SKIP where the controller config differs.
     "needs": lambda v: v in NEEDS,
@@ -8770,6 +9731,41 @@ def validate_case_file(path):
         else:
             errs.append(f"{path}:1: repeat= is the persistent form of a kill (mode=kill) or of "
                         f"fault={'|'.join(sorted(REPEAT_FAULTS))}:<hook> under a push or a scale (mode=rollout|scaledown)")
+    # A window fault: the admission webhook unreachable, or a competing
+    # writer, on the settled service (idle, with during=idle) or as a push
+    # or a scale lands (settling).
+    if fault_kind in WINDOW_FAULTS:
+        if mode not in WINDOW_MODES:
+            errs.append(f"{path}:1: fault={fields.get('fault')} holds a window over a push (mode=rollout), the settled "
+                        f"service (mode=rollout during={IDLE_FAULT_PHASE}) or a scale (mode=scaledown)")
+        if (fault_param == IDLE_FAULT_PHASE) != (during == IDLE_FAULT_PHASE):
+            errs.append(f"{path}:1: fault={fault_kind}:{IDLE_FAULT_PHASE} is the window on the settled service and goes with "
+                        f"during={IDLE_FAULT_PHASE}; fault={fault_kind}:settling starts as the operation lands, with no during=")
+        elif during and during != IDLE_FAULT_PHASE:
+            errs.append(f"{path}:1: during={during} does not combine with fault={fields.get('fault')} (the window starts at its own phase)")
+        if mode == "scaledown" and fault_param != "settling":
+            errs.append(f"{path}:1: a window over a scale starts as the scale lands (fault={fault_kind}:settling)")
+        if fault_kind == WEBHOOK_FAULT:
+            if lift not in WEBHOOK_LIFTS:
+                errs.append(f"{path}:1: fault={fields.get('fault')} needs lift={'|'.join(sorted(WEBHOOK_LIFTS))} "
+                            f"(when the webhook is pointed back)")
+            for k in ("form", "target"):
+                if k in fields:
+                    errs.append(f"{path}:1: {k}= is the competing writer's knob (fault={CONFLICT_FAULT}:<phase>)")
+        else:
+            if str(fields.get("form", "")) not in CONFLICT_FORMS:
+                errs.append(f"{path}:1: fault={fields.get('fault')} needs form={'|'.join(sorted(CONFLICT_FORMS))} "
+                            f"(one competing write, or writes until the operation completes)")
+            if str(fields.get("target", "")) not in CONFLICT_TARGETS:
+                errs.append(f"{path}:1: fault={fields.get('fault')} needs target={'|'.join(sorted(CONFLICT_TARGETS))} "
+                            f"(the object the writer patches)")
+            if "lift" in fields:
+                errs.append(f"{path}:1: lift= is the webhook outage's knob; a competing writer stops when the operation completes")
+    else:
+        if "target" in fields:
+            errs.append(f"{path}:1: target= names the object a competing writer patches (needs fault={CONFLICT_FAULT}:<phase>)")
+        if lift == "after-window":
+            errs.append(f"{path}:1: lift=after-window keeps the webhook unreachable across the hold window (needs fault={WEBHOOK_FAULT}:<phase>)")
     if fault_kind in BREAK_FAULTS | {READINESS_FAULT} and "victimcomp" in fields and str(fields["victimcomp"]) not in BREAK_VICTIM_COMPS:
         errs.append(f"{path}:1: victimcomp={fields['victimcomp']}: a break victim is a pod of "
                     f"{' or '.join(sorted(BREAK_VICTIM_COMPS))} (the Components a roll targets)")
@@ -8786,9 +9782,9 @@ def validate_case_file(path):
                 errs.append(f"{path}:1: {k}= does not combine with pool={POOL_PACKED}")
     if "inv_on" in fields and "J" in str(fields["inv_on"]).split(",") and str(fields.get("expect", "")) == "relocated":
         errs.append(f"{path}:1: inv_on=J asserts no auto-recovery record, and expect=relocated expects one")
-    if "form" in fields and fault_kind not in BREAK_FAULTS and fault_kind != READINESS_FAULT:
+    if "form" in fields and fault_kind not in BREAK_FAULTS and fault_kind not in (READINESS_FAULT, CONFLICT_FAULT):
         errs.append(f"{path}:1: form= says how a break victim fails (needs fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM} "
-                    f"or fault={READINESS_FAULT}:old)")
+                    f"or fault={READINESS_FAULT}:old) or how a competing writer writes (fault={CONFLICT_FAULT}:<phase>)")
     if fault_kind == "crashloop" and str(fields.get("form", "")) not in CRASHLOOP_FORMS:
         errs.append(f"{path}:1: fault={fields.get('fault')} needs form=start|load")
     if crash_new and mode == "rollout":
@@ -9031,7 +10027,7 @@ def validate_case_file(path):
         errs.append(f"{path}:1: expect=fail is the migrate-mode bounded-failure contract — needs mode=migrate + fault=")
     if lift == 1 and not (mode == "migrate" and str(fields.get("fault", "")).startswith("quota:")):
         errs.append(f"{path}:1: lift=1 requires mode=migrate + fault=quota:<n>")
-    if lift in TIGHT_LIFTS and not (pending or via == "preempt"):
+    if lift in TIGHT_LIFTS and not (pending or via == "preempt") and fault_kind not in WINDOW_FAULTS:
         if mode != "rollout" or fault_kind not in TIGHT_FAULTS or during:
             errs.append(f"{path}:1: lift={lift} lifts a capacity squeeze on a rollout (needs mode=rollout and "
                         f"fault=quota:<n> or fault=cordon:all, no during=)")
@@ -15179,6 +16175,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
         return _compremove(case_id, yaml_file, desc, hdr)
     if mode == "pairing":
         return _pairing(case_id, yaml_file, desc, hdr)
+    if str(hdr.get("fault", "")).partition(":")[0] in WINDOW_FAULTS:
+        return _window_op(case_id, yaml_file, desc, hdr)
     if hdr.get("stuck"):
         return _stuck_scale(case_id, yaml_file, desc, hdr)
     if hdr.get("during") == IDLE_FAULT_PHASE:
@@ -15624,6 +16622,8 @@ def run_case(case_id):
         return _crashloop_new(case_id, yaml_file, desc, hdr)
     if str(hdr.get("fault", "")) == f"{READINESS_FAULT}:new":
         return _readiness_new_roll(case_id, yaml_file, desc, hdr)
+    if fault_kind in WINDOW_FAULTS:
+        return _window_op(case_id, yaml_file, desc, hdr)
     if _tight_cell(hdr):
         return _tight_roll(case_id, yaml_file, desc, hdr)
     if fault_kind in PENDING_FAULTS and str(hdr.get("lift")) in PENDING_LIFTS:

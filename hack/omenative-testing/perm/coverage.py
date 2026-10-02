@@ -133,7 +133,6 @@ NOT_DERIVABLE = [
     "production profiles: no header marks a case as a shipped service's lifecycle fixture",
     "the timings `last Instance` and `held floor`: no hook fires at them",
     "migration auto versus manual: `mode=migrate` files an explicit request; `mig=` is the policy",
-    "the faults `webhook unavailable` and `apiserver conflict`: no verb injects them",
 ]
 
 
@@ -197,7 +196,10 @@ HEADER_VALUES = {
     "victim": {"stable", "canary", "moved", "peer", "sibling"},
     "victimcomp": set(COMPONENTS),
     "imgcomp": set(COMPONENTS),
-    "form": {"start", "load", "persist", "recover"},
+    # how a crash victim fails, how a readiness switch ends, or how a competing writer writes
+    "form": {"start", "load", "persist", "recover", "once"},
+    # what a competing writer patches: the ISVC, or every InferenceReplica of the case
+    "target": {"isvc", "ir"},
     "nophase": {"Pending", "Canarying", "Paused", "Promoting", "RollingBack", "RolledBack", "Failed"},
     "inv_off": {"A", "B", "C", "D", "F", "G", "H", "J", "K", "all"},
     "inv_xfail": {"A", "B", "C", "D", "F", "G", "H", "J", "K", "all"},
@@ -237,6 +239,8 @@ def _fault(v):
         return param.lstrip("-").isdigit()   # a negative headroom admits fewer pods than run
     if kind == "taint":
         return param == "all"
+    if kind in ("webhook", "conflict"):
+        return param in ("idle", "settling")   # a window on the settled service, or as the operation lands
     if kind in ("podkill", "ctrlrestart", "evict", "preempt"):
         return param in FAULT_PHASES or _hook(param) or (kind == "ctrlrestart" and param == "idle")
     if kind in ("crashloop", "imagepull"):
@@ -263,7 +267,7 @@ def _during(v):
 
 
 def _lift(v):
-    return v == 1 or v in {"after-settle", "after-failed", "after-recover", "after-hold", "never"}
+    return v == 1 or v in {"after-settle", "after-failed", "after-recover", "after-hold", "after-window", "never"}
 
 
 def _int_list(v):
@@ -563,7 +567,8 @@ def classify_operation(h, mode, size):
         return "rollback", f"the starting revision re-applied at {during}", "push"
     if during == "idle":
         pause = {"true": "pause", "freeze": "freeze"}.get(str(h.get("pause", ""))) if h.get("pauseat") else ""
-        detail = "persistent fault at idle" + (f", {pause} {h['pauseat']} the repair" if pause else "")
+        window = str(h.get("fault", "")).partition(":")[0] in ("webhook", "conflict")
+        detail = ("window fault at idle" if window else "persistent fault at idle") + (f", {pause} {h['pauseat']} the repair" if pause else "")
         detail += ", the fix pushed while paused" if h.get("push") else ""
         return "steady state", detail, pause or ""
     detail = f"{edit} edit" if edit in ROLLOUT_EDITS else "annotation bump"
@@ -679,6 +684,13 @@ def classify_faults(h, mode, pods, strategy, verbs):
         faults.append(("quota", "one-shot" if lifted else "persistent", "-", f"headroom {param}"))
     elif kind == "ctrlrestart":
         faults.append(("controller restart", repeated, "-", "manager"))
+    elif kind == "webhook":
+        # pointed back once the status has said why (one-shot), or kept unreachable across the hold window
+        faults.append(("webhook unavailable", "persistent" if h.get("lift") == "after-window" else "one-shot", "-", "admission webhook"))
+    elif kind == "conflict":
+        # one competing write, or writes until the operation completes
+        faults.append(("apiserver conflict", "persistent" if h.get("form") == "persist" else "one-shot", "-",
+                       f"competing writer on the {h.get('target', 'isvc')}"))
     if h.get("img"):
         component = str(h.get("imgcomp") or h.get("bump", "engine"))
         sibling = component in ("decoder", "router")

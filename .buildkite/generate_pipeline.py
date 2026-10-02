@@ -366,6 +366,8 @@ EVAL_SOFT_FEATURES: list[dict[str, str]] = [
         "gen-fault-edit",
         "gen-packed-pool",
         "gen-repeat",
+        "gen-webhook",
+        "gen-conflict",
     )
 ]
 
@@ -417,11 +419,12 @@ EVAL_FORCE_DELETE_ENV = "OME_EVAL_FORCE_DELETE"
 EVAL_FORCE_DELETE_SLUG = "forcedelete"
 # batch.py runs a case whose fault apparatus reaches past its own pods (a
 # namespace-wide quota, a cordoned or stopped node, a manager restart, every
-# node tainted or filled) on its own after the concurrent pool drains, so the
-# planner gives such a case a wave of its own instead of packing it by its
-# peak pods. The kinds mirror batch.py's cluster_wide_fault; the test suite
-# keeps the two rules in step over the committed corpus.
-EVAL_EXCLUSIVE_FAULT_KINDS = frozenset({"quota", "cordon", "ctrlrestart", "node", "taint", "preempt"})
+# node tainted or filled, the admission webhook made unreachable) on its own
+# after the concurrent pool drains, so the planner gives such a case a wave
+# of its own instead of packing it by its peak pods. The kinds mirror
+# batch.py's cluster_wide_fault; the test suite keeps the two rules in step
+# over the committed corpus.
+EVAL_EXCLUSIVE_FAULT_KINDS = frozenset({"quota", "cordon", "ctrlrestart", "node", "taint", "preempt", "webhook"})
 EVAL_EXCLUSIVE_VIA = "preempt"
 EVAL_EXCLUSIVE_POOL = "packed"
 # Wall-clock minutes one exclusive case of a family takes on the GKE agents,
@@ -452,6 +455,10 @@ EVAL_EXCLUSIVE_CASE_MINUTES: dict[str, float] = {
     # restart about a minute to Ready, then the operation's convergence), and
     # a preemption's fill-and-press cycle twice over with its repair between
     "gen-repeat": 8,
+    # expected: the fleet settles, the webhook is unreachable for the hold
+    # window or until the status says why (up to 90 s either way), the push
+    # or the scale completes once it is back, the rows settle
+    "gen-webhook": 6,
     # measured: quota waits of 7 minutes among restart and cordon cells of 1-2
     "fault": 4,
     # measured: manager restarts at canary hooks of 2 minutes, two quota

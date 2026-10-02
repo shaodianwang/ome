@@ -1,0 +1,13 @@
+# p8970: [gen] conflict scale engine N=4 once on ir  mode=scaledown Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=conflict:settling co=none topo=engine form=once to_e=5 target=ir
+# reason: a competing writer patches an annotation of every InferenceReplica of the service once as the scale lands (engine alone, single-pod), so the controller's next status write carries a stale resourceVersion and conflicts; the conflict must be retried without a lost decision: nothing running may be taken down, the N Instances keep serving, the rows follow every change of the pods in rotation within the configured requeues, and the manager's events stay bounded; the new Instance comes up whole and serving, created once, the survivors keep their pods, and the rows settle with no hold, retry block or Failed row left
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8970 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

@@ -1,0 +1,20 @@
+# p9005: [gen] conflict scale engine-mn W1+router N=2 persist on isvc  mode=scaledown Ne=2 Nd=0 Nr=2 ceil_e=3 ceil_d=0 ceil_r=2 fault=conflict:settling co=none topo=engine-mn form=persist to_e=3 target=isvc
+# reason: a competing writer patches an annotation of the ISVC every few hundred milliseconds from the moment the operation lands until it completes (engine behind a router as gangs of 1 leader + 1 worker), so the controller's next status write carries a stale resourceVersion and conflicts; the conflict must be retried without a lost decision: nothing running may be taken down, the N Instances keep serving, the rows follow every change of the pods in rotation within the configured requeues, and the manager's events stay bounded; the new Instance comes up whole and serving, created once, the survivors keep their pods, and the rows settle with no hold, retry block or Failed row left; the router is a negative control (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9005 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

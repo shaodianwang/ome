@@ -1464,6 +1464,665 @@ class GeneratedSizeFamiliesTest(unittest.TestCase):
                     self.assertEqual([], run.validate_case_file(path), name)
 
 
+class WindowFaultHeaderTest(unittest.TestCase):
+    """webhook:<phase> and conflict:<phase>: the phases, the modes, the knobs
+    each kind needs and refuses, and the idle phase tied to during=idle."""
+
+    BASE = "# p999: x Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
+    IDLE = "# p999: x Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 topo=engine during=idle"
+    SCALE = "# p999: x mode=scaledown Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine to_e=3"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_fault_phases(self):
+        self.assertTrue(run._fault_ok("webhook:idle"))
+        self.assertTrue(run._fault_ok("webhook:settling"))
+        self.assertTrue(run._fault_ok("conflict:settling"))
+        self.assertFalse(run._fault_ok("webhook:rotating"))
+        self.assertFalse(run._fault_ok("conflict:canary-serving"))
+        self.assertFalse(run._fault_ok("webhook"))
+
+    def test_webhook_needs_its_lift_and_refuses_the_writers_knobs(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=webhook:settling lift=after-hold"))
+        self.assertEqual([], self._errs(self.BASE + " fault=webhook:settling lift=after-window"))
+        self.assertEqual([], self._errs(self.IDLE + " fault=webhook:idle lift=after-hold"))
+        self.assertEqual([], self._errs(self.SCALE + " fault=webhook:settling lift=after-window"))
+        self.assertTrue(any("needs lift=" in e for e in self._errs(self.BASE + " fault=webhook:settling")))
+        self.assertTrue(any("needs lift=" in e for e in self._errs(self.BASE + " fault=webhook:settling lift=after-settle")))
+        self.assertTrue(any("competing writer's knob" in e
+                            for e in self._errs(self.BASE + " fault=webhook:settling lift=after-hold form=once")))
+        self.assertTrue(any("competing writer's knob" in e
+                            for e in self._errs(self.BASE + " fault=webhook:settling lift=after-hold target=ir")))
+
+    def test_conflict_needs_form_and_target_and_refuses_a_lift(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=conflict:settling form=once target=isvc"))
+        self.assertEqual([], self._errs(self.IDLE + " fault=conflict:idle form=persist target=ir"))
+        self.assertEqual([], self._errs(self.SCALE + " fault=conflict:settling form=persist target=ir"))
+        self.assertTrue(any("needs form=" in e for e in self._errs(self.BASE + " fault=conflict:settling target=isvc")))
+        self.assertTrue(any("needs target=" in e for e in self._errs(self.BASE + " fault=conflict:settling form=once")))
+        self.assertTrue(any("malformed header value form=" in e
+                            for e in self._errs(self.BASE + " fault=conflict:settling form=twice target=isvc")))
+        self.assertTrue(any("lift= is the webhook outage's knob" in e
+                            for e in self._errs(self.BASE + " fault=conflict:settling form=once target=isvc lift=after-hold")))
+
+    def test_idle_phase_goes_with_during_idle_and_the_modes_are_bounded(self):
+        self.assertTrue(any("goes with during=idle" in e for e in self._errs(self.BASE + " fault=webhook:idle lift=after-hold")))
+        self.assertTrue(any("goes with during=idle" in e for e in self._errs(self.IDLE + " fault=webhook:settling lift=after-hold")))
+        self.assertTrue(any("as the scale lands" in e for e in self._errs(
+            self.SCALE.replace(" to_e=3", "") + " to_e=3 fault=webhook:idle lift=after-hold")))
+        kill = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
+        self.assertTrue(any("holds a window over a push" in e for e in self._errs(kill + " fault=webhook:settling lift=after-hold")))
+        self.assertTrue(any("does not combine" in e
+                            for e in self._errs(self.BASE + " fault=conflict:settling form=once target=isvc during=rotating")))
+
+    def test_the_window_knobs_belong_to_their_faults(self):
+        self.assertTrue(any("names the object a competing writer patches" in e for e in self._errs(self.BASE + " target=isvc")))
+        self.assertTrue(any("keeps the webhook unreachable" in e for e in self._errs(self.BASE + " lift=after-window")))
+        self.assertTrue(any("expect=" in e for e in self._errs(self.IDLE + " fault=webhook:idle lift=after-hold expect=repaired")))
+
+    def test_coverage_vocabulary_matches(self):
+        import coverage
+        self.assertIn("target", coverage.HEADER_VALUES)
+        self.assertEqual(run.CONFLICT_TARGETS, coverage.HEADER_VALUES["target"])
+        self.assertTrue(run.CONFLICT_FORMS <= coverage.HEADER_VALUES["form"])
+        self.assertTrue(coverage._lift("after-window"))
+
+
+SERVICE = {"metadata": {"name": "ome-webhook-server-service", "annotations": {"meta.helm.sh/release-name": "ome"}},
+           "spec": {"selector": {"control-plane": "ome-controller-manager"}}}
+
+
+class WebhookOutageVerbTest(unittest.TestCase):
+    """The outage points the webhook Service at a selector no pod carries,
+    keeps the selector it had in the outage annotation, registers the
+    restore first, and the lift (and the end-of-run sweep) put it back."""
+
+    def test_patches_drop_the_old_selector_and_keep_it_in_the_annotation(self):
+        patch = run._webhook_outage_patch("p999", {"control-plane": "ome-controller-manager"})
+        self.assertEqual({"control-plane": None, run.WEBHOOK_OUTAGE_LABEL: "p999"}, patch["spec"]["selector"])
+        kept = json.loads(patch["metadata"]["annotations"][run.WEBHOOK_OUTAGE_ANNO])
+        self.assertEqual({"case": "p999", "selector": {"control-plane": "ome-controller-manager"}}, kept)
+        back = run._webhook_restore_patch({"control-plane": "ome-controller-manager"})
+        self.assertEqual({run.WEBHOOK_OUTAGE_LABEL: None, "control-plane": "ome-controller-manager"}, back["spec"]["selector"])
+        self.assertIsNone(back["metadata"]["annotations"][run.WEBHOOK_OUTAGE_ANNO])
+
+    def test_start_registers_the_restore_before_the_service_changes(self):
+        f = run._fault_new("p999", {"fault": "webhook:settling", "lift": "after-hold"})
+        calls, saved = [], list(run._FAULT_CLEANUPS)
+
+        def kubectl(*a, **k):
+            calls.append((a, len(run._FAULT_CLEANUPS)))
+            if "get" in a:
+                return subprocess.CompletedProcess(a, 0, json.dumps(SERVICE), "")
+            return subprocess.CompletedProcess(a, 0, "", "")
+        try:
+            with mock.patch.object(run, "kubectl", kubectl):
+                run._fault_fire(f, {}, {}, set())
+            self.assertTrue(f["fired"])
+            self.assertIsNone(f["infra_fail"])
+            patch_call = [c for c in calls if "patch" in c[0]][0]
+            self.assertEqual(("-n", run.CTRL_NS, "patch", "service", run.WEBHOOK_SERVICE, "--type=merge"), patch_call[0][:6])
+            self.assertEqual(len(saved) + 1, patch_call[1], "the restore is registered before the patch")
+            self.assertEqual(json.loads(patch_call[0][7])["spec"]["selector"][run.WEBHOOK_OUTAGE_LABEL], "p999")
+            self.assertEqual({"control-plane": "ome-controller-manager"}, f["webhook_selector"])
+            self.assertIn("unreachable", f["cause"])
+            calls.clear()
+            with mock.patch.object(run, "kubectl", kubectl):
+                self.assertTrue(run._webhook_outage_lift(f))
+                self.assertTrue(run._webhook_outage_lift(f))
+                run._run_fault_cleanups()
+            patches = [c for c in calls if "patch" in c[0]]
+            self.assertEqual(1, len(patches), "a restored Service is not patched twice")
+            self.assertEqual({run.WEBHOOK_OUTAGE_LABEL: None, "control-plane": "ome-controller-manager"},
+                             json.loads(patches[0][0][7])["spec"]["selector"])
+        finally:
+            run._FAULT_CLEANUPS[:] = saved
+
+    def test_start_refuses_a_service_without_a_selector_or_already_pointed_away(self):
+        saved = list(run._FAULT_CLEANUPS)
+        try:
+            bare = {"metadata": {"name": "x"}, "spec": {}}
+            with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(bare), "")):
+                f = run._fault_new("p999", {"fault": "webhook:idle", "lift": "after-hold", "during": "idle"})
+                run._webhook_outage_start(f)
+                self.assertIn("no selector", f["infra_fail"])
+                self.assertIn("no selector", run._webhook_capability())
+            away = {"metadata": {"name": "x", "annotations": {run.WEBHOOK_OUTAGE_ANNO: "{}"}},
+                    "spec": {"selector": {run.WEBHOOK_OUTAGE_LABEL: "p1"}}}
+            with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(away), "")):
+                f = run._fault_new("p999", {"fault": "webhook:idle", "lift": "after-hold", "during": "idle"})
+                run._webhook_outage_start(f)
+                self.assertIn("already pointed away", f["infra_fail"])
+            with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "not found")):
+                self.assertIn("cannot be read", run._webhook_capability())
+                self.assertIn("cannot be read", run._fault_capability(run.WEBHOOK_FAULT))
+            self.assertIsNone(run._fault_capability(run.CONFLICT_FAULT))
+            self.assertEqual(saved, run._FAULT_CLEANUPS, "a refused start registers nothing")
+        finally:
+            run._FAULT_CLEANUPS[:] = saved
+
+    def test_sweep_restores_from_the_annotation_and_batch_calls_it(self):
+        kept = json.dumps({"case": "p999", "selector": {"control-plane": "ome-controller-manager"}})
+        away = {"metadata": {"name": "x", "annotations": {run.WEBHOOK_OUTAGE_ANNO: kept}},
+                "spec": {"selector": {run.WEBHOOK_OUTAGE_LABEL: "p999"}}}
+        calls = []
+
+        def kubectl(*a, **k):
+            calls.append(a)
+            if "get" in a:
+                return subprocess.CompletedProcess(a, 0, json.dumps(away), "")
+            return subprocess.CompletedProcess(a, 0, "", "")
+        with mock.patch.object(run, "kubectl", kubectl):
+            done = run.restore_webhook_service()
+        self.assertIn("restored", done)
+        patch = [c for c in calls if "patch" in c][0]
+        self.assertEqual({run.WEBHOOK_OUTAGE_LABEL: None, "control-plane": "ome-controller-manager"},
+                         json.loads(patch[7])["spec"]["selector"])
+        calls.clear()
+        with mock.patch.object(run, "kubectl", lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0, json.dumps(SERVICE), "")):
+            self.assertEqual("", run.restore_webhook_service())
+        self.assertFalse(any("patch" in c for c in calls), "a Service that was never pointed away is left alone")
+        out = io.StringIO()
+        with mock.patch.object(batch, "restore_webhook_service", lambda: "restored x"), contextlib.redirect_stdout(out):
+            batch.sweep_webhook_outage()
+        self.assertIn("restored x", out.getvalue())
+        self.assertTrue(batch.cluster_wide_fault({"fault": "webhook:settling"}), "a webhook case runs alone")
+        self.assertFalse(batch.cluster_wide_fault({"fault": "conflict:settling"}), "a competing writer stays in the pool")
+
+    def test_probe_reads_the_apiservers_words(self):
+        refusal = 'Error from server (InternalError): Internal error occurred: failed calling webhook "x": no endpoints available'
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", refusal + "\n")):
+            answers, words = run._webhook_probe("p999")
+        self.assertFalse(answers)
+        self.assertIn("failed calling webhook", words)
+        self.assertTrue(run._names_admission(words))
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")):
+            self.assertEqual((True, ""), run._webhook_probe("p999"))
+        self.assertFalse(run._names_admission("Instance 2 waiting on QuotaExceeded"))
+
+
+class ConflictWriterTest(unittest.TestCase):
+    """The competing writer patches its annotation on the ISVC or on every
+    InferenceReplica: once, or at the configured rate until it is stopped;
+    the stop is registered before the first write and is idempotent."""
+
+    def _kubectl(self, calls, irs=("p999-engine", "p999-router")):
+        def kubectl(*a, **k):
+            calls.append(a)
+            if "get" in a:
+                return subprocess.CompletedProcess(a, 0, "\n".join(f"inferencereplica.ome.io/{n}" for n in irs), "")
+            return subprocess.CompletedProcess(a, 0, "", "")
+        return kubectl
+
+    def test_targets(self):
+        calls = []
+        with mock.patch.object(run, "kubectl", self._kubectl(calls)):
+            self.assertEqual([("isvc", "p999")], run._conflict_targets({"target": "isvc", "case_id": "p999"}))
+            self.assertEqual([("inferencereplica", "p999-engine"), ("inferencereplica", "p999-router")],
+                             run._conflict_targets({"target": "ir", "case_id": "p999"}))
+
+    def test_once_writes_every_target_once_after_registering_the_stop(self):
+        f = run._fault_new("p999", {"fault": "conflict:settling", "form": "once", "target": "ir"})
+        calls, saved = [], list(run._FAULT_CLEANUPS)
+        try:
+            with mock.patch.object(run, "kubectl", self._kubectl(calls)):
+                run._fault_fire(f, {}, {}, set())
+            patches = [c for c in calls if "patch" in c]
+            self.assertEqual(2, len(patches))
+            self.assertEqual(("-n", run.NS, "patch", "inferencereplica", "p999-engine", "--type=merge"), patches[0][:6])
+            self.assertEqual({"metadata": {"annotations": {run.CONFLICT_ANNO: "1"}}}, json.loads(patches[0][7]))
+            self.assertEqual((2, 0), (f["writes"], f["refused_writes"]))
+            self.assertTrue(f["stop"].is_set())
+            self.assertEqual((run.CONFLICT_FAULT, f), run._FAULT_CLEANUPS[-1])
+            self.assertTrue(run._conflict_writer_stop(f))
+            with mock.patch.object(run, "kubectl", self._kubectl(calls)):
+                run._run_fault_cleanups()
+            self.assertEqual(2, len([c for c in calls if "patch" in c]), "the cleanup issues no write")
+        finally:
+            run._FAULT_CLEANUPS[:] = saved
+
+    def test_persist_writes_at_the_rate_until_stopped(self):
+        f = run._fault_new("p999", {"fault": "conflict:idle", "form": "persist", "target": "isvc", "during": "idle"})
+        calls, saved = [], list(run._FAULT_CLEANUPS)
+        try:
+            with mock.patch.object(run, "kubectl", self._kubectl(calls)), mock.patch.object(run, "CONFLICT_RATE_HZ", 100.0):
+                run._conflict_writer_start(f)
+                time.sleep(0.2)
+                self.assertTrue(run._conflict_writer_stop(f))
+                written = f["writes"]
+                time.sleep(0.05)
+            self.assertGreaterEqual(written, 3)
+            self.assertEqual(written, f["writes"], "no write after the stop")
+            self.assertTrue(all(c[3] == "isvc" and c[4] == "p999" for c in calls if "patch" in c))
+            values = [json.loads(c[7])["metadata"]["annotations"][run.CONFLICT_ANNO] for c in calls if "patch" in c]
+            self.assertEqual([str(n) for n in range(1, len(values) + 1)], values, "each round bumps the value")
+            self.assertTrue(run._conflict_writer_stop(f), "stopping twice is fine")
+            self.assertIn("persist", f["notes"][0])
+        finally:
+            run._FAULT_CLEANUPS[:] = saved
+
+    def test_no_target_is_an_apparatus_failure_and_refusals_are_counted(self):
+        saved = list(run._FAULT_CLEANUPS)
+        try:
+            f = run._fault_new("p999", {"fault": "conflict:settling", "form": "once", "target": "ir"})
+            with mock.patch.object(run, "kubectl", self._kubectl([], irs=())):
+                run._conflict_writer_start(f)
+            self.assertIn("no ir of the case", f["infra_fail"])
+            g = run._fault_new("p999", {"fault": "conflict:settling", "form": "once", "target": "isvc"})
+            with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "denied by webhook")):
+                run._conflict_writer_start(g)
+            self.assertEqual((0, 1), (g["writes"], g["refused_writes"]))
+            self.assertIn("denied", g["last_refusal"])
+        finally:
+            run._FAULT_CLEANUPS[:] = saved
+
+
+EVENTS = {"items": [
+    {"reason": "InternalError", "message": 'failed calling webhook "x": no endpoints available',
+     "firstTimestamp": "2026-10-01T10:00:10Z", "lastTimestamp": "2026-10-01T10:00:40Z", "count": 7},
+    {"reason": "RecreateUpdateStarted", "message": "component=engine instance=1",
+     "firstTimestamp": "2026-10-01T09:59:00Z", "lastTimestamp": "2026-10-01T10:00:20Z", "count": 4},
+    {"reason": "Old", "message": "before the window",
+     "firstTimestamp": "2026-10-01T09:00:00Z", "lastTimestamp": "2026-10-01T09:00:00Z", "count": 1},
+]}
+T0 = run._event_epoch("2026-10-01T10:00:00Z")
+METRICS = """# HELP controller_runtime_reconcile_total Total number of reconciliations per controller
+controller_runtime_reconcile_total{controller="inferenceservice",result="success"} 120
+controller_runtime_reconcile_total{controller="inferenceservice",result="error"} 5
+controller_runtime_reconcile_total{controller="inferencereplica",result="success"} 300
+controller_runtime_reconcile_total{controller="inferencereplica",result="requeue_after"} 40
+controller_runtime_reconcile_total{controller="basemodel",result="success"} 9
+controller_runtime_reconcile_errors_total{controller="inferenceservice"} 5
+controller_runtime_reconcile_errors_total{controller="inferencereplica"} 2
+"""
+
+
+class WindowReadersTest(unittest.TestCase):
+    """What a window reads: the controller's events inside it, the words that
+    name admission, the reconcile counters, the configured requeue and the
+    fingerprints that tell a stalled status."""
+
+    def test_object_events_count_occurrences_inside_the_window(self):
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(EVENTS), "")):
+            found = run._object_events("InferenceService", "p999", T0)
+            total, reasons = run._controller_event_tally("p999", [], T0, T0 + 60)
+        self.assertEqual(["RecreateUpdateStarted", "InternalError"], [r for _w, r, _m, _n in found], "oldest first")
+        self.assertEqual({"InternalError": 7, "RecreateUpdateStarted": 1}, {r: n for _w, r, _m, n in found},
+                         "a repeat that began before the window counts its latest occurrence alone")
+        self.assertEqual((8, {"InternalError": 7, "RecreateUpdateStarted": 1}), (total, reasons))
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(EVENTS), "")):
+            self.assertEqual((1, {"RecreateUpdateStarted": 1}), run._controller_event_tally("p999", [], T0, T0 + 25))
+
+    def test_write_blocked_reason_reads_events_then_rows_then_conditions(self):
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(EVENTS), "")):
+            where, text = run._write_blocked_reason("p999", [], T0)
+        self.assertEqual("InferenceService p999 event InternalError", where)
+        self.assertIn("failed calling webhook", text)
+        rows = {"engine": {"hold": None, "rows": [{"index": 1, "phase": "Updating",
+                                                   "lastFailure": {"reason": "CreateFailed",
+                                                                   "message": "admission webhook refused the pod"}}]}}
+        with mock.patch.object(run, "_object_events", lambda *a: []), mock.patch.object(run, "_ir_snapshot", lambda c: rows):
+            self.assertEqual(("engine Instance 1 row", "admission webhook refused the pod"), run._write_blocked_reason("p999", ["p999-engine"], T0))
+        held = {"engine": {"hold": {"gate": "Admission", "reason": "the webhook is unavailable"}, "rows": []}}
+        with mock.patch.object(run, "_object_events", lambda *a: []), mock.patch.object(run, "_ir_snapshot", lambda c: held):
+            self.assertEqual(("engine rolloutHold", "the webhook is unavailable"), run._write_blocked_reason("p999", [], T0))
+        status = {"conditions": [{"type": "Ready", "reason": "ReconcileError", "message": "failed calling webhook"}]}
+        with mock.patch.object(run, "_object_events", lambda *a: []), mock.patch.object(run, "_ir_snapshot", lambda c: {}), \
+                mock.patch.object(run, "fetch_status", lambda c: status):
+            self.assertEqual(("ISVC condition Ready", "failed calling webhook"), run._write_blocked_reason("p999", [], T0))
+        with mock.patch.object(run, "_object_events", lambda *a: []), mock.patch.object(run, "_ir_snapshot", lambda c: {}), \
+                mock.patch.object(run, "fetch_status", lambda c: {"conditions": [{"type": "Ready", "message": "all good"}]}):
+            self.assertIsNone(run._write_blocked_reason("p999", [], T0))
+
+    def test_reconcile_counts_and_deltas(self):
+        counts = run._reconcile_counts(METRICS)
+        self.assertEqual({"inferenceservice": (125, 5), "inferencereplica": (340, 2)}, counts, "the model controller is not OMENative")
+        self.assertEqual({}, run._reconcile_counts(""))
+        later = {"inferenceservice": (200, 9), "inferencereplica": (10, 0)}
+        self.assertEqual({"inferenceservice": (75, 4), "inferencereplica": (10, 0)}, run._reconcile_delta(counts, later),
+                         "a counter that went backwards counts from zero")
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, METRICS, "")) as _k:
+            self.assertEqual(METRICS, run._manager_metrics())
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "forbidden")):
+            self.assertEqual("", run._manager_metrics())
+
+    def test_requeue_and_stall_budget(self):
+        with mock.patch.object(run, "_controller_lifecycle_config", lambda: ({"requeue": {"operation": "5s", "gate": "3s"}}, None)):
+            self.assertEqual(5.0, run._controller_requeue_s())
+        with mock.patch.object(run, "_controller_lifecycle_config", lambda: ({"requeue": {"operation": "20s"}}, None)):
+            self.assertEqual(20.0, run._controller_requeue_s())
+        with mock.patch.object(run, "_controller_lifecycle_config", lambda: ({}, None)):
+            self.assertEqual(run.REQUEUE_FALLBACK_S, run._controller_requeue_s())
+        with mock.patch.object(run, "_controller_lifecycle_config", lambda: (None, "unreadable")):
+            self.assertEqual(run.REQUEUE_FALLBACK_S, run._controller_requeue_s())
+        self.assertEqual(int(run.STATUS_STALL_MIN_S * run.TIMEOUT_MULT), run._status_stall_budget(2.0))
+        self.assertEqual(int(run.STATUS_STALL_REQUEUES * 20.0 * run.TIMEOUT_MULT), run._status_stall_budget(20.0))
+
+    def test_fingerprints(self):
+        rows = {"engine": [{"index": 0, "phase": "Ready", "podCount": 1, "servingPodCount": 1, "runningRevision": "r1",
+                            "operation": {"type": "Update", "startedAt": "2026-10-01T10:00:00Z", "lastTransitionTime": "x"}}]}
+        later = {"engine": [dict(rows["engine"][0], operation={"type": "Update", "startedAt": "2026-10-01T10:05:00Z"})]}
+        self.assertEqual(run._rows_fingerprint(rows), run._rows_fingerprint(later), "clocks do not move the fingerprint")
+        moved = {"engine": [dict(rows["engine"][0], servingPodCount=0)]}
+        self.assertNotEqual(run._rows_fingerprint(rows), run._rows_fingerprint(moved))
+        pods = {"a": pod("engine", 0), "b": pod("engine", 1, ready=False), "c": None,
+                "d": dict(pod("engine", 2), serving=False)}
+        for name, uid in (("a", "u-a"), ("b", "u-b"), ("d", "u-d")):
+            pods[name]["uid"] = uid
+        self.assertEqual(frozenset({"u-a"}), run._serving_fingerprint(pods))
+
+    def test_expected_creations(self):
+        ctx = {"N": {"engine": 4, "decoder": 4, "router": 2}, "pods_per_inst": {"engine": 2, "decoder": 1, "router": 1},
+               "configured": {"engine", "decoder", "router"}, "modes": {"engine": "surge", "decoder": "inplace", "router": "surge"}}
+        self.assertEqual({"engine": 8, "decoder": 0, "router": 0}, run._expected_creations(ctx, {"engine"}))
+        self.assertEqual({"engine": 8, "decoder": 0, "router": 0}, run._expected_creations(ctx, {"engine", "decoder"}),
+                         "an in-place member creates nothing")
+        self.assertEqual({"engine": 2, "decoder": 0, "router": 0},
+                         run._expected_creations(ctx, {"engine"}, target={"engine": 5, "decoder": 4, "router": 2}))
+
+    def test_leftover_hold(self):
+        def items(hold=None, blocks=(), rows=()):
+            status = {"rolloutHold": hold, "retryBlocks": list(blocks), "instanceStatuses": list(rows)}
+            return {"engine": {"spec": {"component": "engine"}, "status": status}}
+        with mock.patch.object(run, "_ir_by_component", lambda c: items()):
+            self.assertEqual("", run._leftover_hold("p999"))
+        with mock.patch.object(run, "_ir_by_component", lambda c: items(hold={"gate": "Budget", "reason": "x"})):
+            self.assertIn("rolloutHold gate=Budget", run._leftover_hold("p999"))
+        with mock.patch.object(run, "_ir_by_component", lambda c: items(blocks=[{"state": "Held", "targetRevision": "r2"}])):
+            self.assertIn("still Held", run._leftover_hold("p999"))
+        with mock.patch.object(run, "_ir_by_component", lambda c: items(rows=[{"index": 3, "phase": "Failed"}])):
+            self.assertEqual("engine Instance 3 row Failed", run._leftover_hold("p999"))
+
+
+def _win(kind="webhook", op="push", lift="after-hold", form="", **over):
+    """A window's bookkeeping with the happy readings, overridden per test."""
+    hdr = {"lift": lift} if kind == "webhook" else {"form": form or "once", "target": "isvc"}
+    f = run._fault_new("p999", dict(hdr, fault=f"{kind}:{'idle' if op == 'idle' else 'settling'}"))
+    f["cause"] = "the fault"
+    if kind == "conflict":
+        f.update(writes=4, refused_writes=0, targets=[("isvc", "p999")])
+    with mock.patch.object(run, "_controller_lifecycle_config", lambda: ({"requeue": {"operation": "5s"}}, None)):
+        win = run._window_new(f, hdr, op)
+    win.update(fault_ts=1000.0, refused_at=3.0, refusal="failed calling webhook: no endpoints", answered_at=95.0,
+               said_at=20.0, said_where="InferenceService p999 event InternalError", said="failed calling webhook",
+               created_in_window={"engine": 0}, torn_in_window={"engine": 0}, created={"engine": 4},
+               expected_created={"engine": 4 if op != "idle" else 0}, stall_worst=4.0, events=12, event_reasons={"X": 12},
+               window_s=90.0, reconciles={"inferenceservice": (40, 6), "inferencereplica": (80, 0)},
+               lifted_at=90.0, converged_at=150.0, rows_settled=True, rows_why="", leftover_hold="")
+    if op == "idle":
+        win.update(created={"engine": 0}, said_at=None)
+    if kind == "conflict":
+        win.update(refused_at=None, answered_at=None, said_at=None, reconciles=None, lifted_at=60.0)
+    win.update(over)
+    return f, win
+
+
+class WindowVerdictTest(unittest.TestCase):
+    """_window_checks on fixed readings: each rule's pass, and each rule's
+    failure named in the operator's words."""
+
+    def _run(self, f, win, state="CONVERGED"):
+        notes, checks = [], []
+        verdict = run._window_checks(f, win, state, "PASS", notes, checks)
+        return verdict, notes, checks
+
+    def test_a_push_under_the_outage_passes_with_every_claim(self):
+        f, win = _win()
+        verdict, notes, checks = self._run(f, win)
+        self.assertEqual(("PASS", []), (verdict, notes))
+        text = "\n".join(checks)
+        for claim in ("admission refused 3s", "the status said why the push waited", "no pod was created while the webhook",
+                      "followed every serving change within 4s", "12 controller event(s)", "120 reconcile(s)",
+                      "pointed back 90s in and answered 5s later", "the push completed 60s after the webhook returned",
+                      "each of its 4 pod slot(s) was created once", "ended Ready with no operation open",
+                      "no hold, no Held retry block and no Failed row"):
+            self.assertIn(claim, text, claim)
+        self.assertFalse(any(c.startswith("  ✗") for c in checks), text)
+
+    def test_an_outage_that_never_bit_is_an_apparatus_failure(self):
+        f, win = _win(refused_at=None)
+        self.assertEqual("PASS", self._run(f, win)[0])
+        self.assertIn("never bit", f["infra_fail"])
+        g, win2 = _win(kind="conflict")
+        g["writes"] = 0
+        self.assertEqual("PASS", self._run(g, win2)[0])
+        self.assertIn("wrote nothing", g["infra_fail"])
+
+    def test_a_wait_with_no_reason_fails_but_an_escape_is_reported(self):
+        f, win = _win(said_at=None)
+        verdict, notes, checks = self._run(f, win)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("a wait with no reason" in c for c in checks))
+        f, win = _win(said_at=None, escaped_at=30.0)
+        verdict, _notes, checks = self._run(f, win)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("completed 30s into the outage with nothing said" in c for c in checks))
+        f, win = _win(op="idle", said_at=7.0, said="failed calling webhook")
+        _verdict, _notes, checks = self._run(f, win, state="HELD")
+        self.assertTrue(any("the steady service reported a blocked write" in c for c in checks))
+
+    def test_pods_made_under_the_outage_are_reported_and_pods_moved_at_idle_fail(self):
+        f, win = _win(created_in_window={"engine": 1})
+        verdict, _notes, checks = self._run(f, win)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("did not gate them" in c for c in checks))
+        f, win = _win(op="idle", created={"engine": 1})
+        verdict, notes, checks = self._run(f, win, state="HELD")
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("created on a service nobody touched" in c for c in checks))
+        f, win = _win(op="scale", torn_in_window={"engine": 2}, expected_created={"engine": 1}, created={"engine": 1})
+        verdict, _notes, checks = self._run(f, win)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("nothing may be taken down" in c for c in checks))
+
+    def test_a_stalled_status_fails(self):
+        f, win = _win(stall_worst=31.0)
+        verdict, notes, checks = self._run(f, win)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("the status stopped updating" in c and "6 requeues of 5s" in c for c in checks))
+
+    def test_rates_fail_over_a_long_window_and_report_over_a_short_one(self):
+        f, win = _win(events=200, event_reasons={"InternalError": 200})
+        verdict, _notes, checks = self._run(f, win)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("133/min" in c and "a hot loop (InternalError×200)" in c for c in checks))
+        f, win = _win(events=50, window_s=20.0, lifted_at=20.0)
+        verdict, _notes, checks = self._run(f, win)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("cap 60/min not judged" in c for c in checks))
+        f, win = _win(reconciles={"inferencereplica": (900, 0)})
+        verdict, _notes, checks = self._run(f, win)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("600/min" in c and "reconcile(s) of the OMENative controllers" in c for c in checks))
+        f, win = _win(reconciles=None)
+        verdict, _notes, checks = self._run(f, win)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("reconcile counters were not readable" in c for c in checks))
+        f, win = _win(events=None)
+        self.assertTrue(any("events over the window could not be read" in c for c in self._run(f, win)[2]))
+
+    def test_the_lift_the_completion_and_the_double_apply(self):
+        f, win = _win(lifted_at=None)
+        verdict, _notes, checks = self._run(f, win, state="LIFT_FAILED")
+        self.assertEqual("PASS", verdict, "the apparatus failure is the fault's")
+        self.assertFalse(any("completed" in c for c in checks))
+        f, win = _win()
+        verdict, _notes, checks = self._run(f, win, state="ROTATE_TIMEOUT")
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("did not complete within budget after the webhook returned (ROTATE_TIMEOUT)" in c for c in checks))
+        f, win = _win(created={"engine": 5})
+        verdict, notes, checks = self._run(f, win)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("5 new pod(s) for 4 pod slot(s) — something was applied twice" in c for c in checks))
+        f, win = _win(created={"engine": 3})
+        verdict, _notes, checks = self._run(f, win)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("fewer than a rebuild of each" in c for c in checks))
+        f, win = _win(kind="conflict", form="persist")
+        verdict, _notes, checks = self._run(f, win)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("the writer stopped 60s in" in c for c in checks))
+        self.assertTrue(any("the push completed 150s after the writer started" in c for c in checks))
+
+    def test_rows_and_holds_left_behind_fail(self):
+        f, win = _win(rows_settled=False, rows_why="engine Instance 2 Updating")
+        verdict, _notes, checks = self._run(f, win)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("did not settle within" in c for c in checks))
+        f, win = _win(leftover_hold="engine rolloutHold gate=Budget reason=x")
+        verdict, _notes, checks = self._run(f, win)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("still holds something after the push ended" in c for c in checks))
+        f, win = _win(rows_settled=None, leftover_hold=None)
+        _verdict, _notes, checks = self._run(f, win, state="ROTATE_TIMEOUT")
+        self.assertFalse(any("Ready with no operation open" in c or "no hold" in c for c in checks),
+                         "rows not read when the operation never completed")
+
+
+class WindowTimingTest(unittest.TestCase):
+    """When the webhook is due back, how long a window is held, and how a
+    tick tracks the rows lagging the pods in rotation."""
+
+    def test_lift_due(self):
+        _f, win = _win()
+        win.update(said_at=None, fault_ts=0.0)
+        self.assertFalse(run._window_lift_due(win, run.HOLD_REASON_WAIT_S - 1))
+        self.assertTrue(run._window_lift_due(win, run.HOLD_REASON_WAIT_S))
+        win["said_at"] = 10.0
+        self.assertFalse(run._window_lift_due(win, 10.0 + run.LIFT_SETTLE_S - 1))
+        self.assertTrue(run._window_lift_due(win, 10.0 + run.LIFT_SETTLE_S))
+        _f, after = _win(lift="after-window")
+        after.update(said_at=1.0, fault_ts=0.0)
+        self.assertFalse(run._window_lift_due(after, run.IDLE_HOLD_S - 1))
+        self.assertTrue(run._window_lift_due(after, run.IDLE_HOLD_S))
+        _f, idle = _win(op="idle")
+        idle["fault_ts"] = 0.0
+        self.assertTrue(run._window_lift_due(idle, run.LIFT_SETTLE_S))
+        self.assertFalse(run._window_lift_due(idle, run.LIFT_SETTLE_S - 1))
+
+    def test_window_span(self):
+        self.assertEqual(run.HOLD_REASON_WAIT_S + run.LIFT_SETTLE_S, run._window_span(_win()[1]))
+        self.assertEqual(run.IDLE_HOLD_S, run._window_span(_win(lift="after-window")[1]))
+        self.assertEqual(run.LIFT_SETTLE_S, run._window_span(_win(op="idle")[1]))
+        self.assertEqual(run.LIFT_SETTLE_S, run._window_span(_win(kind="conflict", form="once")[1]))
+        self.assertEqual(run.IDLE_HOLD_S, run._window_span(_win(kind="conflict", form="persist")[1]))
+
+    def test_tick_tracks_the_rows_lagging_a_serving_change(self):
+        f, win = _win(kind="conflict", form="persist")
+        win.update(fault_ts=0.0, stall_worst=0.0, rows_fp=None, rows_changed_at=None, serving_fp=None,
+                   serving_changed_at=None, last_rows_poll=-10.0, uids_seen={})
+        a, b = pod("engine", 0), pod("engine", 1)
+        a["uid"], b["uid"] = "u-a", "u-b"
+        ctx = {"case_id": "p999", "pod_state": {"a": a, "b": b}}
+        rows = {"engine": [{"index": 0, "phase": "Ready", "podCount": 1, "servingPodCount": 1}]}
+        with mock.patch.object(run, "_ir_rows", lambda c: rows):
+            run._window_tick(ctx, f, win, 0.0)
+            self.assertEqual(0.0, win["stall_worst"])
+            b["serving"] = False               # a pod leaves rotation at t=10; the rows never move
+            for now in (10.0, 12.0, 14.0, 40.0):
+                run._window_tick(ctx, f, win, now)
+            self.assertEqual(30.0, win["stall_worst"])
+            rows["engine"][0]["servingPodCount"] = 0   # the rows catch up at t=42
+            run._window_tick(ctx, f, win, 42.0)
+            run._window_tick(ctx, f, win, 60.0)
+            self.assertEqual(30.0, win["stall_worst"], "a caught-up status stops the clock")
+        self.assertEqual({"engine": {"u-a", "u-b"}}, win["uids_seen"])
+
+
+class GeneratedWindowFamiliesTest(unittest.TestCase):
+    """gen-webhook and gen-conflict: every shape family of the ledger at one
+    gang width, the steady state, the push and the scale-up, each kind's own
+    forms; every cell validates and says what it asserts."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.webhook = [(n, kv, m) for f, n, kv, m in rows if f == "gen-webhook"]
+        cls.conflict = [(n, kv, m) for f, n, kv, m in rows if f == "gen-conflict"]
+
+    def _validates(self, folder, fam):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, _kv, _m in fam:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(self.outputs[f"{folder}/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)
+
+    def _families(self, fam):
+        return {(kv["topo"], kv["Nr"] > 0 and kv["Nd"] == 0, kv["Nd"] > 0) for _n, kv, _m in fam}
+
+    def test_webhook_family(self):
+        fam = self.webhook
+        self.assertEqual(48, len(fam))
+        self.assertEqual(6, len(self._families(fam)), "every shape family of the ledger")
+        self.assertEqual({"webhook steady", "webhook push", "webhook scale"}, {m["winop"] for _n, _kv, m in fam})
+        self.assertEqual({"after-hold", "after-window"}, {kv["lift"] for _n, kv, _m in fam})
+        cells = {(kv["topo"], kv["Nr"], m["op"], m["strat"], kv["lift"]) for _n, kv, m in fam}
+        self.assertEqual(48, len(cells))
+        for name, kv, m in fam:
+            text = self.outputs[f"gen-webhook/{name}.yaml"]
+            reason = text.splitlines()[1]
+            self.assertNotIn("form", kv)
+            self.assertNotIn("target", kv)
+            self.assertEqual("none", kv["co"])
+            if m["op"] == "steady":
+                self.assertEqual(("webhook:idle", "idle", kv["Ne"]), (kv["fault"], kv["during"], kv["ceil_e"]))
+                self.assertIn("nothing may move", reason)
+            elif m["op"] == "push":
+                self.assertEqual("webhook:settling", kv["fault"])
+                self.assertNotIn("during", kv)
+                self.assertIn(m["strat"], ("SurgeThenDrain", "RecreatePod"))
+                self.assertEqual(kv["Ne"] + (1 if m["strat"] == "SurgeThenDrain" else 0), kv["ceil_e"])
+                self.assertIn("the status must say why in the webhook's own words", reason)
+                self.assertIn("each pod slot created once", reason)
+            else:
+                self.assertEqual(("scaledown", "webhook:settling", kv["Ne"] + 1, kv["Ne"] + 1), (kv["mode"], kv["fault"], kv["to_e"], kv["ceil_e"]))
+                self.assertIn("the new Instance comes up whole and serving, created once", reason)
+            self.assertIn("hold window" if kv["lift"] == "after-window" else "pointed back", reason)
+            if kv["Nd"]:
+                self.assertIn("decoder and router are negative controls", reason)
+            elif kv["Nr"]:
+                self.assertIn("the router is a negative control", reason)
+                self.assertIn("router:", text)
+        self._validates("gen-webhook", fam)
+
+    def test_conflict_family(self):
+        fam = self.conflict
+        self.assertEqual(72, len(fam))
+        self.assertEqual(6, len(self._families(fam)))
+        self.assertEqual({"once", "persist"}, {kv["form"] for _n, kv, _m in fam})
+        self.assertEqual({"isvc", "ir"}, {kv["target"] for _n, kv, _m in fam})
+        cells = {(kv["topo"], kv["Nr"], m["op"], kv["form"], kv["target"]) for _n, kv, m in fam}
+        self.assertEqual(72, len(cells))
+        for name, kv, m in fam:
+            reason = self.outputs[f"gen-conflict/{name}.yaml"].splitlines()[1]
+            self.assertNotIn("lift", kv)
+            self.assertEqual("conflict:idle" if m["op"] == "steady" else "conflict:settling", kv["fault"])
+            self.assertEqual(kv["Ne"] + (0 if m["op"] == "steady" else 1), kv["ceil_e"],
+                             "one surge under the canonical budget on a push, the new Instance on a scale, nothing at idle")
+            self.assertIn("stale resourceVersion", reason)
+            self.assertIn("once" if kv["form"] == "once" else "every few hundred milliseconds", reason)
+            self.assertIn("the ISVC" if kv["target"] == "isvc" else "every InferenceReplica", reason)
+            if m["op"] == "push":
+                self.assertIn("double apply", reason)
+                self.assertIn('type: "SurgeThenDrain"', self.outputs[f"gen-conflict/{name}.yaml"])
+        self._validates("gen-conflict", fam)
+
+    def test_ids_blocks_and_manifest(self):
+        for folder, fam in (("gen-webhook", self.webhook), ("gen-conflict", self.conflict)):
+            lo, hi = generate_cases.GEN_BLOCKS[folder]
+            self.assertTrue(8900 <= lo < hi <= 9050, folder)
+            for name, _kv, _m in fam:
+                self.assertTrue(lo <= int(name[1:]) < hi, (folder, name))
+        manifest = self.outputs[generate_cases.MANIFEST_REL]
+        for text in ("| gen-webhook | 48 |", "| gen-conflict | 72 |", "By window operation", "By competing-writer form",
+                     "By competing-writer target", "gen-webhook points the admission webhook", "gen-conflict runs a competing writer"):
+            self.assertIn(text, manifest)
+
+
 if __name__ == "__main__":
     unittest.main()
 

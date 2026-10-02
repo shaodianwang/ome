@@ -1,0 +1,13 @@
+# p8906: [gen] webhook scale engine N=4 lift after-hold  mode=scaledown Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=webhook:settling co=none topo=engine to_e=5 lift=after-hold
+# reason: the engine (engine alone, single-pod) is scaled from N to N+1, then the admission webhook is made unreachable: the new Instance's pod is refused by admission, so the scale must wait with the reason stated in the webhook's own words while nothing running may be taken down, the N Instances keep serving, the rows follow every change of the pods in rotation within the configured requeues, and the manager's events stay bounded; the manager's reconciles stay bounded; the webhook is pointed back once the status has said why (or the reason wait has run out), and the new Instance comes up whole and serving, created once, the survivors keep their pods, and the rows settle with no hold, retry block or Failed row left
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8906 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

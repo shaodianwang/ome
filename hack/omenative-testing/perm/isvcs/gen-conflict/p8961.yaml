@@ -1,0 +1,13 @@
+# p8961: [gen] conflict steady engine N=4 persist on isvc  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 fault=conflict:idle co=none topo=engine form=persist during=idle target=isvc
+# reason: a competing writer patches an annotation of the ISVC every few hundred milliseconds across the hold window (engine alone, single-pod), so the controller's next status write carries a stale resourceVersion and conflicts; the conflict must be retried without a lost decision: nothing may move: no pod created or taken down, every Instance keeps serving at N, the rows follow every change of the pods in rotation within the configured requeues and the manager's events stay bounded (a conflict storm is a hot loop); once the writer stops, the rows still read Ready with no operation open and no hold, retry block or Failed row left
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8961 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
