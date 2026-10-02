@@ -223,7 +223,7 @@ KIND_SPEC_GROUPS = (
         "sequential_failure_hold", "sequential_later_only_bump",
     )),
     ("update-core", "Core update strategies", (
-        "update", "inplace", "recreate_pod", "mixed_strategy",
+        "update", "inplace", "inplace_retag", "recreate_pod", "mixed_strategy",
         "percomponent_surge", "minreadyseconds", "strategy_switch_midsurge", "placement_surge", "placement_floors",
     )),
     ("percomponent-maxsurge", "Multi-instance maxSurge", (

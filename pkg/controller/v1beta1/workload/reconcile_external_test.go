@@ -1248,6 +1248,14 @@ type recoveryHarness struct {
 	// model leaves their status exactly as it last wrote it, and the node
 	// lifecycle controller model sets their Ready condition False.
 	kubeletGone map[string]bool
+	// imageNameOnNode maps a spec image to the name the node's runtime
+	// reports for it: the node holds that image under a second reference
+	// (a retag, a mirror alias) and names the one it stored first.
+	imageNameOnNode map[string]string
+	// startedImage is, per pod, the spec image its running container was
+	// started from: the kubelet restarts the container when the spec names
+	// another image, whatever name the runtime reports for either.
+	startedImage map[string]string
 }
 
 func recoveryPodSpec(image string) *corev1.PodSpec {
@@ -1294,6 +1302,7 @@ func newRecoveryHarnessFor(t *testing.T, multiPod bool, container string) *recov
 		retryPolicy:      &workloadtypes.RetryPolicy{MaxAttempts: 2, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2},
 		readinessFails:   map[string]bool{},
 		kubeletGone:      map[string]bool{},
+		startedImage:     map[string]string{},
 	}
 	h.c = fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
@@ -1482,19 +1491,30 @@ func (h *recoveryHarness) kubelet() {
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
+		case h.imageChangedInPlace(pod):
+			// The kubelet replaces a running container whose spec image
+			// changed: the old process is killed, the restart count rises,
+			// and the new container runs under the same pod UID without
+			// having passed its readiness probe yet.
+			h.restartContainerInPlace(pod)
 		default:
+			prior := priorContainerStatus(pod)
 			pod.Status.Phase = corev1.PodRunning
 			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 				Name:  pod.Spec.Containers[0].Name,
-				Image: image,
+				Image: h.runtimeImageName(image),
 				Ready: true,
 				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 			}}
+			carryRestartEvidence(&pod.Status.ContainerStatuses[0], prior)
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionTrue, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, h.servingGate(pod), h.clk.Now())
 		}
 		if podConditionTrue(pod, corev1.PodReady) {
 			h.servedPasses[pod.Name]++
+		}
+		if status := priorContainerStatus(pod); status != nil && status.State.Running != nil {
+			h.startedImage[pod.Name] = image
 		}
 		// Pod status is a built-in subresource on the fake client — a
 		// plain Update silently drops status changes.
@@ -1502,6 +1522,73 @@ func (h *recoveryHarness) kubelet() {
 			h.t.Fatalf("kubelet update %s: %v", pod.Name, err)
 		}
 	}
+}
+
+// priorContainerStatus is the status the kubelet model reported for the
+// pod's container on its previous pass, or nil before the first report.
+func priorContainerStatus(pod *corev1.Pod) *corev1.ContainerStatus {
+	for i := range pod.Status.ContainerStatuses {
+		if pod.Status.ContainerStatuses[i].Name == pod.Spec.Containers[0].Name {
+			return &pod.Status.ContainerStatuses[i]
+		}
+	}
+	return nil
+}
+
+// imageChangedInPlace reports whether the pod's spec names an image other
+// than the one its running container was started from: an in-place image
+// patch the kubelet has not acted on yet.
+func (h *recoveryHarness) imageChangedInPlace(pod *corev1.Pod) bool {
+	prior := priorContainerStatus(pod)
+	if prior == nil || prior.State.Running == nil {
+		return false
+	}
+	started, known := h.startedImage[pod.Name]
+	return known && started != pod.Spec.Containers[0].Image
+}
+
+// runtimeImageName is the name the node's runtime reports for a spec
+// image: the alias the node stored it under, else the spec's own name.
+func (h *recoveryHarness) runtimeImageName(image string) string {
+	if alias, ok := h.imageNameOnNode[image]; ok {
+		return alias
+	}
+	return image
+}
+
+// restartContainerInPlace reports the kubelet's replacement of a running
+// container with the pod's new spec image: the old process ends with the
+// kill signal's exit code, the restart count rises, and the new container
+// is running but not yet Ready, so the pod leaves ContainersReady and
+// PodReady for this pass.
+func (h *recoveryHarness) restartContainerInPlace(pod *corev1.Pod) {
+	prior := priorContainerStatus(pod)
+	now := metav1.NewTime(h.clk.Now())
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:         pod.Spec.Containers[0].Name,
+		Image:        h.runtimeImageName(pod.Spec.Containers[0].Image),
+		Ready:        false,
+		RestartCount: prior.RestartCount + 1,
+		State:        corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: now}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode:   143,
+			Reason:     "Error",
+			FinishedAt: now,
+		}},
+	}}
+	setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
+	setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
+}
+
+// carryRestartEvidence keeps the restart count and the last termination the
+// kubelet reported before, as the kubelet does until the next restart.
+func carryRestartEvidence(status, prior *corev1.ContainerStatus) {
+	if prior == nil {
+		return
+	}
+	status.RestartCount = prior.RestartCount
+	status.LastTerminationState = prior.LastTerminationState
 }
 
 // crashesAfterRunning reports whether the kubelet model crashes pod on

@@ -22,7 +22,7 @@ tick=4 note the pod leaves rotation and the new image wedges while it is still y
 tick=4 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
 tick=4 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-default-0 reason=ImagePullBackOff now=t+0s
 tick=4 row=0 write no-op precondition=no-change
-tick=4 pod patch name=svc-a-engine-0-default-0 annotations=[internal.ome.io/in-place-image-transition:nil→{"targetImages":{"main":"registry.example.com/runtime:v2"}}]
+tick=4 pod patch name=svc-a-engine-0-default-0 annotations=[internal.ome.io/in-place-image-transition:nil→{"targetImages":{"main":"registry.example.com/runtime:v2"},"restartCounts":{"main":0}}]
 tick=4 hold cleared
 tick=4 pass result=after:5s
 tick=5 note the grace elapses, and the same pass issues the image patch and restamps the revision label

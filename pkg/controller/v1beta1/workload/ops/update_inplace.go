@@ -240,18 +240,17 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 	}
 
 	// ContainersReady can remain true in a stale observation after an image
-	// patch. Runtime image confirmation is therefore required for every image
-	// that differs between the immutable running and target revisions. An empty
+	// patch. Every container the roll re-images must therefore be confirmed
+	// at runtime before the pod returns to rotation: the kubelet reports the
+	// target image for it, or has replaced it since the patch. An empty
 	// changed-image set is already satisfied; runtime aliases for unchanged
 	// containers are not evidence about this rollout.
 	if !query.AllPodsRuntimeReady(livePods) {
 		return false, nil
 	}
+	transitions := make(map[string]*inPlaceImageTransition, len(livePods))
 	for _, pod := range livePods {
 		if !evidence.PodImagesMatch(pod, targetSpec) {
-			return false, nil
-		}
-		if !evidence.PodRuntimeImageChangesMatch(pod, runningSpec, targetSpec) {
 			return false, nil
 		}
 		transition, present, valid := inPlaceImageTransitionFromPod(pod)
@@ -259,19 +258,10 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 		if present && !valid {
 			return false, nil
 		}
-		if valid && !inPlaceImageTransitionRuntimeMatches(pod, transition) {
+		if !inPlaceImageRollConfirmed(pod, runningSpec, targetSpec, transition) {
 			return false, nil
 		}
-	}
-	for _, pod := range livePods {
-		_, present, _ := inPlaceImageTransitionFromPod(pod)
-		if !present {
-			continue
-		}
-		if err := removeInPlaceImageTransition(ctx, deps.Client, pod); err != nil {
-			return false, fmt.Errorf("clear image transition (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
-		}
-		return false, nil
+		transitions[pod.Name] = transition
 	}
 
 	for _, pod := range livePods {
@@ -285,11 +275,13 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 
 	// The shared promote bar with the in-place extra: on top of PodReady past
 	// the availability window, every container whose image the roll changed
-	// must report the target image at runtime. Promotion releases this
-	// Instance's unavailability budget slot, so a pod the serving-gate flip
-	// has not yet carried back into rotation holds it.
+	// must be confirmed at runtime. Promotion releases this Instance's
+	// unavailability budget slot, so a pod the serving-gate flip has not yet
+	// carried back into rotation holds it.
 	promotable, wait := query.PodSetPromotable(livePods, plan.MinReadySeconds, input.Now(),
-		func(pod *corev1.Pod) bool { return evidence.PodRuntimeImageChangesMatch(pod, runningSpec, targetSpec) })
+		func(pod *corev1.Pod) bool {
+			return inPlaceImageRollConfirmed(pod, runningSpec, targetSpec, transitions[pod.Name])
+		})
 	if !promotable {
 		input.PromoteWindow.Observe(wait)
 		return false, nil
@@ -300,13 +292,95 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 	workload.RecordNormal(deps.Recorder, workload.EventTarget(input), workload.EventReasonInPlaceUpdateCompleted,
 		"OMENative %s in-place update to revision %s complete",
 		workload.InstanceKey(input.Key.Component, inst.Index), target.Name)
+	// The transition outlives the stamp: it carries the restart counts the
+	// confirmation compares against, and a pass that finds it gone before
+	// the row is Ready cannot confirm a container the kubelet reports
+	// under another name. A marker left by a failed clear is re-recorded
+	// by the next roll's patch.
+	for _, pod := range livePods {
+		if err := removeInPlaceImageTransition(ctx, deps.Client, pod); err != nil {
+			return false, fmt.Errorf("clear image transition (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
+		}
+	}
 	return true, nil
 }
 
 var inPlaceImageTransitionAnnotation = constants.InferenceServiceInPlaceImageTransitionAnnotationKey
 
+// inPlaceImageTransition is the write-ahead record of an image patch: the
+// images the patch moves each container to, and the restart count each
+// container had when its patch was issued, which is how the roll tells a
+// container the kubelet has since replaced from one it has not.
 type inPlaceImageTransition struct {
-	TargetImages map[string]string `json:"targetImages"`
+	TargetImages  map[string]string `json:"targetImages"`
+	RestartCounts map[string]int32  `json:"restartCounts,omitempty"`
+}
+
+// replacedSincePatch reports whether the kubelet has restarted the named
+// container since its image patch was issued: its restart count rose past
+// the count the transition recorded then. Unknown without a recorded count.
+func (t *inPlaceImageTransition) replacedSincePatch(pod *corev1.Pod, name string) bool {
+	if t == nil || pod == nil {
+		return false
+	}
+	recorded, known := t.RestartCounts[name]
+	return known && containerRestartCount(pod, name) > recorded
+}
+
+// containerRestartCount is the kubelet's restart count for the named
+// container; zero before the kubelet has reported it.
+func containerRestartCount(pod *corev1.Pod, name string) int32 {
+	if cs := containerStatusNamed(pod, name); cs != nil {
+		return cs.RestartCount
+	}
+	return 0
+}
+
+// containerReady reports whether the kubelet reports the named container
+// as having passed its readiness probe.
+func containerReady(pod *corev1.Pod, name string) bool {
+	cs := containerStatusNamed(pod, name)
+	return cs != nil && cs.Ready
+}
+
+func containerStatusNamed(pod *corev1.Pod, name string) *corev1.ContainerStatus {
+	if pod == nil {
+		return nil
+	}
+	for i := range pod.Status.ContainerStatuses {
+		if pod.Status.ContainerStatuses[i].Name == name {
+			return &pod.Status.ContainerStatuses[i]
+		}
+	}
+	return nil
+}
+
+// inPlaceImageRollConfirmed reports whether every container the roll
+// re-images — those whose image differs between the running and target
+// revisions, and those the transition is still rolling — runs the target
+// image: the kubelet reports that image for it, or has replaced it since
+// the patch. A node holds an image under whichever references put it
+// there (a pull, a side-load, a second tag on the same image) and reports
+// one of them, so the name alone is not required once the kubelet has
+// acted on the patch. A container with neither proof keeps the pod out of
+// rotation and the Instance at Updating.
+func inPlaceImageRollConfirmed(pod *corev1.Pod, runningSpec, targetSpec *corev1.PodSpec, transition *inPlaceImageTransition) bool {
+	if pod == nil || targetSpec == nil {
+		return false
+	}
+	for name, image := range evidence.ChangedContainerImages(runningSpec, targetSpec) {
+		if !containerImageConfirmed(pod, name, image, transition) {
+			return false
+		}
+	}
+	return transition == nil || inPlaceImageTransitionRuntimeMatches(pod, transition)
+}
+
+// containerImageConfirmed is the per-container proof the roll accepts:
+// the kubelet reports image for the container, or has replaced the
+// container since the patch the transition records.
+func containerImageConfirmed(pod *corev1.Pod, name, image string, transition *inPlaceImageTransition) bool {
+	return evidence.ContainerRuntimeImageIs(pod, name, image) || transition.replacedSincePatch(pod, name)
 }
 
 func inPlaceImageTransitionFromPod(pod *corev1.Pod) (*inPlaceImageTransition, bool, bool) {
@@ -349,9 +423,15 @@ func imagePatchTargets(pod *corev1.Pod, target *corev1.PodSpec) map[string]strin
 	return patches
 }
 
-// ensureInPlaceImageTransition persists the exact runtime images that must be
-// observed before any image patch is issued. Pending container names survive a
-// retarget, with their expected values rewritten from the current target.
+// ensureInPlaceImageTransition persists, before any image patch is issued,
+// the images the patch moves each container to and the restart count the
+// container has at that point. Pending container names survive a retarget,
+// with their expected values rewritten from the current target and their
+// count re-recorded. A recorded count is refreshed only for a Ready
+// container whose count has moved since: its readiness could promote the
+// row, so its baseline must be the count the patch is issued against. A
+// container that is not Ready keeps its baseline, so a crash loop that
+// restarts it between passes never defers the patch.
 func ensureInPlaceImageTransition(ctx context.Context, c client.Client, pod *corev1.Pod, target *corev1.PodSpec, patches map[string]string) (bool, error) {
 	if pod == nil || target == nil {
 		return false, nil
@@ -364,7 +444,7 @@ func ensureInPlaceImageTransition(ctx context.Context, c client.Client, pod *cor
 	for _, container := range target.Containers {
 		targetImages[container.Name] = container.Image
 	}
-	desired := &inPlaceImageTransition{TargetImages: make(map[string]string)}
+	desired := &inPlaceImageTransition{TargetImages: make(map[string]string), RestartCounts: make(map[string]int32)}
 	if present && valid {
 		for name := range current.TargetImages {
 			image, found := targetImages[name]
@@ -373,15 +453,25 @@ func ensureInPlaceImageTransition(ctx context.Context, c client.Client, pod *cor
 				break
 			}
 			desired.TargetImages[name] = image
+			if count, recorded := current.RestartCounts[name]; recorded {
+				desired.RestartCounts[name] = count
+			}
 		}
 	}
 	if present && !valid {
 		desired.TargetImages = maps.Clone(targetImages)
+		desired.RestartCounts = make(map[string]int32)
 	}
 	for name, image := range patches {
+		live := containerRestartCount(pod, name)
+		recorded, known := desired.RestartCounts[name]
+		sameTarget := known && desired.TargetImages[name] == image
+		if !sameTarget || (recorded != live && containerReady(pod, name)) {
+			desired.RestartCounts[name] = live
+		}
 		desired.TargetImages[name] = image
 	}
-	if present && valid && maps.Equal(current.TargetImages, desired.TargetImages) {
+	if present && valid && maps.Equal(current.TargetImages, desired.TargetImages) && maps.Equal(current.RestartCounts, desired.RestartCounts) {
 		return true, nil
 	}
 	if err := patchInPlaceImageTransition(ctx, c, pod, desired); err != nil {
@@ -406,16 +496,15 @@ func inPlaceImageTransitionMatchesTarget(transition *inPlaceImageTransition, tar
 	return true
 }
 
+// inPlaceImageTransitionRuntimeMatches reports whether every container the
+// transition is rolling is confirmed at runtime: the kubelet reports its
+// target image, or has replaced it since the patch the transition records.
 func inPlaceImageTransitionRuntimeMatches(pod *corev1.Pod, transition *inPlaceImageTransition) bool {
 	if pod == nil || transition == nil {
 		return false
 	}
-	runtimeImages := make(map[string]string, len(pod.Status.ContainerStatuses))
-	for _, status := range pod.Status.ContainerStatuses {
-		runtimeImages[status.Name] = evidence.CanonicalImage(status.Image)
-	}
 	for name, targetImage := range transition.TargetImages {
-		if runtimeImages[name] != evidence.CanonicalImage(targetImage) {
+		if !containerImageConfirmed(pod, name, targetImage, transition) {
 			return false
 		}
 	}
@@ -439,6 +528,12 @@ func patchInPlaceImageTransition(ctx context.Context, c client.Client, pod *core
 	return nil
 }
 
+// removeInPlaceImageTransition clears the transition marker. The key is
+// written by this roll alone, so the removal names only it and takes no
+// resource-version lock: the serving-gate patch issued earlier in the
+// same pass, and the kubelet's own status writes, move the pod's version
+// without touching the marker, and a clear that conflicted on them would
+// leave the marker behind with no later pass to retry it.
 func removeInPlaceImageTransition(ctx context.Context, c client.Client, pod *corev1.Pod) error {
 	if pod == nil || pod.Annotations == nil {
 		return nil
@@ -446,10 +541,13 @@ func removeInPlaceImageTransition(ctx context.Context, c client.Client, pod *cor
 	if _, present := pod.Annotations[inPlaceImageTransitionAnnotation]; !present {
 		return nil
 	}
-	base := pod.DeepCopy()
-	delete(pod.Annotations, inPlaceImageTransitionAnnotation)
-	patch := client.StrategicMergeFrom(base, client.MergeFromWithOptimisticLock{})
-	if err := c.Patch(ctx, pod, patch); err != nil {
+	raw, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{"annotations": map[string]any{inPlaceImageTransitionAnnotation: nil}},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal in-place image transition removal for pod %s/%s: %w", pod.Namespace, pod.Name, err)
+	}
+	if err := c.Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, raw)); err != nil {
 		return fmt.Errorf("remove in-place image transition from pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 	return nil

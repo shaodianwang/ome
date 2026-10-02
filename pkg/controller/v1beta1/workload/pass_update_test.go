@@ -3,6 +3,7 @@ package workload_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -19,6 +20,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ktypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -895,5 +898,125 @@ func TestReconcile_SinglePodInPlaceDiffIsGatedAsRecreate(t *testing.T) {
 				t.Errorf("held start moved the row to %s, want Ready", s.Phase)
 			}
 		})
+	}
+}
+
+// inPlaceOnlyHarness converges replicas single-pod Instances on v1 under
+// InPlaceOnly with the given unavailability budget and restart policy,
+// with the runner container named as production names it so container
+// restart evidence is read.
+func inPlaceOnlyHarness(t *testing.T, replicas int32, maxUnavailable intstr.IntOrString, policy types.RestartPolicy) *recoveryHarness {
+	t.Helper()
+	h := newRecoveryHarnessFor(t, false, constants.MainContainerName)
+	h.recorder = record.NewFakeRecorder(64)
+	h.replicas = replicas
+	maxSurge := intstr.FromInt32(0)
+	h.lifecycle = types.Lifecycle{
+		RestartPolicy: &policy,
+		UpdateStrategy: &types.UpdateStrategy{
+			Type:          types.UpdateStrategyInPlaceOnly,
+			RollingUpdate: &types.RollingUpdate{MaxSurge: &maxSurge, MaxUnavailable: &maxUnavailable},
+		},
+	}
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(40, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+	}
+	return h
+}
+
+// podUIDByInstance maps every planned Instance to the UID of its one pod.
+func (h *recoveryHarness) podUIDByInstance(replicas int32) map[int32]ktypes.UID {
+	h.t.Helper()
+	uids := make(map[int32]ktypes.UID, replicas)
+	for idx := int32(0); idx < replicas; idx++ {
+		pods := h.podsOf(idx)
+		if len(pods) != 1 {
+			h.t.Fatalf("instance %d has %d live pods, want 1", idx, len(pods))
+		}
+		uids[idx] = pods[0].UID
+	}
+	return uids
+}
+
+// TestReconcile_InPlaceOnly_ImagePushRollsEveryInstance: four single-pod
+// Instances serve v1 under InPlaceOnly when an image push lands. Each pod
+// is patched where it runs: the kubelet kills the old container, the new
+// image comes up under the same pod UID, and the Instance is promoted on
+// the new revision once it is Ready again. The budget admits the next
+// Instance as soon as the promoted one is back in rotation, so the roll
+// walks every Instance one at a time, never surges, never recreates a pod
+// and never opens a repair; it ends with every Instance Ready on the new
+// revision. Under maxUnavailable 1 and 25 percent, both restart policies,
+// and whether the node reports the new image under its own name or under
+// the old one, as a node that holds one image under two tags does.
+//
+// Cells: instance/Update/InPlace/pod.containersReady[source]/boundary@T-inplace-ready
+func TestReconcile_InPlaceOnly_ImagePushRollsEveryInstance(t *testing.T) {
+	const replicas = 4
+	budgets := []struct {
+		name           string
+		maxUnavailable intstr.IntOrString
+	}{
+		{"maxUnavailable-1", intstr.FromInt32(1)},
+		{"maxUnavailable-25pct", intstr.FromString("25%")},
+	}
+	nodes := []struct {
+		name            string
+		imageNameOnNode map[string]string
+	}{
+		{"distinct-images", nil},
+		{"second-tag-of-one-image", map[string]string{fixedImage: goodImage}},
+	}
+	for _, budget := range budgets {
+		for _, policy := range []types.RestartPolicy{types.RestartPolicyNone, types.RestartPolicyRecreateInstance} {
+			for _, node := range nodes {
+				t.Run(fmt.Sprintf("%s/%s/%s", budget.name, policy, node.name), func(t *testing.T) {
+					h := inPlaceOnlyHarness(t, replicas, budget.maxUnavailable, policy)
+					h.imageNameOnNode = node.imageNameOnNode
+					uids := h.podUIDByInstance(replicas)
+					allowed := escalation.PerComponentMaxUnavailableBudget(h.lifecycle.UpdateStrategy.RollingUpdate, replicas)
+					h.events = nil
+					h.setTarget(h.revFixed, fixedImage)
+
+					oneAtATimeInPlace := func() {
+						if n := escalation.CurrentUnavailableInFlight(h.irStatuses()); n > allowed {
+							h.dumpState("budget")
+							t.Fatalf("%d Instances offline for the roll, budget %d", n, allowed)
+						}
+						offline := int32(0)
+						for idx := int32(0); idx < replicas; idx++ {
+							if !h.instanceServes(idx) {
+								offline++
+							}
+							pods := h.podsOf(idx)
+							if len(pods) != 1 || pods[0].UID != uids[idx] {
+								h.dumpState("pod identity")
+								t.Fatalf("instance %d no longer runs the pod it had before the push: an in-place roll patches, it does not recreate", idx)
+							}
+						}
+						if offline > allowed {
+							h.dumpState("floor")
+							t.Fatalf("%d Instances out of rotation, want at most %d", offline, allowed)
+						}
+						if h.repairInFlight() {
+							h.dumpState("repair")
+							t.Fatalf("a repair opened on an Instance the roll was patching")
+						}
+					}
+					if !h.runWithInvariant(160, func() bool { return h.settledOn(h.revFixed, replicas) }, oneAtATimeInPlace) {
+						h.dumpState("after the push")
+						t.Fatalf("the roll stopped: %d of %d Instances Ready on the new revision", len(h.landedOn(h.revFixed)), replicas)
+					}
+					for idx := int32(0); idx < replicas; idx++ {
+						h.requirePodsRender(idx, h.revFixed, fixedImage)
+					}
+					if h.sawEvent(types.EventReasonRestartTriggered) {
+						t.Fatalf("a restart was recorded during an in-place roll: %v", h.events)
+					}
+				})
+			}
+		}
 	}
 }

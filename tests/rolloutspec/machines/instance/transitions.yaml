@@ -753,9 +753,9 @@ transitions:
     from: Update/InPlace
     event: pod.containersReady
     variant: source
-    guard: every changed container reports the target image at runtime, the transition marker is cleared, serving is back on, the pod is PodReady, and the minReadySeconds window has elapsed
+    guard: every changed container is confirmed at runtime (the kubelet reports the target image for it, or has replaced it since the patch the transition marker recorded), serving is back on, the pod is PodReady, and the minReadySeconds window has elapsed
     to: Ready
-    effects: [revision hash and pairing labels restamped on the live pod, Phase Ready on the target revision with the operation cleared]
+    effects: [revision hash and pairing labels restamped on the live pod, Phase Ready on the target revision with the operation cleared, the transition marker cleared after the stamp]
     decided_in: pkg/controller/v1beta1/workload/ops/update_inplace.go
   - id: T-inplace-fallback
     from: Update/InPlace

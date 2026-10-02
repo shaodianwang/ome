@@ -51,11 +51,11 @@ timeline:
   - tick: 5
     note: the image patch lands while the pod is out of rotation
   - tick: 6
-    note: the kubelet has rolled the container with the fixed image, so the runtime reports it and the marker is cleared
+    note: the kubelet has rolled the container with the fixed image, so the runtime confirms it; the pod returns to rotation on the fixed revision, the Instance promotes and the marker is cleared
     events:
       - pod.ready[target]: {pod: {index: 0}}
   - tick: 7
-    note: the pod returns to rotation on the fixed revision and the Instance promotes
+    note: the endpoint follows the pod back into rotation on the fixed revision; nothing is left to do
     events:
       - endpoint.rotationIn[target]: {pod: {index: 0}}
   - tick: 8

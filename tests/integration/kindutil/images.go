@@ -30,14 +30,13 @@ type ImageBuildSpec struct {
 	Tag string
 
 	// ExtraTags lists additional `docker tag` aliases pointing at the
-	// same built image. Useful when two image references should map to
-	// the same binary — e.g. two tags used purely as a ControllerRevision
-	// trigger for revision-hash drift tests where runtime behavior is
-	// identical. NOT suitable for in-place-update tests: kubelet
-	// short-circuits the digest equality check when two aliases resolve
-	// to the same sha256, leaving Status.ContainerStatuses[*].Image at
-	// the original alias name and stalling
-	// `ops.podRuntimeImagesMatch`. Use BuildArgs + two separate
+	// same built image: two image references that map to the same
+	// binary, as a ControllerRevision trigger with identical runtime
+	// behavior. A node holding one image under several references
+	// reports whichever it stored first in Status.ContainerStatuses[*].Image
+	// for a container running it, so a roll between two aliases is the
+	// retag shape the in-place path confirms by the container's restart
+	// rather than by the reported name. Use BuildArgs with two separate
 	// ImageBuildSpec entries when the test needs a true content change.
 	ExtraTags []string
 

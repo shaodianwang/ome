@@ -82,13 +82,16 @@ func GangScheme() *runtime.Scheme {
 	return s
 }
 
-// FakeServingImages is the v1/v2 fake-serving build spec every suite loads. The
-// distinct VERSION build-arg gives v2 a different digest from v1, which in-place
-// image-bump tests need — kubelet short-circuits the Image-equality check when
-// two tags map to the same sha256.
+// FakeServingImages is the fake-serving build spec every suite loads. The
+// distinct VERSION build-arg gives v2 a different digest from v1, so an
+// image bump between them is a true content change. v1-retag is a second
+// tag of the v1 image: a node holding one image under two references
+// reports whichever it stored first for a container running it, which is
+// the shape an in-place roll between the two tags has to confirm by the
+// container's restart.
 func FakeServingImages() []kindutil.ImageBuildSpec {
 	return []kindutil.ImageBuildSpec{
-		{ContextDir: "tests/integration/kindutil/fake-serving", Tag: "fake-serving:v1", BuildArgs: map[string]string{"VERSION": "v1"}},
+		{ContextDir: "tests/integration/kindutil/fake-serving", Tag: "fake-serving:v1", BuildArgs: map[string]string{"VERSION": "v1"}, ExtraTags: []string{"fake-serving:v1-retag"}},
 		{ContextDir: "tests/integration/kindutil/fake-serving", Tag: "fake-serving:v2", BuildArgs: map[string]string{"VERSION": "v2"}},
 	}
 }

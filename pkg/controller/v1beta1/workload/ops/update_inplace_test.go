@@ -340,20 +340,16 @@ func TestUpdateInPlaceMetadataRollRepairsImageDriftBeforePromotion(t *testing.T)
 	if err := c.Status().Update(context.Background(), patched); err != nil {
 		t.Fatalf("advance runtime status: %v", err)
 	}
-	if run("clear runtime proof") {
-		t.Fatal("marker removal pass returned done=true")
-	}
-	cleared, present, valid := inPlaceImageTransitionFromPod(getPod())
-	if present || valid || cleared != nil {
-		t.Fatalf("transition remained after runtime proof: %+v present=%v valid=%v", cleared, present, valid)
-	}
-
 	if !run("promote") {
 		t.Fatal("confirmed transition did not promote")
 	}
 	final := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
 	if final.Phase != v1beta1.OMENativeInstanceReady || final.RunningRevision != target.Name || final.Operation != nil {
 		t.Fatalf("final status: %+v", final)
+	}
+	cleared, present, valid := inPlaceImageTransitionFromPod(getPod())
+	if present || valid || cleared != nil {
+		t.Fatalf("transition remained after the promote: %+v present=%v valid=%v", cleared, present, valid)
 	}
 }
 
@@ -440,7 +436,10 @@ func TestInPlaceImageTransitionInvalidMarkersFailClosed(t *testing.T) {
 	}
 }
 
-func TestRemoveInPlaceImageTransitionRejectsStaleResourceVersion(t *testing.T) {
+// TestRemoveInPlaceImageTransitionClearsOnlyTheMarker: the clear removes
+// the marker from a pod that changed since it was read, and leaves every
+// other annotation in place.
+func TestRemoveInPlaceImageTransitionClearsOnlyTheMarker(t *testing.T) {
 	isvc, _ := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	pod := legacyPodAtIncarnation(isvc, 0, 1, true, true)
 	pod.Annotations = map[string]string{inPlaceImageTransitionAnnotation: `{"targetImages":{"main":"example.com/app:v2"}}`}
@@ -456,18 +455,18 @@ func TestRemoveInPlaceImageTransitionRejectsStaleResourceVersion(t *testing.T) {
 		t.Fatalf("concurrent update: %v", err)
 	}
 
-	if err := removeInPlaceImageTransition(context.Background(), c, stale); !apierrors.IsConflict(err) {
-		t.Fatalf("removeInPlaceImageTransition error = %v, want conflict", err)
+	if err := removeInPlaceImageTransition(context.Background(), c, stale); err != nil {
+		t.Fatalf("removeInPlaceImageTransition: %v", err)
 	}
 	got := &corev1.Pod{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), got); err != nil {
 		t.Fatalf("get pod: %v", err)
 	}
-	if _, present := got.Annotations[inPlaceImageTransitionAnnotation]; !present {
-		t.Fatal("conflicted removal deleted the transition marker")
+	if _, present := got.Annotations[inPlaceImageTransitionAnnotation]; present {
+		t.Fatal("the transition marker survived its removal")
 	}
 	if got.Annotations["example.com/concurrent"] != "write" {
-		t.Fatal("conflicted removal lost a concurrent annotation")
+		t.Fatal("the removal lost a concurrent annotation")
 	}
 }
 
