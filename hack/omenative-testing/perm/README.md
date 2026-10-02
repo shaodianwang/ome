@@ -102,7 +102,8 @@ perm/
 │   ├── gen-packed-pool/   — generated: every node packed, a bad push then the fix, and the running revision broken then the fix
 │   ├── gen-budget/ gen-inplaceonly/  — percent budgets as the engine resolves them; the strict in-place strategy on its own terms
 │   ├── gen-fault-scale/ gen-fault-delete/  — generated: a scale or a delete on a service with a broken Instance
-│   └── gen-fault-move/ gen-fault-edit/  — generated faults crossed with a move and with a runtime edit
+│   ├── gen-fault-move/ gen-fault-edit/  — generated faults crossed with a move and with a runtime edit
+│   └── gen-repeat/            — generated: faults that keep repeating until they are lifted (`repeat=<n>`)
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -1581,6 +1582,51 @@ shapes.
   prefill/decode shapes, whose decoder carries the same one-down budget;
   every cell selects invariants J and K (`inv_on=J,K`).
 
+- **`repeat=<n>`** is the persistent form of the faults above that the
+  controller heals once: the fault is applied again each time what it took
+  has come back, `n` times in all, and then stops — the lift — so the case
+  reads the window and the end state after it. It rides `mode=kill` (the
+  pod deleted by hand, `via=evict` the eviction, `via=preempt lift=after-settle`
+  the preemption; `kill=leader|worker` names the gang member), a
+  `fault=podkill:<phase>` or `fault=evict:<phase>` under a push or a scale
+  (`mode=scaledown`; `victim=stable` keeps the deleter on the running
+  revision's pods, `victimcomp=engine` on the Component the operation works
+  on), and `fault=ctrlrestart:<phase>` under a push or a scale, or
+  `fault=ctrlrestart:idle during=idle` for the manager restarting on the
+  settled service. A pod fault is due again once the Instance it took is
+  whole, Ready and serving on new pods — the deleter takes the pod that came
+  back, the same Instance, as long as it still fits the aim — or once the
+  roll has retired that Instance (a gang surge abandoned, a source drained)
+  with its Component back at N; the manager restart once the manager pods
+  are Ready under new names; the preemption once the Instance it took is
+  placed and serving again (the fillers are dropped after each wait, each
+  repetition's fillers named after it). The watch budgets grow by
+  `REPEAT_CYCLE_S` per repetition; a repeating fault is ticked between pod
+  events too, since a dead manager raises none.
+  The verdict during the window: the operation's own checks (the roll
+  converges on the new revision, the scale lands, the kill rebuilds exactly
+  its policy's scope each time) and the floor the budget promises
+  (`floor_slack=1` for the Instance each loss takes; `N-1` on the killed
+  Component at steady state); while an Instance is short its row is sampled
+  every `INV_TICK_S` and must report the loss (a phase other than Ready, or
+  fewer serving pods than pods) and must never count the Instance whole once
+  the gap has lasted `GANG_SHORT_REPORT_S` (a preemption's wait with reason
+  `Unschedulable` is its report); every `RestartTriggered` after the first
+  loss names an Instance the fault took, at most one per loss; the pods the
+  controller creates across the window are bounded by what the operation
+  and the repairs explain (the roll's or the scale's own pods, plus one
+  repair scope per loss, plus `REPEAT_CHURN_SLACK` per loss) — the hot-loop
+  bound, since the harness cannot read the manager's reconcile counter, and
+  the service's event rate is printed beside it; and no pod comes back on a
+  revision the service never pushed (at most one new revision per bumped
+  Component, none elsewhere). The manager loop additionally requires that on
+  the idle service no pod is created or deleted at all and every Instance
+  stays Ready. After the lift: every row Ready with no operation open and no
+  `rolloutHold` left on any Component, and the continuous invariants A to H
+  as on every case. The generated `isvcs/gen-repeat/` family drives the four
+  rows on the six shape families at steady state, under a push and under a
+  scale-up; `isvcs/MANIFEST.md` lists what it leaves out and why.
+
 - **`fault=taint:all` and `fault=quota:<n>` with `lift=after-settle|never`**
   (mode=kill, or rollout mode without `during=idle`) are the pending
   causes: a new pod cannot be placed (a `perm.test/pending` NoSchedule
@@ -1828,7 +1874,11 @@ Four generators write into `isvcs/`; re-run one after editing it:
   broken-Instance operations (`p7600`–`p7799`) → `isvcs/gen-fault-scale/` (one
   Instance broken, then the engine scaled down by one, by two, to one, or up
   by one) and `isvcs/gen-fault-delete/` (the same breaks, then the service
-  deleted and re-created under the same name).
+  deleted and re-created under the same name). The repeating faults
+  (`p8700`–`p8899`) → `isvcs/gen-repeat/` (a pod deleted by hand, a gang
+  member lost, an eviction or a preemption applied again each time what it
+  took has come back, and the manager deleted again each time it is Ready,
+  at steady state, under a push and under a scale-up).
 
 A generator owns exactly the case ids it mints. Hand-written cases share the
 feature folders with generated ones (`restart/`, `canary/`, `scale/` and
@@ -1922,7 +1972,9 @@ The ledger's cell is (shape family, operation, fault row):
   `analysis source unusable`. The form is `one-shot` when the harness takes
   the cause away again (`lift=`, `verb=quotalift`, a decaying breach) or
   the controller heals it once (a pod delete, a controller restart), else
-  `persistent`. The side follows `victim=`, the break's `old` victim, and
+  `persistent`; a pod delete, an eviction, a preemption or a controller
+  restart with `repeat=<n>` is `persistent` (it keeps happening until the
+  repetitions are spent). The side follows `victim=`, the break's `old` victim, and
   run.py's component-blind podkill rule (the newest new-revision pod dies
   mid-rotation under a replacement-first strategy, a settled pod otherwise).
   A case with two faults counts in both rows. A fault at a moment of a move

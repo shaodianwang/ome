@@ -1,0 +1,23 @@
+# p8794: [gen] repeat ctrlrestart push pd N=4 SurgeThenDrain s1 x3  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 fault=ctrlrestart:settling co=none topo=pd repeat=3
+# reason: the manager is deleted right after the bump and again each time it is Ready, 3 times, while the roll lands under SurgeThenDrain: the roll resumes from status after every restart and converges with every Instance on the new revision; a restarted manager carries nothing in memory and resumes from status, so nothing is created twice (peaks within the ceiling, pods within what the operation explains, no index collision) and nothing is built on a third revision; after the last restart every row is Ready with no operation open and no hold; decoder and router are negative controls (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8794 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

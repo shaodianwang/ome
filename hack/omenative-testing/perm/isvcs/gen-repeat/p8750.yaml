@@ -1,0 +1,18 @@
+# p8750: [gen] repeat podkill scale-up engine +router 4->5 rp RecreateInstance x3  mode=scaledown Ne=4 Nd=0 Nr=2 ceil_e=5 ceil_d=0 ceil_r=2 fault=podkill:settling co=none topo=engine to_e=5 repeat=3 floor_slack=1
+# reason: the engine grows from 4 to 5 while one engine pod is deleted by hand again each time its Instance is back and serving, 3 times, then left alone: the new Instance comes up and the scale lands at 5 with every Instance Ready; across the window the other Instances keep serving (floor N-1 on the engine, N elsewhere), the status reports each loss and never counts the short Instance whole, every repair recorded is for an Instance the fault took, the pods created are those repairs and the scale's new Instance and no more (no hot loop), no pod comes back on a revision the service never pushed; after the lift every Instance is Ready and serving on its revision with no row mid-operation and no hold left behind; the Instance (one pod) is recreated each time under restart policy RecreateInstanceOnPodRestart
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8750 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

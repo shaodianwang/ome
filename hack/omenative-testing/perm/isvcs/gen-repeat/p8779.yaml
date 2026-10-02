@@ -1,0 +1,20 @@
+# p8779: [gen] repeat ctrlrestart scale-up engine-mn W1 +router 2->3 x3  mode=scaledown Ne=2 Nd=0 Nr=2 ceil_e=3 ceil_d=0 ceil_r=2 fault=ctrlrestart:settling co=none topo=engine-mn to_e=3 repeat=3
+# reason: the engine grows from 2 to 3 while the manager is deleted right after the scale and again each time it is Ready, 3 times: the scale resumes from status and lands at 3, the survivors keep their pods; a restarted manager carries nothing in memory and resumes from status, so nothing is created twice (peaks within the ceiling, pods within what the operation explains, no index collision) and nothing is built on a third revision; after the last restart every row is Ready with no operation open and no hold
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8779 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

@@ -300,6 +300,30 @@ class FaultTest(unittest.TestCase):
         self.assertEqual([("controller restart", "one-shot", "-", "manager")],
                          self.fault(fault="ctrlrestart:rotating", topo="engine"))
 
+    def test_a_fault_that_keeps_repeating_is_the_persistent_form(self):
+        self.assertEqual([("pod deleted by hand", "persistent", "running", "engine")],
+                         self.fault(mode="kill", restart="None", repeat=3, topo="engine"))
+        self.assertEqual([("gang member lost", "persistent", "running", "engine")],
+                         self.fault(mode="kill", restart="RecreateInstance", kill="worker", repeat=3,
+                                    comps=engine(2, w=1), topo="engine-mn"))
+        self.assertEqual([("evicted or preempted", "persistent", "running", "engine")],
+                         self.fault(mode="kill", restart="None", via="evict", repeat=3, topo="engine"))
+        self.assertEqual([("evicted or preempted", "persistent", "running", "engine")],
+                         self.fault(mode="kill", restart="None", via="preempt", lift="after-settle", repeat=2, topo="engine"))
+        self.assertEqual([("pod deleted by hand", "persistent", "running", "engine")],
+                         self.fault(fault="podkill:rotating", victim="stable", floor_slack=1, repeat=3, topo="engine"))
+        self.assertEqual([("evicted or preempted", "persistent", "running", "engine")],
+                         self.fault(mode="scaledown", to_e=3, fault="evict:settling", floor_slack=1, repeat=3, topo="engine"))
+        self.assertEqual([("controller restart", "persistent", "-", "manager")],
+                         self.fault(fault="ctrlrestart:settling", repeat=3, topo="engine"))
+        self.assertEqual([("controller restart", "persistent", "-", "manager")],
+                         self.fault(fault="ctrlrestart:idle", during="idle", repeat=3, topo="engine"))
+        case = self.corpus.write(fault="ctrlrestart:idle", during="idle", repeat=3, topo="engine")
+        self.assertEqual(("steady state", "steady state", [("controller restart", "persistent", "-")]),
+                         (case.operation, case.timing, case.fault_rows()))
+        case = self.corpus.write(mode="scaledown", to_e=3, fault="podkill:settling", floor_slack=1, repeat=3, topo="engine")
+        self.assertEqual(("scale up", "settling"), (case.operation, case.timing))
+
     def test_canary_breaks_of_the_new_revision(self):
         self.assertEqual([("image pull", "persistent", "new", "engine")],
                          self.fault(mode="canary", canary="auto", bump="engine", img="example.com/x:none", terminal="Failed", topo="engine"))

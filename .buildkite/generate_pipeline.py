@@ -365,6 +365,7 @@ EVAL_SOFT_FEATURES: list[dict[str, str]] = [
         "gen-fault-move",
         "gen-fault-edit",
         "gen-packed-pool",
+        "gen-repeat",
     )
 ]
 
@@ -447,6 +448,10 @@ EVAL_EXCLUSIVE_CASE_MINUTES: dict[str, float] = {
     # escalation and the believe window, then the fix rolls one Instance at
     # a time
     "gen-packed-pool": 7,
+    # expected: a manager restarted three times under a roll or a scale (each
+    # restart about a minute to Ready, then the operation's convergence), and
+    # a preemption's fill-and-press cycle twice over with its repair between
+    "gen-repeat": 8,
     # measured: quota waits of 7 minutes among restart and cordon cells of 1-2
     "fault": 4,
     # measured: manager restarts at canary hooks of 2 minutes, two quota

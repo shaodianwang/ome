@@ -1192,7 +1192,13 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         # family's seven-minute rating.
         for topology in ("engine", "engine-mn", "pd", "pd-mn"):
             self.assertEqual(shard_counts[("gen-packed-pool", topology, "")], 12)
-        self.assertEqual(job_count, 572)
+        # The repeating manager restarts and preemptions run one at a time at
+        # about eight minutes each: two per shard; the pod loops run in the pool.
+        self.assertEqual(shard_counts[("gen-repeat", "engine", "")], 6)
+        self.assertEqual(shard_counts[("gen-repeat", "engine-mn", "")], 7)
+        self.assertEqual(shard_counts[("gen-repeat", "pd", "")], 3)
+        self.assertEqual(shard_counts[("gen-repeat", "pd-mn", "")], 3)
+        self.assertEqual(job_count, 591)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin

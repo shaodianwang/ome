@@ -133,8 +133,7 @@ NOT_DERIVABLE = [
     "production profiles: no header marks a case as a shipped service's lifecycle fixture",
     "the timings `last Instance` and `held floor`: no hook fires at them",
     "migration auto versus manual: `mode=migrate` files an explicit request; `mig=` is the policy",
-    "the faults `webhook unavailable`, `apiserver conflict`, `evicted or preempted`, `pod Pending` "
-    "(other than through a quota): no verb injects them",
+    "the faults `webhook unavailable` and `apiserver conflict`: no verb injects them",
 ]
 
 
@@ -303,6 +302,8 @@ HEADER_CHECKS = {
     "minfails": _count, "verbhold": _count, "releaseafter": _count, "skipsoak": _count,
     "ratio_tol": _count, "scale_e": _count, "scale_d": _count, "issue": _count, "victims": _count,
     "exitafter": _count, "floor_slack": _count,
+    # repeat=<n>: the fault is applied again each time what it took has come back, n times, then stops
+    "repeat": lambda v: isinstance(v, int) and v >= 2,
     "rollback": _flag, "readd": _flag, "dup": _flag, "hint": _flag, "hold": _flag, "pkill": _flag, "fixfirst": _flag,
     "blocked": _flag, "infeasible": _flag, "notimpl": _flag, "floor_hard": _flag, "floor_soft": _flag,
     "order_soft": _flag,
@@ -632,21 +633,25 @@ def classify_faults(h, mode, pods, strategy, verbs):
     faults = []
     kind, _, param = str(h.get("fault", "")).partition(":")
     lifted = fault_lifted(h, verbs)
+    # repeat=<n> applies the fault again each time what it took has come
+    # back: the persistent form of a pod loss, an eviction, a preemption
+    # or a manager restart, lifted once the repetitions are spent.
+    repeated = "persistent" if h.get("repeat") else "one-shot"
     if mode == "kill":
         removed = "evicted or preempted" if h.get("via") in ("evict", "preempt") else pod_delete_kind(pods)
-        faults.append((removed, "one-shot", "running", "engine"))
+        faults.append((removed, repeated, "running", "engine"))
     if h.get("pkill"):
         faults.append((pod_delete_kind(pods), "one-shot", "running", "decoder"))
     if "podkill" in verbs:
         # the canary verb deletes one old-revision engine pod by hand
         faults.append((pod_delete_kind(pods), "one-shot", "running", "engine"))
     if kind in ("evict", "preempt"):
-        faults.append(("evicted or preempted", "one-shot", "running", str(h.get("victimcomp", "engine"))))
+        faults.append(("evicted or preempted", repeated, "running", str(h.get("victimcomp", "engine"))))
     elif kind == "taint":
         faults.append(("pod Pending", "one-shot" if lifted else "persistent", "-", "every node tainted"))
     elif kind == "podkill":
         component, side = podkill_victim(h, param.partition("@")[0], strategy, pods)
-        faults.append((pod_delete_kind(pods), "one-shot", side, component))
+        faults.append((pod_delete_kind(pods), repeated, side, component))
     elif kind == "crashloop":
         component = break_component(h)
         crash = "crash at start" if h.get("form") == "start" else "crash after Ready"
@@ -673,7 +678,7 @@ def classify_faults(h, mode, pods, strategy, verbs):
     elif kind == "quota":
         faults.append(("quota", "one-shot" if lifted else "persistent", "-", f"headroom {param}"))
     elif kind == "ctrlrestart":
-        faults.append(("controller restart", "one-shot", "-", "manager"))
+        faults.append(("controller restart", repeated, "-", "manager"))
     if h.get("img"):
         component = str(h.get("imgcomp") or h.get("bump", "engine"))
         sibling = component in ("decoder", "router")

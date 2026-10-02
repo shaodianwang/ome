@@ -9206,3 +9206,406 @@ class PackedPoolVerdictTest(unittest.TestCase):
         self.assertEqual("packed pool: the filler on node-a never bound in 3 sizings", rec["infra_fail"])
         with mock.patch.object(run, "_eligible_nodes", return_value=[]), mock.patch.object(run, "_FAULT_CLEANUPS", []):
             self.assertIn("no Ready, schedulable node", run._pack_pool("p999")["infra_fail"])
+
+
+class RepeatingFaultHeaderTest(unittest.TestCase):
+    """repeat=<n> is the persistent form of a kill, a podkill, an eviction or
+    a manager restart: the fault is applied again each time what it took
+    has come back, n times, then stops."""
+
+    BASE = "# p999: x Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
+    KILL = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
+    SCALE = "# p999: x mode=scaledown Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine to_e=3"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_repeat_rides_a_kill_a_hook_fault_or_the_idle_manager_restart(self):
+        self.assertEqual([], self._errs(self.KILL + " repeat=3"))
+        self.assertEqual([], self._errs(self.KILL + " via=evict repeat=3"))
+        self.assertEqual([], self._errs(self.KILL + " via=preempt lift=after-settle repeat=2"))
+        self.assertEqual([], self._errs(self.KILL.replace("topo=engine", "topo=engine-mn") + " kill=worker repeat=3"))
+        self.assertEqual([], self._errs(self.BASE + " fault=podkill:rotating victim=stable floor_slack=1 repeat=3"))
+        self.assertEqual([], self._errs(self.BASE + " fault=evict:rotating victim=stable floor_slack=1 order_soft=1 repeat=3"))
+        self.assertEqual([], self._errs(self.BASE + " fault=ctrlrestart:settling repeat=3"))
+        self.assertEqual([], self._errs(self.BASE + " fault=ctrlrestart:idle during=idle repeat=3"))
+        self.assertEqual([], self._errs(self.SCALE + " fault=podkill:settling floor_slack=1 repeat=3"))
+        self.assertEqual([], self._errs(self.SCALE + " fault=evict:settling floor_slack=1 repeat=3"))
+        self.assertEqual([], self._errs(self.SCALE + " fault=ctrlrestart:settling repeat=3"))
+
+    def test_repeat_needs_a_fault_that_comes_back_and_no_one_shot_knob(self):
+        self.assertTrue(any("malformed header value repeat=1" in e for e in self._errs(self.KILL + " repeat=1")))
+        self.assertTrue(any("repeat= is the persistent form" in e for e in self._errs(self.BASE + " repeat=3")))
+        self.assertTrue(any("repeat= is the persistent form" in e for e in self._errs(self.BASE + " fault=crashloop:old form=start repeat=2")))
+        self.assertTrue(any("repeat= is the persistent form" in e
+                            for e in self._errs(self.BASE + " fault=preempt:rotating lift=after-settle floor_soft=1 order_soft=1 repeat=2")))
+        self.assertTrue(any("pause= is lifted once" in e for e in self._errs(self.KILL + " pause=true repeat=3")))
+        self.assertTrue(any("needs lift=after-settle" in e for e in self._errs(self.KILL + " via=preempt lift=never repeat=2")))
+        self.assertTrue(any("needs a phase hook" in e for e in self._errs(self.BASE + " fault=ctrlrestart:idle repeat=3")))
+        self.assertTrue(any("needs a persistent fault" in e for e in self._errs(self.BASE + " fault=ctrlrestart:idle during=idle")))
+        self.assertTrue(any("do not combine with it" in e
+                            for e in self._errs(self.BASE + " fault=podkill:settling rollback=1 during=settling repeat=2")))
+
+
+class RepeatingFaultLoopTest(unittest.TestCase):
+    """The loop: the Instance taken before is taken again once it is back,
+    the status is sampled while it is short, and the fault fires again until
+    the repetitions are spent."""
+
+    def _pods(self):
+        return {"e0": _rec("engine", 0, "old", uid="u0"), "e1": _rec("engine", 1, "old", uid="u1"),
+                "e2": _rec("engine", 2, "new", uid="u2", created="5")}
+
+    def _cycle(self, comp="engine", inst="0", uid="u0"):
+        return {"fired_at": 100.0, "comp": comp, "inst": inst, "uid": uid, "reported": False, "lie": None,
+                "retired": False, "back_at": None, "short_since": None, "sampled_at": 0.0, "samples": 0}
+
+    def test_pick_pod_prefers_the_instance_taken_before_while_it_fits_the_aim(self):
+        pods, ppi = self._pods(), {"engine": 1}
+        self.assertEqual("e1", run._fault_pick_pod(pods, ppi, {"old"}, prefer_inst="1"))
+        self.assertEqual("e0", run._fault_pick_pod(pods, ppi, {"old"}, victim="stable", prefer_inst="2"),
+                         "the preferred Instance is on the new revision, so the stable rule picks afresh")
+        self.assertEqual("e2", run._fault_pick_pod(pods, ppi, {"old"}, victim="canary", prefer_inst="0"))
+        self.assertEqual("e2", run._fault_pick_pod(pods, ppi, {"old"}, prefer_inst="7"),
+                         "an Instance that is gone falls back to the rules (the newest new-revision pod)")
+        self.assertIsNone(run._repeat_prefer({"repeat": 3, "fired_count": 0, "victim_inst": "1"}))
+        self.assertEqual("1", run._repeat_prefer({"repeat": 3, "fired_count": 1, "victim_inst": "1"}))
+        self.assertIsNone(run._repeat_prefer({"repeat": 0, "fired_count": 1, "victim_inst": "1"}))
+
+    def test_repeat_back_once_the_instance_is_whole_on_new_pods_or_retired(self):
+        f = {"kind": "podkill", "fleet": {"engine": 3}}
+        pods, ppi = self._pods(), {"engine": 1}
+        cycle = self._cycle()
+        self.assertEqual((False, False), run._repeat_back(f, cycle, pods, ppi, 200.0), "the killed pod is still there")
+        pods["e0"] = _rec("engine", 0, "old", uid="u0b", ready=False)
+        self.assertEqual((False, False), run._repeat_back(f, cycle, pods, ppi, 200.0), "the replacement is not Ready")
+        pods["e0"] = _rec("engine", 0, "old", uid="u0b")
+        self.assertEqual((True, False), run._repeat_back(f, cycle, pods, ppi, 200.0))
+        del pods["e0"]
+        self.assertEqual((False, True), run._repeat_back(f, cycle, pods, ppi, 200.0),
+                         "the index is gone but the Component is short of N: not back yet")
+        self.assertEqual((True, True), run._repeat_back(dict(f, fleet={"engine": 2}), cycle, pods, ppi, 200.0),
+                         "the index is gone and the Component is back at N: the roll retired it")
+        pods["e0"] = _rec("engine", 0, "old", uid="u0", alive=False)
+        self.assertEqual((False, False), run._repeat_back(f, cycle, pods, ppi, 200.0), "a pod of the index is still leaving")
+        gang = {"e0-l": _rec("engine", 0, "old", uid="l0", runner="leader"), "e0-w": _rec("engine", 0, "old", uid="w0", runner="worker")}
+        self.assertEqual((False, False), run._repeat_back({"kind": "podkill", "fleet": {"engine": 1}}, self._cycle(uid="dead"),
+                                                          {"e0-l": gang["e0-l"]}, {"engine": 2}, 200.0), "half a gang is not whole")
+        self.assertEqual((True, False), run._repeat_back({"kind": "podkill", "fleet": {"engine": 1}}, self._cycle(uid="dead"),
+                                                         gang, {"engine": 2}, 200.0))
+
+    def test_manager_is_back_under_new_ready_names_only(self):
+        f = {"kind": "ctrlrestart", "ctrl_pods": ["mgr-old"]}
+        with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "get" in a, _Resp("mgr-old=True\n"))])):
+            self.assertFalse(run._ctrl_back(f, 10.0), "the deleted pod still lists")
+        with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "get" in a, _Resp("mgr-new=False\n"))])):
+            self.assertFalse(run._ctrl_back(f, 20.0), "the new pod is not Ready")
+        with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "get" in a, _Resp("mgr-new=True\n"))])):
+            self.assertFalse(run._ctrl_back(f, 20.0 + run.CTRL_POLL_S / 2), "polled no faster than CTRL_POLL_S")
+            self.assertTrue(run._ctrl_back(f, 20.0 + run.CTRL_POLL_S))
+            self.assertEqual((True, False), run._repeat_back(dict(f, ctrl_polled=0.0), self._cycle(comp=""), {}, {}, 99.0),
+                             "a manager restart is back on the manager alone, whatever the pods")
+
+    def test_row_sampled_while_short_reports_the_loss_or_a_lie(self):
+        pods = {"e0": _rec("engine", 0, "old", uid="u0b", ready=False), "e1": _rec("engine", 1, "old", uid="u1")}
+        cycle = self._cycle()
+        with mock.patch.object(run, "_ir_row", lambda *_a: {"index": 0, "phase": "Creating", "podCount": 1, "servingPodCount": 0}):
+            run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0)
+        self.assertEqual((True, None, 1), (cycle["reported"], cycle["lie"], cycle["samples"]))
+        cycle = self._cycle()
+        whole_row = {"index": 0, "phase": "Ready", "podCount": 1, "servingPodCount": 1}
+        with mock.patch.object(run, "_ir_row", lambda *_a: whole_row):
+            run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0)
+            self.assertIsNone(cycle["lie"], "one reconcile of lag is not a lie")
+            run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0 + run.GANG_SHORT_REPORT_S + run.INV_TICK_S)
+        self.assertFalse(cycle["reported"])
+        self.assertIn("servingPodCount=1", cycle["lie"])
+        cycle = self._cycle()
+        pods["e0"] = _rec("engine", 0, "old", uid="u0b")
+        with mock.patch.object(run, "_ir_row", lambda *_a: self.fail("a whole Instance is not sampled")):
+            run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0)
+        self.assertEqual(0, cycle["samples"])
+
+    def test_tick_fires_again_once_back_and_stops_when_the_repetitions_are_spent(self):
+        fired = []
+        f = {"case_id": "p1", "kind": "podkill", "param": "settling", "victim": "stable", "member": "", "repeat": 2,
+             "fired": True, "fired_count": 1, "infra_fail": None, "notes": [], "victim_comp": "engine", "victim_inst": "0",
+             "victim_uid": "u0", "victim_insts": {("engine", "0")}, "cycles": [self._cycle()], "fleet": {"engine": 3}}
+        pods = self._pods()
+        ctx = {"fault": f, "trigger_ts": 1.0, "pod_state": pods, "pods_per_inst": {"engine": 1}, "old_hashes": {"old"}}
+
+        def fire(rec, *_a, **_k):
+            fired.append(rec["victim_inst"])
+            rec["fired_count"] += 1
+            rec["cycles"].append(self._cycle(uid="u0b"))
+        with mock.patch.object(run, "_fault_fire", fire), mock.patch.object(run, "_ir_row", lambda *_a: None):
+            run._fault_tick(ctx)
+            self.assertEqual([], fired, "the killed pod is still there")
+            pods["e0"] = _rec("engine", 0, "old", uid="u0b")
+            run._fault_tick(ctx)
+            self.assertEqual(["0"], fired)
+            self.assertIsNotNone(f["cycles"][0]["back_at"])
+            pods["e0"] = _rec("engine", 0, "old", uid="u0c")
+            run._fault_tick(ctx)
+            self.assertEqual(["0"], fired, "two repetitions were asked for; the loop is spent")
+            self.assertIsNotNone(f["cycles"][1]["back_at"], "when the last one came back is still noted")
+        self.assertEqual({"u0", "u1", "u2"}, f["base_uids"])
+        self.assertEqual({"u0", "u1", "u2", "u0b", "u0c"}, f["seen_uids"])
+        self.assertEqual({"old", "new"}, f["seen_hashes"]["engine"])
+
+    def test_firing_records_the_count_the_instances_taken_and_a_cycle(self):
+        f = {"case_id": "p1", "kind": "podkill", "param": "settling", "victim": "", "member": "", "repeat": 3,
+             "fired": False, "infra_fail": None, "notes": []}
+        settled = {"e0": _rec("engine", 0, "old", uid="u0"), "e1": _rec("engine", 1, "old", uid="u1")}
+        with mock.patch.object(run, "kubectl", _kubectl_with([])):
+            run._fault_fire(f, settled, {"engine": 1}, {"old"})
+        self.assertEqual((1, {("engine", "0")}, 1), (f["fired_count"], f["victim_insts"], len(f["cycles"])))
+        self.assertEqual(("engine", "0", "u0"), (f["cycles"][0]["comp"], f["cycles"][0]["inst"], f["cycles"][0]["uid"]))
+        once = {"case_id": "p1", "kind": "podkill", "param": "settling", "victim": "", "member": "",
+                "fired": False, "infra_fail": None, "notes": []}
+        with mock.patch.object(run, "kubectl", _kubectl_with([])):
+            run._fault_fire(once, settled, {"engine": 1}, {"old"})
+        self.assertEqual((1, []), (once["fired_count"], once.get("cycles", [])), "a one-shot fault keeps no cycle")
+
+    def test_kill_pick_prefers_the_instance_taken_before_and_the_named_runner(self):
+        pods = {"e1-w": _rec("engine", 1, "old", runner="worker"), "e0-l": _rec("engine", 0, "old", runner="leader"),
+                "e0-w": _rec("engine", 0, "old", runner="worker"), "d0": _rec("decoder", 0, "old")}
+        self.assertEqual("e0-l", run._kill_pick(pods, "engine", "")[0])
+        self.assertEqual("e0-w", run._kill_pick(pods, "engine", "worker")[0])
+        self.assertEqual("e1-w", run._kill_pick(pods, "engine", "worker", prefer_inst="1")[0])
+        self.assertEqual("e0-w", run._kill_pick(pods, "engine", "worker", prefer_inst="9")[0])
+        self.assertEqual((None, None), run._kill_pick(pods, "router", ""))
+
+    def test_fillers_are_named_per_repetition_and_the_reset_waits_for_the_old_ones(self):
+        f = {"case_id": "p1", "fillers": ["a"], "fillers_dropped": True, "crash_pod": "x", "preempted": ["x"]}
+        self.assertEqual("perm-p1-press", run._filler_name(f, "press"))
+        self.assertEqual("perm-p1-fill-n1-r2", run._filler_name(dict(f, cycle=2), "fill-n1"))
+        with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "get" in a, _Resp(""))])), \
+                mock.patch.object(run, "LIFT_SETTLE_S", 1):
+            self.assertTrue(run._preempt_cycle_reset(f, 2))
+        self.assertEqual(([], False, 2, None, []), (f["fillers"], f["fillers_dropped"], f["cycle"], f["crash_pod"], f["preempted"]))
+        with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "get" in a, _Resp("pod/perm-p1-press\n"))])), \
+                mock.patch.object(run, "LIFT_SETTLE_S", 0.01), mock.patch.object(run.time, "sleep", lambda _s: None):
+            self.assertFalse(run._preempt_cycle_reset(f, 3))
+
+
+class RepeatingFaultVerdictTest(unittest.TestCase):
+    """The window's verdict and the end state after the lift."""
+
+    def _rec(self, **kw):
+        cycles = [{"fired_at": 10.0 * k, "comp": "engine", "inst": "0", "uid": f"u{k}", "reported": True, "lie": None,
+                   "retired": False, "back_at": 10.0 * k + 5, "short_since": None, "sampled_at": 0.0, "samples": 2}
+                  for k in range(3)]
+        rec = {"case_id": "p1", "kind": "podkill", "repeat": 3, "fired_count": 3, "cycles": cycles, "infra_fail": None,
+               "victim_insts": {("engine", "0")}, "base_uids": {"a", "b"}, "seen_uids": {"a", "b", "r1", "r2", "r3"},
+               "base_hashes": {"old"}, "seen_hashes": {"engine": {"old"}}}
+        rec.update(kw)
+        return rec
+
+    def _judge(self, rec, events=None, bumped=set(), op_pods=0):
+        notes, checks = [], []
+        with mock.patch.object(run, "_isvc_events_since", lambda *_a: events or []):
+            verdict = run._repeat_checks(rec, {"engine": 1}, bumped, op_pods, 0.0, "PASS", notes, checks)
+        return verdict, notes, "\n".join(checks)
+
+    def test_a_clean_window_passes_and_says_what_it_read(self):
+        repairs = [("RestartTriggered", "component=engine instance=0 restarting")] * 3
+        verdict, notes, checks = self._judge(self._rec(), repairs)
+        self.assertEqual(("PASS", []), (verdict, notes), checks)
+        self.assertIn("fired 3 times", checks)
+        self.assertIn("reported each loss", checks)
+        self.assertIn("3 repair(s) recorded, every one for an Instance the fault took", checks)
+        self.assertIn("3 pod(s) created across the window, within the 6", checks)
+        self.assertIn("running revision or the one pushed", checks)
+
+    def test_fewer_firings_than_asked_fail(self):
+        verdict, notes, checks = self._judge(self._rec(fired_count=2))
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("fired 2 of 3", notes[0])
+
+    def test_status_that_never_reported_the_loss_or_lied_fails(self):
+        rec = self._rec()
+        rec["cycles"][1]["reported"] = False
+        verdict, notes, _c = self._judge(rec)
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("never reported the loss in repetition(s) 2", notes[0])
+        rec = self._rec()
+        rec["cycles"][2]["lie"] = "row engine/0 reads Ready with servingPodCount=1 while 0/1 pod(s) are Ready"
+        verdict, notes, _c = self._judge(rec)
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("counted the short Instance as serving", notes[0])
+        rec = self._rec()
+        rec["cycles"][1].update(reported=False, retired=True)
+        verdict, _n, checks = self._judge(rec)
+        self.assertEqual("PASS", verdict, "an Instance the roll retired has no row to report")
+        self.assertIn("retired the Instance taken in repetition(s) 2", checks)
+        rec = self._rec()
+        rec["cycles"][1].update(reported=False, samples=0)
+        verdict, _n, checks = self._judge(rec)
+        self.assertEqual("PASS", verdict, "a loss that came back before a sample is reported, not failed")
+        self.assertIn("came back before a row sample was read", checks)
+
+    def test_a_repair_for_an_untouched_instance_or_one_too_many_fails(self):
+        foreign = [("RestartTriggered", "component=engine instance=1 restarting")]
+        verdict, notes, _c = self._judge(self._rec(), foreign)
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("never took", notes[0])
+        many = [("RestartTriggered", "component=engine instance=0 restarting")] * 4
+        verdict, notes, _c = self._judge(self._rec(), many)
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("4 repairs for 3 losses", notes[0])
+
+    def test_more_pods_than_the_operation_and_the_repairs_explain_is_a_hot_loop(self):
+        rec = self._rec(seen_uids={"a", "b"} | {f"r{i}" for i in range(7)})
+        verdict, notes, _c = self._judge(rec)
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("7 pods created, at most 6 explained", notes[0])
+        verdict, _n, _c = self._judge(rec, op_pods=3)
+        self.assertEqual("PASS", verdict, "the operation's own pods widen the bound")
+
+    def test_a_revision_the_service_never_pushed_fails(self):
+        rec = self._rec(seen_hashes={"engine": {"old", "new"}})
+        verdict, notes, _c = self._judge(rec)
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("never pushed", notes[0])
+        verdict, _n, _c = self._judge(rec, bumped={"engine"})
+        self.assertEqual("PASS", verdict, "one new revision on a bumped Component is the push")
+        rec = self._rec(seen_hashes={"engine": {"old", "new", "newer"}})
+        self.assertEqual("FAIL", self._judge(rec, bumped={"engine"})[0], "a third revision is never right")
+
+    def test_a_gated_manager_restart_and_a_one_shot_fault_are_left_alone(self):
+        rec = self._rec(kind="ctrlrestart", ctrl_gated=True, fired_count=1)
+        verdict, notes, checks = self._judge(rec)
+        self.assertEqual(("PASS", []), (verdict, notes))
+        self.assertIn("gated off", checks)
+        self.assertEqual("PASS", self._judge(self._rec(repeat=0, fired_count=1))[0])
+
+    def test_end_state_wants_settled_rows_and_no_hold(self):
+        held = {"components": {"engine": {"lifecycle": {"rolloutHold": {"gate": "Budget", "reason": "waiting"}}}}}
+        with mock.patch.object(run, "_wait_rows_settled", lambda *_a: (True, "")), \
+                mock.patch.object(run, "fetch_status", lambda *_a: held):
+            notes, checks = [], []
+            verdict = run._repeat_end_checks("p1", {"engine": 2}, {"engine"}, "PASS", notes, checks)
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("rollout hold is left behind", notes[0])
+        with mock.patch.object(run, "_wait_rows_settled", lambda *_a: (True, "")), \
+                mock.patch.object(run, "fetch_status", lambda *_a: {"components": {"engine": {}}}):
+            notes, checks = [], []
+            verdict = run._repeat_end_checks("p1", {"engine": 2}, {"engine"}, "PASS", notes, checks)
+        self.assertEqual(("PASS", []), (verdict, notes))
+        with mock.patch.object(run, "_wait_rows_settled", lambda *_a: (False, "engine/1: Instance is not settled")), \
+                mock.patch.object(run, "fetch_status", lambda *_a: {}):
+            notes, checks = [], []
+            self.assertEqual("FAIL", run._repeat_end_checks("p1", {"engine": 2}, {"engine"}, "PASS", notes, checks))
+
+
+class GeneratedRepeatFamilyTest(unittest.TestCase):
+    """gen-repeat: the persistent form of a pod deleted by hand, a gang member
+    lost, an eviction or a preemption and a manager restart, on the six shape
+    families at steady state, under a push and under a scale-up."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-repeat"]
+
+    def _family(self, kv):
+        parts = ["engine"] + (["decoder"] if kv["Nd"] else []) + (["router"] if kv["Nr"] else [])
+        return "+".join(parts) + (" gang" if kv["topo"].endswith("-mn") else " single")
+
+    def _operation(self, kv):
+        if kv.get("mode") == "kill":
+            return "steady"
+        if kv.get("mode") == "scaledown":
+            return "scale-up"
+        return "steady" if kv.get("during") == "idle" else "push"
+
+    def _row(self, kv):
+        kind = kv.get("fault", "").partition(":")[0] or ("evict" if kv.get("via") == "evict" else "podkill")
+        if kv.get("via") == "preempt":
+            kind = "preempt"
+        if kind == "ctrlrestart":
+            return "controller restart"
+        if kind in ("evict", "preempt"):
+            return "evicted or preempted"
+        return "gang member lost" if kv["topo"].endswith("-mn") else "pod deleted by hand"
+
+    def test_counts_and_cells(self):
+        self.assertEqual(126, len(self.fam))
+        cells = {(self._row(kv), self._operation(kv), self._family(kv)) for _n, kv, _m in self.fam}
+        families = {"engine single", "engine gang", "engine+router single", "engine+router gang",
+                    "engine+decoder+router single", "engine+decoder+router gang"}
+        ops = {"steady", "push", "scale-up"}
+        self.assertEqual({(f, o) for f in families for o in ops},
+                         {(f, o) for r, o, f in cells if r == "controller restart"})
+        self.assertEqual({(f, o) for f in families for o in ops},
+                         {(f, o) for r, o, f in cells if r == "evicted or preempted"})
+        self.assertEqual({(f, o) for f in families if f.endswith("single") for o in ops},
+                         {(f, o) for r, o, f in cells if r == "pod deleted by hand"})
+        self.assertEqual({(f, o) for f in families if f.endswith("gang") for o in ops},
+                         {(f, o) for r, o, f in cells if r == "gang member lost"})
+        by_row = {}
+        for _n, kv, _m in self.fam:
+            by_row[self._row(kv)] = by_row.get(self._row(kv), 0) + 1
+        self.assertEqual({"pod deleted by hand": 24, "gang member lost": 36, "evicted or preempted": 42, "controller restart": 24}, by_row)
+
+    def test_every_cell_repeats_and_states_the_window_and_the_lift(self):
+        for name, kv, m in self.fam:
+            self.assertGreaterEqual(kv["repeat"], 2, name)
+            text = self.outputs[f"gen-repeat/{name}.yaml"]
+            reason = text.splitlines()[1]
+            self.assertIn("then left alone" if "ctrlrestart" not in kv.get("fault", "") else "each time it is Ready", reason, name)
+            self.assertIn("no hold", reason, name)
+            self.assertEqual("none", kv["co"])
+            self.assertIn(m["loop"].split(" x")[0], m["verb"])
+
+    def test_the_loop_takes_the_same_pod_the_operation_works_on(self):
+        for name, kv, m in self.fam:
+            op = self._operation(kv)
+            if kv.get("mode") == "kill":
+                self.assertEqual(kv["Ne"], kv["ceil_e"], name)
+                self.assertIn(kv["restart"], ("None", "RecreateInstance"))
+                if kv.get("via") == "preempt":
+                    self.assertEqual(("after-settle", generate_cases.REPEAT_PREEMPT_N), (kv["lift"], kv["repeat"]), name)
+                    self.assertNotIn("kill", kv, name)
+                else:
+                    self.assertEqual(generate_cases.REPEAT_N, kv["repeat"], name)
+                continue
+            kind = kv["fault"].partition(":")[0]
+            if kind == "ctrlrestart":
+                self.assertNotIn("floor_slack", kv, name)
+                self.assertEqual("idle" if op == "steady" else "settling", kv["fault"].partition(":")[2], name)
+                continue
+            self.assertEqual(1, kv["floor_slack"], name)
+            if kv["topo"].startswith("pd"):
+                self.assertEqual("engine", kv["victimcomp"], "the fault meets the operation on the engine")
+            if op == "push":
+                self.assertEqual(("rotating", "stable"), (kv["fault"].partition(":")[2], kv["victim"]), name)
+                self.assertEqual(m["strat"] == "SurgeThenDrain", kv.get("order_soft") == 1, name)
+                self.assertEqual(kv["Ne"] + (1 if m["strat"] == "SurgeThenDrain" else 0), kv["ceil_e"], name)
+                if kind == "evict":
+                    self.assertEqual("None", m["rp"], "the eviction loop under a push runs under policy None")
+                elif kv["topo"].endswith("-mn"):
+                    self.assertEqual("RecreateInstance", m["rp"], "a gang member lost under a push rebuilds the gang whole")
+                    self.assertIn(kv["kill"], ("leader", "worker"), name)
+            else:
+                self.assertEqual(("settling", kv["Ne"] + 1, kv["Ne"] + 1), (kv["fault"].partition(":")[2], kv["to_e"], kv["ceil_e"]), name)
+                self.assertNotIn("victim", kv, name)
+
+    def test_every_cell_validates_as_a_case_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "gen-repeat"
+            root.mkdir()
+            for name, _kv, _m in self.fam:
+                (root / f"{name}.yaml").write_text(self.outputs[f"gen-repeat/{name}.yaml"])
+            self.assertEqual(0, run.validate_cases(Path(tmp)))
+
+    def test_cluster_wide_cells_run_exclusively(self):
+        exclusive = [n for n, kv, _m in self.fam if batch.cluster_wide_fault({k: str(v) for k, v in kv.items()})]
+        self.assertEqual(30, len(exclusive), "24 manager restarts and 6 preemptions run one at a time")
+        for name, kv, _m in self.fam:
+            kind = kv.get("fault", "").partition(":")[0]
+            self.assertEqual(name in exclusive, kind == "ctrlrestart" or kv.get("via") == "preempt", name)

@@ -39,6 +39,9 @@ Architecture:
   6. Optional fault injection (header fault=<kind>:<param>): quota:<n> (derived
      ResourceQuota admitting exactly +n case-shaped pods), podkill:<phase>,
      ctrlrestart:<phase> (gated on OME_TEST_ALLOW_CTRL_RESTART=1), cordon:source,
+     repeat=<n> (a podkill, an eviction, the kill of mode=kill or a manager
+     restart applied again each time what it took has come back, n times,
+     then lifted: the persistent form, judged across the window and after),
      crashloop:old (one old-revision pod of victimcomp= made to crash on every
      start, form=start, or after Ready, form=load) and imagepull:old (the same
      pod pointed at an image that cannot be pulled), both from the moment the
@@ -2177,6 +2180,22 @@ FAULT_RETRY_S = 5.0
 # trigger and have no hook to miss.
 HOOK_FAULTS = {"podkill", "ctrlrestart", "evict", "preempt"} | BREAK_FAULTS
 ARMED_FAULTS = {"quota", "cordon", "taint"}
+# repeat=<n>: the fault is applied again each time what it took has come
+# back, n times in all, and then stops (the lift). A pod fault (a podkill,
+# an eviction, the kill of mode=kill) is due again once the Instance it hit
+# is whole and Ready on new pods, or retired by the roll with its Component
+# back at N; a manager restart once the manager pods are Ready again under
+# new names; a preemption (via=preempt) once the Instance it took is placed
+# and serving again. The watch budgets grow by REPEAT_CYCLE_S per
+# repetition. The hot-loop bound: across the window the controller may
+# create no more pods than the operation and the repairs explain, plus
+# REPEAT_CHURN_SLACK per repetition.
+REPEAT_MIN = 2
+REPEAT_FAULTS = {"podkill", "evict", "ctrlrestart"}
+REPEAT_PHASES = {"settling", "rotating", "draining"}
+REPEAT_CYCLE_S = int(90 * TIMEOUT_MULT)
+REPEAT_CHURN_SLACK = 1
+CTRL_POLL_S = 3.0
 # taint:all puts a NoSchedule taint on every node a case pod could be placed
 # on (Ready, uncordoned, otherwise untainted), so no new pod of the case can
 # be placed until the lift removes it; running pods are untouched. The key
@@ -3701,6 +3720,9 @@ def _fault_new(case_id, hdr):
             "fixfirst": bool(hdr.get("fixfirst")),
             "member": str(hdr.get("kill") or ""),
             "at": str(hdr.get("at") or ""),
+            "repeat": int(hdr.get("repeat") or 0), "fired_count": 0, "cycles": [], "victim_insts": set(),
+            "fleet": {"engine": int(hdr.get("Ne") or 0), "decoder": int(hdr.get("Nd") or 0),
+                      "router": int(hdr.get("Nr") or 0)},
             "fired": False, "infra_fail": None, "notes": []}
 
 
@@ -3937,7 +3959,7 @@ def _fault_setup(f, case_id, hdr):
         return False, f["infra_fail"]
 
 
-def _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=None, comp=None, member=None):
+def _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=None, comp=None, member=None, prefer_inst=None):
     """Deterministic podkill victim: (1) gang topology → the leader pod of the
     lowest live instance index (heads the whole gang); (2) surge in flight (an
     alive new-revision pod exists) → the newest surge pod (latest
@@ -3951,7 +3973,10 @@ def _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=None, comp=None
     gang's member for the stable and gang rules, the newest new-revision
     member for the surge rule — and a gang already on its way out (a sibling
     Terminating) is never the one, since killing a pod the drain is about to
-    delete proves nothing."""
+    delete proves nothing. prefer_inst is the Instance a previous repetition
+    took: its pod that came back is the one taken again, as long as it still
+    fits the aim (an old-revision pod under victim=stable, a new-revision one
+    under victim=canary); otherwise the rules pick afresh."""
     def _idx(p):
         try:
             return int(p.get("inst", "0"))
@@ -3966,6 +3991,14 @@ def _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=None, comp=None
                 and (p.get("comp"), p.get("inst", "0")) not in leaving]
     if not live:
         return None
+    if prefer_inst is not None:
+        same = [(n, p) for n, p in live if str(p.get("inst", "0")) == str(prefer_inst)]
+        if victim == "stable" and old_hashes:
+            same = [(n, p) for n, p in same if p.get("hash") in old_hashes]
+        if victim == "canary" and old_hashes is not None:
+            same = [(n, p) for n, p in same if p.get("hash") and p["hash"] not in old_hashes]
+        if same:
+            live = same
     if victim == "stable" and old_hashes:
         olds = [(n, p) for n, p in live if p.get("hash") in old_hashes]
         if olds:
@@ -4030,7 +4063,7 @@ def _fault_evict_fire(f, pod_state, pods_per_inst, old_hashes):
     and due again after FAULT_RETRY_S, the way a drain keeps asking; the
     victim is picked again each time, since the roll moves on meanwhile."""
     victim = _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=f.get("victim"),
-                             comp=f.get("victimcomp") or None)
+                             comp=f.get("victimcomp") or None, prefer_inst=_repeat_prefer(f))
     if not victim:
         f["infra_fail"] = "evict: no live pod to evict"
         return
@@ -4046,17 +4079,59 @@ def _fault_evict_fire(f, pod_state, pods_per_inst, old_hashes):
     if not admitted:
         f["infra_fail"] = f"evict: evicting {victim} failed: {msg}"
         return
-    f["victim_comp"] = (pod_state.get(victim) or {}).get("comp", "")
+    _fault_record_victim(f, victim, pod_state, old_hashes)
     f["crash_pod"] = victim
     f["notes"].append(f"fault fired: evict {victim} ({f['param']})"
                       + (f" after {f['denials']} budget refusal(s)" if f.get("denials") else ""))
     print(f"    ⚡ {f['notes'][-1]}")
 
 
+def _fault_record_victim(f, victim, pod_state, old_hashes):
+    """What a pod fault took: the pod's Component, Instance, UID, runner and
+    whether it was on a new revision."""
+    state = pod_state.get(victim) or {}
+    f["victim_comp"] = state.get("comp", "")
+    f["victim_inst"] = str(state.get("inst", "0"))
+    f["victim_uid"] = state.get("uid", "")
+    f["victim_runner"] = state.get("runner", "default")
+    f["victim_new"] = bool(old_hashes is not None and state.get("hash") and state["hash"] not in old_hashes)
+
+
+def _fault_repeats(f):
+    """True when the fault is applied again each time what it took comes back."""
+    return bool(f) and int(f.get("repeat") or 0) >= REPEAT_MIN
+
+
+def _repeat_prefer(f):
+    """The Instance a repetition takes again: the previous victim's, once
+    the fault has fired at least once."""
+    return f.get("victim_inst") if _fault_repeats(f) and f.get("fired_count") else None
+
+
+def _repeat_record_fire(f):
+    """Bookkeeping of one firing: the count, the Instances the fault has
+    taken, and for a repeating fault the cycle record its samples and its
+    end land on."""
+    f["fired_count"] = f.get("fired_count", 0) + 1
+    if f["kind"] != "ctrlrestart" and f.get("victim_comp") and f.get("victim_inst") is not None:
+        f.setdefault("victim_insts", set()).add((f["victim_comp"], str(f["victim_inst"])))
+    if _fault_repeats(f):
+        f.setdefault("cycles", []).append({
+            "fired_at": f.get("fired_ts") or time.time(), "comp": f.get("victim_comp", "") if f["kind"] != "ctrlrestart" else "",
+            "inst": str(f.get("victim_inst", "")), "uid": f.get("victim_uid", ""), "reported": False, "lie": None,
+            "retired": False, "back_at": None, "short_since": None, "sampled_at": 0.0, "samples": 0})
+
+
 def _fault_fire(f, pod_state, pods_per_inst, old_hashes, inv=None):
-    """One-shot phase-fault action (latched by the caller's fired check). inv
-    is the watcher's invariant state: a fault that changes a live pod's spec
-    records the pod there."""
+    """Fire the fault once (the caller's fired check latches it; a repeating
+    fault is fired again by _repeat_tick). inv is the watcher's invariant
+    state: a fault that changes a live pod's spec records the pod there."""
+    _fault_fire_once(f, pod_state, pods_per_inst, old_hashes, inv)
+    if f["fired"] and not f.get("infra_fail"):
+        _repeat_record_fire(f)
+
+
+def _fault_fire_once(f, pod_state, pods_per_inst, old_hashes, inv=None):
     f["fired"] = True
     f["fired_ts"] = time.time()
     if f["kind"] in BREAK_FAULTS:
@@ -4079,7 +4154,8 @@ def _fault_fire(f, pod_state, pods_per_inst, old_hashes, inv=None):
         return
     if f["kind"] == "podkill":
         victim = _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=f.get("victim"),
-                                 comp=f.get("victimcomp") or None, member=f.get("member") or None)
+                                 comp=f.get("victimcomp") or None, member=f.get("member") or None,
+                                 prefer_inst=_repeat_prefer(f))
         if not victim:
             f["infra_fail"] = "podkill: no live pod to delete"
             return
@@ -4087,12 +4163,7 @@ def _fault_fire(f, pod_state, pods_per_inst, old_hashes, inv=None):
         if r.returncode != 0:
             f["infra_fail"] = f"podkill: delete {victim} failed: {r.stderr.strip()[:120]}"
             return
-        state = pod_state.get(victim) or {}
-        f["victim_comp"] = state.get("comp", "")
-        f["victim_inst"] = str(state.get("inst", "0"))
-        f["victim_uid"] = state.get("uid", "")
-        f["victim_runner"] = state.get("runner", "default")
-        f["victim_new"] = bool(old_hashes is not None and state.get("hash") and state["hash"] not in old_hashes)
+        _fault_record_victim(f, victim, pod_state, old_hashes)
         f["notes"].append(f"fault fired: podkill {victim} ({f['param']}; {f['victim_comp']} instance {f['victim_inst']} "
                           f"{f['victim_runner']}{', new revision' if f['victim_new'] else ''})")
         print(f"    ⚡ {f['notes'][-1]}")
@@ -4100,6 +4171,7 @@ def _fault_fire(f, pod_state, pods_per_inst, old_hashes, inv=None):
     # ctrlrestart — ALWAYS gated (shared-cluster safety): without the explicit
     # env opt-in the fault is skipped with a note, never fired.
     if os.environ.get("OME_TEST_ALLOW_CTRL_RESTART") != "1":
+        f["ctrl_gated"] = True
         f["notes"].append("ⓘ fault ctrlrestart skipped — OME_TEST_ALLOW_CTRL_RESTART=1 not set")
         print(f"    {f['notes'][-1]}")
         return
@@ -4112,8 +4184,9 @@ def _fault_fire(f, pod_state, pods_per_inst, old_hashes, inv=None):
     if rr.returncode != 0:
         f["infra_fail"] = f"ctrlrestart: delete failed: {rr.stderr.strip()[:120]}"
         return
-    f["notes"].append("fault fired: ctrlrestart " +
-                      " ".join(p.split("/")[-1] for p in pods) + f" ({f['param']})")
+    f["ctrl_pods"] = [p.split("/")[-1] for p in pods]
+    f["notes"].append("fault fired: ctrlrestart " + " ".join(f["ctrl_pods"]) + f" ({f['param']})"
+                      + (f" (restart {f.get('fired_count', 0) + 1} of {f['repeat']})" if _fault_repeats(f) else ""))
     print(f"    ⚡ {f['notes'][-1]}")
 
 
@@ -5171,7 +5244,8 @@ def _gang_member_checks(f, pod_state, trigger_ts, hdr, verdict, notes, checks):
 
 def _fault_tick(ctx):
     """Phase-hook dispatcher for the in-flight faults (podkill/ctrlrestart),
-    called every watch iteration; one firing per case (latched):
+    called every watch iteration; one firing per case (latched), or one per
+    repetition of a repeating fault (repeat=, see _repeat_tick):
       settling  → immediately after the trigger was applied;
       rotating  → first observation of a surge/updated pod post-trigger (a
                   podkill aimed at a gang member of the new revision waits
@@ -5179,12 +5253,23 @@ def _fault_tick(ctx):
       draining  → first old-revision pod observed on its way out;
       migrating → migration accept observed (_migrate sets ctx['fault_migrating'])."""
     f = ctx.get("fault")
-    if not f or f["fired"] or f["kind"] not in HOOK_FAULTS:
+    if not f or f["kind"] not in HOOK_FAULTS:
         return
     if ctx.get("trigger_ts") is None or _fault_fired_by_handler(f) or _fault_on_new(f) or _fault_before_push(f):
         return
+    if _fault_repeats(f):
+        _repeat_observe(f, ctx["pod_state"])
+    if f["fired"]:
+        _repeat_tick(f, ctx)
+        return
     if f.get("retry_at") and time.time() < f["retry_at"]:
         return
+    if _fault_hook_due(f, ctx):
+        _fault_fire(f, ctx["pod_state"], ctx["pods_per_inst"], ctx.get("old_hashes"), inv=ctx.get("inv"))
+
+
+def _fault_hook_due(f, ctx):
+    """True when the fault's phase hook has arrived."""
     ph = f["param"]
     if ph.partition("@")[0] in CANARY_HOOKS:
         # Under a canary a fault (a break included) waits for the grid state
@@ -5207,8 +5292,253 @@ def _fault_tick(ctx):
             p and not p["alive"] and p.get("hash") in old for p in ctx["pod_state"].values())
     else:   # migrating
         due = bool(ctx.get("fault_migrating"))
-    if due:
-        _fault_fire(f, ctx["pod_state"], ctx["pods_per_inst"], ctx.get("old_hashes"), inv=ctx.get("inv"))
+    return due
+
+
+# ── A fault that keeps repeating (repeat=<n>) ────────────────────────────────
+def _repeat_observe(f, pod_state):
+    """What the window has shown so far: the pods alive at its start, then
+    every pod UID and, per Component, every revision hash seen since."""
+    if "base_uids" not in f:
+        alive = [p for p in pod_state.values() if p and p["alive"]]
+        f["base_uids"] = {p["uid"] for p in alive if p.get("uid")}
+        f["base_hashes"] = {p["hash"] for p in alive if p.get("hash")}
+        f["seen_uids"], f["seen_hashes"] = set(), defaultdict(set)
+    for p in pod_state.values():
+        if p and p.get("uid"):
+            f["seen_uids"].add(p["uid"])
+            if p.get("hash"):
+                f["seen_hashes"][p.get("comp", "")].add(p["hash"])
+
+
+def _ready_instances(pod_state, comp, ppi):
+    """How many Instances of comp have their whole pod set alive and Ready."""
+    by = defaultdict(list)
+    for p in pod_state.values():
+        if p and p["alive"] and p.get("comp") == comp:
+            by[str(p.get("inst", "0"))].append(p)
+    return sum(1 for pods in by.values() if len(pods) >= ppi and all(p.get("ready") for p in pods))
+
+
+def _ctrl_pods_state():
+    """[(name, Ready)] of the manager pods, [] when they cannot be read."""
+    r = kubectl("-n", CTRL_NS, "get", "pod", "-l", CTRL_SELECTOR, "-o",
+                "jsonpath={range .items[*]}{.metadata.name}{\"=\"}{.status.conditions[?(@.type==\"Ready\")].status}{\"\\n\"}{end}")
+    if r.returncode != 0:
+        return []
+    out = []
+    for line in (r.stdout or "").splitlines():
+        name, _, ready = line.strip().partition("=")
+        if name:
+            out.append((name, ready == "True"))
+    return out
+
+
+def _ctrl_back(f, now):
+    """True once the manager pods are Ready again under names other than
+    the ones the last restart deleted; polled every CTRL_POLL_S."""
+    if now - f.get("ctrl_polled", 0.0) < CTRL_POLL_S:
+        return False
+    f["ctrl_polled"] = now
+    pods = _ctrl_pods_state()
+    gone = set(f.get("ctrl_pods") or [])
+    return bool(pods) and all(ready for _n, ready in pods) and not ({n for n, _r in pods} & gone)
+
+
+def _repeat_back(f, cycle, pod_state, pods_per_inst, now):
+    """(back, retired): whether what the repetition took has come back. A
+    manager restart is back once the manager is Ready under new names. A
+    pod fault is back once its Instance is whole, Ready and serving on new
+    pods, or retired — the roll surged it away or drained it (no pod of its
+    index left, none leaving) with its Component back at N Ready."""
+    if f["kind"] == "ctrlrestart":
+        return _ctrl_back(f, now), False
+    comp, inst = cycle["comp"], cycle["inst"]
+    ppi = pods_per_inst.get(comp, 1)
+    mine = _instance_pods(pod_state, comp, inst)
+    if any(p.get("uid") and p["uid"] == cycle["uid"] for _n, p in mine):
+        return False, False
+    if len(mine) >= ppi and all(p.get("ready") and p.get("serving") for _n, p in mine):
+        return True, False
+    leaving = any(p and not p["alive"] and p.get("comp") == comp and str(p.get("inst", "0")) == inst
+                  for p in pod_state.values())
+    if mine or leaving:
+        return False, False
+    return _ready_instances(pod_state, comp, ppi) >= (f.get("fleet") or {}).get(comp, 0), True
+
+
+def _repeat_sample_row(case_id, cycle, pod_state, pods_per_inst, now):
+    """While the Instance a repetition took is short a Ready pod, read its
+    row every INV_TICK_S: the status must report the loss (a phase other
+    than Ready, or fewer serving pods than pods), and once the gap has
+    lasted GANG_SHORT_REPORT_S it must not count the Instance whole."""
+    comp, inst = cycle["comp"], cycle["inst"]
+    if not comp or cycle["back_at"] is not None:
+        return
+    ppi = pods_per_inst.get(comp, 1)
+    whole = [p for _n, p in _instance_pods(pod_state, comp, inst) if p.get("ready")]
+    if len(whole) >= ppi:
+        cycle["short_since"] = None
+        return
+    cycle["short_since"] = cycle["short_since"] or now
+    if now - cycle["sampled_at"] < INV_TICK_S:
+        return
+    cycle["sampled_at"] = now
+    row = _ir_row(case_id, comp, inst)
+    if row is None:
+        return
+    cycle["samples"] += 1
+    if _row_serving_short(row):
+        cycle["reported"] = True
+    elif now - cycle["short_since"] >= GANG_SHORT_REPORT_S and cycle["lie"] is None:
+        cycle["lie"] = (f"row {comp}/{inst} reads {row.get('phase')} with servingPodCount={row.get('servingPodCount')} "
+                        f"while {len(whole)}/{ppi} pod(s) are Ready, {now - cycle['short_since']:.0f}s into the gap")
+
+
+def _repeat_tick(f, ctx):
+    """After a repeating fault has fired: while the Instance it took is
+    short, sample its row; once what it took has come back, note when and
+    fire again, until the repetitions are spent (the lift)."""
+    if not _fault_repeats(f) or f.get("infra_fail") or f.get("ctrl_gated") or not f.get("cycles"):
+        return
+    now = time.time()
+    cycle = f["cycles"][-1]
+    _repeat_sample_row(f["case_id"], cycle, ctx["pod_state"], ctx["pods_per_inst"], now)
+    if cycle["back_at"] is None:
+        back, retired = _repeat_back(f, cycle, ctx["pod_state"], ctx["pods_per_inst"], now)
+        if not back:
+            return
+        cycle["back_at"], cycle["retired"] = now, retired
+        print(f"    ⟳ repeat: what repetition {f['fired_count']} took is back"
+              f"{' (the Instance was retired by the roll)' if retired else ''} after {now - cycle['fired_at']:.0f}s")
+    if f["fired_count"] >= f["repeat"]:
+        return
+    if f.get("retry_at") and now < f["retry_at"]:
+        return
+    if f.get("victim") == "canary" and not _fault_hook_due(f, ctx):
+        return
+    _fault_fire(f, ctx["pod_state"], ctx["pods_per_inst"], ctx.get("old_hashes"), inv=ctx.get("inv"))
+
+
+def _rollout_holds(case_id, comps):
+    """(component, gate, reason) for every Component whose status reports a
+    rolloutHold right now."""
+    st = fetch_status(case_id)
+    out = []
+    for c in sorted(comps):
+        hold = ((((st.get("components") or {}).get(c) or {}).get("lifecycle") or {}).get("rolloutHold")) or {}
+        if isinstance(hold, dict) and hold.get("gate"):
+            out.append((c, str(hold["gate"]), str(hold.get("reason") or "")[:120]))
+    return out
+
+
+def _repeat_checks(f, pods_per_inst, bumped, op_pods, window_start, verdict, notes, checks):
+    """The verdict of a repeating fault across its window. The fault fired
+    every repetition, each once what it took had come back; while an
+    Instance was short the status said so and never counted it whole; every
+    repair that opened was for an Instance the fault took, at most one per
+    loss; the controller created no more pods than the operation (op_pods)
+    and the repairs explain, the hot-loop bound; and no pod came back on a
+    revision the service never pushed (at most one new revision per bumped
+    Component, none elsewhere)."""
+    if not _fault_repeats(f) or f.get("infra_fail"):
+        return verdict
+    n, fired = int(f["repeat"]), int(f.get("fired_count") or 0)
+    if f.get("ctrl_gated"):
+        checks.append(f"  ⓘ repeat={n}: the manager restart is gated off here (OME_TEST_ALLOW_CTRL_RESTART), the loop never ran")
+        return verdict
+
+    def fail(note, line):
+        nonlocal verdict
+        verdict = "FAIL"
+        notes.append(note)
+        checks.append(line)
+
+    cycles = f.get("cycles") or []
+    gaps = [c["back_at"] - c["fired_at"] for c in cycles if c.get("back_at") is not None]
+    what = "the manager" if f["kind"] == "ctrlrestart" else "the Instance it took"
+    if fired < n:
+        fail(f"repeat: the fault fired {fired} of {n} times",
+             f"  ✗ repeat={n}: the fault fired {fired} time(s); {what} did not come back for the next within the budget")
+    else:
+        checks.append(f"  ✓ repeat={n}: the fault fired {n} times, each once {what} had come back"
+                      + (f" (back after {', '.join(f'{g:.0f}s' for g in gaps)})" if gaps else ""))
+    if f["kind"] != "ctrlrestart" and cycles:
+        unreported = [i + 1 for i, c in enumerate(cycles) if not c["reported"] and not c["retired"] and c["samples"]]
+        unsampled = [i + 1 for i, c in enumerate(cycles) if not c["reported"] and not c["retired"] and not c["samples"]]
+        retired = [i + 1 for i, c in enumerate(cycles) if c["retired"]]
+        lies = [(i + 1, c["lie"]) for i, c in enumerate(cycles) if c["lie"]]
+        if unreported:
+            fail(f"repeat: the status never reported the loss in repetition(s) {', '.join(map(str, unreported))}",
+                 f"  ✗ repeat: the Instance's row never reported the loss (phase or serving count) in repetition(s) "
+                 f"{', '.join(map(str, unreported))} — every wait has a reason")
+        elif any(c["reported"] for c in cycles):
+            checks.append(f"  ✓ repeat: the status reported each loss it was sampled on ({sum(1 for c in cycles if c['reported'])} repetition(s))")
+        if unsampled:
+            checks.append(f"  ⓘ repeat: repetition(s) {', '.join(map(str, unsampled))} came back before a row sample was read")
+        if retired:
+            checks.append(f"  ⓘ repeat: the roll retired the Instance taken in repetition(s) {', '.join(map(str, retired))}")
+        if lies:
+            fail(f"repeat: the status counted the short Instance as serving ({len(lies)} repetition(s))",
+                 f"  ✗ repeat: the status counted a short Instance as whole — repetition {lies[0][0]}: {lies[0][1]}")
+        else:
+            checks.append("  ✓ repeat: no row counted a short Instance as whole")
+    events = _isvc_events_since(f["case_id"], window_start or 0)
+    repairs = [m for reason, m in events if reason == "RestartTriggered"]
+    taken = f.get("victim_insts") or set()
+    foreign = []
+    for m in repairs:
+        named = re.search(r"component=(\S+) instance=(\d+)", m)
+        if not named or (named.group(1), named.group(2)) not in taken:
+            foreign.append(m)
+    if foreign:
+        fail(f"repeat: a repair opened for an Instance the fault never took ({len(foreign)})",
+             f"  ✗ repeat: {len(foreign)} repair(s) opened for an Instance the fault never took: {foreign[0][:160]}")
+    elif len(repairs) > fired:
+        fail(f"repeat: {len(repairs)} repairs for {fired} losses",
+             f"  ✗ repeat: {len(repairs)} repair(s) recorded for {fired} loss(es) — a repair opened for a pod that was not gone")
+    else:
+        checks.append(f"  ✓ repeat: {len(repairs)} repair(s) recorded, every one for an Instance the fault took")
+    new_uids = set(f.get("seen_uids") or set()) - set(f.get("base_uids") or set())
+    scope = pods_per_inst.get(cycles[-1]["comp"], 1) if cycles and cycles[-1]["comp"] else 0
+    bound = op_pods + fired * scope + fired * REPEAT_CHURN_SLACK
+    if len(new_uids) > bound:
+        fail(f"repeat: {len(new_uids)} pods created, at most {bound} explained",
+             f"  ✗ repeat: the controller created {len(new_uids)} pod(s) across the window where the operation ({op_pods}) "
+             f"and {fired} repair(s) explain at most {bound} — a hot loop")
+    else:
+        checks.append(f"  ✓ repeat: {len(new_uids)} pod(s) created across the window, within the {bound} the operation and the repairs explain")
+    base = set(f.get("base_hashes") or set())
+    wrong = []
+    for comp, hashes in sorted((f.get("seen_hashes") or {}).items()):
+        new = set(hashes) - base
+        if len(new) > (1 if comp in (bumped or set()) else 0):
+            wrong.append(f"{comp}: {', '.join(sorted(new))}")
+    if wrong:
+        fail("repeat: pods were built on a revision the service never pushed",
+             f"  ✗ repeat: pods came back on a revision the service never pushed — {'; '.join(wrong)}")
+    else:
+        checks.append("  ✓ repeat: every pod built across the window runs the running revision or the one pushed")
+    span_min = max(1.0, (time.time() - (window_start or time.time())) / 60.0)
+    checks.append(f"  ⓘ repeat: {len(events)} event(s) on the service across the {span_min:.1f}-minute window "
+                  f"({len(events) / span_min:.1f}/min)")
+    return verdict
+
+
+def _repeat_end_checks(case_id, N, configured, verdict, notes, checks):
+    """The end state after the lift: every row Ready with no operation open,
+    and no rollout hold left on any Component."""
+    settled, why = _wait_rows_settled(case_id, N, configured, ROWS_SETTLE_S)
+    verdict = _rows_settled_checks(settled, why, verdict, notes, checks)
+    holds = _rollout_holds(case_id, configured)
+    if holds:
+        verdict = "FAIL"
+        notes.append(f"a rollout hold is left behind on {', '.join(c for c, _g, _r in holds)}")
+        checks.append("  ✗ a rollout hold is left behind after the lift: "
+                      + "; ".join(f"{c} gate={g} {r}" for c, g, r in holds))
+    else:
+        checks.append("  ✓ no rollout hold left behind after the lift")
+    return verdict
 
 
 def _fault_finalize(f, verdict, notes, checks):
@@ -6408,6 +6738,67 @@ def _readiness_checks(f, form, out, verdict, notes, checks):
     return verdict
 
 
+def _idle_ctrl_loop(ctx, f, hdr):
+    """fault=ctrlrestart:idle repeat=<n> (during=idle): the manager is
+    deleted again each time it is Ready, n times, on a service nobody
+    touched. (state, verdict, notes, checks): across the window and a settle
+    after the last restart no pod of the service was created or deleted,
+    every Instance is Ready and serving, no repair was recorded, and at the
+    end every row is Ready with no operation open and no hold."""
+    N, configured, ppi = ctx["N"], ctx["configured"], ctx["pods_per_inst"]
+    n = int(hdr.get("repeat") or 0)
+    ctx["trigger_ts"] = time.time()
+    ctx["track_comps"] = sorted(configured)
+    _repeat_observe(f, ctx["pod_state"])
+    base = set(f["base_uids"])
+    verdict, notes, checks = "PASS", [], []
+    print(f"  Phase 2: the manager is deleted {n} times on the idle service, each once it is Ready again")
+    for k in range(1, n + 1):
+        _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
+        if f["infra_fail"]:
+            return "INFRA-FAIL", "INFRA-FAIL", notes, checks
+        if f.get("ctrl_gated"):
+            break
+        cycle = f["cycles"][-1]
+        deadline = time.time() + CTRL_READY_S
+        while time.time() < deadline and not ctx["closed"]:
+            _read_one(ctx)
+            _repeat_observe(f, ctx["pod_state"])
+            now = time.time()
+            if _ctrl_back(f, now):
+                cycle["back_at"] = now
+                print(f"    ⟳ repeat: the manager is Ready again {now - cycle['fired_at']:.0f}s after restart {k}")
+                break
+        if cycle["back_at"] is None:
+            f["infra_fail"] = f"ctrlrestart: no Ready manager pod within {CTRL_READY_S}s of restart {k}"
+            return "INFRA-FAIL", "INFRA-FAIL", notes, checks
+    print(f"  Phase 3: settle {LIFT_SETTLE_S}s after the last restart")
+    end = time.time() + LIFT_SETTLE_S
+    while time.time() < end and not ctx["closed"]:
+        _read_one(ctx)
+        _repeat_observe(f, ctx["pod_state"])
+    alive = {p["uid"] for p in ctx["pod_state"].values() if p and p["alive"] and p.get("uid")}
+    created, gone = alive - base, base - alive
+    if created or gone:
+        verdict = "FAIL"
+        notes.append(f"pods changed on an idle service under the manager's restarts (+{len(created)}/-{len(gone)})")
+        checks.append(f"  ✗ {len(created)} pod(s) created and {len(gone)} deleted on a service nobody touched while the manager restarted")
+    else:
+        checks.append(f"  ✓ no pod of the service was created or deleted across the manager's {f['fired_count']} restart(s)")
+    agg = ctx.get("agg") or {}
+    short = [f"{c} {agg.get(c, (0, 0, 0))[1]}/{N[c]}" for c in sorted(configured) if agg.get(c, (0, 0, 0))[1] != N[c]]
+    if short:
+        verdict = "FAIL"
+        notes.append(f"Instances not Ready after the restarts: {', '.join(short)}")
+        checks.append(f"  ✗ not every Instance is Ready after the restarts: {', '.join(short)}")
+    else:
+        checks.append("  ✓ every Instance Ready and serving after the restarts")
+    verdict = _idle_peak_checks(ctx, verdict, notes, checks)
+    verdict = _repeat_checks(f, ppi, set(), 0, ctx["trigger_ts"], verdict, notes, checks)
+    verdict = _repeat_end_checks(ctx["case_id"], N, configured, verdict, notes, checks)
+    return ("HELD" if verdict != "FAIL" else "MOVED"), verdict, notes, checks
+
+
 def _idle_fault(case_id, yaml_file, desc, hdr):
     """during=idle: fire the case's persistent fault on the settled service
     and never bump. A break is judged on what the product does about it on
@@ -6434,6 +6825,8 @@ def _idle_fault(case_id, yaml_file, desc, hdr):
     ctx["force_delete"] = (lifecycle or {}).get(FORCE_DELETE_KEY)
     f = ctx["fault"]
     N, configured, ppi = ctx["N"], ctx["configured"], ctx["pods_per_inst"]
+    if f["kind"] == "ctrlrestart":
+        return _finish(case_id, desc, hdr, ctx, *_idle_ctrl_loop(ctx, f, hdr))
     if f["kind"] == READINESS_FAULT:
         expect = f"readiness lost, {f['form']}"
     elif f["kind"] in LIFT_FAULTS:
@@ -7270,6 +7663,31 @@ def _pod_bound(name):
     return str((((_get_pod(name) or {}).get("spec") or {}).get("nodeName")) or "")
 
 
+def _filler_name(f, stem):
+    """A filler's name; a repetition past the first carries its number, so
+    the previous repetition's fillers may still be terminating."""
+    base = f"perm-{f['case_id']}-{stem}"
+    return f"{base}-r{f['cycle']}" if f.get("cycle") else base
+
+
+def _preempt_cycle_reset(f, cycle):
+    """Make the preempt record ready for another press: the previous
+    fillers must be gone (their room is the room the pod needs back), and
+    this repetition's fillers are named after it. False when the fillers
+    did not go away within LIFT_SETTLE_S."""
+    deadline = time.time() + LIFT_SETTLE_S
+    while time.time() < deadline:
+        r = kubectl("-n", NS, "get", "pod", "-l", f"{FILLER_LABEL}={f['case_id']}", "-o", "name")
+        if r.returncode == 0 and not (r.stdout or "").strip():
+            break
+        time.sleep(1.0)
+    else:
+        return False
+    f.update(fillers=[], fillers_dropped=False, cycle=cycle, pre_alive=None, crash_pod=None, crash_comp=None,
+             crash_inst=None, press_pod=None, fire_ts=None, preempted=[], not_victim=set(), fired=False)
+    return True
+
+
 def _filler_create(f, name, node, cpu_m, priority_class=""):
     r = kubectl("apply", "-f", "-", input=json.dumps(_filler_manifest(name, f["case_id"], node, cpu_m, priority_class)))
     if r.returncode == 0:
@@ -7312,7 +7730,7 @@ def _preempt_block_node(f, node):
     """A filler that takes exactly the node's spare CPU and fits without
     preempting anything (no priority class). Sized again when the room moved
     between the read and the bind. (ok, message)."""
-    name = f"perm-{f['case_id']}-fill-{node}"
+    name = _filler_name(f, f"fill-{node}")
     for _attempt in range(3):
         free = _node_cpu_free(node)
         if free is None:
@@ -7366,7 +7784,7 @@ def _preempt_fill(f, target, node, pod_state):
     if free is None:
         f["infra_fail"] = f"preempt: cannot read the spare CPU of {node}"
         return
-    press = f"perm-{f['case_id']}-press"
+    press = _filler_name(f, "press")
     need = max(free, 0) + victim_cpu
     ok, msg = _filler_create(f, press, node, need, f["pc_name"])
     if not ok:
@@ -8026,6 +8444,11 @@ HDR_VALIDATORS = {
     # floor_slack=<k> lowers the capacity floor by the k Instances a fault takes
     # (the gang a podkill breaks), so the untouched capacity stays a hard claim.
     "floor_slack": lambda v: isinstance(v, int) and v >= 1,
+    # repeat=<n> applies the fault again each time what it took has come
+    # back, n times in all, then stops: the persistent form of a pod
+    # deleted by hand, a gang member lost, an eviction or a preemption
+    # (mode=kill), and of a manager restart (fault=ctrlrestart:<hook>).
+    "repeat": lambda v: isinstance(v, int) and v >= REPEAT_MIN,
     "order_soft": lambda v: v == 1,   # opt out of surge-before-drain (a fault, e.g.
     #                                   podkill:rotating, deletes a pod → drain with no
     #                                   preceding surge; informational, not a FAIL)
@@ -8188,9 +8611,10 @@ def validate_case_file(path):
             errs.append(f"{path}:1: during={during} is a canary hook (mode=canary)")
     elif during == IDLE_FAULT_PHASE:
         if mode == "rollout":
-            if fault_kind not in IDLE_FAULTS:
+            idle_restart = fault_kind == "ctrlrestart" and fault_param == IDLE_FAULT_PHASE and "repeat" in fields
+            if fault_kind not in IDLE_FAULTS and not idle_restart:
                 errs.append(f"{path}:1: during={IDLE_FAULT_PHASE} needs a persistent fault to fire "
-                            f"(fault={'|'.join(sorted(IDLE_FAULTS))}:…)")
+                            f"(fault={'|'.join(sorted(IDLE_FAULTS))}:…, or fault=ctrlrestart:{IDLE_FAULT_PHASE} repeat=<n>)")
         elif broken_op:
             if fault_kind not in BROKEN_OP_FAULTS or fault_param != CRASHLOOP_VICTIM:
                 errs.append(f"{path}:1: during={IDLE_FAULT_PHASE} in mode={mode} breaks one Instance of the running "
@@ -8301,8 +8725,8 @@ def validate_case_file(path):
     via = str(fields.get("via", ""))
     if via and mode != "kill":
         errs.append(f"{path}:1: via={via} says how mode=kill removes the pod (mode=kill)")
-    if fault_kind == "evict" and mode != "rollout":
-        errs.append(f"{path}:1: fault=evict:<phase> evicts the podkill victim of a rollout case (mode=rollout); "
+    if fault_kind == "evict" and mode not in ("rollout", "scaledown"):
+        errs.append(f"{path}:1: fault=evict:<phase> evicts the podkill victim of a rollout or scale case (mode=rollout|scaledown); "
                     f"a kill case evicts through via=evict")
     lift = fields.get("lift")
     pending = (fault_kind in PENDING_FAULTS and mode in ("rollout", "kill") and during != IDLE_FAULT_PHASE
@@ -8327,6 +8751,25 @@ def validate_case_file(path):
         errs.append(f"{path}:1: lift= and blocked=1 both describe a held roll; use one")
     if (pending or via == "preempt") and "pause" in fields:
         errs.append(f"{path}:1: pause= is not combined with a pending cause in mode=kill")
+    if "repeat" in fields:
+        # The persistent form: the kill, or the hook fault, applied again each
+        # time what it took has come back.
+        if mode == "kill":
+            if "pause" in fields:
+                errs.append(f"{path}:1: repeat= keeps taking the pod; pause= is lifted once and does not combine with it")
+            if via == "preempt" and lift != "after-settle":
+                errs.append(f"{path}:1: repeat= with via=preempt needs lift=after-settle (the fillers are dropped so the pod lands again)")
+        elif mode in ("rollout", "scaledown") and fault_kind in REPEAT_FAULTS:
+            idle_restart = fault_kind == "ctrlrestart" and fault_param == IDLE_FAULT_PHASE and during == IDLE_FAULT_PHASE and mode == "rollout"
+            if not idle_restart and (fault_param not in REPEAT_PHASES or during == IDLE_FAULT_PHASE):
+                errs.append(f"{path}:1: repeat= with fault={fields.get('fault')} needs a phase hook "
+                            f"({'|'.join(sorted(REPEAT_PHASES))}), or fault=ctrlrestart:{IDLE_FAULT_PHASE} "
+                            f"during={IDLE_FAULT_PHASE} for the manager restarting on the settled service")
+            if any(k in fields for k in ("stuck", "blocked", "rollback", "pauseat")) or _midroll_edit(fields.get("edit")) is not None:
+                errs.append(f"{path}:1: repeat= rides a plain push or scale; stuck=, blocked=, rollback=, pauseat= and a mid-roll edit do not combine with it")
+        else:
+            errs.append(f"{path}:1: repeat= is the persistent form of a kill (mode=kill) or of "
+                        f"fault={'|'.join(sorted(REPEAT_FAULTS))}:<hook> under a push or a scale (mode=rollout|scaledown)")
     if fault_kind in BREAK_FAULTS | {READINESS_FAULT} and "victimcomp" in fields and str(fields["victimcomp"]) not in BREAK_VICTIM_COMPS:
         errs.append(f"{path}:1: victimcomp={fields['victimcomp']}: a break victim is a pod of "
                     f"{' or '.join(sorted(BREAK_VICTIM_COMPS))} (the Components a roll targets)")
@@ -8431,8 +8874,8 @@ def validate_case_file(path):
             errs.append(f"{path}:1: kill= names the gang member a kill or a podkill takes (needs mode=kill or fault=podkill:<phase>)")
         if not str(fields.get("topo", "")).endswith("-mn"):
             errs.append(f"{path}:1: kill={fields['kill']} names a gang member (needs a multi-node topo)")
-    if "floor_slack" in fields and (mode != "rollout" or "fault" not in fields):
-        errs.append(f"{path}:1: floor_slack= widens the capacity floor by the Instances a fault takes (needs fault= on a rollout case)")
+    if "floor_slack" in fields and (mode not in ("rollout", "scaledown") or "fault" not in fields):
+        errs.append(f"{path}:1: floor_slack= widens the capacity floor by the Instances a fault takes (needs fault= on a rollout or scale case)")
     if mode == "canary":
         if "proto" in fields:
             if fields.get("Ne", 0) == 0 or fields.get("Nd", 0) == 0:
@@ -12372,6 +12815,160 @@ def _kill_remove(name, via):
         time.sleep(FAULT_RETRY_S)
 
 
+def _kill_pick(pod_state, kcomp, ktgt, prefer_inst=None):
+    """The pod a kill takes: a live pod of kcomp, of the kill= runner where
+    one is named, from the Instance a previous repetition took when it is
+    back (its replacement is the pod that came back), else the first by
+    name. (name, record), or (None, None)."""
+    cands = [(n, p) for n, p in sorted(pod_state.items()) if p and p["alive"] and p["comp"] == kcomp]
+    if ktgt:
+        cands = [x for x in cands if x[1]["runner"] == ktgt] or cands
+    if prefer_inst is not None:
+        cands = [x for x in cands if str(x[1]["inst"]) == str(prefer_inst)] or cands
+    return cands[0] if cands else (None, None)
+
+
+def _kill_repeat(case_id, desc, hdr, ctx, via, policy, lift, pending, kcomp, ktgt):
+    """mode=kill with repeat=<n>: the pod is taken again each time its
+    Instance is back and serving, n times, then left alone (the lift). Each
+    repetition is judged as a kill is — exactly the policy's scope rebuilt,
+    the fleet back at N, nothing else touched — and the window as a whole
+    through _repeat_checks: the status reported each loss and never counted
+    the short Instance whole, every repair was for the killed Instance, the
+    pods created are those repairs and no more, nothing came back on another
+    revision; the untouched Instances kept serving (the floor is N minus the
+    killed Instance) and nothing surged; after the lift every row is Ready
+    with no operation open and no hold."""
+    N, configured, ppi = ctx["N"], ctx["configured"], ctx["pods_per_inst"]
+    n = int(hdr["repeat"])
+    exp = {"None": 1, "RecreateInstance": ppi[kcomp]}.get(policy, 1)
+    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in configured))
+    ctx["track_comps"] = sorted(configured)
+    ctx["floor_allowance"] = {kcomp: 1}   # the killed Instance itself
+    rec = {"case_id": case_id, "kind": {"delete": "podkill", "evict": "evict", "preempt": "preempt"}[via],
+           "param": "steady", "repeat": n, "fired_count": 0, "cycles": [], "victim_insts": set(),
+           "infra_fail": None, "fleet": dict(N), "member": ktgt, "victim": ""}
+    verdict, notes, checks = "PASS", [], []
+    state, window_start, killed_inst = "RECOVERING", None, None
+    for k in range(1, n + 1):
+        _repeat_observe(rec, ctx["pod_state"])
+        kill_name, kill_pod = _kill_pick(ctx["pod_state"], kcomp, ktgt, killed_inst)
+        if not kill_name:
+            verdict, state = "FAIL", "NO_VICTIM"
+            notes.append(f"repetition {k}: no live {kcomp} pod to take")
+            checks.append(f"  ✗ repetition {k}: no live {kcomp} pod to take")
+            break
+        pre_uids = {p["uid"] for p in ctx["pod_state"].values() if p and p["alive"] and p.get("uid")}
+        killed_inst = kill_pod["inst"]
+        if via == "preempt":
+            if k > 1 and not _preempt_cycle_reset(pending, k):
+                pending["infra_fail"] = f"preempt: the fillers of repetition {k - 1} did not go away within {LIFT_SETTLE_S}s"
+                return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", notes, checks)
+            print(f"  Phase 2 ({k}/{n}): fill every node, then press on {kill_pod.get('node') or '?'} so the scheduler preempts "
+                  f"one pod there (aimed at {kill_name}, comp={kcomp} inst={killed_inst}) restartPolicy={policy}")
+            _preempt_fill(pending, kill_name, kill_pod.get("node") or "", ctx["pod_state"])
+            ctx["trigger_ts"] = time.time()
+            if not pending["infra_fail"]:
+                deadline = time.time() + PREEMPT_WAIT_S
+                while time.time() < deadline and not ctx["closed"] and not _preempt_victim(pending, ctx["pod_state"]):
+                    _read_one(ctx)
+                if not pending.get("crash_pod"):
+                    pending["infra_fail"] = (f"preempt: the scheduler preempted no pod of the case within {PREEMPT_WAIT_S}s "
+                                             f"(filler {pending.get('press_pod')} bound to {_pod_bound(pending.get('press_pod', '')) or 'nothing'})")
+            if pending["infra_fail"]:
+                return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", notes, checks)
+            kill_name, killed_inst = pending["crash_pod"], pending["crash_inst"]
+            kill_pod = {"uid": "", "inst": killed_inst}
+        else:
+            print(f"  Phase 2 ({k}/{n}): {via} pod {kill_name} (comp={kcomp} inst={killed_inst} runner={kill_pod['runner']}) "
+                  f"restartPolicy={policy}")
+            removed, remove_note = _kill_remove(kill_name, via)
+            if removed == "error":
+                return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", notes + [f"INFRA-FAIL: {remove_note}"],
+                               checks + [f"  ✗ INFRA-FAIL (fault apparatus): {remove_note}"])
+            if removed == "denied":
+                return _finish(case_id, desc, hdr, ctx, "EVICT_DENIED", "FAIL", notes + [remove_note], checks + [f"  ✗ {remove_note}"])
+            if remove_note:
+                checks.append(f"  ⓘ repetition {k}: {remove_note}")
+            ctx["trigger_ts"] = time.time()
+        window_start = window_start or ctx["trigger_ts"]
+        rec.update(victim_comp=kcomp, victim_inst=str(killed_inst), victim_uid=kill_pod.get("uid", ""),
+                   fired=True, fired_ts=ctx["trigger_ts"])
+        _repeat_record_fire(rec)
+        cycle = rec["cycles"][-1]
+
+        def recreated_now():
+            return [p for p in ctx["pod_state"].values() if p and p["alive"] and p.get("uid") and p["uid"] not in pre_uids]
+
+        def recovered():
+            agg = ctx.get("agg") or {}
+            return all(agg.get(c, (0, 0, 0))[1] == N[c] for c in configured) and len(recreated_now()) >= exp
+
+        state, stable, dipped, pout = "RECOVERING", None, False, {}
+        if via == "preempt":
+            print(f"  Phase 3 ({k}/{n}): watching the repair of {kcomp} Instance {killed_inst} wait on the fillers (lift={lift}, ≤{budget}s)")
+            pstate, pout = _pending_watch(ctx, pending, [kcomp], lift, recovered, budget, inst=killed_inst)
+            allowance = {c: (1 if c == kcomp else 0) for c in configured}
+            verdict = _pending_checks(pending, lift, pstate, pout, ctx, sorted(configured), allowance, verdict, notes, checks)
+            if len(pending.get("preempted") or []) > 1:
+                pending["infra_fail"] = (f"preempt: the scheduler preempted {len(pending['preempted'])} pods "
+                                         f"({', '.join(pending['preempted'])}); the filler was sized for one")
+                return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", notes, checks)
+            if pstate != "DONE":
+                state = pstate
+                break
+            state = "RECOVERED"
+        else:
+            print(f"  Phase 3 ({k}/{n}): watching recovery (≤{budget}s)")
+            while time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
+                agg = _read_one(ctx)
+                now = time.time()
+                _repeat_observe(rec, ctx["pod_state"])
+                _repeat_sample_row(case_id, cycle, ctx["pod_state"], ppi, now)
+                if any(agg.get(c, (0, 0, 0))[1] < N[c] for c in configured):
+                    dipped = True
+                if dipped and all(agg.get(c, (0, 0, 0))[1] == N[c] for c in configured) and len(recreated_now()) >= exp:
+                    stable = stable or now
+                    if now - stable >= STABILITY_S:
+                        state = "RECOVERED"
+                        break
+                else:
+                    stable = None
+        _repeat_observe(rec, ctx["pod_state"])
+        recreated = recreated_now()
+        rc = len(recreated)
+        elsewhere = [p for p in recreated if not (p["comp"] == kcomp and str(p["inst"]) == str(killed_inst))]
+        if state != "RECOVERED":
+            verdict = "FAIL"
+            notes.append(f"repetition {k}: did not recover (state={state}, recreated={rc})")
+            checks.append(f"  ✗ repetition {k}: never recovered to N ready (state={state}; {rc} pod(s) recreated so far)")
+            break
+        cycle["back_at"] = time.time()
+        if via == "preempt":
+            # The wait the row reported on the fillers is the status saying why.
+            cycle["reported"], cycle["samples"] = pout.get("bitten_at") is not None, 1
+        checks.append(f"  ✓ repetition {k}: recovered to N ready {cycle['back_at'] - ctx['trigger_ts']:.1f}s after the {via}")
+        if elsewhere:
+            verdict = "FAIL"
+            notes.append(f"repetition {k}: {len(elsewhere)} pods recreated outside the killed Instance")
+            checks.append(f"  ✗ repetition {k}: {len(elsewhere)} pod(s) recreated OUTSIDE killed instance {kcomp}/{killed_inst} — over-cascade")
+        if rc != exp:
+            verdict = "FAIL"
+            notes.append(f"repetition {k}: recreated {rc}, want {exp}")
+            checks.append(f"  ✗ repetition {k}: {rc} pod(s) recreated, expected {exp} ({'pod-only' if policy == 'None' else 'whole instance'})")
+        elif not elsewhere:
+            checks.append(f"  ✓ repetition {k}: exactly {rc} pod(s) recreated ({policy}), scoped to killed instance {kcomp}/{killed_inst}")
+    last = rec["cycles"][-1] if rec["cycles"] else None
+    if last and last.get("back_at") and window_start:
+        ctx["converged_at"] = last["back_at"] - window_start
+    verdict = _repeat_checks(rec, ppi, set(), 0, window_start, verdict, notes, checks)
+    verdict = min_ready_checks(ctx, sorted(configured), verdict, notes, checks)
+    verdict = _idle_peak_checks(ctx, verdict, notes, checks)
+    if state == "RECOVERED":
+        verdict = _repeat_end_checks(case_id, N, configured, verdict, notes, checks)
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
 def _kill(case_id, yaml_file, desc, hdr):
     """Delete a live pod and assert the RestartPolicy outcome by which pods get
     new UIDs (recreated):
@@ -12417,6 +13014,8 @@ def _kill(case_id, yaml_file, desc, hdr):
             return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
     kcomp = "engine" if "engine" in configured else sorted(configured)[0]
     ktgt = str(hdr.get("kill", ""))   # leader | worker | ""
+    if int(hdr.get("repeat") or 0) >= REPEAT_MIN:
+        return _kill_repeat(case_id, desc, hdr, ctx, via, policy, lift, pending, kcomp, ktgt)
     if pmode:
         print(f"  Phase 1b: pause rollout (ome.io/rollout-paused={pmode})")
         _pause_annotation(case_id, pmode)
@@ -14616,7 +15215,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     fault = _fault_new(case_id, hdr)  # optional fault=<kind>:<param> plumbing
 
     init_budget = min(MAX_BUDGET_S, INIT_BASE_S + INIT_PER_POD_S * sum(N[c] for c in configured))
-    conv_budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] for c in configured))
+    conv_budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] for c in configured)
+                      + REPEAT_CYCLE_S * int(hdr.get("repeat") or 0))
     print(f"  starting watcher (init≤{init_budget}s, drain≤{conv_budget}s)")
     watcher = start_watcher(case_id)
 
@@ -14654,6 +15254,11 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                 # checks only when caught up, so the multi-second kubectl gets never
                 # throttle event consumption (events processed every iteration below).
                 _inv_tick(inv, pod_state, pods_per_inst)
+                if state == "DRAINING" and _fault_repeats(fault):
+                    # A repeating fault waits on the manager or a pod coming
+                    # back, which may raise no watch event: ticked here too.
+                    _fault_tick({"fault": fault, "trigger_ts": trigger_ts, "old_hashes": None,
+                                 "pod_state": pod_state, "pods_per_inst": pods_per_inst, "inv": inv})
                 if state == "INIT" and initial_pods_ready:
                     ir_items = _fetch_initial_ir_items(case_id)
                     settled, wait = _initial_rollout_settled(
@@ -14853,18 +15458,25 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     # ready throughout the drain (a scaled component never undershoots target, a
     # non-scaled one never dips below N=target). Catches a scaledown that drops
     # capacity below the requested floor mid-drain.
+    # A fault that takes pods during the scale (floor_slack=<k>) lowers the
+    # floor of the Components it took them from by k; the rest hold theirs.
+    taken_insts = set((fault or {}).get("victim_insts") or set())
+    taken_comps = {c for c, _i in taken_insts}
+    floor_slack = int(hdr.get("floor_slack") or 0)
     for c in sorted(configured):
         mr = min_ready.get(c, N[c])
         # Floor = min(start, target): a scaledown must hold >= target; a scaleup
         # legitimately starts at N (< target) and grows, so its floor is the
         # STARTING count, not the target. min() covers both directions.
-        floor = min(N[c], target[c])
+        slack = floor_slack if c in taken_comps else 0
+        floor = min(N[c], target[c]) - slack
+        basis = f"min(start {N[c]}, target {target[c]})" + (f"-slack({slack})" if slack else "")
         if mr < floor:
             verdict = "FAIL"
-            notes.append(f"{c} capacity floor breached: min ready {mr} < floor {floor} (min of start {N[c]}, target {target[c]})")
-            checks.append(f"  ✗ {c} capacity dipped to {mr} ready mid-scale (< floor {floor}=min(start {N[c]}, target {target[c]})) — undershot")
+            notes.append(f"{c} capacity floor breached: min ready {mr} < floor {floor} ({basis})")
+            checks.append(f"  ✗ {c} capacity dipped to {mr} ready mid-scale (< floor {floor}={basis}) — undershot")
         else:
-            checks.append(f"  ✓ {c} capacity floor held: min ready {mr} ≥ floor {floor}=min(start {N[c]}, target {target[c]})")
+            checks.append(f"  ✓ {c} capacity floor held: min ready {mr} ≥ floor {floor}={basis}")
     # Check D: partial-teardown atomicity — no gang index sat 0<live<ppi (an
     # orphan worker/leader) sustained >= GANG_TOL_S during the drain.
     mn_conf = [c for c in sorted(configured) if pods_per_inst.get(c, 1) > 1]
@@ -14886,8 +15498,12 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     if state == "CONVERGED" or blocked:
         recreated = defaultdict(int)
         for q in pod_state.values():
-            if q and q["alive"] and _is_survivor(q) and q.get("uid") and q["uid"] not in survivor_uids:
+            if (q and q["alive"] and _is_survivor(q) and q.get("uid") and q["uid"] not in survivor_uids
+                    and (q["comp"], str(q.get("inst", "0"))) not in taken_insts):
                 recreated[q["comp"]] += 1
+        if taken_insts:
+            checks.append("  ⓘ survivors the fault took are rebuilt by design and left out of the stability check: "
+                          + ", ".join(f"{c}/{i}" for c, i in sorted(taken_insts)))
         if recreated:
             verdict = "FAIL"
             rd = ", ".join(f"{c}+{n}" for c, n in sorted(recreated.items()))
@@ -14895,6 +15511,13 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
             checks.append(f"  ✗ survivor instability: {sum(recreated.values())} pod(s) at surviving indices RECREATED (new UID) instead of untouched ({rd}) — scale needlessly recreated survivors")
         else:
             checks.append("  ✓ survivor stability: every surviving instance (index < min(start,target)) kept its original pods (only the tail changed)")
+    # Check E': a repeating fault across the scale, and the end state once
+    # it stopped; the scale's own new pods are what the operation explains.
+    if _fault_repeats(fault):
+        op_pods = sum(max(0, target[c] - N[c]) * pods_per_inst.get(c, 1) for c in configured)
+        verdict = _repeat_checks(fault, pods_per_inst, set(), op_pods, trigger_ts, verdict, notes, checks)
+        if state == "CONVERGED":
+            verdict = _repeat_end_checks(case_id, target, configured, verdict, notes, checks)
     verdict = soften_expected_fail(hdr, verdict, checks)
     # Check F: continuous invariants + fault apparatus — AFTER the softening
     # (same rationale as teardown_check): a status lie or a broken apparatus is
@@ -15082,6 +15705,9 @@ def run_case(case_id):
     if rb:
         # The roll back onto the starting revision is a second roll.
         rotate_budget = min(MAX_BUDGET_S, rotate_budget + ROTATE_PER_POD_S * sum(N[c] for c in bumped))
+    if int(hdr.get("repeat") or 0) >= REPEAT_MIN:
+        # Each repetition takes again what came back; the roll waits that much longer.
+        rotate_budget = min(MAX_BUDGET_S, rotate_budget + REPEAT_CYCLE_S * int(hdr["repeat"]))
 
     # Start watcher subprocess.
     print(f"  starting watcher (init≤{init_budget}s, rotate≤{rotate_budget}s)")
@@ -15199,11 +15825,13 @@ def run_case(case_id):
                             print(f"\n  Phase 3: watching rotation (peak ≤ {ce}/{cd}/{cr}; bumped {sorted(bumped)} → {goal})")
                         state = "ROTATING"
 
-                # A held push changes no pod, so no watch event arrives to run
-                # the hooks below: the fault hook and the hold are ticked here.
-                if state == "ROTATING" and hold:
+                # A held push changes no pod, and a repeating fault waits on
+                # the manager or a pod coming back, which may raise no watch
+                # event either: the fault hook and the hold are ticked here.
+                if state == "ROTATING" and (hold or _fault_repeats(fault)):
                     _fault_tick({"fault": fault, "trigger_ts": trigger_ts, "old_hashes": old_hashes,
                                  "pod_state": pod_state, "pods_per_inst": pods_per_inst, "inv": inv})
+                if state == "ROTATING" and hold:
                     _held_push_tick(hold, case_id, bumped, pods_per_inst, pod_state, old_uids,
                                     aggregate(pod_state, old_hashes, modes, pods_per_inst), trigger_ts, now)
 
@@ -15617,6 +16245,16 @@ def run_case(case_id):
         verdict = _crashloop_checks(fault, pod_state, old_hashes, trigger_ts, verdict, notes, checks,
                                     bumped=bumped, surges=inv.get("surges"))
         verdict = _gang_member_checks(fault, pod_state, trigger_ts, hdr, verdict, notes, checks)
+    # Check 6b': a repeating fault across its window, and the end state once
+    # it stopped. The roll's own pods are what the operation explains: every
+    # bumped pod under a surge or recreate strategy, none for an in-place
+    # single-pod Component, a whole gang for an in-place gang.
+    if _fault_repeats(fault):
+        op_pods = sum(N[c] * pods_per_inst.get(c, 1) for c in bumped
+                      if modes.get(c) != "inplace" or pods_per_inst.get(c, 1) > 1)
+        verdict = _repeat_checks(fault, pods_per_inst, bumped, op_pods, trigger_ts, verdict, notes, checks)
+        if state == "CONVERGED":
+            verdict = _repeat_end_checks(case_id, N, configured, verdict, notes, checks)
 
     # Check 6c: the mid-roll edit was applied at its hook and the live spec
     # carries it on every bumped member.

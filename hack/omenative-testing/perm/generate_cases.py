@@ -198,6 +198,17 @@ runners (run.py + the KIND CI lane) already implement:
                           (mode=recreate with during=idle): everything goes
                           within budget, the broken pod included, and the same
                           name comes back clean
+    gen-repeat/    p8700+  a fault that keeps repeating until it is lifted
+                          (repeat=<n>): a pod deleted by hand, a gang member
+                          lost, an eviction or a preemption applied again each
+                          time what it took has come back, and the manager
+                          deleted again each time it is Ready, on the six
+                          shape families at steady state (mode=kill, or the
+                          manager on the idle service), under a push and
+                          under a scale-up; the service keeps its floor, the
+                          status says why, nothing is rebuilt on a wrong
+                          revision, and after the lift every Instance is Ready
+                          with no row or hold left behind
     gen-fault-move/ p7800+  a fault at a moment of a move: an Instance is
                           moved by request and, as the request is accepted,
                           as its replacement pod appears or as its source
@@ -533,6 +544,7 @@ GEN_BLOCKS = {
     "gen-fault-move": (7800, 7900),
     "gen-fault-edit": (7900, 8000),
     "gen-packed-pool": (8600, 8700),
+    "gen-repeat": (8700, 8900),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -856,6 +868,31 @@ PACKED_RESTARTS = {"new": RESTARTS, "idle": ["None"]}
 PACKED_GROUPS = {"engine": ["none"], "engine-mn": ["none"], "pd": ["none", "rolling"], "pd-mn": ["none", "rolling"]}
 PACKED_POOL = "packed"
 PACKED_INVARIANTS = "J,K"
+
+# The repeating-fault family: the persistent form of a pod deleted by hand,
+# a gang member lost, an eviction or a preemption and a manager restart. The
+# fault is applied again each time what it took has come back (repeat=<n>),
+# then stops. The six shape families at the sizes the other families use
+# (singles at 4 Instances; the engine gang at 3, so the floor under a
+# drain-first roll has a value; the gang behind a router and the PD gang at
+# 2), under the three operations the loop rides: the steady state, a push
+# under the surge and the drain-first strategy, and a scale-up by one.
+REPEAT_SHAPES = [
+    # (label, topo, N, W, a router in front)
+    ("engine", "engine", 4, 0, False),
+    ("engine gang", "engine-mn", 3, 1, False),
+    ("engine behind a router", "engine", 4, 0, True),
+    ("engine gang behind a router", "engine-mn", 2, 1, True),
+    ("pd", "pd", 4, 0, False),
+    ("pd gang", "pd-mn", 2, 1, False),
+]
+REPEAT_N = 3
+REPEAT_PREEMPT_N = 2
+REPEAT_STRATS = [("SurgeThenDrain", 1, 0), ("RecreatePod", 0, 1)]
+REPEAT_PUSH_HOOK = "rotating"
+REPEAT_SCALE_HOOK = "settling"
+REPEAT_IDLE_HOOK = "idle"
+REPEAT_OPS = ["steady", "push", "scale-up"]
 
 # Canonical shapes: (topo, N, W). Gangs at N=2 with widths 1 and 2; singles at
 # N=4 (pd: engine+decoder N, router lib.NR). Percentage budgets additionally
@@ -3329,6 +3366,210 @@ def emit_packed_pool(add):
                                 coord=lib.coord_for(co) if co != "none" else None)
 
 
+# ── gen-repeat: a fault that keeps repeating until it is lifted ────────────
+def _repeat_counts(shape):
+    _label, topo, n, _w, router = shape
+    if is_pd(topo):
+        return counts(topo, n)
+    return dict(Ne=n, Nd=0, Nr=(lib.NR if router else 0))
+
+
+def _repeat_ceilings(shape, strat, surge, to_e=None):
+    c = _repeat_counts(shape)
+    ce = to_e if to_e is not None else (c["Ne"] + surge if strat == "SurgeThenDrain" else c["Ne"])
+    return dict(ceil_e=ce, ceil_d=c["Nd"], ceil_r=c["Nr"])
+
+
+def _repeat_comps(shape, e_life, d_life=None, r_life=None):
+    _label, topo, n, w, router = shape
+    cw = w if is_mn(topo) else 0
+    cs = [lib.comp("engine", n, cw, e_life)]
+    if is_pd(topo):
+        cs.append(lib.comp("decoder", n, cw, d_life if d_life is not None else lib.lifecycle()))
+    if is_pd(topo) or router:
+        cs.append(lib.comp("router", lib.NR, 0, r_life if r_life is not None else lib.lifecycle()))
+    return cs
+
+
+def _repeat_shape_tag(shape):
+    _label, topo, _n, w, router = shape
+    return shape_tag(topo, w) + (" +router" if router else "")
+
+
+def _repeat_what(kind, member):
+    pod = f"the {member} of one engine gang" if member else "one engine pod"
+    return {"podkill": f"{pod} is deleted by hand",
+            "evict": f"{pod} is evicted through the Eviction API, the way a drain removes it,",
+            "preempt": "one engine pod is preempted by a higher-priority filler (every node's spare CPU taken)"}[kind]
+
+
+REPEAT_WINDOW_CLAIMS = ("the status reports each loss and never counts the short Instance whole, every repair "
+                        "recorded is for an Instance the fault took, the pods created are those repairs{plus} and no "
+                        "more (no hot loop), no pod comes back on a revision the service never pushed")
+REPEAT_END_CLAIM = "after the lift every Instance is Ready and serving on its revision with no row mid-operation and no hold left behind"
+
+
+def _repeat_steady_reason(kind, shape, rp, member, n):
+    _label, topo = shape[0], shape[1]
+    return (f"{_repeat_what(kind, member)} again each time its Instance is back and serving, {n} times, then left alone: "
+            f"each time {_recreate_scope(topo, rp)} under restart policy {RP_FULL[rp]} within the budget and nothing else "
+            f"moves; across the window the other Instances keep serving (floor N-1), "
+            + REPEAT_WINDOW_CLAIMS.format(plus="") + " and nothing surges on a service nobody bumped; " + REPEAT_END_CLAIM)
+
+
+def _repeat_preempt_reason(shape, rp, n):
+    topo = shape[1]
+    return (f"{_repeat_what('preempt', None)} again each time its Instance is placed and serving, {n} times, then left "
+            f"alone: each time the Instance waits with reason Unschedulable until the fillers are dropped, then "
+            f"{_recreate_scope(topo, rp)} under restart policy {RP_FULL[rp]}, nothing is taken down to make room and the "
+            f"fleet is back at N; across the window " + REPEAT_WINDOW_CLAIMS.format(plus="") + "; " + REPEAT_END_CLAIM)
+
+
+def _repeat_push_reason(kind, shape, strat, rp, member, n):
+    topo = shape[1]
+    out = (f"{_repeat_what(kind, member)} again each time its Instance is back and serving while the roll lands under "
+           f"{strat}, {n} times, then left alone: the roll converges with every Instance on the new revision; across the "
+           f"window the untouched Instances hold the floor (N-maxUnavailable-1), "
+           + REPEAT_WINDOW_CLAIMS.format(plus=" and the roll's own pods") + "; " + REPEAT_END_CLAIM)
+    if rp == "RecreateInstance" and is_mn(topo):
+        out += "; each loss rebuilds the gang whole unless the roll takes it first"
+    if is_pd(topo):
+        out += "; decoder and router are negative controls (co=none)"
+    if strat == "SurgeThenDrain":
+        out += "; order waived — each deletion is a drain with no preceding surge"
+    return out
+
+
+def _repeat_scale_reason(kind, shape, rp, member, n):
+    _label, topo, size = shape[0], shape[1], shape[2]
+    return (f"the engine grows from {size} to {size + 1} while {_repeat_what(kind, member)} again each time its Instance "
+            f"is back and serving, {n} times, then left alone: the new Instance comes up and the scale lands at {size + 1} "
+            f"with every Instance Ready; across the window the other Instances keep serving (floor N-1 on the engine, N "
+            f"elsewhere), " + REPEAT_WINDOW_CLAIMS.format(plus=" and the scale's new Instance") + "; " + REPEAT_END_CLAIM
+            + (f"; {_recreate_scope(topo, rp)} each time under restart policy {RP_FULL[rp]}"))
+
+
+def _repeat_ctrl_reason(op, shape, strat, n):
+    topo, size = shape[1], shape[2]
+    resumes = ("a restarted manager carries nothing in memory and resumes from status, so nothing is created twice "
+               "(peaks within the ceiling, pods within what the operation explains, no index collision) and nothing "
+               "is built on a third revision")
+    if op == "steady":
+        out = (f"the manager is deleted again each time it is Ready, {n} times, on the settled service: no pod of the "
+               f"service is created or deleted, every Instance stays Ready and serving and no repair is recorded; "
+               f"{resumes}; after the last restart every row is Ready with no operation open and no hold")
+    elif op == "push":
+        out = (f"the manager is deleted right after the bump and again each time it is Ready, {n} times, while the roll "
+               f"lands under {strat}: the roll resumes from status after every restart and converges with every Instance "
+               f"on the new revision; {resumes}; after the last restart every row is Ready with no operation open and no hold")
+        if is_pd(topo):
+            out += "; decoder and router are negative controls (co=none)"
+    else:
+        out = (f"the engine grows from {size} to {size + 1} while the manager is deleted right after the scale and again "
+               f"each time it is Ready, {n} times: the scale resumes from status and lands at {size + 1}, the survivors "
+               f"keep their pods; {resumes}; after the last restart every row is Ready with no operation open and no hold")
+    return out
+
+
+def emit_repeat(add):
+    n = REPEAT_N
+    for shape in REPEAT_SHAPES:
+        label, topo, size, w, _router = shape
+        members = GANG_MEMBERS if is_mn(topo) else [None]
+        tag = _repeat_shape_tag(shape)
+        victim_kv = dict(victimcomp="engine") if is_pd(topo) else {}
+        for rp in RESTARTS:
+            e_life = lib.lifecycle(restart=RP_FULL[rp])
+            d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+            steady_comps = _repeat_comps(shape, e_life, d_life)
+            for member in members:
+                # Steady state: deleted by hand, or evicted, again each time it is back.
+                for kind, via in (("podkill", "delete"), ("evict", "evict")):
+                    kv = dict(mode="kill", **_repeat_counts(shape), **_repeat_ceilings(shape, "SurgeThenDrain", 0),
+                              restart=rp, co="none", topo=topo, repeat=n)
+                    if member:
+                        kv["kill"] = member
+                    if via != "delete":
+                        kv["via"] = via
+                    desc = (f"{GEN_MARK} repeat {kind} steady {tag} N={size} rp {rp} x{n}"
+                            + (f" target {member}" if member else ""))
+                    add("gen-repeat", desc, kv, steady_comps, _repeat_steady_reason(kind, shape, rp, member, n),
+                        dict(strat="SurgeThenDrain", verb=f"repeat:{kind}:steady", rp=rp, loop=f"{kind} x{n} at steady state"),
+                        cell=("repeat", kind, "steady", label, None, rp, member))
+                # A scale-up by one while the pod keeps being deleted (the eviction loop runs under policy None).
+                for kind in ("podkill", "evict"):
+                    if kind == "evict" and (rp != "None" or member == "leader"):
+                        continue
+                    kv = dict(mode="scaledown", **_repeat_counts(shape), **_repeat_ceilings(shape, "SurgeThenDrain", 0, to_e=size + 1),
+                              fault=f"{kind}:{REPEAT_SCALE_HOOK}", co="none", topo=topo, to_e=size + 1, repeat=n, floor_slack=1,
+                              **victim_kv)
+                    if member and kind == "podkill":
+                        kv["kill"] = member
+                    desc = (f"{GEN_MARK} repeat {kind} scale-up {tag} {size}->{size + 1} rp {rp} x{n}"
+                            + (f" target {member}" if member and kind == "podkill" else ""))
+                    add("gen-repeat", desc, kv, steady_comps, _repeat_scale_reason(kind, shape, rp, member if kind == "podkill" else None, n),
+                        dict(strat="SurgeThenDrain", verb=f"repeat:{kind}:scale-up", rp=rp, loop=f"{kind} x{n} under a scale-up"),
+                        cell=("repeat", kind, "scale-up", label, None, rp, member if kind == "podkill" else None))
+            # A push while the pod keeps being deleted (a gang's member under the
+            # rebuild-whole policy only) or evicted (under policy None only).
+            for strat, surge, unavail in REPEAT_STRATS:
+                roll_life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                roll_comps = _repeat_comps(shape, roll_life, d_life)
+                for kind in ("podkill", "evict"):
+                    if kind == "evict" and rp != "None":
+                        continue
+                    if kind == "podkill" and is_mn(topo) and rp != "RecreateInstance":
+                        continue
+                    for member in (members if kind == "podkill" else [None]):
+                        kv = dict(**_repeat_counts(shape), **_repeat_ceilings(shape, strat, surge),
+                                  fault=f"{kind}:{REPEAT_PUSH_HOOK}", co="none", topo=topo, victim="stable", repeat=n,
+                                  floor_slack=1, **victim_kv)
+                        if member:
+                            kv["kill"] = member
+                        if strat == "SurgeThenDrain":
+                            kv["order_soft"] = 1
+                        desc = (f"{GEN_MARK} repeat {kind} push {tag} N={size} {strat} {budget_tag(strat, surge, unavail)} rp {rp} x{n}"
+                                + (f" target {member}" if member else ""))
+                        add("gen-repeat", desc, kv, roll_comps, _repeat_push_reason(kind, shape, strat, rp, member, n),
+                            dict(strat=strat, verb=f"repeat:{kind}:push", rp=rp, loop=f"{kind} x{n} under a push"),
+                            cell=("repeat", kind, "push", label, strat, rp, member))
+        # The manager restarting again and again: on the idle service, under a push, under a scale-up.
+        life = lib.lifecycle()
+        kv = dict(**_repeat_counts(shape), **_repeat_ceilings(shape, "SurgeThenDrain", 0),
+                  fault=f"ctrlrestart:{REPEAT_IDLE_HOOK}", co="none", topo=topo, during=REPEAT_IDLE_HOOK, repeat=n)
+        add("gen-repeat", f"{GEN_MARK} repeat ctrlrestart steady {tag} N={size} x{n}", kv, _repeat_comps(shape, life),
+            _repeat_ctrl_reason("steady", shape, None, n),
+            dict(strat="SurgeThenDrain", verb="repeat:ctrlrestart:steady", loop=f"ctrlrestart x{n} at steady state"),
+            cell=("repeat", "ctrlrestart", "steady", label, None, None, None))
+        for strat, surge, unavail in REPEAT_STRATS:
+            roll_life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+            kv = dict(**_repeat_counts(shape), **_repeat_ceilings(shape, strat, surge),
+                      fault=f"ctrlrestart:{REPEAT_SCALE_HOOK}", co="none", topo=topo, repeat=n)
+            add("gen-repeat", f"{GEN_MARK} repeat ctrlrestart push {tag} N={size} {strat} {budget_tag(strat, surge, unavail)} x{n}",
+                kv, _repeat_comps(shape, roll_life), _repeat_ctrl_reason("push", shape, strat, n),
+                dict(strat=strat, verb="repeat:ctrlrestart:push", loop=f"ctrlrestart x{n} under a push"),
+                cell=("repeat", "ctrlrestart", "push", label, strat, None, None))
+        kv = dict(mode="scaledown", **_repeat_counts(shape), **_repeat_ceilings(shape, "SurgeThenDrain", 0, to_e=size + 1),
+                  fault=f"ctrlrestart:{REPEAT_SCALE_HOOK}", co="none", topo=topo, to_e=size + 1, repeat=n)
+        add("gen-repeat", f"{GEN_MARK} repeat ctrlrestart scale-up {tag} {size}->{size + 1} x{n}", kv, _repeat_comps(shape, life),
+            _repeat_ctrl_reason("scale-up", shape, None, n),
+            dict(strat="SurgeThenDrain", verb="repeat:ctrlrestart:scale-up", loop=f"ctrlrestart x{n} under a scale-up"),
+            cell=("repeat", "ctrlrestart", "scale-up", label, None, None, None))
+    # The scheduler taking the pod again each time it lands: the preempt
+    # shapes, at steady state, the fillers dropped once the wait has held.
+    for topo, size, w in DISRUPT_SHAPES:
+        shape = (shape_tag(topo, w), topo, size, w, False)
+        for rp in RESTARTS:
+            d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+            kv = dict(mode="kill", **_repeat_counts(shape), **_repeat_ceilings(shape, "SurgeThenDrain", 0), restart=rp,
+                      co="none", topo=topo, via="preempt", lift="after-settle", repeat=REPEAT_PREEMPT_N)
+            add("gen-repeat", f"{GEN_MARK} repeat preempt steady {shape_tag(topo, w)} N={size} rp {rp} x{REPEAT_PREEMPT_N}", kv,
+                _repeat_comps(shape, lib.lifecycle(restart=RP_FULL[rp]), d_life), _repeat_preempt_reason(shape, rp, REPEAT_PREEMPT_N),
+                dict(strat="SurgeThenDrain", verb="repeat:preempt:steady", rp=rp, lift="after-settle",
+                     loop=f"preempt x{REPEAT_PREEMPT_N} at steady state"),
+                cell=("repeat", "preempt", "steady", shape[0], None, rp, None))
+
+
 # ── gen-pending: a new pod cannot be placed or admitted ─────────────────────
 def _pending_quota(moment, strat, w):
     """The quota headroom that refuses exactly the pod the operation creates:
@@ -4159,6 +4400,7 @@ def build_outputs():
     emit_fault_move(add)
     emit_fault_edit(add)
     emit_packed_pool(add)
+    emit_repeat(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -4257,6 +4499,7 @@ def manifest(rows):
     lines += table("By move victim (fault-move)", tally(lambda kv, m: m["who"], where=lambda kv, m: "who" in m))
     lines += table("By runtime edit (fault-edit)", tally(lambda kv, m: m["rtedit"], where=lambda kv, m: "rtedit" in m))
     lines += table_if("By story (packed-pool)", "side")
+    lines += table_if("By repeating fault and operation (gen-repeat)", "loop")
     parked_rows = [(f, n, m["parked"]) for f, n, _kv, m in rows if "parked" in m]
     if parked_rows:
         lines += ["### Parked cells (XFAIL on a tracked issue)", "",
@@ -4625,6 +4868,32 @@ def manifest(rows):
         " fix and the floor and reports whether the status said why: nothing"
         " escalates a pod that runs but never passes readiness before its ready"
         " timeout.",
+        "- gen-repeat is the persistent form of a pod deleted by hand, a gang member"
+        " lost, an eviction or a preemption and a manager restart: the fault is"
+        f" applied again each time what it took has come back ({REPEAT_N} times;"
+        f" {REPEAT_PREEMPT_N} for the preemption, whose fill-and-press cycle is the"
+        " slowest), then stops, and the case reads the window and the end state"
+        " after the lift. It runs on the six shape families at steady state"
+        " (mode=kill; the manager on the idle service), under a push with the"
+        " surge and the drain-first strategy and under a scale-up by one. The"
+        " loop takes the same Instance again once it is back (the deleter hits"
+        " the pod that came back), the running revision's pods under the push"
+        " (victim=stable), and the engine on the prefill/decode shapes"
+        " (victimcomp=engine), so the fault and the operation meet on one"
+        " Component. The kill cells run at the canonical surge budget, dormant at"
+        " steady state, so the floor reads N minus the killed Instance. Left out,"
+        " with the reason: a gang member lost under a push with restart policy"
+        " None (the one-shot gang-member family drives it; the repeating loss"
+        " stresses the rebuild-whole path) and the eviction loop under a push or"
+        " a scale with RecreateInstanceOnPodRestart (the policy only widens what"
+        " is rebuilt, which the steady-state eviction cells cross; the eviction's"
+        " own question is the disruption budget admitting each removal); the"
+        " preemption loop under a push (a repeating preemption needs the kill's"
+        " fill-and-press cycle, which the roll handler does not run) and with"
+        " lift=never (nothing comes back while the fillers stay); the manager"
+        " restarting while a repair is open, as in the one-shot family. The"
+        " cluster-wide forms (the manager restarts, the preemptions) run one at a"
+        " time after the pool, as every such case does.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

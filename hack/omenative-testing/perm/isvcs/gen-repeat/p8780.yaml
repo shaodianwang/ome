@@ -1,0 +1,23 @@
+# p8780: [gen] repeat podkill steady pd N=4 rp None x3  mode=kill Ne=4 Nd=4 Nr=2 ceil_e=4 ceil_d=4 ceil_r=2 restart=None co=none topo=pd repeat=3
+# reason: one engine pod is deleted by hand again each time its Instance is back and serving, 3 times, then left alone: each time the Instance (one pod) is recreated under restart policy None within the budget and nothing else moves; across the window the other Instances keep serving (floor N-1), the status reports each loss and never counts the short Instance whole, every repair recorded is for an Instance the fault took, the pods created are those repairs and no more (no hot loop), no pod comes back on a revision the service never pushed and nothing surges on a service nobody bumped; after the lift every Instance is Ready and serving on its revision with no row mid-operation and no hold left behind
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8780 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
