@@ -95,6 +95,34 @@ func PodSetServesNothing(pods []*corev1.Pod) bool {
 	return live > 0
 }
 
+// PodSetUnavailableOnParkedMember reports whether a pod set is out of
+// the coordination gate's serving count because a member is parked: fewer
+// than desired live pods are in rotation, and a live pod is parked in a
+// terminal kubelet waiting reason. The gate counts an Instance as serving
+// only when every desired pod is, so such an Instance is already inside
+// the gate's unavailability whichever member is parked; a start that
+// replaces the set takes nothing further out of that count, while the
+// per-Component budget still charges it when a routed member serves. A
+// member that is merely not yet Ready parks nothing: its wait may still
+// resolve, so the set keeps the consult.
+func PodSetUnavailableOnParkedMember(pods []*corev1.Pod, desired int32) bool {
+	var serving int32
+	parked := false
+	for _, pod := range pods {
+		if pod == nil || pod.DeletionTimestamp != nil || query.IsTerminalPod(pod) {
+			continue
+		}
+		if podreadiness.ReadyAndServing(pod) {
+			serving++
+			continue
+		}
+		if _, waiting := terminalWaitingReason(pod); waiting {
+			parked = true
+		}
+	}
+	return parked && serving < desired
+}
+
 // podOnCurrentRevision reports whether a pod belongs to the Component's
 // current revision. An unknown hash on either side leaves the pod in
 // scope: the label is the only evidence of ownership, and without it

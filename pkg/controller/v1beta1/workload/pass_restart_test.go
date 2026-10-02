@@ -345,23 +345,22 @@ func TestReconcile_CrashLoopRepair_UncappedRepairsEveryWedge(t *testing.T) {
 	}
 }
 
-// The cross-Component coordination gate is the second layer: a denial
-// there holds a repair that takes a serving pod out of rotation even
-// where the per-Component budget allows it. A gang serves through its
-// leader, so a gang whose worker is wedged while its leader serves is
-// such a repair. A rebuild never surges, so the gate is consulted on the
-// arm that bounds pods taken offline.
+// A crash-loop repair is never put to the cross-Component coordination
+// gate. The gate counts a gang as serving only when every member is, so
+// the parked member that makes the wedge already takes the Instance out
+// of the gate's serving count: a gang whose worker is wedged while its
+// leader serves is inside the gate's unavailability before its repair
+// opens, and a consult would charge the repair for the outage it ends.
+// The per-Component budget still decides it; with none configured, a
+// gate that would deny everything holds nothing.
 //
 // Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/before
-func TestReconcile_CrashLoopRepair_HeldByCoordinationGate(t *testing.T) {
+func TestReconcile_CrashLoopRepair_ServingGangIsNotPutToTheGate(t *testing.T) {
 	ctx := context.Background()
 	in, plan, pods := gangCrashLoopFixture(t, 2, nil, 0, 1)
 	consults := 0
-	in.UpdateGate = func(strategy workloadtypes.UpdateStrategyType, surge, unavail int32) (bool, workloadtypes.RolloutHoldGate, string) {
+	in.UpdateGate = func(workloadtypes.UpdateStrategyType, int32, int32) (bool, workloadtypes.RolloutHoldGate, string) {
 		consults++
-		if strategy != workloadtypes.UpdateStrategyRecreatePod {
-			t.Errorf("a repair rebuilds pods in place; gate consulted with strategy %q", strategy)
-		}
 		return false, workloadtypes.RolloutHoldGateRatio, "peer Component is behind"
 	}
 	c := fake.NewClientBuilder().WithScheme(makeScheme(t)).WithObjects(pods...).Build()
@@ -373,18 +372,16 @@ func TestReconcile_CrashLoopRepair_HeldByCoordinationGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if got := countRestarting(store, 2); got != 0 {
-		t.Fatalf("repairs opened = %d, want 0 while the gate denies", got)
+	if got := countRestarting(store, 2); got != 2 {
+		t.Fatalf("repairs opened = %d, want 2: the gate already counts a gang with a wedged worker as unavailable, so its repair is not held behind its own outage", got)
 	}
-	if consults == 0 {
-		t.Fatal("the coordination gate must be consulted before a repair that takes a serving pod offline opens")
+	if consults != 0 {
+		t.Fatalf("gate consults = %d, want 0: a crash-loop repair is not put to the coordination gate", consults)
 	}
-	// Nothing in the cluster changes while the gate denies, so the pass
-	// must carry its own wake-up and say why it is waiting.
 	if result.RequeueAfter <= 0 {
-		t.Errorf("result = %+v, want a requeue: no watch event will re-consult the gate", result)
+		t.Errorf("result = %+v, want a requeue for the repairs in flight", result)
 	}
-	assertRepairHeld(t, rec, "peer Component is behind")
+	assertNoRepairHeld(t, rec)
 }
 
 // A repair that takes a serving pod offline stays budgeted: a gang whose
@@ -450,19 +447,20 @@ func TestReconcile_CrashLoopRepair_DarkPodSetIsAdmittedByNeitherLayer(t *testing
 }
 
 // A dark repair the pass opened is charged to neither layer. The gang at
-// index 0 is wedged whole and repairs outside the budget and the gate;
-// the gang at index 1 serves through its leader while its worker is
-// wedged, and is admitted against a budget of one, then consulted, with
-// nothing in flight ahead of it.
+// index 0 is wedged whole and repairs outside the budget; the gang at
+// index 1 serves through its leader while its worker is wedged, and is
+// admitted against a budget of one with nothing in flight ahead of it.
+// Neither repair is put to the coordination gate: both gangs are already
+// out of its serving count.
 //
 // Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/before
 func TestReconcile_CrashLoopRepair_DarkRepairIsChargedToNeitherLayer(t *testing.T) {
 	ctx := context.Background()
 	one := intstr.FromInt32(1)
 	in, plan, pods := gangCrashLoopFixture(t, 2, &one, 1)
-	var inFlightSeen []int32
-	in.UpdateGate = func(_ workloadtypes.UpdateStrategyType, _, unavail int32) (bool, workloadtypes.RolloutHoldGate, string) {
-		inFlightSeen = append(inFlightSeen, unavail)
+	consults := 0
+	in.UpdateGate = func(workloadtypes.UpdateStrategyType, int32, int32) (bool, workloadtypes.RolloutHoldGate, string) {
+		consults++
 		return true, "", ""
 	}
 	c := fake.NewClientBuilder().WithScheme(makeScheme(t)).WithObjects(pods...).Build()
@@ -476,8 +474,8 @@ func TestReconcile_CrashLoopRepair_DarkRepairIsChargedToNeitherLayer(t *testing.
 	if got := countRestarting(store, 2); got != 2 {
 		t.Fatalf("repairs opened = %d, want both: the dark gang's repair must not spend the budget the serving gang's needs", got)
 	}
-	if len(inFlightSeen) != 1 || inFlightSeen[0] != 0 {
-		t.Fatalf("gate consults saw in-flight unavailability %v, want [0]: only the serving gang is consulted, with the dark gang's repair uncounted", inFlightSeen)
+	if consults != 0 {
+		t.Fatalf("gate consults = %d, want 0: a crash-loop repair is not put to the coordination gate", consults)
 	}
 	assertNoRepairHeld(t, rec)
 }
@@ -2835,4 +2833,188 @@ func TestScaleDown_BesideAnOpenRepair_RemovesTheBrokenInstanceFirst(t *testing.T
 			}
 		})
 	}
+}
+
+// TestReconcile_GangWithParkedWorker_LandsTheFixInsideTheGroupBudget: the
+// coordination gate counts a gang as serving only when every member is,
+// so a gang whose worker is parked beside a serving leader is already
+// inside the gate's unavailability; a drain-first start on that gang
+// takes nothing further out of the gate's count and skips the consult,
+// while the per-Component budget still charges it, because its leader
+// does leave rotation. Two leader+worker gangs listed in a rollout group
+// with a run open and a budget of one Instance offline, the worker of the
+// higher index crash-looping on the running revision while its leader
+// serves, the fix pushed under each drain-first strategy and both restart
+// policies. With the worker parked for good, the roll cannot wait for the
+// gang to serve again: the healthy gang's start is held by the gate while
+// the broken gang is out of the count, the broken gang is the first to
+// land the fix with its peer untouched and in rotation until then, the
+// peer follows within the budget, no repair opens and both gangs end
+// serving on the fix. With a worker that keeps coming back between
+// crashes the gate's count changes pass by pass, so only the end state
+// and the budget are asserted.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-inplace, instance/Ready/spec.revision/boundary@T-ready-crashloop-restart
+func TestReconcile_GangWithParkedWorker_LandsTheFixInsideTheGroupBudget(t *testing.T) {
+	const replicas = 2
+	for _, sc := range offTargetStrategies[1:] {
+		for _, policy := range []workloadtypes.RestartPolicy{workloadtypes.RestartPolicyNone, workloadtypes.RestartPolicyRecreateInstance} {
+			for _, form := range []crashForm{crashAtStart, crashAfterUp} {
+				t.Run(fmt.Sprintf("%s/%s/%s", sc.strategy, policy, form), func(t *testing.T) {
+					h := offTargetCrashHarness(t, true, sc.strategy, sc.surge, sc.unavail, policy, replicas)
+					consults, denials := 0, 0
+					groupGate := rollingGroupGate(h, replicas, sc.surge, sc.unavail, &consults)
+					h.gate = func(strategy workloadtypes.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, workloadtypes.RolloutHoldGate, string) {
+						allowed, gate, reason := groupGate(strategy, inFlightSurge, inFlightUnavail)
+						if !allowed {
+							denials++
+						}
+						return allowed, gate, reason
+					}
+					const broken = int32(replicas - 1)
+					image := crashStartImage
+					if form == crashAfterUp {
+						image = crashLoadImage
+					}
+					h.crashPod(broken, "worker", image)
+					h.events = nil
+					h.setTarget(h.revFixed, fixedImage)
+					done := func() bool { return h.settledOn(h.revFixed, replicas) }
+					if form == crashAfterUp {
+						requireRollLandsWithinBudget(t, h, sc.strategy, sc.surge, sc.unavail, done)
+						return
+					}
+					requireDarkInstanceRollsFirst(t, h, broken, []int32{0}, nil, sc.strategy, sc.surge, sc.unavail, done)
+					if consults == 0 || denials == 0 {
+						t.Fatalf("gate consults = %d, denials = %d: the healthy gang's start is still put to the gate, and held while the broken gang is out of the serving count", consults, denials)
+					}
+				})
+			}
+		}
+	}
+}
+
+// requireRollLandsWithinBudget drives the roll on the fixed revision
+// until done holds and checks, after every pass, that no repair opens,
+// the roll stays inside its budget and every pod created after the bump
+// runs the fix.
+func requireRollLandsWithinBudget(t *testing.T, h *recoveryHarness, strategy workloadtypes.UpdateStrategyType, surge, unavail int32, done func() bool) {
+	t.Helper()
+	bumpedAt := h.clk.Now()
+	fixedHash := query.RevisionOf(h.revFixed).Hash()
+	invariant := func() {
+		if h.repairInFlight() {
+			h.dumpState("repair opened")
+			t.Fatalf("a repair opened on an Instance whose revision is not the roll target")
+		}
+		rollStaysWithinBudget(t, h, strategy, surge, unavail)
+		for _, pod := range h.livePods() {
+			if !pod.CreationTimestamp.Time.After(bumpedAt) {
+				continue
+			}
+			if pod.Labels[query.LabelRevisionHash] != fixedHash || pod.Spec.Containers[0].Image != fixedImage {
+				h.dumpState("pod created off the fix")
+				t.Fatalf("pod %s was created on %s after the fix was pushed", pod.Name, pod.Spec.Containers[0].Image)
+			}
+		}
+	}
+	if !h.runWithInvariant(100, done, invariant) {
+		h.dumpState("after the bump")
+		t.Fatalf("the roll never reached its end state")
+	}
+	if h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+		t.Fatalf("a restart was recorded for an Instance the roll owned: %v", h.events)
+	}
+}
+
+// TestReconcile_GangWithParkedWorker_RepairOpensInsideTheGroupBudget: the
+// steady-state form of the same self-count. A gang whose worker is
+// parked beside a serving leader is already out of the coordination
+// gate's serving count, so its crash-loop repair is not put to the gate:
+// consulting it would charge the repair for the outage it ends, and under
+// a group budget of one the gang would never be rebuilt. The per-Component
+// budget still decides the repair, because the leader does leave
+// rotation. Two leader+worker gangs converged with a rollout group in
+// front of them, the worker of the higher index crash-looping on the
+// running revision, both restart policies, both crash forms, the group's
+// gate answering as it does with no run open and with one open: under a
+// per-Component budget of one the repair opens, rebuilds the gang Ready
+// on its revision while the healthy peer never leaves rotation, and no
+// hold is announced; under a budget of zero the repair stays held by the
+// budget, named as such, and the gang is never rebuilt. The held case is
+// driven with the worker parked for good: a worker that comes back
+// between crashes also arms RecreateInstanceOnPodRestart's own
+// container-restart trigger, which no layer admits.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/before
+func TestReconcile_GangWithParkedWorker_RepairOpensInsideTheGroupBudget(t *testing.T) {
+	const replicas = 2
+	for _, maxUnavailable := range []int32{1, 0} {
+		forms := []crashForm{crashAtStart, crashAfterUp}
+		if maxUnavailable == 0 {
+			forms = forms[:1]
+		}
+		for _, gate := range steadyStateGroupGates {
+			for _, policy := range []workloadtypes.RestartPolicy{workloadtypes.RestartPolicyNone, workloadtypes.RestartPolicyRecreateInstance} {
+				for _, form := range forms {
+					t.Run(fmt.Sprintf("maxUnavailable=%d/%s/%s/%s", maxUnavailable, gate.name, policy, form), func(t *testing.T) {
+						h := offTargetCrashHarness(t, true, workloadtypes.UpdateStrategyRecreatePod, 0, maxUnavailable, policy, replicas)
+						consults := 0
+						h.gate = gate.build(h, replicas, maxUnavailable, &consults)
+						const peer, broken = int32(0), int32(replicas - 1)
+						image := crashStartImage
+						if form == crashAfterUp {
+							image = crashLoadImage
+						}
+						h.crashPod(broken, "worker", image)
+						h.events = nil
+
+						peerStaysInRotation := func() {
+							if ceiling := replicas * len(h.desired.Runners); len(h.livePods()) > ceiling {
+								t.Fatalf("%d live pods, want at most %d: a repair never surges", len(h.livePods()), ceiling)
+							}
+							if !h.instanceInRotation(peer) || !h.atIncarnation(peer, 1) {
+								h.dumpState("peer out of rotation")
+								t.Fatalf("the healthy peer left rotation while the broken gang was repaired")
+							}
+						}
+						repaired := func() bool { return h.settledOn(h.revV1, replicas) && h.repairedAbove(broken, 1) }
+						if maxUnavailable == 0 {
+							if h.runWithInvariant(40, repaired, peerStaysInRotation) {
+								t.Fatalf("the repair opened under a budget of zero: it takes the serving leader offline and must stay budgeted")
+							}
+							if !h.sawEventWith(workloadtypes.EventReasonRepairHeld, "unavailability budget 0") {
+								t.Fatalf("the hold must be announced naming the budget: %v", h.events)
+							}
+						} else {
+							if !h.runWithInvariant(40, repaired, peerStaysInRotation) {
+								h.dumpState("after the crash")
+								t.Fatalf("the broken gang was never repaired: held by a gate that already counts its outage")
+							}
+							if !h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+								t.Fatalf("the repair must be recorded on the Instance: %v", h.events)
+							}
+							if h.sawEvent(workloadtypes.EventReasonRepairHeld) {
+								t.Fatalf("a repair was announced held: %v", h.events)
+							}
+						}
+						if consults != 0 {
+							t.Fatalf("gate consults = %d, want 0: a repair of an Instance the gate's serving count already excludes is not put to the gate", consults)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// sawEventWith reports whether the harness recorded an event of reason
+// whose message carries detail.
+func (h *recoveryHarness) sawEventWith(reason workloadtypes.EventReason, detail string) bool {
+	for _, e := range h.events {
+		if strings.Contains(e, string(reason)) && strings.Contains(e, detail) {
+			return true
+		}
+	}
+	return false
 }

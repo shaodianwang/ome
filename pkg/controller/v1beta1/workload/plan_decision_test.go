@@ -2432,9 +2432,10 @@ func TestPlan_Update_DarkInstancesListedFirst(t *testing.T) {
 // leader, so the preference for an Instance that serves nothing reads the
 // gang's routed member. Two leader+worker gangs on the running revision
 // under RecreatePod: a gang whose leader is parked in CrashLoopBackOff
-// beside a Ready worker is dark, listed first with its start exempt from
-// the coordination gate; a gang whose worker is parked beside a serving
-// leader still serves, keeps its place in plan order and is consulted.
+// beside a Ready worker is dark and listed first; a gang whose worker is
+// parked beside a serving leader still serves and keeps its place in plan
+// order. Either gang is already out of the coordination gate's serving
+// count, so both starts skip the gate consult.
 //
 // Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate
 func TestPlan_Update_DarkGangIsReadOnItsLeader(t *testing.T) {
@@ -2494,10 +2495,85 @@ func TestPlan_Update_DarkGangIsReadOnItsLeader(t *testing.T) {
 			}
 			for _, item := range ua.Update.Items {
 				dark := tc.dark && item.Instance.Index == 1
-				if item.ReplacesDarkPodSet != dark || item.CoordGateExempt != dark {
-					t.Errorf("instance %d: ReplacesDarkPodSet = %v, CoordGateExempt = %v, want both %v",
-						item.Instance.Index, item.ReplacesDarkPodSet, item.CoordGateExempt, dark)
+				exempt := item.Instance.Index == 1
+				if item.ReplacesDarkPodSet != dark || item.CoordGateExempt != exempt {
+					t.Errorf("instance %d: ReplacesDarkPodSet = %v, CoordGateExempt = %v, want %v and %v",
+						item.Instance.Index, item.ReplacesDarkPodSet, item.CoordGateExempt, dark, exempt)
 				}
+			}
+		})
+	}
+}
+
+// TestPlan_Update_CoordGateExempt_GangWithParkedMember: the coordination
+// gate counts a gang as serving only when every member is, so a gang with
+// a member parked in a terminal waiting reason is already inside the
+// gate's unavailability whichever member it is. A fresh drain-first start
+// on such a gang takes nothing further out of the gate's count and skips
+// the consult; the start keeps its place in plan order when the leader
+// still serves, because the per-Component budget still pays for the
+// leader leaving rotation. A gang whose member is merely not yet Ready,
+// a gang fully in rotation, and any start on a surge strategy keep the
+// consult.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-inplace, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-surge
+func TestPlan_Update_CoordGateExempt_GangWithParkedMember(t *testing.T) {
+	target := updateTarget()
+	member := func(pod *corev1.Pod, runner string) *corev1.Pod {
+		pod.Name += "-" + runner
+		pod.Labels[query.LabelRunner] = runner
+		return pod
+	}
+	bootingWorker := func() *corev1.Pod {
+		pod := enginePod("llama-70b", "prod", 0)
+		pod.Status.Phase = corev1.PodRunning
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name: constants.MainContainerName, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}
+		return member(pod, "worker")
+	}
+	for _, tc := range []struct {
+		name     string
+		strategy types.UpdateStrategyType
+		pods     []*corev1.Pod
+		serving  int32
+		exempt   bool
+		dark     bool
+	}{
+		{name: "worker parked beside a serving leader, recreate", strategy: types.UpdateStrategyRecreatePod,
+			pods: []*corev1.Pod{member(servingEnginePod(0), "leader"), member(wedgedEnginePod(0), "worker")}, serving: 1, exempt: true},
+		{name: "worker parked beside a serving leader, in-place", strategy: types.UpdateStrategyInPlaceIfPossible,
+			pods: []*corev1.Pod{member(servingEnginePod(0), "leader"), member(wedgedEnginePod(0), "worker")}, serving: 1, exempt: true},
+		{name: "worker parked beside a serving leader, surge", strategy: types.UpdateStrategySurgeThenDrain,
+			pods: []*corev1.Pod{member(servingEnginePod(0), "leader"), member(wedgedEnginePod(0), "worker")}, serving: 1, exempt: false},
+		{name: "leader parked beside a serving worker, recreate", strategy: types.UpdateStrategyRecreatePod,
+			pods: []*corev1.Pod{member(wedgedEnginePod(0), "leader"), member(servingEnginePod(0), "worker")}, serving: 1, exempt: true, dark: true},
+		{name: "worker booting beside a serving leader, recreate", strategy: types.UpdateStrategyRecreatePod,
+			pods: []*corev1.Pod{member(servingEnginePod(0), "leader"), bootingWorker()}, serving: 1, exempt: false},
+		{name: "both members serving, recreate", strategy: types.UpdateStrategyRecreatePod,
+			pods: []*corev1.Pod{member(servingEnginePod(0), "leader"), member(servingEnginePod(0), "worker")}, serving: 2, exempt: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := minimalInput(t)
+			forbidMutations(t, &in)
+			in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: 2, ServingPodCount: tc.serving, RunningRevision: crashLoopRepairRevision},
+			}
+			plan := types.ComponentPlan{
+				Component:      types.ComponentEngine,
+				Replicas:       1,
+				UpdateStrategy: types.UpdateStrategy{Type: tc.strategy},
+				Instances: []types.InstancePlan{{Index: 0, Incarnation: 1,
+					Runners: []types.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}},
+			}
+			d := planTargetOrFail(t, in, plan, target, planSnapshot(in, map[int32][]*corev1.Pod{0: tc.pods}))
+			ua := findAction(d, workload.ActionUpdate)
+			if ua == nil || len(ua.Update.Items) != 1 || !ua.Update.Items[0].StartingFresh {
+				t.Fatalf("the off-target gang must be a fresh update start; actions = %v", actionKinds(d))
+			}
+			item := ua.Update.Items[0]
+			if item.CoordGateExempt != tc.exempt || item.ReplacesDarkPodSet != tc.dark {
+				t.Fatalf("CoordGateExempt = %v, ReplacesDarkPodSet = %v, want %v and %v", item.CoordGateExempt, item.ReplacesDarkPodSet, tc.exempt, tc.dark)
 			}
 		})
 	}

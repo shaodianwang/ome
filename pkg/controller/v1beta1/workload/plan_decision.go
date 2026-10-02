@@ -65,8 +65,8 @@ type RestartSelection struct {
 
 	// OpensUnavailability marks the fresh repairs that take serving
 	// capacity offline: a crash-loop repair of a pod set that still
-	// serves. The executor puts exactly those to the unavailability budget
-	// and the coordination gate before they open, so a wedge shared by the
+	// serves. The executor puts exactly those to the per-Component
+	// unavailability budget before they open, so a wedge shared by the
 	// whole Component repairs at the operator's pace instead of recycling
 	// every serving Instance at once.
 	OpensUnavailability bool
@@ -102,9 +102,11 @@ type UpdateItem struct {
 	// continuing one (!types.UpdateContinuation), so it is admitted and charged.
 	StartingFresh bool
 	// CoordGateExempt: the fresh start skips the coordination gate consult
-	// because it takes nothing further offline (types.RecreateOfDarkRow, or
-	// a Ready row whose pod set is provably out of service —
-	// evidence.PodSetServesNothing); the per-Component budget still applies.
+	// because it takes nothing further out of the gate's serving count
+	// (types.RecreateOfDarkRow, a Ready row whose pod set is provably out
+	// of service — evidence.PodSetServesNothing — or one the count already
+	// excludes on a parked member — evidence.PodSetUnavailableOnParkedMember);
+	// the per-Component budget still applies.
 	CoordGateExempt bool
 	// ReplacesDarkPodSet: the fresh start replaces an Instance that serves
 	// nothing (replacesDarkPodSet). Such starts restore capacity rather
@@ -691,10 +693,16 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		}
 		row := input.ObservedState.Instance(inst.Index)
 		startingFresh := !types.UpdateContinuation(row)
+		// The gate's serving count needs every pod of an Instance in
+		// rotation, so a Ready Instance with a member parked is already
+		// inside the gate's unavailability, and a drain-first start on it
+		// skips the consult for its own outage; the per-Component budget
+		// still charges the start when a routed member serves.
+		pods := updateByInstance[inst.Index]
 		gateExempt := types.RecreateOfDarkRow(row, strategy) ||
 			(startingFresh && strategy != types.UpdateStrategySurgeThenDrain &&
 				row != nil && row.Phase == types.InstancePhaseReady &&
-				evidence.PodSetServesNothing(updateByInstance[inst.Index]))
+				(evidence.PodSetServesNothing(pods) || evidence.PodSetUnavailableOnParkedMember(pods, inst.TotalPods())))
 		// The mechanism the start runs on: the shared rule the update op
 		// dispatches on, judged against the same target and the same
 		// recorded running revision (a snapshot read, memoized per revision).
@@ -707,7 +715,7 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 			}
 			recreateFallback = fallback
 		}
-		dark := startingFresh && replacesDarkPodSet(row, updateByInstance[inst.Index])
+		dark := startingFresh && replacesDarkPodSet(row, pods)
 		logf.FromContext(ctx).V(1).Info("update selected",
 			"component", plan.Component, "instance", inst.Index, "target", target.Name,
 			"startingFresh", startingFresh, "coordGateExempt", gateExempt, "recreateFallback", recreateFallback,

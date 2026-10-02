@@ -309,3 +309,60 @@ func TestPodSetServesNothing_GangServesThroughItsLeader(t *testing.T) {
 		})
 	}
 }
+
+// TestPodSetUnavailableOnParkedMember: a set is out of the gate's serving
+// count on a parked member only when a live pod is parked and fewer than
+// desired pods serve, whichever member is parked. A member that is merely
+// booting, a set fully in rotation, a parked pod that is deleting or
+// terminal, and a parked pod beside enough serving pods all keep the set
+// in the count.
+func TestPodSetUnavailableOnParkedMember(t *testing.T) {
+	hash := query.RevisionFromName(clRevision).Hash()
+	runner := func(pod *corev1.Pod, name string) *corev1.Pod {
+		pod.Labels = map[string]string{query.LabelRevisionHash: hash, query.LabelRunner: name}
+		return pod
+	}
+	servingLeader := runner(servingPod("engine-0-leader-0"), "leader")
+	wedgedLeader := runner(crashLoopPod("engine-0-leader-0", 10*time.Minute, hash), "leader")
+	servingWorker := runner(servingPod("engine-0-worker-0"), "worker")
+	wedgedWorker := runner(crashLoopPod("engine-0-worker-0", 10*time.Minute, hash), "worker")
+	bootingWorker := runner(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "engine-0-worker-0"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "main",
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+		},
+	}, "worker")
+	deletingWorker := runner(crashLoopPod("engine-0-worker-0", 10*time.Minute, hash), "worker")
+	ts := metav1.NewTime(tNow)
+	deletingWorker.DeletionTimestamp = &ts
+	terminalWorker := runner(crashLoopPod("engine-0-worker-0", 10*time.Minute, hash), "worker")
+	terminalWorker.Status.Phase = corev1.PodFailed
+
+	for _, tc := range []struct {
+		name    string
+		pods    []*corev1.Pod
+		desired int32
+		want    bool
+	}{
+		{name: "worker parked beside a serving leader", pods: []*corev1.Pod{servingLeader, wedgedWorker}, desired: 2, want: true},
+		{name: "leader parked beside a serving worker", pods: []*corev1.Pod{wedgedLeader, servingWorker}, desired: 2, want: true},
+		{name: "both members parked", pods: []*corev1.Pod{wedgedLeader, wedgedWorker}, desired: 2, want: true},
+		{name: "single parked pod", pods: []*corev1.Pod{wedgedLeader}, desired: 1, want: true},
+		{name: "worker booting beside a serving leader", pods: []*corev1.Pod{servingLeader, bootingWorker}, desired: 2, want: false},
+		{name: "both members serving", pods: []*corev1.Pod{servingLeader, servingWorker}, desired: 2, want: false},
+		{name: "parked worker is deleting", pods: []*corev1.Pod{servingLeader, deletingWorker}, desired: 2, want: false},
+		{name: "parked worker is terminal", pods: []*corev1.Pod{servingLeader, terminalWorker}, desired: 2, want: false},
+		{name: "parked pod beside enough serving pods", pods: []*corev1.Pod{servingLeader, servingWorker, wedgedWorker}, desired: 2, want: false},
+		{name: "no pods", pods: nil, desired: 2, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := evidence.PodSetUnavailableOnParkedMember(tc.pods, tc.desired); got != tc.want {
+				t.Fatalf("PodSetUnavailableOnParkedMember = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

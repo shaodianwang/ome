@@ -696,13 +696,14 @@ func RunnerRestartedSinceReady(pod *corev1.Pod, readySince *metav1.Time) (string
 //
 // The repair is a Restart, not a Failed stamp: the pod set can be
 // rebuilt. Routing it through the restart pass means a rebuild that
-// takes a serving pod offline is admitted the way any such attempt is —
-// the per-Component unavailability budget and the cross-Component
-// coordination gate must both admit it before it opens — while a rebuild
-// of a pod set that serves nothing removes no serving capacity and is
-// admitted by neither. The RetryBlock recorded against the revision
-// denies either once the attempts are spent, so a revision that keeps
-// crash-looping is held rather than recycled forever.
+// takes a serving pod offline is admitted by the per-Component
+// unavailability budget before it opens, while a rebuild of a pod set
+// that serves nothing removes no serving capacity and is not. The
+// coordination gate is not asked either way: the parked member that
+// makes the wedge already puts the Instance inside the gate's
+// serving-based unavailability. The RetryBlock recorded against the
+// revision denies either once the attempts are spent, so a revision that
+// keeps crash-looping is held rather than recycled forever.
 
 // crashLoopRepairReason reports whether this row holds a crash-loop
 // wedge the restart pass may repair: the wedge itself is
@@ -739,11 +740,11 @@ func RestartOpensRepair(input workload.ReconcileInput, inst workload.InstancePla
 
 // RestartOpensUnavailability reports whether a restart selection for
 // inst would OPEN a fresh crash-loop repair this pass that takes serving
-// capacity offline. Only such an open is put to the unavailability budget
-// and the coordination gate: a wedged pod set that serves nothing
+// capacity offline. Only such an open is put to the per-Component
+// unavailability budget: a wedged pod set that serves nothing
 // (evidence.PodSetServesNothing, the reading the update pass makes for a
-// dark row) removes no serving capacity, so its rebuild is admitted and
-// charged by neither layer.
+// dark row) removes no serving capacity, so its rebuild is neither
+// admitted nor charged.
 func RestartOpensUnavailability(input workload.ReconcileInput, inst workload.InstancePlan, instancePods []*corev1.Pod) bool {
 	return RestartOpensRepair(input, inst, instancePods) && !evidence.PodSetServesNothing(instancePods)
 }
