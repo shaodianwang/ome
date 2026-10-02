@@ -763,11 +763,9 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// pace of the slower one.
 		for _, g := range canaryGroups {
 			out, err := canary.Dispatch(ctx, canary.DispatchDeps{
-				ISVC:   isvc,
-				Client: r.Client,
-				// The crash reading decodes per-Instance rows, so the live
-				// reader carries the configured row decoder.
-				Reader:                   irstatus.NewReader(r.APIReader, r.InstanceStatusDecoder),
+				ISVC:                     isvc,
+				Client:                   r.Client,
+				Reader:                   r.APIReader,
 				Recorder:                 r.Recorder,
 				Sampler:                  r.CanarySampler,
 				BundledPrometheusAddress: analysisConfig.BundledPrometheusAddress,

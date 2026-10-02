@@ -26,7 +26,4 @@ const (
 	// no retained ControllerRevision for the stable revision and parks Failed
 	// instead of reporting a revert that cannot happen.
 	EventReasonCanaryStableRevisionMissing = "CanaryStableRevisionMissing"
-	// EventReasonCanaryPodCrashed is recorded when a canary pod dies after its
-	// Instance was serving and the ladder parks at its step, naming the pod.
-	EventReasonCanaryPodCrashed = "CanaryPodCrashed"
 )

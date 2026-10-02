@@ -19,7 +19,6 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/rollout"
 	"github.com/ome-projects/ome/pkg/utils"
@@ -251,7 +250,6 @@ func Dispatch(ctx context.Context, d DispatchDeps) (Outcome, error) {
 		GroupTotalPerRevisionPods: groupPods,
 		GroupStableRevisionHashes: groupStable,
 		GroupReadyPerRevisionPods: readyRev,
-		Crash:                     canaryCrash(d.ISVC, d.Group, primary, revisions, secondaryObserved, observedPods, now),
 		SecondaryCapacityReady:    secondaryReady,
 		Secondaries:               secondaries,
 		Now:                       now,
@@ -653,9 +651,6 @@ type observedCanaryRevisions struct {
 	currentHash string
 	targetHash  string
 	runners     []v1beta1.Runner
-	// rows are the IR's per-Instance rows in the dense shape, the anchors
-	// the crash reading needs; empty when the observation is not an IR's.
-	rows        []v1beta1.OMENativeInstanceStatus
 	fromIR      bool
 	statusFresh bool
 }
@@ -731,15 +726,11 @@ func (r observedCanaryRevisions) readyTargetInstanceCount(pods []*corev1.Pod) *i
 // population, whose new-revision pods can precede the IR status update. A
 // missing IR or empty revision pair is not authoritative and leaves statusFresh
 // false so the caller waits without mutating rollout state.
-//
-// The per-Instance rows are decoded with the decoder the reader carries, so
-// the crash reading has each Instance's entry into Ready; a payload that
-// cannot be decoded is an error, as it is for every reader of the rows.
 func observeCanaryRevisions(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, c v1beta1.ComponentType) (observedCanaryRevisions, error) {
 	if reads != nil {
 		ir := &v1beta1.InferenceReplica{}
 		key := types.NamespacedName{Namespace: isvc.Namespace, Name: irprojector.InferenceReplicaName(isvc.Name, c)}
-		switch _, err := irstatus.GetDecoded(ctx, reads, key, ir); {
+		switch err := reads.Get(ctx, key, ir); {
 		case err == nil:
 			currentHash := query.RevisionFromName(ir.Status.CurrentRevision).Hash()
 			targetHash := query.RevisionFromName(ir.Status.UpdateRevision).Hash()
@@ -752,7 +743,6 @@ func observeCanaryRevisions(ctx context.Context, reads client.Reader, isvc *v1be
 					currentHash: currentHash,
 					targetHash:  targetHash,
 					runners:     ir.Spec.Runners,
-					rows:        ir.Status.InstanceStatuses,
 					fromIR:      true,
 					statusFresh: false,
 				}, nil
@@ -762,7 +752,6 @@ func observeCanaryRevisions(ctx context.Context, reads client.Reader, isvc *v1be
 					currentHash: currentHash,
 					targetHash:  targetHash,
 					runners:     ir.Spec.Runners,
-					rows:        ir.Status.InstanceStatuses,
 					fromIR:      true,
 					statusFresh: true,
 				}, nil
@@ -772,27 +761,6 @@ func observeCanaryRevisions(ctx context.Context, reads client.Reader, isvc *v1be
 		}
 	}
 	return observedCanaryRevisions{}, nil
-}
-
-// canaryCrash reads the unit for a canary pod that died after it served,
-// the primary first and then each secondary the run retargeted, against the
-// primary's step anchor. The first one found is the unit's verdict.
-func canaryCrash(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup, primary v1beta1.ComponentType, primaryObserved observedCanaryRevisions, secondaryObserved map[v1beta1.ComponentType]observedCanaryRevisions, pods map[v1beta1.ComponentType][]*corev1.Pod, now time.Time) *CanaryCrash {
-	since := crashAnchor(rollout.CanaryStatusFor(&isvc.Status, primary), now)
-	if memberRetargeted(isvc, primary) {
-		if crash := crashedCanaryPod(primary, primaryObserved, pods[primary], since); crash != nil {
-			return crash
-		}
-	}
-	for _, comp := range configuredComponents(g) {
-		if comp == primary || !memberRetargeted(isvc, comp) {
-			continue
-		}
-		if crash := crashedCanaryPod(comp, secondaryObserved[comp], pods[comp], since); crash != nil {
-			return crash
-		}
-	}
-	return nil
 }
 
 // primaryComponentOf is the externally-routed Component the canary group drives

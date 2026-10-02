@@ -737,9 +737,6 @@ func TestInferenceReplicaStatusReadInventory(t *testing.T) {
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/ratio.go", "GateContext.CheckSurge", read(1), decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/sequential_gate.go", "observeSequentialComponentsForGate", read(1), decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go", "buildComponentObservation", read(2), decodedObjectRows, rows)
-	// The canary dispatcher reads each member's rows through the decoded
-	// accessor to anchor a canary pod's death at its Instance's entry into Ready.
-	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/dispatch.go", "observeCanaryRevisions", read(2), decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/placement/admission.go", "admittedReplicaCount", read(2), decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/placement/admission.go", "componentHasAdmittedInstance", read(1), decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/placement/member_admission.go", "verifiedMemberAdmission", accessCounts{reads: 1, readWrites: 1}, decodedObjectRows+" (filters admission on a deep copy; never persists rows)", rows)
@@ -819,6 +816,7 @@ func TestInferenceReplicaFetchInventory(t *testing.T) {
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector/irstatus_read.go", "ComponentIR", "Get", 1, passThroughTopLevelStatus+" (raw accessor for callers that inspect no rows)")
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector/status.go", "aggregateOneComponent", "Get", 1, passThroughTopLevelStatus+" (counters, revisions, RolloutHold, Conditions mirrored onto the ISVC)")
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector/projector.go", "EnsureInferenceReplica", "Get", 1, passThroughSpecMetadata+" (spec projection)")
+	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/dispatch.go", "observeCanaryRevisions", "Get", 1, passThroughTopLevelStatus+" (revision pointers)")
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/dispatch.go", "reconcileRollbackSignal", "Get", 1, passThroughTopLevelStatus+" (revision pointers and observedGeneration)")
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/observe.go", "observeGroupTargets", "Get", 1, passThroughTopLevelStatus+" (revision pointers and replica counters)")
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/pdb/cutover.go", "OMENativeCutoverReady", "Get", 1, passThroughTopLevelStatus+" (ready and available counters)")
