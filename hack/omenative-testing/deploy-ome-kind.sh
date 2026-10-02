@@ -26,6 +26,9 @@
 #   OME_EVAL_FORCE_DELETE  set the controller's lifecycle.forceDelete policy (default: false)
 #   OME_EVAL_FORCE_DELETE_THRESHOLD  its nodeUnreachableThreshold (default: 90s)
 #   OME_EVAL_FORCE_DELETE_SLACK  its overdueSlack             (default: 30s)
+#   OME_EVAL_CONTROL_PLANE_PRIORITY_CLASS  PriorityClass stamped on every
+#                      Deployment in OME_NAMESPACE (default: fixture value)
+#   OME_EVAL_CONTROL_PLANE_PRIORITY  its value (default: fixture value)
 #
 # Images are built locally and loaded into the cluster's nodes, never pushed.
 # global.hub is set empty so the chart renders bare `ome-manager:<tag>` /
@@ -119,6 +122,17 @@ METRICS_IMAGE="$(python3 "$RENDER" --kind --value OME_EVAL_METRICS_IMAGE)"
 # chart is installed below.
 SCHEDULER_NAME="$(python3 "$RENDER" --kind --value OME_EVAL_SCHEDULER)"
 SCHEDULER_BUILD_IMAGE="ome-scheduler:${BUILD_TAG}"
+# The harness's preempt cases press on a node with a pod one notch above the
+# case's pods, and the scheduler takes the lowest pods no disruption budget
+# covers first: the control plane must outrank that press or it is the
+# victim. The class comes from the fixtures (the harness reads the same
+# value), is created before the controller lands and is stamped on every
+# Deployment this script installs into the OME namespace.
+CONTROL_PLANE_CLASS="$(python3 "$RENDER" --kind --value OME_EVAL_CONTROL_PLANE_PRIORITY_CLASS)"
+[ -n "$CONTROL_PLANE_CLASS" ] || {
+  echo "FATAL: runtime renderer returned an empty control-plane PriorityClass name" >&2
+  exit 1
+}
 # The gang scheduler pins every gang to a topology domain and treats a gang
 # without one as unresolvable. KIND nodes carry no domain label, so the whole
 # cluster is labeled as one domain and the scheduler falls back to that key.
@@ -240,6 +254,33 @@ wait_for_crd_established() {
       return 1
     fi
     sleep 3
+  done
+}
+
+# Stamp the control-plane PriorityClass on every Deployment in the OME
+# namespace. Idempotent: a template that already names the class is left as
+# it is, so the second call (after the converge pass and the scheduler
+# install) rolls nothing that the first already rolled.
+set_control_plane_priority() {
+  local deploy
+  for deploy in $(kubectl --context "$KCTX" -n "$OME_NS" get deployments -o name); do
+    kubectl --context "$KCTX" -n "$OME_NS" patch "$deploy" --type=merge \
+      -p "{\"spec\":{\"template\":{\"spec\":{\"priorityClassName\":\"${CONTROL_PLANE_CLASS}\"}}}}"
+  done
+}
+
+# Every Deployment in the OME namespace has rolled onto a template that names
+# the class; a deploy that leaves one below the harness's press is wrong.
+verify_control_plane_priority() {
+  local deploy have
+  for deploy in $(kubectl --context "$KCTX" -n "$OME_NS" get deployments -o name); do
+    kubectl --context "$KCTX" -n "$OME_NS" rollout status "$deploy" --timeout=300s
+    have="$(kubectl --context "$KCTX" -n "$OME_NS" get "$deploy" \
+      -o jsonpath='{.spec.template.spec.priorityClassName}')"
+    [ "$have" = "$CONTROL_PLANE_CLASS" ] || {
+      echo "FATAL: ${deploy} runs under PriorityClass '${have:-<none>}', not ${CONTROL_PLANE_CLASS}" >&2
+      exit 1
+    }
   done
 }
 
@@ -420,6 +461,13 @@ helm upgrade --install ome-crd charts/ome-crd/ \
   --set ome.rolloutPolicy.enabled=true \
   --wait --timeout 180s
 
+# Staged in a file: a retried apply must read the manifest again.
+echo "--- create the control-plane PriorityClass ${CONTROL_PLANE_CLASS} ---"
+control_plane_class_file="$(mktemp "${TMPDIR:-/tmp}/ome-control-plane-class.XXXXXX")"
+python3 "$RENDER" --kind --control-plane-priority-class >"$control_plane_class_file"
+apply_with_retry -f "$control_plane_class_file"
+rm -f -- "$control_plane_class_file"
+
 if [ "$OFFLINE" -eq 1 ]; then
   echo "--- install PodGroup CRD ---"
   apply_with_retry -f "${EVAL_DIR}/podgroup-crd.yaml"
@@ -475,6 +523,10 @@ fi
 # configuration and Certificate; the second converges once the webhook answers.
 echo "    pass 1: land the deployment and webhook plumbing"
 helm upgrade --install ome charts/ome-resources/ "${HELM_ARGS[@]}" --wait=false || true
+
+# Before the first rollout is waited on, so the controller rolls once.
+echo "--- raise the control plane to ${CONTROL_PLANE_CLASS} ---"
+set_control_plane_priority
 
 echo "--- wait for the controller to become available ---"
 kubectl --context "$KCTX" -n "$OME_NS" rollout status \
@@ -550,6 +602,12 @@ if [ -n "$SCHEDULER_NAME" ]; then
     --set scheduler.resources.limits.memory=1Gi \
     --wait --timeout 300s
 fi
+
+# The converge pass keeps the class (Helm leaves a field its chart never
+# names alone) and the scheduler arrives without it; stamp again and check.
+echo "--- verify the control plane runs under ${CONTROL_PLANE_CLASS} ---"
+set_control_plane_priority
+verify_control_plane_priority
 
 echo "--- side-load the fixture images ---"
 if [ "$OFFLINE" -eq 1 ]; then

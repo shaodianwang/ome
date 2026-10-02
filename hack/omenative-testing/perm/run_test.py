@@ -8766,7 +8766,9 @@ class PreemptFaultTest(unittest.TestCase):
         self.assertTrue(any("pause=" in e for e in self._errs(self.KILL + " via=preempt lift=never pause=true")))
 
     def test_capability_needs_an_owned_cluster_and_the_priority_api(self):
-        with mock.patch.object(run, "_node_fault_capability", lambda: None), mock.patch.object(run, "_api_served", lambda p: True):
+        # The class apply succeeds and the OME namespace runs no pod below it.
+        with mock.patch.object(run, "_node_fault_capability", lambda: None), mock.patch.object(run, "_api_served", lambda p: True), \
+                mock.patch.object(run, "kubectl", lambda *a, **k: _Resp('{"items": []}')):
             self.assertIsNone(run._fault_capability("preempt"))
         with mock.patch.object(run, "_node_fault_capability", lambda: "not a KIND cluster it owns"):
             self.assertIn("owns", run._fault_capability("preempt"))
@@ -8850,9 +8852,11 @@ class PreemptFaultTest(unittest.TestCase):
             return subprocess.CompletedProcess(a, 0, "", "")
         free = {"kind-worker": 1000, "kind-worker2": 2000}
         target = {"spec": {"containers": [{"resources": {"requests": {"cpu": "50m"}}}]}}
-        with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_get_pod", lambda n: target), \
+        with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_get_pod", lambda n, ns=run.NS: target), \
                 mock.patch.object(run, "_eligible_nodes", lambda: ["kind-worker", "kind-worker2"]), \
-                mock.patch.object(run, "_node_cpu_free", lambda n: free[n]), mock.patch.object(run, "_pod_bound", lambda n: "bound"), \
+                mock.patch.object(run, "_node_pods", lambda n: []), mock.patch.object(run, "_control_plane_pods", lambda: []), \
+                mock.patch.object(run, "_node_cpu_free", lambda n, items=None: free[n]), \
+                mock.patch.object(run, "_pod_bound", lambda n: "bound"), \
                 mock.patch.object(run, "_fixture_values", lambda: {"OME_EVAL_NGINX_IMAGE": "nginx:test"}):
             run._preempt_fill(f, "e0", "kind-worker", pod_state)
         self.assertIsNone(f["infra_fail"])
@@ -8914,18 +8918,20 @@ class PreemptFaultTest(unittest.TestCase):
         marked = {"status": {"conditions": [{"type": "DisruptionTarget", "reason": "PreemptionByScheduler"}]},
                   "metadata": {"deletionTimestamp": "t"}}
         live = {"status": {"conditions": []}, "metadata": {}}
-        with mock.patch.object(run, "_get_pod", lambda n: marked):
+        with mock.patch.object(run, "_get_pod", lambda n, ns=run.NS: marked):
             self.assertTrue(run._pod_preempted("e0"))
-        with mock.patch.object(run, "_get_pod", lambda n: live):
+        with mock.patch.object(run, "_get_pod", lambda n, ns=run.NS: live):
             self.assertFalse(run._pod_preempted("e0"))
         calls = []
 
         def kubectl(*a, **k):
             calls.append(a)
             return subprocess.CompletedProcess(a, 0, json.dumps({"items": [{"reason": "Preempted"}]}), "")
-        with mock.patch.object(run, "_get_pod", lambda n: None), mock.patch.object(run, "kubectl", kubectl):
+        with mock.patch.object(run, "_get_pod", lambda n, ns=run.NS: None), mock.patch.object(run, "kubectl", kubectl):
             self.assertTrue(run._pod_preempted("e0"))
+            self.assertTrue(run._pod_preempted("m0", ns="ome"))
         self.assertIn("involvedObject.kind=Pod,involvedObject.name=e0,reason=Preempted", calls[0])
+        self.assertEqual(("-n", "ome"), calls[1][:2], "a control-plane pod's record is read in its own namespace")
 
     def test_lift_and_cleanup_drop_fillers_and_the_class_once(self):
         f = self._armed()
@@ -11694,3 +11700,255 @@ class BrokenScaleOnTheWindowTest(unittest.TestCase):
         self.assertEqual({"4": (True, True)}, run._broken_new_instances(ctx, "engine", pre))
         self.assertEqual({"0": (True, True), "4": (True, True)}, run._broken_new_instances(ctx, "engine", set(alive_at_the_scale)),
                          "read off the alive pods alone, the rebuilt Instance passes for a new one")
+
+class PressSparesTheControlPlaneTest(unittest.TestCase):
+    """The press of a preempt case can take a pod of the case and nothing
+    else. The class the fixtures name for the OME control plane sits above
+    the press and preempts nothing; the capability check creates it and reads
+    the control plane's priority; the arm keeps the press below it; the fill
+    refuses to press while another pod on the node would go first; a
+    control-plane pod the scheduler preempts anyway fails the case as
+    apparatus; the pending snapshot names each pod's conditions."""
+
+    CP = runtime_fixtures.control_plane_priority_class(runtime_fixtures.resolve(kind=True))
+
+    @staticmethod
+    def _pod(name, ns, cpu=None, priority=0, phase="Running", labels=None, owner="ReplicaSet"):
+        container = {"name": "c", "resources": {"requests": {"cpu": cpu}} if cpu else {}}
+        return {"metadata": {"name": name, "namespace": ns, "uid": f"uid-{name}", "labels": labels or {},
+                             "ownerReferences": [{"kind": owner, "name": "owner"}] if owner else []},
+                "spec": {"priority": priority, "containers": [container]},
+                "status": {"phase": phase}}
+
+    def test_the_control_plane_class_outranks_the_press_and_preempts_nothing(self):
+        press = run._filler_manifest("perm-p1-press", "p1", "worker-1", 550, "perm-p1-preempt")
+        self.assertEqual("perm-p1-preempt", press["spec"]["priorityClassName"])
+        self.assertEqual("PriorityClass", self.CP["kind"])
+        self.assertEqual("Never", self.CP["preemptionPolicy"], "a restarted manager waits for room as before")
+        self.assertFalse(self.CP["globalDefault"])
+        self.assertNotIn("perm.test/fault", self.CP["metadata"]["labels"],
+                         "batch.py's sweep deletes the press classes by that label and must spare this one")
+        self.assertIn(runtime_fixtures.CONTROL_PLANE_CLASS_LABEL, self.CP["metadata"]["labels"])
+        self.assertEqual(self.CP["metadata"]["name"], runtime_fixtures.resolved_value(
+            "OME_EVAL_CONTROL_PLANE_PRIORITY_CLASS", kind=True))
+
+    def test_arm_keeps_the_press_one_notch_above_the_case_and_below_the_control_plane(self):
+        case_pods = {"items": [self._pod("p1-engine-0-default-0", "sandbox", cpu="50m",
+                                         labels={"ome.io/inferenceservice": "p1"})]}
+        state = {"cp": [self._pod("ome-controller-manager-abc", "ome", cpu="500m", priority=self.CP["value"])]}
+        applied = []
+
+        def kubectl(*args, **kw):
+            if args[:1] == ("apply",):
+                applied.append(json.loads(kw["input"]))
+                return _Resp("ok")
+            if "ome.io/inferenceservice=p1" in args:
+                return _Resp(json.dumps(case_pods))
+            if args[:4] == ("-n", run.CTRL_NS, "get", "pods"):
+                return _Resp(json.dumps({"items": state["cp"]}))
+            return _Resp("{}")
+        with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_FAULT_CLEANUPS", []), \
+                contextlib.redirect_stdout(io.StringIO()):
+            f = {"case_id": "p1", "notes": [], "infra_fail": None}
+            ok, msg = run._fault_preempt_arm(f, "p1")
+            self.assertTrue(ok, msg)
+            self.assertEqual((1, 1), (f["pc_value"], applied[-1]["value"]), "one notch above the case's pods")
+            self.assertLess(f["pc_value"], self.CP["value"])
+            state["cp"] = [self._pod("ome-controller-manager-abc", "ome", cpu="500m", priority=0)]
+            g = {"case_id": "p1", "notes": [], "infra_fail": None}
+            ok, _msg = run._fault_preempt_arm(g, "p1")
+        self.assertFalse(ok)
+        self.assertIn("could take a control-plane pod", g["infra_fail"])
+        self.assertEqual(1, len(applied), "no press class for a press that would outrank the control plane")
+
+    def test_press_exposed_names_only_the_pods_the_press_would_take(self):
+        items = [
+            self._pod("ome-controller-manager-abc", "ome", cpu="500m"),
+            self._pod("ome-prometheus-abc", "ome", cpu="100m", priority=self.CP["value"]),
+            self._pod("cert-manager-abc", "cert-manager"),
+            self._pod("seed-abc", "sandbox", cpu="100m", phase="Succeeded", owner="Job"),
+            self._pod("p1-engine-0-default-0", "sandbox", cpu="50m", labels={"ome.io/inferenceservice": "p1"}),
+            self._pod("p2-engine-0-default-0", "sandbox", cpu="50m", labels={"ome.io/inferenceservice": "p2"}),
+        ]
+        self.assertEqual([("ome/ome-controller-manager-abc", 0, 500), ("sandbox/p2-engine-0-default-0", 0, 50)],
+                         run._press_exposed(items, "p1", 1),
+                         "below the press and requesting CPU: the manager and another case's pod; not the pod above "
+                         "the press, the pod with no requests, the finished pod or the case's own")
+        self.assertEqual([], run._press_exposed(items, "p1", 0), "nothing sits below a press at the case's own priority")
+
+    def test_capability_creates_the_class_and_reads_the_control_planes_priority(self):
+        state = {"cp": [self._pod("ome-controller-manager-abc", "ome", cpu="500m", priority=self.CP["value"])],
+                 "apply_rc": 0}
+        applied = []
+
+        def kubectl(*args, **kw):
+            if args[:1] == ("apply",):
+                applied.append(json.loads(kw["input"]))
+                return _Resp("", state["apply_rc"], "forbidden")
+            if args[:4] == ("-n", run.CTRL_NS, "get", "pods"):
+                return _Resp(json.dumps({"items": state["cp"]}))
+            return _Resp("{}")
+        with mock.patch.object(run, "_node_fault_capability", lambda: None), \
+                mock.patch.object(run, "_api_served", lambda p: True), mock.patch.object(run, "kubectl", kubectl):
+            self.assertIsNone(run._preempt_capability())
+            self.assertEqual([self.CP], applied, "the class is created when absent, from the fixtures' definition")
+            state["cp"] = [self._pod("ome-controller-manager-abc", "ome", cpu="500m", priority=0),
+                           self._pod("ome-prometheus-abc", "ome", cpu="100m", priority=self.CP["value"]),
+                           self._pod("ome-coordtest-noop-meta-abc", "ome", cpu="100m", priority=0, owner="Job")]
+            below = run._preempt_capability()
+            state["apply_rc"] = 1
+            refused = run._preempt_capability()
+        self.assertIn("ome/ome-controller-manager-abc runs at priority 0", below)
+        self.assertIn(self.CP["metadata"]["name"], below)
+        self.assertNotIn("ome-prometheus", below)
+        self.assertNotIn("meta", below, "a Job's pod is not the control plane")
+        self.assertIn("cannot be created", refused)
+
+    def _fill(self, node_items, cp_items):
+        f = {"case_id": "p1", "notes": [], "infra_fail": None, "fillers": [], "pc_name": "perm-p1-preempt", "pc_value": 1}
+        case_pod = self._pod("p1-engine-0-default-0", "sandbox", cpu="50m", labels={"ome.io/inferenceservice": "p1"})
+        pod_state = {"p1-engine-0-default-0": {"alive": True, "comp": "engine", "inst": "0", "ready": True,
+                                               "serving": True, "node": "worker-1"}}
+        created = []
+        with mock.patch.object(run, "_get_pod", lambda name, ns=run.NS: case_pod), \
+                mock.patch.object(run, "_eligible_nodes", lambda: ["worker-1", "worker-2"]), \
+                mock.patch.object(run, "_preempt_block_node", lambda f, node: (True, f"filler holds {node}")), \
+                mock.patch.object(run, "_node_pods", lambda node: node_items + [case_pod]), \
+                mock.patch.object(run, "_node_cpu_free", lambda node, items=None: 200), \
+                mock.patch.object(run, "_control_plane_pods", lambda: cp_items), \
+                mock.patch.object(run, "_filler_create",
+                                  lambda f, name, node, cpu, pc="": created.append((name, node, cpu, pc)) or (True, "")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            run._preempt_fill(f, "p1-engine-0-default-0", "worker-1", pod_state)
+        return f, created
+
+    def test_fill_refuses_to_press_while_another_pod_on_the_node_would_go_first(self):
+        manager = self._pod("ome-controller-manager-abc", "ome", cpu="500m")
+        f, created = self._fill([manager], [manager])
+        self.assertIn("would take ome/ome-controller-manager-abc (priority 0, 500m) before any pod of the case",
+                      f["infra_fail"])
+        self.assertEqual([], created, "no press was created")
+        self.assertIsNone(f.get("press_pod"))
+
+    def test_fill_presses_the_aimed_node_and_remembers_the_control_plane(self):
+        manager = self._pod("ome-controller-manager-abc", "ome", cpu="500m", priority=self.CP["value"])
+        f, created = self._fill([manager, self._pod("cert-manager-abc", "cert-manager")], [manager])
+        self.assertIsNone(f["infra_fail"])
+        self.assertEqual([("perm-p1-press", "worker-1", 250, "perm-p1-preempt")], created,
+                         "the node's spare CPU plus the aimed pod's own, under the press class")
+        self.assertEqual({"ome-controller-manager-abc": "uid-ome-controller-manager-abc"}, f["cp_pods"])
+
+    def _after_fire(self):
+        return {"case_id": "p1", "notes": [], "infra_fail": None, "aim_node": "worker-1",
+                "cp_pods": {"ome-controller-manager-abc": "uid-1"}, "preempted": [], "not_victim": set(),
+                "pre_alive": {"p1-engine-0-default-0": {"comp": "engine", "inst": "0", "serving": True}}}
+
+    def test_a_preempted_control_plane_pod_fails_the_case_as_apparatus(self):
+        gone = {"ome-controller-manager-abc"}
+
+        def kubectl(*args, **_kw):
+            if "pod" in args:
+                name = args[args.index("pod") + 1]
+                return _Resp("", 1, "not found") if name in gone else _Resp(json.dumps(self._pod(name, "ome")))
+            if "events" in args:
+                selector = args[args.index("--field-selector") + 1]
+                hit = "ome-controller-manager-abc" in selector and "reason=Preempted" in selector
+                return _Resp(json.dumps({"items": [{"reason": "Preempted"}] if hit else []}))
+            return _Resp("{}")
+        f = self._after_fire()
+        alive = {"p1-engine-0-default-0": {"alive": True, "comp": "engine", "inst": "0"}}
+        with mock.patch.object(run, "kubectl", kubectl), contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(run._preempt_victim(f, alive))
+        self.assertIn("preempted the OME control-plane pod ome/ome-controller-manager-abc for the press on worker-1",
+                      f["infra_fail"])
+        self.assertIn(self.CP["metadata"]["name"], f["infra_fail"])
+        self.assertEqual("ome-controller-manager-abc", f["cp_hit"])
+        notes, checks = [], []
+        self.assertEqual("INFRA-FAIL", run._fault_finalize(dict(f, kind="preempt", fired=True, param="rotating"),
+                                                           "PASS", notes, checks))
+        self.assertTrue(any("INFRA-FAIL (fault apparatus)" in c for c in checks))
+
+    def test_a_control_plane_still_running_is_no_apparatus_failure(self):
+        f = self._after_fire()
+
+        def kubectl(*args, **_kw):
+            if "pod" in args:
+                return _Resp(json.dumps(self._pod(args[args.index("pod") + 1], "ome")))
+            self.fail(f"no event is read while the pod is live: {args}")
+        with mock.patch.object(run, "kubectl", kubectl):
+            self.assertFalse(run._preempt_apparatus_hit(f))
+        self.assertIsNone(f["infra_fail"])
+
+    def test_pending_checks_leave_an_apparatus_failure_to_the_finalizer(self):
+        f = {"kind": "preempt", "infra_fail": "preempt: the scheduler preempted the OME control-plane pod ome/m",
+             "notes": [], "fired": True, "param": "rotating", "cause": "the fillers"}
+        out = {"bitten_at": None, "row": None, "failed": [], "lifted_at": None, "waiting_at_end": False}
+        notes, checks = [], []
+        verdict = run._pending_checks(f, "never", "APPARATUS", out, {"N": {}}, ["engine"], {}, "PASS", notes, checks)
+        self.assertEqual(("PASS", [], []), (verdict, notes, checks), "no product finding is recorded over a broken press")
+
+    def test_pending_pod_lines_carry_the_scheduling_conditions(self):
+        now = run._event_epoch("2026-10-01T10:06:00Z")
+        pending = {"metadata": {"name": "p7469-engine-1-default-0", "creationTimestamp": "2026-10-01T10:00:00Z",
+                                "labels": {"scheduling.x-k8s.io/pod-group": "p7469-engine-1"}},
+                   "spec": {"priority": 0, "schedulingGates": [{"name": "example.com/gang"}]},
+                   "status": {"phase": "Pending", "conditions": [
+                       {"type": "PodScheduled", "status": "False", "reason": "Unschedulable",
+                        "message": "0/3 nodes are available: 2 Insufficient cpu."}]}}
+        silent = {"metadata": {"name": "p7469-engine-1-default-1", "creationTimestamp": "2026-10-01T10:00:00Z"},
+                  "spec": {}, "status": {"phase": "Pending"}}
+        leaving = {"metadata": {"name": "p7469-engine-0-default-0", "creationTimestamp": "2026-10-01T09:50:00Z",
+                                "deletionTimestamp": "2026-10-01T10:05:00Z"},
+                   "spec": {"nodeName": "worker-1", "priority": 0},
+                   "status": {"phase": "Running", "conditions": [{"type": "PodScheduled", "status": "True"},
+                                                                 {"type": "Ready", "status": "True"}]}}
+        lines = run._pending_pod_lines([silent, pending, leaving], now)
+        self.assertEqual("p7469-engine-0-default-0  Running  node=worker-1  priority=0  age=960s  deleting  "
+                         "PodScheduled=True  Ready=True", lines[0])
+        self.assertEqual("p7469-engine-1-default-0  Pending  node=-  priority=0  age=360s  "
+                         "PodScheduled=False/Unschedulable: 0/3 nodes are available: 2 Insufficient cpu.  Ready=-  "
+                         "gates=example.com/gang  pod-group=p7469-engine-1", lines[1])
+        self.assertEqual("p7469-engine-1-default-1  Pending  node=-  priority=0  age=360s  PodScheduled=-  Ready=-",
+                         lines[2], "a pod no scheduler has looked at carries neither condition")
+
+    def test_pending_event_lines_keep_the_case_and_the_window_and_name_the_reporter(self):
+        events = [
+            {"involvedObject": {"kind": "Pod", "name": "p7469-engine-1-default-0"}, "reason": "FailedScheduling",
+             "message": "0/3 nodes", "lastTimestamp": "2026-10-01T10:03:00Z", "reportingComponent": "ome-scheduler"},
+            {"involvedObject": {"kind": "Pod", "name": "p7469-engine-1-default-0"}, "reason": "Scheduled",
+             "message": "before", "lastTimestamp": "2026-10-01T09:30:00Z", "source": {"component": "default-scheduler"}},
+            {"involvedObject": {"kind": "Pod", "name": "p74690-engine-0-default-0"}, "reason": "FailedScheduling",
+             "message": "another case", "lastTimestamp": "2026-10-01T10:03:00Z"},
+            {"involvedObject": {"kind": "InferenceService", "name": "p7469"}, "reason": "Rolling",
+             "message": "not a pod", "lastTimestamp": "2026-10-01T10:03:00Z"},
+        ]
+        since = run._event_epoch("2026-10-01T10:00:00Z")
+        self.assertEqual(["10:03:00 FailedScheduling p7469-engine-1-default-0 (ome-scheduler): 0/3 nodes"],
+                         run._pending_event_lines(events, "p7469", since))
+        self.assertEqual(["09:30:00 Scheduled p7469-engine-1-default-0 (default-scheduler): before",
+                          "10:03:00 FailedScheduling p7469-engine-1-default-0 (ome-scheduler): 0/3 nodes"],
+                         run._pending_event_lines(events, "p7469", None), "oldest first, every event without a window")
+
+    def test_pending_snapshot_reads_the_control_plane_logs_since_the_trigger(self):
+        since = run._event_epoch("2026-10-01T10:00:00Z")
+        kubectl = _kubectl_with([
+            (lambda a: "logs" in a and "-l" in a, _Resp("I p7469 engine 1 waits\nI p0001 other case\n")),
+            (lambda a: "logs" in a and "deployment/ome-scheduler" in a, _Resp("")),
+            (lambda a: "podgroups.scheduling.x-k8s.io" in a, _Resp("", 1, "no such kind")),
+            (lambda a: "pods" in a or "events" in a, _Resp('{"items": []}')),
+        ])
+        out = io.StringIO()
+        with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "SCHED_NAME", "ome-scheduler"), \
+                contextlib.redirect_stdout(out):
+            run._print_pending_snapshot("p7469", since=since)
+        text = out.getvalue()
+        self.assertIn("no pod event of the case since the trigger: no scheduler reported on its pods", text)
+        self.assertIn("manager log lines naming the case since the trigger (last 1):", text)
+        self.assertIn("I p7469 engine 1 waits", text)
+        self.assertNotIn("p0001", text)
+        self.assertIn("the scheduler log names the case in no line since the trigger", text)
+        log_calls = [c for c in kubectl.calls if "logs" in c]
+        self.assertEqual(2, len(log_calls))
+        self.assertTrue(all("--since-time=2026-10-01T10:00:00Z" in c and "--tail=-1" in c for c in log_calls))
+        self.assertIn(("-l", run.CTRL_SELECTOR), [(c[c.index("-l")], c[c.index("-l") + 1]) for c in log_calls if "-l" in c])
+        self.assertTrue(any("deployment/ome-scheduler" in c for c in log_calls))

@@ -104,10 +104,19 @@ case "$tool" in
   kubectl)
     case " $* " in
       *" apply -f - "*) cat >/dev/null ;;
+      *" apply -f "*)
+        # A staged manifest file; the cert-manager apply names a URL.
+        if [ -f "${!#}" ]; then
+          printf 'kubectl apply %s\n' "$(grep -o '"name": "[^"]*"' "${!#}")" >>"$FAKE_LOG"
+        fi
+        ;;
       *" create namespace "*) echo 'apiVersion: v1' ;;
       *" get validatingwebhookconfiguration "*) echo ZmFrZQ== ;;
       *" get endpointslices "*) echo 10.0.0.1 ;;
       *" get clusterbasemodel "*) echo Ready ;;
+      *" get deployments -o name "*) printf 'deployment.apps/%s\n' ome-controller-manager ome-prometheus ;;
+      *" patch deployment.apps/"*) printf 'kubectl %s\n' "$*" >>"$FAKE_LOG" ;;
+      *" -o jsonpath={.spec.template.spec.priorityClassName} "*) echo "$FAKE_CONTROL_PLANE_CLASS" ;;
     esac
     ;;
   python3)
@@ -115,6 +124,8 @@ case "$tool" in
       *" --images "*) ;;
       *" --case-images "*) ;;
       *" --value OME_EVAL_SCHEDULER"*) ;;
+      *" --value OME_EVAL_CONTROL_PLANE_PRIORITY_CLASS"*) echo "$FAKE_CONTROL_PLANE_CLASS" ;;
+      *" --control-plane-priority-class"*) printf '{"kind": "PriorityClass", "metadata": {"name": "%s"}}\n' "$FAKE_CONTROL_PLANE_CLASS" ;;
       *) echo '{}' ;;
     esac
     ;;
@@ -125,9 +136,11 @@ for tool in docker kind helm kubectl python3; do
   ln -s fake-tool "${fake_bin}/${tool}"
 done
 
+control_plane_class="ome-eval-control-plane"
 FAKE_MANAGER_ID="$manager_a" \
 FAKE_AGENT_ID="$agent_a" \
 FAKE_LOG="$fake_log" \
+FAKE_CONTROL_PLANE_CLASS="$control_plane_class" \
 OME_IMAGE_TAG=source \
 PATH="${fake_bin}:$PATH" \
   "$repo_root/hack/omenative-testing/deploy-ome-kind.sh" --skip-build >/dev/null
@@ -143,5 +156,19 @@ grep -F -- "<--set> <ome.omeAgent.tag=${tag}>" "$fake_log" >/dev/null ||
 if grep -Fq 'docker build' "$fake_log"; then
   fail "--skip-build invoked a Docker build"
 fi
+# The control plane outranks the harness's press pods: the class is created
+# before the controller is installed and every Deployment in the OME
+# namespace is stamped with it.
+class_line="$(grep -n "kubectl apply \"name\": \"${control_plane_class}\"" "$fake_log" | head -1 | cut -d: -f1)"
+[ -n "$class_line" ] || fail "the control-plane PriorityClass was not created"
+helm_line="$(grep -n '^helm <upgrade> <--install> <ome> ' "$fake_log" | head -1 | cut -d: -f1)"
+[ -n "$helm_line" ] || fail "the controller chart was not installed"
+[ "$class_line" -lt "$helm_line" ] ||
+  fail "the control-plane PriorityClass must exist before the controller chart references it"
+patch="--type=merge -p {\"spec\":{\"template\":{\"spec\":{\"priorityClassName\":\"${control_plane_class}\"}}}}"
+for deploy in ome-controller-manager ome-prometheus; do
+  grep -Fq -- "patch deployment.apps/${deploy} ${patch}" "$fake_log" ||
+    fail "deployment ${deploy} was not stamped with the control-plane PriorityClass"
+done
 
 echo "deploy-ome-kind tag tests passed."

@@ -1688,11 +1688,26 @@ shapes.
   the repair (or the roll) must complete; `lift=never` keeps them to the
   end and judges the hold instead (below). The verb needs a cluster this
   harness owns, since it blocks every node (the same check as
-  `node:notready`), and the PriorityClass API; elsewhere the case is `SKIP`
-  with the reason. Fillers carry `perm.test/filler=<case>` and the class
+  `node:notready`), the PriorityClass API, and an OME control plane that
+  outranks the press: among the pods below the press on the pressed node
+  the scheduler takes those no disruption budget covers first, and the
+  case's pods are covered, so the manager (or anything else there that
+  requests CPU) would go before them. The eval deploy runs every
+  Deployment in the OME namespace under the class the fixtures name
+  (`OME_EVAL_CONTROL_PLANE_PRIORITY_CLASS`, preempting nothing itself);
+  the capability check creates that class when absent and reads the
+  control plane's priority, and elsewhere the case is `SKIP` with the
+  reason. The fill refuses to press (`INFRA-FAIL`) while any other pod on
+  the pressed node sits below the press and requests CPU, and a
+  control-plane pod the scheduler preempts anyway is `INFRA-FAIL`, never a
+  product finding. Fillers carry `perm.test/filler=<case>` and the class
   `perm.test/fault=<case>`; both go at the end of the case and in
   `batch.py`'s sweep. `isvcs/gen-preempt/` crosses both moments with
-  topology, restart policy, lift and (under the roll) strategy.
+  topology, restart policy, lift and (under the roll) strategy. A pending
+  case that fails prints, before teardown, each pod of the case with its
+  `PodScheduled` and `Ready` conditions, gates and pod group, the
+  PodGroups, the pod events since the trigger with their reporter, and the
+  manager's (and the gang scheduler's) log lines naming the case.
 
 - **`pool=packed` (rollout mode, with `fault=crashloop:new` or
   `fault=crashloop:idle`, `form=start|load`)** is the packed pool: once the

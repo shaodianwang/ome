@@ -21,10 +21,12 @@ Usage:
     python3 runtime_fixtures.py --kind --stage bootstrap > bootstrap.yaml
     python3 runtime_fixtures.py --kind --stage resources > resources.yaml
     python3 runtime_fixtures.py --kind --value OME_EVAL_NGINX_IMAGE
+    python3 runtime_fixtures.py --kind --control-plane-priority-class
     python3 runtime_fixtures.py --case-images
     python3 runtime_fixtures.py --kind | kubectl apply -n sandbox -f -
 """
 import argparse
+import json
 import os
 import re
 import sys
@@ -69,7 +71,22 @@ DEFAULTS = {
     # pods; the scheduler lane sets ome-scheduler and the runner then asserts
     # gang scheduling (invariant D).
     "OME_EVAL_SCHEDULER": "",
+    # The PriorityClass the OME control plane the eval deploys (the manager,
+    # its bundled Prometheus, the gang scheduler) runs under. A preempt case
+    # presses with a class one notch above the case's pods, which carry none,
+    # and the scheduler takes the lowest pods first among those below the
+    # press that no disruption budget covers; the control plane sits far
+    # above any such press so it is never among them, and below the
+    # system-* classes so the node's own agents still outrank it. The class
+    # never preempts, so a restarted manager waits for room as it would with
+    # no class at all.
+    "OME_EVAL_CONTROL_PLANE_PRIORITY_CLASS": "ome-eval-control-plane",
+    "OME_EVAL_CONTROL_PLANE_PRIORITY": "1000000",
 }
+
+# A label only the control-plane class carries: batch.py's sweep deletes the
+# per-case press classes by their own label and must spare this one.
+CONTROL_PLANE_CLASS_LABEL = "perm.test/control-plane"
 
 # KIND has no arch to select for and pulls nothing: its static RWX volume is
 # backed by a path mounted into every node, and fixture images are built or
@@ -206,6 +223,22 @@ def side_loadable(image, values):
     return image != UNPULLABLE_IMAGE and image != values["OME_EVAL_METRICS_IMAGE"]
 
 
+def control_plane_priority_class(values):
+    """The PriorityClass manifest of the OME control plane, from the resolved
+    fixture values: above the press pods of the preempt cases, preempting
+    nothing itself."""
+    return {
+        "apiVersion": "scheduling.k8s.io/v1",
+        "kind": "PriorityClass",
+        "metadata": {"name": values["OME_EVAL_CONTROL_PLANE_PRIORITY_CLASS"],
+                     "labels": {CONTROL_PLANE_CLASS_LABEL: "true"}},
+        "value": int(values["OME_EVAL_CONTROL_PLANE_PRIORITY"]),
+        "globalDefault": False,
+        "preemptionPolicy": "Never",
+        "description": "OME eval: the control plane outranks the harness's press pods and preempts nothing",
+    }
+
+
 def resolved_value(token, kind=False):
     """Return one resolved fixture token or raise KeyError if it is unknown."""
     values = resolve(kind=kind)
@@ -225,6 +258,8 @@ def main():
                         help="list images embedded directly in case manifests")
     output.add_argument("--value", metavar="TOKEN",
                         help="print one resolved token value")
+    output.add_argument("--control-plane-priority-class", action="store_true",
+                        help="print the PriorityClass manifest of the OME control plane")
     ap.add_argument("--stage", choices=STAGES, default=STAGE_ALL,
                     help="render all fixtures or one deployment stage")
     args = ap.parse_args()
@@ -235,6 +270,9 @@ def main():
             ap.error("unknown token %s; expected one of %s" %
                      (args.value, ", ".join(sorted(DEFAULTS))))
         sys.stdout.write(value + "\n")
+    elif args.control_plane_priority_class:
+        json.dump(control_plane_priority_class(resolve(kind=args.kind)), sys.stdout, indent=2)
+        sys.stdout.write("\n")
     elif args.case_images:
         sys.stdout.write("".join(
             image + "\n" for image in case_images(kind=args.kind)

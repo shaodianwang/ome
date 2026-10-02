@@ -2254,6 +2254,14 @@ EVICTION_API = "/apis/policy/v1"
 # the PriorityClass API; elsewhere the case is skipped with the reason.
 PRIORITY_CLASS_API = "/apis/scheduling.k8s.io/v1"
 FILLER_LABEL = "perm.test/filler"
+# The press runs one notch above the case's pods. Among the pods below it on
+# the pressed node the scheduler takes those no disruption budget covers
+# first, and the case's pods are covered, so any other pod there that
+# requests CPU would go before them: the fill refuses to press while one
+# sits there. The OME control plane the eval deploys runs under the
+# fixtures' class, above any press (the capability check creates the class
+# when absent and reads the pods' priority); a control-plane pod the
+# scheduler preempts anyway fails the case as apparatus, not product.
 PREEMPT_WAIT_S = int(60 * TIMEOUT_MULT)
 KILL_VIAS = {"delete", "evict", "preempt"}
 FAULT_RETRY_S = 5.0
@@ -4910,9 +4918,10 @@ def _idle_once(ctx, f, hdr):
     return state, verdict, notes, checks
 
 
-def _get_pod(name):
-    """One pod of the case namespace, read live; None when gone or unreadable."""
-    r = kubectl("-n", NS, "get", "pod", name, "-o", "json")
+def _get_pod(name, ns=NS):
+    """One pod of the case namespace (or `ns`), read live; None when gone or
+    unreadable."""
+    r = kubectl("-n", ns, "get", "pod", name, "-o", "json")
     if r.returncode != 0:
         return None
     try:
@@ -8799,13 +8808,91 @@ def _tight_checks(ctx, f, lift, bumped, out, state, verdict, notes, checks):
 # ── Preemption and pending holds ─────────────────────────────────────────────
 def _preempt_capability():
     """None when a preemption can be staged here: a cluster this harness owns
-    (the fillers take every node's spare CPU) and the PriorityClass API."""
+    (the fillers take every node's spare CPU), the PriorityClass API, and an
+    OME control plane that outranks the press. The control plane's class is
+    created here when absent; its pods must already run under it (the eval
+    deploy stamps it on every Deployment in the OME namespace)."""
     reason = _node_fault_capability()
     if reason:
         return f"filling every node needs a cluster this harness owns: {reason}"
     if not _api_served(PRIORITY_CLASS_API):
         return f"the PriorityClass API ({PRIORITY_CLASS_API}) is not served by this apiserver"
+    pc = _control_plane_class()
+    r = kubectl("apply", "-f", "-", input=json.dumps(pc))
+    if r.returncode != 0:
+        return (f"the control-plane PriorityClass {pc['metadata']['name']} cannot be created: "
+                f"{(r.stderr or '').strip()[:160]}")
+    items = _control_plane_pods()
+    if items is None:
+        return f"the pods of the OME control plane ({CTRL_NS}) cannot be read"
+    below = _control_plane_below(items, pc["value"])
+    if below:
+        return ("the OME control plane must outrank the press: "
+                + ", ".join(f"{CTRL_NS}/{name} runs at priority {prio}" for name, prio in below)
+                + f", below {pc['metadata']['name']} ({pc['value']}); the eval deploy stamps that class on every "
+                f"Deployment in {CTRL_NS}")
     return None
+
+
+def _control_plane_class():
+    """The PriorityClass manifest the OME control plane runs under."""
+    return runtime_fixtures.control_plane_priority_class(_fixture_values())
+
+
+def _pod_priority(obj):
+    """A pod's resolved priority; a pod under no class carries none and sits at 0."""
+    return int(((obj or {}).get("spec") or {}).get("priority") or 0)
+
+
+def _control_plane_pods():
+    """The pods the OME namespace's Deployments run (ReplicaSet-owned, not
+    finished): the manager, with the Prometheus and the gang scheduler the
+    eval installs beside it. None when they cannot be read."""
+    r = kubectl("-n", CTRL_NS, "get", "pods", "-o", "json")
+    if r.returncode != 0:
+        return None
+    try:
+        items = json.loads(r.stdout).get("items", []) or []
+    except Exception:
+        return None
+    return [it for it in items
+            if (it.get("status") or {}).get("phase") not in ("Succeeded", "Failed")
+            and any(o.get("kind") == "ReplicaSet" for o in (it.get("metadata") or {}).get("ownerReferences") or [])]
+
+
+def _control_plane_below(items, floor):
+    """[(name, priority)] of the control-plane pods below `floor`, sorted."""
+    out = []
+    for it in items or []:
+        prio = _pod_priority(it)
+        if prio < floor:
+            out.append((str((it.get("metadata") or {}).get("name") or ""), prio))
+    return sorted(out)
+
+
+def _control_plane_floor(items):
+    """The lowest priority a control-plane pod runs at; None with no pod."""
+    prios = [_pod_priority(it) for it in items or []]
+    return min(prios) if prios else None
+
+
+def _press_exposed(items, case_id, press_priority):
+    """The pods on a node, other than the case's, that a press at
+    `press_priority` would take before any pod of the case: not finished,
+    below the press, requesting CPU (a pod that requests none frees no room,
+    so the scheduler never needs it). [(namespace/name, priority, CPU
+    millicores)], sorted."""
+    out = []
+    for it in items or []:
+        meta, status = it.get("metadata") or {}, it.get("status") or {}
+        if status.get("phase") in ("Succeeded", "Failed"):
+            continue
+        if (meta.get("labels") or {}).get("ome.io/inferenceservice") == case_id:
+            continue
+        prio, cpu = _pod_priority(it), _pod_requests(it).get("cpu", 0)
+        if prio < press_priority and cpu > 0:
+            out.append((f"{meta.get('namespace', '')}/{meta.get('name', '')}", prio, cpu))
+    return sorted(out)
 
 
 def _eligible_nodes():
@@ -8830,10 +8917,22 @@ def _eligible_nodes():
     return sorted(out)
 
 
-def _node_cpu_free(node):
+def _node_pods(node):
+    """Every pod bound to `node`, read live across namespaces; None when
+    they cannot be read."""
+    r = kubectl("get", "pods", "-A", "--field-selector", f"spec.nodeName={node}", "-o", "json")
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout).get("items", []) or []
+    except Exception:
+        return None
+
+
+def _node_cpu_free(node, items=None):
     """Millicores of CPU on `node` that no bound, non-terminal pod requests:
-    allocatable minus the requests of every pod bound there, read live across
-    namespaces. None when either side cannot be read."""
+    allocatable minus the requests of every pod bound there (`items` when
+    the caller has read them). None when either side cannot be read."""
     r = kubectl("get", "node", node, "-o", "json")
     if r.returncode != 0:
         return None
@@ -8841,12 +8940,9 @@ def _node_cpu_free(node):
         alloc = _qty("cpu", ((json.loads(r.stdout).get("status") or {}).get("allocatable") or {}).get("cpu", "0"))
     except Exception:
         return None
-    r2 = kubectl("get", "pods", "-A", "--field-selector", f"spec.nodeName={node}", "-o", "json")
-    if r2.returncode != 0:
-        return None
-    try:
-        items = json.loads(r2.stdout).get("items", []) or []
-    except Exception:
+    if items is None:
+        items = _node_pods(node)
+    if items is None:
         return None
     used = 0
     for it in items:
@@ -8898,7 +8994,8 @@ def _preempt_cycle_reset(f, cycle):
     else:
         return False
     f.update(fillers=[], fillers_dropped=False, cycle=cycle, pre_alive=None, crash_pod=None, crash_comp=None,
-             crash_inst=None, press_pod=None, fire_ts=None, preempted=[], not_victim=set(), fired=False)
+             crash_inst=None, press_pod=None, fire_ts=None, preempted=[], not_victim=set(), fired=False,
+             cp_pods=None, cp_polled=0.0)
     return True
 
 
@@ -8923,6 +9020,11 @@ def _fault_preempt_arm(f, case_id):
                        for it in json.loads(r.stdout).get("items", [])] or [0])
     except Exception as e:
         f["infra_fail"] = f"preempt: cannot parse case pods: {e}"
+        return False, f["infra_fail"]
+    floor = _control_plane_floor(_control_plane_pods())
+    if floor is not None and highest + 1 >= floor:
+        f["infra_fail"] = (f"preempt: the press class would run at {highest + 1}, not below the OME control "
+                           f"plane's lowest priority {floor}; the press could take a control-plane pod")
         return False, f["infra_fail"]
     name = f"perm-{case_id}-preempt"
     f.update(pc_name=name, pc_value=highest + 1, fillers=[], pc_deleted=False, fillers_dropped=False)
@@ -8994,10 +9096,19 @@ def _preempt_fill(f, target, node, pod_state):
             f["infra_fail"] = f"preempt: {msg}"
             return
         f["notes"].append(f"fault armed: {msg}")
-    free = _node_cpu_free(node)
+    items = _node_pods(node)
+    free = _node_cpu_free(node, items)
     if free is None:
         f["infra_fail"] = f"preempt: cannot read the spare CPU of {node}"
         return
+    exposed = _press_exposed(items, f["case_id"], f["pc_value"])
+    if exposed:
+        f["infra_fail"] = (f"preempt: the press on {node} would take "
+                           + ", ".join(f"{name} (priority {prio}, {cpu}m)" for name, prio, cpu in exposed)
+                           + " before any pod of the case; nothing but the case's pods may sit below the press there")
+        return
+    f["cp_pods"] = {str((it.get("metadata") or {}).get("name") or ""): str((it.get("metadata") or {}).get("uid") or "")
+                    for it in (_control_plane_pods() or [])}
     press = _filler_name(f, "press")
     need = max(free, 0) + victim_cpu
     ok, msg = _filler_create(f, press, node, need, f["pc_name"])
@@ -9026,18 +9137,18 @@ def _fault_preempt_fire(f, pod_state, pods_per_inst, old_hashes):
     _preempt_fill(f, target, node, pod_state)
 
 
-def _pod_preempted(name):
+def _pod_preempted(name, ns=NS):
     """True when the scheduler preempted this pod: the live pod carries the
     DisruptionTarget condition from the scheduler, or (once it is gone) the
     scheduler's Preempted event names it."""
-    obj = _get_pod(name)
+    obj = _get_pod(name, ns=ns)
     if obj is not None:
         for c in (obj.get("status") or {}).get("conditions") or []:
             if c.get("type") == "DisruptionTarget" and c.get("reason") == "PreemptionByScheduler":
                 return True
         if (obj.get("metadata") or {}).get("deletionTimestamp") is None:
             return False
-    r = kubectl("-n", NS, "get", "events", "--field-selector",
+    r = kubectl("-n", ns, "get", "events", "--field-selector",
                 f"involvedObject.kind=Pod,involvedObject.name={name},reason=Preempted", "-o", "json")
     if r.returncode != 0:
         return False
@@ -9047,10 +9158,39 @@ def _pod_preempted(name):
         return False
 
 
+def _preempt_apparatus_hit(f):
+    """True once the scheduler has preempted a control-plane pod that was
+    running when the press fired: the press took the product's manager (or
+    what runs beside it) instead of a pod of the case, which fails the case
+    as apparatus. Polled every CTRL_POLL_S; the failure is recorded once."""
+    if f.get("cp_hit"):
+        return True
+    if not f.get("cp_pods"):
+        return False
+    now = time.time()
+    if now - f.get("cp_polled", 0.0) < CTRL_POLL_S:
+        return False
+    f["cp_polled"] = now
+    for name in sorted(f["cp_pods"]):
+        if not _pod_preempted(name, ns=CTRL_NS):
+            continue
+        pc = _control_plane_class()
+        f["cp_hit"] = name
+        f["infra_fail"] = (f"preempt: the scheduler preempted the OME control-plane pod {CTRL_NS}/{name} for the press "
+                           f"on {f.get('aim_node')}; the control plane must run above the press class "
+                           f"({pc['metadata']['name']} at {pc['value']})")
+        print(f"    ⚡ {f['infra_fail']}")
+        return True
+    return False
+
+
 def _preempt_victim(f, pod_state):
     """The case pods the scheduler preempted: alive at the fire, gone or
     deleting now, confirmed by the scheduler's own record (a pod the roll
-    drained has none). The first one is the fault's victim."""
+    drained has none). The first one is the fault's victim. None, with the
+    apparatus failure recorded, once a control-plane pod went instead."""
+    if _preempt_apparatus_hit(f):
+        return None
     if not f.get("pre_alive"):
         return f.get("crash_pod")
     for name, was in sorted(f["pre_alive"].items()):
@@ -9204,6 +9344,11 @@ def _pending_watch(ctx, f, comps, lift, done, budget, inst=None):
             _preempt_victim(f, ctx["pod_state"])
         if now - last_poll >= ROW_POLL_S:
             last_poll = now
+            if f["kind"] == "preempt":
+                _preempt_apparatus_hit(f)
+            if f.get("infra_fail"):
+                state = "APPARATUS"
+                break
             rows = _ir_rows_by_index(case_id, comps)
             hit = _pending_row(rows, tokens, inst)
             for key, row in sorted(rows.items()):
@@ -9259,6 +9404,8 @@ def _pending_checks(f, lift, state, out, ctx, comps, allowance, verdict, notes, 
     needs the cause gone and the operation done; lift=never needs the wait
     still reported at the end of the hold."""
     kind, cause, tokens = f["kind"], f.get("cause") or "the cause", sorted(PENDING_TOKENS[f["kind"]])
+    if f.get("infra_fail"):
+        return verdict   # the apparatus broke; _fault_finalize records it as INFRA-FAIL
     if state == "UNBOUND":
         f["infra_fail"] = (f"{kind}: the operation completed {out['unbound_at']:.0f}s in with {cause} in place "
                            f"and no wait reported — the cause never bound")
@@ -11798,30 +11945,131 @@ def soften_expected_fail(hdr, verdict, checks):
     return verdict
 
 
-def _print_pending_snapshot(case_id):
-    """What the case's pods, PodGroups and scheduler events looked like when it
-    never settled — printed before teardown, which erases all of it."""
-    cols = ("NAME:.metadata.name,PHASE:.status.phase,NODE:.spec.nodeName,SCHED:.spec.schedulerName,"
-            "PG:.metadata.labels.scheduling\\.x-k8s\\.io/pod-group,READY:.status.conditions[?(@.type==\"Ready\")].status")
-    r = kubectl("-n", NS, "get", "pods", "-l", f"ome.io/inferenceservice={case_id}", "-o", f"custom-columns={cols}")
-    print("  pods at timeout:")
-    for line in (r.stdout or r.stderr).strip().splitlines()[:24]:
+# How much of the pending snapshot is printed: pods of the case, their
+# events since the trigger, and the control-plane log lines naming the case.
+PENDING_DUMP_PODS = 32
+PENDING_DUMP_EVENTS = 24
+PENDING_DUMP_LOG_LINES = 24
+
+
+def _condition_text(conds, kind):
+    """`Type=Status/Reason: message` of one pod condition, `Type=-` when the
+    pod does not carry it."""
+    c = conds.get(kind)
+    if not c:
+        return f"{kind}=-"
+    text = f"{kind}={c.get('status')}"
+    if c.get("reason"):
+        text += f"/{c['reason']}"
+    if c.get("message"):
+        text += f": {str(c['message'])[:160]}"
+    return text
+
+
+def _pending_pod_lines(items, now):
+    """One line per pod of the case: phase, node, priority, age, whether it
+    is leaving, the PodScheduled and Ready conditions with their reason and
+    message (a pod the scheduler cannot place says why there, a pod no
+    scheduler has looked at carries neither), the scheduling gates and the
+    pod group. Sorted by name."""
+    lines = []
+    for it in sorted(items or [], key=lambda x: str((x.get("metadata") or {}).get("name"))):
+        meta, spec, status = it.get("metadata") or {}, it.get("spec") or {}, it.get("status") or {}
+        conds = {c.get("type"): c for c in status.get("conditions") or [] if c.get("type")}
+        created = _event_epoch(meta.get("creationTimestamp"))
+        age = f"{max(0, int(now - created))}s" if created is not None else "?"
+        text = (f"{meta.get('name')}  {status.get('phase') or '-'}  node={spec.get('nodeName') or '-'}  "
+                f"priority={_pod_priority(it)}  age={age}")
+        if meta.get("deletionTimestamp"):
+            text += "  deleting"
+        text += f"  {_condition_text(conds, 'PodScheduled')}  {_condition_text(conds, 'Ready')}"
+        gates = [g.get("name") for g in spec.get("schedulingGates") or []]
+        if gates:
+            text += f"  gates={','.join(str(g) for g in gates)}"
+        pg = (meta.get("labels") or {}).get("scheduling.x-k8s.io/pod-group")
+        if pg:
+            text += f"  pod-group={pg}"
+        lines.append(text)
+    return lines
+
+
+def _pending_event_lines(items, case_id, since):
+    """`when reason object (reporter): message` of the pod events that name a
+    pod of the case, at or after `since` (every event when None), oldest
+    first; the reporter tells which scheduler, if any, spoke."""
+    out = []
+    for it in items or []:
+        obj = it.get("involvedObject") or {}
+        if obj.get("kind") != "Pod" or not str(obj.get("name") or "").startswith(f"{case_id}-"):
+            continue
+        last = _event_epoch(it.get("lastTimestamp") or it.get("eventTime")
+                            or (it.get("metadata") or {}).get("creationTimestamp"))
+        if since is not None and (last is None or last < since):
+            continue
+        reporter = it.get("reportingComponent") or (it.get("source") or {}).get("component") or "?"
+        when = time.strftime("%H:%M:%S", time.gmtime(last)) if last is not None else "?"
+        out.append((last or 0, f"{when} {it.get('reason') or '?'} {obj.get('name')} ({reporter}): "
+                              f"{str(it.get('message') or '')[:160]}"))
+    return [text for _when, text in sorted(out, key=lambda x: x[0])]
+
+
+def _control_plane_log_lines(selector, case_id, since):
+    """The last lines of a control-plane log that name the case since
+    `since`: `selector` is a label selector or a deployment/<name>."""
+    args = ["-n", CTRL_NS, "logs", "--all-containers", "--tail=-1",
+            f"--since-time={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(since))}"]
+    args += [selector] if "/" in selector else ["-l", selector]
+    r = kubectl(*args)
+    if r.returncode != 0:
+        return None
+    return [line[:220] for line in (r.stdout or "").splitlines() if case_id in line][-PENDING_DUMP_LOG_LINES:]
+
+
+def _print_pending_snapshot(case_id, since=None):
+    """What the case's pods, PodGroups, scheduler events and the control
+    plane's own words looked like when a wait never resolved — printed
+    before teardown, which erases all of it. With `since` (the trigger), the
+    events and the log lines are those of the wait itself."""
+    now = time.time()
+    r = kubectl("-n", NS, "get", "pods", "-l", f"ome.io/inferenceservice={case_id}", "-o", "json")
+    try:
+        pods = json.loads(r.stdout).get("items", []) if r.returncode == 0 else []
+    except Exception:
+        pods = []
+    print("  pods of the case (phase, node, priority, age, PodScheduled, Ready):")
+    for line in _pending_pod_lines(pods, now)[:PENDING_DUMP_PODS] or ["    (none)"]:
         print(f"    {line}")
     r = kubectl("-n", NS, "get", "podgroups.scheduling.x-k8s.io", "-l", f"ome.io/inferenceservice={case_id}",
                 "-o", "custom-columns=NAME:.metadata.name,MIN:.spec.minMember,PHASE:.status.phase,SCHEDULED:.status.scheduled,RUNNING:.status.running")
     if r.returncode == 0 and r.stdout.strip():
-        print("  podgroups at timeout:")
+        print("  podgroups of the case:")
         for line in r.stdout.strip().splitlines()[:12]:
             print(f"    {line}")
-    r = kubectl("-n", NS, "get", "events", "--field-selector", "involvedObject.kind=Pod",
-                "--sort-by=.lastTimestamp", "-o",
-                "custom-columns=LAST:.lastTimestamp,TYPE:.type,REASON:.reason,OBJECT:.involvedObject.name,MESSAGE:.message")
-    if r.returncode == 0:
-        mine = [l for l in r.stdout.splitlines() if case_id in l]
-        if mine:
-            print("  pod events (newest last):")
-            for line in mine[-16:]:
-                print(f"    {line[:220]}")
+    r = kubectl("-n", NS, "get", "events", "--field-selector", "involvedObject.kind=Pod", "-o", "json")
+    try:
+        events = json.loads(r.stdout).get("items", []) if r.returncode == 0 else []
+    except Exception:
+        events = []
+    window = "since the trigger" if since is not None else "recorded"
+    lines = _pending_event_lines(events, case_id, since)
+    if lines:
+        print(f"  pod events of the case {window} (oldest first, the reporter in brackets):")
+        for line in lines[-PENDING_DUMP_EVENTS:]:
+            print(f"    {line}")
+    else:
+        print(f"  no pod event of the case {window}: no scheduler reported on its pods")
+    if since is None:
+        return
+    for what, selector in (("manager", CTRL_SELECTOR),) + ((("scheduler", f"deployment/{SCHED_NAME}"),) if SCHED_NAME else ()):
+        lines = _control_plane_log_lines(selector, case_id, since)
+        if lines is None:
+            print(f"  the {what} log could not be read ({CTRL_NS}, {selector})")
+        elif lines:
+            print(f"  {what} log lines naming the case since the trigger (last {len(lines)}):")
+            for line in lines:
+                print(f"    {line}")
+        else:
+            print(f"  the {what} log names the case in no line since the trigger")
 
 
 def _print_failure_snapshot(case_id, hdr, ctx):
@@ -11990,6 +12238,8 @@ def _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks):
     verdict = _fault_finalize(ctx.get("fault"), verdict, notes, checks)
     if verdict in ("FAIL", "INFRA-FAIL"):
         _print_failure_snapshot(case_id, hdr, ctx)
+        if (ctx.get("fault") or {}).get("kind") in PENDING_TOKENS:
+            _print_pending_snapshot(case_id, since=ctx.get("trigger_ts"))
     _stop_watcher(ctx)
     # Teardown gate runs AFTER the infeasible/notimpl softening: a cleanup
     # that doesn't converge is never an expected failure, so it re-hardens
@@ -15114,9 +15364,10 @@ def _kill_repeat(case_id, desc, hdr, ctx, via, policy, lift, pending, kcomp, ktg
             ctx["trigger_ts"] = time.time()
             if not pending["infra_fail"]:
                 deadline = time.time() + PREEMPT_WAIT_S
-                while time.time() < deadline and not ctx["closed"] and not _preempt_victim(pending, ctx["pod_state"]):
+                while (time.time() < deadline and not ctx["closed"] and not pending["infra_fail"]
+                       and not _preempt_victim(pending, ctx["pod_state"])):
                     _read_one(ctx)
-                if not pending.get("crash_pod"):
+                if not pending.get("crash_pod") and not pending["infra_fail"]:
                     pending["infra_fail"] = (f"preempt: the scheduler preempted no pod of the case within {PREEMPT_WAIT_S}s "
                                              f"(filler {pending.get('press_pod')} bound to {_pod_bound(pending.get('press_pod', '')) or 'nothing'})")
             if pending["infra_fail"]:
@@ -15280,9 +15531,10 @@ def _kill(case_id, yaml_file, desc, hdr):
         ctx["trigger_ts"] = time.time()
         if not pending["infra_fail"]:
             deadline = time.time() + PREEMPT_WAIT_S
-            while time.time() < deadline and not ctx["closed"] and not _preempt_victim(pending, ctx["pod_state"]):
+            while (time.time() < deadline and not ctx["closed"] and not pending["infra_fail"]
+                   and not _preempt_victim(pending, ctx["pod_state"])):
                 _read_one(ctx)
-            if not pending.get("crash_pod"):
+            if not pending.get("crash_pod") and not pending["infra_fail"]:
                 pending["infra_fail"] = (f"preempt: the scheduler preempted no pod of the case within {PREEMPT_WAIT_S}s "
                                          f"(filler {pending.get('press_pod')} bound to {_pod_bound(pending.get('press_pod', '')) or 'nothing'})")
         if pending["infra_fail"]:
