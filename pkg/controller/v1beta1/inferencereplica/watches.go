@@ -252,9 +252,11 @@ func managedByOMENativePredicate() predicate.Predicate {
 //   - Status.Phase — Instance phase aggregation.
 //   - ContainersReady condition — CountReadyPods / AllPodsRuntimeReady.
 //   - PodReady condition — the bar every path stamps Ready on
-//     (query.PodSetPromotable). Kubelet folds the serving gate into it in a
+//     (query.PodSetPromotable) and half of the serving count
+//     (CountServingPods). Kubelet folds the serving gate into it in a
 //     status write that touches nothing else, so without this the promote
-//     waits for the next poll instead of the observation.
+//     waits for the next poll instead of the observation; the node
+//     lifecycle controller revokes it on a lost node the same way.
 //   - ome.io/serving condition — CountServingPods / RatioBalanced gate.
 //   - ContainerStatuses / InitContainerStatuses — terminal-failure
 //     detection (CrashLoopBackOff / ImagePullBackOff escalation).

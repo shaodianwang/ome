@@ -59,7 +59,7 @@ func recycleFailedCreateContainerTarget(
 	// Cleanup is safe only while the canonical source is still healthy and in
 	// rotation. A missing or unhealthy source requires operator attention rather
 	// than another automatic target recycle.
-	if liveSource.DeletionTimestamp != nil || !podreadiness.IsContainersReady(liveSource) || !podreadiness.IsServing(liveSource) {
+	if liveSource.DeletionTimestamp != nil || !podreadiness.ReadyAndServing(liveSource) {
 		return true, nil
 	}
 	sourceRev := query.RevisionFromName(row.RunningRevision)

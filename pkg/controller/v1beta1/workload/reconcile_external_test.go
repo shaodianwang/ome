@@ -1244,6 +1244,10 @@ type recoveryHarness struct {
 	// scale-down wave requires; off, the passes take the one-row write
 	// path.
 	atomicStatus bool
+	// kubeletGone names the pods whose node stopped reporting: the kubelet
+	// model leaves their status exactly as it last wrote it, and the node
+	// lifecycle controller model sets their Ready condition False.
+	kubeletGone map[string]bool
 }
 
 func recoveryPodSpec(image string) *corev1.PodSpec {
@@ -1289,6 +1293,7 @@ func newRecoveryHarnessFor(t *testing.T, multiPod bool, container string) *recov
 		servedPasses:     map[string]int{},
 		retryPolicy:      &workloadtypes.RetryPolicy{MaxAttempts: 2, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2},
 		readinessFails:   map[string]bool{},
+		kubeletGone:      map[string]bool{},
 	}
 	h.c = fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
@@ -1362,6 +1367,10 @@ func (h *recoveryHarness) kubelet() {
 		if h.deadNodes[pod.Spec.NodeName] {
 			// The kubelet under this pod is stopped: nothing it reports
 			// changes, and a pod deleted on it never finishes terminating.
+			continue
+		}
+		if h.kubeletGone[pod.Name] {
+			h.nodeControllerMarksNotReady(pod)
 			continue
 		}
 		if pod.DeletionTimestamp != nil {
@@ -5055,6 +5064,100 @@ func (h *recoveryHarness) loseRunner(idx int32, runner string) {
 	h.t.Fatalf("no pod of instance %d runner %q to lose", idx, runner)
 }
 
+// loseNodeUnder stops the kubelet under the live pods of runner at index
+// idx (every pod of the Instance when runner is empty): from the next pass
+// on, the kubelet model never touches them again and the node lifecycle
+// controller model revokes their Ready condition.
+func (h *recoveryHarness) loseNodeUnder(idx int32, runner string) {
+	h.t.Helper()
+	lost := 0
+	for _, pod := range h.podsOf(idx) {
+		if runner != "" && pod.Labels[query.LabelRunner] != runner {
+			continue
+		}
+		h.kubeletGone[pod.Name] = true
+		lost++
+	}
+	if lost == 0 {
+		h.t.Fatalf("no pod of instance %d runner %q under the lost node", idx, runner)
+	}
+}
+
+// nodeControllerMarksNotReady is the node lifecycle controller's half of a
+// lost node: once the node misses its grace, the pod's Ready condition is
+// set False and nothing else on the pod changes, since the kubelet that
+// wrote the container statuses and the controller that wrote the serving
+// gate are not looking at the node.
+func (h *recoveryHarness) nodeControllerMarksNotReady(pod *corev1.Pod) {
+	h.t.Helper()
+	if !podConditionTrue(pod, corev1.PodReady) {
+		return
+	}
+	setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
+	if err := h.c.Status().Update(h.ctx, pod); err != nil {
+		h.t.Fatalf("node controller marks %s not ready: %v", pod.Name, err)
+	}
+}
+
+// publication is the status the InferenceReplica adapter would publish
+// from the harness's pods: the live counters overlaid on the persisted
+// rows, and the Component counters derived from the same observation.
+// The harness has no EndpointSlices, so the Available counters read zero.
+func (h *recoveryHarness) publication() ([]workloadtypes.InstanceStatus, workload.ComponentCounters) {
+	h.t.Helper()
+	in := h.buildInput()
+	plan, err := workload.BuildPlan(workloadtypes.ComponentEngine, h.desired, in.ObservedState)
+	if err != nil {
+		h.t.Fatalf("BuildPlan: %v", err)
+	}
+	list := &corev1.PodList{}
+	if err := h.c.List(h.ctx, list, client.InNamespace(recoveryNS)); err != nil {
+		h.t.Fatalf("list pods: %v", err)
+	}
+	pods := make([]*corev1.Pod, 0, len(list.Items))
+	for i := range list.Items {
+		pods = append(pods, &list.Items[i])
+	}
+	observation, err := workload.NewOwnedPublicationObservation(
+		h.irStatuses(),
+		workload.NewCachedSelectorPodObservation(pods, query.BucketPodsByInstanceIdx(pods)),
+		map[string]struct{}{},
+		status.AvailabilityWindow{MinReadySeconds: plan.MinReadySeconds, Now: h.clk.Now()},
+	)
+	if err != nil {
+		h.t.Fatalf("publication observation: %v", err)
+	}
+	rows, counters, err := observation.TakeInlineV1Publication(status.DesiredPodCountByInstance(plan), h.target.Name)
+	if err != nil {
+		h.t.Fatalf("publication: %v", err)
+	}
+	return rows, counters
+}
+
+// publishedRow is the published row of Instance idx.
+func (h *recoveryHarness) publishedRow(rows []workloadtypes.InstanceStatus, idx int32) workloadtypes.InstanceStatus {
+	h.t.Helper()
+	for _, row := range rows {
+		if row.Index == idx {
+			return row
+		}
+	}
+	h.t.Fatalf("no published row for instance %d", idx)
+	return workloadtypes.InstanceStatus{}
+}
+
+// podSetSignature identifies the live pod set by name and creation
+// instant, so a rebuild under a reused name is as visible as a delete.
+func (h *recoveryHarness) podSetSignature() string {
+	h.t.Helper()
+	var keys []string
+	for _, pod := range h.livePods() {
+		keys = append(keys, wedgeKey(pod))
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
+}
+
 // instanceIdentity is the row's incarnation and its live pod set by name
 // and creation instant, so a rebuild under a reused name is as visible as
 // a delete; empty when the row is gone.
@@ -5941,5 +6044,105 @@ func TestScaleDown_RemovesTheInstanceThatServesNothingFirst(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// TestNodeLoss_ServingFollowsThePodReadyCondition: the kubelet under a
+// serving Instance stops. The node lifecycle controller sets the pod's
+// Ready condition False, while the container statuses and the serving
+// gate, last written by that kubelet and by this controller, keep their
+// values. On the next pass the Instance stops counting as serving: its
+// serving count drops, the Component's serving replicas drop, its peers
+// are untouched, and nothing is rebuilt, because no restart policy frees
+// the names a dead node holds without a force-delete policy. Single pod
+// and gang, under both restart policies.
+//
+// Cells: instance/Ready/pod.nodeLost[NodeNotReady]/before
+func TestNodeLoss_ServingFollowsThePodReadyCondition(t *testing.T) {
+	recreate := workloadtypes.RestartPolicyRecreateInstance
+	none := workloadtypes.RestartPolicyNone
+	cases := []struct {
+		name     string
+		multiPod bool
+		runner   string
+		policy   workloadtypes.RestartPolicy
+	}{
+		{"single pod under policy None", false, "", none},
+		{"single pod under RecreateInstanceOnPodRestart", false, "", recreate},
+		{"gang worker under policy None", true, "worker", none},
+		{"gang leader under RecreateInstanceOnPodRestart", true, "leader", recreate},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryHarness(t, tc.multiPod)
+			h.replicas = 2
+			policy := tc.policy
+			h.lifecycle.RestartPolicy = &policy
+			h.setTarget(h.revV1, goodImage)
+			if !h.run(40, func() bool { return h.settledOn(h.revV1, 2) }) {
+				h.dumpState("initial create")
+				t.Fatalf("two instances never settled on v1")
+			}
+			perInstance := int32(len(h.desired.Runners))
+			rows, counters := h.publication()
+			for _, row := range rows {
+				if row.ServingPodCount != perInstance {
+					t.Fatalf("instance %d serves %d of %d pods before the fault", row.Index, row.ServingPodCount, perInstance)
+				}
+			}
+			if counters.ServingReplicas != 2 {
+				t.Fatalf("serving replicas before the fault = %d, want 2", counters.ServingReplicas)
+			}
+			pods := h.podSetSignature()
+			incarnation := h.instance(0).Incarnation
+
+			h.loseNodeUnder(0, tc.runner)
+			h.step()
+
+			requireServingDropped := func() {
+				t.Helper()
+				rows, counters := h.publication()
+				if got := h.publishedRow(rows, 0).ServingPodCount; got != perInstance-1 {
+					t.Fatalf("instance 0 serving pods = %d, want %d: the pod the control plane marked not Ready still counts as serving", got, perInstance-1)
+				}
+				if got := h.publishedRow(rows, 1).ServingPodCount; got != perInstance {
+					t.Fatalf("instance 1 serving pods = %d, want %d: the peer is untouched by the lost node", got, perInstance)
+				}
+				if counters.ServingReplicas != 1 {
+					t.Fatalf("serving replicas = %d, want 1", counters.ServingReplicas)
+				}
+			}
+			requireNothingRebuilt := func() {
+				t.Helper()
+				for _, s := range h.irStatuses() {
+					if s.Phase != workloadtypes.InstancePhaseReady || s.Operation != nil {
+						h.dumpState("after the node loss")
+						t.Fatalf("instance %d: phase=%s op=%+v, want Ready with no operation", s.Index, s.Phase, s.Operation)
+					}
+				}
+				if got := h.instance(0).Incarnation; got != incarnation {
+					t.Fatalf("instance 0 incarnation = %d, want %d: nothing frees a dead node's pods without a force-delete policy", got, incarnation)
+				}
+				if got := h.podSetSignature(); got != pods {
+					t.Fatalf("pod set changed:\n got %s\nwant %s", got, pods)
+				}
+			}
+			for _, pod := range h.podsOf(0) {
+				if !h.kubeletGone[pod.Name] {
+					continue
+				}
+				if !podConditionTrue(pod, corev1.ContainersReady) || !podreadiness.IsServing(pod) || podConditionTrue(pod, corev1.PodReady) {
+					t.Fatalf("pod %s: ContainersReady=%v serving=%v Ready=%v, want the kubelet's and the controller's last writes under a revoked Ready",
+						pod.Name, podConditionTrue(pod, corev1.ContainersReady), podreadiness.IsServing(pod), podConditionTrue(pod, corev1.PodReady))
+				}
+			}
+			requireServingDropped()
+			requireNothingRebuilt()
+			for i := 0; i < 6; i++ {
+				h.step()
+				requireServingDropped()
+				requireNothingRebuilt()
+			}
+		})
 	}
 }

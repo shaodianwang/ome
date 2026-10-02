@@ -498,6 +498,14 @@ func podForIR(ir *v1beta1.InferenceReplica, instanceIdx int32, runnerName string
 			LastTransitionTime: now,
 		})
 	}
+	if ready && serving {
+		// The kubelet folds a satisfied gate into the pod's Ready condition.
+		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+			Type:               corev1.PodReady,
+			Status:             corev1.ConditionTrue,
+			LastTransitionTime: now,
+		})
+	}
 	return pod
 }
 

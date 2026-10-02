@@ -235,6 +235,12 @@ func TestPodSetServesNothing(t *testing.T) {
 	deleting := crashLoopPod("engine-0-default-0", 10*time.Minute, hash)
 	ts := metav1.NewTime(tNow)
 	deleting.DeletionTimestamp = &ts
+	nodeLost := servingPod("engine-0-default-0")
+	for i := range nodeLost.Status.Conditions {
+		if nodeLost.Status.Conditions[i].Type == corev1.PodReady {
+			nodeLost.Status.Conditions[i].Status = corev1.ConditionFalse
+		}
+	}
 
 	for _, tc := range []struct {
 		name string
@@ -247,6 +253,7 @@ func TestPodSetServesNothing(t *testing.T) {
 		{name: "serving pod", pods: []*corev1.Pod{serving}, want: false},
 		{name: "wedged beside serving", pods: []*corev1.Pod{wedged, serving}, want: false},
 		{name: "running, not yet ready", pods: []*corev1.Pod{notReady}, want: false},
+		{name: "node lost under a serving pod", pods: []*corev1.Pod{nodeLost}, want: false},
 		{name: "only a deleting pod", pods: []*corev1.Pod{deleting}, want: false},
 		{name: "no pods", pods: nil, want: false},
 	} {

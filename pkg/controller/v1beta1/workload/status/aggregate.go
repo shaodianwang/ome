@@ -60,17 +60,17 @@ func CountReadyPods(pods []*corev1.Pod) int32 {
 	return n
 }
 
-// CountServingPods counts pods that are BOTH ContainersReady AND have
-// the controller's serving gate set to True — i.e., pods actually in
-// the load-balancer rotation. This is the count MaxUnavailable budgets
-// in coordination/ratio.go gate against; ContainersReady alone misses
-// the case where the controller has flipped serving=False (in-place
-// update drain, recreate Phase A) while containers technically remain
-// Ready.
+// CountServingPods counts pods in their Service's rotation: Ready by the
+// control plane and carrying the controller's serving gate
+// (podreadiness.ReadyAndServing). This is the count MaxUnavailable budgets
+// in coordination/ratio.go gate against; it drops when the controller takes
+// a pod out of rotation (in-place update drain, recreate Phase A) and when
+// the node under a pod stops reporting, whatever the stale container
+// statuses say.
 func CountServingPods(pods []*corev1.Pod) int32 {
 	var n int32
 	for _, p := range pods {
-		if podreadiness.IsContainersReady(p) && podreadiness.IsServing(p) {
+		if podreadiness.ReadyAndServing(p) {
 			n++
 		}
 	}
@@ -209,7 +209,7 @@ func InstanceMeetsThreshold(observedPodCount, observedSatisfying, desired int32)
 }
 
 // CountServingInstances counts Instances whose desired-many pods are
-// BOTH ContainersReady AND serving=True. This is the count the
+// Ready and serving (podreadiness.ReadyAndServing). This is the count the
 // coordination unavailability gate (GateContext.CheckUnavailability)
 // works from — "instances actually in the load balancer rotation
 // right now."

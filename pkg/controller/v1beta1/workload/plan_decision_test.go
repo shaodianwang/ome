@@ -2301,13 +2301,14 @@ func TestPlan_Restart_DemotedRowOffTarget(t *testing.T) {
 	})
 }
 
-// servingEnginePod is an engine pod in rotation: ContainersReady with
-// the serving gate set.
+// servingEnginePod is an engine pod in rotation: Ready with the serving
+// gate set.
 func servingEnginePod(idx int32) *corev1.Pod {
 	pod := enginePod("llama-70b", "prod", idx)
 	pod.Status.Phase = corev1.PodRunning
 	pod.Status.Conditions = []corev1.PodCondition{
 		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: corev1.PodReady, Status: corev1.ConditionTrue},
 		{Type: query.ServingConditionType, Status: corev1.ConditionTrue},
 	}
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{

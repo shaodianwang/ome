@@ -97,7 +97,7 @@ cells:
     event: pod.servingOn
     variants: [source]
     outcome: ignore
-    note: rejoining the rotation updates ServingPodCount only; the escalation pass never un-stamps Failed, and recovery is by promotion rather than by un-stamping - a parked repair whose set is complete and ContainersReady re-enters through T-failed-repair-resume on that readiness, not on the gate
+    note: rejoining the rotation raises ServingPodCount once the kubelet folds the gate into the pod's Ready condition, and nothing else; the escalation pass never un-stamps Failed, and recovery is by promotion rather than by un-stamping - a parked repair whose set is complete and ContainersReady re-enters through T-failed-repair-resume on that readiness, not on the gate
     invariants: [failed.is.sticky]
     placement: perm
     coverage: {perm: [], unit: [], kind: []}

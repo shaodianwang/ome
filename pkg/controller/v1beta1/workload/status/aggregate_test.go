@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
@@ -203,5 +204,53 @@ func TestDemotableReady(t *testing.T) {
 	}
 	if status.DemotableReady(nil) {
 		t.Errorf("a nil row is the Empty slot, never a demotion candidate")
+	}
+}
+
+// TestCountServingPods_RequiresThePodReadyCondition: a pod is serving only
+// when the pod's Ready condition and the serving gate are both True.
+// ContainersReady and the gate are the kubelet's and the controller's last
+// writes; on a node whose kubelet stopped both keep their values while the
+// node lifecycle controller sets Ready False, and such a pod is in no
+// Service's endpoints. The same shape is a gate the kubelet has not folded
+// into Ready yet, and that pod is not in the endpoints either.
+func TestCountServingPods_RequiresThePodReadyCondition(t *testing.T) {
+	condition := func(conditionType corev1.PodConditionType, value corev1.ConditionStatus) corev1.PodCondition {
+		return corev1.PodCondition{Type: conditionType, Status: value}
+	}
+	pod := func(conditions ...corev1.PodCondition) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "engine-0-default-0"},
+			Status:     corev1.PodStatus{Conditions: conditions},
+		}
+	}
+	containersReady := condition(corev1.ContainersReady, corev1.ConditionTrue)
+	ready := condition(corev1.PodReady, corev1.ConditionTrue)
+	readyRevoked := condition(corev1.PodReady, corev1.ConditionFalse)
+	gateOn := condition(podreadiness.ConditionType, corev1.ConditionTrue)
+	gateOff := condition(podreadiness.ConditionType, corev1.ConditionFalse)
+
+	for _, tc := range []struct {
+		name string
+		pod  *corev1.Pod
+		want int32
+	}{
+		{name: "Ready with the gate on", pod: pod(containersReady, ready, gateOn), want: 1},
+		{name: "Ready revoked by the control plane, containers and gate unchanged", pod: pod(containersReady, readyRevoked, gateOn), want: 0},
+		{name: "gate off, Ready not yet folded", pod: pod(containersReady, ready, gateOff), want: 0},
+		{name: "gate on, Ready never reported", pod: pod(containersReady, gateOn), want: 0},
+		{name: "no conditions", pod: pod(), want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := status.CountServingPods([]*corev1.Pod{tc.pod}); got != tc.want {
+				t.Fatalf("CountServingPods = %d, want %d", got, tc.want)
+			}
+		})
+	}
+
+	lost := pod(containersReady, readyRevoked, gateOn)
+	counters := status.CountersForInstance([]*corev1.Pod{lost}, map[string]struct{}{}, status.AvailabilityWindow{})
+	if counters.PodCount != 1 || counters.ServingPodCount != 0 {
+		t.Fatalf("counters under a revoked Ready: pods=%d serving=%d, want pods=1 serving=0", counters.PodCount, counters.ServingPodCount)
 	}
 }

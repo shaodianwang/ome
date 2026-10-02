@@ -336,6 +336,16 @@ func HeldNotServing(pod *corev1.Pod) bool {
 	return cond != nil && cond.Status != corev1.ConditionTrue
 }
 
+// ReadyAndServing reports whether the pod is serving: its Ready condition
+// and the serving gate are both True. The gate is read on its own because
+// a drain flips it before the kubelet folds it into Ready; Ready is read on
+// its own because the node lifecycle controller revokes it on a pod whose
+// kubelet stopped reporting, leaving the container statuses and the gate at
+// their last values. Until both agree the pod is in no Service's endpoints.
+func ReadyAndServing(pod *corev1.Pod) bool {
+	return IsPodReady(pod) && IsServing(pod)
+}
+
 // IsContainersReady reports whether the kubelet-owned ContainersReady
 // condition is True — i.e., all containers in the pod have passed their
 // readiness probes.

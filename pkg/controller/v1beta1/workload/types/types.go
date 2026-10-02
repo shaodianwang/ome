@@ -260,8 +260,8 @@ type InstanceStatus struct {
 	PodCount int32
 	// ReadyPodCount counts pods reporting Ready=True.
 	ReadyPodCount int32
-	// ServingPodCount counts pods that are BOTH ContainersReady AND
-	// have serving=True on the controller-managed readiness gate.
+	// ServingPodCount counts pods in rotation: Ready by the control plane
+	// AND serving=True on the controller-managed readiness gate.
 	ServingPodCount int32
 	// AvailablePodCount counts pods in rotation on the Component's
 	// headless Service that, when MinReadySeconds is set, have been Ready

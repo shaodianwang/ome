@@ -85,7 +85,7 @@ func PodSetServesNothing(pods []*corev1.Pod) bool {
 		if query.IsTerminalPod(pod) || !query.RoutedRunner(pod) {
 			continue
 		}
-		if podreadiness.IsContainersReady(pod) && podreadiness.IsServing(pod) {
+		if podreadiness.ReadyAndServing(pod) {
 			return false
 		}
 		if _, parked := terminalWaitingReason(pod); !parked {

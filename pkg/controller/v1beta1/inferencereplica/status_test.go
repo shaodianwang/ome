@@ -398,11 +398,11 @@ func TestReconcile_WakesWhenMinReadyWindowElapses(t *testing.T) {
 		// trigger rolls the row and the wake under test never applies.
 		pod0.Labels[query.LabelRevisionHash] =
 			query.RevisionHashFromControllerRevisionName(targetRevisionNameFor(t, ir))
-		pod0.Status.Conditions = append(pod0.Status.Conditions, corev1.PodCondition{
-			Type:               corev1.PodReady,
-			Status:             corev1.ConditionTrue,
-			LastTransitionTime: metav1.NewTime(readyAt),
-		})
+		for i := range pod0.Status.Conditions {
+			if pod0.Status.Conditions[i].Type == corev1.PodReady {
+				pod0.Status.Conditions[i].LastTransitionTime = metav1.NewTime(readyAt)
+			}
+		}
 		slice0 := sliceForIRPod(ir, pod0, true)
 		r, c := newReconciler(t, ir, pod0, slice0)
 		r.Clock = clocktesting.NewFakeClock(now)
