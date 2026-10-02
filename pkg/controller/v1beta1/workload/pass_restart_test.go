@@ -2507,3 +2507,101 @@ func TestReconcile_CrashLoopRepair_OpensAtMostTheBatchPerPass(t *testing.T) {
 		}
 	}
 }
+
+// TestReconcile_DarkGang_WedgedLeaderRollsFirst: a gang serves through its
+// leader, so a gang whose leader is wedged on the running revision serves
+// nothing whatever its worker reports, and a fix pushed over it lands on
+// that gang first. Two leader+worker gangs, the leader of the higher index
+// crash-looping while its worker stays Ready, the fix pushed under each
+// drain-first strategy with one Instance offline at a time, standalone
+// and listed in a rollout group with a run open, both crash forms: the
+// wedged gang is the first to land the fix, its healthy peer stays in
+// rotation until then and rolls after it within the budget, no repair
+// opens, and both gangs end on the fix.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-inplace, instance/Ready/spec.revision/boundary@T-ready-crashloop-restart
+func TestReconcile_DarkGang_WedgedLeaderRollsFirst(t *testing.T) {
+	const replicas = 2
+	for _, sc := range offTargetStrategies[1:] {
+		for _, roll := range rollShapes {
+			for _, form := range []crashForm{crashAtStart, crashAfterUp} {
+				t.Run(fmt.Sprintf("%s/%s/%s", sc.strategy, roll.name, form), func(t *testing.T) {
+					h := offTargetCrashHarness(t, true, sc.strategy, sc.surge, sc.unavail, workloadtypes.RestartPolicyNone, replicas)
+					consults := 0
+					if roll.gated {
+						h.gate = rollingGroupGate(h, replicas, sc.surge, sc.unavail, &consults)
+					}
+					const victim = int32(replicas - 1)
+					breakInstance(t, h, victim, true, form)
+					h.events = nil
+					h.setTarget(h.revFixed, fixedImage)
+					requireDarkInstanceRollsFirst(t, h, victim, []int32{0}, nil, sc.strategy, sc.surge, sc.unavail,
+						func() bool { return h.settledOn(h.revFixed, replicas) })
+				})
+			}
+		}
+	}
+}
+
+// TestReconcile_GangWithCrashLoopingWorker_RollsInPlanOrder: the
+// preference reads service, not health. A gang whose worker crash-loops
+// while its leader stays in rotation serves by the Component's own
+// reading of its pod set, so replacing it takes a serving pod offline like
+// any other start: it keeps its place in plan order, after the lower
+// index, and lands the fix within the budget. Two leader+worker gangs, the
+// worker of the higher index crash-looping on the running revision, the
+// fix pushed standalone under each drain-first strategy with one Instance
+// offline at a time: no repair opens under RestartPolicy None, every pod
+// created after the push runs the fix, the roll never takes more than its
+// budget offline, the lower index lands first, and both gangs end serving
+// on the fix.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-inplace, instance/Ready/spec.revision/boundary@T-ready-crashloop-restart
+func TestReconcile_GangWithCrashLoopingWorker_RollsInPlanOrder(t *testing.T) {
+	const replicas = 2
+	for _, sc := range offTargetStrategies[1:] {
+		t.Run(string(sc.strategy), func(t *testing.T) {
+			h := offTargetCrashHarness(t, true, sc.strategy, sc.surge, sc.unavail, workloadtypes.RestartPolicyNone, replicas)
+			const broken = int32(replicas - 1)
+			h.crashPod(broken, "worker", crashStartImage)
+			h.events = nil
+			h.setTarget(h.revFixed, fixedImage)
+			bumpedAt := h.clk.Now()
+			fixedHash := query.RevisionOf(h.revFixed).Hash()
+			var firstLanded []int32
+			invariant := func() {
+				if h.repairInFlight() {
+					h.dumpState("repair opened")
+					t.Fatalf("a repair opened on an Instance whose revision is not the roll target")
+				}
+				if n := escalation.CurrentUnavailableInFlight(h.irStatuses()); n > sc.unavail {
+					t.Fatalf("%d Instances offline for the roll, budget %d", n, sc.unavail)
+				}
+				for _, pod := range h.livePods() {
+					if !pod.CreationTimestamp.Time.After(bumpedAt) {
+						continue
+					}
+					if pod.Labels[query.LabelRevisionHash] != fixedHash || pod.Spec.Containers[0].Image != fixedImage {
+						h.dumpState("pod created off the fix")
+						t.Fatalf("pod %s was created on %s after the fix was pushed", pod.Name, pod.Spec.Containers[0].Image)
+					}
+				}
+				if firstLanded == nil {
+					if landed := h.landedOn(h.revFixed); len(landed) > 0 {
+						firstLanded = landed
+					}
+				}
+			}
+			if !h.runWithInvariant(100, func() bool { return h.settledOn(h.revFixed, replicas) }, invariant) {
+				h.dumpState("after the bump")
+				t.Fatalf("the Component never settled on the fixed revision")
+			}
+			if len(firstLanded) != 1 || firstLanded[0] != 0 {
+				t.Fatalf("first to land the fix = %v, want the lower index: a gang in rotation through its leader keeps its place in plan order", firstLanded)
+			}
+			if h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+				t.Fatalf("a restart was recorded for an Instance the roll owned: %v", h.events)
+			}
+		})
+	}
+}

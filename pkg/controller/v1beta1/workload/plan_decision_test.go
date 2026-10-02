@@ -2427,3 +2427,78 @@ func TestPlan_Update_DarkInstancesListedFirst(t *testing.T) {
 		})
 	}
 }
+
+// TestPlan_Update_DarkGangIsReadOnItsLeader: a gang serves through its
+// leader, so the preference for an Instance that serves nothing reads the
+// gang's routed member. Two leader+worker gangs on the running revision
+// under RecreatePod: a gang whose leader is parked in CrashLoopBackOff
+// beside a Ready worker is dark, listed first with its start exempt from
+// the coordination gate; a gang whose worker is parked beside a serving
+// leader still serves, keeps its place in plan order and is consulted.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate
+func TestPlan_Update_DarkGangIsReadOnItsLeader(t *testing.T) {
+	target := updateTarget()
+	gangPod := func(idx int32, runner string, parked bool) *corev1.Pod {
+		pod := servingEnginePod(idx)
+		if parked {
+			pod = wedgedEnginePod(idx)
+		}
+		pod.Name += "-" + runner
+		pod.Labels[query.LabelRunner] = runner
+		return pod
+	}
+	for _, tc := range []struct {
+		name   string
+		parked string
+		dark   bool
+	}{
+		{name: "leader parked beside a Ready worker", parked: "leader", dark: true},
+		{name: "worker parked beside a serving leader", parked: "worker", dark: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := minimalInput(t)
+			forbidMutations(t, &in)
+			in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: 2, ServingPodCount: 2, RunningRevision: crashLoopRepairRevision},
+				{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: 2, ServingPodCount: 1, RunningRevision: crashLoopRepairRevision},
+			}
+			plan := types.ComponentPlan{
+				Component:      types.ComponentEngine,
+				Replicas:       2,
+				UpdateStrategy: types.UpdateStrategy{Type: types.UpdateStrategyRecreatePod},
+			}
+			for idx := int32(0); idx < 2; idx++ {
+				plan.Instances = append(plan.Instances, types.InstancePlan{Index: idx, Incarnation: 1,
+					Runners: []types.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}})
+			}
+			pods := map[int32][]*corev1.Pod{
+				0: {gangPod(0, "leader", false), gangPod(0, "worker", false)},
+				1: {gangPod(1, "leader", tc.parked == "leader"), gangPod(1, "worker", tc.parked == "worker")},
+			}
+			d := planTargetOrFail(t, in, plan, target, planSnapshot(in, pods))
+			ua := findAction(d, workload.ActionUpdate)
+			if ua == nil || len(ua.Update.Items) != 2 {
+				t.Fatalf("expected both gangs selected for the update, got %v", actionKinds(d))
+			}
+			want := []int32{0, 1}
+			if tc.dark {
+				want = []int32{1, 0}
+			}
+			var got []int32
+			for _, item := range ua.Update.Items {
+				got = append(got, item.Instance.Index)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("update items = %v, want %v", got, want)
+			}
+			for _, item := range ua.Update.Items {
+				dark := tc.dark && item.Instance.Index == 1
+				if item.ReplacesDarkPodSet != dark || item.CoordGateExempt != dark {
+					t.Errorf("instance %d: ReplacesDarkPodSet = %v, CoordGateExempt = %v, want both %v",
+						item.Instance.Index, item.ReplacesDarkPodSet, item.CoordGateExempt, dark)
+				}
+			}
+		})
+	}
+}
