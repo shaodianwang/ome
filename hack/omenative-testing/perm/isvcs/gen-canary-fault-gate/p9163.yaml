@@ -1,5 +1,5 @@
 # p9163: [gen] canary gate source unreachable never Hold at idle pd N=8  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=2 fault=source:idle co=none topo=pd canary=auto form=unreachable analysis=pass failurelimit=1 terminal=Failed cell=canary/Idle/sourceUnusable[unreachable] lift=never health=pass oninconclusive=hold
-# reason: the analysis source points at a name that resolves nowhere before the push lands on engine+decoder+router single (8 Instances); the gate reports that it cannot read health, holds the ladder at its step and counts no breach; the source never returns, so past the stall timeout the ladder parks Failed at that step with reason AnalysisStalled while the stable revision keeps serving every Instance the canary has not replaced, and nothing rolls back
+# reason: the analysis source is unreachable (the case's front for the store, which the run pinned, is aimed at nothing) before the push lands on engine+decoder+router single (8 Instances); the gate reports that it cannot read health, holds the ladder at its step and counts no breach; the store never comes back, so past the stall timeout the ladder parks Failed at that step with reason AnalysisStalled while the stable revision keeps serving every Instance the canary has not replaced, and nothing rolls back
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p9163 }

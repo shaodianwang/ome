@@ -1,5 +1,5 @@
 # p9202: [gen] canary gate sibling decoder new pod killed once at mid pd N=8 rp None  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=2 fault=crashloop:canary-serving@1 co=none topo=pd canary=auto form=load victim=canary victimcomp=decoder nophase=Failed cell=canary/Serving[soak]/siblingBroken[decoderNewOnce] lift=after-settle
-# reason: one pod of the decoder's canary revision is killed once while the second step soaks on engine+decoder+router single (8 Instances), under restart policy None; the kubelet restarts the runner and the step keeps its state across the capacity dip: the ladder walks every step to Stable and every Instance of every bumped member ends on its new revision serving
+# reason: one pod of the decoder's canary revision is killed once while the second step soaks on engine+decoder+router single (8 Instances), under restart policy None; the kubelet restarts the runner and the step keeps its state across the capacity dip: the ladder walks every step to Stable, every Instance of every bumped member ends on its new revision serving, and the decoder's other Instances hold the floor read with the killed Instance allowed for
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p9202 }

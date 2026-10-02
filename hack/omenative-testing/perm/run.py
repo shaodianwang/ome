@@ -448,7 +448,7 @@ def get_spec_info(case_id):
     """
     info = {"policy": None, "members": [], "order": [], "soak": 0, "strat": {},
             "pacing": None, "ratio_tol": None, "workers": {}, "max_unavail": {}, "partition": {},
-            "canary": None, "canary_groups": [], "pairing": ""}
+            "canary": None, "canary_groups": [], "pairing": "", "restart": {}}
     r = kubectl("-n", NS, "get", "isvc", case_id, "-o", "json")
     if r.returncode != 0:
         return info
@@ -461,6 +461,9 @@ def get_spec_info(case_id):
         if isinstance(cs, dict):
             t = cs.get("lifecycle", {}).get("updateStrategy", {}).get("type", "SurgeThenDrain")
             info["strat"][c] = t or "SurgeThenDrain"
+            # The restart policy a verdict reads the Component against when
+            # the case header names none.
+            info["restart"][c] = str(cs.get("lifecycle", {}).get("restartPolicy") or "")
             # Multi-node: a Component with worker.size>0 runs each Instance as
             # 1 leader + worker.size worker pods (otherwise a single 'default'
             # pod). Drives pods-per-Instance for the Instance-level counters.
@@ -3803,7 +3806,7 @@ def _run_fault_cleanups():
         elif kind == CONFLICT_FAULT:
             _conflict_writer_stop(arg)
         elif kind == "source":
-            _source_restore(arg)
+            _source_cleanup(arg)
 
 
 def _lift_quota(case_id):
@@ -4296,6 +4299,8 @@ def _fault_evict_fire(f, pod_state, pods_per_inst, old_hashes):
         f["fired"] = False
         f["denials"] = f.get("denials", 0) + 1
         f["retry_at"] = time.time() + FAULT_RETRY_S
+        if f.get("refused_since") is None:
+            f["refused_since"] = time.time()   # this repetition's retry window starts at its first refusal
         if f["denials"] == 1:
             f["notes"].append(f"eviction of {victim} refused by the disruption budget; asking again every {FAULT_RETRY_S:.0f}s")
             print(f"    ⓘ {f['notes'][-1]}")
@@ -4303,6 +4308,7 @@ def _fault_evict_fire(f, pod_state, pods_per_inst, old_hashes):
     if not admitted:
         f["infra_fail"] = f"evict: evicting {victim} failed: {msg}"
         return
+    f["refused_since"] = None
     _fault_record_victim(f, victim, pod_state, old_hashes)
     f["crash_pod"] = victim
     f["notes"].append(f"fault fired: evict {victim} ({f['param']})"
@@ -4324,6 +4330,17 @@ def _fault_record_victim(f, victim, pod_state, old_hashes):
 def _fault_repeats(f):
     """True when the fault is applied again each time what it took comes back."""
     return bool(f) and int(f.get("repeat") or 0) >= REPEAT_MIN
+
+
+def _repeat_retrying(f, now):
+    """True while a repeating fault's next repetition is waiting out a
+    refusal by the disruption budget: refused, and the retry window
+    (LIFT_SETTLE_S from this repetition's first refusal) has not run out.
+    A watch loop keeps its window open meanwhile: the fleet is whole only
+    because the next eviction is being refused."""
+    if not _fault_repeats(f) or int(f.get("fired_count") or 0) >= int(f["repeat"]) or f.get("refused_since") is None:
+        return False
+    return now - f["refused_since"] < LIFT_SETTLE_S
 
 
 def _repeat_prefer(f):
@@ -4368,7 +4385,7 @@ def _fault_fire_once(f, pod_state, pods_per_inst, old_hashes, inv=None):
         _fault_metric_fire(f, pod_state, old_hashes)
         return
     if f["kind"] == SOURCE_FAULT:
-        _fault_source_fire(f)
+        _fault_source_fire(f, pod_state, old_hashes)
         return
     if f["kind"] == "evict":
         _fault_evict_fire(f, pod_state, pods_per_inst, old_hashes)
@@ -5167,13 +5184,14 @@ def _row_hold(row):
     return token, str(fail.get("message") or op.get("reason") or "")
 
 
-def _row_serving_short(row):
-    """True when a row reports fewer serving pods than pods, or a phase other
-    than Ready: the status telling the operator the Instance is not whole."""
+def _row_serving_short(row, ppi=1):
+    """True when a row reports fewer serving pods than pods (or than the
+    Instance's width, for a gang), or a phase other than Ready: the status
+    telling the operator the Instance is not whole."""
     if not row:
         return False
     try:
-        return (int(row.get("servingPodCount") or 0) < int(row.get("podCount") or 0)
+        return (int(row.get("servingPodCount") or 0) < max(int(row.get("podCount") or 0), int(ppi))
                 or str(row.get("phase") or "") != "Ready")
     except (TypeError, ValueError):
         return False
@@ -5893,20 +5911,74 @@ def _metric_query(case_id, comp, revision):
 
 
 # ── The analysis source becomes unusable (fault=source, canary) ─────────────
-def _source_address(form, case_id):
-    """The address the case's analysis is pointed at: a name that resolves
-    nowhere (unreachable), or the bundled Prometheus on a path that is not
-    its API, so every query is answered with something that is not a sample
-    (garbage). (address, None) or (None, why it cannot be built)."""
-    if form == "unreachable":
-        return f"http://{case_id}-no-such-source.{NS}.svc:9090", None
-    block, err = _controller_config_block(CANARY_ANALYSIS_CONFIG_KEY)
+# A run pins its analysis source when it opens, so an edit of the address is
+# inert on an open run and, made at idle, is pinned into the next one. The
+# fault therefore never edits the address: the case gets its own front for
+# the bundled store (a Service with no selector and the EndpointSlice that
+# aims it at the store's pod), the driven group is pointed at the front
+# before the push, and the fault breaks what sits behind the front.
+SOURCE_FRONT_LABEL = "perm.test/source-front"
+SOURCE_FRONT_PORT_NAME = "http"
+
+
+def _source_front_name(case_id):
+    return f"perm-{case_id}-source"
+
+
+def _store_endpoint():
+    """(address, port) of the bundled store's pod behind the Service the
+    deployed controller config names, or (None, why not)."""
+    svc, err = _prometheus_service()
     if err:
         return None, err
-    address = str((block or {}).get(BUNDLED_PROMETHEUS_KEY) or "")
-    if not address:
-        return None, "the deployed controller config names no bundled Prometheus to answer with garbage"
-    return address.rstrip("/") + "/-/healthy", None
+    ns, name, _port = svc
+    r = kubectl("-n", ns, "get", "endpointslices", "-l", f"kubernetes.io/service-name={name}", "-o", "json")
+    if r.returncode != 0:
+        return None, f"the endpoints of {ns}/{name} cannot be read: {(r.stderr or '').strip()[:120]}"
+    try:
+        items = json.loads(r.stdout).get("items") or []
+    except ValueError:
+        items = []
+    for item in items:
+        port = next((int(p["port"]) for p in item.get("ports") or [] if p.get("port")), None)
+        for ep in item.get("endpoints") or []:
+            if port and (ep.get("conditions") or {}).get("ready", True) is not False and ep.get("addresses"):
+                return (str(ep["addresses"][0]), port), None
+    return None, f"the store behind {ns}/{name} has no ready endpoint"
+
+
+def _source_front_slice(case_id, endpoint):
+    """The EndpointSlice that aims the case's source front at `endpoint`
+    ((address, port)), or at nothing (None)."""
+    name = _source_front_name(case_id)
+    address, port = endpoint or ("", 0)
+    return {"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice",
+            "metadata": {"name": name, "namespace": NS,
+                         "labels": {"kubernetes.io/service-name": name, SOURCE_FRONT_LABEL: case_id}},
+            "addressType": "IPv6" if ":" in address else "IPv4",
+            "ports": [{"name": SOURCE_FRONT_PORT_NAME, "port": port, "protocol": "TCP"}] if endpoint else [],
+            "endpoints": [{"addresses": [address], "conditions": {"ready": True}}] if endpoint else []}
+
+
+def _source_front_apply(case_id, port, endpoint):
+    """Create the case's source front: a Service with no selector on `port`
+    and the EndpointSlice aiming it at `endpoint`. (ok, why not)."""
+    name = _source_front_name(case_id)
+    svc = {"apiVersion": "v1", "kind": "Service",
+           "metadata": {"name": name, "namespace": NS, "labels": {SOURCE_FRONT_LABEL: case_id}},
+           "spec": {"ports": [{"name": SOURCE_FRONT_PORT_NAME, "port": port, "targetPort": port, "protocol": "TCP"}]}}
+    body = json.dumps({"apiVersion": "v1", "kind": "List", "items": [svc, _source_front_slice(case_id, endpoint)]})
+    r = kubectl("apply", "-f", "-", input=body)
+    return r.returncode == 0, (r.stderr or "").strip()[:160]
+
+
+def _source_front_point(case_id, endpoint):
+    """Aim the case's source front at `endpoint`, or at nothing (None).
+    (ok, why not)."""
+    s = _source_front_slice(case_id, endpoint)
+    r = kubectl("-n", NS, "patch", "endpointslice", _source_front_name(case_id), "--type=merge",
+                "-p", json.dumps({"endpoints": s["endpoints"], "ports": s["ports"]}))
+    return r.returncode == 0, (r.stderr or "").strip()[:160]
 
 
 def _source_group_patch(spec, members, prometheus, present):
@@ -5923,59 +5995,112 @@ def _source_group_patch(spec, members, prometheus, present):
     return None
 
 
-def _fault_source_fire(f):
-    """fault=source: point the driven group's analysis at the unusable
-    address, remembering the source it had so the lift and the end-of-case
-    cleanup can put it back."""
-    cid = f["case_id"]
-    address = f.get("source_address")
-    if not address:
-        f["infra_fail"] = f"{SOURCE_FAULT}: no address to point the analysis at"
-        return
-    r = kubectl("-n", NS, "get", "isvc", cid, "-o", "json")
+def _source_front_setup(f, case_id):
+    """Stand the case's source front in front of the bundled store and
+    declare it as the driven group's analysis source, before anything
+    fires: the run pins the front, and the fault breaks what is behind it.
+    None once done, else why it cannot be set up."""
+    svc, err = _prometheus_service()
+    if err:
+        return err
+    store, err = _store_endpoint()
+    if err:
+        return err
+    name, port = _source_front_name(case_id), svc[2]
+    ok, msg = _source_front_apply(case_id, port, store)
+    if not ok:
+        return f"the source front {name} could not be created: {msg}"
+    f.update(source_front=name, source_port=port, source_store=store, source_broken=False, source_restored=False)
+    _FAULT_CLEANUPS.append(("source", f))   # registered BEFORE the group is pointed at the front
+    r = kubectl("-n", NS, "get", "isvc", case_id, "-o", "json")
     if r.returncode != 0:
-        f["infra_fail"] = f"{SOURCE_FAULT}: cannot read the live spec: {r.stderr.strip()[:120]}"
-        return
+        return f"cannot read the live spec: {(r.stderr or '').strip()[:120]}"
     spec = json.loads(r.stdout).get("spec", {})
-    groups = (spec.get("rollout") or {}).get("groups") or []
-    original = next(((g["canary"].get("prometheus"), "prometheus" in g["canary"]) for g in groups
-                     if isinstance(g.get("canary"), dict)
-                     and set(g.get("components") or []) == set(f.get("source_members") or [])), None)
-    if original is None:
-        f["infra_fail"] = f"{SOURCE_FAULT}: no canary group matches the driven unit {sorted(f.get('source_members') or [])}"
-        return
-    f["source_original"], f["source_had_key"] = original
-    f["source_restored"] = False
-    _FAULT_CLEANUPS.append(("source", f))   # registered BEFORE the source is replaced
+    address = f"http://{name}.{NS}.svc:{port}"
     groups = _source_group_patch(spec, f.get("source_members") or [], {"serverAddress": address}, True)
-    rr = kubectl("-n", NS, "patch", "isvc", cid, "--type=merge", "-p",
+    if groups is None:
+        return f"no canary group matches the driven unit {sorted(f.get('source_members') or [])}"
+    rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge", "-p",
                  json.dumps({"spec": {"rollout": {"groups": groups}}}))
     if rr.returncode != 0:
-        f["infra_fail"] = f"{SOURCE_FAULT}: pointing the analysis at {address} failed: {rr.stderr.strip()[:120]}"
+        return f"declaring {address} as the analysis source failed: {(rr.stderr or '').strip()[:120]}"
+    f["source_address"] = address
+    f["notes"].append(f"analysis source: {address}, the case's front for the store at {store[0]}:{store[1]}")
+    print(f"    {f['notes'][-1]}")
+    return None
+
+
+def _source_garbage_target(f, pod_state, old_hashes):
+    """((pod, address, port), None): a live running-revision pod of the
+    driven unit to answer the gate's queries with something that is not a
+    sample (its server answers no metrics API); or (None, why not)."""
+    members = f.get("source_members") or [BREAK_DEFAULT_COMP]
+    comp = BREAK_DEFAULT_COMP if BREAK_DEFAULT_COMP in members else members[0]
+    pods = _metric_side_pods(pod_state, old_hashes, comp, "stable")
+    if not pods:
+        return None, f"no live running-revision {comp} pod to answer the queries"
+    name = pods[0]
+    r = kubectl("-n", NS, "get", "pod", name, "-o", "json")
+    if r.returncode != 0:
+        return None, f"the pod {name} cannot be read: {(r.stderr or '').strip()[:120]}"
+    obj = json.loads(r.stdout)
+    address = str((obj.get("status") or {}).get("podIP") or "")
+    port = next((int(p["containerPort"]) for c in (obj.get("spec") or {}).get("containers") or []
+                 for p in c.get("ports") or [] if p.get("containerPort")), None)
+    if not address or not port:
+        return None, f"the pod {name} has no address or declares no container port"
+    return (name, address, port), None
+
+
+def _fault_source_fire(f, pod_state, old_hashes):
+    """fault=source: break the store behind the case's source front, which
+    the run pinned. unreachable points the front at nothing; garbage points
+    it at a running-revision pod of the service, which answers no metrics."""
+    if not f.get("source_front"):
+        f["infra_fail"] = f"{SOURCE_FAULT}: no source front to break"
         return
-    f["notes"].append(f"fault fired: {SOURCE_FAULT} form={f.get('form')} — the analysis source is now {address}")
+    if f.get("form") == "garbage":
+        target, err = _source_garbage_target(f, pod_state, old_hashes)
+        if err:
+            f["infra_fail"] = f"{SOURCE_FAULT}: {err}"
+            return
+        endpoint = (target[1], target[2])
+        where = f"at {target[0]} ({target[1]}:{target[2]}), a pod of the service that answers no metrics"
+    else:
+        endpoint, where = None, "at nothing"
+    ok, msg = _source_front_point(f["case_id"], endpoint)
+    if not ok:
+        f["infra_fail"] = f"{SOURCE_FAULT}: pointing {f['source_front']} {where} failed: {msg}"
+        return
+    f["source_broken"], f["source_restored"] = True, False
+    f["notes"].append(f"fault fired: {SOURCE_FAULT} form={f.get('form')} — the store behind {f.get('source_address')} "
+                      f"{'is unreachable' if endpoint is None else 'answers garbage'}: the front points {where}")
     print(f"    ⚡ {f['notes'][-1]}")
 
 
 def _source_restore(f):
-    """Put the analysis source back as the case declared it. Idempotent: the
-    one-shot form restores it at its time, the end-of-case cleanup again."""
-    if f.get("source_restored") or "source_original" not in f:
+    """Point the case's source front back at the store (looked up again, in
+    case it moved). Idempotent: the one-shot form restores it at its time,
+    the end-of-case cleanup again."""
+    if not f.get("source_broken") or f.get("source_restored"):
         return True
-    cid = f["case_id"]
-    r = kubectl("-n", NS, "get", "isvc", cid, "-o", "json")
-    if r.returncode != 0:
+    store, err = _store_endpoint()
+    if err:
+        store = f.get("source_store")
+    if not store:
         return False
-    spec = json.loads(r.stdout).get("spec", {})
-    groups = _source_group_patch(spec, f.get("source_members") or [], f.get("source_original"), f.get("source_had_key"))
-    if groups is None:
-        return False
-    rr = kubectl("-n", NS, "patch", "isvc", cid, "--type=merge", "-p",
-                 json.dumps({"spec": {"rollout": {"groups": groups}}}))
-    if rr.returncode == 0:
+    ok, _msg = _source_front_point(f["case_id"], tuple(store))
+    if ok:
         f["source_restored"] = True
         f["lifted_ts"] = time.time()
-    return rr.returncode == 0
+    return ok
+
+
+def _source_cleanup(f):
+    """End of case: the store back behind the front, then the front gone."""
+    _source_restore(f)
+    if f.get("source_front"):
+        kubectl("-n", NS, "delete", "service,endpointslice", f["source_front"], "--ignore-not-found=true")
 
 
 def _inconclusive_result_at(can, since_epoch):
@@ -6085,7 +6210,7 @@ def _source_track(ctx, f, track, can, step, now, rel):
         overdue = track["bite_at"] is None and now - track["fired_at"] >= SOURCE_BITE_S
         if (settled or overdue) and _source_restore(f):
             track["lifted_at"], track["step_at_lift"] = now, step
-            f["notes"].append(f"the analysis source was restored {now - track['fired_at']:.0f}s after the fault"
+            f["notes"].append(f"the store is back behind the analysis source {now - track['fired_at']:.0f}s after the fault"
                               + ("" if settled else " (the gate never reported it; restored anyway)"))
             print(f"    ⚡ {f['notes'][-1]}")
 
@@ -6175,8 +6300,8 @@ def _gate_fault_checks(ctx, f, track, on_inconclusive, failed_checks_peak, rejec
        f"{label}: an unusable source was never counted as a breach (failing samples stayed at {failed_checks_peak})",
        f"{label}: an unusable source was counted as a breach ({failed_checks_peak} failing sample(s))")
     if f.get("lift") == HEAL_LIFT:
-        ok(track["lifted_at"] is not None, f"{label}: the source was restored once the hold had settled",
-           f"{label}: the source was never restored")
+        ok(track["lifted_at"] is not None, f"{label}: the store was put back behind the source once the hold had settled",
+           f"{label}: the store was never put back behind the source")
         return verdict
     park = track["park"]
     if on_inconclusive == "rollbackonstall":
@@ -6193,6 +6318,16 @@ def _gate_fault_checks(ctx, f, track, on_inconclusive, failed_checks_peak, rejec
            f"{label}: the park kept the step the source broke at (step {track['bite_step']})",
            f"{label}: the park is at step {park['step']}, the source broke at step {track['bite_step']}")
     return verdict
+
+
+def _canary_break_allowance(ctx, fault, new_break):
+    """Under a canary, the Instances a break took are the fault's cost on
+    either side, on the primary or on a sibling: the floor the healthy
+    Instances must hold is lowered by that many, once, when the break has
+    fired. A break the push itself carries is costed by its crash watch."""
+    if fault and fault.get("kind") in BREAK_FAULTS and fault.get("fired") and not new_break \
+            and fault.get("crash_comp") and "floor_allowance" not in ctx:
+        ctx["floor_allowance"] = {fault["crash_comp"]: len(_break_victims(fault))}
 
 
 def _sibling_park_track(ctx, parked, track, now):
@@ -6222,8 +6357,9 @@ def _sibling_park_track(ctx, parked, track, now):
 def _sibling_park_checks(ctx, parked, track, verdict, notes, checks):
     """A bumped sibling outside the canary unit whose revision cannot start
     parks on its own: no pod of that revision ever served, status said why,
-    and it ends whole on its running revision; the ladder beside it is
-    judged without it."""
+    and it ends whole on its running revision (an Instance whose
+    running-revision pod still serves is kept on it, whatever failed attempt
+    sits beside it); the ladder beside it is judged without it."""
     def ok(cond, msg_ok, msg_bad):
         nonlocal verdict
         if cond:
@@ -6240,11 +6376,12 @@ def _sibling_park_checks(ctx, parked, track, verdict, notes, checks):
            f"sibling {comp}: status said why its roll stopped {why[1]:.0f}s after the push: {why[0][:120]}" if why else "",
            f"sibling {comp}: nothing said why its roll stopped (no rolloutHold, no Failed row, no RetryHeld or "
            f"InstanceFailed event names it)")
-        rolled, kept = _inst_rev_split(ctx, comp)
+        kept, attempts = _inst_kept_serving(ctx, comp), _attempt_pods(ctx, comp)
         ok(kept == ctx["N"][comp],
-           f"sibling {comp}: whole on its running revision at the end ({kept}/{ctx['N'][comp]}; "
-           f"{rolled} attempt(s) on the unstartable one)",
-           f"sibling {comp}: {kept}/{ctx['N'][comp]} on its running revision at the end ({rolled} on the unstartable one)")
+           f"sibling {comp}: whole on its running revision at the end ({kept}/{ctx['N'][comp]} serving on it; "
+           f"{attempts} attempt(s) on the unstartable one)",
+           f"sibling {comp}: {kept}/{ctx['N'][comp]} serving on its running revision at the end "
+           f"({attempts} attempt(s) on the unstartable one)")
         checks.append(f"  ⓘ sibling {comp}: left parked by design; the ladder beside it was judged on the unit alone")
     return verdict
 
@@ -6603,7 +6740,19 @@ def _gang_member_tick(f, case_id, pod_state, pods_per_inst, now):
                                    f"pods Ready, {now - f['short_since']:.0f}s into the gap")
 
 
-def _gang_member_checks(f, pod_state, trigger_ts, hdr, verdict, notes, checks):
+def _restart_policy(hdr, info, comp):
+    """The restart policy a verdict reads a Component against: the header's
+    restart= (the generator's short name) where it names one, else the live
+    spec's restartPolicy on that Component, which reads as the default
+    policy when it is unset."""
+    named = str((hdr or {}).get("restart") or "")
+    if named:
+        return named
+    live = str(((info or {}).get("restart") or {}).get(comp) or "")
+    return "RecreateInstance" if live == "RecreateInstanceOnPodRestart" else "None"
+
+
+def _gang_member_checks(f, pod_state, trigger_ts, hdr, verdict, notes, checks, info=None):
     """What became of the gang that lost a member (fault=podkill with kill=).
     Under RecreateInstanceOnPodRestart the engine rebuilds the gang as a
     whole (a RestartTriggered event names it) unless the roll took the gang
@@ -6618,7 +6767,7 @@ def _gang_member_checks(f, pod_state, trigger_ts, hdr, verdict, notes, checks):
     key = f"component={comp} instance={inst}"
     repairs = [m for reason, m in _isvc_events_since(f["case_id"], trigger_ts or 0)
                if reason == "RestartTriggered" and key in m]
-    policy = str(hdr.get("restart") or "None")
+    policy = _restart_policy(hdr, info, comp)
     pods = _instance_pods(pod_state, comp, inst)
     if any(p.get("uid") and p["uid"] == f.get("victim_uid") for _n, p in pods):
         verdict = "FAIL"
@@ -6784,8 +6933,10 @@ def _repeat_back(f, cycle, pod_state, pods_per_inst, now):
 def _repeat_sample_row(case_id, cycle, pod_state, pods_per_inst, now):
     """While the Instance a repetition took is short a Ready pod, read its
     row every INV_TICK_S: the status must report the loss (a phase other
-    than Ready, or fewer serving pods than pods), and once the gap has
-    lasted GANG_SHORT_REPORT_S it must not count the Instance whole."""
+    than Ready, or fewer serving pods than pods or than the gang's width),
+    and once the gap has lasted GANG_SHORT_REPORT_S it must not count the
+    Instance whole on two samples in a row (one sample at the edge of the
+    gap can read a row a reconcile ahead of the pods)."""
     comp, inst = cycle["comp"], cycle["inst"]
     if not comp or cycle["back_at"] is not None:
         return
@@ -6802,11 +6953,16 @@ def _repeat_sample_row(case_id, cycle, pod_state, pods_per_inst, now):
     if row is None:
         return
     cycle["samples"] += 1
-    if _row_serving_short(row):
+    if _row_serving_short(row, ppi):
         cycle["reported"] = True
+        cycle["lie_seen"] = None
     elif now - cycle["short_since"] >= GANG_SHORT_REPORT_S and cycle["lie"] is None:
-        cycle["lie"] = (f"row {comp}/{inst} reads {row.get('phase')} with servingPodCount={row.get('servingPodCount')} "
-                        f"while {len(whole)}/{ppi} pod(s) are Ready, {now - cycle['short_since']:.0f}s into the gap")
+        text = (f"row {comp}/{inst} reads {row.get('phase')} with servingPodCount={row.get('servingPodCount')} "
+                f"while {len(whole)}/{ppi} pod(s) are Ready, {now - cycle['short_since']:.0f}s into the gap")
+        if cycle.get("lie_seen") is None:
+            cycle["lie_seen"] = text
+        else:
+            cycle["lie"] = f"{text} (and at the sample before it)"
 
 
 def _repeat_tick(f, ctx):
@@ -6848,7 +7004,9 @@ def _rollout_holds(case_id, comps):
 
 def _repeat_checks(f, pods_per_inst, bumped, op_pods, window_start, verdict, notes, checks):
     """The verdict of a repeating fault across its window. The fault fired
-    every repetition, each once what it took had come back; while an
+    every repetition, each once what it took had come back (under a
+    disruption budget that keeps refusing, the repetitions the budget
+    admits, at least one); while an
     Instance was short the status said so and never counted it whole; every
     repair that opened was for an Instance the fault took, at most one per
     loss; the controller created no more pods than the operation (op_pods)
@@ -6871,12 +7029,20 @@ def _repeat_checks(f, pods_per_inst, bumped, op_pods, window_start, verdict, not
     cycles = f.get("cycles") or []
     gaps = [c["back_at"] - c["fired_at"] for c in cycles if c.get("back_at") is not None]
     what = "the manager" if f["kind"] == "ctrlrestart" else "the Instance it took"
-    if fired < n:
+    refused = int(f.get("denials") or 0)
+    if fired < n and refused and fired >= 1:
+        # The budget refuses while the operation holds an Instance down, so
+        # the window holds the repetitions the budget admits: at least one.
+        checks.append(f"  ⓘ repeat={n}: the fault fired {fired} time(s) under a budget that refuses — the disruption "
+                      f"budget refused {refused} eviction(s) and the operation's window held no further admitted one")
+    elif fired < n:
         fail(f"repeat: the fault fired {fired} of {n} times",
              f"  ✗ repeat={n}: the fault fired {fired} time(s); {what} did not come back for the next within the budget")
     else:
+        read = [f"back after {', '.join(f'{g:.0f}s' for g in gaps)}"] if gaps else []
+        read += [f"{refused} refusal(s) by the disruption budget waited out"] if refused else []
         checks.append(f"  ✓ repeat={n}: the fault fired {n} times, each once {what} had come back"
-                      + (f" (back after {', '.join(f'{g:.0f}s' for g in gaps)})" if gaps else ""))
+                      + (f" ({'; '.join(read)})" if read else ""))
     if f["kind"] != "ctrlrestart" and cycles:
         unreported = [i + 1 for i, c in enumerate(cycles) if not c["reported"] and not c["retired"] and c["samples"]]
         unsampled = [i + 1 for i, c in enumerate(cycles) if not c["reported"] and not c["retired"] and not c["samples"]]
@@ -6964,12 +7130,13 @@ def _fault_finalize(f, verdict, notes, checks):
     for x in f["notes"]:
         notes.append(x)
         checks.append(f"  ⓘ {x}")
-    if f["kind"] == "evict" and not f["fired"] and f.get("denials"):
+    fired_before = bool(f.get("fired_count"))   # a repetition that fired keeps the record fired
+    if f["kind"] == "evict" and not f["fired"] and f.get("denials") and not fired_before:
         verdict = "FAIL"
         notes.append(f"eviction never admitted ({f['denials']} budget refusal(s))")
         checks.append(f"  ✗ evict: the disruption budget refused the eviction {f['denials']} time(s) and never "
                       f"admitted it while the roll ran — a drain of that node would never finish")
-    elif f["kind"] not in ARMED_FAULTS and not f["fired"]:
+    elif f["kind"] not in ARMED_FAULTS and not f["fired"] and not fired_before:
         checks.append(f"  ⓘ fault {f['kind']}:{f['param']} never reached its phase hook (not fired)")
     if f["infra_fail"]:
         verdict = "INFRA-FAIL"
@@ -7672,13 +7839,24 @@ def _packed_broken_running(ctx, story, bumped):
     return _watch_convergence(ctx, bumped, budget, set(ctx["old_hashes"])), {}, None
 
 
+def _packed_rooms(story):
+    """Where a rebuilt Instance may land when more than one Component rolls
+    under the push: any node a settled pod of a rolled Component occupied,
+    since a decoder's drain vacates room an engine gang can take. None when
+    one Component rolls alone: then only the room the Instance vacated."""
+    if len(story["comps"]) <= 1:
+        return None
+    return {n for (c, _i), rec in story["settled"].items() if c in story["comps"] for n in rec["nodes"] if n}
+
+
 def _packed_checks(story, hdr, verdict, notes, checks):
     """The packed-pool story's own verdict: the pool was packed; never two
     Instances of a Component down at once (floor_soft=1 reports it instead
     where a runner that exits after Ready can be Ready when the roll takes
     the next Instance); the broken Instance landed the good revision first
     (hard for a crash at start, reported for a crash after Ready, whose pod
-    can be Ready when the push lands); it landed in the room it vacated;
+    can be Ready when the push lands); it landed in the room it vacated, or
+    in room any rolled Component's pod vacated when more than one rolls;
     and, for the mirror, nothing was rebuilt on the running revision after
     the good push. Pure over the story record."""
     soft = bool((hdr or {}).get("floor_soft"))
@@ -7730,16 +7908,22 @@ def _packed_checks(story, hdr, verdict, notes, checks):
                           f"Ready when the push lands, so the roll need not read it as serving nothing")
     final = story.get("final")
     vacated = story["settled"].get((victim, inst)) if inst is not None else None
+    rooms = _packed_rooms(story)
     if inst is None or final is None or not vacated:
         checks.append("  ⓘ node: the broken Instance's placement is not measurable")
     elif final["uids"] and final["uids"] <= vacated["uids"]:
         checks.append(f"  ✓ node: broken {victim} Instance {inst} was patched in place on {', '.join(vacated['nodes'])} (same pod)")
     elif final["nodes"] == vacated["nodes"]:
         checks.append(f"  ✓ node: broken {victim} Instance {inst} came back in the room it vacated on {', '.join(vacated['nodes'])}")
+    elif rooms is not None and final["nodes"] and all(n in rooms for n in final["nodes"]):
+        checks.append(f"  ✓ node: broken {victim} Instance {inst} came back on {', '.join(final['nodes'])}, in room this "
+                      f"service's own pods vacated ({' and '.join(story['comps'])} roll together)")
     else:
-        fail(f"broken {victim} Instance {inst} came back on {final['nodes']} instead of {vacated['nodes']}",
+        where = vacated["nodes"] if rooms is None else sorted(rooms)
+        fail(f"broken {victim} Instance {inst} came back on {final['nodes']} instead of {where}",
              f"  ✗ node: broken {victim} Instance {inst} came back on {', '.join(n or '(unbound)' for n in final['nodes'])} "
-             f"instead of the room it vacated on {', '.join(vacated['nodes'])} — in a packed pool there was nowhere else")
+             f"instead of the room {'it vacated' if rooms is None else 'this service\'s own pods vacated'} on "
+             f"{', '.join(where)} — in a packed pool there was nowhere else")
     if not bad_push:
         if story["old_rebuilt"]:
             fail(f"{len(story['old_rebuilt'])} pod(s) rebuilt on the running revision after the good push",
@@ -12682,6 +12866,24 @@ def _inst_rev_split(ctx, comp):
     return new, old
 
 
+def _inst_kept_serving(ctx, comp):
+    """Instances of comp kept on their running revision: every alive pod of
+    the Instance on that revision is Ready and serving. A failed attempt at
+    a new revision beside such a pod does not move the Instance off the
+    revision that serves it."""
+    by = defaultdict(list)
+    for p in ctx["pod_state"].values():
+        if p and p["alive"] and p["comp"] == comp and not (p.get("hash") and p["hash"] not in ctx["old_hashes"]):
+            by[p["inst"]].append(bool(p.get("ready") and p.get("serving")))
+    return sum(1 for pods in by.values() if all(pods))
+
+
+def _attempt_pods(ctx, comp):
+    """Alive pods of comp on a revision other than the running one."""
+    return sum(1 for p in ctx["pod_state"].values()
+               if p and p["alive"] and p["comp"] == comp and p.get("hash") and p["hash"] not in ctx["old_hashes"])
+
+
 def _partition(case_id, yaml_file, desc, hdr):
     """Bump the revision with RollingUpdate.Partition=k set; assert the staged
     canary — exactly (N-k) Instances roll to the new revision and k hold on the
@@ -15742,13 +15944,17 @@ def _kill_repeat(case_id, desc, hdr, ctx, via, policy, lift, pending, kcomp, ktg
     pods created are those repairs and no more, nothing came back on another
     revision; the untouched Instances kept serving (the floor is N minus the
     killed Instance) and nothing surged; after the lift every row is Ready
-    with no operation open and no hold."""
+    with no operation open and no hold. Under a press the scheduler chooses
+    the pod it takes on the pressed node, so the watch, the allowance, the
+    scope and the record follow that pod's Component, not the aim."""
     N, configured, ppi = ctx["N"], ctx["configured"], ctx["pods_per_inst"]
     n = int(hdr["repeat"])
-    exp = {"None": 1, "RecreateInstance": ppi[kcomp]}.get(policy, 1)
     budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in configured))
     ctx["track_comps"] = sorted(configured)
     ctx["floor_allowance"] = {kcomp: 1}   # the killed Instance itself
+    # kcomp is the Component the kill is aimed at; vcomp the Component of the
+    # pod a repetition took, which under a press is the scheduler's choice.
+    vcomp = kcomp
     rec = {"case_id": case_id, "kind": {"delete": "podkill", "evict": "evict", "preempt": "preempt"}[via],
            "param": "steady", "repeat": n, "fired_count": 0, "cycles": [], "victim_insts": set(),
            "infra_fail": None, "fleet": dict(N), "member": ktgt, "victim": ""}
@@ -15756,7 +15962,7 @@ def _kill_repeat(case_id, desc, hdr, ctx, via, policy, lift, pending, kcomp, ktg
     state, window_start, killed_inst = "RECOVERING", None, None
     for k in range(1, n + 1):
         _repeat_observe(rec, ctx["pod_state"])
-        kill_name, kill_pod = _kill_pick(ctx["pod_state"], kcomp, ktgt, killed_inst)
+        kill_name, kill_pod = _kill_pick(ctx["pod_state"], kcomp, ktgt, killed_inst if vcomp == kcomp else None)
         if not kill_name:
             verdict, state = "FAIL", "NO_VICTIM"
             notes.append(f"repetition {k}: no live {kcomp} pod to take")
@@ -15782,9 +15988,14 @@ def _kill_repeat(case_id, desc, hdr, ctx, via, policy, lift, pending, kcomp, ktg
                                              f"(filler {pending.get('press_pod')} bound to {_pod_bound(pending.get('press_pod', '')) or 'nothing'})")
             if pending["infra_fail"]:
                 return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", notes, checks)
+            # The scheduler chooses the pod it takes on the pressed node: the
+            # watch, the allowance, the scope and the record follow that
+            # pod's Component, whatever the press was aimed at.
             kill_name, killed_inst = pending["crash_pod"], pending["crash_inst"]
+            vcomp = str(pending.get("crash_comp") or kcomp)
             kill_pod = {"uid": "", "inst": killed_inst}
         else:
+            vcomp = kcomp
             print(f"  Phase 2 ({k}/{n}): {via} pod {kill_name} (comp={kcomp} inst={killed_inst} runner={kill_pod['runner']}) "
                   f"restartPolicy={policy}")
             removed, remove_note = _kill_remove(kill_name, via)
@@ -15797,7 +16008,9 @@ def _kill_repeat(case_id, desc, hdr, ctx, via, policy, lift, pending, kcomp, ktg
                 checks.append(f"  ⓘ repetition {k}: {remove_note}")
             ctx["trigger_ts"] = time.time()
         window_start = window_start or ctx["trigger_ts"]
-        rec.update(victim_comp=kcomp, victim_inst=str(killed_inst), victim_uid=kill_pod.get("uid", ""),
+        exp = {"None": 1, "RecreateInstance": ppi[vcomp]}.get(policy, 1)
+        ctx["floor_allowance"] = {vcomp: 1}   # the taken Instance itself
+        rec.update(victim_comp=vcomp, victim_inst=str(killed_inst), victim_uid=kill_pod.get("uid", ""),
                    fired=True, fired_ts=ctx["trigger_ts"])
         _repeat_record_fire(rec)
         cycle = rec["cycles"][-1]
@@ -15811,9 +16024,10 @@ def _kill_repeat(case_id, desc, hdr, ctx, via, policy, lift, pending, kcomp, ktg
 
         state, stable, dipped, pout = "RECOVERING", None, False, {}
         if via == "preempt":
-            print(f"  Phase 3 ({k}/{n}): watching the repair of {kcomp} Instance {killed_inst} wait on the fillers (lift={lift}, ≤{budget}s)")
-            pstate, pout = _pending_watch(ctx, pending, [kcomp], lift, recovered, budget, inst=killed_inst)
-            allowance = {c: (1 if c == kcomp else 0) for c in configured}
+            print(f"  Phase 3 ({k}/{n}): watching the repair of {vcomp} Instance {killed_inst} wait on the fillers (lift={lift}, ≤{budget}s)")
+            pstate, pout = _pending_watch(ctx, pending, [vcomp], lift, recovered, budget, inst=killed_inst)
+            _repeat_observe(rec, ctx["pod_state"])   # what the watch saw rebuilt is the window's
+            allowance = {c: (1 if c == vcomp else 0) for c in configured}
             verdict = _pending_checks(pending, lift, pstate, pout, ctx, sorted(configured), allowance, verdict, notes, checks)
             if len(pending.get("preempted") or []) > 1:
                 pending["infra_fail"] = (f"preempt: the scheduler preempted {len(pending['preempted'])} pods "
@@ -15842,7 +16056,7 @@ def _kill_repeat(case_id, desc, hdr, ctx, via, policy, lift, pending, kcomp, ktg
         _repeat_observe(rec, ctx["pod_state"])
         recreated = recreated_now()
         rc = len(recreated)
-        elsewhere = [p for p in recreated if not (p["comp"] == kcomp and str(p["inst"]) == str(killed_inst))]
+        elsewhere = [p for p in recreated if not (p["comp"] == vcomp and str(p["inst"]) == str(killed_inst))]
         if state != "RECOVERED":
             verdict = "FAIL"
             notes.append(f"repetition {k}: did not recover (state={state}, recreated={rc})")
@@ -15856,13 +16070,13 @@ def _kill_repeat(case_id, desc, hdr, ctx, via, policy, lift, pending, kcomp, ktg
         if elsewhere:
             verdict = "FAIL"
             notes.append(f"repetition {k}: {len(elsewhere)} pods recreated outside the killed Instance")
-            checks.append(f"  ✗ repetition {k}: {len(elsewhere)} pod(s) recreated OUTSIDE killed instance {kcomp}/{killed_inst} — over-cascade")
+            checks.append(f"  ✗ repetition {k}: {len(elsewhere)} pod(s) recreated OUTSIDE killed instance {vcomp}/{killed_inst} — over-cascade")
         if rc != exp:
             verdict = "FAIL"
             notes.append(f"repetition {k}: recreated {rc}, want {exp}")
             checks.append(f"  ✗ repetition {k}: {rc} pod(s) recreated, expected {exp} ({'pod-only' if policy == 'None' else 'whole instance'})")
         elif not elsewhere:
-            checks.append(f"  ✓ repetition {k}: exactly {rc} pod(s) recreated ({policy}), scoped to killed instance {kcomp}/{killed_inst}")
+            checks.append(f"  ✓ repetition {k}: exactly {rc} pod(s) recreated ({policy}), scoped to killed instance {vcomp}/{killed_inst}")
     last = rec["cycles"][-1] if rec["cycles"] else None
     if last and last.get("back_at") and window_start:
         ctx["converged_at"] = last["back_at"] - window_start
@@ -17204,14 +17418,14 @@ def _canary(case_id, yaml_file, desc, hdr):
     gate_threshold = _gate_threshold(cinfo.get("steps") or [])
     sibpark = {}
     if gate_fault and gate_fault["kind"] == SOURCE_FAULT:
-        # The source fault edits the driven group's analysis source; the
-        # address it points at is built before anything fires.
+        # The run pins its analysis source when it opens, so the fault breaks
+        # the store behind the address, never the address: the case's front
+        # for the store is declared before anything fires.
         gate_fault["source_members"] = sorted(set(cinfo.get("members") or []) & ctx["configured"])
-        address, err = _source_address(gate_fault.get("form"), case_id)
+        err = _source_front_setup(gate_fault, case_id)
         if err:
             _stop_watcher(ctx)
             return _write_fail(case_id, desc, hdr, "INFRA-FAIL", f"{SOURCE_FAULT}: {err}")
-        gate_fault["source_address"] = address
     if _fault_before_push(fault):
         ok, why = _break_before_push(ctx, fault)
         if not ok:
@@ -17454,11 +17668,7 @@ def _canary(case_id, yaml_file, desc, hdr):
             hook_fired_ts = now
         elif hook_fired_ts is not None and phase:
             after_hook_phases.add(phase)
-        if fault and fault.get("kind") in BREAK_FAULTS and fault.get("fired") and not new_break \
-                and fault.get("victim") != "canary" and "floor_allowance" not in ctx:
-            # The broken Instances are the fault's cost; the healthy ones must
-            # hold the floor that remains.
-            ctx["floor_allowance"] = {fault["crash_comp"]: len(_break_victims(fault))}
+        _canary_break_allowance(ctx, fault, new_break)
         _break_heal_tick(ctx, now)
         if gate_fault:
             _gate_track(ctx, gate_fault, gate, can, step, now, failed_checks_peak, gate_threshold)
@@ -18237,7 +18447,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                         deadline_conv = trigger_ts + conv_budget
                         print(f"\n  Phase 3: draining to targets (peak must stay ≤ {ce}/{cd}/{cr})")
                         state = "DRAINING"
-                if state == "DRAINING" and progressed and stable_since is not None and now - stable_since >= STABILITY_S:
+                if state == "DRAINING" and progressed and stable_since is not None and now - stable_since >= STABILITY_S \
+                        and not _repeat_retrying(fault, now):
                     state = "CONVERGED"
                     converged_at = stable_since - trigger_ts
                     print(f"\n  ✓ CONVERGED (drained) at {converged_at:.1f}s post-trigger")
@@ -18801,7 +19012,8 @@ def run_case(case_id):
                         state = "HOOK_MISSED"
                         print(f"  ✗ the roll completed on the new revision before the {rb['hook']} hook was reached")
                         break
-                if state == "ROTATING" and progressed and stable_since is not None and now - stable_since >= STABILITY_S:
+                if state == "ROTATING" and progressed and stable_since is not None and now - stable_since >= STABILITY_S \
+                        and not _repeat_retrying(fault, now):
                     settled_ir, why_ir = (True, "") if not rb else _rollback_ir_settled(
                         _fetch_initial_ir_items(case_id), N, configured, bumped, old_hashes)
                     if settled_ir:
@@ -19185,7 +19397,7 @@ def run_case(case_id):
                                     bumped=bumped, surges=inv.get("surges"))
         verdict = _once_push_checks(fault, case_id, pod_state, old_hashes, hdr, N, configured, verdict, notes, checks,
                                     surges=inv.get("surges"))
-        verdict = _gang_member_checks(fault, pod_state, trigger_ts, hdr, verdict, notes, checks)
+        verdict = _gang_member_checks(fault, pod_state, trigger_ts, hdr, verdict, notes, checks, info=info)
     # Check 6b': a repeating fault across its window, and the end state once
     # it stopped. The roll's own pods are what the operation explains: every
     # bumped pod under a surge or recreate strategy, none for an in-place

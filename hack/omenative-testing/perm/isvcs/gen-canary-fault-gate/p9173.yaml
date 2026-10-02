@@ -1,5 +1,5 @@
 # p9173: [gen] canary gate source garbage after-settle Hold at mid pd N=8  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=2 fault=source:canary-serving@1 co=none topo=pd canary=auto form=garbage analysis=pass failurelimit=1 nophase=Failed cell=canary/Serving[analysis]/sourceUnusable[garbage] lift=after-settle health=pass oninconclusive=hold
-# reason: the analysis source points at a server that answers with something other than the Prometheus API while the second step's analysis gate samples on engine+decoder+router single (8 Instances); the gate reports that it cannot read health, holds the ladder at its step and counts no breach; the source is restored 20s after the hold was observed and the ladder resumes: every Instance ends on the canary revision serving
+# reason: the analysis source answers garbage (the case's front for the store, which the run pinned, is aimed at a pod of the service that answers no metrics) while the second step's analysis gate samples on engine+decoder+router single (8 Instances); the gate reports that it cannot read health, holds the ladder at its step and counts no breach; the store is back behind the source 20s after the hold was observed and the ladder resumes: every Instance ends on the canary revision serving
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p9173 }

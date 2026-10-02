@@ -8378,6 +8378,31 @@ class GangMemberVerdictTest(unittest.TestCase):
         self.assertEqual("FAIL", verdict)
         self.assertTrue(any("counted as serving while short" in c for c in checks))
 
+    def test_the_restart_policy_is_read_off_the_spec_when_the_header_names_none(self):
+        live = {"restart": {"engine": "RecreateInstanceOnPodRestart", "decoder": ""}}
+        self.assertEqual("RecreateInstance", run._restart_policy({}, live, "engine"))
+        self.assertEqual("None", run._restart_policy({}, live, "decoder"))
+        self.assertEqual("None", run._restart_policy({}, {}, "engine"), "no header, no spec: the default policy")
+        self.assertEqual("RecreateInstance", run._restart_policy({"restart": "RecreateInstance"}, {"restart": {"engine": "None"}}, "engine"),
+                         "the header speaks for the case where it names the policy")
+        f = self._fault(short_samples=2)
+        pods = {"e0-l": _rec("engine", 0, "new", runner="leader"), "e0-w": _rec("engine", 0, "new", runner="worker")}
+        events = [("RestartTriggered", "OMENative component=engine instance=0 restart triggered: pod count 1 below desired 2")]
+        with mock.patch.object(run, "_isvc_events_since", lambda *a: events):
+            n, c = [], []
+            v = run._gang_member_checks(f, pods, 1.0, {}, "PASS", n, c, info=live)
+            self.assertEqual("PASS", v, "a push cell's header carries no restart=; the spec says the gang is rebuilt whole")
+            self.assertTrue(any("rebuilt as a whole" in x for x in c), c)
+            n, c = [], []
+            self.assertEqual("FAIL", run._gang_member_checks(f, pods, 1.0, {}, "PASS", n, c, info={"restart": {"engine": "None"}}))
+            self.assertTrue(any("restartPolicy None must bring back only" in x for x in c), c)
+        spec = {"spec": {"engine": {"lifecycle": {"restartPolicy": "RecreateInstanceOnPodRestart",
+                                                  "updateStrategy": {"type": "RecreatePod", "rollingUpdate": {"maxUnavailable": 1}}}},
+                         "decoder": {"lifecycle": {"updateStrategy": {"type": "SurgeThenDrain"}}}}}
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(spec), "")):
+            info = run.get_spec_info("p1")
+        self.assertEqual({"engine": "RecreateInstanceOnPodRestart", "decoder": ""}, info["restart"])
+
     def test_policy_none_must_not_rebuild_the_whole_gang(self):
         f = self._fault(short_samples=2)
         pods = {"e0-l": _rec("engine", 0, "new", runner="leader"), "e0-w": _rec("engine", 0, "new", runner="worker")}
@@ -9123,6 +9148,12 @@ class EvictFaultTest(unittest.TestCase):
         admitted = run._fault_new("p999", {"fault": "evict:rotating"})
         admitted["fired"] = True
         self.assertEqual("PASS", run._fault_finalize(admitted, "PASS", [], []))
+        repeated = run._fault_new("p999", {"fault": "evict:rotating", "repeat": 3})
+        repeated.update(fired=False, denials=3, fired_count=2)
+        checks = []
+        self.assertEqual("PASS", run._fault_finalize(repeated, "PASS", [], checks),
+                         "a repetition refused at the window's end does not unfire the ones that fired")
+        self.assertFalse(any("never reached its phase hook" in c for c in checks))
         unfired = run._fault_new("p999", {"fault": "evict:rotating"})
         checks = []
         self.assertEqual("PASS", run._fault_finalize(unfired, "PASS", [], checks))
@@ -10713,6 +10744,30 @@ class PackedPoolVerdictTest(unittest.TestCase):
         verdict = run._packed_checks(story, hdr or {}, "PASS", notes, checks)
         return verdict, notes, checks
 
+    def test_the_room_is_the_services_own_when_more_than_one_component_rolls(self):
+        story = self._good()
+        story["final"] = {"nodes": ["node-3"], "uids": {"uid-engine-2-fix"}}
+        verdict, notes, _checks = self._judge(story)
+        self.assertEqual("FAIL", verdict, "the engine rolls alone: only the room it vacated")
+        self.assertTrue(any("instead of ['node-2']" in n for n in notes), notes)
+        story["comps"] = ["decoder", "engine"]
+        story["settled"][("decoder", "0")] = {"nodes": ["node-3"], "uids": {"uid-decoder-0-old"}}
+        story["settled"][("router", "0")] = {"nodes": ["node-7"], "uids": {"uid-router-0-old"}}
+        self.assertEqual({"node-0", "node-1", "node-2", "node-3"}, run._packed_rooms(story),
+                         "the room of every rolled Component's pods; the router rolls nothing and vacates nothing")
+        verdict, notes, checks = self._judge(story)
+        self.assertEqual("PASS", verdict, notes)
+        self.assertTrue(any("came back on node-3, in room this service's own pods vacated (decoder and engine roll together)" in c
+                            for c in checks), checks)
+        story["final"] = {"nodes": ["node-7"], "uids": {"uid-engine-2-fix"}}
+        verdict, notes, _checks = self._judge(story)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("instead of ['node-0', 'node-1', 'node-2', 'node-3']" in n for n in notes), notes)
+        story["final"] = {"nodes": ["node-2"], "uids": {"uid-engine-2-fix"}}
+        verdict, _notes, checks = self._judge(story)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("came back in the room it vacated on node-2" in c for c in checks), "its own room first")
+
     def test_verdict_states_the_operators_end_state(self):
         verdict, notes, checks = self._judge(self._good())
         self.assertEqual("PASS", verdict, notes)
@@ -10925,12 +10980,33 @@ class RepeatingFaultLoopTest(unittest.TestCase):
         self.assertEqual((True, None, 1), (cycle["reported"], cycle["lie"], cycle["samples"]))
         cycle = self._cycle()
         whole_row = {"index": 0, "phase": "Ready", "podCount": 1, "servingPodCount": 1}
+        t1, t2 = 100.0 + run.GANG_SHORT_REPORT_S + run.INV_TICK_S, 100.0 + run.GANG_SHORT_REPORT_S + 2 * run.INV_TICK_S
         with mock.patch.object(run, "_ir_row", lambda *_a: whole_row):
             run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0)
             self.assertIsNone(cycle["lie"], "one reconcile of lag is not a lie")
-            run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0 + run.GANG_SHORT_REPORT_S + run.INV_TICK_S)
+            run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, t1)
+            self.assertIsNone(cycle["lie"], "one sample can read a row a reconcile ahead of the pods at the edge of the gap")
+            self.assertIn("servingPodCount=1", cycle["lie_seen"])
+            run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, t2)
         self.assertFalse(cycle["reported"])
-        self.assertIn("servingPodCount=1", cycle["lie"])
+        self.assertIn("servingPodCount=1", cycle["lie"], "the lie persisted across two samples")
+        cycle = self._cycle()
+        rows = iter([whole_row, {"index": 0, "phase": "Restarting", "podCount": 1, "servingPodCount": 0}, whole_row])
+        with mock.patch.object(run, "_ir_row", lambda *_a: next(rows)):
+            for k in range(3):
+                run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, t1 + k * run.INV_TICK_S)
+        self.assertEqual((True, None), (cycle["reported"], cycle["lie"]), "a reporting sample between two whole readings clears the first")
+        self.assertIsNotNone(cycle["lie_seen"])
+        gang = {"e0-l": _rec("engine", 0, "old", runner="leader", uid="l0"),
+                "e0-w": _rec("engine", 0, "old", runner="worker", uid="w0", ready=False)}
+        cycle = self._cycle()
+        with mock.patch.object(run, "_ir_row", lambda *_a: {"index": 0, "phase": "Ready", "podCount": 1, "servingPodCount": 1}):
+            run._repeat_sample_row("p1", cycle, gang, {"engine": 2}, t1)
+        self.assertEqual((True, None, None), (cycle["reported"], cycle["lie"], cycle.get("lie_seen")),
+                         "one serving pod of a two-pod gang is the loss reported, not the gang counted whole")
+        self.assertTrue(run._row_serving_short({"phase": "Ready", "podCount": 1, "servingPodCount": 1}, 2))
+        self.assertFalse(run._row_serving_short({"phase": "Ready", "podCount": 2, "servingPodCount": 2}, 2))
+        self.assertFalse(run._row_serving_short({"phase": "Ready", "podCount": 1, "servingPodCount": 1}))
         cycle = self._cycle()
         pods["e0"] = _rec("engine", 0, "old", uid="u0b")
         with mock.patch.object(run, "_ir_row", lambda *_a: self.fail("a whole Instance is not sampled")):
@@ -11019,6 +11095,34 @@ class RepeatingFaultVerdictTest(unittest.TestCase):
             verdict = run._repeat_checks(rec, {"engine": 1}, bumped, op_pods, 0.0, "PASS", notes, checks)
         return verdict, notes, "\n".join(checks)
 
+    def test_a_refused_repetition_gets_the_budgets_retry_window(self):
+        f = {"case_id": "p1", "kind": "evict", "param": "settling", "victim": "stable", "repeat": 3, "fired": True,
+             "fired_count": 1, "infra_fail": None, "notes": [], "victim_insts": set()}
+        pods = {"e0": _rec("engine", 0, "old", uid="u0")}
+        refusal = "Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget."
+        with mock.patch.object(run, "_fault_pick_pod", lambda *a, **k: "e0"), \
+                mock.patch.object(run, "kubectl", lambda *a, **k: _Resp("", 1, refusal)), \
+                mock.patch.object(run.time, "time", return_value=100.0):
+            run._fault_evict_fire(f, pods, {"engine": 1}, {"old"})
+            self.assertEqual((False, 1, 100.0, 105.0), (f["fired"], f["denials"], f["refused_since"], f["retry_at"]))
+        with mock.patch.object(run, "_fault_pick_pod", lambda *a, **k: "e0"), \
+                mock.patch.object(run, "kubectl", lambda *a, **k: _Resp("", 1, refusal)), \
+                mock.patch.object(run.time, "time", return_value=105.0):
+            run._fault_evict_fire(f, pods, {"engine": 1}, {"old"})
+            self.assertEqual((2, 100.0), (f["denials"], f["refused_since"]), "the window runs from the first refusal of this repetition")
+        self.assertTrue(run._repeat_retrying(f, 100.0 + run.LIFT_SETTLE_S - 1), "the loop keeps its window open while the refusal is retried")
+        self.assertFalse(run._repeat_retrying(f, 100.0 + run.LIFT_SETTLE_S), "and closes it once the retry window ran out")
+        self.assertFalse(run._repeat_retrying(dict(f, fired_count=3), 101.0), "nothing is owed once the repetitions are spent")
+        self.assertFalse(run._repeat_retrying(dict(f, repeat=0), 101.0), "a one-shot fault owes no repetition")
+        with mock.patch.object(run, "_fault_pick_pod", lambda *a, **k: "e0"), \
+                mock.patch.object(run, "kubectl", lambda *a, **k: _Resp("", 0, "")), \
+                mock.patch.object(run.time, "time", return_value=110.0):
+            f["fired"] = True
+            run._fault_evict_fire(f, pods, {"engine": 1}, {"old"})
+        self.assertIsNone(f["refused_since"], "admitted: the next repetition starts with no refusal on its clock")
+        self.assertFalse(run._repeat_retrying(f, 111.0))
+        self.assertIn("after 2 budget refusal(s)", f["notes"][-1])
+
     def test_a_clean_window_passes_and_says_what_it_read(self):
         repairs = [("RestartTriggered", "component=engine instance=0 restarting")] * 3
         verdict, notes, checks = self._judge(self._rec(), repairs)
@@ -11030,6 +11134,17 @@ class RepeatingFaultVerdictTest(unittest.TestCase):
         self.assertIn("running revision or the one pushed", checks)
 
     def test_fewer_firings_than_asked_fail(self):
+        once = self._rec(kind="evict", fired_count=1, denials=8, seen_uids={"a", "b", "r1"})
+        once["cycles"] = once["cycles"][:1]
+        verdict, notes, checks = self._judge(once)
+        self.assertEqual(("PASS", []), (verdict, notes), checks)
+        self.assertIn("fired 1 time(s) under a budget that refuses — the disruption budget refused 8 eviction(s)", checks)
+        verdict, notes, checks = self._judge(self._rec(kind="evict", fired_count=0, denials=8, cycles=[]))
+        self.assertEqual("FAIL", verdict, "a budget that admitted nothing is no window at all")
+        self.assertIn("fired 0 time(s)", checks)
+        verdict, notes, checks = self._judge(self._rec(denials=2), [("RestartTriggered", "component=engine instance=0 restarting")] * 3)
+        self.assertEqual("PASS", verdict, checks)
+        self.assertIn("fired 3 times, each once the Instance it took had come back (back after 5s, 5s, 5s; 2 refusal(s) by the disruption budget waited out)", checks)
         verdict, notes, checks = self._judge(self._rec(fired_count=2))
         self.assertEqual("FAIL", verdict)
         self.assertIn("fired 2 of 3", notes[0])
@@ -11716,20 +11831,35 @@ class CanaryGateFaultTest(unittest.TestCase):
         data = {"canaryAnalysis": json.dumps({"bundledPrometheusAddress": address, "queryTimeout": "5s"})}
         return json.dumps({"data": data})
 
-    def test_prometheus_service_and_source_addresses(self):
+    def test_prometheus_service_and_store_endpoint(self):
         with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, self._configmap("http://ome-prometheus.ome.svc:9090"), "")):
             self.assertEqual((("ome", "ome-prometheus", 9090), None), run._prometheus_service())
-            self.assertEqual(("http://ome-prometheus.ome.svc:9090/-/healthy", None), run._source_address("garbage", "p999"))
-        self.assertEqual((f"http://p999-no-such-source.{run.NS}.svc:9090", None), run._source_address("unreachable", "p999"))
         with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, self._configmap(""), "")):
             svc, err = run._prometheus_service()
             self.assertIsNone(svc)
             self.assertIn("no in-cluster bundled Prometheus", err)
-            addr, err = run._source_address("garbage", "p999")
-            self.assertIsNone(addr)
-            self.assertIn("names no bundled Prometheus", err)
+            ep, err = run._store_endpoint()
+            self.assertIsNone(ep)
+            self.assertIn("no in-cluster bundled Prometheus", err)
         with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, self._configmap("http://prom.example.com:9090"), "")):
             self.assertIsNone(run._prometheus_service()[0], "an address outside the cluster is not proxied")
+        slices = {"items": [{"ports": [{"name": "http-web", "port": 9090}],
+                             "endpoints": [{"addresses": ["10.0.0.9"], "conditions": {"ready": False}},
+                                           {"addresses": ["10.0.0.7"], "conditions": {"ready": True}}]}]}
+
+        def fake(*a, **k):
+            if "endpointslices" in a:
+                self.assertEqual(("-n", "ome", "get", "endpointslices", "-l", "kubernetes.io/service-name=ome-prometheus"), a[:6])
+                return subprocess.CompletedProcess(a, 0, json.dumps(slices), "")
+            return subprocess.CompletedProcess(a, 0, self._configmap("http://ome-prometheus.ome.svc:9090"), "")
+        with mock.patch.object(run, "kubectl", fake):
+            self.assertEqual((("10.0.0.7", 9090), None), run._store_endpoint(), "the first ready endpoint of the store")
+        empty = {"items": [{"ports": [{"name": "http-web", "port": 9090}], "endpoints": []}]}
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(
+                a, 0, json.dumps(empty) if "endpointslices" in a else self._configmap("http://ome-prometheus.ome.svc:9090"), "")):
+            ep, err = run._store_endpoint()
+            self.assertIsNone(ep)
+            self.assertIn("no ready endpoint", err)
 
     def test_prometheus_max_reads_the_largest_series(self):
         body = json.dumps({"data": {"result": [{"value": [1, "0.1"]}, {"value": [1, "0.9"]}]}})
@@ -11753,44 +11883,89 @@ class CanaryGateFaultTest(unittest.TestCase):
             g["canary"]["prometheus"] = prometheus
         return {"spec": {"rollout": {"groups": [g, {"components": ["router"], "blueGreen": {}}]}}}
 
-    def test_source_fire_points_the_group_at_the_address_and_restore_puts_it_back(self):
+    def test_source_front_is_declared_before_the_push_and_the_fault_breaks_the_store_behind_it(self):
         f = run._fault_new("p999", {"fault": "source:canary-serving@1", "form": "unreachable", "lift": "after-settle"})
-        f["source_members"], f["source_address"] = ["engine"], "http://nowhere.svc:9090"
-        patches = []
+        f["source_members"] = ["engine"]
+        slices = {"items": [{"ports": [{"name": "http-web", "port": 9090}],
+                             "endpoints": [{"addresses": ["10.0.0.7"], "conditions": {"ready": True}}]}]}
+        pod = {"status": {"podIP": "10.0.1.5"}, "spec": {"containers": [{"ports": [{"containerPort": 8080}]}]}}
+        calls = []
 
         def fake(*a, **k):
+            calls.append((a, k))
+            if "endpointslices" in a:
+                return subprocess.CompletedProcess(a, 0, json.dumps(slices), "")
             if a[2:4] == ("get", "isvc"):
                 return subprocess.CompletedProcess(a, 0, json.dumps(self._spec()), "")
-            patches.append(json.loads(a[-1]))
+            if a[2:4] == ("get", "pod"):
+                return subprocess.CompletedProcess(a, 0, json.dumps(pod), "")
+            if a[2:4] == ("get", "configmap"):
+                return subprocess.CompletedProcess(a, 0, self._configmap("http://ome-prometheus.ome.svc:9090"), "")
             return subprocess.CompletedProcess(a, 0, "", "")
         with mock.patch.object(run, "kubectl", fake):
-            run._fault_source_fire(f)
-            self.assertIsNone(f["infra_fail"])
-            self.assertEqual((None, False, False), (f["source_original"], f["source_had_key"], f["source_restored"]))
-            groups = patches[-1]["spec"]["rollout"]["groups"]
-            self.assertEqual({"serverAddress": "http://nowhere.svc:9090"}, groups[0]["canary"]["prometheus"])
+            self.assertIsNone(run._source_front_setup(f, "p999"))
+            applied = json.loads(next(k["input"] for a, k in calls if a[:2] == ("apply", "-f")))
+            svc, sl = applied["items"]
+            self.assertEqual(("Service", "perm-p999-source", run.NS),
+                             (svc["kind"], svc["metadata"]["name"], svc["metadata"]["namespace"]))
+            self.assertNotIn("selector", svc["spec"], "a front with no selector: its endpoints are the harness's to aim")
+            self.assertEqual([{"name": "http", "port": 9090, "targetPort": 9090, "protocol": "TCP"}], svc["spec"]["ports"])
+            self.assertEqual(("EndpointSlice", "perm-p999-source", "IPv4"),
+                             (sl["kind"], sl["metadata"]["labels"]["kubernetes.io/service-name"], sl["addressType"]))
+            self.assertEqual([{"addresses": ["10.0.0.7"], "conditions": {"ready": True}}], sl["endpoints"], "aimed at the store")
+            self.assertEqual([{"name": "http", "port": 9090, "protocol": "TCP"}], sl["ports"])
+            groups = json.loads(next(a[-1] for a, k in calls if a[2:5] == ("patch", "isvc", "p999")))["spec"]["rollout"]["groups"]
+            self.assertEqual({"serverAddress": f"http://perm-p999-source.{run.NS}.svc:9090"}, groups[0]["canary"]["prometheus"],
+                             "the driven group is pointed at the front before the push, so the run pins the front")
             self.assertEqual({"components": ["router"], "blueGreen": {}}, groups[1], "the other group is written back as it was")
             self.assertIn(("source", f), run._FAULT_CLEANUPS)
             run._FAULT_CLEANUPS.remove(("source", f))
+            self.assertEqual((("10.0.0.7", 9090), False, False), (f["source_store"], f["source_broken"], f["source_restored"]))
+            calls.clear()
+            run._fault_source_fire(f, {}, {"old"})
+            self.assertIsNone(f["infra_fail"])
+            a, _k = calls[-1]
+            self.assertEqual(("-n", run.NS, "patch", "endpointslice", "perm-p999-source", "--type=merge", "-p"), a[:7])
+            self.assertEqual({"endpoints": [], "ports": []}, json.loads(a[-1]), "unreachable: the front points at nothing")
+            self.assertTrue(f["source_broken"])
+            self.assertIn("is unreachable", f["notes"][-1])
+            calls.clear()
             self.assertTrue(run._source_restore(f))
-            self.assertNotIn("prometheus", patches[-1]["spec"]["rollout"]["groups"][0]["canary"],
-                             "a source the case never declared is removed again")
+            self.assertEqual({"endpoints": [{"addresses": ["10.0.0.7"], "conditions": {"ready": True}}],
+                              "ports": [{"name": "http", "port": 9090, "protocol": "TCP"}]}, json.loads(calls[-1][0][-1]),
+                             "the store, looked up again, is back behind the front")
             self.assertTrue(f["source_restored"])
+            calls.clear()
             self.assertTrue(run._source_restore(f), "idempotent")
-        self.assertEqual(2, len(patches))
-        declared = run._fault_new("p999", {"fault": "source:idle", "form": "garbage", "lift": "never"})
-        declared["source_members"], declared["source_address"] = ["engine"], "http://x/-/healthy"
-        original = {"serverAddress": "http://ome-prometheus.ome.svc:9090"}
-        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(
-                a, 0, json.dumps(self._spec(original, True)) if a[2:4] == ("get", "isvc") else "", "")):
-            run._fault_source_fire(declared)
-        self.assertEqual((original, True), (declared["source_original"], declared["source_had_key"]))
-        run._FAULT_CLEANUPS.remove(("source", declared))
-        nogroup = run._fault_new("p999", {"fault": "source:idle", "form": "garbage", "lift": "never"})
-        nogroup["source_members"], nogroup["source_address"] = ["decoder"], "http://x"
-        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(self._spec()), "")):
-            run._fault_source_fire(nogroup)
-        self.assertIn("no canary group matches", nogroup["infra_fail"])
+            self.assertEqual([], calls)
+            g = run._fault_new("p999", {"fault": "source:canary-serving@1", "form": "garbage", "lift": "never"})
+            g.update(source_members=["decoder", "engine"], source_front="perm-p999-source", source_address="http://front",
+                     source_store=("10.0.0.7", 9090))
+            pods = {"p999-engine-0-default-0": _rec("engine", 0, "old"), "p999-engine-1-default-0": _rec("engine", 1, "new"),
+                    "p999-decoder-0-default-0": _rec("decoder", 0, "old")}
+            calls.clear()
+            run._fault_source_fire(g, pods, {"old"})
+            self.assertIsNone(g["infra_fail"])
+            self.assertIn(("-n", run.NS, "get", "pod", "p999-engine-0-default-0"), [a[:5] for a, _k in calls],
+                          "garbage: a running-revision pod of the engine")
+            self.assertEqual({"endpoints": [{"addresses": ["10.0.1.5"], "conditions": {"ready": True}}],
+                              "ports": [{"name": "http", "port": 8080, "protocol": "TCP"}]}, json.loads(calls[-1][0][-1]),
+                             "the front points at the pod's own server, which answers no metrics API")
+            self.assertIn("answers garbage", g["notes"][-1])
+            calls.clear()
+            run._source_cleanup(g)
+            self.assertTrue(g["source_restored"])
+            self.assertEqual(("-n", run.NS, "delete", "service,endpointslice", "perm-p999-source"), calls[-1][0][:5])
+            nopod = dict(g, source_broken=False, notes=[], infra_fail=None)
+            run._fault_source_fire(nopod, {"p999-engine-1-default-0": _rec("engine", 1, "new")}, {"old"})
+            self.assertIn("no live running-revision engine pod", nopod["infra_fail"])
+            nogroup = run._fault_new("p999", {"fault": "source:idle", "form": "garbage", "lift": "never"})
+            nogroup["source_members"] = ["decoder"]
+            self.assertIn("no canary group matches", run._source_front_setup(nogroup, "p999"))
+            run._FAULT_CLEANUPS.remove(("source", nogroup))
+        unfronted = run._fault_new("p999", {"fault": "source:idle", "form": "unreachable", "lift": "never"})
+        run._fault_source_fire(unfronted, {}, set())
+        self.assertIn("no source front", unfronted["infra_fail"])
 
     def test_inconclusive_result_is_read_from_the_metric_results(self):
         can = {"metricResults": [{"name": "error_rate", "value": "0.01", "passed": True, "time": "2026-01-01T00:00:30Z"}]}
@@ -11866,8 +12041,9 @@ class CanaryGateFaultTest(unittest.TestCase):
 
     def _source_fault(self, lift):
         f = run._fault_new("p999", {"fault": "source:canary-serving@1", "form": "unreachable", "lift": lift})
-        f.update(fired=True, fired_ts=110.0, source_members=["engine"], source_address="http://nowhere",
-                 source_original=None, source_had_key=False, source_restored=False)
+        f.update(fired=True, fired_ts=110.0, source_members=["engine"], source_front="perm-p999-source",
+                 source_address=f"http://perm-p999-source.{run.NS}.svc:9090", source_store=("10.0.0.7", 9090),
+                 source_broken=True, source_restored=False)
         return f
 
     def test_source_track_holds_then_lifts_and_resumes(self):
@@ -11890,7 +12066,7 @@ class CanaryGateFaultTest(unittest.TestCase):
         checks = []
         self.assertEqual("PASS", run._gate_fault_checks(ctx, f, track, "hold", 0, None, {"Paused", "Stable"}, "PASS", [], checks))
         self.assertTrue(any("the ladder held at step 1" in c for c in checks))
-        self.assertTrue(any("source was restored" in c for c in checks))
+        self.assertTrue(any("store was put back behind the source" in c for c in checks))
         moved = dict(track, steps_while_broken={1, 2})
         notes = []
         self.assertEqual("FAIL", run._gate_fault_checks(ctx, f, moved, "hold", 0, None, set(), "PASS", notes, []))
@@ -12019,6 +12195,31 @@ class CanaryGateFaultTest(unittest.TestCase):
         self.assertEqual("FAIL", run._break_victim_checks(stable_victim, stable_victim, pods, {"old"}, events, {"engine", "decoder"}, "PASS", notes, []))
         self.assertTrue(any("was repaired after the bump" in n for n in notes))
 
+    def test_a_sibling_break_is_the_faults_cost_on_either_side(self):
+        canary_side = run._fault_new("p999", {"fault": "crashloop:canary-serving@1", "form": "load", "victim": "canary",
+                                              "victimcomp": "router", "lift": "after-settle"})
+        ctx = {}
+        run._canary_break_allowance(ctx, canary_side, False)
+        self.assertNotIn("floor_allowance", ctx, "nothing is allowed for before the break has fired")
+        canary_side.update(fired=True, crash_comp="router", crash_inst="1")
+        run._canary_break_allowance(ctx, canary_side, False)
+        self.assertEqual({"router": 1}, ctx["floor_allowance"],
+                         "the Instance the fault keeps killing is excluded from the floor, as on the running side")
+        canary_side["extra_victims"] = [{"crash_comp": "router", "crash_inst": "0"}]
+        run._canary_break_allowance(ctx, canary_side, False)
+        self.assertEqual({"router": 1}, ctx["floor_allowance"], "read once, when the break fired")
+        stable_side = dict(canary_side, victim="stable", extra_victims=[])
+        ctx = {}
+        run._canary_break_allowance(ctx, stable_side, False)
+        self.assertEqual({"router": 1}, ctx["floor_allowance"])
+        ctx = {}
+        run._canary_break_allowance(ctx, dict(canary_side, extra_victims=[]), True)
+        self.assertNotIn("floor_allowance", ctx, "a break the push carries is costed by its crash watch")
+        metric = run._fault_new("p999", {"fault": "metric:canary-serving@1", "form": "persist", "victim": "canary"})
+        metric.update(fired=True, crash_comp="engine")
+        run._canary_break_allowance(ctx, metric, False)
+        self.assertNotIn("floor_allowance", ctx, "a gate fault takes no Instance")
+
     def test_a_gate_fault_that_never_fired_fails_the_case(self):
         notes = []
         f = run._fault_new("p999", {"fault": "source:canary-serving@2", "form": "garbage", "lift": "never"})
@@ -12048,7 +12249,7 @@ class CanaryGateFaultTest(unittest.TestCase):
         self.assertNotIn("served", track)
         checks = []
         self.assertEqual("PASS", run._sibling_park_checks(ctx, {"router"}, track, "PASS", [], checks))
-        self.assertTrue(any("whole on its running revision at the end (2/2; 1 attempt(s)" in c for c in checks))
+        self.assertTrue(any("whole on its running revision at the end (2/2 serving on it; 1 attempt(s)" in c for c in checks))
         pods["r2"].update(ready=True, serving=True)
         with mock.patch.object(run, "_ir_snapshot", lambda cid: snapshot), \
                 mock.patch.object(run, "_isvc_events_since", lambda cid, since: []):
@@ -12059,6 +12260,104 @@ class CanaryGateFaultTest(unittest.TestCase):
         notes = []
         self.assertEqual("FAIL", run._sibling_park_checks(ctx, {"router"}, {}, "PASS", notes, []))
         self.assertTrue(any("nothing said why its roll stopped" in n for n in notes))
+
+
+    def test_a_parked_sibling_keeps_an_instance_whose_running_pod_still_serves(self):
+        pods = {"r0": {"alive": True, "comp": "router", "inst": "0", "hash": "old", "ready": True, "serving": True},
+                "r0b": {"alive": True, "comp": "router", "inst": "0", "hash": "new", "ready": False, "serving": False},
+                "r1": {"alive": True, "comp": "router", "inst": "1", "hash": "old", "ready": True, "serving": True}}
+        ctx = self._ctx(pods)
+        self.assertEqual((0, 1), run._inst_rev_split(ctx, "router"), "the roll split reads a mixed Instance as neither")
+        self.assertEqual(2, run._inst_kept_serving(ctx, "router"), "the failed attempt beside a serving pod moves nothing")
+        self.assertEqual(1, run._attempt_pods(ctx, "router"))
+        track = {"why": {"router": ("rolloutHold gate=RetryBlock", 68.0)}}
+        checks = []
+        self.assertEqual("PASS", run._sibling_park_checks(ctx, {"router"}, track, "PASS", [], checks))
+        self.assertTrue(any("whole on its running revision at the end (2/2 serving on it; 1 attempt(s)" in c for c in checks), checks)
+        pods["r0"].update(ready=False, serving=False)
+        notes = []
+        self.assertEqual("FAIL", run._sibling_park_checks(ctx, {"router"}, track, "PASS", notes, []))
+        self.assertTrue(any("1/2 serving on its running revision at the end (1 attempt(s)" in n for n in notes), notes)
+
+
+
+class KillRepeatFollowsTheVictimTest(unittest.TestCase):
+    """mode=kill via=preempt repeat=<n>: the scheduler chooses the pod it
+    takes on the pressed node, so the watch, the allowance, the scope and
+    the record follow that pod's Component, not the press's aim."""
+
+    def _ctx(self):
+        pods = {"p1-engine-0-leader-0": _rec("engine", 0, "old", runner="leader", uid="e0l"),
+                "p1-engine-0-worker-0": _rec("engine", 0, "old", runner="worker", uid="e0w"),
+                "p1-engine-1-leader-0": _rec("engine", 1, "old", runner="leader", uid="e1l"),
+                "p1-engine-1-worker-0": _rec("engine", 1, "old", runner="worker", uid="e1w"),
+                "p1-router-0-default-0": _rec("router", 0, "old", uid="r0"),
+                "p1-router-1-default-0": _rec("router", 1, "old", uid="r1")}
+        for p in pods.values():
+            p["node"] = "n1"
+        return {"case_id": "p1", "N": {"engine": 2, "decoder": 0, "router": 2}, "configured": {"engine", "router"},
+                "pods_per_inst": {"engine": 2, "decoder": 1, "router": 1}, "pod_state": pods, "closed": False,
+                "trigger_ts": None, "hdr": {}, "info": {"max_unavail": {}}, "min_ready": {"engine": 2, "router": 1},
+                "floor_sust": {}, "peaks": {"engine": 2, "decoder": 0, "router": 2}, "old_hashes": {"old"},
+                "agg": {"engine": (2, 2, 0), "router": (2, 2, 0)}}
+
+    def _run(self, ctx, pending, watch_state, repeat=2):
+        watched, allowed, finished, records = [], [], [], []
+        victims = iter([("p1-router-0-default-0", "0")])
+
+        def watch(ctx_, f, comps, lift, done, budget, inst=None):
+            watched.append((list(comps), inst))
+            gone, comp, idx = f["crash_pod"], f["crash_comp"], f["crash_inst"]
+            ctx_["pod_state"].pop(gone)
+            ctx_["pod_state"][f"p1-{comp}-{idx}-default-1"] = dict(_rec(comp, idx, "old", uid=f"{comp}{idx}b"), node="n1")
+            return watch_state, {"bitten_at": 4.0}
+
+        def reset(f, k):
+            f["crash_pod"], f["crash_inst"] = next(victims)
+            return True
+
+        real_checks = run._repeat_checks
+
+        def repeat_checks(f, *a):
+            records.append(f)
+            return real_checks(f, *a)
+        with mock.patch.object(run, "_preempt_fill", lambda *a, **k: None), \
+                mock.patch.object(run, "_preempt_apparatus_hit", lambda f: False), \
+                mock.patch.object(run, "_preempt_cycle_reset", reset), \
+                mock.patch.object(run, "_pending_watch", watch), \
+                mock.patch.object(run, "_pending_checks", lambda f, lift, state, out, c, comps, allowance, verdict, notes, checks:
+                                  allowed.append(dict(allowance)) or verdict), \
+                mock.patch.object(run, "_repeat_checks", repeat_checks), \
+                mock.patch.object(run, "_isvc_events_since", lambda *a: []), \
+                mock.patch.object(run, "_repeat_end_checks", lambda case_id, N, configured, verdict, notes, checks: verdict), \
+                mock.patch.object(run, "_finish", lambda case_id, desc, hdr, c, state, verdict, notes, checks:
+                                  finished.append((state, verdict, notes, checks)) or 0):
+            run._kill_repeat("p1", "desc", {"repeat": repeat}, ctx, "preempt", "None", "after-settle", pending, "engine", "")
+        return watched, allowed, finished[0], records[0]
+
+    def test_a_router_taken_by_a_press_aimed_at_the_engine(self):
+        ctx = self._ctx()
+        pending = {"case_id": "p1", "kind": "preempt", "infra_fail": None, "notes": [], "fillers": [], "preempted": [],
+                   "not_victim": set(), "crash_pod": "p1-router-1-default-0", "crash_comp": "router", "crash_inst": "1"}
+        watched, allowed, (state, verdict, notes, checks), rec = self._run(ctx, pending, "DONE")
+        self.assertEqual([(["router"], "1"), (["router"], "0")], watched, "the wait is read on the router's row, the pod the scheduler took")
+        self.assertEqual({"engine": 0, "router": 1}, allowed[0], "the allowance is the router's Instance")
+        self.assertEqual({"router": 1}, ctx["floor_allowance"])
+        self.assertEqual({("router", "1"), ("router", "0")}, rec["victim_insts"])
+        self.assertEqual(["router", "router"], [c["comp"] for c in rec["cycles"]], "the record names the Component taken")
+        self.assertEqual(("RECOVERED", "PASS", []), (state, verdict, notes), checks)
+        self.assertTrue(any("exactly 1 pod(s) recreated (None), scoped to killed instance router/1" in c for c in checks), checks)
+        self.assertTrue(any("2 pod(s) created across the window, within the 4" in c for c in checks),
+                        "the pods the watch saw rebuilt are the window's")
+
+    def test_the_window_is_read_even_when_the_wait_does_not_complete(self):
+        ctx = self._ctx()
+        pending = {"case_id": "p1", "kind": "preempt", "infra_fail": None, "notes": [], "fillers": [], "preempted": [],
+                   "not_victim": set(), "crash_pod": "p1-router-1-default-0", "crash_comp": "router", "crash_inst": "1"}
+        watched, _allowed, (state, verdict, _notes, checks), _rec_ = self._run(ctx, pending, "WAIT_TIMEOUT")
+        self.assertEqual([(["router"], "1")], watched)
+        self.assertEqual(("WAIT_TIMEOUT", "FAIL"), (state, verdict))
+        self.assertTrue(any("1 pod(s) created across the window" in c for c in checks), checks)
 
 
 class GeneratedCanaryGateFamilyTest(unittest.TestCase):

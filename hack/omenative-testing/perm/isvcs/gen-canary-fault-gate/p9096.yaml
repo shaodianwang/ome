@@ -1,5 +1,5 @@
 # p9096: [gen] canary gate source unreachable after-settle Hold at idle engine router N=8  mode=canary Ne=8 Nd=0 Nr=2 ceil_e=9 ceil_d=0 ceil_r=2 fault=source:idle co=none topo=engine canary=auto form=unreachable analysis=pass failurelimit=1 nophase=Failed cell=canary/Idle/sourceUnusable[unreachable] lift=after-settle health=pass oninconclusive=hold
-# reason: the analysis source points at a name that resolves nowhere before the push lands on engine+router single (8 Instances); the gate reports that it cannot read health, holds the ladder at its step and counts no breach; the source is restored 20s after the hold was observed and the ladder resumes: every Instance ends on the canary revision serving
+# reason: the analysis source is unreachable (the case's front for the store, which the run pinned, is aimed at nothing) before the push lands on engine+router single (8 Instances); the gate reports that it cannot read health, holds the ladder at its step and counts no breach; the store is back behind the source 20s after the hold was observed and the ladder resumes: every Instance ends on the canary revision serving
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p9096 }

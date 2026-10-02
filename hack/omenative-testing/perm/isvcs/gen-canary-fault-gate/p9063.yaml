@@ -1,5 +1,5 @@
 # p9063: [gen] canary gate source unreachable after-settle RollbackOnStall at idle engine N=8  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 fault=source:idle co=none topo=engine canary=auto form=unreachable analysis=pass failurelimit=1 nophase=RollingBack cell=canary/Idle/sourceUnusable[unreachable] lift=after-settle health=pass oninconclusive=rollbackonstall
-# reason: the analysis source points at a name that resolves nowhere before the push lands on engine single (8 Instances); the gate reports that it cannot read health, holds the ladder at its step and counts no breach; the source is restored 20s after the hold was observed and the ladder resumes: every Instance ends on the canary revision serving (a blip shorter than the stall timeout never rolls back)
+# reason: the analysis source is unreachable (the case's front for the store, which the run pinned, is aimed at nothing) before the push lands on engine single (8 Instances); the gate reports that it cannot read health, holds the ladder at its step and counts no breach; the store is back behind the source 20s after the hold was observed and the ladder resumes: every Instance ends on the canary revision serving (a blip shorter than the stall timeout never rolls back)
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p9063 }

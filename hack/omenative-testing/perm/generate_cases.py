@@ -2537,19 +2537,23 @@ def lib_seconds(name):
 
 def _source_reason(form, lift, policy, pos, family, n, w):
     shape = _gate_shape_words(family, n, w)
-    how = {"unreachable": "points at a name that resolves nowhere",
-           "garbage": "points at a server that answers with something other than the Prometheus API"}[form]
+    # A run pins its analysis source when it opens, so the fault breaks the
+    # store behind the address the run pinned (the case's own front for the
+    # bundled store), never the address.
+    how = {"unreachable": "is unreachable (the case's front for the store, which the run pinned, is aimed at nothing)",
+           "garbage": ("answers garbage (the case's front for the store, which the run pinned, is aimed at a pod of the "
+                       "service that answers no metrics)")}[form]
     out = (f"the analysis source {how} {_gate_when(pos)} on {shape}; the gate reports that it cannot read health, "
            f"holds the ladder at its step and counts no breach")
     if lift == "after-settle":
-        return out + (f"; the source is restored {lib_seconds('LIFT_SETTLE_S')}s after the hold was observed and the "
-                      f"ladder resumes: every Instance ends on the canary revision serving"
+        return out + (f"; the store is back behind the source {lib_seconds('LIFT_SETTLE_S')}s after the hold was observed "
+                      f"and the ladder resumes: every Instance ends on the canary revision serving"
                       + (" (a blip shorter than the stall timeout never rolls back)" if policy == "RollbackOnStall" else ""))
     if policy == "Hold":
-        return out + ("; the source never returns, so past the stall timeout the ladder parks Failed at that step with "
+        return out + ("; the store never comes back, so past the stall timeout the ladder parks Failed at that step with "
                       "reason AnalysisStalled while the stable revision keeps serving every Instance the canary has "
                       "not replaced, and nothing rolls back")
-    return out + ("; the source never returns, so past the stall timeout the fail-safe policy rolls the canary back "
+    return out + ("; the store never comes back, so past the stall timeout the fail-safe policy rolls the canary back "
                   "instead of parking it: the canary drains to the stable revision and the rejected revision is recorded")
 
 
@@ -2597,7 +2601,8 @@ def _sibling_park_reason(family, n, w):
     shape = _gate_shape_words(family, n, w)
     return (f"the router is pushed beside the engine ladder onto an image that cannot be pulled on {shape}; the "
             f"router rolls on its own, never promotes a pod of that revision, keeps every router Instance serving on "
-            f"its running revision and says why it stopped (a hold, a Failed row or a RetryHeld or InstanceFailed event "
+            f"its running revision (an Instance whose running-revision pod still serves is kept on it, whatever failed "
+            f"attempt sits beside it) and says why it stopped (a hold, a Failed row or a RetryHeld or InstanceFailed event "
             f"naming it), while the engine ladder walks every step to Stable unaffected; the router is left parked, as "
             f"the status says")
 
@@ -2608,8 +2613,9 @@ def _sibling_new_oneshot_reason(sib, rp, pos, family, n, w, router_rolls):
             else "the decoder's canary revision")
     return (f"one pod of {side} is killed once {_gate_when(pos, gated=False)} on {shape}, under restart policy {RP_FULL[rp]}; "
             f"{'the restart policy rebuilds the Instance' if rp == 'RecreateInstance' else 'the kubelet restarts the runner'} "
-            f"and the step keeps its state across the capacity dip: the ladder walks every step to Stable and every "
-            f"Instance of every bumped member ends on its new revision serving")
+            f"and the step keeps its state across the capacity dip: the ladder walks every step to Stable, every "
+            f"Instance of every bumped member ends on its new revision serving, and the {sib}'s other Instances hold "
+            f"the floor read with the killed Instance allowed for")
 
 
 def _gate_cell(pos, event, variant, gated=True):
@@ -3823,6 +3829,10 @@ def packed_comps(topo, n, w, router, life):
 def _packed_reason(side, form, strat, rp, co, router):
     pool = ("fillers take every node's spare CPU once the service has settled, so the only room a pod can be "
             "placed in is what a pod of the service vacates")
+    # The engine rolling alone comes back in its own room; with the decoder
+    # rolling beside it, room either Component's pods vacated is the pool's.
+    room = ("in the room it vacated" if co == "none" else
+            "in room this service's own pods vacated (the decoder rolls beside the engine, so its room counts too)")
     if side == "new":
         how = ("the pushed engine revision dies at every start (its runner image has no shell for the fixture command)"
                if form == "start" else
@@ -3835,10 +3845,10 @@ def _packed_reason(side, form, strat, rp, co, router):
                                        "the first Instance in the room its pod vacated")}[strat]
         out = (f"{pool}; {how}; {lands} and the roll stops there, never two Instances down at once; status says why "
                f"(a rolloutHold or a Failed row, and a RetryHeld or InstanceFailed event) and no further attempt at that "
-               f"revision follows; the good push then lands on the broken Instance first, in the same room, then on the "
+               f"revision follows; the good push then lands on the broken Instance first, {room}, then on the "
                f"others one at a time, every Instance ends serving on it and nothing rebuilds the crashing revision")
         if rp == "RecreateInstance":
-            out += "; every rebuild RecreateInstanceOnPodRestart opens on the crashing Instance lands in that same room"
+            out += f"; every rebuild RecreateInstanceOnPodRestart opens on the crashing Instance lands {room}"
     else:
         how = ("one engine pod of the running revision is pointed at an image with no shell on the settled service, "
                "so it crashes at every start and is never Ready again"
@@ -3846,7 +3856,7 @@ def _packed_reason(side, form, strat, rp, co, router):
                "one engine pod of the running revision has its runner killed every few seconds while it is up, so "
                "it dies after Ready and comes back between crashes")
         out = (f"{pool}; {how}; once the break has bitten the good push lands: the broken Instance, which serves "
-               f"nothing, is rolled first and comes back in the room it vacated, the others follow one at a time, "
+               f"nothing, is rolled first and comes back {room}, the others follow one at a time, "
                f"never two Instances down at once, every Instance ends serving on the good revision, no repair is "
                f"recorded for the broken Instance after the push and nothing rebuilds the running revision")
     if form == "load":
@@ -3925,6 +3935,12 @@ REPEAT_WINDOW_CLAIMS = ("the status reports each loss and never counts the short
                         "recorded is for an Instance the fault took, the pods created are those repairs{plus} and no "
                         "more (no hot loop), no pod comes back on a revision the service never pushed")
 REPEAT_END_CLAIM = "after the lift every Instance is Ready and serving on its revision with no row mid-operation and no hold left behind"
+# An eviction the disruption budget refuses is asked again, and the
+# operation's window waits for the repetition instead of closing on a fleet
+# that is whole only because the eviction is being refused.
+REPEAT_EVICT_CLAIM = ("; an eviction the disruption budget refuses is asked again every few seconds and the operation's "
+                      "window waits for that repetition; under a budget that keeps refusing while the operation holds an "
+                      "Instance down, the repetitions are those the budget admits, at least one")
 
 
 def _repeat_steady_reason(kind, shape, rp, member, n):
@@ -3932,7 +3948,8 @@ def _repeat_steady_reason(kind, shape, rp, member, n):
     return (f"{_repeat_what(kind, member)} again each time its Instance is back and serving, {n} times, then left alone: "
             f"each time {_recreate_scope(topo, rp)} under restart policy {RP_FULL[rp]} within the budget and nothing else "
             f"moves; across the window the other Instances keep serving (floor N-1), "
-            + REPEAT_WINDOW_CLAIMS.format(plus="") + " and nothing surges on a service nobody bumped; " + REPEAT_END_CLAIM)
+            + REPEAT_WINDOW_CLAIMS.format(plus="") + " and nothing surges on a service nobody bumped; " + REPEAT_END_CLAIM
+            + (REPEAT_EVICT_CLAIM if kind == "evict" else ""))
 
 
 def _repeat_preempt_reason(shape, rp, n):
@@ -3955,6 +3972,8 @@ def _repeat_push_reason(kind, shape, strat, rp, member, n):
         out += "; decoder and router are negative controls (co=none)"
     if strat == "SurgeThenDrain":
         out += "; order waived — each deletion is a drain with no preceding surge"
+    if kind == "evict":
+        out += REPEAT_EVICT_CLAIM
     return out
 
 
@@ -3964,7 +3983,8 @@ def _repeat_scale_reason(kind, shape, rp, member, n):
             f"is back and serving, {n} times, then left alone: the new Instance comes up and the scale lands at {size + 1} "
             f"with every Instance Ready; across the window the other Instances keep serving (floor N-1 on the engine, N "
             f"elsewhere), " + REPEAT_WINDOW_CLAIMS.format(plus=" and the scale's new Instance") + "; " + REPEAT_END_CLAIM
-            + (f"; {_recreate_scope(topo, rp)} each time under restart policy {RP_FULL[rp]}"))
+            + (f"; {_recreate_scope(topo, rp)} each time under restart policy {RP_FULL[rp]}")
+            + (REPEAT_EVICT_CLAIM if kind == "evict" else ""))
 
 
 def _repeat_ctrl_reason(op, shape, strat, n):

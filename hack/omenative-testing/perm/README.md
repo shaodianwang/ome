@@ -69,11 +69,14 @@ scale behavior. Targets whatever cluster your kubeconfig points at — override 
 > `ome-prometheus` enabled in the cluster (chart `prometheus.enabled`, now the
 > default) scraping `$OME_TEST_NS`, and the `canary-metrics` image (built from
 > `dockerfiles/canary-metrics.Dockerfile` by the pipeline) pullable by the cluster.
-> The gate-fault cases (`fault=metric`, `fault=source`) also reach a pod's
-> metrics server and the bundled Prometheus through the apiserver proxy
+> The metric-fault cases (`fault=metric`) also reach a pod's metrics server
+> and the bundled Prometheus through the apiserver proxy
 > (`kubectl get --raw /api/v1/namespaces/<ns>/pods/<pod>:8080/proxy/...` and
 > `.../services/<prometheus>:<port>/proxy/api/v1/query`), so the kubeconfig
-> needs `pods/proxy` and `services/proxy` on top of the usual verbs.
+> needs `pods/proxy` and `services/proxy` on top of the usual verbs; the
+> source-fault cases (`fault=source`) read the store's EndpointSlices in the
+> controller's namespace and create a Service and an EndpointSlice in the
+> case namespace.
 
 The expansion roadmap (P1–P4, the feature taxonomy, deferred autoscaling) lives
 in [`../DESIGN.md`](../DESIGN.md). This file is the how-to-run reference.
@@ -648,22 +651,29 @@ states the operator's end state on line two.
   recorded), `analysis=pass health=pass minfails=1` with a `failurelimit`
   above the samples a 45 s breach can produce rides it out and promotes.
 - **`fault=source:idle|canary-<state>[@step]` with `form=unreachable|garbage`
-  and `lift=after-settle|never`** — the analysis source becomes unusable:
-  the driven group's `canary.prometheus.serverAddress` is pointed at a name
-  that resolves nowhere (`<case>-no-such-source.<ns>.svc`) or at the bundled
-  Prometheus on a path that is not its API (the address the controller's
-  `canaryAnalysis` block names, plus `/-/healthy`: every query is answered
-  with something that is not a sample). The gate must report it in
-  `metricResults` (an unevaluated sample with a message), hold the ladder at
-  that step and count no breach. `lift=after-settle` restores the declared
-  source `LIFT_SETTLE_S` after the hold was observed (or once the gate has
-  had `SOURCE_BITE_S` to report and did not, so the case still ends) and the
-  ladder must resume to `Stable`; `lift=never` keeps it, and the step's
-  `onInconclusive` decides the end: `Hold` parks `Failed` at that step with
-  reason `AnalysisStalled` past the stall timeout (the group's `readyTimeout`,
+  and `lift=after-settle|never`** — the analysis source becomes unusable.
+  A run pins its analysis source when it opens, so the fault never edits
+  the address (an edit is inert on an open run and, made at idle, is pinned
+  into the next one): before the push the case gets its own front for the
+  bundled store, `perm-<case>-source` in the case namespace (a Service with
+  no selector and the EndpointSlice that aims it at the store's pod, read
+  off the Service the controller's `canaryAnalysis` block names), and the
+  driven group's `canary.prometheus.serverAddress` is pointed at the front,
+  which the run then pins. The fault breaks what is behind the front:
+  `unreachable` aims it at nothing (every query is refused), `garbage` aims
+  it at a running-revision pod of the unit, whose server answers no metrics
+  API (every query is answered with something that is not a sample). The
+  gate must report it in `metricResults` (an unevaluated sample with a
+  message), hold the ladder at that step and count no breach.
+  `lift=after-settle` puts the store back behind the front `LIFT_SETTLE_S`
+  after the hold was observed (or once the gate has had `SOURCE_BITE_S` to
+  report and did not, so the case still ends) and the ladder must resume to
+  `Stable`; `lift=never` keeps it broken, and the step's `onInconclusive`
+  decides the end: `Hold` parks `Failed` at that step with reason
+  `AnalysisStalled` past the stall timeout (the group's `readyTimeout`,
   150 s in the family, with the stable revision still serving),
-  `RollbackOnStall` rolls back instead (analysis-initiated). The source is
-  restored by the end-of-case cleanup as well.
+  `RollbackOnStall` rolls back instead (analysis-initiated). The end-of-case
+  cleanup puts the store back and removes the front.
 - **The sibling rows** reuse the break grammar on the router of an engine
   ladder and the decoder of a prefill/decode unit (admission makes engine and
   decoder one unit, so the ladder owns the decoder's running-side break and
@@ -672,10 +682,15 @@ states the operator's end state on line two.
   under `RecreateInstanceOnPodRestart`), once (`lift=after-settle`: one kill,
   or the image put back), on the new side as the fault-new breaks of the
   decoder under both exits, as the router pushed beside the ladder onto an
-  unpullable image (the parked sibling above), and as one kill of a pod of
-  the sibling's new revision (`victim=canary`). The sibling rows run the
-  plain fixture runtime and a timed ladder: a break needs a shell to kill or
-  an image to swap, and the analysis gate changes nothing about a sibling.
+  unpullable image (the parked sibling above: an Instance whose
+  running-revision pod still serves is kept on that revision, whatever
+  failed attempt sits beside it), and as one kill of a pod of the
+  sibling's new revision (`victim=canary`). On every sibling row the
+  Instance the break took is the fault's cost, on the running side and on
+  the new side alike: the floor the sibling's other Instances must hold is
+  read with it allowed for. The sibling rows run the plain fixture runtime
+  and a timed ladder: a break needs a shell to kill or an image to swap, and
+  the analysis gate changes nothing about a sibling.
 
 ### Scale & hung-Prometheus (`perf/`)
 
@@ -1697,8 +1712,15 @@ shapes.
   OMENative pods (`podDisruptionBudget.omeNative` in the chart, one
   disruption at a time), so the API may refuse an eviction while a pod is
   already down: the runner asks again every `FAULT_RETRY_S` seconds as a
-  drain would, reports the refusals, and reds a case whose eviction is
-  never admitted (at steady state a budget that refuses one eviction of a
+  drain would, reports the refusals (under `repeat=<n>` the operation's
+  window stays open while a refused repetition is asked again,
+  `LIFT_SETTLE_S` from its first refusal, instead of closing on a fleet
+  that is whole only because the eviction is being refused; where the
+  budget keeps refusing while the operation holds an Instance down, the
+  repetitions are those the budget admits, at least one, and the verdict
+  names the refusals), and reds a
+  case whose eviction is never admitted (at steady state a budget that
+  refuses one eviction of a
   fully serving fleet through `LIFT_SETTLE_S` is `FAIL`; the apparatus is
   checked first, so an apiserver without `policy/v1` records `SKIP`). In
   kill mode the verdict is the usual restart-policy one: exactly the
@@ -1771,9 +1793,12 @@ shapes.
   capacity floor; the broken Instance lands the good revision first (read
   from when each Instance was first seen on it); it comes back in the room
   it vacated (its pods' nodes, as a multiset, or the same pod under an
-  in-place patch); for the mirror, no pod is created on the running
-  revision after the good push, and a repair that opened before the push is
-  reported. A crash after Ready (`form=load`) carries `floor_soft=1` and
+  in-place patch) when the engine rolls alone, or in room any pod of a
+  rolled Component vacated when engine and decoder roll together (a
+  decoder's drain frees room an engine gang can take); for the mirror, no
+  pod is created on the running revision after the good push, and a repair
+  that opened before the push is reported. A crash after Ready
+  (`form=load`) carries `floor_soft=1` and
   reports the one-down rule and the landing order instead of asserting
   them: a runner that exits after Ready can be Ready when the roll decides,
   so the roll need not read that Instance as serving nothing. The usual
@@ -1809,7 +1834,10 @@ shapes.
   with its Component back at N; the manager restart once the manager pods
   are Ready under new names; the preemption once the Instance it took is
   placed and serving again (the fillers are dropped after each wait, each
-  repetition's fillers named after it). The watch budgets grow by
+  repetition's fillers named after it; the scheduler chooses the pod it
+  takes on the pressed node, so the wait, the allowance, the scope and the
+  record follow that pod's Component, a router or decoder beside the
+  engine the press was aimed at). The watch budgets grow by
   `REPEAT_CYCLE_S` per repetition; a repeating fault is ticked between pod
   events too, since a dead manager raises none.
   The verdict during the window: the operation's own checks (the roll
@@ -2132,8 +2160,8 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `isvcs/gen-tight/`, `isvcs/gen-evict/`, `isvcs/gen-preempt/` and `isvcs/gen-pending/`, the packed pool
   (`p8600`–`p8699`) → `isvcs/gen-packed-pool/` (every node's spare CPU taken
   once the service has settled; a push whose revision crashes stops at one
-  Instance down and the good push lands on that Instance first, in the room
-  it vacated, then on the others one at a time; and the mirror, the running
+  Instance down and the good push lands on that Instance first, in room the
+  service's own pods vacated, then on the others one at a time; and the mirror, the running
   revision crashing on one Instance before the push), the percent budgets (`p8200`–`p8329`) →
   `isvcs/gen-budget/` (maxSurge and maxUnavailable at 10, 25 and 50 percent
   on fleets of 4 and 8, for a plain push, a push with a crash-looping
