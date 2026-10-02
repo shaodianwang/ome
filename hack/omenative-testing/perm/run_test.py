@@ -7573,6 +7573,13 @@ class MigrateBumpOverlapVerdictTest(unittest.TestCase):
         self.assertEqual("FAIL", self._run(self._ov(), self._pods(), ledger=[entry, dict(entry)])[0])
         other = {"requestUUID": "uuid-9", "phase": "Completed", "surgeInstance": 3}
         self.assertEqual("FAIL", self._run(self._ov(), self._pods(), ledger=[entry, other])[0])
+        relocation = {"requestUUID": "uuid-8", "phase": "Completed", "reason": run.AUTO_RECOVER_REASON}
+        self.assertEqual("FAIL", self._run(self._ov(), self._pods(), ledger=[entry, relocation])[0],
+                         "a relocation the product filed beside the move is another move")
+        sweep = {"requestUUID": "pod-uid-1", "phase": "Completed", "reason": run.FORCE_DELETE_REASON}
+        v, _notes, checks = self._run(self._ov(), self._pods(), ledger=[entry, sweep])
+        self.assertEqual("PASS", v, "the force-delete sweep's audit row is a record, not a move")
+        self.assertTrue(any("recorded once" in c for c in checks))
         self.assertEqual("FAIL", self._run(self._ov(), self._pods(), ir=[entry, dict(entry)])[0])
         v, _notes, checks = self._run(self._ov(), self._pods(), ir=None)
         self.assertEqual("PASS", v)
@@ -9548,6 +9555,38 @@ class MoveMomentFaultTest(unittest.TestCase):
         pods["e3"]["serving"] = True
         pods["e2"]["ready"] = False
         self.assertIn("whole serving Instance(s)", self._end(pods, fault, {"u0"}, True)[1])
+
+    def test_settled_waits_for_a_broken_sibling_to_be_rebuilt_and_serving(self):
+        pods = self._fleet()
+        del pods["e0"]
+        pods["e3"] = self._pod("engine", 3, "fresh", node="n3")
+        fault = {"kind": "crashloop", "crash_comp": "decoder", "crash_inst": "1", "crash_uid": "v1", "crash_pod": "d1"}
+        ctx = {"N": {"engine": 3, "decoder": 2, "router": 0}, "pods_per_inst": {"engine": 1, "decoder": 1, "router": 1},
+               "pod_state": pods}
+        settled = lambda victim: run._move_fault_settled(ctx, fault, {"victim": victim}, "engine", "3", {"u0"}, True)
+        pods["d1"]["ready"] = pods["d1"]["serving"] = False
+        ok, why = settled("sibling")
+        self.assertFalse(ok)
+        self.assertIn("still there and not serving", why, "the pod the fault hit is still the decoder's pod")
+        pods["d1"] = self._pod("decoder", 1, "rebuilt", ready=False, serving=False)
+        ok, why = settled("sibling")
+        self.assertFalse(ok)
+        self.assertIn("not rebuilt and serving yet", why, "a rebuild that has only just opened is not an end state")
+        self.assertTrue(settled("moved")[0], "with the break on the moved Instance the sibling is nobody's to wait for")
+        pods["d1"]["ready"] = pods["d1"]["serving"] = True
+        self.assertEqual((True, "whole, Ready and serving"), settled("sibling"))
+        self.assertEqual((True, "whole, Ready and serving"), settled("peer"))
+
+    def test_ledger_moves_leave_out_the_force_delete_sweeps_rows(self):
+        rows = [{"requestUUID": "uuid-1", "phase": "Completed"},
+                {"requestUUID": "pod-uid", "phase": "Completed", "reason": run.FORCE_DELETE_REASON},
+                {"requestUUID": "uuid-2", "phase": "Completed", "reason": run.AUTO_RECOVER_REASON}]
+        orig = run._migration_ledger_entries
+        run._migration_ledger_entries = lambda case_id: rows
+        try:
+            self.assertEqual(["uuid-1", "uuid-2"], [e["requestUUID"] for e in run._migration_ledger_moves("p999")])
+        finally:
+            run._migration_ledger_entries = orig
 
     def test_end_state_waits_for_the_pod_the_fault_hit_to_go(self):
         pods = self._fleet()

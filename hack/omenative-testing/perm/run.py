@@ -225,6 +225,9 @@ INV_NAMES = {"A": "status-truth", "B": "endpoints-membership", "C": "pair-alive"
 AUDIT_LEDGER_SUFFIX = "-ome-migration-audit"
 AUDIT_LEDGER_KEY = "history.json"
 AUTO_RECOVER_REASON = "AutoRecover"
+# The reason the force-delete sweep stamps on the audit row it writes under
+# the UID of a pod it deleted on a dead node: a record, never a move.
+FORCE_DELETE_REASON = "ForceDelete"
 HOSTNAME_LABEL = "kubernetes.io/hostname"
 
 # Dynamic timeouts: real kubelet + a 15s artificial startup sleep per pod, and
@@ -2991,14 +2994,14 @@ def _overlap_checks(ov, ctx, mcomp, reqs, entries, ir_entries, rollout_conv_ts, 
     else:
         fail(f"controller rows not settled after both operations: {why}",
              f"  ✗ controller rows not settled after both operations: {why} — an Instance is left mid-operation")
-    cm_rows = _migration_ledger_entries(ctx["case_id"])
+    cm_rows = _migration_ledger_moves(ctx["case_id"])
     mine = sum(1 for e in cm_rows if e.get("requestUUID") == req_uuid)
     if mine == 1 and len(cm_rows) == len(reqs):
         checks.append("  ✓ the move is recorded once: one ledger row for the request and no other move")
     else:
-        fail(f"ledger rows: {mine} for the request, {len(cm_rows)} in all (want 1 and {len(reqs)})",
+        fail(f"ledger rows: {mine} for the request, {len(cm_rows)} moves in all (want 1 and {len(reqs)})",
              f"  ✗ the move must be recorded once: {mine} ledger row(s) carry the request and {len(cm_rows)} "
-             f"row(s) exist in all (want 1 and {len(reqs)}) — a move was dropped or repeated")
+             f"move row(s) exist in all (want 1 and {len(reqs)}) — a move was dropped or repeated")
     if ir_entries is None:
         checks.append("  ⓘ IR status.migrations unavailable on this build — the once-recorded check reads the ledger alone")
     else:
@@ -12848,6 +12851,13 @@ def _migration_ledger_entries(case_id):
     return hist.get("entries", []) or []
 
 
+def _migration_ledger_moves(case_id):
+    """The ledger rows that record a move: every row but the force-delete
+    sweep's, which audits a pod it deleted on a dead node under that pod's
+    UID and is a record, never a migration."""
+    return [e for e in _migration_ledger_entries(case_id) if e.get("reason") != FORCE_DELETE_REASON]
+
+
 def _migration_ledger_entry(case_id, req_uuid):
     """The audit-ledger row for a request UUID; None if it doesn't exist yet."""
     for e in _migration_ledger_entries(case_id):
@@ -13034,10 +13044,27 @@ def _move_end_state(ctx, f, mcomp, idx, src_uids, completed):
     return True, "whole, Ready and serving"
 
 
+def _move_fault_settled(ctx, f, mv, mcomp, idx, src_uids, completed):
+    """(ok, why) of the whole fault-move end state: the moved Component reads
+    its end state and, when the break hit a peer or a sibling, that Instance
+    is rebuilt whole, Ready and serving on new pods. The repair's end state
+    is read together with the move's so the verdict never judges a rebuild
+    that has only just opened."""
+    ok, why = _move_end_state(ctx, f, mcomp, idx, src_uids, completed)
+    if not ok or mv["victim"] not in ("peer", "sibling") or f["kind"] not in BREAK_FAULTS:
+        return ok, why
+    comp, binst = f.get("crash_comp"), f.get("crash_inst")
+    pods = _instance_pods(ctx["pod_state"], comp, binst)
+    if _instance_rebuilt_whole(pods, {f.get("crash_uid")}, max(1, ctx["pods_per_inst"].get(comp, 1))):
+        return True, why
+    return False, f"the broken {mv['victim']} ({comp} Instance {binst}) is not rebuilt and serving yet"
+
+
 def _move_wait_end(ctx, f, mv, mcomp, inst, entry, ph, src_uids):
     """Watch, once the move's record is terminal, until the moved Component
-    reads its end state for STABILITY_S or the budget ends; a node loss is
-    lifted (the kubelet started again) once that is read."""
+    reads its end state, the broken peer or sibling with it, for STABILITY_S
+    or the budget ends; a node loss is lifted (the kubelet started again)
+    once that is read."""
     completed = ph == "Completed"
     idx = str(entry.get("surgeInstance")) if completed and entry.get("surgeInstance") is not None else str(inst)
     mv["end_index"] = idx
@@ -13047,7 +13074,7 @@ def _move_wait_end(ctx, f, mv, mcomp, inst, entry, ph, src_uids):
     stable, held, why = None, False, "not read"
     while time.time() < deadline and not ctx["closed"]:
         _read_one(ctx)
-        ok, why = _move_end_state(ctx, f, mcomp, idx, src_uids, completed)
+        ok, why = _move_fault_settled(ctx, f, mv, mcomp, idx, src_uids, completed)
         if not ok:
             stable = None
             continue
@@ -13103,14 +13130,14 @@ def _move_fault_checks(ctx, f, mv, mcomp, inst, reqs, entries, ir_entries, verdi
     else:
         fail(f"the move never finished (phase={ph})",
              f"  ✗ the move neither finished nor was abandoned within budget (phase={ph}) — the fault wedged it")
-    rows = _migration_ledger_entries(case_id)
+    rows = _migration_ledger_moves(case_id)
     mine = sum(1 for e in rows if e.get("requestUUID") == req_uuid)
     if mine == 1 and len(rows) == len(reqs):
         checks.append("  ✓ the move is recorded once: one ledger row for the request and no other move")
     else:
-        fail(f"ledger rows: {mine} for the request, {len(rows)} in all (want 1 and {len(reqs)})",
-             f"  ✗ the move must be recorded once: {mine} ledger row(s) carry the request and {len(rows)} exist in "
-             f"all (want 1 and {len(reqs)}) — a move was dropped or repeated")
+        fail(f"ledger rows: {mine} for the request, {len(rows)} moves in all (want 1 and {len(reqs)})",
+             f"  ✗ the move must be recorded once: {mine} ledger row(s) carry the request and {len(rows)} move row(s) "
+             f"exist in all (want 1 and {len(reqs)}) — a move was dropped or repeated")
     if ir_entries is None:
         checks.append("  ⓘ IR status.migrations unavailable on this build — the once-recorded check reads the ledger alone")
     else:

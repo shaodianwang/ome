@@ -1057,7 +1057,9 @@ index the record names) ends among them, Ready and serving (a gang roll
 under SurgeThenDrain may rebuild that index under another one, which is
 reported); the controller's rows are settled with no open operation and
 name the new revision; the move is recorded once and consumed once (one
-ledger row for the request, no other row, one controller record);
+ledger row for the request, no other move's row, one controller record;
+the force-delete sweep's audit rows, written under the UID of a pod it
+deleted on a dead node, are records and are not counted as moves);
 Components outside the roll keep the same pods on their revision. The node
 the replacement came up on is compared with the node it left and reported
 (a one-node pool cannot satisfy it). Ceilings count the move's one
@@ -1188,12 +1190,14 @@ node takes every pod on it).
 The verdict is the operator's end state. The move finishes (`Completed`) or
 is abandoned with a reason its record carries (`Failed` with a reason; a
 `Failed` without one, or no terminal record within budget, fails). It is
-recorded once: one ledger row for the request, no other row, one controller
+recorded once: one ledger row for the request, no other move's row (the
+force-delete sweep's audit rows are records, not moves), one controller
 record. Once the record is terminal the runner watches until the moved
 Instance reads whole, Ready and serving on one pod set at the index the
 record names (its replacement index when the move completed, its source
 index otherwise), with no source pod alive after a completed move, no pod
-the fault hit surviving unserving, and the moved Component holding N whole
+the fault hit surviving unserving, a broken peer or sibling rebuilt whole and
+serving on new pods, and the moved Component holding N whole
 Instances on N distinct indices, sustained for the stability window within
 the idle budget (the relocation budget for a node loss). A break on a `peer`
 or a `sibling` must not fail the move, and that Instance must be rebuilt
