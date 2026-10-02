@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	appsv1 "k8s.io/api/apps/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
@@ -40,10 +41,10 @@ import (
 // pre-migration view, so the passes after it would recreate the
 // source-side index; the next reconcile rebuilds the plan from the
 // post-migration status.
-func executeMigratePass(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, selection MigrationSelection) (res ctrl.Result, stop bool, err error) {
+func executeMigratePass(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, selection MigrationSelection) (res ctrl.Result, stop bool, err error) {
 	pacing := false
 	for _, record := range selection.Parked {
-		done, accepted, err := driveMigration(ctx, deps, input, plan, record)
+		done, accepted, err := driveMigration(ctx, deps, input, plan, target, record)
 		if err != nil {
 			return ctrl.Result{}, false, err
 		}
@@ -53,7 +54,7 @@ func executeMigratePass(ctx context.Context, deps types.Deps, input types.Reconc
 		pacing = pacing || accepted
 	}
 	if selection.Head != nil {
-		done, accepted, err := driveMigration(ctx, deps, input, plan, *selection.Head)
+		done, accepted, err := driveMigration(ctx, deps, input, plan, target, *selection.Head)
 		if err != nil {
 			return ctrl.Result{}, false, err
 		}
@@ -71,7 +72,7 @@ func executeMigratePass(ctx context.Context, deps types.Deps, input types.Reconc
 // driveMigration runs one Migrate step for record, reconstructing the
 // executor's request view from it — the annotation was consumed at
 // accept time.
-func driveMigration(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, record types.MigrationRecord) (done, accepted bool, err error) {
+func driveMigration(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, record types.MigrationRecord) (done, accepted bool, err error) {
 	request := &audit.MigrationRequest{
 		SchemaVersion:   audit.SchemaV1,
 		Component:       string(plan.Component),
@@ -81,7 +82,7 @@ func driveMigration(ctx context.Context, deps types.Deps, input types.ReconcileI
 		Reason:          record.Reason,
 	}
 	sourceIdx := record.SourceInstance
-	done, accepted, err = workloadops.Migrate(ctx, deps, input, plan, sourceIdx, record.RequestUUID, request)
+	done, accepted, err = workloadops.Migrate(ctx, deps, input, plan, target, sourceIdx, record.RequestUUID, request)
 	if err != nil {
 		return false, false, fmt.Errorf("workload.Reconcile: migrate instance %d: %w", sourceIdx, err)
 	}

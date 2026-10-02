@@ -435,10 +435,14 @@ cells:
     outcome: defer
     note: the update trigger declines outright for a migrate-owned status, so a new
       target revision waits for the record to reach a terminal phase; a migration
-      surge and an update surge never stack on one Instance
+      surge and an update surge never stack on one Instance. The surge renders the
+      source revision's stored template and stamps its hash, with none of the
+      pod-template keys the new revision added, so the per-revision Service routes
+      to a pod running the revision its label names; the roll takes the moved
+      Instance to the new revision once the record is terminal
     invariants: [one.operation.per.instance]
     placement: unit
-    coverage: {perm: [], unit: [TestMigrate_RevisionRetargetIsDeclinedWhileTheRecordDrives], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_RevisionRetargetIsDeclinedWhileTheRecordDrives, TestMigrate_SurgeRendersTheSourceRevisionWhileTheTemplateHasMoved, TestStoredTemplate_RevisionWithoutMetadataRendersNoneOfTheTargets], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: spec.annotationOnly
@@ -1199,11 +1203,12 @@ cells:
     event: spec.revision
     outcome: defer
     note: the update trigger declines for a migrate-owned status and this row is a
-      replacement marker driven by its pair, never an independent update target; the
-      new revision rolls once the record is terminal
+      replacement marker driven by its pair, never an independent update target; its
+      pods are the source revision's template under the source revision's hash, and
+      the new revision rolls once the record is terminal
     invariants: [one.operation.per.instance]
     placement: unit
-    coverage: {perm: [], unit: [TestMigrate_RevisionRetargetIsDeclinedWhileTheRecordDrives], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_RevisionRetargetIsDeclinedWhileTheRecordDrives, TestMigrate_SurgeRendersTheSourceRevisionWhileTheTemplateHasMoved], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: spec.annotationOnly

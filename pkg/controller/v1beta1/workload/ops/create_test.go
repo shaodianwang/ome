@@ -1124,7 +1124,7 @@ func TestMigrateSurge_InvalidPodSpec_FailsTheMigration(t *testing.T) {
 		return nil
 	}
 
-	done, accepted, err := Migrate(context.Background(), f.deps(), in, f.plan, record.SourceInstance, uuid, req)
+	done, accepted, err := Migrate(context.Background(), f.deps(), in, f.plan, f.target, record.SourceInstance, uuid, req)
 	if err != nil {
 		t.Fatalf("migrate pass: %v", err)
 	}

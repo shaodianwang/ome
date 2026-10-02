@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -468,6 +469,13 @@ type migFixture struct {
 	// finalizeInstanceResources models per-Instance cleanup owned by the IR
 	// adapter. When set, the fixture also wires the guarded batch status writer.
 	finalizeInstanceResources func(context.Context, int32) (bool, error)
+	// target is the roll target the pass runs under. nil is a Component
+	// whose template has not moved since the source's revision was minted.
+	target *appsv1.ControllerRevision
+	// desiredPodSpec and desiredPodMeta, when set, are the current template
+	// the roll target renders: a push in flight while the migration runs.
+	desiredPodSpec *corev1.PodSpec
+	desiredPodMeta *metav1.ObjectMeta
 }
 
 // deps builds the fixture's workload.Deps (clock and recorder included
@@ -614,6 +622,15 @@ func (f *migFixture) input(t *testing.T) workload.ReconcileInput {
 	in.MutateInstance = f.mutateInstance()
 	in.RemoveInstance = legacyRemoveInstance(f.c, f.isvc, f.component)
 	in.DesiredSpec.GangSchedulingAvailable = f.gangSched
+	if f.desiredPodSpec != nil {
+		in.DesiredSpec.PodSpec = f.desiredPodSpec
+	}
+	if f.desiredPodMeta != nil {
+		in.DesiredSpec.PodTemplateObjectMeta = f.desiredPodMeta
+	}
+	if f.target != nil {
+		in.ObservedState.UpdateRevision = f.target.Name
+	}
 	in.Clock = f.clk
 	in.ForceDelete = f.forceDelete
 	in.StuckPodGrace = f.stuckPodGrace
@@ -806,7 +823,7 @@ func (f *migFixture) passResult(t *testing.T, uuid string) (done, accepted bool,
 		Reason:          rec.Reason,
 	}
 	in := f.input(t)
-	return Migrate(context.Background(), f.deps(), in, f.plan, rec.SourceInstance, uuid, req)
+	return Migrate(context.Background(), f.deps(), in, f.plan, f.target, rec.SourceInstance, uuid, req)
 }
 
 func (f *migFixture) listPods(t *testing.T) []*corev1.Pod {
@@ -1640,7 +1657,7 @@ func TestMigrate_CompletionTailRecoveryRechecksAuthoritativeAbsence(t *testing.T
 		FromNode:      record.FromNode,
 		Reason:        record.Reason,
 	}
-	done, accepted, err := Migrate(context.Background(), f.deps(), input, f.plan, record.SourceInstance, uuid, req)
+	done, accepted, err := Migrate(context.Background(), f.deps(), input, f.plan, f.target, record.SourceInstance, uuid, req)
 	if err != nil || done || !accepted {
 		t.Fatalf("drift pass: done=%v accepted=%v err=%v", done, accepted, err)
 	}
@@ -2317,7 +2334,7 @@ func migPassWithRejectedCreates(t *testing.T, f *migFixture, uuid string, reject
 	for i := 0; i < 5; i++ {
 		var accepted bool
 		var err error
-		done, accepted, err = Migrate(context.Background(), deps, in, f.plan, rec.SourceInstance, uuid, req)
+		done, accepted, err = Migrate(context.Background(), deps, in, f.plan, f.target, rec.SourceInstance, uuid, req)
 		if err != nil {
 			t.Fatalf("Migrate over a rejected create: %v", err)
 		}
@@ -2492,6 +2509,97 @@ func TestMigrate_RevisionRetargetIsDeclinedWhileTheRecordDrives(t *testing.T) {
 	}
 }
 
+// TestMigrate_SurgeRendersTheSourceRevisionWhileTheTemplateHasMoved: a
+// migration moves an Instance, never its revision. Filed while a roll is
+// rotating the Component — the current template is already the new
+// revision's, with an image and a pod-template annotation the source's
+// revision never carried — the surge renders the source revision's stored
+// template and stamps its hash, so the per-revision Service selecting on
+// that hash routes to a pod running that revision, and the roll takes the
+// moved Instance to the new revision afterwards like any other row. The
+// promoted surge records the source revision.
+//
+// Cells: instance/Migrate/CreateSurge/spec.revision/before, instance/Migrate/SurgeTarget/spec.revision/before
+func TestMigrate_SurgeRendersTheSourceRevisionWhileTheTemplateHasMoved(t *testing.T) {
+	f := newMultiInstanceMigFixture(t, 3)
+	f.recorder = record.NewFakeRecorder(64)
+	source := findInstanceStatusOnIRForFixture(t, f, 2)
+	sourceRevision := &appsv1.ControllerRevision{}
+	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: f.isvc.Namespace, Name: source.RunningRevision}, sourceRevision); err != nil {
+		t.Fatalf("get the source revision: %v", err)
+	}
+
+	// The operator pushes a new revision while every Instance still runs
+	// the source's: a new image and a pod-template annotation the source
+	// revision never carried.
+	const releaseAnnotation = "example.com/release"
+	nextSpec := legacyTargetSpecImage("llama:v2")
+	nextMeta := &metav1.ObjectMeta{Annotations: map[string]string{releaseAnnotation: "v2"}}
+	f.target = legacyEnsureTargetCRWithMeta(t, f.c, f.isvc, nextSpec, nextMeta)
+	f.desiredPodSpec = nextSpec
+	f.desiredPodMeta = nextMeta
+
+	const uuid = "mig-mid-roll"
+	f.records = []workload.MigrationRecord{mkMigRecord(uuid, 2, "node-a")}
+
+	if done, accepted := f.pass(t, uuid); done || !accepted {
+		t.Fatalf("pass 1: got done=%v accepted=%v, want the surge in flight", done, accepted)
+	}
+	surgePod := &corev1.Pod{}
+	surgePodName := query.PodName(f.isvc.Name, f.component, 3, "default", 0)
+	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: f.isvc.Namespace, Name: surgePodName}, surgePod); err != nil {
+		t.Fatalf("the surge pod must exist after pass 1: %v", err)
+	}
+	requirePodRendersRevision(t, surgePod, sourceRevision)
+	if got, ok := surgePod.Annotations[releaseAnnotation]; ok {
+		t.Fatalf("surge pod carries %s=%q, an annotation the new revision added, while labelled with the source revision %s",
+			releaseAnnotation, got, sourceRevision.Name)
+	}
+
+	f.react(t)
+	f.drive(t, uuid, 10)
+	surge := findInstanceStatusOnIRForFixture(t, f, 3)
+	if surge == nil || surge.Phase != v1beta1.OMENativeInstanceReady || surge.RunningRevision != sourceRevision.Name {
+		t.Fatalf("promoted surge = %+v, want Ready on the source revision %s", surge, sourceRevision.Name)
+	}
+	events := drainEvents(f.recorder)
+	if want := fmt.Sprintf("instance=3 (revision=%s)", sourceRevision.Name); !anyContains(events, want) {
+		t.Fatalf("no MigrationCompleted event naming the source revision; events = %v", events)
+	}
+}
+
+// requirePodRendersRevision asserts pod is revision rev end to end: rev's
+// hash on its revision label, rev's image in its runner container, and
+// every label and annotation rev records. A pod whose label and template
+// name different revisions is routed, counted and drained as one revision
+// while running another.
+func requirePodRendersRevision(t *testing.T, pod *corev1.Pod, rev *appsv1.ControllerRevision) {
+	t.Helper()
+	payload, err := revision.PayloadFromControllerRevision(rev)
+	if err != nil || payload == nil || payload.PodSpec == nil {
+		t.Fatalf("revision %s records no pod template: %v", rev.Name, err)
+	}
+	if got, want := pod.Labels[query.LabelRevisionHash], query.RevisionOf(rev).Hash(); got != want {
+		t.Fatalf("pod %s revision label = %q, want %q", pod.Name, got, want)
+	}
+	if got, want := pod.Spec.Containers[0].Image, payload.PodSpec.Containers[0].Image; got != want {
+		t.Fatalf("pod %s labelled %s runs image %q, want %q", pod.Name, rev.Name, got, want)
+	}
+	if payload.PodMeta == nil {
+		return
+	}
+	for key, want := range payload.PodMeta.Labels {
+		if got := pod.Labels[key]; got != want {
+			t.Fatalf("pod %s label %s=%q, want %q as revision %s records", pod.Name, key, got, want, rev.Name)
+		}
+	}
+	for key, want := range payload.PodMeta.Annotations {
+		if got := pod.Annotations[key]; got != want {
+			t.Fatalf("pod %s annotation %s=%q, want %q as revision %s records", pod.Name, key, got, want, rev.Name)
+		}
+	}
+}
+
 // TestMigrate_SecondRequestQueuesBehindTheInFlightPair: dispatch is
 // serial and oldest-first, so a second request that arrives while a pair
 // is in flight sits in status.migrations as a queued Accepted record. It
@@ -2568,7 +2676,7 @@ func TestMigrate_StatusConflictCostsAPassAndReDerives(t *testing.T) {
 		FromNode:      rec.FromNode,
 		Reason:        rec.Reason,
 	}
-	_, _, _ = Migrate(context.Background(), f.deps(), in, f.plan, rec.SourceInstance, uuid, req)
+	_, _, _ = Migrate(context.Background(), f.deps(), in, f.plan, f.target, rec.SourceInstance, uuid, req)
 
 	if got := f.record(t, uuid); got.Phase.Terminal() {
 		t.Fatalf("a conflict closed the record: %+v", *got)
@@ -2772,7 +2880,7 @@ func TestMigrate_DrainRejectsAuthoritativePairDrift(t *testing.T) {
 			})
 			wantEffects := snapshotMigrationEffects(t, f)
 
-			done, accepted, err := Migrate(context.Background(), f.deps(), input, f.plan, 0, uuid, migrationRequest(t, f, uuid))
+			done, accepted, err := Migrate(context.Background(), f.deps(), input, f.plan, f.target, 0, uuid, migrationRequest(t, f, uuid))
 			if err != nil || done || !accepted {
 				t.Fatalf("guarded drain: done=%v accepted=%v err=%v", done, accepted, err)
 			}
@@ -2841,7 +2949,7 @@ func TestMigrate_InitialPairStampRejectsAuthoritativeDrift(t *testing.T) {
 				return nil
 			}
 
-			done, accepted, err := Migrate(context.Background(), f.deps(), input, f.plan, 0, uuid, migrationRequest(t, f, uuid))
+			done, accepted, err := Migrate(context.Background(), f.deps(), input, f.plan, f.target, 0, uuid, migrationRequest(t, f, uuid))
 			if err != nil || done || !accepted {
 				t.Fatalf("guarded initial stamp: done=%v accepted=%v err=%v", done, accepted, err)
 			}
@@ -2916,7 +3024,7 @@ func TestMigrate_PromotionRejectsPairDriftAfterDrainClaim(t *testing.T) {
 				return err
 			}
 
-			done, accepted, err := Migrate(context.Background(), f.deps(), input, f.plan, 0, uuid, migrationRequest(t, f, uuid))
+			done, accepted, err := Migrate(context.Background(), f.deps(), input, f.plan, f.target, 0, uuid, migrationRequest(t, f, uuid))
 			if err != nil || done || !accepted {
 				t.Fatalf("guarded promotion: done=%v accepted=%v err=%v", done, accepted, err)
 			}
@@ -2976,7 +3084,7 @@ func TestMigrate_CompletionRecoveryRejectsAuthoritativeTargetDrift(t *testing.T)
 			})
 			wantEffects := snapshotMigrationEffects(t, f)
 
-			done, accepted, err := Migrate(context.Background(), f.deps(), input, f.plan, 0, uuid, migrationRequest(t, f, uuid))
+			done, accepted, err := Migrate(context.Background(), f.deps(), input, f.plan, f.target, 0, uuid, migrationRequest(t, f, uuid))
 			if err != nil || done || !accepted {
 				t.Fatalf("guarded completion recovery: done=%v accepted=%v err=%v", done, accepted, err)
 			}
@@ -4123,7 +4231,7 @@ func TestPlacementPauseMigrationSurge(t *testing.T) {
 				in := f.input(t)
 				in.PauseNewSurge = true
 				req := &audit.MigrationRequest{SchemaVersion: audit.SchemaV1, Component: string(f.component), Instance: 0, FromNode: "node-a"}
-				done, accepted, err := Migrate(context.Background(), f.deps(), in, f.plan, 0, uuid, req)
+				done, accepted, err := Migrate(context.Background(), f.deps(), in, f.plan, f.target, 0, uuid, req)
 				if err != nil {
 					t.Fatal(err)
 				}

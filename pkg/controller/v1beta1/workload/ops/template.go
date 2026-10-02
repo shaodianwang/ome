@@ -51,16 +51,18 @@ func pinnedTemplate(ctx context.Context, reads client.Reader, input workload.Rec
 	if target != nil && name == target.Name {
 		return desiredTemplate(input, plan, query.RevisionOf(target)), true, nil
 	}
-	return storedTemplate(ctx, reads, input, name)
+	return storedTemplate(ctx, reads, input, target, name)
 }
 
 // storedTemplate is the template the named ControllerRevision records,
-// stamped with that revision. found is false when the revision is gone;
+// stamped with that revision. target is the roll target: it tells the
+// renderer which keys of the current template's metadata belong to a
+// revision (see revisionMeta). found is false when the revision is gone;
 // the caller decides what a rebuild with nothing to render from does.
 // The roll target is never read through here: the Component's current
 // template IS that revision's, and callers with the target in hand go
 // through desiredTemplate.
-func storedTemplate(ctx context.Context, reads client.Reader, input workload.ReconcileInput, name string) (podTemplate, bool, error) {
+func storedTemplate(ctx context.Context, reads client.Reader, input workload.ReconcileInput, target *appsv1.ControllerRevision, name string) (podTemplate, bool, error) {
 	payload, err := loadRevisionPayload(ctx, reads, input.Key.Namespace, name)
 	if err != nil {
 		return podTemplate{}, false, err
@@ -68,7 +70,7 @@ func storedTemplate(ctx context.Context, reads client.Reader, input workload.Rec
 	if payload == nil {
 		return podTemplate{}, false, nil
 	}
-	tmpl, err := templateFromPayload(input, name, payload)
+	tmpl, err := templateFromPayload(input, target, name, payload)
 	if err != nil {
 		return podTemplate{}, false, err
 	}
@@ -79,15 +81,19 @@ func storedTemplate(ctx context.Context, reads client.Reader, input workload.Rec
 // holds. The pairing protocol is revision-owned, so a pod rendered from a
 // stored revision carries that revision's protocol, not the current
 // spec's.
-func templateFromPayload(input workload.ReconcileInput, name string, payload *revision.DataPayload) (podTemplate, error) {
+func templateFromPayload(input workload.ReconcileInput, target *appsv1.ControllerRevision, name string, payload *revision.DataPayload) (podTemplate, error) {
 	if payload == nil || payload.PodSpec == nil {
 		return podTemplate{}, fmt.Errorf("revision %s records no pod template", name)
+	}
+	owned, err := revisionOwnedMeta(target)
+	if err != nil {
+		return podTemplate{}, err
 	}
 	tmpl := podTemplate{
 		revision:      query.RevisionFromName(name),
 		podSpec:       payload.PodSpec,
 		workerPodSpec: payload.WorkerPodSpec,
-		meta:          revisionMeta(input.DesiredSpec.PodTemplateObjectMeta, payload.PodMeta),
+		meta:          revisionMeta(input.DesiredSpec.PodTemplateObjectMeta, owned, payload.PodMeta),
 	}
 	if payload.PairingProtocol != nil {
 		tmpl.pairingProtocol = *payload.PairingProtocol
@@ -95,47 +101,77 @@ func templateFromPayload(input workload.ReconcileInput, name string, payload *re
 	return tmpl, nil
 }
 
+// revisionOwnedMeta is the pod-template metadata the roll target hashed:
+// the labels and annotations of the current template that belong to a
+// revision. nil when no target is in hand or it records no metadata, in
+// which case no key of the current template is treated as a revision's.
+func revisionOwnedMeta(target *appsv1.ControllerRevision) (*metav1.ObjectMeta, error) {
+	payload, err := loadControllerRevisionPayload(target)
+	if err != nil {
+		return nil, fmt.Errorf("roll target %s: %w", target.Name, err)
+	}
+	if payload == nil {
+		return nil, nil
+	}
+	return payload.PodMeta, nil
+}
+
 // revisionMeta composes the labels and annotations a pod of a stored
-// revision carries: every key the revision hashed takes the revision's
-// value, and a key the revision does not name keeps the current
-// template's. The keys no revision hashes — the admission plane's queue
-// labels, the annotations inherited from the owner — must keep following
-// the live spec, and the renderer cannot tell those apart from a key a
-// newer revision added, so the current template is the base and the
-// stored revision overrides it.
-func revisionMeta(current, stored *metav1.ObjectMeta) *metav1.ObjectMeta {
-	if stored == nil || (len(stored.Labels) == 0 && len(stored.Annotations) == 0) {
-		return current
+// revision carries. A key a revision hashes belongs to the revision: it
+// takes the stored revision's value and is absent when the stored
+// revision does not record it, even if the current template does — that
+// is a key a newer revision added. A key no revision hashes — the
+// admission plane's queue labels, the annotations inherited from the
+// owner — keeps following the current template. The renderer tells the
+// two apart by owned, the metadata the roll target recorded: a current
+// key the target hashed is a revision's; every other current key is not.
+func revisionMeta(current, owned, stored *metav1.ObjectMeta) *metav1.ObjectMeta {
+	if current == nil && stored == nil {
+		return nil
+	}
+	var ownedLabels, ownedAnnotations map[string]string
+	if owned != nil {
+		ownedLabels, ownedAnnotations = owned.Labels, owned.Annotations
 	}
 	out := &metav1.ObjectMeta{}
 	if current != nil {
-		out.Labels = cloneStringMap(current.Labels)
-		out.Annotations = cloneStringMap(current.Annotations)
+		out.Labels = cloneWithout(current.Labels, ownedLabels)
+		out.Annotations = cloneWithout(current.Annotations, ownedAnnotations)
 	}
-	if len(stored.Labels) > 0 && out.Labels == nil {
-		out.Labels = make(map[string]string, len(stored.Labels))
-	}
-	for k, v := range stored.Labels {
-		out.Labels[k] = v
-	}
-	if len(stored.Annotations) > 0 && out.Annotations == nil {
-		out.Annotations = make(map[string]string, len(stored.Annotations))
-	}
-	for k, v := range stored.Annotations {
-		out.Annotations[k] = v
+	if stored != nil {
+		out.Labels = overlay(out.Labels, stored.Labels)
+		out.Annotations = overlay(out.Annotations, stored.Annotations)
 	}
 	return out
 }
 
-func cloneStringMap(in map[string]string) map[string]string {
+// cloneWithout copies in, leaving out every key drop names.
+func cloneWithout(in, drop map[string]string) map[string]string {
 	if in == nil {
 		return nil
 	}
 	out := make(map[string]string, len(in))
 	for k, v := range in {
+		if _, dropped := drop[k]; dropped {
+			continue
+		}
 		out[k] = v
 	}
 	return out
+}
+
+// overlay writes every entry of over into base and returns the result.
+func overlay(base, over map[string]string) map[string]string {
+	if len(over) == 0 {
+		return base
+	}
+	if base == nil {
+		base = make(map[string]string, len(over))
+	}
+	for k, v := range over {
+		base[k] = v
+	}
+	return base
 }
 
 // announceRevisionGone reports, once per attempt on the row, that a

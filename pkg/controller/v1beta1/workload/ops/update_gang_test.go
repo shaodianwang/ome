@@ -808,7 +808,7 @@ func TestMigrateSurge_InheritsExcludedNodes(t *testing.T) {
 		FromNode:  "node-from",
 	}
 
-	done, accepted, err := Migrate(context.Background(), legacyTestDeps(c), input, plan, 0, "uuid-mig-1", req)
+	done, accepted, err := Migrate(context.Background(), legacyTestDeps(c), input, plan, nil, 0, "uuid-mig-1", req)
 	if err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}

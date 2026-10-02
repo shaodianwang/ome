@@ -8,13 +8,19 @@ import (
 	"github.com/google/uuid"
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
@@ -1063,4 +1069,194 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 			g.Expect(pod.UID).NotTo(Equal(sourceUID))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
+
+	// A migration filed while a roll is rotating the Component moves an
+	// Instance without changing its revision. The replacement is rendered
+	// from the source revision's stored template and labelled with its
+	// hash — image and pod-template annotations agree with the
+	// ControllerRevision the label names — so the per-revision Service of
+	// the first revision routes to a pod that runs it. The roll then takes
+	// the moved Instance to the new revision like any other row, and the
+	// Component ends with every Instance serving the new revision.
+	//
+	// Three Instances under SurgeThenDrain with maxSurge=1 /
+	// maxUnavailable=0 roll in index order, so Instance 2 is still on the
+	// first revision while the roll works on the others; the startup delay
+	// keeps each rotation long enough for the migration to be admitted at
+	// a surge boundary before the roll reaches it.
+	ginkgo.It("a migration filed mid-roll replaces the Instance on its own revision and the roll finishes on the new one", func() {
+		const (
+			isvcName       = "midroll-isvc"
+			replicas       = 3
+			sourceIndex    = int32(2)
+			bumpAnnotation = "example.com/release"
+		)
+		maxSurge := intstr.FromInt(1)
+		maxUnavail := intstr.FromInt(0)
+		fix := newCoordFixture(ns.Name, WithISVCName(isvcName),
+			WithoutDecoder(),
+			WithEngineReplicas(replicas),
+			WithEngineStartupDelay(20),
+			WithEngineImage("fake-serving:v1"))
+		fix.ISVC.Spec.Engine.MaxReplicas = replicas
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
+			UpdateStrategy: &v1beta1.UpdateStrategy{
+				Type: v1beta1.UpdateStrategySurgeThenDrain,
+				RollingUpdate: &v1beta1.RollingUpdate{
+					MaxSurge:       &maxSurge,
+					MaxUnavailable: &maxUnavail,
+				},
+			},
+		}
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+
+		ginkgo.By("waiting for three Instances serving on the first revision")
+		var v1Hash, v1Target, sourceNode string
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			engCS := c.Status.Components[v1beta1.EngineComponent]
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(replicas)))
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(BeEmpty(),
+				"engine CurrentRevision must be promoted before the push")
+			v1Hash = query.RevisionHashFromControllerRevisionName(engCS.Lifecycle.CurrentRevision)
+			v1Target = engineTargetRevision(g, ns.Name, isvcName)
+			pod := singleEnginePodOfInstance(g, ns.Name, isvcName, fmt.Sprintf("%d", sourceIndex))
+			g.Expect(pod.Spec.NodeName).NotTo(BeEmpty(), "the source pod must be scheduled before requesting migration")
+			sourceNode = pod.Spec.NodeName
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("pushing a new revision: a new image and a pod-template annotation the first revision never carried")
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Spec.Engine.PodSpec.Containers[0].Image = "fake-serving:v2"
+			if cur.Spec.Engine.ComponentExtensionSpec.Annotations == nil {
+				cur.Spec.Engine.ComponentExtensionSpec.Annotations = map[string]string{}
+			}
+			cur.Spec.Engine.ComponentExtensionSpec.Annotations[bumpAnnotation] = "v2"
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		awaitEngineTargetMoved(ns.Name, isvcName, v1Target)
+
+		ginkgo.By(fmt.Sprintf("filing a migration for Instance %d while the roll is rotating", sourceIndex))
+		reqUUID := uuid.NewString()
+		writeMigrationRequest(Default, client.ObjectKeyFromObject(fix.ISVC), reqUUID, sourceNode, sourceIndex)
+
+		ginkgo.By("expecting the replacement to carry the first revision's hash and run its template")
+		var surgeIndex int32
+		var surgePodName string
+		Eventually(func(g Gomega) {
+			entry := findMigrationEntry(migrationEntries(g, ns.Name, isvcName, v1beta1.EngineComponent), reqUUID)
+			g.Expect(entry).NotTo(BeNil(), "accept must create the status.migrations entry")
+			g.Expect(entry.SurgeInstance).NotTo(BeNil(), "the migration must allocate its surge index")
+			surgeIndex = *entry.SurgeInstance
+			pod := singleEnginePodOfInstance(g, ns.Name, isvcName, fmt.Sprintf("%d", surgeIndex))
+			surgePodName = pod.Name
+			g.Expect(pod.Labels[query.LabelRevisionHash]).To(Equal(v1Hash),
+				"the replacement of an Instance on the first revision must carry the first revision's hash")
+			requirePodRendersItsRevision(g, ns.Name, isvcName, pod)
+			g.Expect(pod.Annotations).NotTo(HaveKey(bumpAnnotation),
+				"the replacement must not carry the annotation the new revision added")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("expecting the first revision's Service to route to the replacement once it serves")
+		v1Service := query.PerRevisionServiceName(isvcName, workloadtypes.ComponentEngine, v1Hash)
+		Eventually(func(g Gomega) {
+			g.Expect(readyEndpointPodNames(g, ns.Name, v1Service)).To(ContainElement(surgePodName),
+				"the per-revision Service of the first revision must publish the replacement as a Ready endpoint")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("expecting the migration to complete with the moved Instance on the first revision")
+		Eventually(func(g Gomega) {
+			entry := findMigrationEntry(migrationEntries(g, ns.Name, isvcName, v1beta1.EngineComponent), reqUUID)
+			g.Expect(entry).NotTo(BeNil())
+			g.Expect(entry.Phase).To(Equal(v1beta1.MigrationPhaseCompleted),
+				"the migration must complete; got phase=%s message=%q", entry.Phase, entry.Message)
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("expecting the roll to finish with every Instance, the moved one included, serving the new revision")
+		Eventually(func(g Gomega) {
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(replicas))
+			indices := make([]int32, 0, len(insts))
+			for _, s := range insts {
+				indices = append(indices, s.Index)
+				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady), "instance %d: %+v", s.Index, s)
+				g.Expect(query.RevisionHashFromControllerRevisionName(s.RunningRevision)).NotTo(Equal(v1Hash),
+					"instance %d must run the new revision; got %s", s.Index, s.RunningRevision)
+			}
+			g.Expect(indices).To(ContainElement(surgeIndex), "the moved Instance keeps its surge index")
+			g.Expect(indices).NotTo(ContainElement(sourceIndex), "the source index is released by the migration")
+
+			snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, isvcName)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(servingEnginePodsOffRevision(snap, v1Hash)).To(Equal(replicas),
+				"all three Instances must be serving on the new revision")
+			g.Expect(snap.OnRevision(v1beta1.EngineComponent, v1Hash)).To(Equal(0),
+				"no pod may still carry the first revision")
+			for _, pod := range snap.ByComponent[v1beta1.EngineComponent] {
+				requirePodRendersItsRevision(g, ns.Name, isvcName, pod)
+			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
 })
+
+// requirePodRendersItsRevision asserts pod runs the template of the
+// ControllerRevision its revision-hash label names: the recorded image in
+// its runner container and every pod-template label and annotation the
+// revision records. Per-revision routing selects on the label, so a pod
+// whose label and template name different revisions is routed as one
+// revision while running another.
+func requirePodRendersItsRevision(g Gomega, namespace, isvcName string, pod *corev1.Pod) {
+	hash := pod.Labels[query.LabelRevisionHash]
+	g.ExpectWithOffset(1, hash).NotTo(BeEmpty(), "pod %s carries no revision-hash label", pod.Name)
+	rev := &appsv1.ControllerRevision{}
+	name := revision.Name(revision.Key{Name: isvcName + "-" + string(v1beta1.EngineComponent)}, hash)
+	g.ExpectWithOffset(1, k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: namespace, Name: name}, rev)).To(Succeed(),
+		"pod %s names revision %s, which must exist", pod.Name, name)
+	payload, err := revision.PayloadFromControllerRevision(rev)
+	g.ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	g.ExpectWithOffset(1, payload).NotTo(BeNil(), "revision %s records no template", name)
+	g.ExpectWithOffset(1, payload.PodSpec).NotTo(BeNil(), "revision %s records no pod template", name)
+	for _, recorded := range payload.PodSpec.Containers {
+		for _, running := range pod.Spec.Containers {
+			if running.Name != recorded.Name {
+				continue
+			}
+			g.ExpectWithOffset(1, running.Image).To(Equal(recorded.Image),
+				"pod %s labelled %s runs container %s with another revision's image", pod.Name, name, running.Name)
+		}
+	}
+	if payload.PodMeta == nil {
+		return
+	}
+	for key, value := range payload.PodMeta.Labels {
+		g.ExpectWithOffset(1, pod.Labels).To(HaveKeyWithValue(key, value),
+			"pod %s is missing label %s=%s that revision %s records", pod.Name, key, value, name)
+	}
+	for key, value := range payload.PodMeta.Annotations {
+		g.ExpectWithOffset(1, pod.Annotations).To(HaveKeyWithValue(key, value),
+			"pod %s is missing annotation %s=%s that revision %s records", pod.Name, key, value, name)
+	}
+}
+
+// readyEndpointPodNames lists the pods a Service publishes as Ready
+// endpoints across its EndpointSlices.
+func readyEndpointPodNames(g Gomega, namespace, serviceName string) []string {
+	slices := &discoveryv1.EndpointSliceList{}
+	g.ExpectWithOffset(1, k8sClient.List(suiteCtx, slices,
+		client.InNamespace(namespace),
+		client.MatchingLabels{discoveryv1.LabelServiceName: serviceName},
+	)).To(Succeed())
+	var names []string
+	for i := range slices.Items {
+		for _, endpoint := range slices.Items[i].Endpoints {
+			if endpoint.Conditions.Ready == nil || !*endpoint.Conditions.Ready || endpoint.TargetRef == nil {
+				continue
+			}
+			names = append(names, endpoint.TargetRef.Name)
+		}
+	}
+	return names
+}

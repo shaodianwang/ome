@@ -266,7 +266,7 @@ func executeActions(ctx context.Context, deps types.Deps, input types.ReconcileI
 		// one leaves the plan stale, so both end it; a fresh-record defer
 		// falls through so the in-flight op it waits on converges.
 		case ActionMigrate:
-			res, stop, err := executeMigratePass(ctx, deps, input, plan, *action.Migration)
+			res, stop, err := executeMigratePass(ctx, deps, input, plan, target, *action.Migration)
 			if err != nil {
 				return res, false, err
 			}

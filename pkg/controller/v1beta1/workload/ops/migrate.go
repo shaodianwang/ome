@@ -77,7 +77,10 @@ func ledgerOwnerGVK(input workload.ReconcileInput) schema.GroupVersionKind {
 //  3. Reuse source's RunningRevision as the surge template — the surge
 //     mirrors the source's full Runner layout (a single "default" pod,
 //     or leader + workers for a gang); create surge pods with the
-//     migration anti-affinity overlay.
+//     migration anti-affinity overlay. target is the roll target: the
+//     surge carries only the pod-template keys the source's revision
+//     records, whatever the current template added since (see
+//     storedTemplate).
 //  4. Wait surge ContainersReady + in-rotation + Available; flip
 //     serving; record Phase=SurgeReady.
 //  5. Drain source (serving=False, wait drain.IsPodDrained), delete;
@@ -110,7 +113,7 @@ func ledgerOwnerGVK(input workload.ReconcileInput) schema.GroupVersionKind {
 //     fall through to Update/Create/etc. so the in-flight op converges;
 //     otherwise the dispatcher loops indefinitely in the Migrate-defer
 //     branch and the source never reaches Ready (silent deadlock).
-func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx int32, requestUUID string, req *audit.MigrationRequest) (done bool, accepted bool, err error) {
+func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision, sourceIdx int32, requestUUID string, req *audit.MigrationRequest) (done bool, accepted bool, err error) {
 	if deps.Client == nil {
 		return false, false, fmt.Errorf("Migrate: nil client")
 	}
@@ -473,7 +476,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		// Source not yet promoted with a RunningRevision — retry.
 		return false, accepted, nil
 	}
-	surgeTemplate, err := templateFromPayload(input, surgeRev.Name, surgePayload)
+	surgeTemplate, err := templateFromPayload(input, target, surgeRev.Name, surgePayload)
 	if err != nil {
 		return false, accepted, fmt.Errorf("Migrate: resolve surge template: %w", err)
 	}
