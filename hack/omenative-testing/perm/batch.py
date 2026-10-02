@@ -366,9 +366,11 @@ def cluster_wide_fault(fields):
     """True when a case's apparatus reaches past its own pods, so it runs
     serially after the concurrent pool: a namespace-wide quota, a cordoned or
     dead node, the manager restarted, every node tainted, or every node's
-    spare CPU taken by fillers (a preemption, as a fault or as the kill)."""
+    spare CPU taken by fillers (a preemption, as a fault or as the kill, or
+    a packed pool)."""
     fault = str(fields.get("fault", "")).split(":", 1)[0]
-    return fault in ("quota", "cordon", "ctrlrestart", "node", "taint", "preempt") or fields.get("via") == "preempt"
+    return (fault in ("quota", "cordon", "ctrlrestart", "node", "taint", "preempt")
+            or fields.get("via") == "preempt" or fields.get("pool") == "packed")
 
 
 def sweep_fault_artifacts():

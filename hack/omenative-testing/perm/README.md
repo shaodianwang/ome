@@ -99,6 +99,7 @@ perm/
 │   ├── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary
 │   ├── gen-size/ gen-router-gang/  — generated small fleets (one and two Instances per Component) and the engine gang behind a router
 │   ├── gen-readiness/ gen-gang-member/ gen-tight/ gen-evict/ gen-preempt/ gen-pending/  — generated fault families (see isvcs/MANIFEST.md)
+│   ├── gen-packed-pool/   — generated: every node packed, a bad push then the fix, and the running revision broken then the fix
 │   ├── gen-budget/ gen-inplaceonly/  — percent budgets as the engine resolves them; the strict in-place strategy on its own terms
 │   ├── gen-fault-scale/ gen-fault-delete/  — generated: a scale or a delete on a service with a broken Instance
 │   └── gen-fault-move/ gen-fault-edit/  — generated faults crossed with a move and with a runtime edit
@@ -213,7 +214,10 @@ tracked bug is itself a continuous-invariant violation adds
 invariant's violations record as the case's `XFAIL (known bug: #N)` instead of
 hardening the verdict — the invariant is still evaluated and printed (nothing
 is blinded, unlike `inv_off`), and any other invariant still fails hard, so
-unrelated regressions cannot hide behind the parking.
+unrelated regressions cannot hide behind the parking. `inv_on=J,K` selects
+the two opt-in invariants (J, no auto-recovery record in the audit ledger;
+K, no node exclusion on a pod), which run on every case of a family whose
+story forbids them and nowhere else (see *Continuous invariants*).
 
 ## How a case runs (`run.py`)
 
@@ -1534,6 +1538,49 @@ shapes.
   `batch.py`'s sweep. `isvcs/gen-preempt/` crosses both moments with
   topology, restart policy, lift and (under the roll) strategy.
 
+- **`pool=packed` (rollout mode, with `fault=crashloop:new` or
+  `fault=crashloop:idle`, `form=start|load`)** is the packed pool: once the
+  service has settled, a filler takes the spare CPU of every node a case pod
+  can be placed on (the preempt verb's filler, sized to the node, under no
+  priority class), so the service's pods have exactly the room they occupy
+  and a rebuilt pod can land only in the room a pod of the service vacates.
+  Then the story, under the strategies that add no pod (RecreatePod and
+  InPlaceIfPossible at `maxSurge: 0, maxUnavailable: 1`): with
+  `crashloop:new` the push brings a revision whose pods crash, exactly as
+  the crashloop:new verb drives it (the arm, the hold, the `rebump-fix`
+  push); with `crashloop:idle` the running revision is broken on one
+  Instance of the settled service (the break victim rule: the highest
+  Instance's leader or single pod of `victimcomp=`), the push waits until
+  the break has bitten (`BREAK_BITE_S`) and then lands the good revision.
+  The verdict is the operator's end state, on top of the crashloop:new
+  checks (the hold, the reason, the fix landing with nothing rebuilt on the
+  crashing revision) or the running-revision break checks (the Instance
+  ends on the good revision serving with no repair recorded after the
+  push): never two Instances of a Component down at once from the push (or
+  the break) to the end, sampled on every watch read and debounced like the
+  capacity floor; the broken Instance lands the good revision first (read
+  from when each Instance was first seen on it); it comes back in the room
+  it vacated (its pods' nodes, as a multiset, or the same pod under an
+  in-place patch); for the mirror, no pod is created on the running
+  revision after the good push, and a repair that opened before the push is
+  reported. A crash after Ready (`form=load`) carries `floor_soft=1` and
+  reports the one-down rule and the landing order instead of asserting
+  them: a runner that exits after Ready can be Ready when the roll decides,
+  so the roll need not read that Instance as serving nothing. The usual
+  peaks, isolation, gang atomicity, index partition and capacity floor
+  apply. The verb needs a cluster this harness owns (the same check as
+  `node:notready`); elsewhere the case is `SKIP` with the reason. Fillers
+  carry `perm.test/filler=<case>` and go at the end of the case and in
+  `batch.py`'s sweep. The generated `isvcs/gen-packed-pool/` family
+  (`p8600`+) crosses both stories and both forms with the six shape families
+  (the engine, the engine behind a router, prefill/decode, single-pod at
+  three Instances and as gangs at two), both strategies, both restart
+  policies on the bad push (the mirror runs under `None`: its break lives in
+  the live pod, so `RecreateInstanceOnPodRestart` heals it with its own
+  rebuild before the push lands) and a `rollingUpdate` group on the
+  prefill/decode shapes, whose decoder carries the same one-down budget;
+  every cell selects invariants J and K (`inv_on=J,K`).
+
 - **`fault=taint:all` and `fault=quota:<n>` with `lift=after-settle|never`**
   (mode=kill, or rollout mode without `during=idle`) are the pending
   causes: a new pod cannot be placed (a `perm.test/pending` NoSchedule
@@ -1562,8 +1609,8 @@ shapes.
   restart policy, lift and (under the roll) strategy, with the quota sized
   per cell as above.
 
-- **`fault=quota`, `fault=taint`, `fault=preempt` and `via=preempt` cases
-  run serially.** A quota case creates a *namespace-wide*
+- **`fault=quota`, `fault=taint`, `fault=preempt`, `via=preempt` and
+  `pool=packed` cases run serially.** A quota case creates a *namespace-wide*
   ResourceQuota sized from a live usage snapshot, so run concurrently it both
   blocks other cases' pod admissions and mis-sizes its own headroom.
   `batch.py` partitions automatically: all other cases keep the concurrent
@@ -1692,6 +1739,40 @@ itself waits for; a revision the IR calls `updateRevision` while the ISVC
 spec already moved on is caught only once the next run opens and closes.
 The settle window absorbs the run close and the next render.
 
+Two classes are opt-in, selected per case with `inv_on=J,K` (both, or one),
+because their claim is a story's, not every case's: a node loss expects the
+very record J forbids. They fire on a single tick (what they read is durable,
+not a transition) and park and waive like the others (`inv_xfail=J`,
+`inv_off=K`). The letter I is skipped: it reads as the digit one and as the
+ⓘ marker of the verdict lines.
+
+**J no-auto-recovery** — the service's audit ledger ConfigMap
+(`<isvc>-ome-migration-audit`, key `history.json`) holds no entry whose
+`reason` is `AutoRecover`: the record the engine writes when it gives up on
+an Instance's node and steers the rebuild elsewhere, which also feeds the
+node-exclusion memory. A case that selects J says nothing it does should
+provoke that: a broken Instance in a packed pool is rebuilt where it stood.
+The ledger is read once per tick; an absent ConfigMap is an empty ledger, an
+unreadable one makes no observation. A violation reads `invariant J violated
+(auto-recover): engine/2: the audit ledger records an AutoRecover entry
+(fromNode=<node> revision=<hash> phase=Completed outcome=relocate-recreate)`.
+Limits: it reads the ledger, not the pods; a relocation the engine decided
+and never recorded is invisible to it (K reads the other half); and the
+ledger ring-buffers its terminal rows, so a very churny service could age a
+row out within a case.
+
+**K no-node-exclusion** — no live pod of the service carries a required
+`kubernetes.io/hostname NotIn` node affinity term. The engine writes one only
+to keep an Instance's rebuild off a node it gave up on; a case that selects K
+says no placement of its pods may be narrowed that way (in a packed pool
+such a term would make the only room unusable). The reading is the pod spec
+the watcher already carries (`excl` on every watcher record); a record
+without the field is not evaluated. A violation reads `invariant K violated
+(node-exclusion): engine/2 pod <name> carries a required kubernetes.io/hostname
+NotIn [<node>] node affinity term`. Limits: a preferred (soft) term, an
+`In` term that pins the pod elsewhere, and any other key are not exclusions
+and pass; so does a term on a pod the watcher never saw alive.
+
 ## Regenerating cases
 
 Four generators write into `isvcs/`; re-run one after editing it:
@@ -1721,7 +1802,12 @@ Four generators write into `isvcs/`; re-run one after editing it:
   a fix push lands), the small fleets and the engine gang behind a router
   (`p8000`–`p8199`) → `isvcs/gen-size/` and `isvcs/gen-router-gang/`, the fault
   families (`p7000`–`p7399`) → `isvcs/gen-readiness/`, `isvcs/gen-gang-member/`,
-  `isvcs/gen-tight/`, `isvcs/gen-evict/`, `isvcs/gen-preempt/` and `isvcs/gen-pending/`, the percent budgets (`p8200`–`p8329`) →
+  `isvcs/gen-tight/`, `isvcs/gen-evict/`, `isvcs/gen-preempt/` and `isvcs/gen-pending/`, the packed pool
+  (`p8600`–`p8699`) → `isvcs/gen-packed-pool/` (every node's spare CPU taken
+  once the service has settled; a push whose revision crashes stops at one
+  Instance down and the good push lands on that Instance first, in the room
+  it vacated, then on the others one at a time; and the mirror, the running
+  revision crashing on one Instance before the push), the percent budgets (`p8200`–`p8329`) →
   `isvcs/gen-budget/` (maxSurge and maxUnavailable at 10, 25 and 50 percent
   on fleets of 4 and 8, for a plain push, a push with a crash-looping
   Instance and a canary ladder; each case states the engine's rounding rule

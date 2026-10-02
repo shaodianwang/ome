@@ -1188,7 +1188,11 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-fault-edit", "engine", "")], 2)
         self.assertEqual(shard_counts[("gen-fault-edit", "engine-mn", "")], 1)
         self.assertEqual(shard_counts[("gen-fault-edit", "pd", "")], 2)
-        self.assertEqual(job_count, 524)
+        # A packed pool holds every node for the case: two per shard at the
+        # family's seven-minute rating.
+        for topology in ("engine", "engine-mn", "pd", "pd-mn"):
+            self.assertEqual(shard_counts[("gen-packed-pool", topology, "")], 12)
+        self.assertEqual(job_count, 572)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin

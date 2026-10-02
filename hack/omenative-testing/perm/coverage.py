@@ -200,8 +200,10 @@ HEADER_VALUES = {
     "imgcomp": set(COMPONENTS),
     "form": {"start", "load", "persist", "recover"},
     "nophase": {"Pending", "Canarying", "Paused", "Promoting", "RollingBack", "RolledBack", "Failed"},
-    "inv_off": {"A", "B", "C", "D", "F", "G", "H", "all"},
-    "inv_xfail": {"A", "B", "C", "D", "F", "G", "H", "all"},
+    "inv_off": {"A", "B", "C", "D", "F", "G", "H", "J", "K", "all"},
+    "inv_xfail": {"A", "B", "C", "D", "F", "G", "H", "J", "K", "all"},
+    # fillers take every node's spare CPU once the service has settled
+    "pool": {"packed"},
     "xcheck": {"sectraffic"},
     "verb": CANARY_VERBS,
     "verb2": CANARY_VERBS,
@@ -290,6 +292,11 @@ def _members(v):
     return bool(str(v)) and all(m in COMPONENTS for m in str(v).split(","))
 
 
+def _opt_in_invariants(v):
+    # the opt-in continuous invariants: J (no auto-recovery record), K (no node exclusion)
+    return bool(str(v)) and all(c in ("J", "K") for c in str(v).split(","))
+
+
 HEADER_CHECKS = {
     "Ne": _count, "Nd": _count, "Nr": _count, "ceil_e": _count, "ceil_d": _count, "ceil_r": _count,
     "to_e": _count, "to_d": _count, "to_r": _count, "partition": _count, "failurelimit": _count,
@@ -302,6 +309,7 @@ HEADER_CHECKS = {
     "fault": _fault, "during": _during, "during2": _hook, "edit": _edit, "lift": _lift,
     "inst": lambda v: _int_list(v) or v == "last", "errorrate": _number, "timeout": _duration, "cell": _cells, "bump": _members,
     "img": _text, "rt": _text, "reason": _text, "proto": _text, "proto2": _text, "pairto": _text,
+    "inv_on": _opt_in_invariants,
 }
 HEADER_KEYS = set(HEADER_VALUES) | set(HEADER_CHECKS)
 REQUIRED_KEYS = ("Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r")
@@ -558,6 +566,8 @@ def classify_operation(h, mode, size):
         detail += ", the fix pushed while paused" if h.get("push") else ""
         return "steady state", detail, pause or ""
     detail = f"{edit} edit" if edit in ROLLOUT_EDITS else "annotation bump"
+    if h.get("pool") == "packed":
+        detail += ", packed pool"
     # A push the strategy cannot apply is held and the corrective push lands.
     second = "push" if h.get("expect") == "held" else ""
     return "push", detail, second

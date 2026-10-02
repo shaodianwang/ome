@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **3179**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **3275**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -46,24 +46,25 @@ Total generated cases: **3179**. The whole-corpus per-PR cap (hand + generated) 
 | gen-fault-delete | 28 | p7700..p7727 |
 | gen-fault-move | 75 | p7800..p7874 |
 | gen-fault-edit | 52 | p7900..p7951 |
+| gen-packed-pool | 96 | p8600..p8695 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 811 |
-| engine-mn | 739 |
-| pd | 1023 |
-| pd-mn | 606 |
+| engine | 835 |
+| engine-mn | 763 |
+| pd | 1047 |
+| pd-mn | 630 |
 
 ### By update strategy
 
 | value | cases |
 |---|---|
 | (dormant: nothing rolls) | 166 |
-| InPlaceIfPossible | 404 |
+| InPlaceIfPossible | 452 |
 | InPlaceOnly | 281 |
-| RecreatePod | 702 |
+| RecreatePod | 750 |
 | SurgeThenDrain | 1626 |
 
 ### By failure verb / phase
@@ -168,6 +169,10 @@ Total generated cases: **3179**. The whole-corpus per-PR cap (hand + generated) 
 | node@move-accept | 6 |
 | node@move-surge | 6 |
 | none | 140 |
+| packed:idle:load | 16 |
+| packed:idle:start | 16 |
+| packed:new:load | 32 |
+| packed:new:start | 32 |
 | pending:quota:roll | 22 |
 | pending:quota:steady | 12 |
 | pending:taint:roll | 24 |
@@ -220,22 +225,22 @@ Total generated cases: **3179**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (unset — baseline) | 758 |
-| None | 1210 |
-| RecreateInstance | 1211 |
+| None | 1274 |
+| RecreateInstance | 1243 |
 
 ### By pause
 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 2885 |
+| off | 2981 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 2999 |
+| (no pause around a repair) | 3095 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -244,7 +249,7 @@ Total generated cases: **3179**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 2999 |
+| (no pause around a repair) | 3095 |
 | fix | 90 |
 | none | 90 |
 
@@ -254,9 +259,9 @@ Total generated cases: **3179**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 48 |
 | canary | 24 |
-| none | 2496 |
+| none | 2568 |
 | ratio | 16 |
-| rolling | 561 |
+| rolling | 585 |
 | seq | 34 |
 
 ### By mid-roll edit (gen-switch)
@@ -298,7 +303,7 @@ Total generated cases: **3179**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 2301 |
+| (no break) | 2397 |
 | decoder | 77 |
 | engine | 801 |
 
@@ -414,6 +419,13 @@ Total generated cases: **3179**. The whole-corpus per-PR cap (hand + generated) 
 | env | 8 |
 | image | 44 |
 
+### By story (packed-pool)
+
+| value | cases |
+|---|---|
+| bad push then fix | 64 |
+| broken running then fix | 32 |
+
 ## Constraint ledger (tuples excluded during construction)
 
 - `pause` multiplies `mode=kill` and the pause-and-repair family (`pauseat=`); run.py consumes the pause header nowhere else, and a rollout case that pauses without `pauseat=` is rejected as a dead knob.
@@ -432,6 +444,7 @@ Total generated cases: **3179**. The whole-corpus per-PR cap (hand + generated) 
 - heal breaks the engine runner, so its coordination axis is a rollingUpdate group over the engine alone or, where a decoder exists, over engine and decoder; nothing rolls, so the update strategy stays canonical and is not an axis. `lift=after-failed` carries `instanceReadyTimeout: 90s` on the victim so the row escalates inside the case budget.
 - imagepull has one form (an image that never pulls has no after-Ready form) and runs each strategy at its canonical budget only; its idle half carries no group, since a grouped repair's hold is its own family.
 - node:notready reads the fate of a Ready Instance on a dead node under the deployed force-delete policy, a lane dimension: without `lifecycle.forceDelete` (the chart default) nothing frees the pod names a silent node holds, so the outcomes are `parked` (nothing rebuilds it while the node is down) and `repaired` (the kubelet returns and the pods it never stopped serve again), both at `lift=after-settle`; with the policy the names are freed once the node's unreachable evidence is older than the threshold and the Instance is rebuilt elsewhere while the node is down, `relocated` at `lift=after-recover`. `needs=` pins parked to the plain lane and relocated to the force-delete lane (the runner SKIPs where the controller config differs); repaired holds under both. The migration axis is Auto (the default) and Never — the API has no mode that admits explicit requests but not relocation, and neither mode moves a Ready Instance (Auto relocates on an expired attempt's deadline, which a Ready Instance never has); restart policy and an idle rolling group change nothing either, and each cell says why. The update strategy is dormant at idle (one canonical budget).
+- The packed-pool family runs RecreatePod and InPlaceIfPossible at maxSurge 0, maxUnavailable 1 only: a surge needs room a packed pool has not got (the tight-cluster family's story), and InPlaceOnly refuses the after-Ready form's env diff and patches the at-start form as InPlaceIfPossible does. Its group axis is a rollingUpdate group on the prefill/decode shapes, whose decoder carries the same one-down budget; blueGreen and Sequential need a whole second set of pods. The mirror (fault=crashloop:idle) runs under restart policy None only: the break lives in the live pod, not the template, so RecreateInstanceOnPodRestart heals it with its own rebuild before the push lands. The after-Ready form carries floor_soft=1 and reports the one-down rule and the landing order: a runner that exits after Ready can be Ready when the roll decides.
 - ctrlrestart has no hook inside a repair (one fault per case; the idle-break handler fires no second one), so a restart while a crash-loop repair is open is not emitted. The strategy axis is live for the two rollout conditions and dormant under a migration and a scale-down, where both strategies still run for the family's symmetry; a rolling group is crossed in on the PD rollout conditions only.
 - The gen-canary-* families drive operator stories through a canary at small size: 8 single-pod Instances, SurgeThenDrain with the engine surge at 1 and 2, a four-step ladder (10/30/60/100 percent capacity and traffic) with a timed soak in place of an analysis gate, on the engine and prefill/decode shapes only (the stories run single-pod Instances; the gang shapes are the crashloop family's).
 - gen-canary-crash breaks the stable side at the first split (canary-serving@0): every break kind and form, both restart policies, 1 and 3 victim Instances at once. The floor is read with the victims allowed for, not waived.

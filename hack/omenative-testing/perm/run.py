@@ -208,8 +208,20 @@ INV_TRANSIENT_PHASES = {"Pending", "Creating", "Updating", "Restarting", "Migrat
 SERVING_COND = "ome.io/serving"   # controller-managed pod readiness gate (query.ServingConditionType)
 # The invariant classes a header may waive (inv_off) or park (inv_xfail). E,
 # the cohort-ratio observer, is informational and never fails, so it is not
-# a class here.
-INV_CLASSES = {"A", "B", "C", "D", "F", "G", "H"}
+# a class here. J (no auto-recovery record) and K (no node exclusion) are
+# opt-in: a header selects them with inv_on=J,K.
+INV_OPT_IN = {"J", "K"}
+INV_CLASSES = {"A", "B", "C", "D", "F", "G", "H"} | INV_OPT_IN
+INV_NAMES = {"A": "status-truth", "B": "endpoints-membership", "C": "pair-alive", "D": "gang-scheduling",
+             "F": "label-truth", "G": "ready-serving", "H": "superseded-revision",
+             "J": "no-auto-recovery", "K": "no-node-exclusion"}
+# The audit ledger ConfigMap the engine keeps per service, and the record it
+# writes when it gives up on an Instance's node and steers the rebuild
+# elsewhere. Invariant J reads it.
+AUDIT_LEDGER_SUFFIX = "-ome-migration-audit"
+AUDIT_LEDGER_KEY = "history.json"
+AUTO_RECOVER_REASON = "AutoRecover"
+HOSTNAME_LABEL = "kubernetes.io/hostname"
 
 # Dynamic timeouts: real kubelet + a 15s artificial startup sleep per pod, and
 # surge=1 rolls serialize. Static 240s was too tight for N=8 and for two-member
@@ -936,14 +948,30 @@ def _pod_serving(obj):
 
 def _pod_placement(obj, labels):
     """Scheduler-facing fields every watcher record carries, whichever loop
-    builds it: node binding, scheduler name and the pod-group label.
-    Invariant D reads all three; a record without them is never evaluated."""
+    builds it: node binding, scheduler name, the pod-group label and the
+    nodes a required hostname NotIn term keeps the pod off. Invariant D
+    reads the first three, invariant K the last; a record without them is
+    never evaluated."""
     spec = obj.get("spec") or {}
     return {
         "node": spec.get("nodeName", ""),
         "sched": spec.get("schedulerName", ""),
         "pg": labels.get("scheduling.x-k8s.io/pod-group", ""),
+        "excl": _hostname_exclusions(spec),
     }
+
+
+def _hostname_exclusions(spec):
+    """The node names a pod's required node affinity keeps it off: every
+    value of a kubernetes.io/hostname NotIn term, sorted."""
+    required = (((spec.get("affinity") or {}).get("nodeAffinity") or {})
+                .get("requiredDuringSchedulingIgnoredDuringExecution") or {})
+    out = set()
+    for term in required.get("nodeSelectorTerms") or []:
+        for expr in term.get("matchExpressions") or []:
+            if expr.get("key") == HOSTNAME_LABEL and expr.get("operator") == "NotIn":
+                out.update(str(v) for v in expr.get("values") or [])
+    return sorted(out)
 
 
 def _pod_template(obj):
@@ -1035,6 +1063,7 @@ def _inv_new(case_id, hdr):
     handler sets inv["pairing"] at trigger time for a non-empty→non-empty
     protocol transition; without that it never evaluates."""
     off = str(hdr.get("inv_off", "") or "")
+    opted = {c for c in str(hdr.get("inv_on", "") or "").split(",") if c}
     return {
         "case_id": case_id,
         "off": off,
@@ -1057,6 +1086,12 @@ def _inv_new(case_id, hdr):
         # rest on the old revision by design — so H is not evaluated there.
         "h_on": off not in ("H", "all") and str(hdr.get("mode") or "") != "partition",
         "h_seen": False,          # ≥1 Component reporting its rollout done was evaluated
+        # Invariants J (no auto-recovery record in the audit ledger) and K (no
+        # required hostname NotIn term on a live pod) are opt-in: inv_on=.
+        "j_on": "J" in opted and off not in ("J", "all"),
+        "j_seen": False,          # the audit ledger was read at least once
+        "k_on": "K" in opted and off not in ("K", "all"),
+        "k_seen": False,          # ≥1 live pod's node affinity was read
         # Invariant D (gang scheduling) exists only when the fixtures name a
         # scheduler (OME_EVAL_SCHEDULER): every pod must run under it and every
         # gang must bind as one PodGroup.
@@ -1642,6 +1677,57 @@ def _list_podgroups(case_id):
             for it in items}
 
 
+def _inv_fetch_ledger(case_id):
+    """The rows of the service's audit ledger ConfigMap: [] while the
+    ConfigMap does not exist, None when it cannot be read this tick."""
+    r = kubectl("-n", NS, "get", "cm", f"{case_id}{AUDIT_LEDGER_SUFFIX}", "-o", "json")
+    if r.returncode != 0:
+        return [] if "not found" in (r.stderr or "").lower() else None
+    try:
+        hist = json.loads(json.loads(r.stdout).get("data", {}).get(AUDIT_LEDGER_KEY, "{}"))
+        return hist.get("entries", []) or []
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def _inv_check_auto_recover(inv, ledger, hits, now):
+    """Invariant J, one tick: the service's audit ledger holds no AutoRecover
+    record. The engine writes one when it gives up on an Instance's node and
+    steers the rebuild elsewhere; a case that selects J says nothing it does
+    should provoke that. A None ledger makes no observation. One tick is
+    enough: a ledger row is durable, not a transition."""
+    if ledger is None:
+        return
+    inv["j_seen"] = True
+    for entry in ledger:
+        if str(entry.get("reason") or "") != AUTO_RECOVER_REASON:
+            continue
+        comp, idx = str(entry.get("component") or "?"), str(entry.get("sourceInstance", "?"))
+        key = ("J", "auto-recover", comp, idx)
+        _inv_hit(inv, hits, key, key, 1, now,
+                 f"{comp}/{idx}: the audit ledger records an {AUTO_RECOVER_REASON} entry "
+                 f"(fromNode={entry.get('fromNode') or '?'} revision={str(entry.get('revision') or '?')[-12:]} "
+                 f"phase={entry.get('phase') or '?'} outcome={entry.get('outcome') or '?'})")
+
+
+def _inv_check_node_exclusion(inv, pod_state, hits, now):
+    """Invariant K, one tick: no live pod of the service carries a required
+    kubernetes.io/hostname NotIn term. The engine writes one only to keep an
+    Instance's rebuild off a node it gave up on; a case that selects K says
+    no placement of its pods may be narrowed that way. A record without the
+    field (another watcher builder) is not evaluated."""
+    for name, p in sorted(pod_state.items()):
+        if not (p and p["alive"]) or "excl" not in p:
+            continue
+        inv["k_seen"] = True
+        if not p["excl"]:
+            continue
+        key = ("K", "node-exclusion", p.get("comp", "?"), name)
+        _inv_hit(inv, hits, key, key, 1, now,
+                 f"{p.get('comp', '?')}/{p.get('inst', '?')} pod {name} carries a required "
+                 f"{HOSTNAME_LABEL} NotIn [{', '.join(p['excl'])}] node affinity term")
+
+
 def _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now):
     """Invariant D, one tick, only when OME_EVAL_SCHEDULER names a scheduler:
     D1 every live case pod carries that schedulerName (the runtime's name
@@ -1703,7 +1789,7 @@ def _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now):
 
 
 def _inv_any_on(inv):
-    return any(inv.get(k) for k in ("a_on", "b_on", "c_on", "d_on", "f_on", "g_on", "h_on", "ratio"))
+    return any(inv.get(k) for k in ("a_on", "b_on", "c_on", "d_on", "f_on", "g_on", "h_on", "j_on", "k_on", "ratio"))
 
 
 def _inv_tick(inv, pod_state, pods_per_inst):
@@ -1723,12 +1809,13 @@ def _inv_tick(inv, pod_state, pods_per_inst):
     isvc_status = fetch_status(case_id) if inv["h_on"] else None
     revisions = (_inv_fetch_revisions(case_id)
                  if inv["f_on"] and _inv_revisions_wanted(inv, pod_state) else None)
+    ledger = _inv_fetch_ledger(case_id) if inv.get("j_on") else None
     _inv_observe(inv, pod_state, pods_per_inst, now, ir_items=ir_items, routing=routing,
-                 isvc_status=isvc_status, revisions=revisions)
+                 isvc_status=isvc_status, revisions=revisions, ledger=ledger)
 
 
 def _inv_observe(inv, pod_state, pods_per_inst, now, ir_items=None, routing=None,
-                 isvc_status=None, revisions=None):
+                 isvc_status=None, revisions=None, ledger=None):
     """One observation over already-fetched snapshots: every enabled check
     runs, then streaks reset for keys not observed this tick (the
     CONSECUTIVE-tick sustain rule). Pure, so tests drive ticks with synthetic
@@ -1753,6 +1840,10 @@ def _inv_observe(inv, pod_state, pods_per_inst, now, ir_items=None, routing=None
         _inv_check_ready_serving(inv, pod_state, pods_per_inst, ir_items, routing, hits, now)
     if inv["h_on"]:
         _inv_check_superseded(inv, pod_state, ir_items, isvc_status, hits, now)
+    if inv.get("j_on"):
+        _inv_check_auto_recover(inv, ledger, hits, now)
+    if inv.get("k_on"):
+        _inv_check_node_exclusion(inv, pod_state, hits, now)
     for k in [k for k in inv["streaks"] if k not in hits]:
         del inv["streaks"][k]
 
@@ -1793,6 +1884,10 @@ def invariant_checks(inv, verdict, notes, checks):
         checks.append("  ⓘ invariant G: no routed Service observed — the serving gate was asserted, endpoint membership was not")
     if inv.get("h_on") and not inv.get("h_seen"):
         checks.append("  ⓘ invariant H (superseded-revision) never saw a Component report its rollout done — vacuous (no assertion made)")
+    if inv.get("j_on") and not inv.get("j_seen"):
+        checks.append("  ⓘ invariant J (no-auto-recovery) never read the audit ledger — vacuous (no assertion made)")
+    if inv.get("k_on") and not inv.get("k_seen"):
+        checks.append("  ⓘ invariant K (no-node-exclusion) never saw a live pod's node affinity — vacuous (no assertion made)")
     ratio = inv.get("ratio")
     if ratio:
         tol_pct = int(round(ratio["tol"] * 100))
@@ -1809,11 +1904,12 @@ def invariant_checks(inv, verdict, notes, checks):
                                   ("D", inv.get("d_on", False) and inv.get("d_seen", False)),
                                   ("F", inv.get("f_on", False) and inv.get("f_seen", False)),
                                   ("G", inv.get("g_on", False) and inv.get("g_seen", False)),
-                                  ("H", inv.get("h_on", False) and inv.get("h_seen", False))) if on]
+                                  ("H", inv.get("h_on", False) and inv.get("h_seen", False)),
+                                  ("J", inv.get("j_on", False) and inv.get("j_seen", False)),
+                                  ("K", inv.get("k_on", False) and inv.get("k_seen", False))) if on]
         if active:
             checks.append(f"  ✓ continuous invariants held ({'+'.join(active)}): no sustained "
-                          "status-truth / endpoints-membership / pair-alive / gang-scheduling / "
-                          "label-truth / ready-serving / superseded-revision violation")
+                          f"{' / '.join(INV_NAMES[x] for x in active)} violation")
         return verdict
     scope = inv.get("xfail") or ""
     ref = f"#{inv['xfail_issue']}" if inv.get("xfail_issue") else "UNLINKED"
@@ -3543,6 +3639,12 @@ def _churn_stopped(case_id):
         return True, f"pod set held still across {CHURN_SETTLE_S:.0f}s ({len(b)} pod(s))"
     return False, (f"pod set still churning across {CHURN_SETTLE_S:.0f}s "
                    f"({len(a)}→{len(b)} pod(s), {len(a ^ b)} differing)")
+
+
+def _inv_on_ok(v):
+    """inv_on= names opt-in invariant classes, comma-separated, each once."""
+    parts = str(v).split(",")
+    return all(part in INV_OPT_IN for part in parts) and len(set(parts)) == len(parts)
 
 
 def _fault_ok(v):
@@ -5566,6 +5668,296 @@ def _crashloop_new(case_id, yaml_file, desc, hdr):
     verdict = _crash_new_checks(ctx, f, out, victim, bumped, allowance, verdict, notes, checks)
     verdict = _crash_new_fleet_checks(ctx, hdr, bumped, verdict, notes, checks)
     return _finish(case_id, desc, hdr, ctx, out["fix"]["state"], verdict, notes, checks)
+
+# ── A packed pool: the only room is what a broken pod vacates (pool=packed) ──
+POOL_PACKED = "packed"
+
+
+def _packed_capability():
+    """None when a pool can be packed here: a cluster this harness owns (the
+    fillers take every node's spare CPU)."""
+    reason = _node_fault_capability()
+    if reason:
+        return f"filling every node needs a cluster this harness owns: {reason}"
+    return None
+
+
+def _pack_pool(case_id):
+    """A filler on every node a case pod can be placed on, each sized to the
+    node's spare CPU, so the case's pods have exactly the room they occupy.
+    The cleanup is registered before the first filler lands (the preempt
+    cleanup drops fillers by label; no PriorityClass is involved). Returns
+    the record, with any apparatus failure on it."""
+    rec = {"case_id": case_id, "fillers": [], "fillers_dropped": False, "nodes": {}, "infra_fail": None}
+    _FAULT_CLEANUPS.append(("preempt", rec))
+    nodes = _eligible_nodes()
+    if not nodes:
+        rec["infra_fail"] = "packed pool: no Ready, schedulable node to fill"
+        return rec
+    for node in nodes:
+        ok, msg = _preempt_block_node(rec, node)
+        if not ok:
+            rec["infra_fail"] = f"packed pool: {msg}"
+            return rec
+        rec["nodes"][node] = msg
+        print(f"    ⚡ packed pool: {msg}")
+    return rec
+
+
+def _packed_placement(pod_state):
+    """{(component, index): {"nodes": the node of each alive pod, sorted;
+    "uids": their UIDs}}: where every Instance sits."""
+    out = {}
+    for p in pod_state.values():
+        if not (p and p["alive"]):
+            continue
+        rec = out.setdefault((p.get("comp"), str(p.get("inst", "0"))), {"nodes": [], "uids": set()})
+        rec["nodes"].append(p.get("node", ""))
+        if p.get("uid"):
+            rec["uids"].add(p["uid"])
+    for rec in out.values():
+        rec["nodes"].sort()
+    return out
+
+
+def _packed_new(side, form, victim, bumped, pack, settled):
+    """Fresh packed-pool story state, the record _packed_sample fills."""
+    return {"side": side, "form": form, "victim": victim, "comps": sorted(bumped), "pack": pack,
+            "settled": settled, "crash_hashes": set(), "broken_inst": None, "first_fixed": {},
+            "old_rebuilt": [], "down_peak": 0, "two_down_span": 0.0, "two_down_since": None,
+            "two_down_detail": "", "two_down_worst": 0, "armed_ts": None, "fix_ts": None,
+            "push_uids": None, "final": None, "repair_before_push": []}
+
+
+def _packed_sample(ctx):
+    """One watch read of a packed-pool case, once the story is armed: which
+    Instance the crashing revision landed on, when each Instance was first
+    seen on the good revision, any pod rebuilt on the running revision after
+    the good push, and how many Instances of each bumped Component have no
+    serving pod set (two at once, sustained, is the breach)."""
+    story = ctx.get("packed")
+    if not story or not story.get("armed_ts"):
+        return
+    now = time.time()
+    pod_state, N, old = ctx["pod_state"], ctx["N"], set(ctx["old_hashes"] or ())
+    crash, victim = story["crash_hashes"], story["victim"]
+    bad_push, fixing = story["side"] == CRASHLOOP_NEW, bool(story.get("fix_ts"))
+    for name, p in pod_state.items():
+        if not (p and p["alive"] and p.get("hash")):
+            continue
+        comp, inst, fresh = p.get("comp"), str(p.get("inst", "0")), p["hash"] not in old
+        if bad_push and fresh and comp == victim and not fixing and story["broken_inst"] is None:
+            story["broken_inst"] = inst
+        if fresh and comp in story["comps"] and p["hash"] not in crash and (fixing or not bad_push):
+            story["first_fixed"].setdefault((comp, inst), now)
+        if (not bad_push and not fresh and story.get("push_uids") is not None and p.get("uid")
+                and p["uid"] not in story["push_uids"] and name not in story["old_rebuilt"]):
+            story["old_rebuilt"].append(name)
+    if now - story["armed_ts"] < MINREADY_GRACE_S:
+        return
+    serving = _serving_instance_counts(pod_state, ctx["pods_per_inst"])
+    down = {c: N[c] - serving.get(c, 0) for c in story["comps"]}
+    worst = max(down.values()) if down else 0
+    story["down_peak"] = max(story["down_peak"], worst)
+    if worst > 1:
+        story["two_down_since"] = story["two_down_since"] or now
+        story["two_down_span"] = max(story["two_down_span"], now - story["two_down_since"])
+        if worst > story["two_down_worst"]:
+            story["two_down_worst"] = worst
+            story["two_down_detail"] = ", ".join(f"{c} {d} down" for c, d in sorted(down.items()) if d)
+    else:
+        story["two_down_since"] = None
+
+
+def _packed_bad_push(ctx, story, bumped):
+    """The bad push, its hold and the good push, as the crashloop:new handler
+    drives them, with the story sampled on every read. (state, out, err)."""
+    f, victim = ctx["fault"], story["victim"]
+    allowance = _crash_new_allowance(_isvc_spec(ctx["case_id"]), victim, ctx["N"][victim])
+    uid_seen = {}
+    print(f"  Phase 3: push a revision whose {victim} pods crash ({f['form']}) on {sorted(bumped)}")
+    ok, armed = _crash_new_arm(ctx, bumped, victim, f["form"])
+    f["fired"] = True
+    if not ok:
+        return None, None, ("TRIGGER_FAIL", f"crashing push failed: {ctx.get('trigger_error')}")
+    f["notes"].append(f"fault armed: crashloop:new form={f['form']} on {victim} ({armed})")
+    story["armed_ts"] = ctx["trigger_ts"]
+    out = {"allowance": allowance,
+           "hold": _crash_new_watch_hold(ctx, victim, bumped, allowance, story["crash_hashes"], uid_seen)}
+    pre_fix_uids = set(uid_seen)
+    print(f"  Phase 4: the good push — a bump that drops the crashing runner override on {sorted(bumped)}")
+    if not _bump_rev(ctx, bumped, val="v3", image=""):
+        return None, None, ("TRIGGER_FAIL", f"fix push failed: {ctx.get('trigger_error')}")
+    story["fix_ts"] = ctx["trigger_ts"]
+    out["fix"] = _crash_new_watch_fix(ctx, bumped, story["crash_hashes"], uid_seen, pre_fix_uids)
+    return out["fix"]["state"], out, None
+
+
+def _packed_broken_running(ctx, story, bumped):
+    """The mirror: the running revision breaks on one Instance of the settled
+    service, the break bites, then the good push lands. (state, out, err);
+    an apparatus failure is left on the fault record."""
+    f, case_id, victim = ctx["fault"], ctx["case_id"], story["victim"]
+    print(f"  Phase 3: {f['kind']} form={f['form']} on the running revision of {victim} before any push")
+    _fault_fire(f, ctx["pod_state"], ctx["pods_per_inst"], ctx["old_hashes"], inv=ctx.get("inv"))
+    if f["infra_fail"]:
+        return None, None, None
+    story["armed_ts"] = break_ts = time.time()
+    story["broken_inst"] = f["crash_inst"]
+    bitten = _wait_break_bitten(ctx, f, BREAK_BITE_S)
+    if bitten is None:
+        f["infra_fail"] = f"{f['kind']}: the break on the running revision did not bite within {BREAK_BITE_S}s"
+        return None, None, None
+    f["notes"].append(f"the break had bitten {bitten:.0f}s after it landed; the good push follows")
+    print(f"    {f['notes'][-1]}")
+    story["repair_before_push"] = [m for reason, m in _isvc_events_since(case_id, break_ts)
+                                   if reason == "RestartTriggered" and _event_names_instance(m, f["crash_comp"], f["crash_inst"])]
+    story["push_uids"] = {p["uid"] for p in ctx["pod_state"].values() if p and p["alive"] and p.get("uid")}
+    print(f"  Phase 4: the good push on {sorted(bumped)}")
+    if not _bump_rev(ctx, bumped):
+        return None, None, ("TRIGGER_FAIL", ctx.get("trigger_error", "bump failed"))
+    budget = _idle_budget(ctx)
+    print(f"  Phase 5: watching the good revision land on every Instance, the broken one first (≤{budget}s)")
+    return _watch_convergence(ctx, bumped, budget, set(ctx["old_hashes"])), {}, None
+
+
+def _packed_checks(story, hdr, verdict, notes, checks):
+    """The packed-pool story's own verdict: the pool was packed; never two
+    Instances of a Component down at once (floor_soft=1 reports it instead
+    where a runner that exits after Ready can be Ready when the roll takes
+    the next Instance); the broken Instance landed the good revision first
+    (hard for a crash at start, reported for a crash after Ready, whose pod
+    can be Ready when the push lands); it landed in the room it vacated;
+    and, for the mirror, nothing was rebuilt on the running revision after
+    the good push. Pure over the story record."""
+    soft = bool((hdr or {}).get("floor_soft"))
+    victim, inst, form = story["victim"], story.get("broken_inst"), story["form"]
+    comps, bad_push = ", ".join(story["comps"]), story["side"] == CRASHLOOP_NEW
+
+    def fail(note, line):
+        nonlocal verdict
+        verdict = "FAIL"
+        notes.append(note)
+        checks.append(line)
+
+    nodes = story["pack"]["nodes"]
+    checks.append(f"  ✓ packed pool: fillers took the spare CPU of {len(nodes)} node(s) before the push "
+                  f"({'; '.join(nodes[n] for n in sorted(nodes))})")
+    span, peak = story["two_down_span"], story["down_peak"]
+    if span >= FLOOR_SUSTAIN_S:
+        what = f"{story['two_down_detail']} at once for {span:.0f}s (peak {peak} down)"
+        if soft:
+            checks.append(f"  ⚠ one down: {what} — reported (floor_soft=1): a runner that exits after Ready can be "
+                          f"Ready when the roll takes the next Instance")
+        else:
+            fail(f"two Instances down at once ({story['two_down_detail']}, {span:.0f}s)",
+                 f"  ✗ one down: {what} — the roll took a second Instance down while one served nothing")
+    elif peak > 1:
+        checks.append(f"  ⚠ one down: {story['two_down_detail']} at once for <{FLOOR_SUSTAIN_S:.0f}s (peak {peak} down) "
+                      f"— debounced as a readiness flap")
+    else:
+        checks.append(f"  ✓ one down: never two {comps} Instances down at once from the "
+                      f"{'bad push' if bad_push else 'break'} to the end (peak {peak} down)")
+    first = {i: t for (c, i), t in story["first_fixed"].items() if c == victim}
+    if inst is None:
+        checks.append(f"  ⓘ order: no {victim} Instance was seen on the crashing revision, so the landing order is not measurable")
+    else:
+        mine, peers = first.get(inst), {i: t for i, t in first.items() if i != inst}
+        if mine is None or not peers:
+            checks.append(f"  ⓘ order: the good revision's landing order on {victim} is not measurable "
+                          f"(broken Instance {inst} seen on it: {'yes' if mine is not None else 'no'}, peers seen: {len(peers)})")
+        elif mine <= min(peers.values()):
+            checks.append(f"  ✓ order: broken {victim} Instance {inst} landed the good revision first, "
+                          f"{min(peers.values()) - mine:.0f}s before the next Instance")
+        elif form == "start":
+            fail(f"broken {victim} Instance {inst} was not the first to land the good revision",
+                 f"  ✗ order: broken {victim} Instance {inst} landed the good revision {mine - min(peers.values()):.0f}s "
+                 f"after Instance {min(peers, key=peers.get)} — an Instance that serves nothing is rolled first")
+        else:
+            checks.append(f"  ⚠ order: broken {victim} Instance {inst} landed the good revision {mine - min(peers.values()):.0f}s "
+                          f"after Instance {min(peers, key=peers.get)} — reported: a runner that exits after Ready can be "
+                          f"Ready when the push lands, so the roll need not read it as serving nothing")
+    final = story.get("final")
+    vacated = story["settled"].get((victim, inst)) if inst is not None else None
+    if inst is None or final is None or not vacated:
+        checks.append("  ⓘ node: the broken Instance's placement is not measurable")
+    elif final["uids"] and final["uids"] <= vacated["uids"]:
+        checks.append(f"  ✓ node: broken {victim} Instance {inst} was patched in place on {', '.join(vacated['nodes'])} (same pod)")
+    elif final["nodes"] == vacated["nodes"]:
+        checks.append(f"  ✓ node: broken {victim} Instance {inst} came back in the room it vacated on {', '.join(vacated['nodes'])}")
+    else:
+        fail(f"broken {victim} Instance {inst} came back on {final['nodes']} instead of {vacated['nodes']}",
+             f"  ✗ node: broken {victim} Instance {inst} came back on {', '.join(n or '(unbound)' for n in final['nodes'])} "
+             f"instead of the room it vacated on {', '.join(vacated['nodes'])} — in a packed pool there was nowhere else")
+    if not bad_push:
+        if story["old_rebuilt"]:
+            fail(f"{len(story['old_rebuilt'])} pod(s) rebuilt on the running revision after the good push",
+                 f"  ✗ fix: {len(story['old_rebuilt'])} pod(s) were created on the running revision after the good push: "
+                 f"{', '.join(story['old_rebuilt'][:4])}")
+        else:
+            checks.append("  ✓ fix: nothing rebuilt the running revision after the good push")
+        if story["repair_before_push"]:
+            checks.append(f"  ⓘ a repair opened on {victim} Instance {inst} before the good push landed: "
+                          f"{story['repair_before_push'][0][:160]}")
+    return verdict
+
+
+def _packed_pool(case_id, yaml_file, desc, hdr):
+    """pool=packed: once the service has settled, fillers take every node's
+    spare CPU, so the only room a pod can be placed in is what a pod of the
+    service vacates. Then the story: a push whose revision crashes
+    (fault=crashloop:new) takes one Instance down and must stop there, and
+    the good push lands on that Instance first, in the room it vacated, then
+    on the others one at a time; or the running revision crashes on one
+    Instance before any push (fault=crashloop:idle) and the good push lands
+    the same way. Never two Instances down at once, nothing rebuilt on the
+    broken revision after the good push; inv_on= adds the ledger and
+    node-exclusion invariants."""
+    reason = _packed_capability()
+    if reason:
+        print(f"  ⓘ packed pool unavailable here: {reason}")
+        return _write_fail(case_id, desc, hdr, "SKIP", f"packed pool unavailable here: {reason}")
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    f = ctx["fault"]
+    victim = str(hdr.get("victimcomp") or BREAK_DEFAULT_COMP)
+    bumped = _bumped(ctx)
+    if victim not in bumped:
+        _stop_watcher(ctx)
+        delete_case(yaml_file)
+        return _write_fail(case_id, desc, hdr, "CASE_ERROR",
+                           f"victimcomp={victim} is not a member the push bumps ({sorted(bumped)})")
+    ctx["track_comps"] = sorted(bumped)
+    print("  Phase 2: packing the pool — a filler takes the spare CPU of every node")
+    pack = _pack_pool(case_id)
+    if pack["infra_fail"]:
+        return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [f"INFRA-FAIL: {pack['infra_fail']}"],
+                       [f"  ✗ INFRA-FAIL (packed pool): {pack['infra_fail']}"])
+    story = _packed_new(f["param"], f["form"], victim, bumped, pack, _packed_placement(ctx["pod_state"]))
+    ctx["packed"], ctx["on_read"] = story, _packed_sample
+    drive = _packed_bad_push if f["param"] == CRASHLOOP_NEW else _packed_broken_running
+    state, out, err = drive(ctx, story, bumped)
+    if err:
+        _stop_watcher(ctx)
+        delete_case(yaml_file)
+        return _write_fail(case_id, desc, hdr, *err)
+    if state is None:
+        return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
+    if story["broken_inst"] is not None:
+        story["final"] = _packed_placement(ctx["pod_state"]).get((victim, story["broken_inst"]))
+    verdict, notes, checks = "PASS", [], []
+    verdict = _packed_checks(story, hdr, verdict, notes, checks)
+    if f["param"] == CRASHLOOP_NEW:
+        verdict = _crash_new_checks(ctx, f, out, victim, bumped, out["allowance"], verdict, notes, checks)
+    else:
+        verdict = _crashloop_checks(f, ctx["pod_state"], ctx["old_hashes"], ctx["trigger_ts"], verdict, notes, checks,
+                                    bumped=bumped, surges=(ctx.get("inv") or {}).get("surges"))
+    verdict = _crash_new_fleet_checks(ctx, hdr, bumped, verdict, notes, checks)
+    verdict = min_ready_checks(ctx, sorted(bumped), verdict, notes, checks)
+    if state == "CONVERGED":
+        verdict = index_collision_checks(ctx, sorted(bumped), verdict, notes, checks)
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
 # ── Persistent faults on the idle service (during=idle) ──────────────────────
@@ -7650,6 +8042,15 @@ HDR_VALIDATORS = {
     # violation of any OTHER invariant fails hard as always. Requires
     # notimpl=1 (whose issue= names the bug) + the line-2 '# reason:' comment.
     "inv_xfail": lambda v: v in INV_CLASSES | {"all"},
+    # inv_on=<classes>: select the opt-in continuous invariants, comma-
+    # separated (J=no auto-recovery record in the audit ledger, K=no required
+    # hostname NotIn term on a live pod of the service).
+    "inv_on": _inv_on_ok,
+    # pool=packed (rollout mode, with fault=crashloop:new or crashloop:idle):
+    # once the service has settled, fillers take the spare CPU of every node
+    # a case pod can be placed on, so the pods have exactly the room they
+    # occupy and a rebuilt pod can land only in the room a pod vacated.
+    "pool": lambda v: v == POOL_PACKED,
     # Fault injection: fault=<kind>:<param> — quota:<n≥0>, podkill:<phase>,
     # ctrlrestart:<phase> (phase ∈ FAULT_PHASES, or idle: before the bump),
     # cordon:<target ∈ FAULT_TARGETS>, crashloop|imagepull:old (with form=),
@@ -7931,6 +8332,17 @@ def validate_case_file(path):
                     f"{' or '.join(sorted(BREAK_VICTIM_COMPS))} (the Components a roll targets)")
     break_param = str(fields.get("fault", "")).partition(":")[2] if fault_kind in BREAK_FAULTS else ""
     crash_new = str(fields.get("fault", "")) == f"crashloop:{CRASHLOOP_NEW}"
+    packed = str(fields.get("pool", "")) == POOL_PACKED
+    if packed:
+        if mode != "rollout" or fault_kind != "crashloop" or break_param not in (CRASHLOOP_NEW, IDLE_FAULT_PHASE):
+            errs.append(f"{path}:1: pool={POOL_PACKED} fills every node under a push whose revision crashes, or a crash "
+                        f"of the running revision before the push (mode=rollout with "
+                        f"fault=crashloop:{CRASHLOOP_NEW}|{IDLE_FAULT_PHASE})")
+        for k in ("during", "lift", "pause", "rollback", "edit", "stuck", "blocked", "victims", "fixfirst", "bump"):
+            if k in fields:
+                errs.append(f"{path}:1: {k}= does not combine with pool={POOL_PACKED}")
+    if "inv_on" in fields and "J" in str(fields["inv_on"]).split(",") and str(fields.get("expect", "")) == "relocated":
+        errs.append(f"{path}:1: inv_on=J asserts no auto-recovery record, and expect=relocated expects one")
     if "form" in fields and fault_kind not in BREAK_FAULTS and fault_kind != READINESS_FAULT:
         errs.append(f"{path}:1: form= says how a break victim fails (needs fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM} "
                     f"or fault={READINESS_FAULT}:old)")
@@ -7962,9 +8374,12 @@ def validate_case_file(path):
         if str(fields.get("expect", "roll")) != "roll" or "break" in fields or "during" in fields:
             errs.append(f"{path}:1: fault={fields.get('fault')} under mode=runtimerev rides an edit that rolls as it "
                         f"lands (expect=roll, no break=, no during= other than during={REPAIR_HOOK})")
-    if fault_kind in BREAK_FAULTS and break_param != CRASHLOOP_VICTIM and mode != "canary" and not (pushed_crash and mode == "rollout"):
+    packed_mirror = packed and break_param == IDLE_FAULT_PHASE and mode == "rollout"
+    if fault_kind in BREAK_FAULTS and break_param != CRASHLOOP_VICTIM and mode != "canary" and not (pushed_crash and mode == "rollout") \
+            and not packed_mirror:
         errs.append(f"{path}:1: fault={fields.get('fault')} breaks the stable side at a canary hook or before the push, "
-                    f"or the revision the push brings (mode=canary; a crash loop the push brings also runs as mode=rollout)")
+                    f"or the revision the push brings (mode=canary; a crash loop the push brings also runs as mode=rollout, "
+                    f"and a crash of the running revision before the push under pool={POOL_PACKED})")
     new_break = fault_kind in BREAK_FAULTS and break_param == CRASHLOOP_NEW
     if "victims" in fields and (fault_kind not in BREAK_FAULTS or new_break):
         errs.append(f"{path}:1: victims= counts the stable-side Instances a break hits at once "
@@ -8448,6 +8863,11 @@ def _read_one(ctx, timeout=1.0):
     # Continuous invariants: one observation per INV_TICK_S (self-rate-limited),
     # for the whole case duration — INIT through the handler's last watch read.
     _inv_tick(ctx.get("inv"), ctx["pod_state"], ctx["pods_per_inst"])
+    # A handler's own per-read sampler, over the same pod_state the watch
+    # loops it shares (the crashloop:new watches) read.
+    on_read = ctx.get("on_read")
+    if on_read is not None:
+        on_read(ctx)
     if ctx.get("trigger_ts") is not None:                       # per-tick progress (post-trigger) for diagnosis
         snap = tuple(agg.get(c, (0, 0, 0)) for c in COMPS)
         if snap != ctx.get("last_snap"):
@@ -9913,11 +10333,11 @@ def _runtimerev(case_id, yaml_file, desc, hdr):
 def _migration_ledger_entries(case_id):
     """All rows of the audit ledger CM <isvc>-ome-migration-audit (data key
     history.json). Empty when the CM doesn't exist yet."""
-    r = kubectl("-n", NS, "get", "cm", f"{case_id}-ome-migration-audit", "-o", "json")
+    r = kubectl("-n", NS, "get", "cm", f"{case_id}{AUDIT_LEDGER_SUFFIX}", "-o", "json")
     if r.returncode != 0:
         return []
     try:
-        hist = json.loads(json.loads(r.stdout).get("data", {}).get("history.json", "{}"))
+        hist = json.loads(json.loads(r.stdout).get("data", {}).get(AUDIT_LEDGER_KEY, "{}"))
     except Exception:
         return []
     return hist.get("entries", []) or []
@@ -14570,6 +14990,8 @@ def run_case(case_id):
         if hdr.get("pauseat"):
             return _pause_repair(case_id, yaml_file, desc, hdr)
         return _idle_fault(case_id, yaml_file, desc, hdr)
+    if str(hdr.get("pool", "")) == POOL_PACKED:
+        return _packed_pool(case_id, yaml_file, desc, hdr)
     fault_kind = str(hdr.get("fault", "")).partition(":")[0]
     reason = _fault_capability(fault_kind)
     if reason:

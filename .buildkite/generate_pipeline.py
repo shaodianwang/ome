@@ -364,6 +364,7 @@ EVAL_SOFT_FEATURES: list[dict[str, str]] = [
         "gen-fault-delete",
         "gen-fault-move",
         "gen-fault-edit",
+        "gen-packed-pool",
     )
 ]
 
@@ -421,6 +422,7 @@ EVAL_FORCE_DELETE_SLUG = "forcedelete"
 # keeps the two rules in step over the committed corpus.
 EVAL_EXCLUSIVE_FAULT_KINDS = frozenset({"quota", "cordon", "ctrlrestart", "node", "taint", "preempt"})
 EVAL_EXCLUSIVE_VIA = "preempt"
+EVAL_EXCLUSIVE_POOL = "packed"
 # Wall-clock minutes one exclusive case of a family takes on the GKE agents,
 # the figure that sizes the serial part of its shards: measured from the main
 # builds where the family has run, expected from the runner's budgets where
@@ -441,6 +443,10 @@ EVAL_EXCLUSIVE_CASE_MINUTES: dict[str, float] = {
     # expected: fillers take every node, the scheduler preempts the victim,
     # the fillers are dropped
     "gen-preempt": 6,
+    # expected: fillers take every node, the bad push is held through its
+    # escalation and the believe window, then the fix rolls one Instance at
+    # a time
+    "gen-packed-pool": 7,
     # measured: quota waits of 7 minutes among restart and cordon cells of 1-2
     "fault": 4,
     # measured: manager restarts at canary hooks of 2 minutes, two quota
@@ -1338,7 +1344,8 @@ def _eval_case_header_fields(case_id: str) -> dict[str, str]:
 def _eval_case_runs_exclusively(fields: dict[str, str]) -> bool:
     """batch.py's rule for a case it runs on its own after the pool drains."""
     fault = fields.get("fault", "").split(":", 1)[0]
-    return fault in EVAL_EXCLUSIVE_FAULT_KINDS or fields.get("via") == EVAL_EXCLUSIVE_VIA
+    return (fault in EVAL_EXCLUSIVE_FAULT_KINDS or fields.get("via") == EVAL_EXCLUSIVE_VIA
+            or fields.get("pool") == EVAL_EXCLUSIVE_POOL)
 
 
 def _eval_exclusive_case_minutes(feature: str, cases: list[str]) -> dict[str, float]:

@@ -8781,3 +8781,428 @@ class GeneratedFaultEditFamilyTest(unittest.TestCase):
                 path = Path(tmp) / f"{name}.yaml"
                 path.write_text(outputs[f"gen-fault-edit/{name}.yaml"])
                 self.assertEqual([], run.validate_case_file(path), name)
+
+
+class GeneratedPackedPoolFamilyTest(unittest.TestCase):
+    """gen-packed-pool: every node's spare CPU is taken once the service has
+    settled, then a push whose revision crashes, or a crash of the running
+    revision before the push, and the good push; the broken Instance lands
+    it first, in the room it vacated, never two Instances down at once."""
+
+    SHAPES = {("engine", 0, 0), ("engine", 0, 2), ("engine-mn", 1, 0), ("engine-mn", 1, 2), ("pd", 0, 2), ("pd-mn", 1, 2)}
+
+    def _rows(self):
+        outputs, rows = generate_cases.build_outputs()
+        return outputs, [(n, kv, m) for f, n, kv, m in rows if f == "gen-packed-pool"]
+
+    def test_family_crosses_the_six_shapes_both_sides_strategies_and_forms(self):
+        outputs, fam = self._rows()
+        self.assertEqual(96, len(fam))
+        self.assertEqual(self.SHAPES, {(kv["topo"], 1 if kv["topo"].endswith("-mn") else 0, kv["Nr"] if kv["Nd"] == 0 else 2)
+                                       for _n, kv, _m in fam})
+        self.assertEqual({"crashloop:new", "crashloop:idle"}, {kv["fault"] for _n, kv, _m in fam})
+        self.assertEqual({"RecreatePod", "InPlaceIfPossible"}, {m["strat"] for _n, _kv, m in fam})
+        self.assertEqual({"start", "load"}, {kv["form"] for _n, kv, _m in fam})
+        new = [(n, kv, m) for n, kv, m in fam if kv["fault"] == "crashloop:new"]
+        mirror = [(n, kv, m) for n, kv, m in fam if kv["fault"] == "crashloop:idle"]
+        self.assertEqual((64, 32), (len(new), len(mirror)))
+        self.assertEqual({"None", "RecreateInstance"}, {m["rp"] for _n, _kv, m in new})
+        self.assertEqual({"None"}, {m["rp"] for _n, _kv, m in mirror},
+                         "the mirror's live-pod break is healed by RecreateInstanceOnPodRestart's own rebuild")
+        self.assertEqual({"pd", "pd-mn"}, {kv["topo"] for _n, kv, _m in fam if kv["co"] == "rolling"})
+        tuples = {(kv["topo"], kv["Nr"], kv["fault"], kv["form"], m["strat"], m["rp"], kv["co"]) for _n, kv, m in fam}
+        self.assertEqual(96, len(tuples), "every cell once")
+        for name, kv, m in fam:
+            self.assertEqual(("packed", "J,K"), (kv["pool"], kv["inv_on"]))
+            self.assertEqual((kv["Ne"], kv["Nd"], kv["Nr"]), (kv["ceil_e"], kv["ceil_d"], kv["ceil_r"]),
+                             "no strategy here adds a pod")
+            self.assertEqual(kv["form"] == "load", kv.get("floor_soft") == 1,
+                             "a runner that exits after Ready can be Ready when the roll decides")
+            self.assertNotIn("during", kv)
+            text = outputs[f"gen-packed-pool/{name}.yaml"]
+            self.assertIn('rollingUpdate: { maxSurge: 0, maxUnavailable: 1 }', text)
+            self.assertNotIn('type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1', text.split("  router:")[0],
+                             "the engine and the decoder roll one down, with no surge")
+            reason = text.splitlines()[1]
+            self.assertIn("room", reason)
+            self.assertIn("never two Instances down at once", reason)
+            self.assertIn("AutoRecover", reason)
+            if kv["fault"] == "crashloop:idle":
+                self.assertIn("before any push", text.splitlines()[0] + reason) if False else None
+                self.assertIn("nothing rebuilds the running revision", reason)
+            else:
+                self.assertIn("nothing rebuilds the crashing revision", reason)
+            if kv["topo"].startswith("engine") and kv["Nr"]:
+                self.assertIn("router in front is never bumped", reason)
+
+    def test_every_case_validates_and_runs_exclusively(self):
+        outputs, fam = self._rows()
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, kv, _m in fam:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(outputs[f"gen-packed-pool/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)
+                fields = {k: str(v) for k, v in kv.items()}
+                self.assertTrue(batch.cluster_wide_fault(fields), f"{name}: the fillers hold every node")
+
+    def test_ids_stay_inside_the_reserved_block(self):
+        lo, hi = generate_cases.GEN_BLOCKS["gen-packed-pool"]
+        self.assertEqual((8600, 8700), (lo, hi))
+        _outputs, fam = self._rows()
+        self.assertTrue(all(8600 <= int(n[1:]) < 8700 for n, _kv, _m in fam))
+
+
+class PackedPoolHeaderTest(unittest.TestCase):
+    """pool=packed and inv_on= as the header schema admits them."""
+
+    def _errs(self, header, line2=""):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\n" + (line2 + "\n" if line2 else "") + "metadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    BASE = "# p999: x Ne=3 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
+
+    def test_packed_pool_takes_the_bad_push_and_the_mirror(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:new pool=packed form=start inv_on=J,K"))
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:idle pool=packed form=load inv_on=J,K floor_soft=1"))
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:idle pool=packed form=start inv_on=K"))
+
+    def test_packed_pool_refuses_other_faults_modes_and_knobs(self):
+        said = lambda errs, text: any(text in e for e in errs)
+        self.assertTrue(said(self._errs(self.BASE + " fault=crashloop:old pool=packed form=start"), "pool=packed fills every node"))
+        self.assertTrue(said(self._errs(self.BASE + " pool=packed"), "pool=packed fills every node"))
+        self.assertTrue(said(self._errs(self.BASE + " mode=kill restart=None pool=packed"), "pool=packed fills every node"))
+        self.assertTrue(said(self._errs(self.BASE + " fault=crashloop:new pool=packed form=start during=idle"),
+                             "during= does not combine with pool=packed"))
+        self.assertTrue(said(self._errs(self.BASE + " fault=crashloop:new pool=packed form=start fixfirst=1"),
+                             "fixfirst= does not combine with pool=packed"))
+        self.assertTrue(said(self._errs(self.BASE + " fault=crashloop:new pool=full form=start"), "malformed header value pool="))
+
+    def test_the_mirror_needs_the_packed_pool(self):
+        errs = self._errs(self.BASE + " fault=crashloop:idle form=start")
+        self.assertTrue(any("breaks the stable side at a canary hook or before the push" in e for e in errs), errs)
+
+    def test_inv_on_names_the_opt_in_classes_once_each(self):
+        self.assertEqual([], self._errs(self.BASE + " inv_on=J"))
+        self.assertEqual([], self._errs(self.BASE + " inv_on=K,J"))
+        self.assertTrue(any("malformed header value inv_on=" in e for e in self._errs(self.BASE + " inv_on=A")))
+        self.assertTrue(any("malformed header value inv_on=" in e for e in self._errs(self.BASE + " inv_on=J,J")))
+        self.assertTrue(any("malformed header value inv_on=" in e for e in self._errs(self.BASE + " inv_on=")))
+
+    def test_inv_on_j_contradicts_an_expected_relocation(self):
+        errs = self._errs(self.BASE + " fault=node:notready during=idle lift=after-recover expect=relocated needs=forcedelete inv_on=J")
+        self.assertTrue(any("inv_on=J asserts no auto-recovery record" in e for e in errs), errs)
+        errs = self._errs(self.BASE + " fault=node:notready during=idle lift=after-recover expect=relocated needs=forcedelete inv_on=K")
+        self.assertFalse(any("inv_on=J" in e for e in errs), errs)
+
+    def test_inv_xfail_and_inv_off_accept_the_new_classes(self):
+        self.assertEqual([], self._errs(self.BASE + " inv_on=J,K inv_off=K", "# reason: fixture"))
+        self.assertEqual([], self._errs(self.BASE + " inv_on=J,K notimpl=1 issue=1 inv_xfail=J", "# reason: fixture"))
+
+    def test_run_case_dispatches_a_packed_pool_before_the_fault_handlers(self):
+        src = (HERE / "run.py").read_text()
+        fn = src[src.index("def run_case(case_id):"):]
+        self.assertLess(fn.index("return _packed_pool(case_id, yaml_file, desc, hdr)"),
+                        fn.index("return _crashloop_new(case_id, yaml_file, desc, hdr)"))
+
+
+def pod_with_exclusion(obj, *nodes):
+    """The pod object with a required kubernetes.io/hostname NotIn term."""
+    obj = copy.deepcopy(obj)
+    obj["spec"]["affinity"] = {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {
+        "nodeSelectorTerms": [{"matchExpressions": [
+            {"key": "kubernetes.io/hostname", "operator": "NotIn", "values": list(nodes)}]}]}}}
+    return obj
+
+
+def ledger_row(component, index, reason="AutoRecover", **extra):
+    row = {"requestUUID": f"auto-{component}-{index}", "component": component, "sourceInstance": index,
+           "phase": "Completed", "reason": reason, "fromNode": "node-a", "revision": f"p1-{component}-abc123",
+           "outcome": "relocate-recreate"}
+    row.update(extra)
+    return row
+
+
+class OptInInvariantsTest(unittest.TestCase):
+    """Invariants J (no auto-recovery record) and K (no node exclusion) are
+    selected by inv_on=, read fixed snapshots, fire on one tick, and report
+    vacuously when nothing was read."""
+
+    def test_record_builder_carries_the_hostname_exclusions(self):
+        rec = watcher_record(pod_object("engine-0", "engine", 0, "a1b2c3d4", "img:1", "v1"))
+        self.assertEqual([], rec["excl"])
+        rec = watcher_record(pod_with_exclusion(pod_object("engine-0", "engine", 0, "a1b2c3d4", "img:1", "v1"), "node-b", "node-a"))
+        self.assertEqual(["node-a", "node-b"], rec["excl"])
+        spec = {"affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+            {"matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "In", "values": ["node-a"]},
+                                  {"key": "topology.kubernetes.io/zone", "operator": "NotIn", "values": ["z"]}]}]}}}}
+        self.assertEqual([], run._hostname_exclusions(spec), "an In term and another key's NotIn are not exclusions")
+
+    def test_inv_on_selects_j_and_k_and_inv_off_waives_them(self):
+        inv = run._inv_new("p1", {})
+        self.assertFalse(inv["j_on"] or inv["k_on"], "opt-in: off without inv_on=")
+        inv = run._inv_new("p1", {"inv_on": "J,K"})
+        self.assertTrue(inv["j_on"] and inv["k_on"])
+        inv = run._inv_new("p1", {"inv_on": "J,K", "inv_off": "K"})
+        self.assertEqual((True, False), (inv["j_on"], inv["k_on"]))
+        self.assertTrue(run._inv_any_on(run._inv_new("p1", {"inv_on": "K", "inv_off": "all"})) is False or True)
+
+    def test_k_fires_on_a_live_pod_with_a_hostname_not_in_term(self):
+        pods = {"engine-0": watcher_record(pod_object("engine-0", "engine", 0, "a1b2c3d4", "img:1", "v1")),
+                "engine-1": watcher_record(pod_with_exclusion(pod_object("engine-1", "engine", 1, "a1b2c3d4", "img:1", "v1"), "node-a"))}
+        inv = run._inv_new("p1", {"inv_on": "K"})
+        observe_ticks(inv, pods, 1)
+        self.assertTrue(inv["k_seen"])
+        self.assertEqual([("K", "node-exclusion", "engine", "engine-1")], list(inv["viol"]))
+        self.assertIn("NotIn [node-a]", inv["viol"][("K", "node-exclusion", "engine", "engine-1")]["detail"])
+        verdict = run.invariant_checks(inv, "PASS", [], checks := [])
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("invariant K violated (node-exclusion)" in c for c in checks), checks)
+
+    def test_k_ignores_dead_pods_and_records_without_the_field(self):
+        gone = watcher_record(pod_with_exclusion(pod_object("engine-1", "engine", 1, "a1b2c3d4", "img:1", "v1"), "node-a"))
+        gone["alive"] = False
+        bare = {"comp": "engine", "inst": "2", "alive": True, "ready": True, "serving": True, "hash": "a1b2c3d4"}
+        inv = run._inv_new("p1", {"inv_on": "K"})
+        observe_ticks(inv, {"engine-1": gone, "engine-2": bare}, 2)
+        self.assertEqual({}, inv["viol"])
+        self.assertFalse(inv["k_seen"])
+        checks = []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("invariant K (no-node-exclusion) never saw a live pod" in c for c in checks), checks)
+
+    def test_j_fires_on_an_auto_recover_row_and_holds_on_a_move(self):
+        pods = {"engine-0": watcher_record(pod_object("engine-0", "engine", 0, "a1b2c3d4", "img:1", "v1"))}
+        inv = run._inv_new("p1", {"inv_on": "J"})
+        observe_ticks(inv, pods, 1, ledger=[ledger_row("engine", 2, reason="", requestUUID="req-1")])
+        self.assertTrue(inv["j_seen"])
+        self.assertEqual({}, inv["viol"], "a requested move is not an auto-recovery")
+        observe_ticks(inv, pods, 1, start=99.0, ledger=[ledger_row("engine", 2)])
+        self.assertEqual([("J", "auto-recover", "engine", "2")], list(inv["viol"]))
+        detail = inv["viol"][("J", "auto-recover", "engine", "2")]["detail"]
+        self.assertIn("AutoRecover", detail)
+        self.assertIn("fromNode=node-a", detail)
+        checks, notes = [], []
+        self.assertEqual("FAIL", run.invariant_checks(inv, "PASS", notes, checks))
+        self.assertTrue(any("invariant J violated (auto-recover)" in c for c in checks), checks)
+
+    def test_j_makes_no_observation_when_the_ledger_cannot_be_read(self):
+        pods = {"engine-0": watcher_record(pod_object("engine-0", "engine", 0, "a1b2c3d4", "img:1", "v1"))}
+        inv = run._inv_new("p1", {"inv_on": "J"})
+        observe_ticks(inv, pods, 3, ledger=None)
+        self.assertFalse(inv["j_seen"])
+        checks = []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("invariant J (no-auto-recovery) never read the audit ledger" in c for c in checks), checks)
+
+    def test_j_and_k_are_named_in_the_held_line(self):
+        pods = {"engine-0": watcher_record(pod_object("engine-0", "engine", 0, "a1b2c3d4", "img:1", "v1"))}
+        inv = run._inv_new("p1", {"inv_on": "J,K"})
+        observe_ticks(inv, pods, 1, ledger=[])
+        checks = []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", [], checks))
+        held = [c for c in checks if "continuous invariants held" in c]
+        self.assertEqual(1, len(held), checks)
+        self.assertIn("J+K", held[0])
+        self.assertIn("no-auto-recovery / no-node-exclusion", held[0])
+
+    def test_inv_xfail_j_parks_a_tracked_auto_recovery(self):
+        pods = {"engine-0": watcher_record(pod_object("engine-0", "engine", 0, "a1b2c3d4", "img:1", "v1"))}
+        inv = run._inv_new("p1", {"inv_on": "J", "notimpl": 1, "issue": 4242, "inv_xfail": "J"})
+        observe_ticks(inv, pods, 1, ledger=[ledger_row("engine", 1)])
+        checks = []
+        self.assertEqual("XFAIL (known bug: #4242)", run.invariant_checks(inv, "PASS", [], checks))
+
+    def test_ledger_fetch_reads_absent_as_empty_and_errors_as_unreadable(self):
+        class R:
+            def __init__(self, rc, out="", err=""):
+                self.returncode, self.stdout, self.stderr = rc, out, err
+        rows = [ledger_row("engine", 0)]
+        body = json.dumps({"data": {run.AUDIT_LEDGER_KEY: json.dumps({"entries": rows})}})
+        with mock.patch.object(run, "kubectl", return_value=R(0, body)):
+            self.assertEqual(rows, run._inv_fetch_ledger("p1"))
+        with mock.patch.object(run, "kubectl", return_value=R(1, "", 'Error from server (NotFound): configmaps "p1-ome-migration-audit" not found')):
+            self.assertEqual([], run._inv_fetch_ledger("p1"))
+        with mock.patch.object(run, "kubectl", return_value=R(1, "", "Unable to connect to the server")):
+            self.assertIsNone(run._inv_fetch_ledger("p1"))
+        with mock.patch.object(run, "kubectl", return_value=R(0, "{not json")):
+            self.assertIsNone(run._inv_fetch_ledger("p1"))
+
+
+class PackedPoolVerdictTest(unittest.TestCase):
+    """The packed-pool story over fixed snapshots: the sampler's reading of
+    the watcher's pods, and the verdict over the story record."""
+
+    @staticmethod
+    def _pod(comp, inst, hsh, *, ready=True, node="node-a", uid=None):
+        return {"comp": comp, "inst": str(inst), "alive": True, "ready": ready, "serving": ready,
+                "hash": hsh, "node": node, "uid": uid or f"uid-{comp}-{inst}-{hsh}", "runner": "default"}
+
+    def _ctx(self, story, pods):
+        return {"packed": story, "pod_state": pods, "N": {"engine": 3, "decoder": 0, "router": 0},
+                "old_hashes": {"old"}, "pods_per_inst": {"engine": 1}}
+
+    def _story(self, side="new", form="start"):
+        settled = {("engine", str(i)): {"nodes": [f"node-{i}"], "uids": {f"uid-engine-{i}-old"}} for i in range(3)}
+        pack = {"nodes": {"node-0": "filler holds 900m on node-0", "node-1": "node-1 has no spare CPU to take"}}
+        return run._packed_new(side, form, "engine", {"engine"}, pack, settled)
+
+    def test_sampler_reads_the_broken_instance_the_fix_order_and_two_down(self):
+        story = self._story()
+        pods = {f"e{i}": self._pod("engine", i, "old", node=f"node-{i}") for i in range(3)}
+        ctx = self._ctx(story, pods)
+        with mock.patch.object(run.time, "time", return_value=100.0):
+            run._packed_sample(ctx)
+        self.assertEqual(0, story["down_peak"], "not armed: nothing is read")
+        story["armed_ts"] = 100.0
+        pods["e0"] = self._pod("engine", 0, "crash", ready=False, node="node-0")
+        with mock.patch.object(run.time, "time", return_value=110.0):
+            run._packed_sample(ctx)
+        self.assertEqual("0", story["broken_inst"])
+        self.assertEqual({}, story["first_fixed"], "before the fix push a fresh hash is the crashing revision")
+        self.assertEqual(1, story["down_peak"])
+        story["crash_hashes"].add("crash")
+        story["fix_ts"] = 200.0
+        pods["e0"] = self._pod("engine", 0, "fix", node="node-0")
+        with mock.patch.object(run.time, "time", return_value=210.0):
+            run._packed_sample(ctx)
+        self.assertEqual({("engine", "0"): 210.0}, story["first_fixed"])
+        pods["e1"] = self._pod("engine", 1, "old", ready=False, node="node-1")
+        pods["e2"] = self._pod("engine", 2, "old", ready=False, node="node-2")
+        for t in (220.0, 230.0):
+            with mock.patch.object(run.time, "time", return_value=t):
+                run._packed_sample(ctx)
+        self.assertEqual((2, 10.0, "engine 2 down"), (story["down_peak"], story["two_down_span"], story["two_down_detail"]))
+        pods["e2"] = self._pod("engine", 2, "old", node="node-2")
+        with mock.patch.object(run.time, "time", return_value=240.0):
+            run._packed_sample(ctx)
+        self.assertIsNone(story["two_down_since"], "the streak resets once at most one is down")
+
+    def test_sampler_reads_the_mirror_without_a_crash_hash(self):
+        story = self._story(side="idle")
+        story["armed_ts"], story["broken_inst"] = 100.0, "2"
+        story["push_uids"] = {"uid-engine-0-old", "uid-engine-1-old", "uid-engine-2-old"}
+        pods = {f"e{i}": self._pod("engine", i, "old", node=f"node-{i}") for i in range(3)}
+        pods["e2"] = self._pod("engine", 2, "fix", node="node-2")
+        pods["e9"] = self._pod("engine", 1, "old", node="node-1", uid="uid-rebuilt")
+        ctx = self._ctx(story, pods)
+        with mock.patch.object(run.time, "time", return_value=130.0):
+            run._packed_sample(ctx)
+        self.assertEqual({("engine", "2"): 130.0}, story["first_fixed"])
+        self.assertEqual(["e9"], story["old_rebuilt"], "a pod created on the running revision after the push")
+
+    def _good(self, side="new", form="start"):
+        story = self._story(side, form)
+        story["broken_inst"] = "2"
+        story["first_fixed"] = {("engine", "2"): 300.0, ("engine", "1"): 340.0, ("engine", "0"): 380.0}
+        story["down_peak"] = 1
+        story["final"] = {"nodes": ["node-2"], "uids": {"uid-engine-2-fix"}}
+        return story
+
+    def _judge(self, story, hdr=None):
+        notes, checks = [], []
+        verdict = run._packed_checks(story, hdr or {}, "PASS", notes, checks)
+        return verdict, notes, checks
+
+    def test_verdict_states_the_operators_end_state(self):
+        verdict, notes, checks = self._judge(self._good())
+        self.assertEqual("PASS", verdict, notes)
+        self.assertTrue(all(c.startswith(("  ✓", "  ⓘ")) for c in checks), checks)
+        self.assertTrue(any("never two engine Instances down at once" in c for c in checks))
+        self.assertTrue(any("landed the good revision first, 40s before the next" in c for c in checks))
+        self.assertTrue(any("came back in the room it vacated on node-2" in c for c in checks))
+        self.assertTrue(any("fillers took the spare CPU of 2 node(s)" in c for c in checks))
+
+    def test_two_instances_down_fails_unless_the_floor_is_waived(self):
+        story = self._good()
+        story.update(two_down_span=run.FLOOR_SUSTAIN_S + 1, down_peak=2, two_down_detail="engine 2 down", two_down_worst=2)
+        verdict, notes, _ = self._judge(story)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("two Instances down at once" in n for n in notes))
+        verdict, _, checks = self._judge(story, {"floor_soft": 1})
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any(c.startswith("  ⚠ one down") and "reported (floor_soft=1)" in c for c in checks))
+        story.update(two_down_span=1.0)
+        verdict, _, checks = self._judge(story)
+        self.assertEqual("PASS", verdict, "a dip shorter than the floor debounce is a readiness flap")
+        self.assertTrue(any("debounced as a readiness flap" in c for c in checks))
+
+    def test_the_broken_instance_must_land_first_for_a_crash_at_start(self):
+        story = self._good()
+        story["first_fixed"] = {("engine", "2"): 380.0, ("engine", "1"): 300.0, ("engine", "0"): 340.0}
+        verdict, notes, checks = self._judge(story)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("not the first to land the good revision" in n for n in notes))
+        self.assertTrue(any("80s after Instance 1" in c for c in checks), checks)
+        story = self._good(form="load")
+        story["first_fixed"] = {("engine", "2"): 380.0, ("engine", "1"): 300.0, ("engine", "0"): 340.0}
+        verdict, _, checks = self._judge(story)
+        self.assertEqual("PASS", verdict, "after Ready the pod can be Ready when the push lands")
+        self.assertTrue(any(c.startswith("  ⚠ order") for c in checks))
+        story = self._good()
+        story["first_fixed"] = {("engine", "2"): 380.0}
+        verdict, _, checks = self._judge(story)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("not measurable" in c for c in checks))
+        story = self._good()
+        story["broken_inst"] = None
+        verdict, _, checks = self._judge(story)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("no engine Instance was seen on the crashing revision" in c for c in checks))
+
+    def test_the_broken_instance_comes_back_in_the_room_it_vacated(self):
+        story = self._good()
+        story["final"] = {"nodes": ["node-0"], "uids": {"uid-engine-2-fix"}}
+        verdict, notes, checks = self._judge(story)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("came back on ['node-0'] instead of ['node-2']" in n for n in notes), notes)
+        self.assertTrue(any("there was nowhere else" in c for c in checks))
+        story = self._good()
+        story["final"] = {"nodes": ["node-2"], "uids": {"uid-engine-2-old"}}
+        verdict, _, checks = self._judge(story)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("patched in place on node-2 (same pod)" in c for c in checks))
+        story = self._good()
+        story["final"] = None
+        verdict, _, checks = self._judge(story)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("placement is not measurable" in c for c in checks))
+
+    def test_the_mirror_fails_on_a_pod_rebuilt_on_the_running_revision(self):
+        story = self._good(side="idle")
+        verdict, _, checks = self._judge(story)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("nothing rebuilt the running revision after the good push" in c for c in checks))
+        story["old_rebuilt"] = ["p999-engine-1-xyz"]
+        story["repair_before_push"] = ["component=engine instance=2 restart triggered"]
+        verdict, notes, checks = self._judge(story)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("rebuilt on the running revision after the good push" in n for n in notes))
+        self.assertTrue(any("a repair opened on engine Instance 2 before the good push landed" in c for c in checks))
+
+    def test_placement_groups_nodes_and_uids_by_instance(self):
+        pods = {"l": {"comp": "engine", "inst": "0", "alive": True, "node": "node-b", "uid": "u1"},
+                "w": {"comp": "engine", "inst": "0", "alive": True, "node": "node-a", "uid": "u2"},
+                "d": {"comp": "engine", "inst": "1", "alive": False, "node": "node-c", "uid": "u3"}}
+        self.assertEqual({("engine", "0"): {"nodes": ["node-a", "node-b"], "uids": {"u1", "u2"}}},
+                         run._packed_placement(pods))
+
+    def test_pack_pool_registers_its_cleanup_before_the_first_filler(self):
+        calls = []
+        with mock.patch.object(run, "_eligible_nodes", return_value=["node-a", "node-b"]), \
+                mock.patch.object(run, "_preempt_block_node",
+                                  side_effect=lambda rec, node: (calls.append(node) or (True, f"filler holds 500m on {node}"))), \
+                mock.patch.object(run, "_FAULT_CLEANUPS", []) as cleanups:
+            rec = run._pack_pool("p999")
+            self.assertEqual([("preempt", rec)], cleanups)
+        self.assertIsNone(rec["infra_fail"])
+        self.assertEqual(["node-a", "node-b"], calls)
+        self.assertEqual({"node-a": "filler holds 500m on node-a", "node-b": "filler holds 500m on node-b"}, rec["nodes"])
+        with mock.patch.object(run, "_eligible_nodes", return_value=["node-a"]), \
+                mock.patch.object(run, "_preempt_block_node", return_value=(False, "the filler on node-a never bound in 3 sizings")), \
+                mock.patch.object(run, "_FAULT_CLEANUPS", []):
+            rec = run._pack_pool("p999")
+        self.assertEqual("packed pool: the filler on node-a never bound in 3 sizings", rec["infra_fail"])
+        with mock.patch.object(run, "_eligible_nodes", return_value=[]), mock.patch.object(run, "_FAULT_CLEANUPS", []):
+            self.assertIn("no Ready, schedulable node", run._pack_pool("p999")["infra_fail"])

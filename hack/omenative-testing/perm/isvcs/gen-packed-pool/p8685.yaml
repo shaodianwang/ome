@@ -1,0 +1,31 @@
+# p8685: [gen] packed pool bad push then fix load pd-mn W1 N=2 InPlaceIfPossible u1 rp None co rolling  Ne=2 Nd=2 Nr=2 ceil_e=2 ceil_d=2 ceil_r=2 fault=crashloop:new pool=packed floor_soft=1 co=rolling topo=pd-mn form=load inv_on=J,K
+# reason: fillers take every node's spare CPU once the service has settled, so the only room a pod can be placed in is what a pod of the service vacates; the pushed engine revision passes readiness, is promoted, and exits a few seconds later, every time the kubelet restarts it; the exit switch is a pod-template env diff, so in-place resolves to a recreate of the first Instance in the room its pod vacated and the roll stops there, never two Instances down at once; status says why (a rolloutHold or a Failed row, and a RetryHeld or InstanceFailed event) and no further attempt at that revision follows; the good push then lands on the broken Instance first, in the same room, then on the others one at a time, every Instance ends serving on it and nothing rebuilds the crashing revision; the one-down rule and the landing order are reported, not asserted: a runner that exits after Ready can be Ready when the roll decides, so the roll need not read that Instance as serving nothing; the audit ledger records no AutoRecover row and no pod carries a hostname NotIn term (invariants J and K); the decoder rolls under the same one-down budget beside the engine (converges, or holds with a reason)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8685 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          rollingUpdate: {}

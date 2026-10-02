@@ -1,0 +1,18 @@
+# p8622: [gen] packed pool broken running then fix start engine +router N=3 InPlaceIfPossible u1 rp None co none  Ne=3 Nd=0 Nr=2 ceil_e=3 ceil_d=0 ceil_r=2 fault=crashloop:idle pool=packed co=none topo=engine form=start inv_on=J,K
+# reason: fillers take every node's spare CPU once the service has settled, so the only room a pod can be placed in is what a pod of the service vacates; one engine pod of the running revision is pointed at an image with no shell on the settled service, so it crashes at every start and is never Ready again; once the break has bitten the good push lands: the broken Instance, which serves nothing, is rolled first and comes back in the room it vacated, the others follow one at a time, never two Instances down at once, every Instance ends serving on the good revision, no repair is recorded for the broken Instance after the push and nothing rebuilds the running revision; the audit ledger records no AutoRecover row and no pod carries a hostname NotIn term (invariants J and K); the router in front is never bumped and stays in rotation
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8622 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 3
+    maxReplicas: 3
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

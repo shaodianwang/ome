@@ -235,6 +235,21 @@ class FaultTest(unittest.TestCase):
         self.assertEqual([("image pull", "persistent", "running", "engine")],
                          self.fault(fault="imagepull:old", topo="engine"))
 
+    def test_a_packed_pool_keeps_the_breaks_side_and_marks_the_push(self):
+        case = self.corpus.write(fault="crashloop:new", pool="packed", form="start", inv_on="J,K", topo="engine",
+                                 **counts(3, 0, 0, ceil_e=3))
+        self.assertEqual([("crash at start", "persistent", "new", "engine")], case.faults)
+        self.assertEqual(("push", "annotation bump, packed pool", ""), (case.operation, case.operation_detail, case.second_operation))
+        self.assertEqual("settling", case.timing)
+        case = self.corpus.write(fault="crashloop:idle", pool="packed", form="load", floor_soft=1, inv_on="J,K", topo="engine",
+                                 **counts(3, 0, 0, ceil_e=3))
+        self.assertEqual([("crash after Ready", "persistent", "running", "engine")], case.faults)
+        self.assertEqual(("push", "steady state"), (case.operation, case.timing))
+        self.assertEqual([], case.problems)
+        self.assertFalse(case.invariants_off)
+        bad = self.corpus.write(fault="crashloop:new", pool="full", form="start", inv_on="J,Z", topo="engine", **counts(3, 0, 0, ceil_e=3))
+        self.assertEqual({"unknown value pool=full", "malformed value inv_on=J,Z"}, set(bad.problems))
+
     def test_a_break_on_the_decoder_is_a_broken_sibling(self):
         self.assertEqual([("sibling broken", "persistent", "running", "decoder")],
                          self.fault(fault="crashloop:old", form="start", victimcomp="decoder",
@@ -558,6 +573,20 @@ class CommittedCorpusTest(unittest.TestCase):
         self.assertEqual({"push", "scale up", "scale down", "canary"}, {c.operation for c in gang})
         for case in sizes + gang:
             self.assertEqual("", case.parked, f"{case.id}: nothing is parked")
+        packed = self.by_folder["gen-packed-pool"]
+        self.assertEqual(set(coverage.SHAPE_FAMILIES), {c.shape_family for c in packed},
+                         "the six shape families of the product")
+        self.assertEqual({"push"}, {c.operation for c in packed})
+        self.assertEqual({("crash at start", "persistent", "new"), ("crash after Ready", "persistent", "new"),
+                          ("crash at start", "persistent", "running"), ("crash after Ready", "persistent", "running")},
+                         {(c.fault_kind, c.fault_form, c.fault_side) for c in packed})
+        self.assertEqual({"RecreatePod", "InPlaceIfPossible"}, {c.strategy for c in packed})
+        self.assertEqual({"1"}, {c.budget for c in packed})
+        self.assertEqual({"none", "rollingUpdate"}, {c.group for c in packed})
+        self.assertEqual({"None", "RecreateInstanceOnPodRestart"}, {c.restart_policy for c in packed})
+        for case in packed:
+            self.assertEqual("", case.parked, f"{case.id}: nothing is parked")
+            self.assertIn("packed pool", case.operation_detail, case.id)
 
     def test_the_corpus_markdown_renders(self):
         text = coverage.render_markdown(self.cases)

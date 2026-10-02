@@ -209,6 +209,19 @@ runners (run.py + the KIND CI lane) already implement:
                           abandoned with a reason, the Instance ends whole
                           and serving on one pod set, a broken peer is
                           repaired under its policy
+    gen-packed-pool/ p8600+ a packed pool: fillers take every node's spare
+                          CPU once the service has settled, so the only room
+                          is what a broken pod vacates; a push whose revision
+                          crashes stops at one Instance down and the good push
+                          lands on that Instance first, in the same room, then
+                          on the others one at a time (fault=crashloop:new,
+                          pool=packed), and the mirror, the running revision
+                          crashing on one Instance before the push
+                          (fault=crashloop:idle); crossed with the six shape
+                          families x the drain-first and in-place strategies
+                          at maxUnavailable 1 x crash form x restartPolicy x
+                          group; every cell selects the ledger and
+                          node-exclusion invariants (inv_on=J,K)
     gen-fault-edit/ p7900+  a fault during a runtime edit: the runtime every
                           Component inherits gets a new image or runner env
                           and, as the edit lands, a pod of the running
@@ -444,6 +457,24 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     that never becomes Ready restarts no runner. One gang width, no pd-mn,
     no group, no readiness loss on the running side, as in fault-move.
 
+  - The packed-pool family runs the strategies that add no pod: RecreatePod
+    and InPlaceIfPossible at maxSurge 0, maxUnavailable 1 (a surge needs
+    room a packed pool has not got, which is the tight-cluster family's
+    story; InPlaceOnly refuses the after-Ready form's env diff and patches
+    the at-start form exactly as InPlaceIfPossible does). Single-pod shapes
+    run three Instances, the smallest fleet where "the broken one first,
+    then the others one at a time" is an order; gangs run two at one width.
+    The group axis is a rollingUpdate group on the prefill/decode shapes,
+    whose decoder carries the same one-down budget so its roll fits the
+    pool; blueGreen and Sequential need a whole second set of pods and have
+    no room. The mirror (the running revision crashing before the push)
+    runs under restart policy None only: the break lives in the live pod,
+    not the template, so under RecreateInstanceOnPodRestart the policy's
+    own rebuild heals it before the push lands. The after-Ready form
+    carries floor_soft=1 and reports the one-down rule and the landing
+    order instead of asserting them: a runner that exits after Ready can be
+    Ready when the roll decides.
+
 The t=3 covering fill over the deferred dimensions (coordination/rollout
 groups, canary promotion, budget x coordination interactions) is the --fill
 knob: documented, deliberately not emitted until this lane has baked in.
@@ -501,6 +532,7 @@ GEN_BLOCKS = {
     "gen-fault-delete": (7700, 7800),
     "gen-fault-move": (7800, 7900),
     "gen-fault-edit": (7900, 8000),
+    "gen-packed-pool": (8600, 8700),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -802,6 +834,29 @@ PENDING_CAUSES = ["taint", "quota"]
 PENDING_LIFTS = ["after-settle", "never"]
 PENDING_TOKEN = {"taint": "Unschedulable", "quota": "QuotaExceeded"}
 
+# The packed-pool family: once the service has settled, fillers take every
+# node's spare CPU, so the only room is what a broken pod vacates. The six
+# shape families (the engine, the engine behind a router, prefill/decode,
+# each single-pod and as a gang), the strategies that add no pod at
+# maxUnavailable 1, both crash forms, and the side the crash is on: the
+# push brings it (fault=crashloop:new, then the good push), or the running
+# revision crashes before any push (fault=crashloop:idle, then the good
+# push). The restart policy axis is live on the bad push; the mirror runs
+# under None (see the module docstring). Every cell selects the ledger and
+# node-exclusion invariants.
+PACKED_SHAPES = [
+    # (topo, N, W, a router in front of an engine-only shape)
+    ("engine", 3, 0, False), ("engine", 3, 0, True),
+    ("engine-mn", 2, 1, False), ("engine-mn", 2, 1, True),
+    ("pd", 3, 0, False), ("pd-mn", 2, 1, False),
+]
+PACKED_STRATS = [("RecreatePod", 0, 1), ("InPlaceIfPossible", 0, 1)]
+PACKED_SIDES = ["new", "idle"]
+PACKED_RESTARTS = {"new": RESTARTS, "idle": ["None"]}
+PACKED_GROUPS = {"engine": ["none"], "engine-mn": ["none"], "pd": ["none", "rolling"], "pd-mn": ["none", "rolling"]}
+PACKED_POOL = "packed"
+PACKED_INVARIANTS = "J,K"
+
 # Canonical shapes: (topo, N, W). Gangs at N=2 with widths 1 and 2; singles at
 # N=4 (pd: engine+decoder N, router lib.NR). Percentage budgets additionally
 # run a mid-size variant (MID_SHAPE) so the ceil() rounding actually differs.
@@ -947,11 +1002,11 @@ def shape_tag(topo, w):
 # families' keys follow the closing co= topo= pair, so the hot-core headers
 # read as they always have.
 GEN_HDR_ORDER = ["mode", "Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r",
-                 "restart", "kill", "pause", "fault", "floor_soft", "floor_hard", "order_soft",
+                 "restart", "kill", "pause", "fault", "pool", "floor_soft", "floor_hard", "order_soft",
                  "co", "topo",
                  "canary", "bump", "img", "form", "victims", "exitafter", "during", "verb", "verbhold",
                  "verb2", "during2", "victim", "victimcomp", "release", "releaseafter", "rt",
-                 "analysis", "failurelimit", "terminal", "nophase", "cell"]
+                 "analysis", "failurelimit", "terminal", "nophase", "inv_on", "cell"]
 
 
 def header(name, desc, kv):
@@ -3183,6 +3238,97 @@ def emit_preempt(add):
                         cell=("preempt", DISRUPT_PHASE, topo, w, strat, rp, lift))
 
 
+# ── gen-packed-pool: the only room is what a broken pod vacates ─────────────
+def packed_counts(topo, n, router):
+    if is_pd(topo):
+        return dict(Ne=n, Nd=n, Nr=lib.NR)
+    return dict(Ne=n, Nd=0, Nr=lib.NR if router else 0)
+
+
+def packed_ceilings(topo, n, router):
+    """No strategy here adds a pod: every Component peaks at its count."""
+    if is_pd(topo):
+        return dict(ceil_e=n, ceil_d=n, ceil_r=lib.NR)
+    return dict(ceil_e=n, ceil_d=0, ceil_r=lib.NR if router else 0)
+
+
+def packed_comps(topo, n, w, router, life):
+    """The engine, the decoder where one exists under the same one-down
+    lifecycle (a grouped decoder roll has to fit the pool too), and the
+    router of a prefill/decode shape or of an engine-only shape behind one."""
+    cw = w if is_mn(topo) else 0
+    cs = [lib.comp("engine", n, cw, life)]
+    if is_pd(topo):
+        cs.append(lib.comp("decoder", n, cw, life))
+    if is_pd(topo) or router:
+        cs.append(lib.comp("router", lib.NR, 0, lib.lifecycle()))
+    return cs
+
+
+def _packed_reason(side, form, strat, rp, co, router):
+    pool = ("fillers take every node's spare CPU once the service has settled, so the only room a pod can be "
+            "placed in is what a pod of the service vacates")
+    if side == "new":
+        how = ("the pushed engine revision dies at every start (its runner image has no shell for the fixture command)"
+               if form == "start" else
+               "the pushed engine revision passes readiness, is promoted, and exits a few seconds later, every time "
+               "the kubelet restarts it")
+        lands = {"RecreatePod": "the first Instance drained is rebuilt on the crashing revision in the room its pod vacated",
+                 "InPlaceIfPossible": ("the image patches the first Instance's pod in place and it crash-loops there"
+                                       if form == "start" else
+                                       "the exit switch is a pod-template env diff, so in-place resolves to a recreate of "
+                                       "the first Instance in the room its pod vacated")}[strat]
+        out = (f"{pool}; {how}; {lands} and the roll stops there, never two Instances down at once; status says why "
+               f"(a rolloutHold or a Failed row, and a RetryHeld or InstanceFailed event) and no further attempt at that "
+               f"revision follows; the good push then lands on the broken Instance first, in the same room, then on the "
+               f"others one at a time, every Instance ends serving on it and nothing rebuilds the crashing revision")
+        if rp == "RecreateInstance":
+            out += "; every rebuild RecreateInstanceOnPodRestart opens on the crashing Instance lands in that same room"
+    else:
+        how = ("one engine pod of the running revision is pointed at an image with no shell on the settled service, "
+               "so it crashes at every start and is never Ready again"
+               if form == "start" else
+               "one engine pod of the running revision has its runner killed every few seconds while it is up, so "
+               "it dies after Ready and comes back between crashes")
+        out = (f"{pool}; {how}; once the break has bitten the good push lands: the broken Instance, which serves "
+               f"nothing, is rolled first and comes back in the room it vacated, the others follow one at a time, "
+               f"never two Instances down at once, every Instance ends serving on the good revision, no repair is "
+               f"recorded for the broken Instance after the push and nothing rebuilds the running revision")
+    if form == "load":
+        out += ("; the one-down rule and the landing order are reported, not asserted: a runner that exits after "
+                "Ready can be Ready when the roll decides, so the roll need not read that Instance as serving nothing")
+    out += "; the audit ledger records no AutoRecover row and no pod carries a hostname NotIn term (invariants J and K)"
+    if co != "none":
+        out += "; the decoder rolls under the same one-down budget beside the engine (converges, or holds with a reason)"
+    if router:
+        out += "; the router in front is never bumped and stays in rotation"
+    return out
+
+
+def emit_packed_pool(add):
+    for topo, n, w, router in PACKED_SHAPES:
+        for side in PACKED_SIDES:
+            for strat, surge, unavail in PACKED_STRATS:
+                for form in CRASH_FORMS:
+                    for rp in PACKED_RESTARTS[side]:
+                        for co in PACKED_GROUPS[topo]:
+                            kv = dict(**packed_counts(topo, n, router), **packed_ceilings(topo, n, router),
+                                      fault=f"crashloop:{side}", pool=PACKED_POOL, co=co, topo=topo, form=form,
+                                      inv_on=PACKED_INVARIANTS)
+                            if form == "load":
+                                kv["floor_soft"] = 1
+                            story = "bad push then fix" if side == "new" else "broken running then fix"
+                            meta = dict(strat=strat, verb=f"packed:{side}:{form}", rp=rp, side=story)
+                            desc = (f"{GEN_MARK} packed pool {story} {form} {shape_tag(topo, w)}"
+                                    f"{' +router' if router else ''} N={n} {strat} {budget_tag(strat, surge, unavail)} "
+                                    f"rp {rp} co {co}")
+                            life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                            add("gen-packed-pool", desc, kv, packed_comps(topo, n, w, router, life),
+                                _packed_reason(side, form, strat, rp, co, router), meta,
+                                cell=("packed-pool", side, form, topo, w, router, strat, rp, co),
+                                coord=lib.coord_for(co) if co != "none" else None)
+
+
 # ── gen-pending: a new pod cannot be placed or admitted ─────────────────────
 def _pending_quota(moment, strat, w):
     """The quota headroom that refuses exactly the pod the operation creates:
@@ -4012,6 +4158,7 @@ def build_outputs():
     emit_fault_delete(add)
     emit_fault_move(add)
     emit_fault_edit(add)
+    emit_packed_pool(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -4109,6 +4256,7 @@ def manifest(rows):
     lines += table("By move moment (fault-move)", tally(lambda kv, m: m["at"], where=lambda kv, m: "at" in m))
     lines += table("By move victim (fault-move)", tally(lambda kv, m: m["who"], where=lambda kv, m: "who" in m))
     lines += table("By runtime edit (fault-edit)", tally(lambda kv, m: m["rtedit"], where=lambda kv, m: "rtedit" in m))
+    lines += table_if("By story (packed-pool)", "side")
     parked_rows = [(f, n, m["parked"]) for f, n, _kv, m in rows if "parked" in m]
     if parked_rows:
         lines += ["### Parked cells (XFAIL on a tracked issue)", "",
@@ -4196,6 +4344,19 @@ def manifest(rows):
         " attempt's deadline, which a Ready Instance never has); restart policy"
         " and an idle rolling group change nothing either, and each cell says"
         " why. The update strategy is dormant at idle (one canonical budget).",
+        "- The packed-pool family runs RecreatePod and InPlaceIfPossible at"
+        " maxSurge 0, maxUnavailable 1 only: a surge needs room a packed pool"
+        " has not got (the tight-cluster family's story), and InPlaceOnly"
+        " refuses the after-Ready form's env diff and patches the at-start"
+        " form as InPlaceIfPossible does. Its group axis is a rollingUpdate"
+        " group on the prefill/decode shapes, whose decoder carries the same"
+        " one-down budget; blueGreen and Sequential need a whole second set"
+        " of pods. The mirror (fault=crashloop:idle) runs under restart"
+        " policy None only: the break lives in the live pod, not the"
+        " template, so RecreateInstanceOnPodRestart heals it with its own"
+        " rebuild before the push lands. The after-Ready form carries"
+        " floor_soft=1 and reports the one-down rule and the landing order:"
+        " a runner that exits after Ready can be Ready when the roll decides.",
         "- ctrlrestart has no hook inside a repair (one fault per case; the"
         " idle-break handler fires no second one), so a restart while a"
         " crash-loop repair is open is not emitted. The strategy axis is live"
