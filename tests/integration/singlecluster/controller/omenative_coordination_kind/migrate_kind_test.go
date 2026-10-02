@@ -281,7 +281,13 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 	// FromNode mismatch: requester's view of the source node is stale.
 	// validateFromNode must reject with a Failed audit row and a
 	// MigrationFromNodeMismatch event; NO surge is created.
-	ginkgo.It("FromNode mismatch is rejected with Failed audit row and no surge", func() {
+	// A request whose from_node is not where the Instance runs binds to
+	// the Instance: the move leaves the node the source actually occupies,
+	// the record and the ledger name that node, and one Normal event names
+	// both. The requester's view of placement is stale whenever a roll, a
+	// repair or a node loss rebuilt the Instance between the request and
+	// its dispatch.
+	ginkgo.It("a from_node the Instance has left binds the move to the node it runs on", func() {
 		fix := newCoordFixture(ns.Name, WithISVCName("mismatch-isvc"),
 			WithoutDecoder(),
 			WithEngineImage("fake-serving:v1"))
@@ -305,79 +311,78 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 			sourceNode = pod.Spec.NodeName
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		ginkgo.By("sending a migration request with the WRONG from_node")
-		wrongNode := "not-" + sourceNode
+		ginkgo.By("sending a migration request naming a node the Instance is not on")
+		staleNode := "not-" + sourceNode
 		reqUUID := uuid.NewString()
-		writeMigrationRequest(Default, client.ObjectKeyFromObject(fix.ISVC), reqUUID, wrongNode, 0)
+		writeMigrationRequest(Default, client.ObjectKeyFromObject(fix.ISVC), reqUUID, staleNode, 0)
 
-		ginkgo.By("expecting a Failed audit row")
+		ginkgo.By("expecting the record to name the node the Instance runs on and allocate its surge")
+		var surgeIndex int32
+		Eventually(func(g Gomega) {
+			entry := findMigrationEntry(migrationEntries(g, ns.Name, "mismatch-isvc", v1beta1.EngineComponent), reqUUID)
+			g.Expect(entry).NotTo(BeNil(), "accept must create the status.migrations entry")
+			g.Expect(entry.SurgeInstance).NotTo(BeNil(), "the move must allocate its surge index")
+			g.Expect(entry.FromNode).To(Equal(sourceNode),
+				"the record must name the node the Instance leaves, not the stale one the request named")
+			surgeIndex = *entry.SurgeInstance
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("expecting the move to complete with the replacement off the node the Instance left")
+		Eventually(func(g Gomega) {
+			entry := findMigrationEntry(migrationEntries(g, ns.Name, "mismatch-isvc", v1beta1.EngineComponent), reqUUID)
+			g.Expect(entry).NotTo(BeNil())
+			g.Expect(entry.Phase).To(Equal(v1beta1.MigrationPhaseCompleted),
+				"the migration must complete; got phase=%s message=%q", entry.Phase, entry.Message)
+			insts := instanceStatuses(g, ns.Name, "mismatch-isvc", v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1), "the source index is released and the surge is the Instance")
+			g.Expect(insts[0].Index).To(Equal(surgeIndex))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			pod := singleEnginePodOfInstance(g, ns.Name, "mismatch-isvc", fmt.Sprintf("%d", surgeIndex))
+			g.Expect(pod.Spec.NodeName).NotTo(BeEmpty())
+			g.Expect(pod.Spec.NodeName).NotTo(Equal(sourceNode),
+				"the replacement must come up off the node the Instance left")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("expecting the ledger row to name the node the Instance left")
 		Eventually(func(g Gomega) {
 			ledger := loadLedger(g, ns.Name, "mismatch-isvc")
 			matched := false
 			for _, e := range ledger.Entries {
-				if e.RequestUUID == reqUUID && e.Phase == "Failed" {
+				if e.RequestUUID == reqUUID && e.Phase == "Completed" {
 					matched = true
-					g.Expect(e.Outcome).NotTo(BeEmpty(),
-						"Failed audit row should carry a rejection reason")
+					g.Expect(e.FromNode).To(Equal(sourceNode),
+						"the ledger must record the node the Instance left")
 					break
 				}
 			}
 			g.Expect(matched).To(BeTrue(),
-				"expected a Failed audit row for uuid=%s; got %+v", reqUUID, ledger.Entries)
+				"expected a Completed audit row for uuid=%s; got %+v", reqUUID, ledger.Entries)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		ginkgo.By("expecting the status entry to be terminal Failed naming the mismatch")
-		// The stale FromNode passes accept-time validation (the adapter
-		// cannot observe pod placement), so an entry IS born; the
-		// executor's from-node check then fails it terminally before any
-		// surge is allocated.
-		Eventually(func(g Gomega) {
-			entry := findMigrationEntry(migrationEntries(g, ns.Name, "mismatch-isvc", v1beta1.EngineComponent), reqUUID)
-			g.Expect(entry).NotTo(BeNil(), "the accepted entry must persist as a Failed record")
-			g.Expect(entry.Phase).To(Equal(v1beta1.MigrationPhaseFailed))
-			g.Expect(entry.CompletedAt).NotTo(BeNil())
-			g.Expect(entry.Message).To(ContainSubstring(wrongNode),
-				"the terminal message must name the stale FromNode")
-			g.Expect(entry.SurgeInstance).To(BeNil(),
-				"a from-node rejection must never allocate a surge index")
-		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
-
-		ginkgo.By("asserting no surge instance is ever created")
-		Consistently(func(g Gomega) {
-			c := freshISVC(g, ns.Name, "mismatch-isvc")
-			cs := c.Status.Components[v1beta1.EngineComponent]
-			g.Expect(cs.Lifecycle).NotTo(BeNil())
-			insts := instanceStatuses(g, ns.Name, "mismatch-isvc", v1beta1.EngineComponent)
-			g.Expect(insts).To(HaveLen(1),
-				"rejected migration must not create a surge; got %d InstanceStatuses",
-				len(insts))
-			g.Expect(insts[0].Index).To(Equal(int32(0)),
-				"only the source InstanceStatus should exist")
-		}, "3s", kindPollInterval).Should(Succeed())
-
-		ginkgo.By("expecting the rejected request's annotation to be cleared")
+		ginkgo.By("expecting the request's annotation to be consumed")
 		Eventually(func(g Gomega) {
 			fresh := freshISVC(g, ns.Name, "mismatch-isvc")
 			_, present := fresh.Annotations[migrationAnnoPrefix+reqUUID]
-			g.Expect(present).To(BeFalse(),
-				"annotation must be cleared on rejection so the requester stops retrying")
+			g.Expect(present).To(BeFalse(), "annotation must be cleared once the request is consumed")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		ginkgo.By("expecting a MigrationFromNodeMismatch warning event")
+		ginkgo.By("expecting one Normal MigrationFromNodeMismatch event naming both nodes")
 		Eventually(func(g Gomega) {
 			events := &corev1.EventList{}
 			g.Expect(k8sClient.List(suiteCtx, events, client.InNamespace(ns.Name))).To(Succeed())
 			matched := false
 			for _, e := range events.Items {
-				if e.Reason == "MigrationFromNodeMismatch" && e.InvolvedObject.Name == "mismatch-isvc" {
-					matched = true
-					g.Expect(e.Message).To(ContainSubstring(wrongNode),
-						"event message should reference the wrong node")
-					break
+				if e.Reason != "MigrationFromNodeMismatch" || e.InvolvedObject.Name != "mismatch-isvc" {
+					continue
 				}
+				matched = true
+				g.Expect(e.Type).To(Equal(corev1.EventTypeNormal),
+					"binding the move to the node the Instance runs on is not a warning")
+				g.Expect(e.Message).To(ContainSubstring(staleNode), "the event names the node the request asked for")
+				g.Expect(e.Message).To(ContainSubstring(sourceNode), "the event names the node the Instance leaves")
+				break
 			}
-			g.Expect(matched).To(BeTrue(),
-				"expected MigrationFromNodeMismatch warning event for the stale FromNode")
+			g.Expect(matched).To(BeTrue(), "expected a MigrationFromNodeMismatch event for the stale from_node")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
@@ -1198,6 +1203,147 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 			for _, pod := range snap.ByComponent[v1beta1.EngineComponent] {
 				requirePodRendersItsRevision(g, ns.Name, isvcName, pod)
 			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+
+	// The move is filed for the very Instance the roll is replacing. The
+	// roll rebuilds that Instance first, on whichever node the scheduler
+	// picks, and only then is the source steady enough for the move to
+	// start: the move leaves the node the rebuilt Instance runs on, both
+	// operations finish, and every Instance ends on the new revision.
+	ginkgo.It("a migration filed for the Instance a roll is replacing moves it off the node it was rebuilt on", func() {
+		const (
+			isvcName    = "midroll-replaced-isvc"
+			replicas    = 3
+			sourceIndex = int32(0)
+		)
+		maxSurge := intstr.FromInt(1)
+		maxUnavail := intstr.FromInt(0)
+		fix := newCoordFixture(ns.Name, WithISVCName(isvcName),
+			WithoutDecoder(),
+			WithEngineReplicas(replicas),
+			WithEngineStartupDelay(20),
+			WithEngineImage("fake-serving:v1"))
+		fix.ISVC.Spec.Engine.MaxReplicas = replicas
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
+			UpdateStrategy: &v1beta1.UpdateStrategy{
+				Type: v1beta1.UpdateStrategySurgeThenDrain,
+				RollingUpdate: &v1beta1.RollingUpdate{
+					MaxSurge:       &maxSurge,
+					MaxUnavailable: &maxUnavail,
+				},
+			},
+		}
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+
+		ginkgo.By("waiting for three Instances serving on the first revision")
+		var v1Hash, v1Target, requestedNode string
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			engCS := c.Status.Components[v1beta1.EngineComponent]
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(replicas)))
+			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(BeEmpty(),
+				"engine CurrentRevision must be promoted before the push")
+			v1Hash = query.RevisionHashFromControllerRevisionName(engCS.Lifecycle.CurrentRevision)
+			v1Target = engineTargetRevision(g, ns.Name, isvcName)
+			pod := singleEnginePodOfInstance(g, ns.Name, isvcName, fmt.Sprintf("%d", sourceIndex))
+			g.Expect(pod.Spec.NodeName).NotTo(BeEmpty(), "the source pod must be scheduled before requesting migration")
+			requestedNode = pod.Spec.NodeName
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("pushing a new revision")
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Spec.Engine.PodSpec.Containers[0].Image = "fake-serving:v2"
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		awaitEngineTargetMoved(ns.Name, isvcName, v1Target)
+
+		ginkgo.By(fmt.Sprintf("waiting for the roll to start replacing Instance %d", sourceIndex))
+		Eventually(func(g Gomega) {
+			for _, s := range instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent) {
+				if s.Index == sourceIndex {
+					g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceUpdating),
+						"instance %d must be mid-update when the move is filed; got %+v", sourceIndex, s)
+					return
+				}
+			}
+			g.Expect(false).To(BeTrue(), "instance %d must exist", sourceIndex)
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By(fmt.Sprintf("filing a migration for Instance %d off %s while the roll is replacing it", sourceIndex, requestedNode))
+		reqUUID := uuid.NewString()
+		writeMigrationRequest(Default, client.ObjectKeyFromObject(fix.ISVC), reqUUID, requestedNode, sourceIndex)
+
+		ginkgo.By("expecting the move to start once the roll has rebuilt the Instance, leaving the node it was rebuilt on")
+		var surgeIndex int32
+		var leftNode string
+		Eventually(func(g Gomega) {
+			entry := findMigrationEntry(migrationEntries(g, ns.Name, isvcName, v1beta1.EngineComponent), reqUUID)
+			g.Expect(entry).NotTo(BeNil(), "accept must create the status.migrations entry")
+			g.Expect(entry.SurgeInstance).NotTo(BeNil(), "the move must allocate its surge index")
+			surgeIndex = *entry.SurgeInstance
+			leftNode = entry.FromNode
+			source := singleEnginePodOfInstance(g, ns.Name, isvcName, fmt.Sprintf("%d", sourceIndex))
+			g.Expect(source.Labels[query.LabelRevisionHash]).NotTo(Equal(v1Hash),
+				"the roll must have rebuilt the Instance before the move took it")
+			g.Expect(source.Spec.NodeName).To(Equal(leftNode),
+				"the record must name the node the rebuilt Instance runs on")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		if leftNode != requestedNode {
+			fmt.Fprintf(ginkgo.GinkgoWriter, "the roll rebuilt Instance %d on %s; the move left that node instead of %s\n",
+				sourceIndex, leftNode, requestedNode)
+		}
+
+		ginkgo.By("expecting the move to complete with the replacement off the node it left")
+		Eventually(func(g Gomega) {
+			entry := findMigrationEntry(migrationEntries(g, ns.Name, isvcName, v1beta1.EngineComponent), reqUUID)
+			g.Expect(entry).NotTo(BeNil())
+			g.Expect(entry.Phase).To(Equal(v1beta1.MigrationPhaseCompleted),
+				"the migration must complete; got phase=%s message=%q", entry.Phase, entry.Message)
+			pod := singleEnginePodOfInstance(g, ns.Name, isvcName, fmt.Sprintf("%d", surgeIndex))
+			g.Expect(pod.Spec.NodeName).NotTo(BeEmpty())
+			g.Expect(pod.Spec.NodeName).NotTo(Equal(leftNode), "the replacement must come up off the node it left")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("expecting the roll to finish with every Instance, the moved one included, serving the new revision")
+		Eventually(func(g Gomega) {
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(replicas))
+			indices := make([]int32, 0, len(insts))
+			for _, s := range insts {
+				indices = append(indices, s.Index)
+				g.Expect(s.Phase).To(Equal(v1beta1.OMENativeInstanceReady), "instance %d: %+v", s.Index, s)
+				g.Expect(s.Operation).To(BeNil(), "instance %d must carry no open operation: %+v", s.Index, s)
+				g.Expect(query.RevisionHashFromControllerRevisionName(s.RunningRevision)).NotTo(Equal(v1Hash),
+					"instance %d must run the new revision; got %s", s.Index, s.RunningRevision)
+			}
+			g.Expect(indices).To(ContainElement(surgeIndex), "the moved Instance keeps its surge index")
+			g.Expect(indices).NotTo(ContainElement(sourceIndex), "the source index is released by the migration")
+
+			snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, isvcName)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(servingEnginePodsOffRevision(snap, v1Hash)).To(Equal(replicas),
+				"all three Instances must be serving on the new revision")
+			g.Expect(snap.OnRevision(v1beta1.EngineComponent, v1Hash)).To(Equal(0),
+				"no pod may still carry the first revision")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("expecting one ledger row for the request, Completed, naming the node it left")
+		Eventually(func(g Gomega) {
+			ledger := loadLedger(g, ns.Name, isvcName)
+			rows := 0
+			for _, e := range ledger.Entries {
+				if e.RequestUUID != reqUUID {
+					continue
+				}
+				rows++
+				g.Expect(e.Phase).To(Equal("Completed"))
+				g.Expect(e.FromNode).To(Equal(leftNode))
+			}
+			g.Expect(rows).To(Equal(1), "the move is recorded once; got %+v", ledger.Entries)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

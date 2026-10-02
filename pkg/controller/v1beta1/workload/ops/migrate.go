@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
+	"sort"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -66,8 +66,10 @@ func ledgerOwnerGVK(input workload.ReconcileInput) schema.GroupVersionKind {
 //
 //  1. Terminal record → done. Fresh record (SurgeInstance unset):
 //     run the fresh-request guards (steady-Ready source,
-//     validateFromNode, capacity over status.migrations, overlay
-//     pre-check); rejections mark the record Failed.
+//     resolveSourceNode, capacity over status.migrations, overlay
+//     pre-check); rejections mark the record Failed. The move binds to
+//     the Instance: a source rebuilt off the request's FromNode since
+//     the request leaves the node it runs on, and the record says so.
 //  2. Allocate surge index = lowest unused; write it back to the
 //     record (SurgeInstance + Phase=SurgePending) FIRST, then stamp
 //     source Phase=Migrating + surge Phase=Creating and update the
@@ -95,9 +97,10 @@ func ledgerOwnerGVK(input workload.ReconcileInput) schema.GroupVersionKind {
 // source's Runner layout and worker template from its RunningRevision;
 // a gang surge requeues one pass after stamping so EnsurePodGroups
 // creates the surge PodGroup before the gang's pods render;
-// validateFromNode is gang-aware (FromNode must host at least one
-// member); the rotation/drain gates assert the routable leader only —
-// workers are never routed.
+// resolveSourceNode is gang-aware (FromNode names the member to
+// relocate off; with none there, the routable member's node); the
+// rotation/drain gates assert the routable leader only — workers are
+// never routed.
 //
 // Returns (done, accepted, err):
 //   - done=true: migration finished (success or terminal failure);
@@ -212,23 +215,29 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			return false, false, nil
 		}
 
-		// Validate FromNode against where source pods actually run. The
-		// requester's view may be stale; if source has since moved, the
-		// surge's NotIn[FromNode] could land on the SAME node as the
-		// post-move source — silently no-op'ing the migration.
-		switch mismatch, defer_, err := validateFromNode(ctx, deps, input, plan, sourceIdx, req.FromNode); {
+		// The node the move leaves: the request's FromNode while the
+		// source still sits there, else the node the Instance was rebuilt
+		// on since the request. The record follows in the allocation
+		// write below, so the overlay, the ledger and every later pass
+		// name the node the Instance actually leaves.
+		switch leaving, defer_, rejection, err := resolveSourceNode(ctx, deps, input, plan, sourceIdx, req.FromNode); {
 		case err != nil:
-			return false, false, fmt.Errorf("Migrate: validate from-node (instance=%d): %w", sourceIdx, err)
+			return false, false, fmt.Errorf("Migrate: resolve source node (instance=%d): %w", sourceIdx, err)
 		case defer_:
 			// Transient (unscheduled source pod). Defer without ownership;
-			// caller can fall through. validateFromNode's defer_ path is a
-			// fresh-request guard and must not block other ops.
+			// caller can fall through. The defer is a fresh-request guard
+			// and must not block other ops.
 			return false, false, nil
-		case mismatch != "":
+		case rejection != "":
 			workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationFromNodeMismatch,
-				"OMENative migration uuid=%s rejected: %s", requestUUID, mismatch)
-			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, mismatch)
+				"OMENative migration uuid=%s rejected: %s", requestUUID, rejection)
+			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, rejection)
 			return d, true, ferr
+		case leaving != req.FromNode:
+			workload.RecordNormal(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationFromNodeMismatch,
+				"OMENative migration uuid=%s: request.FromNode=%s does not match observed source node=%s; %s leaves %s",
+				requestUUID, req.FromNode, leaving, workload.InstanceKey(input.Key.Component, sourceIdx), leaving)
+			req.FromNode = leaving
 		}
 
 		// Capacity / rate-limit gate over the owner's migration records —
@@ -300,12 +309,14 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		// stamps above; the reverse order would strand a stamped source
 		// behind the fresh-request guards forever.
 		allocated := surgeIdx
+		leaving := req.FromNode
 		if err := input.MutateMigration(ctx, requestUUID, func(m *workload.MigrationRecord) bool {
 			if m.SurgeInstance != nil && *m.SurgeInstance == allocated &&
 				workload.MigrationPhaseAtOrPast(m.Phase, workload.MigrationPhaseSurgePending) {
 				return false
 			}
 			m.SurgeInstance = &allocated
+			m.FromNode = leaving
 			// Execution starts here — the capacity gate counts from
 			// AllocatedAt, stamped in the same write as the index.
 			if m.AllocatedAt == nil {
@@ -475,6 +486,15 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	if surgeRev == nil || surgePayload == nil {
 		// Source not yet promoted with a RunningRevision — retry.
 		return false, accepted, nil
+	}
+	// Once the source is drained and deleted the handover is done: the
+	// surge is the Instance, whatever its pods do next. The tail promotes
+	// it and closes the record, and its pod set is the repair's to rebuild
+	// as any Instance's is. The surge gates below are not re-run here:
+	// they would park the record in Draining with nothing left to restore.
+	if migrationHandedOver(entry, sourcePods) {
+		done, err = finishMigration(ctx, deps, input, ledger, req, requestUUID, source, surge, sourceIdx, surgeIdx, surgeRev.Name)
+		return done, accepted, err
 	}
 	surgeTemplate, err := templateFromPayload(input, target, surgeRev.Name, surgePayload)
 	if err != nil {
@@ -746,45 +766,69 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return false, accepted, nil
 	}
 
-	// Terminal order: surge promote, source resource finalization, and guarded
-	// source-status removal; then the Completed ledger row (audit); then the
-	// record's terminal stamp. The record write is LAST so a crash in this tail
-	// leaves it non-terminal and the next pass re-runs the idempotent
-	// steps to completion; a record already Completed would never be
-	// picked again and cleanup would strand.
-	promoted, perr := promoteMigrationSurge(ctx, input, source, surge, requestUUID, surgeRev.Name)
+	done, err = finishMigration(ctx, deps, input, ledger, req, requestUUID, source, surge, sourceIdx, surgeIdx, surgeRev.Name)
+	return done, accepted, err
+}
+
+// migrationHandedOver reports whether the move's handover is done: the
+// record reached Draining, so the surge was in rotation when the source
+// drain began, and no source pod is left. Nothing can be restored from
+// here, so the completion tail runs whatever the surge's pods do.
+func migrationHandedOver(record *workload.MigrationRecord, sourcePods []*corev1.Pod) bool {
+	return workload.MigrationPhaseAtOrPast(record.Phase, workload.MigrationPhaseDraining) && len(sourcePods) == 0
+}
+
+// finishMigration is the completion tail, in terminal order: surge
+// promoted Ready on revisionName, source resources finalized and its
+// status removed under its ownership guard, the Completed ledger row,
+// then the record's terminal stamp. The record write is last so a crash
+// in the tail leaves it non-terminal and the next pass re-runs the
+// idempotent steps; a record already Completed would never be picked
+// again and cleanup would strand. done reports the record closed.
+func finishMigration(
+	ctx context.Context,
+	deps workload.Deps,
+	input workload.ReconcileInput,
+	ledger *audit.Ledger,
+	req *audit.MigrationRequest,
+	requestUUID string,
+	source, surge *workload.InstanceStatus,
+	sourceIdx, surgeIdx int32,
+	revisionName string,
+) (bool, error) {
+	promoted, perr := promoteMigrationSurge(ctx, input, source, surge, requestUUID, revisionName)
 	if perr != nil {
-		return false, accepted, fmt.Errorf("Migrate: promote surge to Ready: %w", perr)
+		return false, fmt.Errorf("Migrate: promote surge to Ready: %w", perr)
 	}
 	if !promoted {
-		return false, accepted, nil
+		return false, nil
 	}
 	if source != nil && !status.MigrationSourceOwnsRemoval(source, requestUUID, surgeIdx) {
-		return false, accepted, nil
+		return false, nil
 	}
 	removed, rerr := status.FinalizeAndRemove(ctx, deps, input, sourceIdx, source)
 	if rerr != nil {
-		return false, accepted, fmt.Errorf("Migrate: finalize source Instance: %w", rerr)
+		return false, fmt.Errorf("Migrate: finalize source Instance: %w", rerr)
 	}
 	if !removed {
-		return false, accepted, nil
+		return false, nil
 	}
 	promotedSurge := *surge
 	status.EnterReady(&promotedSurge, input.Now())
-	promotedSurge.RunningRevision = surgeRev.Name
+	promotedSurge.RunningRevision = revisionName
 	promotedSurge.TargetRevision = ""
 	promotedSurge.Operation = nil
 	confirmed, cerr := confirmMigrationCompletionPair(ctx, input, sourceIdx, &promotedSurge)
 	if cerr != nil {
-		return false, accepted, fmt.Errorf("Migrate: confirm promoted migration pair: %w", cerr)
+		return false, fmt.Errorf("Migrate: confirm promoted migration pair: %w", cerr)
 	}
 	if !confirmed {
-		return false, accepted, nil
+		return false, nil
 	}
-	if err := completeMigrationTail(ctx, deps, input, ledger, req, requestUUID, sourceIdx, surgeIdx, surgeRev.Name); err != nil {
-		return false, accepted, err
+	if err := completeMigrationTail(ctx, deps, input, ledger, req, requestUUID, sourceIdx, surgeIdx, revisionName); err != nil {
+		return false, err
 	}
-	return true, accepted, nil
+	return true, nil
 }
 
 func migrationCompletionTailRecoverable(
@@ -1069,33 +1113,31 @@ func advanceMigrationPhase(ctx context.Context, input workload.ReconcileInput, u
 	})
 }
 
-// validateFromNode live-reads source pods, returning three states:
+// resolveSourceNode live-reads the source pods and names the node the
+// surge is kept off. A request binds to the Instance; its FromNode is
+// where the requester saw it. A source still on FromNode leaves it. A
+// source rebuilt elsewhere since the request (a roll, a repair, a node
+// loss) leaves the node it runs on now, so the overlay never excludes a
+// node the Instance already left while leaving it free to land where the
+// Instance actually is. For a gang, FromNode names the member to
+// relocate off, and when no member sits there any more the routable
+// member's node stands in, since the whole gang moves anyway.
 //
-//   - rejectionReason="" defer_=false err=nil — valid, proceed
-//   - defer_=true — transient (pod not scheduled yet); caller requeues
-//   - rejectionReason != "" — permanent mismatch; caller fails
-//
-// The check is gang-aware. A multi-node gang Instance (leader + workers)
-// spans nodes BY DESIGN, so the whole-gang surge only needs req.FromNode
-// to host at least one of the source pods — that pod is the one the surge's
-// NotIn[FromNode] anti-affinity relocates off. Rejecting a gang merely for
-// spanning nodes (the single-pod assumption) wrongly failed every gang
-// migration whose pods didn't happen to co-locate. A single-pod Instance is
-// the degenerate case: its one pod must sit on FromNode, and "pods on
-// multiple nodes" stays a rejection because a single-pod migration can't
-// legitimately span nodes. Either way an unscheduled pod defers so the next
-// reconcile re-validates once scheduling settles.
-func validateFromNode(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx int32, fromNode string) (string, bool, error) {
+// Returns (node, defer, rejection, err): defer while a source pod is
+// unscheduled or every source pod is Terminating; rejection for the
+// shapes that name no node to leave, no live pod at all and a single-pod
+// Instance whose live pods span several nodes.
+func resolveSourceNode(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx int32, fromNode string) (string, bool, string, error) {
 	listed, err := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, sourceIdx)
 	if err != nil {
-		return "", false, fmt.Errorf("list source pods: %w", err)
+		return "", false, "", fmt.Errorf("list source pods: %w", err)
 	}
 	if len(listed) == 0 {
-		return "source instance has no live pods", false, nil
+		return "", false, "source instance has no live pods", nil
 	}
 	// Terminating pods are seconds from gone (recreate churn leaves the
-	// old pod Terminating beside its replacement) — validating against
-	// them would permanently fail a legitimate request. All-Terminating
+	// old pod Terminating beside its replacement) — resolving against
+	// them would name a node the Instance is leaving anyway. All-Terminating
 	// is transient (replacements pending): defer, don't reject.
 	pods := make([]*corev1.Pod, 0, len(listed))
 	for _, pod := range listed {
@@ -1105,56 +1147,51 @@ func validateFromNode(ctx context.Context, deps workload.Deps, input workload.Re
 		pods = append(pods, pod)
 	}
 	if len(pods) == 0 {
-		return "", true, nil
+		return "", true, "", nil
 	}
+	sort.Slice(pods, func(i, j int) bool { return pods[i].Name < pods[j].Name })
 
 	if isMultiPodInstance(plan, sourceIdx) {
-		// Gang: the surge relocates the whole Instance, but FromNode names a
-		// single source node to evacuate. Defer first while any member is
-		// still unscheduled (the fresh-request guard — surge sizing and the
-		// gang readiness gate need the full layout settled, and an
-		// as-yet-unscheduled member could still land on FromNode). Once the
-		// gang is fully scheduled, accept iff FromNode hosts a member; reject
-		// only when none of them landed there (stale request — the gang has
-		// since moved off that node).
-		observed := make([]string, 0, len(pods))
-		onFromNode := false
+		// Defer while any member is still unscheduled: surge sizing and
+		// the gang readiness gate need the full layout settled, and an
+		// as-yet-unscheduled member could still land on FromNode.
+		routable := ""
 		for _, pod := range pods {
 			node := pod.Spec.NodeName
 			if node == "" {
-				// Unscheduled gang member — defer; next reconcile re-validates.
-				return "", true, nil
+				return "", true, "", nil
 			}
-			if node == fromNode {
-				onFromNode = true
+			if routable == "" && query.RoutedRunner(pod) {
+				routable = node
 			}
-			observed = append(observed, node)
 		}
-		if onFromNode {
-			return "", false, nil
+		for _, pod := range pods {
+			if pod.Spec.NodeName == fromNode {
+				return fromNode, false, "", nil
+			}
 		}
-		return "request.FromNode=" + fromNode + " hosts no source pod; gang spans nodes " + strings.Join(observed, ", "), false, nil
+		if routable == "" {
+			routable = pods[0].Spec.NodeName
+		}
+		return routable, false, "", nil
 	}
 
 	var observed string
 	for _, pod := range pods {
 		node := pod.Spec.NodeName
 		if node == "" {
-			// Unscheduled — defer; next reconcile re-validates.
-			return "", true, nil
+			// Unscheduled — defer; next reconcile re-resolves.
+			return "", true, "", nil
 		}
 		if observed == "" {
 			observed = node
 			continue
 		}
 		if observed != node {
-			return "source pods span multiple nodes (" + observed + ", " + node + ")", false, nil
+			return "", false, "source pods span multiple nodes (" + observed + ", " + node + ")", nil
 		}
 	}
-	if observed != fromNode {
-		return "request.FromNode=" + fromNode + " does not match observed source node=" + observed, false, nil
-	}
-	return "", false, nil
+	return observed, false, "", nil
 }
 
 // migrationCapacityUnconfiguredMessage is what a held request carries on

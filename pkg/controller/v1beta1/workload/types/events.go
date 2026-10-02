@@ -272,8 +272,13 @@ const (
 	// ladder (lifecycle.updateRetry) allows and its pods are still wedged.
 	// The row stays Failed until an operator resets it or a new revision
 	// arrives.
-	EventReasonRepairRetriesExhausted        EventReason = "RepairRetriesExhausted"
-	EventReasonMigrationSurgeCreateBlocked   EventReason = "MigrationSurgeCreateBlocked"
+	EventReasonRepairRetriesExhausted      EventReason = "RepairRetriesExhausted"
+	EventReasonMigrationSurgeCreateBlocked EventReason = "MigrationSurgeCreateBlocked"
+	// EventReasonMigrationFromNodeMismatch fires when a request's
+	// FromNode is not where the source runs. Normal when the move binds
+	// to the node the Instance occupies instead, naming both nodes;
+	// Warning when the source names no node to leave and the request is
+	// rejected.
 	EventReasonMigrationFromNodeMismatch     EventReason = "MigrationFromNodeMismatch"
 	EventReasonMigrationNodeAffinityConflict EventReason = "MigrationNodeAffinityConflict"
 

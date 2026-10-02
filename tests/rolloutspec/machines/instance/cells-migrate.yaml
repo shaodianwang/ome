@@ -185,12 +185,14 @@ cells:
       MigrationClosedSourceUnhealthy, which describes the source rather than the
       wedge; the wedge is what the record and the Warning carry. The check runs
       after the completion tail, so a migration that is actually completing still
-      wins, and a source already drained and deleted has nothing to restore, so that
-      shape is left to the record Deadline, which stays the backstop for everything
-      this evidence does not cover
+      wins. Once the source is drained and deleted the handover is done and the
+      surge is the Instance whatever its pods do, so the tail promotes it on the
+      source's revision and closes the record Completed, and the broken pod set is
+      the repair's to rebuild, as any Instance's is. The record Deadline stays the
+      backstop for everything this evidence does not cover
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [TestMigrate_SurgeWedgedInImagePull_FailsThroughRecord, TestMigrate_SurgeCrashLoop_ClosesOnlyPastTheGrace, TestMigrate_SurgeWedgedWhileDraining_RestoresRotation, TestMigrate_SurgeWedgedAfterSourceGone_LeavesTheDeadline], kind: [], replay: [migrate-surge-wedged]}
+    coverage: {perm: [], unit: [TestMigrate_SurgeWedgedInImagePull_FailsThroughRecord, TestMigrate_SurgeCrashLoop_ClosesOnlyPastTheGrace, TestMigrate_SurgeWedgedWhileDraining_RestoresRotation, TestMigrate_SurgeBreaksAfterSourceGone_CompletesTheHandover], kind: [], replay: [migrate-surge-wedged]}
     status: decided
   - state: Migrate/CreateSurge
     event: pod.waiting
@@ -819,8 +821,8 @@ cells:
     event: pod.scheduled
     outcome: ignore
     note: this row's pods landing off FromNode is the whole point of the migration
-      overlay, but it is observed, not stamped; the from-node check runs once, before
-      the pair is stamped
+      overlay, but it is observed, not stamped; the node the move leaves is resolved
+      once, before the pair is stamped, from where the source actually runs
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -966,12 +968,14 @@ cells:
       tears it down while the paired source is restored by the same record write,
       carrying reason MigrationClosedSourceUnhealthy when observation finds it not
       runtime-ready. A migration that is actually completing still wins, because the
-      completion tail is read first, and once the paired source is drained and
-      deleted there is nothing to restore, so that shape is left to the record
-      Deadline, which stays the backstop
+      completion tail is read first. Once the paired source is drained and deleted
+      the handover is done and this row is the Instance whatever its pods do, so
+      the tail promotes it Ready on the source's revision with the pin cleared and
+      closes the record Completed, and the broken pod set is the repair's to
+      rebuild. The record Deadline stays the backstop for everything else
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [TestMigrate_SurgeWedgedInImagePull_FailsThroughRecord, TestMigrate_GangSurgeMemberWedged_FailsThroughRecord, TestMigrate_SurgeWedgedWhileDraining_RestoresRotation, TestMigrate_SurgeWedgedAfterSourceGone_LeavesTheDeadline], kind: [], replay: [migrate-surge-wedged]}
+    coverage: {perm: [], unit: [TestMigrate_SurgeWedgedInImagePull_FailsThroughRecord, TestMigrate_GangSurgeMemberWedged_FailsThroughRecord, TestMigrate_SurgeWedgedWhileDraining_RestoresRotation, TestMigrate_SurgeBreaksAfterSourceGone_CompletesTheHandover], kind: [], replay: [migrate-surge-wedged]}
     status: decided
   - state: Migrate/SurgeTarget
     event: pod.waiting

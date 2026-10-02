@@ -48,8 +48,8 @@ func migratioLivePodCountForInstance(g Gomega, namespace, isvcName string, idx i
 // specs pin the state-machine contracts; these pin the gang-specific
 // surface on real kubelets:
 //
-//   - validateFromNode is gang-aware: FromNode names ONE node hosting at
-//     least one member (the leader here), and the whole gang relocates.
+//   - the source-node check is gang-aware: FromNode names ONE node hosting
+//     at least one member (the leader here), and the whole gang relocates.
 //   - The surge mirrors the source's full Runner layout (leader +
 //     worker), so a gang never migrates into a single-pod shape.
 //   - The migration overlay applies to every surge pod: no member of
