@@ -718,11 +718,25 @@ class PodRecordBuilders(unittest.TestCase):
             self.assertIn("_pod_placement(obj, labels)", block, src[start:start + 200])
             self.assertIn("_pod_template(obj)", block, src[start:start + 200])
 
+    def test_every_record_builder_reads_the_pod_ready_condition(self):
+        """`ready` is the pod's Ready condition in every builder; a container
+        status is what the kubelet last wrote and freezes when it stops."""
+        src = (HERE / "run.py").read_text()
+        builders = [m.start() for m in re.finditer(r'pod_state(?:"\])?\[[^\]]+\] = \{', src)]
+        self.assertGreaterEqual(len(builders), 3)
+        for start in builders:
+            before = src[max(0, start - 3000):start]
+            self.assertIn("ready = _pod_ready(obj)", before, src[start:start + 200])
+            self.assertNotIn('cs.get("ready")', before.rsplit("ready = _pod_ready(obj)", 1)[1])
+            self.assertIn('"ctn_ready": _main_container_ready(obj)', src[start:start + 1200])
+
 
 def pod_object(name, component, index, revision, image, anno, *, runner="default",
-               test_rev="v1", cpu="50m", ready=True, serving=True):
+               test_rev="v1", cpu="50m", ready=True, serving=True, container_ready=None):
     """A pod as kubectl -w hands it to the watcher: the labels, annotation,
-    container spec and conditions the record builders and invariants read."""
+    container spec and conditions the record builders and invariants read.
+    `ready` is the pod's Ready condition; the main container's own status
+    follows it unless `container_ready` says otherwise."""
     return {
         "metadata": {"name": name, "uid": f"uid-{name}",
                      "labels": {"component": component, "ome.io/instance-index": str(index),
@@ -735,8 +749,10 @@ def pod_object(name, component, index, revision, image, anno, *, runner="default
                     {"name": "OME_INSTANCE_INDEX", "value": str(index)},
                     {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}],
             "resources": {"requests": {"cpu": cpu, "memory": "64Mi"}}}]},
-        "status": {"containerStatuses": [{"name": run.MAIN_CONTAINER, "ready": ready}],
-                   "conditions": [{"type": run.SERVING_COND, "status": "True" if serving else "False"}]},
+        "status": {"containerStatuses": [{"name": run.MAIN_CONTAINER,
+                                          "ready": ready if container_ready is None else container_ready}],
+                   "conditions": [{"type": run.SERVING_COND, "status": "True" if serving else "False"},
+                                  {"type": "Ready", "status": "True" if ready else "False"}]},
     }
 
 
@@ -785,6 +801,110 @@ def routed_service(case_id, component, revision, *uids, ready=True, runner=None)
 def routing_of(*pairs):
     """(Services, EndpointSlices) from routed_service pairs."""
     return [s for s, _ in pairs], [sl for _, sl in pairs]
+
+
+class PodReadyConditionTest(unittest.TestCase):
+    """The watcher's `ready` is the pod's Ready condition. A pod on a node
+    whose kubelet stopped keeps a container status that says ready while the
+    node lifecycle controller sets the pod's Ready condition False and the
+    EndpointSlices drop it: the fleet, the invariants and the floor must all
+    read it as not Ready."""
+
+    REV = "a1b2c3d4"
+
+    def _lost(self):
+        return pod_object("engine-0", "engine", 0, self.REV, "img:1", "v1", ready=False, container_ready=True)
+
+    def test_record_reads_the_condition_and_keeps_the_container_state(self):
+        rec = watcher_record(self._lost())
+        self.assertFalse(rec["ready"])
+        self.assertTrue(rec["ctn_ready"])
+        self.assertTrue(rec["serving"], "the gate the controller wrote is read as it is")
+        live = watcher_record(pod_object("engine-1", "engine", 1, self.REV, "img:1", "v1"))
+        self.assertTrue(live["ready"] and live["ctn_ready"])
+        gated = watcher_record(pod_object("engine-2", "engine", 2, self.REV, "img:1", "v1", ready=False, serving=False,
+                                          container_ready=True))
+        self.assertFalse(gated["ready"], "containers ready behind a closed gate is not Ready")
+        bare = dict(self._lost())
+        bare["status"] = {"containerStatuses": [{"name": run.MAIN_CONTAINER, "ready": True}]}
+        self.assertFalse(watcher_record(bare)["ready"], "no Ready condition reads as not Ready")
+
+    def test_the_fleet_counts_and_the_floor_do_not_count_it(self):
+        pods = {"engine-0": watcher_record(self._lost()),
+                "engine-1": watcher_record(pod_object("engine-1", "engine", 1, self.REV, "img:1", "v1"))}
+        self.assertEqual({"engine": (2, 1, 0)}, run.aggregate(pods, None, {}, {"engine": 1}))
+        self.assertEqual({"engine": 1}, run._serving_instance_counts(pods, {"engine": 1}))
+
+    def test_invariants_b_and_g_do_not_demand_an_endpoint_for_it(self):
+        pods = {"engine-0": watcher_record(self._lost()),
+                "engine-1": watcher_record(pod_object("engine-1", "engine", 1, self.REV, "img:1", "v1"))}
+        inv = run._inv_new("p1", {})
+        ir = [ir_item("p1", "engine", [(0, "Ready", self.REV), (1, "Ready", self.REV)], current=self.REV)]
+        routing = routing_of(routed_service("p1", "engine", self.REV, "uid-engine-1"))
+        observe_ticks(inv, pods, run.INV_SUSTAIN_SETTLE + 1, ir_items=ir, routing=routing)
+        self.assertEqual({}, inv["viol"])
+        self.assertTrue(inv["b_seen"] and inv["g_seen"], "the live pod was judged, the lost one left alone")
+        held = watcher_record(pod_object("engine-0", "engine", 0, self.REV, "img:1", "v1"))
+        pods["engine-0"] = held
+        observe_ticks(inv, pods, run.INV_SUSTAIN_B_MISSING + 1, start=999.0, ir_items=ir, routing=routing)
+        self.assertIn(("B", "missing-endpoint", f"p1-engine-rev-{self.REV}"), inv["viol"],
+                      "a pod whose Ready condition is True must be in rotation")
+
+
+class BreakRegistersItsPodTest(unittest.TestCase):
+    """A break path hands the watcher's invariant state along, so the live
+    pod the break re-points is recorded and invariant F never judges the
+    harness's own image swap against the pod's revision: read per path on a
+    fixed snapshot. A deletion records nothing, and the pod the product
+    builds in its place is judged."""
+
+    OLD = "a1b2c3d4"
+
+    def _ctx(self, hdr):
+        pods = {f"p999-engine-{i}-0": _rec("engine", i, self.OLD) for i in range(2)}
+        return _ctx_for(hdr, pods)
+
+    def test_canary_break_before_push_records_the_pod(self):
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 3, "ceil_d": 0, "ceil_r": 0, "mode": "canary", "canary": "auto",
+               "fault": "crashloop:idle", "form": "start", "victims": 1, "topo": "engine"}
+        for rc, bite, want_ok in ((0, 2.0, True), (1, 2.0, False), (0, None, False)):
+            ctx = self._ctx(hdr)
+            fault = ctx["fault"]
+            self.assertTrue(run._fault_before_push(fault))
+            with mock.patch.object(run, "kubectl", lambda *a, **k: _Resp("", rc, "denied")), \
+                    mock.patch.object(run, "_wait_break_bitten", lambda *a: bite):
+                ok, why = run._break_before_push(ctx, fault)
+            self.assertEqual(want_ok, ok, (rc, bite, why))
+            if rc == 0:
+                self.assertEqual({"engine-1-default-" + self.OLD: "p999-engine-1-0"}, ctx["inv"]["mutated_uids"],
+                                 "the highest Instance's pod was re-pointed and recorded")
+            else:
+                self.assertEqual({}, ctx["inv"]["mutated_uids"], "a patch the apiserver refused changed nothing")
+                self.assertIn("point p999-engine-1-0", why)
+            if bite is None and rc == 0:
+                self.assertIn("did not bite", why)
+            if want_ok:
+                self.assertTrue(any("the push follows" in n for n in fault["notes"]))
+
+    def test_podkill_records_nothing_and_its_replacement_is_judged(self):
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 3, "ceil_d": 0, "ceil_r": 0, "mode": "canary", "canary": "auto",
+               "topo": "engine"}
+        ctx = self._ctx(hdr)
+        ctx.update(victim="stable", victimcomp="engine")
+        calls = []
+        with mock.patch.object(run, "kubectl", lambda *a, **k: calls.append(a) or _Resp('{"items": []}')):
+            run._podkill_verb(ctx)
+        self.assertTrue(any(a[2:4] == ("delete", "pod") for a in calls), calls)
+        self.assertEqual({}, ctx["inv"]["mutated_uids"], "a deletion changes no live pod's spec")
+        inv = ctx["inv"]
+        revisions = {self.OLD: revision_payload("img:1", "")}
+        replacement = pod_object("p999-engine-0-0", "engine", 0, self.OLD, "img:1", "v2")
+        replacement["metadata"]["uid"] = "uid-replacement"
+        pods = {"p999-engine-0-0": watcher_record(replacement)}
+        observe_ticks(inv, pods, run.INV_SUSTAIN_SETTLE + 1, revisions=revisions)
+        key = ("F", "label-template-mismatch", "engine", "p999-engine-0-0")
+        self.assertIn(key, inv["viol"], "the product's replacement under the old label is a product finding")
+        self.assertIn("annotation perm.test/rev: revision '' vs pod 'v2'", inv["viol"][key]["detail"])
 
 
 class EndpointsMembershipInvariantTest(unittest.TestCase):
@@ -3432,6 +3552,16 @@ class PairingVerbTest(unittest.TestCase):
 
 
 class QuotaLiftTest(unittest.TestCase):
+    def test_lift_says_whether_the_quota_is_gone(self):
+        """Every lift path reads the same answer: True once the delete has
+        gone through (a quota that was never there included), False when the
+        apiserver refused it."""
+        for rc, want in ((0, True), (1, False)):
+            calls = []
+            with mock.patch.object(run, "kubectl", lambda *a, **k: calls.append(a) or _Resp("", rc, "boom")):
+                self.assertIs(want, run._lift_quota("p1"), rc)
+            self.assertEqual(("-n", run.NS, "delete", "resourcequota", "perm-p1-quota", "--ignore-not-found=true"), calls[0])
+
     def test_verb_deletes_the_case_quota(self):
         calls = []
 
@@ -3957,8 +4087,10 @@ class CrashloopFaultTest(unittest.TestCase):
         """The sibling family: the decoder breaks as an engine-only bump lands,
         on both PD topologies under every group kind, under every (crash
         form, restart policy) pair a repair is promised for; the engine
-        surges within its own budget and the decoder is a negative control;
-        no cell is parked."""
+        surges within its own budget and the decoder is a negative control.
+        A rollingUpdate group admits no push that leaves a member out, so
+        its cells bump both members and the decoder surges too; no cell is
+        parked."""
         outputs, rows = generate_cases.build_outputs()
         fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-crashloop-sibling"]
         self.assertEqual(30, len(fam))
@@ -3967,9 +4099,19 @@ class CrashloopFaultTest(unittest.TestCase):
         self.assertEqual({("start", "None"), ("start", "RecreateInstance"), ("load", "RecreateInstance")},
                          {(kv["form"], m["rp"]) for _n, kv, m in fam})
         for n, kv, m in fam:
-            self.assertEqual(("crashloop:old", "decoder", "engine"), (kv["fault"], kv["victimcomp"], kv["bump"]))
+            rolling = kv["co"] == "rolling"
+            self.assertEqual(("crashloop:old", "decoder", "engine,decoder" if rolling else "engine"),
+                             (kv["fault"], kv["victimcomp"], kv["bump"]))
             self.assertEqual("decoder", m["victim"])
-            self.assertEqual((kv["Ne"] + 1, kv["Nd"], kv["Nr"]), (kv["ceil_e"], kv["ceil_d"], kv["ceil_r"]))
+            self.assertEqual((kv["Ne"] + 1, kv["Nd"] + (1 if rolling else 0), kv["Nr"]),
+                             (kv["ceil_e"], kv["ceil_d"], kv["ceil_r"]))
+            reason = outputs[f"gen-crashloop-sibling/{n}.yaml"].splitlines()[1]
+            if rolling:
+                self.assertIn("engine and decoder are bumped together", reason)
+                self.assertIn("no RestartTriggered event names it after the bump", reason)
+            else:
+                self.assertIn("the engine is bumped alone", reason)
+                self.assertIn("rebuilt by a repair", reason)
             self.assertNotIn("during", kv)
             self.assertNotIn("expect", kv)
             self.assertNotIn("floor_soft", kv, "the break is on the decoder; the engine keeps its floor")
@@ -6280,6 +6422,57 @@ class PlainRollbackTest(unittest.TestCase):
         self.assertFalse(run._rollback_due(held, stuck, olds, ppi, N, bumped, 100.0 + run.HELD_SETTLE_S),
                          "a Ready new-revision pod means the roll is not held")
 
+    def test_held_hook_on_a_gang_reads_the_pod_condition(self):
+        """A stuck surge gang: the leader never passes readiness, so the
+        serving gate never flips for the gang and its worker, whose container
+        is ready, is not Ready either; the hook is due. A gang whose leader
+        passes readiness is not held."""
+        olds, N, ppi, bumped = {"a"}, {"engine": 2}, {"engine": 2}, {"engine"}
+
+        def gang(idx, rev, *, ready=True):
+            leader = pod_object(f"e{idx}-leader", "engine", idx, rev, "img:1", "v1", runner="leader",
+                                ready=ready, serving=ready)
+            worker = pod_object(f"e{idx}-worker", "engine", idx, rev, "img:1", "v1", runner="worker",
+                                ready=ready, serving=ready, container_ready=True)
+            return {f"e{idx}-leader": watcher_record(leader), f"e{idx}-worker": watcher_record(worker)}
+        pods = {**gang(0, "a"), **gang(1, "a"), **gang(2, "b", ready=False)}
+        self.assertTrue(pods["e2-worker"]["ctn_ready"] and not pods["e2-worker"]["ready"])
+        held = run._rollback_new({"rollback": 1, "during": "held", "break": "stuck"})
+        run._rollback_tick(held, "p999", bumped, pods, olds, ppi, N, 100.0, 1.0)
+        self.assertEqual(100.0, held["first_new_at"])
+        self.assertFalse(held["fired"])
+        self.assertTrue(run._rollback_due(held, pods, olds, ppi, N, bumped, 100.0 + run.HELD_SETTLE_S))
+        pods.update(gang(2, "b"))
+        self.assertFalse(run._rollback_due(held, pods, olds, ppi, N, bumped, 100.0 + run.HELD_SETTLE_S),
+                         "a Ready gang on the new revision means the roll is not held")
+
+    def test_end_state_is_read_from_the_pods_between_events_too(self):
+        """Every Instance Ready and serving on the starting revision and no
+        new-revision pod alive is the end state, read from the pods; a
+        rollback that landed before any pod moved raises no further event,
+        so the idle tick latches it once the rollback has fired."""
+        olds, N, ppi, bumped, conf = {"a"}, {"engine": 4}, {"engine": 1}, {"engine"}, {"engine"}
+        modes = {"engine": "surge"}
+        back = {f"e{i}": self._pod("engine", i, "a") for i in range(4)}
+
+        def settled(pods, modes=modes):
+            return run._rollback_settled_pods(pods, run.aggregate(pods, olds, modes, ppi), N, conf, bumped, olds)
+        self.assertTrue(settled(back))
+        self.assertFalse(settled({**back, "e4": self._pod("engine", 0, "b", ready=False, serving=False)}),
+                         "a new-revision pod alive")
+        self.assertFalse(settled({**back, "e3": self._pod("engine", 3, "a", ready=False)}), "an Instance not Ready")
+        self.assertFalse(settled({**back, "e3": self._pod("engine", 3, "a", newanno=True)}, {"engine": "inplace"}),
+                         "in place, the annotation still new")
+        self.assertFalse(settled({k: v for k, v in back.items() if k != "e3"}), "an Instance short")
+        rb = run._rollback_new({"rollback": 1, "during": "settling"})
+        args = (back, olds, modes, ppi, N, conf, bumped)
+        self.assertIsNone(run._rollback_idle_settle(rb, None, *args, 50.0), "unfired: nothing to settle")
+        rb["fired"] = True
+        self.assertEqual(50.0, run._rollback_idle_settle(rb, None, *args, 50.0))
+        self.assertEqual(40.0, run._rollback_idle_settle(rb, 40.0, *args, 50.0), "latched once")
+        moving = {**back, "e4": self._pod("engine", 0, "b")}
+        self.assertIsNone(run._rollback_idle_settle(rb, None, moving, olds, modes, ppi, N, conf, bumped, 50.0))
+
     def test_fire_replaces_each_member_with_its_snapshot_once(self):
         olds, N, ppi, bumped = {"a"}, {"engine": 4}, {"engine": 1}, {"engine"}
         rb = run._rollback_new({"rollback": 1, "during": "last"})
@@ -8058,9 +8251,55 @@ class HandlerSmokeTest(unittest.TestCase):
         out = self._run(run._tight_roll, ctx, fleet,
                         {"_bump_rev": bump,
                          "_capacity_hold": lambda *a: None if lifted else ("QuotaExceeded", "engine Instance 2: exceeded quota"),
-                         "_lift_quota": lambda cid: lifted.append(1) or _Resp("")})
+                         "_lift_quota": lambda cid: lifted.append(1) or True})
         self.assertEqual(("CONVERGED", "PASS"), (out["state"], out["verdict"]), out["checks"])
         self.assertTrue(any("kept its running gangs" in c for c in out["checks"]))
+
+    def test_tight_roll_reads_the_lift_as_an_answer(self):
+        """The lift path consumes the lift's yes-or-no: a refused lift is an
+        apparatus failure recorded on the fault, a lift that went through
+        starts the watch for the roll to complete. The real lift runs over a
+        stubbed kubectl, so the contract between the two is what is tested."""
+        for rc, want_fail in ((1, True), (0, False)):
+            hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 3, "ceil_d": 0, "ceil_r": 0, "fault": "quota:1",
+                   "lift": "after-hold", "topo": "engine-mn"}
+            pods = {}
+            for i in (0, 1):
+                pods[f"p999-engine-{i}-0"] = _rec("engine", i, "old", runner="leader")
+                pods[f"p999-engine-{i}-1"] = _rec("engine", i, "old", runner="worker")
+            ctx = _ctx_for(hdr, pods, workers=1)
+            deletes = []
+
+            def kubectl(*a, **k):
+                if "resourcequota" in a:
+                    deletes.append(a)
+                    return _Resp("", rc, "forbidden" if rc else "")
+                return _Resp('{"items": []}')
+
+            def script(ctx_, n):
+                ps = ctx_["pod_state"]
+                if ctx_.get("trigger_ts") and "p999-engine-2-0" not in ps:
+                    ps["p999-engine-2-0"] = _rec("engine", 2, "new", runner="leader", ready=False)
+                if deletes and rc == 0:
+                    for i in (0, 1):
+                        ps[f"p999-engine-{i}-0"] = _rec("engine", i, "new", runner="leader", created="9")
+                        ps[f"p999-engine-{i}-1"] = _rec("engine", i, "new", runner="worker", created="9")
+                    ps.pop("p999-engine-2-0", None)
+            fleet = _FakeFleet(ctx, script)
+
+            def bump(ctx_, bumped):
+                ctx_["trigger_ts"] = time.time()
+                return True
+            out = self._run(run._tight_roll, ctx, fleet,
+                            {"_bump_rev": bump, "kubectl": kubectl,
+                             "_capacity_hold": lambda *a: None if deletes else ("QuotaExceeded", "engine Instance 2: exceeded quota")})
+            self.assertEqual(1, len(deletes), rc)
+            if want_fail:
+                self.assertEqual("quota: the squeeze could not be lifted", ctx["fault"]["infra_fail"])
+                self.assertNotEqual("CONVERGED", out["state"])
+            else:
+                self.assertIsNone(ctx["fault"]["infra_fail"])
+                self.assertEqual("CONVERGED", out["state"], out["checks"])
 
     def test_tight_roll_never_judges_the_wait(self):
         hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 3, "ceil_d": 0, "ceil_r": 0, "fault": "cordon:all",
@@ -8080,6 +8319,58 @@ class HandlerSmokeTest(unittest.TestCase):
                          "_capacity_hold": lambda *a: ("Unschedulable", "engine Instance 2: 0/2 nodes are available: 2 node(s) were unschedulable")})
         self.assertEqual(("HELD", "PASS"), (out["state"], out["verdict"]), out["checks"])
         self.assertTrue(any("still reported at the end" in c for c in out["checks"]))
+
+
+    def _break_kubectl(self, patched):
+        def kubectl(*a, **k):
+            if a[2:4] == ("patch", "pod"):
+                patched.append(a[4])
+            return _Resp('{"items": []}')
+        return kubectl
+
+    def test_pause_repair_break_records_the_pod(self):
+        """The break on the settled service re-points the highest Instance's
+        pod; the handler hands the invariant state along, so that pod's UID
+        is recorded before the pause lands."""
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 2, "ceil_d": 0, "ceil_r": 0, "fault": "crashloop:old",
+               "form": "start", "during": "idle", "expect": "repaired", "victimcomp": "engine",
+               "pause": "true", "pauseat": "after", "topo": "engine"}
+        pods = {f"p999-engine-{i}-0": _rec("engine", i, "old") for i in range(2)}
+        ctx = _ctx_for(hdr, pods)
+        patched, seen = [], {}
+
+        def script(ctx_, n):
+            if patched and "p999-engine-1-0" not in seen:
+                seen["p999-engine-1-0"] = dict(ctx_["inv"]["mutated_uids"])
+                ctx_["pod_state"]["p999-engine-1-0"] = _rec("engine", 1, "old", uid="rebuilt-1", created="9")
+        fleet = _FakeFleet(ctx, script)
+        out = self._run(run._pause_repair, ctx, fleet,
+                        {"kubectl": self._break_kubectl(patched), "_pause_annotation": lambda *a, **k: None,
+                         "_ir_row_phase": lambda *a: "Ready", "_victim_events": lambda *a: ([], []),
+                         "_victim_repairs": lambda *a: [], "_fetch_initial_ir_items": lambda *a: [],
+                         "_isvc_pause_value": lambda *a: ""})
+        self.assertEqual(["p999-engine-1-0"], patched)
+        self.assertEqual({"engine-1-default-old": "p999-engine-1-0"}, seen["p999-engine-1-0"],
+                         "recorded as soon as the break landed")
+        self.assertEqual({"engine-1-default-old": "p999-engine-1-0"}, ctx["inv"]["mutated_uids"],
+                         "the rebuilt pod (a new UID) is not recorded: it is judged")
+        self.assertEqual("CONVERGED", out["state"], out["checks"])
+
+    def test_runtime_edit_repair_break_records_the_pod(self):
+        """The break that precedes a runtime edit re-points the highest
+        Instance's pod and records it; a repair that never opens ends the
+        case, the record stays."""
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 3, "ceil_d": 0, "ceil_r": 0, "mode": "runtimerev",
+               "rt": "ome-coordtest-rt-p999", "expect": "roll", "edit": "env", "fault": "crashloop:old",
+               "form": "start", "during": "repair", "topo": "engine"}
+        pods = {f"p999-engine-{i}-0": _rec("engine", i, "old") for i in range(2)}
+        ctx = _ctx_for(hdr, pods)
+        patched = []
+        out = self._run(lambda *a: run._runtimerev_repair(*a, "ome-coordtest-rt-p999"), ctx, _FakeFleet(ctx),
+                        {"kubectl": self._break_kubectl(patched), "_ir_row_phase": lambda *a: ""})
+        self.assertEqual(["p999-engine-1-0"], patched)
+        self.assertEqual({"engine-1-default-old": "p999-engine-1-0"}, ctx["inv"]["mutated_uids"])
+        self.assertEqual("NO_REPAIR", out["state"], out["checks"])
 
 
 class GeneratedFaultFamiliesTest(unittest.TestCase):

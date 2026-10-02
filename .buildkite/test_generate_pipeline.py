@@ -1811,7 +1811,7 @@ class TestPipelineUploads(PipelineTestCase):
     def test_todays_corpus_uploads_within_the_limit_and_the_total_is_pinned(self):
         self.assert_uploads_are_well_formed(self.batches, self.children)
         self.assertGreater(len(self.batches), 2)
-        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 1619)
+        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 1618)
 
     def test_a_corpus_three_times_larger_still_uploads_within_the_limit(self):
         tripled = [

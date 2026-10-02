@@ -32,7 +32,11 @@ runners (run.py + the KIND CI lane) already implement:
                           engine-only bump lands (bump=engine, victimcomp=
                           decoder), crossed with the PD topologies x group
                           kind x crash form x restartPolicy; the engine roll
-                          converges and the decoder is repaired
+                          converges and the decoder is repaired. A
+                          rollingUpdate group admits no push that leaves a
+                          member out, so under co=rolling the bump names
+                          engine and decoder and the roll owns the broken
+                          Instance
     gen-heal/      p3000+  a cause that disappears: the engine runner's
                           ConfigMap key is removed on the idle service and
                           put back at lift=after-settle|after-failed
@@ -1615,6 +1619,13 @@ def _idle_reason(form, victim, co):
 
 
 def _sibling_reason(form, co):
+    if co == "rolling":
+        return (f"the rollingUpdate group lists both Components and admits no push that names one without the "
+                f"other, so engine and decoder are bumped together and, as the bump lands, "
+                f"{_break_how(form, 'decoder')}; both rolls converge within their budgets with every Instance on "
+                f"the new revision, and the decoder's broken Instance is the roll's to land, not a repair's: it "
+                f"ends on the new revision serving and no RestartTriggered event names it after the bump, while "
+                f"the group's gate paces the two members as one run")
     out = (f"the engine is bumped alone and, as the bump lands, {_break_how(form, 'decoder')}; the engine "
            f"roll converges within its budget with every engine Instance on the new revision, while the "
            f"decoder, which nothing bumped, keeps N with nothing rotated and its broken Instance is rebuilt "
@@ -1662,9 +1673,15 @@ def emit_crashloop_sibling(add):
                 for form in CRASH_FORMS:
                     if (form, rp) in UNPROMISED_REPAIR:
                         continue   # constraint ledger: no repair is promised there
+                    # A rollingUpdate group's lockstep rule denies a push that
+                    # names one member: the bump then carries both, and the
+                    # decoder rolls under its own surge beside the engine.
+                    bump = "engine,decoder" if co == "rolling" else "engine"
                     kv = dict(**counts(topo, n), **ceilings(topo, n, "SurgeThenDrain", 1),
                               fault="crashloop:old", co=co, topo=topo, form=form,
-                              victimcomp="decoder", bump="engine")
+                              victimcomp="decoder", bump=bump)
+                    if co == "rolling":
+                        kv["ceil_d"] = n + 1
                     if co == "canary":
                         kv["canary"] = "auto"
                     meta = dict(strat="SurgeThenDrain", verb=f"crashloop:{form}@sibling", rp=rp, victim="decoder")
@@ -5337,6 +5354,12 @@ def manifest(rows):
         "- The sibling family rolls the engine under the default strategy at its"
         " canonical budget: the sibling's break is independent of how the"
         " engine's own pods are replaced.",
+        "- A rollingUpdate group admits no push that names one member without"
+        " the other, so the sibling family's `co=rolling` cells bump engine and"
+        " decoder together (`bump=engine,decoder`, the decoder's ceiling N+1 for"
+        " its own surge) and the decoder's broken Instance is judged as the"
+        " roll's: it ends on the new revision serving with no repair recorded"
+        " after the bump.",
         "- Every cell of both families runs live and asserts the repair"
         " (`expect=repaired`; the engine converges and the decoder is repaired):"
         " an Instance that serves nothing is rebuilt without touching its"

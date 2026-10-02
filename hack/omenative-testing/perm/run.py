@@ -567,7 +567,8 @@ def aggregate(state, old_hashes, modes, pods_per_inst, measures=None):
     worker.size 'worker' pods (multi-node); pods_per_inst[comp] is that expected
     per-Instance pod count. An Instance is:
       * alive   → it has >=1 pod (a surge adds a whole new Instance index);
-      * ready   → it has its full pod set AND every pod is Ready;
+      * ready   → it has its full pod set AND every pod's Ready condition is
+                  True (containers ready and the serving gate folded in);
       * updated → every pod moved to the new generation, per update mode:
           - surge   → pod's revision-hash is NOT in old_hashes (a new pod)
           - inplace → pod carries the new perm.test/rev annotation (same pod)
@@ -633,8 +634,10 @@ def aggregate(state, old_hashes, modes, pods_per_inst, measures=None):
 
 def _dump_index_breakdown(ctx, comp, checks):
     """On a collision / shared-index failure, print the settle-snapshot pod
-    layout for `comp` (per instance-index: runner:rev:aliveReady) so the log
-    proves whether a gang truly settled short (missing/old pod) vs a transient."""
+    layout for `comp` (per instance-index: runner:rev:aliveReady, where R is
+    the pod's Ready condition, c a main container the kubelet reports ready
+    while the pod is not) so the log proves whether a gang truly settled
+    short (missing/old pod) vs a transient."""
     old = ctx.get("old_hashes") or set()
     by = defaultdict(list)
     for p in (ctx.get("pod_state") or {}).values():
@@ -643,7 +646,8 @@ def _dump_index_breakdown(ctx, comp, checks):
     checks.append(f"    · {comp} settle-snapshot per instance-index:")
     for idx in sorted(by, key=lambda x: str(x)):
         parts = [f"{p.get('runner','?')}:{'new' if (p.get('hash') and p['hash'] not in old) else 'old'}:"
-                 f"{'A' if p.get('alive') else 'x'}{'R' if p.get('ready') else '-'}" for p in by[idx]]
+                 f"{'A' if p.get('alive') else 'x'}"
+                 f"{'R' if p.get('ready') else ('c' if p.get('ctn_ready') else '-')}" for p in by[idx]]
         checks.append(f"      idx {idx}: {' '.join(parts)}")
 
 
@@ -948,6 +952,25 @@ def _pod_serving(obj):
         if c.get("type") == SERVING_COND:
             return c.get("status") == "True"
     return False
+
+
+def _pod_ready(obj):
+    """True when the pod's Ready condition is True: the kubelet's verdict over
+    the containers and every readiness gate, which the node lifecycle
+    controller revokes once the node is lost. EndpointSlices and the
+    controller's serving view follow this condition, so the watcher's
+    `ready` reads it; a container status alone freezes with a dead kubelet."""
+    for c in (obj.get("status", {}).get("conditions") or []):
+        if c.get("type") == "Ready":
+            return c.get("status") == "True"
+    return False
+
+
+def _main_container_ready(obj):
+    """True when the kubelet reports the main container ready. Diagnostics
+    only: it is what the kubelet last wrote, Ready or not."""
+    return any(cs.get("name") == MAIN_CONTAINER and bool(cs.get("ready"))
+               for cs in (obj.get("status", {}).get("containerStatuses") or []))
 
 
 def _pod_placement(obj, labels):
@@ -1559,8 +1582,10 @@ def _inv_check_ready_serving(inv, pod_state, pods_per_inst, ir_items, routing, h
     set the watcher sees Ready, has at least one pod in rotation — the serving
     gate True and a Ready endpoint of a routed Service that selects it. The
     endpoint half is asserted only once a routed Service is visible; the
-    gate half always. An Instance whose pod set is incomplete or not all
-    Ready is some other invariant's business."""
+    gate half always, though a pod rendered with the serving readiness gate
+    cannot be Ready without it, so that half guards pods rendered without
+    the gate. An Instance whose pod set is incomplete or not all Ready is
+    some other invariant's business."""
     if ir_items is None:
         return
     in_rotation = _rotation_uids(routing, pod_state)
@@ -3104,6 +3129,9 @@ def _rollback_due(rb, pod_state, old_hashes, pods_per_inst, N, bumped, now):
     if hook == "held":
         if not rb["stuck"] or rb["first_new_at"] is None or now - rb["first_new_at"] < HELD_SETTLE_S:
             return False
+        # Ready is the pod's Ready condition: a gang whose leader never passes
+        # readiness never gets its serving gate, so its workers are not Ready
+        # either and the whole gang reads as held.
         return not any(p and p["alive"] and p.get("ready") and _pod_on_new(p, old_hashes)
                        for p in pod_state.values())
     return False
@@ -3144,6 +3172,35 @@ def _rollback_tick(rb, case_id, bumped, pod_state, old_hashes, pods_per_inst, N,
     if rb["fired"] or not _rollback_due(rb, pod_state, old_hashes, pods_per_inst, N, bumped, now):
         return
     _rollback_fire(rb, case_id, bumped, pod_state, old_hashes, pods_per_inst, now_rel)
+
+
+def _rollback_settled_pods(pod_state, agg, N, configured, bumped, old_hashes):
+    """The operator's end state after a rollback as the pods show it: every
+    configured Component at N alive and N Ready (the pod's Ready condition,
+    serving gate included), and on the bumped members nothing counted as
+    updated and no alive pod carrying the new revision."""
+    for c in configured:
+        a, rd, up = agg.get(c, (0, 0, 0))
+        if a != N[c] or rd != N[c]:
+            return False
+        if c in bumped and (up != 0 or any(p and p["alive"] and p["comp"] == c and _pod_on_new(p, old_hashes)
+                                            for p in pod_state.values())):
+            return False
+    return True
+
+
+def _rollback_idle_settle(rb, stable_since, pod_state, old_hashes, modes, pods_per_inst, N, configured, bumped, now):
+    """Between pod events, once the rollback has fired: the moment the fleet
+    reads back on the starting revision, latched once. A rollback that lands
+    before any pod moved raises no further pod event, so the end state is
+    read here as well as on events."""
+    if not rb or not rb["fired"] or stable_since is not None:
+        return stable_since
+    agg = aggregate(pod_state, old_hashes, modes, pods_per_inst)
+    if not _rollback_settled_pods(pod_state, agg, N, configured, bumped, old_hashes):
+        return None
+    print(f"  → every Instance back on the starting revision; waiting {STABILITY_S}s for stability")
+    return now
 
 
 def _revision_hash(name):
@@ -3732,11 +3789,13 @@ def _run_fault_cleanups():
 
 
 def _lift_quota(case_id):
-    """Remove the case's fault ResourceQuota. Idempotent — callable mid-case
-    (a case that lifts the quota to let a blocked surge proceed) and again
-    from the end-of-case cleanup."""
-    kubectl("-n", NS, "delete", "resourcequota", f"perm-{case_id}-quota",
-            "--ignore-not-found=true")
+    """Remove the case's fault ResourceQuota; True once it is gone (a quota
+    that was never there counts). Idempotent — callable mid-case (a case
+    that lifts the quota to let a blocked surge proceed) and again from the
+    end-of-case cleanup."""
+    r = kubectl("-n", NS, "delete", "resourcequota", f"perm-{case_id}-quota",
+                "--ignore-not-found=true")
+    return r.returncode == 0
 
 
 CHURN_SETTLE_S = 20.0   # blocked=1 probe: two pod snapshots this far apart must match
@@ -3870,6 +3929,24 @@ def _fault_before_push(f):
     its metrics already breach or the gate's source is already unusable when
     the push lands, and no phase hook fires it."""
     return bool(f) and f.get("kind") in BREAK_FAULTS | GATE_FAULTS and f.get("param") == IDLE_FAULT_PHASE
+
+
+def _break_before_push(ctx, fault):
+    """Fire a fault that lands on the idle service before the push: the
+    stable side breaks, its metrics breach or the gate's source goes, and a
+    break must have visibly bitten before the push follows (a breach and a
+    lost source show once the gate samples). A pod the break changes is
+    recorded on the watcher's invariant state. (True, "") or (False, why)."""
+    _fault_fire(fault, ctx["pod_state"], ctx["pods_per_inst"], ctx["old_hashes"], inv=ctx.get("inv"))
+    if fault["infra_fail"]:
+        return False, fault["infra_fail"]
+    if fault["kind"] in BREAK_FAULTS:
+        bitten = _wait_break_bitten(ctx, fault, BREAK_BITE_S)
+        if bitten is None:
+            return False, f"{fault['kind']}: the break on the idle service did not bite within {BREAK_BITE_S}s"
+        fault["notes"].append(f"the break had bitten {bitten:.0f}s after it landed; the push follows")
+        print(f"    {fault['notes'][-1]}")
+    return True, ""
 
 
 def _metric_on_new(f):
@@ -8511,7 +8588,7 @@ def _tight_roll(case_id, yaml_file, desc, hdr):
             state = "HELD" if kept else "RELEASED"
         else:
             print("  Phase 5: lift — the squeeze is removed")
-            ok = _lift_quota(case_id).returncode == 0 if f["kind"] == "quota" else _lift_cordon(f)
+            ok = _lift_quota(case_id) if f["kind"] == "quota" else _lift_cordon(f)
             if not ok:
                 f["infra_fail"] = f"{f['kind']}: the squeeze could not be lifted"
             else:
@@ -11174,8 +11251,7 @@ def _apply_event(ctx, ev):
     name = meta.get("name", "?")
     labels = meta.get("labels", {}) or {}
     annos = meta.get("annotations", {}) or {}
-    cstats = obj.get("status", {}).get("containerStatuses") or []
-    ready = any(cs.get("name") == MAIN_CONTAINER and cs.get("ready") for cs in cstats)
+    ready = _pod_ready(obj)
     comp = labels.get("component", "?")
     rev = labels.get(REV_LABEL, "")
     deletion = meta.get("deletionTimestamp")
@@ -11210,7 +11286,7 @@ def _apply_event(ctx, ev):
             "runner": labels.get("ome.io/runner", "default"),
             "ord": labels.get("ome.io/pod-ordinal", "0"),
             "alive": deletion is None,
-            "ready": ready, "hash": rev,
+            "ready": ready, "ctn_ready": _main_container_ready(obj), "hash": rev,
             "pairing": labels.get(PAIRING_LABEL, ""),
             "serving": _pod_serving(obj),
             "uid": meta.get("uid", ""),
@@ -11508,7 +11584,7 @@ def _setup_and_ready(case_id, yaml_file, hdr):
                 ctx["pod_state"], ctx["pods_per_inst"], N, configured, ir_items or [])
             if not settled:
                 if wait != last_wait:
-                    print(f"  … Pods are container-ready; waiting for settled serving state ({wait})")
+                    print(f"  … Pods are Ready; waiting for the controller's settled state ({wait})")
                     last_wait = wait
                 continue
             alive = [p for p in ctx["pod_state"].values() if p and p["alive"]]
@@ -16293,21 +16369,10 @@ def _canary(case_id, yaml_file, desc, hdr):
             return _write_fail(case_id, desc, hdr, "INFRA-FAIL", f"{SOURCE_FAULT}: {err}")
         gate_fault["source_address"] = address
     if _fault_before_push(fault):
-        # The stable side breaks, its metrics breach or the gate's source goes
-        # on the idle service; the push lands only once a break has visibly
-        # bitten (a breach and a lost source show once the gate samples).
-        _fault_fire(fault, ctx["pod_state"], ctx["pods_per_inst"], ctx["old_hashes"], inv=ctx.get("inv"))
-        if fault["infra_fail"]:
+        ok, why = _break_before_push(ctx, fault)
+        if not ok:
             _stop_watcher(ctx)
-            return _write_fail(case_id, desc, hdr, "INFRA-FAIL", fault["infra_fail"])
-        if fault["kind"] in BREAK_FAULTS:
-            bitten = _wait_break_bitten(ctx, fault, BREAK_BITE_S)
-            if bitten is None:
-                _stop_watcher(ctx)
-                return _write_fail(case_id, desc, hdr, "INFRA-FAIL",
-                                   f"{fault['kind']}: the break on the idle service did not bite within {BREAK_BITE_S}s")
-            fault["notes"].append(f"the break had bitten {bitten:.0f}s after it landed; the push follows")
-            print(f"    {fault['notes'][-1]}")
+            return _write_fail(case_id, desc, hdr, "INFRA-FAIL", why)
     # A plan edit left on the idle service is the plan the next run pins.
     nsteps = (len(cinfo.get("steps") or []) or 2) + (1 if prearm == "planedit" else 0)
     # Bump EVERY configured member of the canary group, not just the primary — a
@@ -17305,7 +17370,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                         pod_state, pods_per_inst, N, configured, ir_items or [])
                     if not settled:
                         if wait != initial_wait:
-                            print(f"  … Pods are container-ready; waiting for settled serving state ({wait})")
+                            print(f"  … Pods are Ready; waiting for the controller's settled state ({wait})")
                             initial_wait = wait
                     else:
                         print(f"  ✓ Initial fleet settled after {int(now - init_started)}s")
@@ -17358,8 +17423,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
             meta = obj.get("metadata", {})
             name = meta.get("name", "?")
             labels = meta.get("labels", {}) or {}
-            cstats = obj.get("status", {}).get("containerStatuses") or []
-            ready = any(cs.get("name") == MAIN_CONTAINER and cs.get("ready") for cs in cstats)
+            ready = _pod_ready(obj)
             if ev_type == "DELETED":
                 if meta.get("uid"):
                     inv["dead_uids"].add(meta["uid"])   # stale-endpoint invariant
@@ -17370,7 +17434,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                                    "runner": labels.get("ome.io/runner", "default"),
                                    "ord": labels.get("ome.io/pod-ordinal", "0"),
                                    "alive": meta.get("deletionTimestamp") is None,
-                                   "ready": ready, "hash": labels.get(REV_LABEL, ""),
+                                   "ready": ready, "ctn_ready": _main_container_ready(obj),
+                                   "hash": labels.get(REV_LABEL, ""),
                                    "pairing": labels.get(PAIRING_LABEL, ""),
                                    "uid": meta.get("uid", ""), "newanno": False,
                                    "serving": _pod_serving(obj),
@@ -17820,7 +17885,7 @@ def run_case(case_id):
                         pod_state, pods_per_inst, N, configured, ir_items or [])
                     if not settled:
                         if wait != initial_wait:
-                            print(f"  … Pods are container-ready; waiting for settled serving state ({wait})")
+                            print(f"  … Pods are Ready; waiting for the controller's settled state ({wait})")
                             initial_wait = wait
                     else:
                         print(f"\n  ✓ Initial fleet settled after {int(now - init_started)}s")
@@ -17887,6 +17952,8 @@ def run_case(case_id):
                     _rollback_tick(rb, case_id, bumped, pod_state, old_hashes, pods_per_inst, N, now, now - trigger_ts)
                     if rb["fired"]:
                         progressed = True
+                        stable_since = _rollback_idle_settle(rb, stable_since, pod_state, old_hashes, modes,
+                                                             pods_per_inst, N, configured, bumped, now)
                     elif new_done_since is not None and now - new_done_since >= STABILITY_S:
                         state = "HOOK_MISSED"
                         print(f"  ✗ the roll completed on the new revision before the {rb['hook']} hook was reached")
@@ -17937,12 +18004,7 @@ def run_case(case_id):
             uid = meta.get("uid", "")
             newanno = annos.get(TRIGGER_ANNO) == TRIGGER_VAL
             deletion = meta.get("deletionTimestamp")
-            cstats = obj.get("status", {}).get("containerStatuses") or []
-            ready = False
-            for cs in cstats:
-                if cs.get("name") == MAIN_CONTAINER:
-                    ready = bool(cs.get("ready"))
-                    break
+            ready = _pod_ready(obj)
 
             # Surge-before-drain ordering (SurgeThenDrain): a source pod must not
             # begin draining before its replacement is Ready. Classify by revision
@@ -17975,7 +18037,8 @@ def run_case(case_id):
                                    "runner": labels.get("ome.io/runner", "default"),
                                    "ord": labels.get("ome.io/pod-ordinal", "0"),
                                    "alive": deletion is None,
-                                   "ready": ready, "hash": rev, "uid": uid, "newanno": newanno,
+                                   "ready": ready, "ctn_ready": _main_container_ready(obj),
+                                   "hash": rev, "uid": uid, "newanno": newanno,
                                    "pairing": labels.get(PAIRING_LABEL, ""),
                                    "serving": _pod_serving(obj),
                                    "created": meta.get("creationTimestamp", ""),
@@ -18112,15 +18175,12 @@ def run_case(case_id):
                     a, rd, up = agg.get(c, (0, 0, 0))
                     if a != N[c] or rd != N[c]:
                         return False
-                    if c in bumped and rb:
-                        # Back on the starting revision: nothing counts as
-                        # updated and no alive pod carries the new revision.
-                        return up == 0 and not any(p and p["alive"] and p["comp"] == c and _pod_on_new(p, old_hashes)
-                                                   for p in pod_state.values())
-                    if c in bumped:
-                        return up == N[c]
-                    return True
-                target = all(comp_ok(c) for c in configured) and (not rb or rb["fired"])
+                    return up == N[c] if c in bumped else True
+                if rb:
+                    # Back on the starting revision once the rollback has fired.
+                    target = rb["fired"] and _rollback_settled_pods(pod_state, agg, N, configured, bumped, old_hashes)
+                else:
+                    target = all(comp_ok(c) for c in configured)
                 if target:
                     if stable_since is None:
                         stable_since = now
