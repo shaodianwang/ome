@@ -2605,3 +2605,234 @@ func TestReconcile_GangWithCrashLoopingWorker_RollsInPlanOrder(t *testing.T) {
 		})
 	}
 }
+
+// The faults that wedge a running pod so the crash-loop repair opens on
+// it once the stuck-pod grace has elapsed, under every restart policy.
+var openRepairFaults = []struct {
+	name  string
+	image string
+}{
+	{"crash at start", crashStartImage},
+	{"image cannot be pulled", badImage},
+}
+
+// scaleBesideRepairHarness is four single-pod Instances settled on v1
+// under restart policy None, with the kubelet termination model on: a
+// deleted pod stays Terminating for longer than a pass, so an operation
+// that lands right after a repair opens finds the old pod still there
+// and the rebuilt one not yet created, the window a scale in the field
+// lands in when the operator acts on a row that reads Restarting.
+func scaleBesideRepairHarness(t *testing.T) *recoveryHarness {
+	t.Helper()
+	h := newRecoveryHarness(t, false)
+	h.atomicStatus = true
+	h.recorder = record.NewFakeRecorder(64)
+	h.replicas = 4
+	none := workloadtypes.RestartPolicyNone
+	h.lifecycle.RestartPolicy = &none
+	h.podGrace = 3 * recoveryStepFloor
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(40, func() bool { return h.settledOn(h.revV1, 4) }) {
+		h.dumpState("initial create")
+		t.Fatalf("four instances never settled on v1")
+	}
+	return h
+}
+
+// openRepairOn wedges the Instance at idx with image and runs until its
+// repair is open: the row reads Restarting and its old pod is deleted,
+// held Terminating by the termination model. Returns the Instance's
+// incarnation before the repair.
+func openRepairOn(t *testing.T, h *recoveryHarness, idx int32, image string) int64 {
+	t.Helper()
+	before := h.instance(idx).Incarnation
+	h.crashPod(idx, "", image)
+	h.events = nil
+	if !h.run(10, h.repairInFlight) {
+		h.dumpState("waiting for the repair")
+		t.Fatalf("no repair opened on instance %d within the stuck-pod grace", idx)
+	}
+	if n := len(h.podsOf(idx)); n != 0 {
+		h.dumpState("repair opened")
+		t.Fatalf("instance %d still has %d live pod(s) after its repair opened; want the old pod Terminating", idx, n)
+	}
+	if n := len(podObjectsOf(h, idx)); n != 1 {
+		h.dumpState("repair opened")
+		t.Fatalf("instance %d has %d pod object(s) after its repair opened; want the old pod held Terminating", idx, n)
+	}
+	return before
+}
+
+// podObjectsOf is every pod object of the Instance at idx, Terminating
+// ones included.
+func podObjectsOf(h *recoveryHarness, idx int32) []*corev1.Pod {
+	h.t.Helper()
+	pods := &corev1.PodList{}
+	if err := h.c.List(h.ctx, pods, client.InNamespace(recoveryNS)); err != nil {
+		h.t.Fatalf("list pods: %v", err)
+	}
+	var out []*corev1.Pod
+	for i := range pods.Items {
+		if got, ok := query.InstanceIdxFromLabels(&pods.Items[i]); ok && got == idx {
+			out = append(out, &pods.Items[i])
+		}
+	}
+	return out
+}
+
+// observedIndices is the sorted set of indices any row or any pod object
+// of the Component carries.
+func observedIndices(h *recoveryHarness) []int32 {
+	h.t.Helper()
+	seen := map[int32]struct{}{}
+	for _, row := range h.irStatuses() {
+		seen[row.Index] = struct{}{}
+	}
+	pods := &corev1.PodList{}
+	if err := h.c.List(h.ctx, pods, client.InNamespace(recoveryNS)); err != nil {
+		h.t.Fatalf("list pods: %v", err)
+	}
+	for i := range pods.Items {
+		if idx, ok := query.InstanceIdxFromLabels(&pods.Items[i]); ok {
+			seen[idx] = struct{}{}
+		}
+	}
+	out := make([]int32, 0, len(seen))
+	for idx := range seen {
+		out = append(out, idx)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+func indicesString(indices []int32) string {
+	parts := make([]string, 0, len(indices))
+	for _, idx := range indices {
+		parts = append(parts, fmt.Sprint(idx))
+	}
+	return "[" + strings.Join(parts, " ") + "]"
+}
+
+// requireIdentitiesKept fails when any of the Instances changed pods or
+// incarnation since before was recorded.
+func requireIdentitiesKept(t *testing.T, h *recoveryHarness, before map[int32]string, label string) {
+	t.Helper()
+	for idx, want := range before {
+		if got := h.instanceIdentity(idx); got != want {
+			h.dumpState(label)
+			t.Fatalf("instance %d should have kept its pods across the %s:\n got %q\nwant %q", idx, label, got, want)
+		}
+	}
+}
+
+// A scale-up that lands while a repair is open adds exactly one Instance.
+//
+// Four single-pod Instances under restart policy None. The pod of
+// Instance 2 is wedged on the running revision; once it has sat in its
+// terminal waiting state past the stuck-pod grace the repair opens: the
+// row reads Restarting and the old pod is deleted. In that window, the old
+// pod still Terminating and the rebuilt one not yet created, the operator
+// scales from four to five. The repair keeps index 2 and rebuilds it under
+// its own index once the name clears; the create pass adds index 4 and no
+// other; the healthy Instances keep their pods; the Component settles with
+// five Instances Ready on v1 and a RestartTriggered event names Instance 2.
+// No index above 4 exists at any point.
+//
+// Cells: instance/Restart/Drain/spec.replicasUp/before
+func TestScaleUp_BesideAnOpenRepair_AddsExactlyOneInstance(t *testing.T) {
+	const broken = int32(2)
+	for _, fault := range openRepairFaults {
+		t.Run(fault.name, func(t *testing.T) {
+			h := scaleBesideRepairHarness(t)
+			incarnationBefore := openRepairOn(t, h, broken, fault.image)
+			healthy := map[int32]string{}
+			for _, idx := range []int32{0, 1, 3} {
+				healthy[idx] = h.instanceIdentity(idx)
+			}
+
+			h.replicas = 5
+			h.setTarget(h.revV1, goodImage)
+			withinFive := func() {
+				indices := observedIndices(h)
+				if len(indices) > 0 && indices[len(indices)-1] > 4 {
+					h.dumpState("scale-up beside the repair")
+					t.Fatalf("an index above 4 exists: the scale-up minted a second new Instance beside the repair; indices %s", indicesString(indices))
+				}
+				if n := len(h.irStatuses()); n > 5 {
+					h.dumpState("scale-up beside the repair")
+					t.Fatalf("%d rows for a Component of five", n)
+				}
+			}
+			if !h.runWithInvariant(40, func() bool { return h.settledOn(h.revV1, 5) }, withinFive) {
+				h.dumpState("scale-up beside the repair")
+				t.Fatalf("the component never settled with five instances on v1")
+			}
+
+			if got := observedIndices(h); indicesString(got) != "[0 1 2 3 4]" {
+				t.Fatalf("indices after the scale-up = %s, want [0 1 2 3 4]: one new Instance beside the rebuilt one", indicesString(got))
+			}
+			requireIdentitiesKept(t, h, healthy, "scale-up beside the repair")
+			if row := h.instance(broken); row.Incarnation != incarnationBefore+1 {
+				t.Fatalf("instance %d incarnation = %d, want %d: rebuilt exactly once under its own index", broken, row.Incarnation, incarnationBefore+1)
+			}
+			if !h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+				t.Fatalf("no RestartTriggered event names the rebuilt Instance: %v", h.events)
+			}
+		})
+	}
+}
+
+// A scale-down that lands while a repair is open removes the broken
+// Instance first.
+//
+// The same opening: Instance 2's repair is open, its old pod Terminating.
+// The operator scales from four to two. The plan keeps the two lowest
+// Instances in rotation, 0 and 1; the broken Instance 2 and the highest
+// healthy one, 3, leave, the delete wave taking the broken row over from
+// its repair. The survivors keep their pods, nothing is rebuilt, and each
+// removed row is gone by the end of the pass that finds its pods gone.
+// The Component settles with two Instances Ready on v1.
+//
+// Cells: instance/Restart/Drain/spec.replicasDown/before
+func TestScaleDown_BesideAnOpenRepair_RemovesTheBrokenInstanceFirst(t *testing.T) {
+	const broken = int32(2)
+	for _, fault := range openRepairFaults {
+		t.Run(fault.name, func(t *testing.T) {
+			h := scaleBesideRepairHarness(t)
+			openRepairOn(t, h, broken, fault.image)
+			kept := map[int32]string{0: h.instanceIdentity(0), 1: h.instanceIdentity(1)}
+
+			h.replicas = 2
+			h.setTarget(h.revV1, goodImage)
+			podsGoneBeforePass := map[int32]bool{}
+			rowsFollowPods := func() {
+				for _, idx := range []int32{broken, 3} {
+					if podsGoneBeforePass[idx] && h.instance(idx) != nil {
+						h.dumpState("scale-down beside the repair")
+						t.Fatalf("instance %d has no pod left yet its row survived the pass that found them gone: %+v", idx, h.instance(idx))
+					}
+					podsGoneBeforePass[idx] = len(podObjectsOf(h, idx)) == 0
+				}
+				if len(h.irStatuses()) > 4 {
+					h.dumpState("scale-down beside the repair")
+					t.Fatalf("a scale-down created a row")
+				}
+			}
+			if !h.runWithInvariant(40, func() bool { return h.settledOn(h.revV1, 2) }, rowsFollowPods) {
+				h.dumpState("scale-down beside the repair")
+				t.Fatalf("the component never settled with two instances on v1")
+			}
+
+			for _, idx := range []int32{broken, 3} {
+				if h.instance(idx) != nil || len(podObjectsOf(h, idx)) != 0 {
+					h.dumpState("scale-down beside the repair")
+					t.Fatalf("instance %d should have left: row=%+v pods=%d", idx, h.instance(idx), len(podObjectsOf(h, idx)))
+				}
+			}
+			requireIdentitiesKept(t, h, kept, "scale-down beside the repair")
+			if got := observedIndices(h); indicesString(got) != "[0 1]" {
+				t.Fatalf("indices after the scale-down = %s, want [0 1]", indicesString(got))
+			}
+		})
+	}
+}

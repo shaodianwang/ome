@@ -14246,6 +14246,16 @@ def _pods_by_instance(ctx, comp):
     return dict(out)
 
 
+def _broken_pre_indices(pods_by_instance, rows, inst):
+    """The Instances that exist when an operation lands on a service with
+    one broken Instance: those with an alive pod, those with a row, and the
+    broken one by name. Its repair may have opened just before the
+    operation, leaving its old pod Terminating and the rebuilt one not yet
+    created; it is the same Instance, and the pod that replaces it is not a
+    new Instance."""
+    return set(pods_by_instance) | {str(i) for i, _h, _ph in rows} | {str(inst)}
+
+
 def _broken_new_instances(ctx, comp, pre_indices):
     """{index: (whole and serving, on the running revision)} of the
     Component's Instances that did not exist before the operation."""
@@ -14417,17 +14427,24 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
     verdict, notes, checks = "PASS", [], []
     f = ctx["fault"]
     print(f"  Phase 2: {f['kind']} break on the settled service; the scale lands once the status reports it")
+    # The pods of every Instance as the fault finds them: the broken
+    # Instance counts as rebuilt once none of these is left. Read before the
+    # break, not at the scale: the scale lands when the row reads Restarting,
+    # which is when the repair has already deleted the old pod and may have
+    # created the rebuilt one.
+    pods_before_break = {c: _pods_by_instance(ctx, c) for c in configured}
     report = _broken_fire_and_report(ctx, hdr)
     if f["infra_fail"]:
         return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", notes, checks)
     verdict = _broken_report_checks(f, report, verdict, notes, checks)
     comp, inst = f["crash_comp"], f["crash_inst"]
+    broken_uids = set(pods_before_break.get(comp, {}).get(inst, set()))
     controls = configured - scaled
 
     # The fleet at the moment the scale lands.
-    rows_at_op = {c: _broken_rows(case_id, c) for c in scaled}
+    rows_at_op = {c: _broken_rows(case_id, c) for c in scaled | {comp}}
     pre_pods = {c: _pods_by_instance(ctx, c) for c in configured}
-    broken_uids = set(pre_pods[comp].get(inst, set()))
+    pre_indices = _broken_pre_indices(pre_pods[comp], rows_at_op[comp], inst)
     pre_ready = {c: ctx["agg"].get(c, (0, 0, 0))[1] for c in configured}
     plans = {c: {"at the scale": _broken_removals([(i, h) for i, h, _ph in rows_at_op[c]], N[c] - target[c])}
              for c in scaled if not up}
@@ -14461,8 +14478,8 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
         if up:
             if rebuilt_at is None and _pods_by_instance(ctx, comp).get(inst, set()) - broken_uids:
                 rebuilt_at = now - op_ts
-                print(f"    {comp} Instance {inst} has a new pod ({rebuilt_at:.0f}s after the scale)")
-            new_instances = _broken_new_instances(ctx, comp, set(pre_pods[comp]))
+                print(f"    {comp} Instance {inst} has a pod the fault did not hit ({rebuilt_at:.0f}s after the scale)")
+            new_instances = _broken_new_instances(ctx, comp, pre_indices)
         if now - last_poll >= 3.0:
             last_poll = now
             for c in scaled:
@@ -14510,6 +14527,13 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
     else:
         got = " ".join(f"{c} {ctx.get('measures', {}).get(c, (0, 0, 0))[0]}/{target[c]}" for c in sorted(scaled))
         checks.append(f"  ✓ converged on the target at {ctx['converged_at']:.1f}s ({got})")
+    # The rows are judged once they have settled: a removed Instance's row
+    # goes when its pods are gone, which trails the pods leaving rotation by
+    # their termination, so a read at the moment the pod count lands can
+    # still list it.
+    rows_settled, settle_why = False, "the scale did not converge"
+    if state == "CONVERGED":
+        rows_settled, settle_why = _wait_broken_rows_settled(case_id, target, configured, BROKEN_ROWS_SETTLE_S)
     if not up:
         for c in sorted(scaled):
             rows_now = {i for i, _h, _ph in _broken_rows(case_id, c)}
@@ -14589,13 +14613,12 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
         else:
             checks.append(f"  ✓ {c} (not scaled) stayed as it was")
     if state == "CONVERGED":
-        settled, why = _wait_broken_rows_settled(case_id, target, configured, BROKEN_ROWS_SETTLE_S)
-        if settled:
+        if rows_settled:
             checks.append("  ✓ every Instance row settled: Ready, no operation open")
         else:
             verdict = "FAIL"
-            notes.append(f"a row was left mid-operation after the scale ({why})")
-            checks.append(f"  ✗ a row did not settle within {BROKEN_ROWS_SETTLE_S}s after the scale ({why}) — left mid-operation")
+            notes.append(f"a row was left mid-operation after the scale ({settle_why})")
+            checks.append(f"  ✗ a row did not settle within {BROKEN_ROWS_SETTLE_S}s after the scale ({settle_why}) — left mid-operation")
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 

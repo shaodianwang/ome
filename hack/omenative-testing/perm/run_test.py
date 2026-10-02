@@ -11398,3 +11398,126 @@ class GeneratedCanaryGateFamilyTest(unittest.TestCase):
 
 def _name_of(fam, kv):
     return next(n for n, k, _m in fam if k is kv)
+
+
+class BrokenScaleOnTheWindowTest(unittest.TestCase):
+    """_broken_scale judged end to end on a scripted fleet. The scale lands
+    the moment the broken Instance's row reads Restarting, which is the
+    moment its repair has deleted the old pod: at the scale the Instance
+    has no alive pod, or already has the rebuilt one coming up. Neither
+    makes the rebuilt pod a new Instance or the pod the fault hit."""
+
+    def _pod(self, inst, uid, alive=True, ready=True, serving=True):
+        return {"alive": alive, "ready": ready, "serving": serving, "hash": "old", "inst": inst,
+                "comp": "engine", "uid": uid}
+
+    def _ctx(self):
+        pods = {f"e{i}": self._pod(str(i), f"u{i}") for i in range(4)}
+        return {"case_id": "p1", "N": {"engine": 4, "decoder": 0, "router": 0}, "configured": {"engine"},
+                "pods_per_inst": {"engine": 1, "decoder": 0, "router": 0},
+                "old_hashes": {"old"}, "pod_state": pods, "agg": {"engine": (4, 4, 0)},
+                "measures": {"engine": (4, 0, 0)}, "peaks": {"engine": 4}, "closed": False,
+                "fault": {"kind": "crashloop", "infra_fail": None, "notes": []}}
+
+    def _repair_opens(self, ctx, rebuilt_pod_up):
+        """The break bites Instance 0 and its repair opens: the old pod is
+        Terminating, and with rebuilt_pod_up the rebuilt one is already
+        alive but not yet Ready."""
+        ctx["fault"].update(crash_comp="engine", crash_inst="0", crash_uid="u0", crash_pod="e0")
+        ctx["pod_state"]["e0"]["alive"] = False
+        if rebuilt_pod_up:
+            ctx["pod_state"]["e0b"] = self._pod("0", "u0b", ready=False, serving=False)
+        ctx["agg"]["engine"] = (3, 3, 0)
+        ctx["measures"]["engine"] = (3 + int(rebuilt_pod_up), 0, 0)
+        ctx["trigger_ts"] = time.time()
+        return {"bitten_at": 1.0, "reported_at": 1.0, "acted_on": "its row reads Restarting", "row": None}
+
+    def _drive(self, hdr, ctx, fire, read_one, rows, settle, events=()):
+        out = {}
+
+        def finish(case_id, desc, hdr, ctx, state, verdict, notes, checks):
+            out.update(state=state, verdict=verdict, notes=notes, checks=checks)
+            return verdict
+        with mock.patch.multiple(run, _setup_and_ready=lambda *a: (ctx, None), _broken_fire_and_report=fire,
+                                 _broken_rows=rows, _scale_patch=lambda *a: (True, ""), _read_one=read_one,
+                                 _wait_broken_rows_settled=settle, _isvc_events_since=lambda *a: list(events),
+                                 _finish=finish, STABILITY_S=0):
+            run._broken_scale("p1", "p1.yaml", "desc", hdr)
+        return out
+
+    RESTARTING_ROWS = [("0", False, "Restarting"), ("1", True, "Ready"), ("2", True, "Ready"), ("3", True, "Ready")]
+    REPAIR = [("RestartTriggered", "OMENative component=engine instance=0 restart triggered: pod e0 wedged")]
+
+    def _up(self, rebuilt_pod_up):
+        hdr = {"mode": "scaledown", "to_e": 5, "ceil_e": 5, "inst": 0, "expect": "repaired", "during": "idle"}
+        ctx = self._ctx()
+        reads = []
+
+        def read_one(ctx):
+            reads.append(1)
+            if len(reads) > 1:
+                return
+            ctx["pod_state"]["e0b"] = self._pod("0", "u0b")
+            ctx["pod_state"]["e4"] = self._pod("4", "u4")
+            ctx["agg"]["engine"] = (5, 5, 0)
+            ctx["measures"]["engine"] = (5, 0, 0)
+            ctx["peaks"]["engine"] = 5
+        return self._drive(hdr, ctx, lambda ctx, hdr: self._repair_opens(ctx, rebuilt_pod_up), read_one,
+                           lambda case_id, c: self.RESTARTING_ROWS, lambda *a: (True, "settled"), self.REPAIR)
+
+    def test_a_scale_up_landing_between_the_old_pod_and_the_rebuilt_one_sees_one_new_instance(self):
+        out = self._up(rebuilt_pod_up=False)
+        self.assertEqual("PASS", out["verdict"], out["notes"])
+        self.assertTrue(any("new Instance(s) ['4'] came up whole" in c for c in out["checks"]), out["checks"])
+        self.assertTrue(any("Instance 0 was rebuilt (every pod new)" in c for c in out["checks"]), out["checks"])
+        self.assertTrue(any("kept 3 Instance(s) Ready" in c for c in out["checks"]), out["checks"])
+
+    def test_a_scale_up_landing_once_the_rebuilt_pod_is_up_sees_the_instance_rebuilt(self):
+        out = self._up(rebuilt_pod_up=True)
+        self.assertEqual("PASS", out["verdict"], out["notes"])
+        self.assertTrue(any("Instance 0 was rebuilt (every pod new)" in c for c in out["checks"]), out["checks"])
+        self.assertTrue(any("new Instance(s) ['4'] came up whole" in c for c in out["checks"]), out["checks"])
+
+    def test_a_scale_down_is_judged_on_the_rows_once_they_have_settled(self):
+        hdr = {"mode": "scaledown", "to_e": 2, "ceil_e": 4, "inst": 0, "during": "idle"}
+        ctx = self._ctx()
+        settled = []
+
+        def read_one(ctx):
+            # The wave takes the broken row over from its repair and deletes
+            # the highest healthy Instance; the pods leave rotation at once.
+            ctx["pod_state"]["e3"]["alive"] = False
+            ctx["agg"]["engine"] = (2, 2, 0)
+            ctx["measures"]["engine"] = (2, 0, 0)
+
+        def rows(case_id, c):
+            # The rows trail the pods: a removed Instance's row goes when its
+            # pods are gone, after their termination, not when they leave.
+            if settled:
+                return [("1", True, "Ready"), ("2", True, "Ready")]
+            return self.RESTARTING_ROWS
+
+        def settle(*a):
+            settled.append(1)
+            return True, "settled"
+        out = self._drive(hdr, ctx, lambda ctx, hdr: self._repair_opens(ctx, False), read_one, rows, settle)
+        self.assertEqual("PASS", out["verdict"], out["notes"])
+        self.assertTrue(any("Instances ['0', '3'] went" in c and "['1', '2'] stayed" in c for c in out["checks"]), out["checks"])
+        self.assertTrue(any("every Instance row settled" in c for c in out["checks"]), out["checks"])
+
+    def test_the_instances_at_the_scale_include_the_broken_one_between_its_pods(self):
+        rows = self.RESTARTING_ROWS
+        self.assertEqual({"0", "1", "2", "3"}, run._broken_pre_indices({"1": {"u1"}, "2": {"u2"}, "3": {"u3"}}, rows, "0"))
+        self.assertEqual({"0", "1"}, run._broken_pre_indices({"1": {"u1"}}, [], 0), "the broken Instance counts by name alone")
+        self.assertEqual({"4", "5"}, run._broken_pre_indices({"5": {"u5"}}, [("4", True, "Ready")], "5"))
+
+    def test_a_rebuilt_broken_instance_is_not_a_new_instance(self):
+        ctx = self._ctx()
+        ctx["pod_state"]["e0"]["alive"] = False
+        ctx["pod_state"]["e0b"] = self._pod("0", "u0b")
+        ctx["pod_state"]["e4"] = self._pod("4", "u4")
+        alive_at_the_scale = {"1": {"u1"}, "2": {"u2"}, "3": {"u3"}}
+        pre = run._broken_pre_indices(alive_at_the_scale, self.RESTARTING_ROWS, "0")
+        self.assertEqual({"4": (True, True)}, run._broken_new_instances(ctx, "engine", pre))
+        self.assertEqual({"0": (True, True), "4": (True, True)}, run._broken_new_instances(ctx, "engine", set(alive_at_the_scale)),
+                         "read off the alive pods alone, the rebuilt Instance passes for a new one")

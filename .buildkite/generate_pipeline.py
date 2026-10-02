@@ -253,6 +253,7 @@ KIND_SPEC_GROUPS = (
     )),
     ("scale-transitions", "Scale transitions", (
         "bounded_scale_down", "scale_during_rollout", "bluegreen_scale_down_during",
+        "scale_up_beside_open_repair",
     )),
     ("scale-transition-boundaries", "Scale transition boundaries", (
         "scale_tr_oversized_gang", "scale_tr_orphan_refusal",

@@ -262,7 +262,7 @@ cells:
     outcome: ignore
     note: the repair keeps this index while the Create pass materializes the other fresh indices from a plan that excludes every restart selection (planExcludingRestartSelections)
     placement: perm
-    coverage: {perm: [], unit: [TestReconcile_ScaleUpDuringRestart_CreatesFreshIndices, TestReconcile_ScaleUpDuringRestart_ExcludesRestartSelectedCreateOwner], kind: []}
+    coverage: {perm: [], unit: [TestReconcile_ScaleUpDuringRestart_CreatesFreshIndices, TestReconcile_ScaleUpDuringRestart_ExcludesRestartSelectedCreateOwner, TestScaleUp_BesideAnOpenRepair_AddsExactlyOneInstance], kind: [scale_up_beside_open_repair]}
     status: decided
   - state: Restart/Drain
     event: spec.replicasDown
@@ -272,7 +272,7 @@ cells:
     guard: the index falls beyond the desired set and the scale-down wave admits it within its pod budget
     note: scale-down is selected ahead of the restart pass and the delete admission stamps Deleting with a Delete Drain operation over the restart's
     placement: perm
-    coverage: {perm: [], unit: [TestPlan_ScaleDownPrecedesRestart], kind: [], replay: [restart-scaledown]}
+    coverage: {perm: [], unit: [TestPlan_ScaleDownPrecedesRestart, TestScaleDown_BesideAnOpenRepair_RemovesTheBrokenInstanceFirst], kind: [], replay: [restart-scaledown]}
     status: current
   - state: Restart/Drain
     event: spec.replicasDown
