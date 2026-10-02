@@ -376,6 +376,15 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 			// weight through a dip; the gate only keeps the step from moving.
 			return (&Result{Active: true, Partition: partition}).wake(in.Requeue), nil
 		}
+		// A traffic target names a revision only while that revision has a
+		// serving pod. A ladder that has not shifted traffic yet owns no
+		// split, so the targets a superseded ladder left behind return to the
+		// stable revision, on the capacity that serves, until this step's
+		// gate passes and writes its own; between steps the previous step's
+		// weight stands and is not touched here.
+		if cs.ObservedTrafficWeight == 0 {
+			returnTrafficToStable(in)
+		}
 		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhasePending)
 		return (&Result{Active: true, Partition: partition}).wake(in.Requeue), nil
 	}

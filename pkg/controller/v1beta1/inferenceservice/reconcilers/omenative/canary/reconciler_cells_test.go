@@ -511,6 +511,9 @@ func TestReconcileCells(t *testing.T) {
 				t.Errorf("result active=%v rolledBack=%v complete=%v, want active=%v rolledBack=%v complete=%v",
 					res.Active, res.RolledBack, res.Complete, c.want.active, c.want.rolledBk, c.want.complete)
 			}
+			// Whatever the cell decided, every weighted target it leaves behind
+			// names a revision with a serving pod in the pass's own view.
+			expectTrafficServes(t, isvc, v1beta1.EngineComponent, in.PerRevisionPods)
 			// RollingBack is a wait on the drain: the pass must ask to come back.
 			if c.want.state == rollingBack && res.RequeueAfter == 0 && !res.Requeue {
 				t.Errorf("RollingBack must requeue, got %+v", res)

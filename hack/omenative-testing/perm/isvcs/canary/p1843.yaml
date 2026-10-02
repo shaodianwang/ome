@@ -1,5 +1,4 @@
-# p1843: canary engine new target after completion opens a new run  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto during=canary-done verb=rebump cell=canary/Done/newTarget co=none topo=engine notimpl=1 issue=2040
-# reason: parked: after a canary re-target the traffic split can name a revision with no serving pod for about twenty seconds (a race, not every run)
+# p1843: canary engine new target after completion opens a new run  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto during=canary-done verb=rebump cell=canary/Done/newTarget co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1843 }

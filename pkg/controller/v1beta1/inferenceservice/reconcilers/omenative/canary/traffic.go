@@ -24,19 +24,49 @@ func canaryWeights(canaryHash, stableHash, canaryProtocol, stableProtocol string
 	}
 }
 
+// servingStable resolves the revision a split's remainder is written on, and
+// its pairing protocol. The stable revision carries the remainder while it
+// has a serving pod. A stable revision with none, whose instances rolled onto
+// another revision, hands the remainder to that revision: the one serving the
+// most pods off the canary, under no protocol (pairs with anything), so the
+// remainder never points at capacity that moved. With nothing serving in its
+// place, or no pod view, the stable revision keeps its share: a pod loss is
+// the workload's repair, not a traffic decision.
+func servingStable(stableHash, stableProtocol, canaryHash string, readyPods map[string]int32) (string, string) {
+	if stableHash == "" || stableHash == canaryHash || readyPods == nil || readyPods[stableHash] > 0 {
+		return stableHash, stableProtocol
+	}
+	substitute, most := "", int32(0)
+	for hash, count := range readyPods {
+		if hash == "" || hash == canaryHash || count <= 0 {
+			continue
+		}
+		if count > most || (count == most && hash < substitute) {
+			substitute, most = hash, count
+		}
+	}
+	if substitute == "" {
+		return stableHash, stableProtocol
+	}
+	return substitute, ""
+}
+
 // memberWeights is a secondary's split at a step: its target revision at
 // `weight` percent and its stable revision at the remainder, each under the
-// protocol it was minted with. A member whose target is its stable revision
-// was not bumped, and a member with no stable revision has nothing to shift
-// traffic from; both serve their target alone. No target yields no weights.
-func memberWeights(m MemberRevisions, weight int32) []coordination.RevisionWeight {
+// protocol it was minted with; readyPods is the member's serving pods per
+// revision, which decide the revision the remainder rests on. A member whose
+// target is its stable revision was not bumped, and a member with no stable
+// revision has nothing to shift traffic from; both serve their target alone.
+// No target yields no weights.
+func memberWeights(m MemberRevisions, weight int32, readyPods map[string]int32) []coordination.RevisionWeight {
 	if m.CanaryRevisionHash == "" {
 		return nil
 	}
 	if m.StableRevisionHash == "" || m.StableRevisionHash == m.CanaryRevisionHash {
 		return canaryWeights(m.CanaryRevisionHash, m.CanaryRevisionHash, m.CanaryPairingProtocol, m.CanaryPairingProtocol, weight)
 	}
-	return canaryWeights(m.CanaryRevisionHash, m.StableRevisionHash, m.CanaryPairingProtocol, m.StablePairingProtocol, weight)
+	stable, protocol := servingStable(m.StableRevisionHash, m.StablePairingProtocol, m.CanaryRevisionHash, readyPods)
+	return canaryWeights(m.CanaryRevisionHash, stable, m.CanaryPairingProtocol, protocol, weight)
 }
 
 // memberStableWeights is a rolled-back secondary's traffic: its stable
@@ -84,12 +114,34 @@ func applyMemberTraffic(isvc *v1beta1.InferenceService, c v1beta1.ComponentType,
 // applyGroupTraffic programs one step weight onto every member of the canary
 // unit: the primary's split on its own revision pair and each secondary's on
 // its own. The weights are the same; only the revisions they name differ, so
-// a routing consumer finds a target for every member at every step.
+// a routing consumer finds a target for every member at every step. Each
+// member's remainder rests on the revision servingStable resolves from that
+// member's serving pods.
 func applyGroupTraffic(in ReconcileInputs, weight int32) {
-	applyTraffic(in.ISVC, in.Component, in.CanaryRevisionHash, in.StableRevisionHash,
-		in.CanaryPairingProtocol, in.StablePairingProtocol, weight)
+	stable, protocol := servingStable(in.StableRevisionHash, in.StablePairingProtocol, in.CanaryRevisionHash, in.PerRevisionPods)
+	applyTraffic(in.ISVC, in.Component, in.CanaryRevisionHash, stable, in.CanaryPairingProtocol, protocol, weight)
 	for c, m := range in.Secondaries {
-		applyMemberTraffic(in.ISVC, c, memberWeights(m, weight))
+		applyMemberTraffic(in.ISVC, c, memberWeights(m, weight, in.GroupReadyPerRevisionPods[c]))
+	}
+}
+
+// returnTrafficToStable writes the split a superseded ladder left behind back
+// onto each member's stable revision, as servingStable resolves it, with the
+// new target at nothing. A member with no targets written, or no stable
+// revision distinct from its target, has nothing to return and keeps what it
+// has.
+func returnTrafficToStable(in ReconcileInputs) {
+	if len(in.ISVC.Status.Components[in.Component].Traffic) > 0 &&
+		in.StableRevisionHash != "" && in.StableRevisionHash != in.CanaryRevisionHash {
+		stable, protocol := servingStable(in.StableRevisionHash, in.StablePairingProtocol, in.CanaryRevisionHash, in.PerRevisionPods)
+		applyTraffic(in.ISVC, in.Component, in.CanaryRevisionHash, stable, in.CanaryPairingProtocol, protocol, 0)
+	}
+	for c, m := range in.Secondaries {
+		if len(in.ISVC.Status.Components[c].Traffic) == 0 ||
+			m.StableRevisionHash == "" || m.StableRevisionHash == m.CanaryRevisionHash {
+			continue
+		}
+		applyMemberTraffic(in.ISVC, c, memberWeights(m, 0, in.GroupReadyPerRevisionPods[c]))
 	}
 }
 
