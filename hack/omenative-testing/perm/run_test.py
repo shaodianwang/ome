@@ -2083,6 +2083,26 @@ class CanaryHandlerBindingsTest(unittest.TestCase):
         self.assertEqual(1, len(binds), f"`want` rebound inside _canary at lines {binds}")
 
 
+class RunCaseBindingsTest(unittest.TestCase):
+    """`rb` in run_case is the rollback state for the whole run (a dict, or
+    None without rollback=1): bound once from _rollback_new, so no loop-local
+    count can shadow it before the convergence guards index it."""
+
+    def test_rb_is_bound_only_from_rollback_new_in_run_case(self):
+        import ast
+        tree = ast.parse((HERE / "run.py").read_text())
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run_case")
+        stores = sorted(n.lineno for n in ast.walk(fn)
+                        if isinstance(n, ast.Name) and n.id == "rb" and isinstance(n.ctx, ast.Store))
+        from_rollback_new = sorted(
+            n.lineno for n in ast.walk(fn) if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "rb" for t in n.targets)
+            and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name)
+            and n.value.func.id == "_rollback_new")
+        self.assertEqual(1, len(from_rollback_new), f"`rb` must come from _rollback_new once, got {from_rollback_new}")
+        self.assertEqual(from_rollback_new, stores, f"`rb` rebound inside run_case at lines {stores}")
+
+
 class CanarySettleTest(unittest.TestCase):
     """The terminal is reached only when every bumped member's pods agree
     with it, and a multi-node image override names the leader's container."""
@@ -5054,6 +5074,29 @@ class RetargetVerbTest(unittest.TestCase):
                                                               "targetRevisions": [{"component": "engine", "revision": "h1"}]}}})
         self.assertEqual("Superseded", lagged["outcome"], "with no run pinned at the verb the target revision names it")
 
+    def test_retarget_ignores_the_run_that_closed_before_the_verb(self):
+        # A decoder-only re-bump under a router primary records the router's
+        # unchanged revision, which the initial run (closed Completed before
+        # the verb fired) also rolled toward; only the run open at the verb,
+        # closed Superseded, answers for the re-target.
+        stale = {"outcome": "Completed", "openedAt": "T0",
+                 "targetRevisions": [{"component": "router", "revision": "r0"}]}
+        at_verb = {"rollout": {"activeRun": {"openedAt": "T1", "runID": "r1"}, "lastRun": stale}}
+        rec = run._retarget_record(at_verb, "r0", "rebump", "canary-serving", 3.0)
+        run._retarget_closed(rec, at_verb)
+        self.assertIsNone(rec["outcome"], "a run closed before the verb fired is not the re-target's")
+        run._retarget_closed(rec, {"rollout": {"lastRun": {"outcome": "Superseded", "openedAt": "T1",
+                                                           "targetRevisions": [{"component": "router", "revision": "r0"}]}}})
+        self.assertEqual("Superseded", rec["outcome"])
+        # With no run pinned at the verb the revision names the run, but
+        # still never one that was already closed when the verb fired.
+        unpinned = run._retarget_record({"rollout": {"lastRun": stale}}, "r0", "rebump", "canary-serving", 3.0)
+        run._retarget_closed(unpinned, {"rollout": {"lastRun": stale}})
+        self.assertIsNone(unpinned["outcome"])
+        run._retarget_closed(unpinned, {"rollout": {"lastRun": {"outcome": "Superseded", "openedAt": "T1",
+                                                                "targetRevisions": [{"component": "router", "revision": "r0"}]}}})
+        self.assertEqual("Superseded", unpinned["outcome"])
+
     def test_traffic_revision_hash_reads_the_service_name(self):
         self.assertEqual("abc123", run._traffic_revision_hash("p999-engine-rev-abc123", {"abc123", "zzz"}))
         self.assertEqual("abc123", run._traffic_revision_hash("p999-engine-rev-abc", {"abc123"}))
@@ -6497,6 +6540,39 @@ class MigrateBumpOverlapHookTest(unittest.TestCase):
         self.assertFalse(run._rows_settled_on_new(busy, {"engine": 2}, {"engine"}, {"engine"}, {"old"})[0])
 
 
+class RowsSettledAfterRollTest(unittest.TestCase):
+    """After a roll the rows settle at whichever indexes the roll left them
+    (a gang surge rebuilds Instance 0 at index 2 and Instance 1 at index 0);
+    only a fresh fleet is held to the indexes 0..N-1."""
+
+    def _rolled(self):
+        items = [inference_replica("engine", 2, current="rev-b", update="rev-b")]
+        items[0]["status"]["instanceStatuses"] = [{"index": 0, "phase": "Ready", "operation": None},
+                                                  {"index": 2, "phase": "Ready", "operation": None}]
+        return items
+
+    def test_rows_after_a_gang_surge_roll_settle_on_the_indexes_it_left(self):
+        rolled = self._rolled()
+        self.assertEqual((True, "settled"), run._rolled_ir_settled(rolled, {"engine": 2}, {"engine"}))
+        ok, why = run._initial_ir_settled(rolled, {"engine": 2}, {"engine"})
+        self.assertFalse(ok)
+        self.assertIn("Instance indexes have not converged", why)
+        busy = self._rolled()
+        busy[0]["status"]["instanceStatuses"][1]["operation"] = {"type": "Surge"}
+        self.assertFalse(run._rolled_ir_settled(busy, {"engine": 2}, {"engine"})[0], "an open operation is not settled")
+        short = self._rolled()
+        short[0]["status"]["instanceStatuses"].pop()
+        self.assertFalse(run._rolled_ir_settled(short, {"engine": 2}, {"engine"})[0], "N rows are still required")
+        lagging = self._rolled()
+        lagging[0]["status"]["updateRevision"] = "rev-c"
+        self.assertFalse(run._rolled_ir_settled(lagging, {"engine": 2}, {"engine"})[0], "the revisions must agree")
+
+    def test_the_after_roll_wait_accepts_the_indexes_the_roll_left(self):
+        with mock.patch.object(run, "_fetch_initial_ir_items", return_value=self._rolled()):
+            settled, why = run._wait_rows_settled("p999", {"engine": 2}, {"engine"}, 1)
+        self.assertTrue(settled, why)
+
+
 class MigrateBumpOverlapVerdictTest(unittest.TestCase):
     """The operator's end state after a move and a revision bump overlapped."""
 
@@ -6519,9 +6595,9 @@ class MigrateBumpOverlapVerdictTest(unittest.TestCase):
                 "e2": _overlap_pod("engine", "2", "e2u", moved_rev, node="node-b"),
                 "d0": _overlap_pod("decoder", "0", "d0u", "old"), "d1": _overlap_pod("decoder", "1", "d1u", "old")}
 
-    def _run(self, ov, pods, ledger=None, ir="one", roll_ts=160.0, **ctx_kw):
+    def _run(self, ov, pods, ledger=None, ir="one", roll_ts=160.0, entry=None, **ctx_kw):
         reqs = {"0": ("uuid-1", "ome.io/migration-request-v1-uuid-1", "node-a")}
-        entry = {"requestUUID": "uuid-1", "phase": "Completed", "surgeInstance": 2}
+        entry = entry or {"requestUUID": "uuid-1", "phase": "Completed", "surgeInstance": 2}
         ir_entries = [entry] if ir == "one" else ir
         orig = run._migration_ledger_entries
         run._migration_ledger_entries = lambda case_id: [entry] if ledger is None else ledger
@@ -6542,6 +6618,27 @@ class MigrateBumpOverlapVerdictTest(unittest.TestCase):
                      "off the node it left", "controller rows settled", "recorded once", "one record for the request",
                      "decoder untouched", "order (not asserted): the move finished first"):
             self.assertTrue(any(want in c for c in checks), (want, checks))
+
+    def test_the_moved_index_is_read_once_the_record_allocates_it(self):
+        # The record carries -1 until the surge index is allocated; the
+        # replacement is judged at the index the final record names.
+        self.assertIsNone(run._surge_index_allocated({"surgeInstance": -1}))
+        self.assertIsNone(run._surge_index_allocated({"phase": "Pending"}))
+        self.assertIsNone(run._surge_index_allocated(None))
+        self.assertEqual(3, run._surge_index_allocated({"surgeInstance": 3}))
+        self.assertEqual(0, run._surge_index_allocated({"surgeInstance": 0}))
+        pending = {"requestUUID": "uuid-1", "phase": "SurgePending", "surgeInstance": -1}
+        v, notes, checks = self._run(self._ov(moved_index=None, moved_nodes={}), self._pods(), entry=pending)
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("never named its replacement index" in c for c in checks), checks)
+        self.assertFalse(any("index -1" in c for c in checks), checks)
+        done = {"requestUUID": "uuid-1", "phase": "Completed", "surgeInstance": 3}
+        pods = {"e1": _overlap_pod("engine", "1", "e1u", "new"),
+                "e3": _overlap_pod("engine", "3", "e3u", "new", node="node-b"),
+                "d0": _overlap_pod("decoder", "0", "d0u", "old"), "d1": _overlap_pod("decoder", "1", "d1u", "old")}
+        v, notes, checks = self._run(self._ov(moved_index=None, moved_nodes={"e3u": "node-b"}), pods, entry=done)
+        self.assertEqual("PASS", v, notes)
+        self.assertTrue(any("index 3) ends on the new revision" in c for c in checks), checks)
 
     def test_a_missed_hook_judges_nothing_else(self):
         v, notes, checks = self._run(self._ov(fired=False, missed="the move completed before the hook"), self._pods())

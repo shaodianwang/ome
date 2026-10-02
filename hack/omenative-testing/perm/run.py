@@ -2591,6 +2591,17 @@ def _pick_last_instance(pod_state, old_hashes, mcomp):
     return max(steady or list(off), key=int)
 
 
+def _surge_index_allocated(record):
+    """The replacement index a migration record or ledger row names, once
+    the product has allocated one; None before that (the record carries a
+    negative placeholder until the surge index exists)."""
+    try:
+        index = int((record or {}).get("surgeInstance"))
+    except (TypeError, ValueError):
+        return None
+    return index if index >= 0 else None
+
+
 def _overlap_track_moved(ov, pod_state, surge_index, mcomp, orig_uids):
     """Remember the move's replacement pods (fresh pods at the index the
     record names) and the nodes they came up on."""
@@ -2700,8 +2711,9 @@ def _overlap_checks(ov, ctx, mcomp, reqs, entries, ir_entries, rollout_conv_ts, 
     else:
         checks.append(f"  ✓ the roll converged onto its new revision at {rel(rollout_conv_ts)}")
     # The moved Instance: the index the record names, as the fleet ends.
+    ledger_index = _surge_index_allocated(entries.get(inst))
     moved = ov["moved_index"] if ov["moved_index"] is not None else (
-        None if (entries.get(inst) or {}).get("surgeInstance") is None else str(entries[inst]["surgeInstance"]))
+        None if ledger_index is None else str(ledger_index))
     ppi = max(1, ctx["pods_per_inst"].get(mcomp, 1))
     pods = [p for p in ctx["pod_state"].values()
             if p and p["alive"] and p.get("comp") == mcomp and str(p.get("inst")) == str(moved)]
@@ -8519,8 +8531,12 @@ def _serving_instance_counts(pod_state, pods_per_inst):
     return dict(counts)
 
 
-def _initial_ir_settled(items, expected, configured):
-    """Require authoritative IR status to describe a steady initial fleet."""
+def _ir_settled(items, expected, configured, fresh_indexes):
+    """Authoritative IR status describing a steady fleet: one InferenceReplica
+    per Component with its generation observed, every counter at N, current
+    and update revision equal, and N rows Ready with no operation open. A
+    fresh fleet also sits at the indexes 0..N-1; a rolled fleet keeps the
+    indexes a gang surge left it on, so after a roll only the count holds."""
     by_component = defaultdict(list)
     for item in items:
         component = (item.get("spec") or {}).get("component")
@@ -8561,17 +8577,27 @@ def _initial_ir_settled(items, expected, configured):
         if not isinstance(instances, list) or len(instances) != desired:
             actual = len(instances) if isinstance(instances, list) else 0
             return False, f"{component}: instanceStatuses {actual}/{desired}"
-        expected_indexes = set(range(desired))
         try:
             indexes = {int(instance.get("index", -1)) for instance in instances}
         except (AttributeError, TypeError, ValueError):
             return False, f"{component}: Instance indexes are malformed"
-        if indexes != expected_indexes:
+        if fresh_indexes and indexes != set(range(desired)):
             return False, f"{component}: Instance indexes have not converged"
         for instance in instances:
             if instance.get("phase") != "Ready" or instance.get("operation") is not None:
                 return False, f"{component}/{instance.get('index', '?')}: Instance is not settled"
     return True, "settled"
+
+
+def _initial_ir_settled(items, expected, configured):
+    """A steady initial fleet, its rows at the indexes 0..N-1."""
+    return _ir_settled(items, expected, configured, fresh_indexes=True)
+
+
+def _rolled_ir_settled(items, expected, configured):
+    """A steady fleet after a roll: N rows at whichever indexes the roll
+    left them."""
+    return _ir_settled(items, expected, configured, fresh_indexes=False)
 
 
 def _initial_rollout_settled(pod_state, pods_per_inst, expected, configured, ir_items):
@@ -9542,13 +9568,14 @@ def _rebuild_count_checks(f, rebuilt_after, ppi, verdict, notes, checks):
 
 
 def _wait_rows_settled(case_id, N, configured, budget_s):
-    """Poll the InferenceReplicas until every row of every configured
-    Component is Ready with no operation open and the counters agree, or
-    the budget ends. Returns (settled, the last reason it was not)."""
+    """Poll the InferenceReplicas after a roll until every configured
+    Component has N rows, each Ready with no operation open, at whichever
+    indexes the roll left them, and the counters agree, or the budget ends.
+    Returns (settled, the last reason it was not)."""
     deadline = time.time() + budget_s
     while True:
         items = _fetch_initial_ir_items(case_id)
-        settled, why = _initial_ir_settled(items or [], N, configured)
+        settled, why = _rolled_ir_settled(items or [], N, configured)
         if settled or time.time() >= deadline:
             return settled, why
         time.sleep(2.0)
@@ -10377,8 +10404,9 @@ def _migrate(case_id, yaml_file, desc, hdr):
                 else:
                     ov["error"] = f"the bump at {ov['at']} failed: {ctx.get('trigger_error')}"
         if ov:
-            if seen[0] is not None and seen[0].get("surgeInstance") is not None:
-                moved_idx = seen[0]["surgeInstance"]
+            record_index = _surge_index_allocated(seen[0])
+            if record_index is not None:
+                moved_idx = record_index
             _overlap_track_moved(ov, ctx["pod_state"], moved_idx, mcomp, orig_uids)
             if ov["fired"] and rollout_conv_ts is None and _rollout_done():
                 rollout_conv_ts = now
@@ -10389,8 +10417,8 @@ def _migrate(case_id, yaml_file, desc, hdr):
             last_poll = now
             ents = {i: (_migration_ledger_entry(case_id, ru) or {}) for i, (ru, _, _) in reqs.items()}
             phs = {i: e.get("phase") for i, e in ents.items()}
-            if ov and moved_idx is None and ents[inst].get("surgeInstance") is not None:
-                moved_idx = ents[inst]["surgeInstance"]
+            if ov and moved_idx is None:
+                moved_idx = _surge_index_allocated(ents[inst])
             if ov and moved_idx is None and now - last_record_poll >= OVERLAP_POLL_S:
                 last_record_poll = now
                 seen = (_migration_record(case_id, mcomp, reqs[inst][0]), ents[inst] or None, seen[2])
@@ -12690,25 +12718,39 @@ def _runtime_edit_verb(ctx):
 
 def _retarget_record(st, revision, verb, hook, now_rel):
     """The run a re-target verb must close: the one pinned when the verb
-    fired, named by when it opened and the revision it rolled toward."""
-    active = (st.get("rollout") or {}).get("activeRun") or {}
+    fired, named by when it opened and the revision it rolled toward. The
+    run already closed at that moment is remembered: it is never the
+    verb's outcome."""
+    rollout = st.get("rollout") or {}
+    active, closed = rollout.get("activeRun") or {}, rollout.get("lastRun") or {}
     return {"verb": verb, "hook": hook, "opened_at": active.get("openedAt"), "revision": revision,
-            "outcome": None, "at": now_rel}
+            "closed_before": closed.get("openedAt"), "outcome": None, "at": now_rel}
 
 
 def _retarget_closed(record, st):
-    """Fold the most recently closed run into the record once it is the run
-    the verb found open: its outcome is how the re-target closed it."""
+    """Fold the most recently closed run into the record once it is a run
+    opened no earlier than the one the verb found open; with no run pinned
+    at the verb, a run that rolled toward the revision. A run closed before
+    the verb fired is ignored even when it rolled toward that revision: a
+    member the re-target leaves alone keeps a revision the initial run
+    also carried."""
     if not record or record.get("outcome"):
         return
     last = (st.get("rollout") or {}).get("lastRun") or {}
     if not last:
         return
-    targets = {t.get("revision") for t in (last.get("targetRevisions") or []) if isinstance(t, dict)}
-    same_open = bool(record.get("opened_at")) and last.get("openedAt") == record["opened_at"]
-    same_target = bool(record.get("revision")) and record["revision"] in targets
-    if same_open or same_target:
-        record["outcome"] = str(last.get("outcome") or "")
+    opened = str(last.get("openedAt") or "")
+    if record.get("closed_before") and opened == record["closed_before"]:
+        return
+    if record.get("opened_at"):
+        # RFC 3339 stamps in UTC at one precision order as strings.
+        if opened < str(record["opened_at"]):
+            return
+    else:
+        targets = {t.get("revision") for t in (last.get("targetRevisions") or []) if isinstance(t, dict)}
+        if not record.get("revision") or record["revision"] not in targets:
+            return
+    record["outcome"] = str(last.get("outcome") or "")
 
 
 def _traffic_revision_hash(revision_name, known_hashes):
@@ -14892,8 +14934,8 @@ def run_case(case_id):
                 # within ratioTolerancePercent of N(a):N(b); a large swing means the gate
                 # is not holding (e.g. the IR-path bypass let one race ahead).
                 if ratio_pair:
-                    ra = agg.get(ratio_pair[0], (0, 0, 0))[1]
-                    rb = agg.get(ratio_pair[1], (0, 0, 0))[1]
+                    ready_a = agg.get(ratio_pair[0], (0, 0, 0))[1]
+                    ready_b = agg.get(ratio_pair[1], (0, 0, 0))[1]
                     # Cap each side's ready at its steady N before measuring the
                     # deviation. SurgeThenDrain transiently lifts the surging side to
                     # N+1 (surge headroom) — extra capacity, not an imbalance: the peer
@@ -14903,8 +14945,8 @@ def run_case(case_id):
                     # the capacity-floor check). Capping only neutralizes the benign
                     # over-capacity surge peak, whose timing across the two independent
                     # gang rollouts is not synchronized.
-                    ca = min(ra, N[ratio_pair[0]])
-                    cb = min(rb, N[ratio_pair[1]])
+                    ca = min(ready_a, N[ratio_pair[0]])
+                    cb = min(ready_b, N[ratio_pair[1]])
                     if ca > 0 or cb > 0:
                         dev = 9.99 if cb == 0 else abs((ca / cb) / ratio_target - 1.0)
                         ratio_samples.append((tnow, dev, ca, cb))

@@ -1,4 +1,5 @@
-# p733: migration filed mid-rotate — both complete without wedge (product may preempt the rollout; ordering unasserted)  mode=migrate mig=Auto inst=2 during=rollout Ne=3 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 co=none topo=engine
+# p733: migration filed mid-rotate — both complete without wedge (product may preempt the rollout; ordering unasserted)  mode=migrate mig=Auto inst=2 during=rollout Ne=3 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 co=none topo=engine notimpl=1 issue=2041
+# reason: parked: a migration replacement pod is rendered from the live template but labelled with the source revision hash, so invariant F fails
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p733 }
