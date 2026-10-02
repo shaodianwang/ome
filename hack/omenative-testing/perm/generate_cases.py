@@ -292,6 +292,15 @@ runners (run.py + the KIND CI lane) already implement:
                           ends Ready and serving on the revision it should
                           run, nothing is escalated or held, the push lands,
                           and a repair runs only where the policy promises it
+    gen-lift/      p9250+  the lift axis of the config-key, readiness and
+                          image-pull faults: a cause kept to the end of the
+                          case (lift=never) or taken away after a bounded
+                          time (lift=after-settle), on the running revision
+                          at steady state and on the pushed revision under a
+                          push, across the six shape families; a kept cause
+                          parks the Instance Failed with its reason, a
+                          lifted one leaves the Instance serving with no
+                          hold behind it
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -610,6 +619,7 @@ GEN_BLOCKS = {
     "gen-webhook": (8900, 8960),
     "gen-conflict": (8960, 9050),
     "gen-crash-once": (8400, 8600),
+    "gen-lift": (9250, 9400),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -5174,6 +5184,201 @@ def emit_crash_once(add):
                             cell=("crash-once", "push", side, form, topo, w, router, rp, strat))
 
 
+# ── gen-lift: a cause kept to the end, or taken away after a while ──────────
+# The forms the ledger's fault rows lacked, on the crash-once shape list (the
+# six shape families): lift=never keeps the cause until the case ends,
+# lift=after-settle takes it away once it has visibly bitten for the settle
+# window. The running-revision rows fire on the settled service; the
+# pushed-revision rows ride a push under the surge and the drain-first
+# strategies (an in-place push starts no pod of its own to break).
+LIFT_SHAPES = CRASH_ONCE_SHAPES
+LIFT_PUSH_STRATS = CRASH_ONCE_STRATS
+LIFT_IDLE_STRAT = CRASH_ONCE_IDLE_STRAT
+# The ledger row each form fills, named as coverage.py prints it.
+LIFT_ROW_CONFIG_RUNNING_KEPT = "config missing, persistent, running"
+LIFT_ROW_CONFIG_NEW_KEPT = "config missing, persistent, new"
+LIFT_ROW_CONFIG_NEW_LIFTED = "config missing, one-shot, new"
+LIFT_ROW_READINESS_NEW_LIFTED = "readiness never passes, one-shot, new"
+LIFT_ROW_IMAGEPULL_RUNNING_LIFTED = "image pull, one-shot, running"
+LIFT_ROW_IMAGEPULL_NEW_LIFTED = "image pull, one-shot, new"
+# The pushed-revision rows run under one restart policy: a pod that never
+# started has no restart for a policy to read.
+LIFT_PUSH_RP = "None"
+
+
+def _lift_shape(topo, w, router):
+    return shape_tag(topo, w) + ("+router" if router and not is_pd(topo) else "")
+
+
+def _lift_untouched(topo, router):
+    if is_pd(topo):
+        return "decoder and router stay as they were"
+    return "the router stays as it was" if router else ""
+
+
+def _lift_configkey_body(name, topo, n, w, router, life, rp):
+    """The case body of a config-key cell: the engine runner reads one key of
+    a ConfigMap named after the case, carried as a second document so the
+    apply creates it and the teardown removes it with the case."""
+    cm = f"{name}{HEAL_CONFIG_SUFFIX}"
+    cs = _crash_once_comps(topo, n, w, router, life, rp)
+    cs[0]["runner"] = lib.configmap_env(cm, HEAL_CONFIG_KEY, HEAL_CONFIG_VAR, gang=is_mn(topo))
+    return lib.render(name, cs, docs=[lib.configmap_doc(cm, {HEAL_CONFIG_KEY: HEAL_CONFIG_VALUE})])
+
+
+def _lift_configkey_kept_reason(rp, topo, router):
+    where = "gang leader" if is_mn(topo) else "pod"
+    repair = ("the crash-loop repair opens as soon as the wait is seen and rebuilds the pod, which waits on the same key"
+              if rp == "None" else "the runner-restart repair rebuilds the pod, which waits on the same key")
+    out = (f"the engine runner's ConfigMap key is removed on the highest Instance's {where} and the runner restarted, "
+           f"so its next start waits in CreateContainerConfigError, and the key is not put back while the case runs; "
+           f"{repair}; the wait outlives the attempt's Instance ready timeout and the escalation parks the repair at "
+           f"Failed with the reason recorded on the row; the row stays Failed with nothing of the Instance serving "
+           f"across the hold window; no new revision appears, the reset mailbox is never written and no Component "
+           f"exceeds N alive; the key returns only with the case's teardown")
+    untouched = _lift_untouched(topo, router)
+    return out + (f"; {untouched}" if untouched else "")
+
+
+def _lift_first_pod(strat):
+    return {"SurgeThenDrain": "the surge Instance's pod (nothing drains; floor N)",
+            "RecreatePod": "the first drained Instance's replacement (floor N-1)"}[strat]
+
+
+def _lift_configkey_new_reason(lift, strat, topo, router):
+    pod = "leader pod" if is_mn(topo) else "pod"
+    out = (f"the push points the engine runner at a ConfigMap key the ConfigMap lacks, so the pushed revision's first "
+           f"engine {pod}, {_lift_first_pod(strat)}, waits in CreateContainerConfigError from its creation and is never "
+           f"Ready")
+    if lift == "never":
+        out += ("; the key is not added: the roll holds at the Instance ready timeout with the new Instance Failed and "
+                "the reason recorded, the old revision keeps serving at the floor and the broken revision never serves; "
+                "a fix push back onto the present key then lands on every Instance with nothing of the broken revision left")
+    else:
+        out += (f"; once that wait has held for the settle window the key is added, the kubelet's own retry starts the "
+                f"container and the Instance comes up on its own; the {strat} roll lands the new revision on every "
+                f"Instance within its budget with no hold behind it: no row reads Failed, nothing is escalated or held, "
+                f"the Instance serves on the new revision, a repair is reported if one ran and never twice, every row settles")
+    untouched = _lift_untouched(topo, router)
+    return out + (f"; {untouched}" if untouched else "")
+
+
+def _lift_readiness_new_reason(topo, router):
+    pod = "leader pod" if is_mn(topo) else "pod"
+    out = (f"the push's first engine {pod}, the surge Instance's, gets the fixture's readiness switch file while its "
+           f"runner is still starting, before it was ever Ready, so it runs and does not pass readiness; the surge "
+           f"waits (nothing drains; floor N) and nothing rebuilds or restarts the pod, under either restart policy, "
+           f"because readiness is the runtime's own out-of-rotation signal and not a failure; once the pod has run "
+           f"the bite window without passing and the drop has held for the settle window the switch is lifted and "
+           f"the same pod passes readiness; the roll then lands the new revision on every Instance within its budget "
+           f"with no hold behind it: no row reads Failed, nothing is escalated or held, no repair is recorded, the "
+           f"pod keeps its identity and serves on the new revision, every row settles")
+    untouched = _lift_untouched(topo, router)
+    return out + (f"; {untouched}" if untouched else "")
+
+
+def _lift_imagepull_idle_reason(rp, topo, router):
+    where = "leader pod" if is_mn(topo) else "pod"
+    back = ("the crash-loop repair opens once the pod has sat past the stuck-pod grace and rebuilds the Instance, unless "
+            "the image returns first and the kubelet starts the container again"
+            if rp == "None" else
+            "the kubelet's restart of the container is the runner restart the policy reads, so a rebuild may follow the "
+            "return of the image, or the container simply starts again")
+    out = (f"the {where} of the engine's highest Instance is pointed at an image that cannot be pulled, so the kubelet "
+           f"stops its container and parks it in ImagePullBackOff; once that has held for the settle window the image is "
+           f"pointed back; {back}; either way the Instance is Ready and serving again on its running revision within the "
+           f"budget, with no new revision and no reset mailbox, and no Component exceeds N alive")
+    untouched = _lift_untouched(topo, router)
+    return out + (f"; {untouched}" if untouched else "")
+
+
+def _lift_imagepull_new_reason(rp, topo, router):
+    pod = "leader pod" if is_mn(topo) else "pod"
+    policy = ("restart policy None reads nothing into the kubelet's restart of the container, so no repair is recorded"
+              if rp == "None" else
+              "RecreateInstanceOnPodRestart may read the kubelet's restart of the container as a runner restart, so one "
+              "rebuild is reported, never required, never twice")
+    out = (f"the push's first engine {pod}, the surge Instance's, is pointed at an image that cannot be pulled while its "
+           f"runner is still starting, before it was ever Ready, so the kubelet stops the container and parks the pod in "
+           f"ImagePullBackOff; the surge waits (nothing drains; floor N); once the pull failure has held for the settle "
+           f"window the pod is pointed back at the image it ran and the kubelet starts the container; the roll then lands "
+           f"the new revision on every Instance within its budget with no hold behind it: no row reads Failed, nothing is "
+           f"escalated or held, the Instance serves on the new revision, every row settles; {policy}")
+    untouched = _lift_untouched(topo, router)
+    return out + (f"; {untouched}" if untouched else "")
+
+
+def emit_lift(add):
+    for topo, n, w, router in LIFT_SHAPES:
+        shape = _lift_shape(topo, w, router)
+        strat, surge, unavail = LIFT_IDLE_STRAT
+        for rp in RESTARTS:
+            kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, 0),
+                      restart=rp, fault="configkey:missing", co="none", topo=topo, during=IDLE_PHASE,
+                      lift="never", expect="failed")
+            meta = dict(strat="(dormant: nothing rolls)", verb="configkey:never", rp=rp,
+                        liftrow=LIFT_ROW_CONFIG_RUNNING_KEPT)
+            desc = f"{GEN_MARK} configkey kept {shape} N={n} rp {rp}"
+            life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp],
+                                 ready_timeout=HEAL_FAILED_READY_TIMEOUT)
+            add("gen-lift", desc, kv, None, _lift_configkey_kept_reason(rp, topo, router), meta,
+                cell=("lift", "configkey", "kept", "old", topo, w, router, rp),
+                body=functools.partial(_lift_configkey_body, topo=topo, n=n, w=w, router=router, life=life, rp=rp))
+    for topo, n, w, router in LIFT_SHAPES:
+        shape = _lift_shape(topo, w, router)
+        for lift, row in (("never", LIFT_ROW_CONFIG_NEW_KEPT), ("after-settle", LIFT_ROW_CONFIG_NEW_LIFTED)):
+            for strat, surge, unavail in LIFT_PUSH_STRATS:
+                rp = LIFT_PUSH_RP
+                kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, surge),
+                          restart=rp, fault="configkey:new", co="none", topo=topo, lift=lift)
+                meta = dict(strat=strat, verb=f"configkey:new:{lift}", rp=rp, liftrow=row)
+                desc = (f"{GEN_MARK} configkey new {'kept' if lift == 'never' else 'lifted'} {shape} N={n} {strat} "
+                        f"{budget_tag(strat, surge, unavail)} rp {rp}")
+                timeout = READINESS_NEW_TIMEOUT if lift == "never" else None
+                life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp], ready_timeout=timeout)
+                add("gen-lift", desc, kv, None, _lift_configkey_new_reason(lift, strat, topo, router), meta,
+                    cell=("lift", "configkey", lift, "new", topo, w, router, strat),
+                    body=functools.partial(_lift_configkey_body, topo=topo, n=n, w=w, router=router, life=life, rp=rp))
+    for topo, n, w, router in LIFT_SHAPES:
+        shape = _lift_shape(topo, w, router)
+        strat, surge, unavail = LIFT_IDLE_STRAT
+        for rp in RESTARTS:
+            kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, surge),
+                      restart=rp, fault="readiness:new", co="none", topo=topo, form="recover")
+            meta = dict(strat=strat, verb="readiness:new:recover", rp=rp, liftrow=LIFT_ROW_READINESS_NEW_LIFTED)
+            desc = f"{GEN_MARK} readiness new lifted {shape} N={n} {strat} {budget_tag(strat, surge, unavail)} rp {rp}"
+            life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+            add("gen-lift", desc, kv, _crash_once_comps(topo, n, w, router, life, rp),
+                _lift_readiness_new_reason(topo, router), meta,
+                cell=("lift", "readiness", "after-settle", "new", topo, w, router, rp))
+    for topo, n, w, router in LIFT_SHAPES:
+        shape = _lift_shape(topo, w, router)
+        strat, surge, unavail = LIFT_IDLE_STRAT
+        for rp in RESTARTS:
+            kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, 0),
+                      restart=rp, fault="imagepull:old", co="none", topo=topo, during=IDLE_PHASE,
+                      lift="after-settle", expect="heals")
+            meta = dict(strat="(dormant: nothing rolls)", verb="imagepull:idle:after-settle", rp=rp,
+                        liftrow=LIFT_ROW_IMAGEPULL_RUNNING_LIFTED)
+            desc = f"{GEN_MARK} imagepull lifted idle {shape} N={n} rp {rp}"
+            life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+            add("gen-lift", desc, kv, _crash_once_comps(topo, n, w, router, life, rp),
+                _lift_imagepull_idle_reason(rp, topo, router), meta,
+                cell=("lift", "imagepull", "after-settle", "old", topo, w, router, rp))
+    for topo, n, w, router in LIFT_SHAPES:
+        shape = _lift_shape(topo, w, router)
+        strat, surge, unavail = LIFT_IDLE_STRAT
+        for rp in RESTARTS:
+            kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, surge),
+                      restart=rp, fault="imagepull:new", co="none", topo=topo, lift="after-settle")
+            meta = dict(strat=strat, verb="imagepull:new:after-settle", rp=rp, liftrow=LIFT_ROW_IMAGEPULL_NEW_LIFTED)
+            desc = f"{GEN_MARK} imagepull new lifted {shape} N={n} {strat} {budget_tag(strat, surge, unavail)} rp {rp}"
+            life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+            add("gen-lift", desc, kv, _crash_once_comps(topo, n, w, router, life, rp),
+                _lift_imagepull_new_reason(rp, topo, router), meta,
+                cell=("lift", "imagepull", "after-settle", "new", topo, w, router, rp))
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 def build_outputs():
     """{relative path under isvcs/: file text} — the entire owned output set."""
@@ -5263,6 +5468,7 @@ def build_outputs():
     emit_webhook(add)
     emit_conflict(add)
     emit_crash_once(add)
+    emit_lift(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -5361,6 +5567,7 @@ def manifest(rows):
     lines += table("By operation on a service with a broken Instance",
                    tally(lambda kv, m: m["op"], where=lambda kv, m: "op" in m))
     lines += table_if("By one-shot crash (gen-crash-once)", "oneshot")
+    lines += table_if("By ledger fault row (gen-lift)", "liftrow")
     lines += table("By move moment (fault-move)", tally(lambda kv, m: m["at"], where=lambda kv, m: "at" in m))
     lines += table("By move victim (fault-move)", tally(lambda kv, m: m["who"], where=lambda kv, m: "who" in m))
     lines += table("By runtime edit (fault-edit)", tally(lambda kv, m: m["rtedit"], where=lambda kv, m: "rtedit" in m))
@@ -5862,6 +6069,7 @@ def manifest(rows):
                      + (f" pause={pause}" if pause else "")
                      + (f" target={target}" if target else ""))
     lines += heal_notes()
+    lines += lift_notes()
     lines += [
         "",
         "## Missing runner verbs/hooks (future coverage, not emitted)",
@@ -5879,6 +6087,44 @@ def manifest(rows):
         "",
     ]
     return "\n".join(lines)
+
+
+def lift_notes():
+    """What each form of gen-lift reads, and the axes it does not cross."""
+    return [
+        "",
+        "## gen-lift: what each form reads",
+        "",
+        "One family fills the six ledger rows the other families left empty; every"
+        " cell runs live. A kept cause (`lift=never`) is the persistent form, a"
+        " lifted one (`lift=after-settle`) the one-shot form.",
+        "",
+        f"- `{LIFT_ROW_CONFIG_RUNNING_KEPT}`: `configkey:missing during=idle lift=never"
+        " expect=failed`; the row reaches Failed with its reason inside the"
+        f" `instanceReadyTimeout: {HEAL_FAILED_READY_TIMEOUT}` and stays Failed with nothing"
+        " serving across the hold; both restart policies (which repair opens first differs).",
+        f"- `{LIFT_ROW_CONFIG_NEW_KEPT}` and `{LIFT_ROW_CONFIG_NEW_LIFTED}`:"
+        " `configkey:new` with `lift=never` (the roll holds at the ready timeout with its"
+        " reason; a fix push back onto the present key lands) or `lift=after-settle` (the"
+        " key is added and the roll completes with no hold behind it). The surge and the"
+        " drain-first strategies decide which pod waits and the floor; one restart policy,"
+        " since a pod that never started has no restart for a policy to read.",
+        f"- `{LIFT_ROW_READINESS_NEW_LIFTED}`: `readiness:new form=recover`; the switch"
+        " file is set in the push's first engine pod as it starts and lifted once the drop"
+        " has settled; the same pod returns and no restart policy may rebuild it. Both"
+        " restart policies under SurgeThenDrain (the surge pod is the first pushed pod and"
+        " takes no capacity while it waits; drain-first is the same story at floor N-1).",
+        f"- `{LIFT_ROW_IMAGEPULL_RUNNING_LIFTED}`: `imagepull:old during=idle"
+        " lift=after-settle expect=heals`; the image is pointed back once the pull failure"
+        " has settled; the kubelet or a repair brings the Instance back, both restart policies.",
+        f"- `{LIFT_ROW_IMAGEPULL_NEW_LIFTED}`: `imagepull:new lift=after-settle`; the push's"
+        " first engine pod is pointed at the unpullable image as it starts and back once the"
+        " failure has settled; one rebuild may be reported under"
+        " RecreateInstanceOnPodRestart, never required, never twice; both restart policies"
+        " under SurgeThenDrain.",
+        "- No group axis: a kept cause changes no fleet for a group to pace, and a lifted"
+        " one leaves the roll to finish as any plain push; the group families cover the gates.",
+    ]
 
 
 def heal_notes():

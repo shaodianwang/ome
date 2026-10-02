@@ -1,0 +1,27 @@
+# p9321: [gen] imagepull new lifted pd-mn W1 N=2 SurgeThenDrain s1 rp RecreateInstance  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=2 ceil_r=2 restart=RecreateInstance fault=imagepull:new co=none topo=pd-mn lift=after-settle
+# reason: the push's first engine leader pod, the surge Instance's, is pointed at an image that cannot be pulled while its runner is still starting, before it was ever Ready, so the kubelet stops the container and parks the pod in ImagePullBackOff; the surge waits (nothing drains; floor N); once the pull failure has held for the settle window the pod is pointed back at the image it ran and the kubelet starts the container; the roll then lands the new revision on every Instance within its budget with no hold behind it: no row reads Failed, nothing is escalated or held, the Instance serves on the new revision, every row settles; RecreateInstanceOnPodRestart may read the kubelet's restart of the container as a runner restart, so one rebuild is reported, never required, never twice; decoder and router stay as they were
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9321 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

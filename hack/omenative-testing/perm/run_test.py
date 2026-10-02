@@ -8261,7 +8261,7 @@ class ReadinessHeaderTest(unittest.TestCase):
     def test_new_side_is_the_bump_itself(self):
         self.assertEqual([], self._errs(self.base.replace("ceil_e=2", "ceil_e=3") + " fault=readiness:new"))
         self.assertTrue(any("no during=" in e for e in self._errs(self.base + " fault=readiness:new during=settling")))
-        self.assertTrue(any("has no form=" in e for e in self._errs(self.base + " fault=readiness:new form=persist")))
+        self.assertTrue(any("form=recover is the one-shot form" in e for e in self._errs(self.base + " fault=readiness:new form=persist")))
         self.assertTrue(any("malformed header value fault=" in e for e in self._errs(self.base + " fault=readiness:stable")))
         self.assertTrue(any("mode=rollout" in e for e in self._errs(self.base.replace(" Ne=", " mode=kill Ne=") + " fault=readiness:new")))
 
@@ -12878,3 +12878,499 @@ class PressSparesTheControlPlaneTest(unittest.TestCase):
         self.assertTrue(all("--since-time=2026-10-01T10:00:00Z" in c and "--tail=-1" in c for c in log_calls))
         self.assertIn(("-l", run.CTRL_SELECTOR), [(c[c.index("-l")], c[c.index("-l") + 1]) for c in log_calls if "-l" in c])
         self.assertTrue(any("deployment/ome-scheduler" in c for c in log_calls))
+
+
+class LiftFamilyTest(unittest.TestCase):
+    """gen-lift: a cause kept to the end of the case (lift=never) or taken
+    away after a bounded time, on the running revision and on the pushed
+    one; the ledger rows the other families left empty."""
+
+    BASE = "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_a_kept_key_is_read_as_expect_failed(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=configkey:missing during=idle lift=never expect=failed"))
+        for bad in (" fault=configkey:missing during=idle lift=never expect=heals",
+                    " fault=configkey:missing during=idle lift=after-settle expect=failed",
+                    " fault=configkey:missing during=idle lift=never expect=parked issue=1",
+                    " fault=node:notready during=idle lift=never expect=failed"):
+            self.assertTrue(self._errs(self.BASE + bad), bad)
+
+    def _kept(self, **over):
+        out = dict(bitten_at=3.0, failed_at=40.0, lifted_at=None, park_broken=None, new_hash=False, reset_used=False,
+                   phase_after="Failed", failure={"reason": "InstanceReadyTimeout", "message": "pod waits on its config"})
+        out.update(over)
+        return out
+
+    def test_kept_verdict_needs_the_failed_row_its_reason_and_the_hold(self):
+        f = {"crash_inst": "1", "crash_comp": "engine", "kind": "configkey",
+             "cause": "ConfigMap key p1-config/value", "bite": run.CONFIGKEY_WAITING}
+        checks = []
+        self.assertEqual("PASS", run._lift_checks(f, "failed", "never", self._kept(), {}, "PASS", [], checks))
+        self.assertTrue(any("says why" in c for c in checks), checks)
+        self.assertTrue(any("stayed Failed" in c for c in checks), checks)
+        for broken in (dict(failure={}), dict(park_broken=12.0), dict(failed_at=None), dict(new_hash=True),
+                       dict(reset_used=True)):
+            self.assertEqual("FAIL", run._lift_checks(dict(f), "failed", "never", self._kept(**broken), {}, "PASS", [], []),
+                             broken)
+        f = dict(f)
+        run._lift_checks(f, "failed", "never", self._kept(bitten_at=None), {}, "PASS", [], [])
+        self.assertIn("never showed", f["infra_fail"])
+
+    def test_generated_family_fills_the_kept_config_row(self):
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift"]
+        kept = [(n, kv, m) for n, kv, m in fam if m.get("liftrow") == generate_cases.LIFT_ROW_CONFIG_RUNNING_KEPT]
+        self.assertEqual(12, len(kept))
+        self.assertEqual(6, len({(kv["topo"], kv["Nd"] > 0, kv["Nr"] > 0) for _n, kv, _m in kept}), "six shape families")
+        self.assertEqual({"None", "RecreateInstance"}, {kv["restart"] for _n, kv, _m in kept})
+        for name, kv, _m in kept:
+            self.assertEqual(("configkey:missing", "idle", "never", "failed"),
+                             (kv["fault"], kv["during"], kv["lift"], kv["expect"]), name)
+            text = outputs[f"gen-lift/{name}.yaml"]
+            self.assertIn("configMapKeyRef", text, name)
+            self.assertIn("kind: ConfigMap", text, name)
+            self.assertIn(f"instanceReadyTimeout: \"{generate_cases.HEAL_FAILED_READY_TIMEOUT}\"", text, name)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(text)
+                self.assertEqual([], run.validate_case_file(path), name)
+
+    def test_ledger_reads_a_kept_cause_as_the_persistent_running_row(self):
+        import coverage
+        cases = coverage.load_cases(coverage.ISVCS / "gen-lift")
+        kept = [c for c in cases if c.header.get("lift") == "never" and c.header.get("fault") == "configkey:missing"]
+        self.assertEqual(12, len(kept))
+        for case in kept:
+            self.assertEqual(("config missing", "persistent", "running"), case.fault_rows()[0], case.id)
+            self.assertEqual("steady state", case.operation, case.id)
+
+
+class LiftPushedKeyTest(unittest.TestCase):
+    """fault=configkey:new: the pushed engine revision reads a key the
+    ConfigMap lacks; lift=never holds the roll and a fix push lands,
+    lift=after-settle adds the key and the roll completes with no hold."""
+
+    BASE = "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 restart=None topo=engine"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_header_names_its_lift_and_rides_the_push_alone(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=configkey:new lift=never"))
+        self.assertEqual([], self._errs(self.BASE + " fault=configkey:new lift=after-settle"))
+        for bad in (" fault=configkey:new", " fault=configkey:new lift=after-failed",
+                    " fault=configkey:new lift=never during=idle", " fault=configkey:new lift=never expect=held",
+                    " fault=configkey:new lift=after-settle once=1", " fault=configkey:new lift=never victimcomp=engine"):
+            self.assertTrue(self._errs(self.BASE + bad), bad)
+
+    @staticmethod
+    def _pod_obj(waiting):
+        state = {"waiting": {"reason": waiting}} if waiting else {"running": {}}
+        return {"metadata": {"uid": "u"}, "status": {"containerStatuses": [{"name": run.MAIN_CONTAINER, "state": state}]}}
+
+    def test_bite_is_the_first_pushed_pod_waiting_on_its_config(self):
+        pods = {
+            "e0": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "runner": "default", "ready": True, "created": "1", "uid": "a"},
+            "n1": {"alive": True, "hash": "new", "inst": "1", "comp": "engine", "runner": "default", "ready": False, "created": "2", "uid": "b"},
+        }
+        ctx = {"pod_state": pods, "old_hashes": {"old"}}
+        f = run._fault_new("p999", {"fault": "configkey:new", "lift": "after-settle"})
+        live = {"n1": self._pod_obj(""), "e0": self._pod_obj("")}
+        orig = run._get_pod
+        run._get_pod = lambda name, ns=None: live.get(name)
+        try:
+            self.assertFalse(run._oneshot_new_bitten(f, ctx), "a pushed pod that starts is no bite")
+            live["n1"] = self._pod_obj(run.CONFIGKEY_WAITING)
+            self.assertTrue(run._oneshot_new_bitten(f, ctx))
+            self.assertEqual(("n1", "1", "engine", "b"), (f["crash_pod"], f["crash_inst"], f["crash_comp"], f["crash_uid"]))
+        finally:
+            run._get_pod = orig
+
+    def _ctx(self, **pods):
+        f = run._fault_new("p999", {"fault": "configkey:new", "lift": "after-settle"})
+        f.update(fired=True, fired_ts=1.0, crash_pod="n1", crash_inst="1", crash_comp="engine", crash_uid="b",
+                 bite=run.CONFIGKEY_WAITING, cause="ConfigMap key p999-config/value-new")
+        state = {"n1": {"alive": True, "hash": "new", "inst": "1", "comp": "engine", "runner": "default",
+                        "ready": True, "serving": True, "uid": "b", "created": "2"}}
+        state.update(pods)
+        return {"fault": f, "case_id": "p999", "N": {"engine": 2, "decoder": 0, "router": 0}, "configured": {"engine"},
+                "pod_state": state, "old_hashes": {"old"}, "converged_at": 50.0, "first_fresh": "engine Instance 1", "inv": {}}
+
+    def test_verdict_is_the_roll_with_no_hold_behind_it(self):
+        orig = (run._isvc_events_since, run._victim_index_chain, run._wait_rows_settled)
+        events = []
+        run._isvc_events_since = lambda cid, since: list(events)
+        run._victim_index_chain = lambda comp, inst, surges, ev: [inst]
+        run._wait_rows_settled = lambda cid, N, configured, budget: (True, "")
+        good = {"bitten_at": 4.0, "lifted_at": 25.0, "held_at": None, "hold": ""}
+        try:
+            ctx = self._ctx()
+            checks = []
+            self.assertEqual("PASS", run._oneshot_new_checks(ctx, dict(good), "CONVERGED", "PASS", [], checks))
+            self.assertTrue(any("came up on its own" in c for c in checks), checks)
+            self.assertEqual("FAIL", run._oneshot_new_checks(self._ctx(), dict(good, held_at=60.0, hold="engine Instance 1 Failed"),
+                                                             "HELD", "PASS", [], []))
+            self.assertEqual("FAIL", run._oneshot_new_checks(self._ctx(), dict(good), "ROTATE_TIMEOUT", "PASS", [], []))
+            not_serving = self._ctx(n1={"alive": True, "hash": "new", "inst": "1", "comp": "engine", "runner": "default",
+                                        "ready": False, "serving": False, "uid": "b", "created": "2"})
+            self.assertEqual("FAIL", run._oneshot_new_checks(not_serving, dict(good), "CONVERGED", "PASS", [], []))
+            events[:] = [("InstanceFailed", "OMENative component=engine instance=1 failed: ready timeout")]
+            self.assertEqual("FAIL", run._oneshot_new_checks(self._ctx(), dict(good), "CONVERGED", "PASS", [], []))
+            events[:] = [("RestartTriggered", "OMENative component=engine instance=1 restart triggered: stuck")]
+            checks = []
+            self.assertEqual("PASS", run._oneshot_new_checks(self._ctx(), dict(good), "CONVERGED", "PASS", [], checks))
+            self.assertTrue(any("reported, not judged" in c for c in checks), checks)
+            events[:] = events * 2
+            self.assertEqual("FAIL", run._oneshot_new_checks(self._ctx(), dict(good), "CONVERGED", "PASS", [], []))
+            events[:] = []
+            run._wait_rows_settled = lambda cid, N, configured, budget: (False, "engine/1 Repairing")
+            self.assertEqual("FAIL", run._oneshot_new_checks(self._ctx(), dict(good), "CONVERGED", "PASS", [], []))
+            run._wait_rows_settled = orig[2]
+            for apparatus, missing in ((dict(good, bitten_at=None), "ever showed"), (dict(good, lifted_at=None), "never lifted")):
+                ctx = self._ctx()
+                self.assertEqual("PASS", run._oneshot_new_checks(ctx, apparatus, "CONVERGED", "PASS", [], []))
+                self.assertIn(missing, ctx["fault"]["infra_fail"])
+        finally:
+            run._isvc_events_since, run._victim_index_chain, run._wait_rows_settled = orig
+
+    def test_generated_family_fills_both_pushed_rows(self):
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift" and kv["fault"] == "configkey:new"]
+        self.assertEqual(24, len(fam))
+        kept = [(n, kv, m) for n, kv, m in fam if kv["lift"] == "never"]
+        lifted = [(n, kv, m) for n, kv, m in fam if kv["lift"] == "after-settle"]
+        self.assertEqual((12, 12), (len(kept), len(lifted)))
+        for group, row in ((kept, generate_cases.LIFT_ROW_CONFIG_NEW_KEPT), (lifted, generate_cases.LIFT_ROW_CONFIG_NEW_LIFTED)):
+            self.assertEqual({row}, {m["liftrow"] for _n, _kv, m in group})
+            self.assertEqual(6, len({(kv["topo"], kv["Nd"] > 0, kv["Nr"] > 0) for _n, kv, _m in group}), "six shape families")
+            self.assertEqual({"SurgeThenDrain", "RecreatePod"}, {m["strat"] for _n, _kv, m in group})
+            self.assertTrue(all("during" not in kv and "expect" not in kv for _n, kv, _m in group), "the push itself")
+        for name, kv, _m in fam:
+            text = outputs[f"gen-lift/{name}.yaml"]
+            self.assertEqual(kv["lift"] == "never", "instanceReadyTimeout" in text, name)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(text)
+                self.assertEqual([], run.validate_case_file(path), name)
+
+    def test_ledger_reads_the_pushed_key_rows(self):
+        import coverage
+        cases = [c for c in coverage.load_cases(coverage.ISVCS / "gen-lift") if c.header.get("fault") == "configkey:new"]
+        self.assertEqual(24, len(cases))
+        for case in cases:
+            form = "persistent" if case.header["lift"] == "never" else "one-shot"
+            self.assertEqual(("config missing", form, "new"), case.fault_rows()[0], case.id)
+            self.assertEqual("push", case.operation, case.id)
+
+
+class LiftPushedReadinessTest(unittest.TestCase):
+    """fault=readiness:new form=recover: the push's first engine pod gets the
+    switch while its runner starts and loses it once the drop has settled;
+    the same pod returns and nothing rebuilt it."""
+
+    BASE = "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 restart=None topo=engine"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_form_recover_is_the_one_shot_form(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=readiness:new form=recover"))
+        self.assertEqual([], self._errs(self.BASE + " fault=readiness:new"))
+        for bad in (" fault=readiness:new form=persist", " fault=readiness:new form=recover during=idle"):
+            self.assertTrue(self._errs(self.BASE + bad), bad)
+
+    def test_switch_lands_on_the_first_pushed_pod_before_it_is_ready(self):
+        pods = {
+            "e0": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "runner": "default", "ready": True, "created": "1", "uid": "a"},
+            "n2": {"alive": True, "hash": "new", "inst": "2", "comp": "engine", "runner": "default", "ready": False, "created": "3", "uid": "c"},
+            "n1": {"alive": True, "hash": "new", "inst": "1", "comp": "engine", "runner": "default", "ready": False, "created": "2", "uid": "b"},
+            "w1": {"alive": True, "hash": "new", "inst": "1", "comp": "engine", "runner": "worker", "ready": False, "created": "2", "uid": "w"},
+        }
+        ctx = {"pod_state": pods, "old_hashes": {"old"}}
+        live = {"n1": (False, False, 0, "b")}
+        switched = []
+        orig = (run._pod_main_state, run._readiness_switch, list(run._FAULT_CLEANUPS))
+        run._pod_main_state = lambda name: live.get(name)
+        run._readiness_switch = lambda pod, on: (switched.append((pod, on)) or subprocess.CompletedProcess([], 0, "", ""))
+        try:
+            f = run._fault_new("p999", {"fault": "readiness:new", "form": "recover"})
+            f["once_poll"] = 0.0
+            run._oneshot_new_fire(f, ctx)
+            self.assertFalse(f["fired"], "the aimed pod's runner is not running yet")
+            live["n1"] = (True, False, 0, "b")
+            f["once_poll"] = 0.0
+            run._oneshot_new_fire(f, ctx)
+            self.assertTrue(f["fired"])
+            self.assertEqual([("n1", True)], switched, "the earliest new-revision single or leader pod, not the worker")
+            self.assertEqual(("n1", "1", "b"), (f["crash_pod"], f["crash_inst"], f["crash_uid"]))
+            self.assertIn(("readiness", f), run._FAULT_CLEANUPS)
+            # the bite: the pod has run the bite window without passing readiness
+            f["fired_ts"] = time.time() - run.READINESS_NEW_BITE_S - 1
+            self.assertTrue(run._oneshot_new_bitten(f, ctx))
+            live["n1"] = (True, True, 0, "b")
+            g = dict(f)
+            self.assertFalse(run._oneshot_new_bitten(g, ctx))
+            self.assertIn("the harness was late", run._oneshot_new_bite_missed(g))
+            live["n1"] = (True, False, 1, "b")
+            g = dict(f)
+            self.assertFalse(run._oneshot_new_bitten(g, ctx))
+            self.assertEqual("", run._oneshot_new_bite_missed(g), "a restart is the product's to answer for")
+            self.assertEqual(1, g["victim_restarted"])
+            live["n1"] = None
+            g = dict(f)
+            self.assertFalse(run._oneshot_new_bitten(g, ctx))
+            self.assertTrue(g["victim_gone"])
+        finally:
+            run._pod_main_state, run._readiness_switch = orig[0], orig[1]
+            run._FAULT_CLEANUPS[:] = orig[2]
+
+    def _ctx(self, uid="b", **over):
+        f = run._fault_new("p999", {"fault": "readiness:new", "form": "recover"})
+        f.update(fired=True, fired_ts=1.0, crash_pod="n1", crash_inst="1", crash_comp="engine", crash_uid="b",
+                 bite="no readiness while running", cause="the readiness switch")
+        f.update(over)
+        state = {"n1": {"alive": True, "hash": "new", "inst": "1", "comp": "engine", "runner": "default",
+                        "ready": True, "serving": True, "uid": uid, "created": "2"}}
+        return {"fault": f, "case_id": "p999", "N": {"engine": 2, "decoder": 0, "router": 0}, "configured": {"engine"},
+                "pod_state": state, "old_hashes": {"old"}, "converged_at": 50.0, "first_fresh": "engine Instance 1", "inv": {}}
+
+    def test_verdict_keeps_the_pod_and_allows_no_repair(self):
+        orig = (run._isvc_events_since, run._victim_index_chain, run._wait_rows_settled)
+        events = []
+        run._isvc_events_since = lambda cid, since: list(events)
+        run._victim_index_chain = lambda comp, inst, surges, ev: [inst]
+        run._wait_rows_settled = lambda cid, N, configured, budget: (True, "")
+        good = {"bitten_at": 34.0, "lifted_at": 55.0, "held_at": None, "hold": ""}
+        try:
+            checks = []
+            self.assertEqual("PASS", run._oneshot_new_checks(self._ctx(), dict(good), "CONVERGED", "PASS", [], checks))
+            self.assertTrue(any("same pod" in c for c in checks), checks)
+            self.assertEqual("FAIL", run._oneshot_new_checks(self._ctx(uid="z"), dict(good), "CONVERGED", "PASS", [], []),
+                             "a replaced pod fails: readiness is not a failure")
+            events[:] = [("RestartTriggered", "OMENative component=engine instance=1 restart triggered: unready")]
+            self.assertEqual("FAIL", run._oneshot_new_checks(self._ctx(), dict(good), "CONVERGED", "PASS", [], []),
+                             "one repair fails under readiness, where crash forms only report it")
+            events[:] = []
+            ctx = self._ctx(victim_restarted=1)
+            self.assertEqual("FAIL", run._oneshot_new_checks(ctx, dict(good, bitten_at=None), "CONVERGED", "PASS", [], []))
+            self.assertIsNone(ctx["fault"]["infra_fail"])
+            ctx = self._ctx(ready_before_lift=3.0)
+            self.assertEqual("PASS", run._oneshot_new_checks(ctx, dict(good, bitten_at=None), "CONVERGED", "PASS", [], []))
+            self.assertIn("the harness was late", ctx["fault"]["infra_fail"])
+            ctx = self._ctx(fired=False)
+            self.assertEqual("PASS", run._oneshot_new_checks(ctx, dict(good), "CONVERGED", "PASS", [], []))
+            self.assertIn("never landed", ctx["fault"]["infra_fail"])
+        finally:
+            run._isvc_events_since, run._victim_index_chain, run._wait_rows_settled = orig
+
+    def test_generated_family_fills_the_readiness_row(self):
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift" and kv["fault"] == "readiness:new"]
+        self.assertEqual(12, len(fam))
+        self.assertEqual({generate_cases.LIFT_ROW_READINESS_NEW_LIFTED}, {m["liftrow"] for _n, _kv, m in fam})
+        self.assertEqual(6, len({(kv["topo"], kv["Nd"] > 0, kv["Nr"] > 0) for _n, kv, _m in fam}), "six shape families")
+        self.assertEqual({"None", "RecreateInstance"}, {kv["restart"] for _n, kv, _m in fam})
+        self.assertEqual({"SurgeThenDrain"}, {m["strat"] for _n, _kv, m in fam})
+        for name, kv, _m in fam:
+            self.assertEqual("recover", kv["form"], name)
+            text = outputs[f"gen-lift/{name}.yaml"]
+            self.assertNotIn("instanceReadyTimeout", text, name)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(text)
+                self.assertEqual([], run.validate_case_file(path), name)
+
+    def test_ledger_reads_the_lifted_readiness_row(self):
+        import coverage
+        cases = [c for c in coverage.load_cases(coverage.ISVCS / "gen-lift") if c.header.get("fault") == "readiness:new"]
+        self.assertEqual(12, len(cases))
+        for case in cases:
+            self.assertEqual(("readiness never passes", "one-shot", "new"), case.fault_rows()[0], case.id)
+            self.assertEqual("push", case.operation, case.id)
+
+
+class LiftHealedPullTest(unittest.TestCase):
+    """fault=imagepull:old during=idle lift=after-settle expect=heals: the
+    running revision's pod cannot pull for a while, then can; the Instance
+    serves again on its running revision."""
+
+    BASE = "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_a_healed_break_at_idle_reads_expect_heals(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=imagepull:old during=idle lift=after-settle expect=heals"))
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=start during=idle lift=after-settle expect=heals"))
+        self.assertEqual([], self._errs(self.BASE + " fault=imagepull:old during=idle expect=repaired"))
+        for bad in (" fault=imagepull:old during=idle lift=after-settle",
+                    " fault=imagepull:old during=idle lift=after-settle expect=repaired",
+                    " fault=imagepull:old during=idle lift=after-failed expect=heals",
+                    " fault=imagepull:old lift=after-settle expect=heals",
+                    " fault=imagepull:old during=idle expect=heals"):
+            self.assertTrue(self._errs(self.BASE + bad), bad)
+
+    def test_the_lift_flow_owns_a_healed_break(self):
+        f = run._fault_new("p999", {"fault": "imagepull:old", "during": "idle", "lift": "after-settle", "expect": "heals"})
+        self.assertTrue(run._break_heals_at_idle(f))
+        self.assertFalse(run._break_heals_at_idle(run._fault_new("p999", {"fault": "imagepull:old", "during": "idle", "expect": "repaired"})))
+        self.assertFalse(run._break_heals_at_idle(run._fault_new("p999", {"fault": "imagepull:old", "lift": "after-settle"})))
+        self.assertEqual(run.IMAGEPULL_REASONS, run._break_wait_reasons("imagepull"))
+        self.assertEqual(run.CRASH_START_REASONS, run._break_wait_reasons("crashloop"))
+        healed = []
+        orig = run._break_heal
+        run._break_heal = lambda rec: healed.append(rec["crash_pod"])
+        try:
+            f["crash_pod"] = "e1"
+            self.assertTrue(run._lift_cause(f))
+            self.assertEqual(["e1"], healed)
+        finally:
+            run._break_heal = orig
+
+    def test_generated_family_fills_the_healed_pull_row(self):
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift" and kv["fault"] == "imagepull:old"]
+        self.assertEqual(12, len(fam))
+        self.assertEqual({generate_cases.LIFT_ROW_IMAGEPULL_RUNNING_LIFTED}, {m["liftrow"] for _n, _kv, m in fam})
+        self.assertEqual(6, len({(kv["topo"], kv["Nd"] > 0, kv["Nr"] > 0) for _n, kv, _m in fam}), "six shape families")
+        self.assertEqual({"None", "RecreateInstance"}, {kv["restart"] for _n, kv, _m in fam})
+        for name, kv, _m in fam:
+            self.assertEqual(("idle", "after-settle", "heals"), (kv["during"], kv["lift"], kv["expect"]), name)
+            self.assertEqual(kv["Ne"], kv["ceil_e"], "nothing surges a service nobody bumped")
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(outputs[f"gen-lift/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)
+
+    def test_ledger_reads_the_healed_pull_as_one_shot_running(self):
+        import coverage
+        cases = [c for c in coverage.load_cases(coverage.ISVCS / "gen-lift") if c.header.get("fault") == "imagepull:old"]
+        self.assertEqual(12, len(cases))
+        for case in cases:
+            self.assertEqual(("image pull", "one-shot", "running"), case.fault_rows()[0], case.id)
+            self.assertEqual("steady state", case.operation, case.id)
+
+
+class LiftPushedPullTest(unittest.TestCase):
+    """fault=imagepull:new lift=after-settle: the push's first engine pod is
+    pointed at the unpullable image as it starts and back once the pull
+    failure has settled; the roll completes with no hold behind it."""
+
+    BASE = "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 restart=None topo=engine"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_header_is_the_push_with_the_lift(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=imagepull:new lift=after-settle"))
+        for bad in (" fault=imagepull:new", " fault=imagepull:new lift=never",
+                    " fault=imagepull:new lift=after-settle during=settling",
+                    " fault=imagepull:new lift=after-settle img=example.com/x:none",
+                    " fault=imagepull:new lift=after-settle expect=heals",
+                    " fault=crashloop:new form=start lift=after-settle"):
+            self.assertTrue(self._errs(self.BASE + bad), bad)
+
+    def test_fire_points_the_first_pushed_pod_at_the_break_image_and_records_what_it_ran(self):
+        pods = {
+            "e0": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "runner": "default", "ready": True, "created": "1", "uid": "a"},
+            "n1": {"alive": True, "hash": "new", "inst": "1", "comp": "engine", "runner": "default", "ready": False, "created": "2", "uid": "b"},
+        }
+        inv = {"mutated_uids": {}}
+        ctx = {"pod_state": pods, "old_hashes": {"old"}, "inv": inv}
+        patched = []
+        orig = (run._pod_main_state, run._get_pod, run.kubectl)
+        run._pod_main_state = lambda name: (True, False, 0, "b") if name == "n1" else None
+        run._get_pod = lambda name, ns=None: {"spec": {"containers": [{"name": run.MAIN_CONTAINER, "image": "fixture:1"}]},
+                                             "status": {"containerStatuses": [{"name": run.MAIN_CONTAINER,
+                                                                               "state": {"waiting": {"reason": "ErrImagePull"}}}]}}
+        run.kubectl = lambda *a: (patched.append(a) or subprocess.CompletedProcess(a, 0, "", ""))
+        try:
+            f = run._fault_new("p999", {"fault": "imagepull:new", "lift": "after-settle"})
+            f["once_poll"] = 0.0
+            run._oneshot_new_fire(f, ctx)
+            self.assertTrue(f["fired"])
+            self.assertEqual("fixture:1", f["crash_image"], "what the heal puts back")
+            self.assertEqual(("n1", "1", "b"), (f["crash_pod"], f["crash_inst"], f["crash_uid"]))
+            self.assertEqual({"b": "n1"}, inv["mutated_uids"], "a pod the harness changed is never judged against its revision")
+            self.assertEqual(1, len(patched))
+            self.assertIn("patch", patched[0])
+            self.assertIn(runtime_fixtures.UNPULLABLE_IMAGE, patched[0][-1])
+            self.assertTrue(run._oneshot_new_bitten(f, ctx), "the kubelet's pull failure is the bite")
+            run._pod_main_state = lambda name: None
+            g = dict(f)
+            self.assertFalse(run._oneshot_new_bitten(g, ctx))
+            self.assertTrue(g["victim_gone"])
+        finally:
+            run._pod_main_state, run._get_pod, run.kubectl = orig
+
+    def test_lift_points_the_pod_back_and_a_repair_is_reported_not_required(self):
+        healed = []
+        orig = (run._break_heal, run._isvc_events_since, run._victim_index_chain, run._wait_rows_settled)
+        run._break_heal = lambda rec: healed.append(rec["crash_pod"])
+        events = [("RestartTriggered", "OMENative component=engine instance=1 restart triggered: runner restarted")]
+        run._isvc_events_since = lambda cid, since: list(events)
+        run._victim_index_chain = lambda comp, inst, surges, ev: [inst]
+        run._wait_rows_settled = lambda cid, N, configured, budget: (True, "")
+        try:
+            f = run._fault_new("p999", {"fault": "imagepull:new", "lift": "after-settle"})
+            f.update(fired=True, fired_ts=1.0, crash_pod="n1", crash_inst="1", crash_comp="engine", crash_uid="b",
+                     crash_image="fixture:1", bite="ErrImagePull|ImagePullBackOff", cause="the break image on n1")
+            self.assertTrue(run._oneshot_new_lift(f))
+            self.assertEqual(["n1"], healed)
+            state = {"n1": {"alive": True, "hash": "new", "inst": "1", "comp": "engine", "runner": "default",
+                            "ready": True, "serving": True, "uid": "c", "created": "2"}}
+            ctx = {"fault": f, "case_id": "p999", "N": {"engine": 2, "decoder": 0, "router": 0}, "configured": {"engine"},
+                   "pod_state": state, "old_hashes": {"old"}, "converged_at": 50.0, "first_fresh": "engine Instance 1", "inv": {}}
+            out = {"bitten_at": 6.0, "lifted_at": 27.0, "held_at": None, "hold": ""}
+            checks = []
+            self.assertEqual("PASS", run._oneshot_new_checks(ctx, out, "CONVERGED", "PASS", [], checks))
+            self.assertTrue(any("reported, not judged" in c for c in checks), checks)
+            events.append(events[0])
+            self.assertEqual("FAIL", run._oneshot_new_checks(ctx, out, "CONVERGED", "PASS", [], []), "never twice")
+        finally:
+            run._break_heal, run._isvc_events_since, run._victim_index_chain, run._wait_rows_settled = orig
+
+    def test_generated_family_fills_the_pushed_pull_row(self):
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift" and kv["fault"] == "imagepull:new"]
+        self.assertEqual(12, len(fam))
+        self.assertEqual({generate_cases.LIFT_ROW_IMAGEPULL_NEW_LIFTED}, {m["liftrow"] for _n, _kv, m in fam})
+        self.assertEqual(6, len({(kv["topo"], kv["Nd"] > 0, kv["Nr"] > 0) for _n, kv, _m in fam}), "six shape families")
+        self.assertEqual({"None", "RecreateInstance"}, {kv["restart"] for _n, kv, _m in fam})
+        self.assertEqual({"SurgeThenDrain"}, {m["strat"] for _n, _kv, m in fam})
+        for name, kv, _m in fam:
+            self.assertEqual("after-settle", kv["lift"], name)
+            self.assertTrue("during" not in kv and "expect" not in kv, name)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(outputs[f"gen-lift/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)
+        whole = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift"]
+        self.assertEqual(72, len(whole))
+        self.assertEqual(6, len({m["liftrow"] for _n, _kv, m in whole}), "six ledger rows, one family")
+
+    def test_ledger_reads_the_pushed_pull_as_one_shot_new(self):
+        import coverage
+        cases = [c for c in coverage.load_cases(coverage.ISVCS / "gen-lift") if c.header.get("fault") == "imagepull:new"]
+        self.assertEqual(12, len(cases))
+        for case in cases:
+            self.assertEqual(("image pull", "one-shot", "new"), case.fault_rows()[0], case.id)
+            self.assertEqual("push", case.operation, case.id)

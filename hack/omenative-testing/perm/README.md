@@ -115,7 +115,8 @@ perm/
 │   ├── gen-fault-move/ gen-fault-edit/  — generated faults crossed with a move and with a runtime edit
 │   ├── gen-repeat/            — generated: faults that keep repeating until they are lifted (`repeat=<n>`)
 │   ├── gen-webhook/ gen-conflict/  — generated window faults: the admission webhook unreachable, a competing writer
-│   └── gen-crash-once/  — generated: a crash that happens exactly once (once=1), at start or after Ready, on either revision
+│   ├── gen-crash-once/  — generated: a crash that happens exactly once (once=1), at start or after Ready, on either revision
+│   └── gen-lift/        — generated: a cause kept to the end of the case or taken away after a while (the config key, readiness and image pull, on either revision)
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -1450,8 +1451,8 @@ shapes.
   pushed revision under a push, the six shape families of the coverage
   ledger (the engine alone, behind a router and with a decoder and a
   router, single-pod and as a gang), both restart policies and the surge
-  and drain-first strategies; the one-shot forms of the readiness and
-  config-key faults are not driven yet.
+  and drain-first strategies; the one-shot forms of the readiness, config-key
+  and image-pull faults are the `isvcs/gen-lift/` family's (below).
 
 - **`fault=imagepull:old`** is the same break with an image that cannot be
   pulled: the victim's live pod is pointed at the harness's unpullable
@@ -1514,6 +1515,34 @@ shapes.
   and a grouped engine's repair is admitted without the group's gate while
   the Instance serves nothing — `isvcs/MANIFEST.md` states per axis how
   each half heals.
+
+- **`fault=configkey:missing` with `lift=never` and `expect=failed`**
+  (rollout mode, `during=idle`) keeps the key away until the case ends: the
+  same break, never restored by the harness (only by the end-of-case
+  cleanup). The verdict needs the victim's row to reach `Failed` within the
+  budget with a recorded reason (the case's `lifecycle.instanceReadyTimeout`
+  brings the escalation inside it), to stay `Failed` with nothing of the
+  Instance serving across `IDLE_HOLD_S`, no new revision, no reset mailbox
+  and no Component above N alive. It is the persistent form of `config
+  missing` on the running revision; `batch.py` does not list it as debt.
+
+- **`fault=configkey:new` with `lift=never|after-settle`** (rollout mode,
+  no `during=`) is the push itself: the bump points the bumped engine
+  runner at `<key>-new`, next to the key the running revision reads (the
+  reference and the env var are read off a live engine pod), so the pushed
+  revision's first engine pod waits in `CreateContainerConfigError` from
+  its creation. `lift=never` reads like `readiness:new`: the roll holds at
+  the Instance ready timeout with the new Instance `Failed` and its reason,
+  the old revision keeps serving at the floor, nothing of the broken
+  revision serves, and a fix push back onto the present key lands on every
+  Instance with nothing of the broken revision left. `lift=after-settle`
+  adds the key once the wait has held for `LIFT_SETTLE_S`; the kubelet's
+  own retry starts the container and the roll must complete with no hold
+  behind it: no bumped Instance `Failed`, nothing escalated or held
+  (`InstanceFailed`, `RetryHeld`, `RepairHeld`), the Instance Ready and
+  serving on the new revision, every row settled; a repair is reported,
+  never required, never twice. The watch and verdict are shared by the
+  one-shot pushed-revision forms of readiness and image pull below.
 
 - **`fault=node:notready` with `lift=<phase>` and
   `expect=relocated|repaired|parked`** (rollout mode, `during=idle` only)
@@ -1609,6 +1638,31 @@ shapes.
   broken revision left. Cases set a short `lifecycle.instanceReadyTimeout` so
   the hold arrives inside the budget. The switch is a template change beyond
   images, so an in-place strategy recreates and its pods are counted by hash.
+  **`form=recover`** is the one-shot form: the push is an ordinary bump and
+  the harness sets the switch file in the push's first engine single or
+  leader pod while its runner is still starting (running, not Ready, never
+  restarted), lifting it once the pod has run `READINESS_NEW_BITE_S` without
+  passing readiness and the drop has held for `LIFT_SETTLE_S`. The roll must
+  complete with no hold behind it, the same pod (same UID) Ready and serving
+  on the new revision and no `RestartTriggered` for the Instance under either
+  restart policy; a pod read Ready before the lift is an apparatus verdict
+  (the switch landed late), a pod restarted or replaced while it only failed
+  readiness fails the case.
+
+- **`fault=imagepull:old` with `during=idle lift=after-settle expect=heals`**
+  and **`fault=imagepull:new` with `lift=after-settle`** are the one-shot
+  forms of the image pull. At idle the running revision's victim is pointed
+  at the unpullable reference as above, and once the kubelet's pull failure
+  (`ImagePullBackOff` or `ErrImagePull`) has held for `LIFT_SETTLE_S` the pod
+  is pointed back at the image it ran; the heal verdict of `configkey` applies
+  (Ready and serving again on the running revision, no new revision, no
+  reset mailbox, no Component above N alive), whether the kubelet started
+  the container again or a repair rebuilt the pod first. Under a push the
+  push's first engine pod is pointed at the unpullable reference while its
+  runner is still starting and back once the failure has settled; the
+  one-shot pushed-revision verdict applies, with one rebuild reported (the
+  kubelet's restart of the container may be read as a runner restart by
+  `RecreateInstanceOnPodRestart`), never required, never twice.
 
 - **`fault=podkill:<phase>` with `kill=leader|worker`** (gang topologies)
   aims the podkill at one gang member instead of the lowest gang's leader,
@@ -2183,7 +2237,12 @@ Four generators write into `isvcs/`; re-run one after editing it:
   the inherited runtime lands, and a bad edit followed by its fix), the
   crash that happens exactly once (`p8400`–`p8599`) → `isvcs/gen-crash-once/`
   (`once=1`: one kill of the runner, at start or after Ready, on the running
-  revision at idle and under a push and on the pushed revision), plus
+  revision at idle and under a push and on the pushed revision), the cause
+  kept or lifted (`p9250`–`p9399`) → `isvcs/gen-lift/` (the config key kept
+  away on the running revision or missing for the pushed one, the pushed
+  revision's pod failing readiness for a while, the image that cannot be
+  pulled for a while on either revision; the six ledger rows no other family
+  filled, each on the six shape families), plus
   `isvcs/MANIFEST.md` (per-dimension counts, the
   constraint ledger with every omitted cell and its reason, missing-hook
   catalog). The story families are canary lanes in CI: the pipeline gives
@@ -2276,8 +2335,10 @@ The ledger's cell is (shape family, operation, fault row):
   the `operation+operation` overlap;
 - **fault row** — (kind, form, side). `fault=crashloop:old` is `crash at
   start` / `crash after Ready` by `form=`, `imagepull:old` is `image pull`,
-  `readiness:old` is `readiness never passes` on the running revision,
-  `configkey:missing` is `config missing`, `node:notready` and
+  `readiness:old` is `readiness never passes` on the running revision and
+  `readiness:new` on the new one (one-shot under `form=recover`),
+  `configkey:missing` is `config missing` on the running revision and
+  `configkey:new` on the new one, `node:notready` and
   `cordon:source` are `node`, `quota:<n>` is `quota`, `ctrlrestart` is
   `controller restart`; `mode=kill`, `podkill` and `pkill=1` are `pod
   deleted by hand` on a single-pod service and `gang member lost` on a gang;

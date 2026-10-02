@@ -1,0 +1,15 @@
+# p9301: [gen] imagepull lifted idle engine-mn W1 N=2 rp RecreateInstance  Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=RecreateInstance fault=imagepull:old co=none topo=engine-mn during=idle lift=after-settle expect=heals
+# reason: the leader pod of the engine's highest Instance is pointed at an image that cannot be pulled, so the kubelet stops its container and parks it in ImagePullBackOff; once that has held for the settle window the image is pointed back; the kubelet's restart of the container is the runner restart the policy reads, so a rebuild may follow the return of the image, or the container simply starts again; either way the Instance is Ready and serving again on its running revision within the budget, with no new revision and no reset mailbox, and no Component exceeds N alive
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9301 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

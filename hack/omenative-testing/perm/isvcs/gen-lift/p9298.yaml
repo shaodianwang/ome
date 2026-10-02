@@ -1,0 +1,13 @@
+# p9298: [gen] imagepull lifted idle engine N=4 rp None  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 restart=None fault=imagepull:old co=none topo=engine during=idle lift=after-settle expect=heals
+# reason: the pod of the engine's highest Instance is pointed at an image that cannot be pulled, so the kubelet stops its container and parks it in ImagePullBackOff; once that has held for the settle window the image is pointed back; the crash-loop repair opens once the pod has sat past the stuck-pod grace and rebuilds the Instance, unless the image returns first and the kubelet starts the container again; either way the Instance is Ready and serving again on its running revision within the budget, with no new revision and no reset mailbox, and no Component exceeds N alive
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9298 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

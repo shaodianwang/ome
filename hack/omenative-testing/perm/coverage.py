@@ -165,7 +165,7 @@ UPDATE_STRATEGIES = {"SurgeThenDrain", "RecreatePod", "InPlaceIfPossible", "InPl
 RESTART_POLICY_NAMES = {"None", "RecreateInstanceOnPodRestart"}
 # The rollout-mode runner edits a push carries beside its annotation bump.
 ROLLOUT_EDITS = {"image", "env", "resources", "probe"}
-IDLE_EXPECTS = {"repaired", "held", "heals", "parked", "relocated"}
+IDLE_EXPECTS = {"repaired", "held", "heals", "parked", "relocated", "failed"}
 # What a scale-up leaves a broken Instance at: repaired, or left as the fault left it.
 BROKEN_UP_EXPECTS = {"repaired", "left"}
 
@@ -260,7 +260,9 @@ def _fault(v):
         return param == "idle" or _hook(param)   # the analysis source goes before the push or at a hook
     if kind == "cordon":
         return param in ("source", "all")   # the source node, or every node (a roll with no room)
-    return {"configkey": "missing", "node": "notready"}.get(kind) == param
+    if kind == "configkey":
+        return param in ("missing", "new")   # the running revision's key removed, or a pushed revision reading a missing key
+    return {"node": "notready"}.get(kind) == param
 
 
 def _edit(v):
@@ -687,7 +689,9 @@ def classify_faults(h, mode, pods, strategy, verbs):
     elif kind == "source":
         faults.append(("analysis source unusable", "one-shot" if lifted else "persistent", "-", str(h.get("form", ""))))
     elif kind == "configkey":
-        faults.append(("config missing", "one-shot" if lifted else "persistent", "running", str(h.get("victimcomp", "engine"))))
+        # the running revision's key removed at idle (missing), or the pushed revision reading a key the ConfigMap lacks (new)
+        faults.append(("config missing", "one-shot" if lifted else "persistent", "new" if param == "new" else "running",
+                       str(h.get("victimcomp", "engine"))))
     elif kind == "node":
         faults.append(("node", "persistent" if h.get("lift") == "after-recover" else "one-shot", "-", str(h.get("victimcomp", "engine"))))
     elif kind == "cordon" and param == "all":
@@ -695,9 +699,10 @@ def classify_faults(h, mode, pods, strategy, verbs):
     elif kind == "cordon":
         faults.append(("node", "persistent", "-", "cordoned source node"))
     elif kind == "readiness":
-        # a serving pod that stops passing readiness (kept, or lifted) or a pushed revision that never passes it
+        # a serving pod that stops passing readiness, or a pushed revision's first pod that never passes it;
+        # form=recover lifts the switch again on either side
         component = str(h.get("victimcomp", "engine"))
-        persistent = param == "new" or h.get("form") != "recover"
+        persistent = h.get("form") != "recover"
         faults.append(("sibling broken" if component != "engine" else "readiness never passes",
                        "persistent" if persistent else "one-shot", "new" if param == "new" else "running", component))
     elif kind == "quota":

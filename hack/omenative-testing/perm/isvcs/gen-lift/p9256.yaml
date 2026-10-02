@@ -1,0 +1,25 @@
+# p9256: [gen] configkey kept engine-mn W1+router N=2 rp None  Ne=2 Nd=0 Nr=2 ceil_e=2 ceil_d=0 ceil_r=2 restart=None fault=configkey:missing co=none topo=engine-mn during=idle lift=never expect=failed
+# reason: the engine runner's ConfigMap key is removed on the highest Instance's gang leader and the runner restarted, so its next start waits in CreateContainerConfigError, and the key is not put back while the case runs; the crash-loop repair opens as soon as the wait is seen and rebuilds the pod, which waits on the same key; the wait outlives the attempt's Instance ready timeout and the escalation parks the repair at Failed with the reason recorded on the row; the row stays Failed with nothing of the Instance serving across the hold window; no new revision appears, the reset mailbox is never written and no Component exceeds N alive; the key returns only with the case's teardown; the router stays as it was
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9256 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: { runner: { name: "ome-container", env: [{ name: "TEST_CONFIG_VALUE", valueFrom: { configMapKeyRef: { name: "p9256-config", key: "value" } } }] } }
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", instanceReadyTimeout: "90s", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: p9256-config }
+data: { value: "1" }

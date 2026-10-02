@@ -280,6 +280,8 @@ class FaultTest(unittest.TestCase):
                                     victimcomp="decoder", comps=pd(), topo="pd", **counts(2, 2, 2)))
         self.assertEqual([("readiness never passes", "persistent", "new", "engine")],
                          self.fault(fault="readiness:new", topo="engine"))
+        self.assertEqual([("readiness never passes", "one-shot", "new", "engine")],
+                         self.fault(fault="readiness:new", form="recover", topo="engine"))
 
     def test_lifted_causes_are_the_one_shot_form(self):
         self.assertEqual([("config missing", "one-shot", "running", "engine")],
@@ -288,6 +290,22 @@ class FaultTest(unittest.TestCase):
                          self.fault(mode="migrate", mig="Auto", fault="quota:0", expect="fail", lift=1, topo="engine"))
         self.assertEqual([("quota", "persistent", "-", "headroom 1")],
                          self.fault(fault="quota:1", blocked=1, topo="engine"))
+
+    def test_a_break_healed_at_idle_is_the_one_shot_running_form(self):
+        self.assertEqual([("image pull", "one-shot", "running", "engine")],
+                         self.fault(fault="imagepull:old", during="idle", lift="after-settle", expect="heals", topo="engine"))
+        self.assertEqual([("image pull", "one-shot", "new", "engine")],
+                         self.fault(fault="imagepull:new", lift="after-settle", topo="engine"))
+
+    def test_a_cause_kept_to_the_end_is_the_persistent_form(self):
+        self.assertEqual([("config missing", "persistent", "running", "engine")],
+                         self.fault(fault="configkey:missing", during="idle", lift="never", expect="failed", topo="engine"))
+
+    def test_a_pushed_revision_reading_a_missing_key_is_the_new_side(self):
+        self.assertEqual([("config missing", "persistent", "new", "engine")],
+                         self.fault(fault="configkey:new", lift="never", topo="engine"))
+        self.assertEqual([("config missing", "one-shot", "new", "engine")],
+                         self.fault(fault="configkey:new", lift="after-settle", topo="engine"))
 
     def test_node_fault_is_persistent_only_when_the_engine_must_act_with_the_node_down(self):
         self.assertEqual([("node", "persistent", "-", "engine")],

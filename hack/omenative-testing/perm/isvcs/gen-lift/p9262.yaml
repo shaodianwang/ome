@@ -1,0 +1,19 @@
+# p9262: [gen] configkey new kept engine N=4 SurgeThenDrain s1 rp None  Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 restart=None fault=configkey:new co=none topo=engine lift=never
+# reason: the push points the engine runner at a ConfigMap key the ConfigMap lacks, so the pushed revision's first engine pod, the surge Instance's pod (nothing drains; floor N), waits in CreateContainerConfigError from its creation and is never Ready; the key is not added: the roll holds at the Instance ready timeout with the new Instance Failed and the reason recorded, the old revision keeps serving at the floor and the broken revision never serves; a fix push back onto the present key then lands on every Instance with nothing of the broken revision left
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9262 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    runner: { env: [{ name: "TEST_CONFIG_VALUE", valueFrom: { configMapKeyRef: { name: "p9262-config", key: "value" } } }] }
+    lifecycle: { restartPolicy: "None", instanceReadyTimeout: "90s", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: p9262-config }
+data: { value: "1" }

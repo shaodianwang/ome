@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **3814**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **3886**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -52,25 +52,26 @@ Total generated cases: **3814**. The whole-corpus per-PR cap (hand + generated) 
 | gen-webhook | 48 | p8900..p8947 |
 | gen-conflict | 72 | p8960..p9031 |
 | gen-crash-once | 120 | p8400..p8519 |
+| gen-lift | 72 | p9250..p9321 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 1026 |
-| engine-mn | 915 |
-| pd | 1163 |
-| pd-mn | 710 |
+| engine | 1050 |
+| engine-mn | 939 |
+| pd | 1175 |
+| pd-mn | 722 |
 
 ### By update strategy
 
 | value | cases |
 |---|---|
-| (dormant: nothing rolls) | 262 |
+| (dormant: nothing rolls) | 286 |
 | InPlaceIfPossible | 452 |
 | InPlaceOnly | 281 |
-| RecreatePod | 834 |
-| SurgeThenDrain | 1985 |
+| RecreatePod | 846 |
+| SurgeThenDrain | 2021 |
 
 ### By failure verb / phase
 
@@ -86,6 +87,9 @@ Total generated cases: **3814**. The whole-corpus per-PR cap (hand + generated) 
 | canary:manual | 4 |
 | configkey:after-failed | 16 |
 | configkey:after-settle | 16 |
+| configkey:never | 12 |
+| configkey:new:after-settle | 12 |
+| configkey:new:never | 12 |
 | conflict:idle | 24 |
 | conflict:settling | 48 |
 | cordon:after-hold | 8 |
@@ -183,6 +187,8 @@ Total generated cases: **3814**. The whole-corpus per-PR cap (hand + generated) 
 | imagepull:decoder@last | 1 |
 | imagepull:decoder@mid | 2 |
 | imagepull:idle | 8 |
+| imagepull:idle:after-settle | 12 |
+| imagepull:new:after-settle | 12 |
 | imagepull:new:decoder:imagePull | 4 |
 | imagepull:new:imagePull | 12 |
 | imagepull:new:router:parked | 3 |
@@ -261,6 +267,7 @@ Total generated cases: **3814**. The whole-corpus per-PR cap (hand + generated) 
 | quota:completes | 4 |
 | quota:never | 4 |
 | readiness:new | 18 |
+| readiness:new:recover | 12 |
 | readiness:old:persist | 6 |
 | readiness:old:recover | 6 |
 | readiness@delete | 4 |
@@ -307,22 +314,22 @@ Total generated cases: **3814**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (unset — baseline) | 902 |
-| None | 1541 |
-| RecreateInstance | 1371 |
+| None | 1589 |
+| RecreateInstance | 1395 |
 
 ### By pause
 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 3520 |
+| off | 3592 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 3634 |
+| (no pause around a repair) | 3706 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -331,7 +338,7 @@ Total generated cases: **3814**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 3634 |
+| (no pause around a repair) | 3706 |
 | fix | 90 |
 | none | 90 |
 
@@ -341,7 +348,7 @@ Total generated cases: **3814**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 48 |
 | canary | 24 |
-| none | 3107 |
+| none | 3179 |
 | ratio | 16 |
 | rolling | 585 |
 | seq | 34 |
@@ -385,7 +392,7 @@ Total generated cases: **3814**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 2816 |
+| (no break) | 2888 |
 | decoder | 77 |
 | engine | 921 |
 
@@ -521,6 +528,17 @@ Total generated cases: **3814**. The whole-corpus per-PR cap (hand + generated) 
 | start on the pushed revision under a push | 24 |
 | start on the running revision at idle | 12 |
 | start on the running revision under a push | 24 |
+
+### By ledger fault row (gen-lift)
+
+| value | cases |
+|---|---|
+| config missing, one-shot, new | 12 |
+| config missing, persistent, new | 12 |
+| config missing, persistent, running | 12 |
+| image pull, one-shot, new | 12 |
+| image pull, one-shot, running | 12 |
+| readiness never passes, one-shot, new | 12 |
 
 ### By move moment (fault-move)
 
@@ -671,6 +689,17 @@ The family asserts `expect=heals` on every cell, and every cell runs live. A rol
 
 - `lift=after-settle`: the key returns once the CreateContainerConfigError wait has held for the settle window, before any attempt escalates. Under `None` the crash-loop repair opens as soon as the wait is seen (the stuck-pod clock counts from the pod's creation and the victim is older than the grace), rebuilds the pod, and the rebuilt pod waits on the same key; under `RecreateInstanceOnPodRestart` the runner-restart repair does the same. Either way the kubelet starts the container once the key is back and the open repair promotes the Instance. The settle window (`LIFT_SETTLE_S`, 20 s before `OME_TEST_TIMEOUT_MULT`) has to stay inside the deployment's `stuckPodGracePeriod` (60 s in the chart): a multiplier of 3 or more turns these cells into the after-failed shape.
 - `lift=after-failed`: the same repair opens, and the rebuilt pod's wait outlives the stuck-pod grace (or the attempt its `instanceReadyTimeout`, `HEAL_FAILED_READY_TIMEOUT`), so the escalation parks the repair at Failed with its Restart kept. A parked repair keeps two exits of its own: the restart pass resumes its promote when the rebuilt set comes up, and re-arms it on `lifecycle.updateRetry` while the set stays wedged. The key returns once the row reads Failed, the kubelet's retry brings the rebuilt set up, and the resume promotes the Instance on its running revision with no reset mailbox and no new revision, whether or not a ladder is configured.
+
+## gen-lift: what each form reads
+
+One family fills the six ledger rows the other families left empty; every cell runs live. A kept cause (`lift=never`) is the persistent form, a lifted one (`lift=after-settle`) the one-shot form.
+
+- `config missing, persistent, running`: `configkey:missing during=idle lift=never expect=failed`; the row reaches Failed with its reason inside the `instanceReadyTimeout: 90s` and stays Failed with nothing serving across the hold; both restart policies (which repair opens first differs).
+- `config missing, persistent, new` and `config missing, one-shot, new`: `configkey:new` with `lift=never` (the roll holds at the ready timeout with its reason; a fix push back onto the present key lands) or `lift=after-settle` (the key is added and the roll completes with no hold behind it). The surge and the drain-first strategies decide which pod waits and the floor; one restart policy, since a pod that never started has no restart for a policy to read.
+- `readiness never passes, one-shot, new`: `readiness:new form=recover`; the switch file is set in the push's first engine pod as it starts and lifted once the drop has settled; the same pod returns and no restart policy may rebuild it. Both restart policies under SurgeThenDrain (the surge pod is the first pushed pod and takes no capacity while it waits; drain-first is the same story at floor N-1).
+- `image pull, one-shot, running`: `imagepull:old during=idle lift=after-settle expect=heals`; the image is pointed back once the pull failure has settled; the kubelet or a repair brings the Instance back, both restart policies.
+- `image pull, one-shot, new`: `imagepull:new lift=after-settle`; the push's first engine pod is pointed at the unpullable image as it starts and back once the failure has settled; one rebuild may be reported under RecreateInstanceOnPodRestart, never required, never twice; both restart policies under SurgeThenDrain.
+- No group axis: a kept cause changes no fleet for a group to pace, and a lifted one leaves the roll to finish as any plain push; the group families cover the gates.
 
 ## Missing runner verbs/hooks (future coverage, not emitted)
 
