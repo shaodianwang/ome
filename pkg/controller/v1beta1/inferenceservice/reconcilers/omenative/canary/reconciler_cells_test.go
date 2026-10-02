@@ -341,6 +341,21 @@ func evMemberStableUnknown(isvc *v1beta1.InferenceService, in *ReconcileInputs) 
 	evPrimaryReverted(isvc, in)
 	in.GroupStableRevisionHashes[v1beta1.DecoderComponent] = ""
 }
+
+// evCanaryCrashed: a canary pod died after its Instance was serving. The
+// kubelet has it back up, so the capacity counts are unchanged.
+func evCanaryCrashed(_ *v1beta1.InferenceService, in *ReconcileInputs) {
+	in.Crash = &CanaryCrash{Component: v1beta1.EngineComponent, PodName: "svc-engine-3-default-0", Detail: "Error (exit 1)"}
+}
+
+// evCanaryPodDeleted: a canary pod is deleted by hand a minute into the
+// step. The pass reads the pod on its way out, its runner stopped by the
+// kubelet, and sees the dip.
+func evCanaryPodDeleted(isvc *v1beta1.InferenceService, in *ReconcileInputs) {
+	in.Now = in.Now.Add(time.Minute)
+	in.Crash = deletedCanaryPodReading(isvc, in.Now)
+	in.PerRevisionPods = map[string]int32{"new": 1, "old": 2}
+}
 func evRunLost(_ *v1beta1.InferenceService, in *ReconcileInputs) { in.RunActive = false }
 func evRunLostAfterSoak(_ *v1beta1.InferenceService, in *ReconcileInputs) {
 	in.RunActive = false
@@ -445,6 +460,24 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/Draining/capacityDropped", fixtureDraining, evDrainingCapacityDropped, cellWant{state: draining, phase: v1beta1.RolloutPhasePromoting, step: 1, active: true}},
 		// a canary pod lost after the cutover completed is the workload's repair, not a canary state
 		{"canary/Done/capacityDropped", fixtureDone, evCanaryPodLost, cellWant{state: done, phase: v1beta1.RolloutPhaseStable, step: 2}},
+		// canary crashed: a pod that served and then died parks a live ladder at its step, whatever
+		// the counts say now; a hold, a revert and a finished cutover are not moved by it.
+		{"canary/Idle/canaryCrashed", fixtureIdle, evCanaryCrashed, cellWant{state: idle, phase: v1beta1.RolloutPhaseStable}},
+		{"canary/Staging/canaryCrashed", fixtureStaging, evCanaryCrashed, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
+		{"canary/Serving/canaryCrashed", fixtureServingManual, evCanaryCrashed, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
+		{"canary/Serving[T]/canaryCrashed", fixtureServingTimed, evCanaryCrashed, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
+		{"canary/PreHold/canaryCrashed", fixturePreHold, evCanaryCrashed, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
+		{"canary/Draining/canaryCrashed", fixtureDraining, evCanaryCrashed, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, step: 1, active: true}},
+		{"canary/Done/canaryCrashed", fixtureDone, evCanaryCrashed, cellWant{state: done, phase: v1beta1.RolloutPhaseStable, step: 2}},
+		{"canary/Done[rolling]/canaryCrashed", fixtureDoneRolling, evCanaryCrashed, cellWant{state: done, phase: v1beta1.RolloutPhasePromoting, step: 2, active: true}},
+		{"canary/RollingBack/canaryCrashed", fixtureRollingBack, evCanaryCrashed, cellWant{state: rollingBack, phase: v1beta1.RolloutPhaseRollingBack, active: true, rolledBk: true}},
+		{"canary/RolledBack/canaryCrashed", fixtureRolledBack, evCanaryCrashed, cellWant{state: rolledBack, phase: v1beta1.RolloutPhaseRolledBack, active: true, rolledBk: true}},
+		{"canary/Failed/canaryCrashed", fixtureFailed, evCanaryCrashed, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
+		// canary pod deleted: a pod on its way out is a loss, so the step keeps its phase and
+		// weight like any dip, and a held split stays held.
+		{"canary/Staging/canaryPodDeleted", fixtureStaging, evCanaryPodDeleted, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
+		{"canary/Serving/canaryPodDeleted", fixtureServingManual, evCanaryPodDeleted, cellWant{state: serving, phase: v1beta1.RolloutPhasePaused, active: true}},
+		{"canary/PreHold/canaryPodDeleted", fixturePreHold, evCanaryPodDeleted, cellWant{state: preHold, phase: v1beta1.RolloutPhasePaused, active: true}},
 		// rejected pods gone
 		{"canary/RollingBack/rejectedPodsGone", fixtureRollingBack, evRejectedPodsGone, cellWant{state: rolledBack, phase: v1beta1.RolloutPhaseRolledBack, active: true, rolledBk: true}},
 		// rejected pods gone in a two-member unit: the rollback completes for the group, not the primary

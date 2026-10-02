@@ -1,12 +1,13 @@
 package omenative_coordination_kind
 
 import (
+	"time"
+
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	ktypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -14,15 +15,22 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Behavior test — canary capacity gate under real pod loss.
+// Behavior test — canary capacity gate under real pod loss, and its
+// counterpart under a real crash.
 //
 // The capacity gate is a live invariant, not a one-shot check: losing a READY
 // canary pod mid-hold records the capacity wait and keeps the step from
 // moving, while the held step keeps its phase and its programmed split.
 // Once the replacement canary pod serves, the wait clears and a subsequent
 // promote still carries the rollout to completion.
+//
+// A canary pod that served and then died is the other side of that line: the
+// kubelet brings the container back, so the counts recover on their own, and
+// the ladder must still park where it stood with the step's traffic back on
+// the stable revision, until the operator's rollback lands.
 // Requires a real kubelet: the reopened-gate window exists only while a
-// replacement pod is actually starting.
+// replacement pod is actually starting, and the crash is a container that
+// really exits under a running kubelet.
 var _ = ginkgo.Describe("behavior — canary capacity gate under pod loss", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -106,10 +114,10 @@ var _ = ginkgo.Describe("behavior — canary capacity gate under pod loss", gink
 			stablePodName = stablePods[0].Name
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// Action: kill the ready canary pod out from under the hold.
-		zero := int64(0)
-		Expect(k8sClient.Delete(suiteCtx, &lostPod,
-			&client.DeleteOptions{GracePeriodSeconds: &zero})).To(Succeed())
+		// Action: delete the ready canary pod out from under the hold, with
+		// its grace period, so the pod is on its way out for a while with its
+		// runner stopped by the kubelet: the shape a hand deletion has.
+		Expect(k8sClient.Delete(suiteCtx, &lostPod)).To(Succeed())
 
 		// Invariant: losing the canary pod does not move the step machine. The
 		// hold keeps its phase and its programmed split while the replacement
@@ -184,6 +192,126 @@ var _ = ginkgo.Describe("behavior — canary capacity gate under pod loss", gink
 				}
 				g.Expect(pod.Labels[query.LabelRevisionHash]).To(Equal(canaryHash),
 					"pod %s must be on the promoted revision", pod.Name)
+			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+
+	ginkgo.It("parks the ladder when the canary pod dies after it served, with the step's traffic back on stable, and the rollback lands", func() {
+		// Config: 2-replica engine under restart policy None, so the crashed
+		// container is restarted in place by the kubelet and the pod stays.
+		const isvcName = "canary-lc2"
+		fix := newCoordFixture(ns.Name, WithISVCName(isvcName),
+			WithoutDecoder(),
+			WithEngineReplicas(2),
+			WithEngineImage("fake-serving:v1"))
+		restartNone := v1beta1.InstanceRestartPolicyNone
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{RestartPolicy: &restartNone}
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+
+		var stableHash string
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			engCS := c.Status.Components[v1beta1.EngineComponent]
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			rev := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent).Status.CurrentRevision
+			g.Expect(rev).NotTo(BeEmpty())
+			stableHash = query.RevisionFromName(rev).Hash()
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Action: add a manual canary plan and push a revision whose
+		// container serves for a minute and then exits.
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				Canary: &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{
+					{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{}},
+					{Capacity: intstr.FromString("100%"), Traffic: 100},
+				}},
+			}}}
+			engine := &cur.Spec.Engine.PodSpec.Containers[0]
+			engine.Image = "fake-serving:v2"
+			engine.Env = append(engine.Env, corev1.EnvVar{Name: "FAIL_AT", Value: "after-1m"})
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// The split serves at the manual hold: one ready canary pod under half
+		// the traffic.
+		var canaryHash, canaryPodName string
+		pushedAt := time.Now()
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
+			canaryHash = c.Status.Canary.CanaryRevisionHash
+			g.Expect(canaryHash).NotTo(BeEmpty())
+			g.Expect(canaryHash).NotTo(Equal(stableHash))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
+				To(Equal(v1beta1.RolloutPhasePaused))
+			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(50)))
+			for _, pod := range listOMENativePods(g, ns.Name, isvcName) {
+				if pod.DeletionTimestamp == nil && podIsReady(&pod) && pod.Labels[query.LabelRevisionHash] == canaryHash {
+					canaryPodName = pod.Name
+				}
+			}
+			g.Expect(canaryPodName).NotTo(BeEmpty(), "the canary pod must be serving at the hold")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Invariant: the container exits after its minute and the kubelet
+		// restarts it in place; the ladder parks at step 0 with a reason, no
+		// traffic names the canary revision, the stable revision owns it all,
+		// and the event names the pod. The pod itself stays and carries the
+		// restart.
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
+				To(Equal(v1beta1.RolloutPhaseFailed), "a canary pod that died after serving must park the ladder")
+			g.Expect(c.Status.Canary.Failed).NotTo(BeNil(), "the park must say why the ladder stopped")
+			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)), "the park must hold the step where the canary broke")
+			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(0)))
+			traffic := c.Status.Components[v1beta1.EngineComponent].Traffic
+			g.Expect(traffic).To(HaveLen(1), "the step's split must be back on the stable revision alone: %+v", traffic)
+			g.Expect(query.RevisionFromName(traffic[0].RevisionName).Hash()).To(Equal(stableHash))
+			g.Expect(traffic[0].Percent).To(Equal(int32(100)))
+			g.Expect(eventsRecorded(ns.Name, isvcName, "CanaryPodCrashed", pushedAt)).To(ContainElement(ContainSubstring(canaryPodName)),
+				"the park must name the pod that died")
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, ktypes.NamespacedName{Namespace: ns.Name, Name: canaryPodName}, pod)).To(Succeed())
+			g.Expect(pod.DeletionTimestamp).To(BeNil(), "under restart policy None the crashed pod stays")
+			restarted := false
+			for _, cs := range pod.Status.ContainerStatuses {
+				restarted = restarted || cs.RestartCount > 0
+			}
+			g.Expect(restarted).To(BeTrue(), "the kubelet must have restarted the crashed container in place")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Action: the operator rolls back.
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			if cur.Annotations == nil {
+				cur.Annotations = map[string]string{}
+			}
+			cur.Annotations[constants.RolloutRollbackAnnotation] = "true"
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Invariant: the revert drains the broken revision and holds at
+		// RolledBack with the rejected revision recorded; every pod serves the
+		// stable revision again.
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
+				To(Equal(v1beta1.RolloutPhaseRolledBack))
+			g.Expect(c.Status.Canary.RolledBackRevisionHash).To(Equal(canaryHash))
+			for _, pod := range listOMENativePods(g, ns.Name, isvcName) {
+				if pod.DeletionTimestamp != nil {
+					continue
+				}
+				g.Expect(pod.Labels[query.LabelRevisionHash]).To(Equal(stableHash),
+					"pod %s must be back on the stable revision", pod.Name)
 			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})

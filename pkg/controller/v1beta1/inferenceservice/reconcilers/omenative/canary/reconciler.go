@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/analysis"
@@ -62,6 +64,10 @@ type ReconcileInputs struct {
 	// onto its stable revision only when that revision has serving capacity;
 	// a member absent here is written on the primary's view alone.
 	GroupReadyPerRevisionPods map[v1beta1.ComponentType]map[string]int32
+	// Crash is a canary pod that died after its Instance was serving, on any
+	// member of the unit; nil when none did. The dispatcher reads it from the
+	// pods and the Instance rows; a live ladder parks on it.
+	Crash *CanaryCrash
 	// SecondaryCapacityReady is true when every NON-primary component's canary
 	// Instances have reached that component's step newCount. The primary uses its
 	// exact complete-PodReady target Instance count. Single-component canaries
@@ -335,6 +341,13 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 		cs.StableRevisionHash = in.StableRevisionHash
 	}
 
+	// A canary pod that served and then died is the canary's verdict on the
+	// revision, read before any gate so no count can argue with it: the
+	// ladder parks where it stands and the broken revision serves nothing.
+	if in.Crash != nil {
+		return parkOnCrash(in, cs, plan), nil
+	}
+
 	// Finish any promotion whose advance already persisted: hand the applied
 	// promote annotation back for removal and, once it is gone, clear the
 	// durable record so manual promotion re-arms for later steps.
@@ -503,6 +516,23 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 	}
 	advanceStep(in, take)
 	return (&Result{Active: true, Stepped: true, Partition: partition}).wake(in.Requeue), nil
+}
+
+// parkOnCrash parks a live ladder at its current step because a canary pod
+// died after it was serving. A capacity dip keeps the step's split while the
+// workload repairs it; a crash returns the split to the stable revision,
+// because the capacity is there and cannot be trusted with traffic. The park
+// is the capacity gate's: the step's canary capacity did not hold, and the
+// pod that broke it is named in the event. Stable keeps serving until the
+// operator rolls back, resumes or pushes a new revision.
+func parkOnCrash(in ReconcileInputs, cs *v1beta1.CanaryStatus, plan *v1beta1.GroupCanary) *Result {
+	partition := stepPartition(plan.Steps[cs.CurrentStep], in.DesiredReplicas)
+	returnTrafficToStable(in)
+	parkFailed(in.ISVC, in.Component, cs, v1beta1.CanaryFailureCapacityTimeout, in.Now)
+	emit(in.Recorder, in.ISVC, corev1.EventTypeWarning, EventReasonCanaryPodCrashed,
+		"%s canary pod %s died after it was serving (%s); the ladder is parked at step %d and the step's traffic is back on the stable revision",
+		in.Crash.Component, in.Crash.PodName, in.Crash.Detail, cs.CurrentStep)
+	return (&Result{Active: true, Partition: partition}).wake(in.ParkedRequeue)
 }
 
 // pausedResult reports a globally-paused canary's state without mutating it.
