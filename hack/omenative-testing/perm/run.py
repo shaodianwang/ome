@@ -7920,9 +7920,10 @@ def _packed_checks(story, hdr, verdict, notes, checks):
                       f"service's own pods vacated ({' and '.join(story['comps'])} roll together)")
     else:
         where = vacated["nodes"] if rooms is None else sorted(rooms)
+        room_phrase = "it vacated" if rooms is None else "this service's own pods vacated"
         fail(f"broken {victim} Instance {inst} came back on {final['nodes']} instead of {where}",
              f"  ✗ node: broken {victim} Instance {inst} came back on {', '.join(n or '(unbound)' for n in final['nodes'])} "
-             f"instead of the room {'it vacated' if rooms is None else 'this service\'s own pods vacated'} on "
+             f"instead of the room {room_phrase} on "
              f"{', '.join(where)} — in a packed pool there was nowhere else")
     if not bad_push:
         if story["old_rebuilt"]:
