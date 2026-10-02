@@ -64,6 +64,19 @@ for key in 'name: builds' 'API_TOKEN: /etc/ome-bot/secrets/token' 'timeoutSecond
 done
 grep -Eq '^    kargo:' <<<"${extras}" || fail "kargo block did not render"
 
+# --- guarded verbs are off by default and opt-in per cluster ---
+
+grep -Eq '^    mutations:' <<<"${default}" || fail "config.yaml lacks the mutations block"
+grep -Eq '^      enabled: false' <<<"${default}" || fail "mutations render on instead of off by default"
+if grep -Fq 'writable:' <<<"${default}"; then
+  fail "a registry entry rendered writable without asking"
+fi
+writable="$(render --set-json 'clusters=[{"name":"dev-a","provider":"gke","inCluster":true,"writable":true}]' \
+  --set-json "${secrets}" --set config.mutations.enabled=true)"
+grep -Eq '^        name: dev-a' <<<"${writable}" || fail "the writable registry entry did not render"
+grep -Eq '^        writable: true' <<<"${writable}" || fail "writable did not reach the registry entry"
+grep -Eq '^      enabled: true' <<<"${writable}" || fail "config.mutations.enabled did not render"
+
 # --- docs can be switched off ---
 
 nodocs="$(render --set-json "${cluster}" --set-json "${secrets}" --set config.docs=null)"

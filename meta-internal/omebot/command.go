@@ -35,6 +35,10 @@ type Parsed struct {
 	// QuestionMode is "ask", "recipe", or "" when a question mark alone
 	// marked the text as a question.
 	QuestionMode string
+	// Guarded marks one of kubectl-ome's eleven actions that change a
+	// cluster; Confirmed records the caller's --yes.
+	Guarded   bool
+	Confirmed bool
 }
 
 var (
@@ -82,6 +86,23 @@ var readVerbs = map[string]bool{
 	"cluster status":        true,
 }
 
+// guardedVerbs are kubectl-ome's eleven actions that change a cluster. They
+// parse like read verbs and run only under the conditions the server
+// enforces: mutations on, a writable cluster, a cleared actor, and --yes.
+var guardedVerbs = map[string]bool{
+	"rollout pause":         true,
+	"rollout resume":        true,
+	"rollout promote":       true,
+	"rollout rollback":      true,
+	"rollout repin":         true,
+	"traffic drain":         true,
+	"traffic undrain":       true,
+	"migration start":       true,
+	"instance release-held": true,
+	"runtime sync":          true,
+	"scale":                 true,
+}
+
 // fanoutVerbs may run on every registry cluster when --cluster is absent;
 // they are cheap lookups whose union is the useful answer.
 var fanoutVerbs = map[string]bool{
@@ -91,17 +112,28 @@ var fanoutVerbs = map[string]bool{
 
 // forbiddenFlags would let a caller change which identity or endpoint the
 // CLI talks to, or bypass a guard. They are rejected regardless of position.
+// --yes is handled apart: it is the confirmation a guarded verb needs and
+// meaningless, so refused, on a read verb.
 var forbiddenFlags = []string{
 	"--kubeconfig", "--context", "--cluster-name", "--user", "--as", "--as-group", "--as-uid",
 	"--token", "--server", "--tls-server-name", "--client-certificate", "--client-key",
 	"--certificate-authority", "--insecure-skip-tls-verify", "--username", "--password",
-	"--cache-dir", "--yes", "--exec",
+	"--cache-dir", "--exec",
 }
 
 // ReadVerbs lists the allowed verbs for help output.
 func ReadVerbs() []string {
-	out := make([]string, 0, len(readVerbs))
-	for v := range readVerbs {
+	return sortedVerbs(readVerbs)
+}
+
+// GuardedVerbs lists the guarded verbs for help output.
+func GuardedVerbs() []string {
+	return sortedVerbs(guardedVerbs)
+}
+
+func sortedVerbs(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for v := range m {
 		out = append(out, v)
 	}
 	sort.Strings(out)
@@ -142,15 +174,16 @@ func ParseCommand(text string) (Parsed, error) {
 	}
 
 	verbLen := 0
-	if len(tokens) >= 2 && readVerbs[tokens[0]+" "+tokens[1]] {
+	if two := strings.Join(tokens[:min(2, len(tokens))], " "); len(tokens) >= 2 && (readVerbs[two] || guardedVerbs[two]) {
 		verbLen = 2
-	} else if readVerbs[tokens[0]] {
+	} else if readVerbs[tokens[0]] || guardedVerbs[tokens[0]] {
 		verbLen = 1
 	}
 	if verbLen == 0 {
-		return Parsed{}, refuse(ErrNotAVerb, "%q is not a read-only kubectl-ome verb this bot runs; try `help`", strings.Join(tokens[:min(2, len(tokens))], " "))
+		return Parsed{}, refuse(ErrNotAVerb, "%q is not a kubectl-ome verb this bot runs; try `help`", strings.Join(tokens[:min(2, len(tokens))], " "))
 	}
-	p := Parsed{Kind: KindCLI, Verb: tokens[:verbLen]}
+	verb := strings.Join(tokens[:verbLen], " ")
+	p := Parsed{Kind: KindCLI, Verb: tokens[:verbLen], Guarded: guardedVerbs[verb]}
 	rest := tokens[verbLen:]
 	for i := 0; i < len(rest); i++ {
 		tok := rest[i]
@@ -165,6 +198,11 @@ func ParseCommand(text string) (Parsed, error) {
 		case strings.HasPrefix(tok, "--cluster="):
 			p.Cluster = strings.TrimPrefix(tok, "--cluster=")
 			continue
+		case tok == "--yes":
+			if !p.Guarded {
+				return Parsed{}, refuse(ErrForbiddenFlag, "flag --yes is not allowed with a read verb")
+			}
+			p.Confirmed = true
 		}
 		for _, f := range forbiddenFlags {
 			if tok == f || strings.HasPrefix(tok, f+"=") {
@@ -173,8 +211,11 @@ func ParseCommand(text string) (Parsed, error) {
 		}
 		p.Args = append(p.Args, tok)
 	}
-	if p.Cluster == "" && !fanoutVerbs[strings.Join(p.Verb, " ")] {
-		return Parsed{}, refuse(ErrNeedsCluster, "`%s` needs `--cluster <name>`; `clusters` lists them", strings.Join(p.Verb, " "))
+	if p.Cluster == "" && p.Guarded {
+		return Parsed{}, refuse(ErrNeedsCluster, "`%s` changes a cluster and needs `--cluster <name>`; `clusters` lists them", verb)
+	}
+	if p.Cluster == "" && !fanoutVerbs[verb] {
+		return Parsed{}, refuse(ErrNeedsCluster, "`%s` needs `--cluster <name>`; `clusters` lists them", verb)
 	}
 	return p, nil
 }
@@ -241,8 +282,9 @@ func tokenize(text string) ([]string, error) {
 	return tokens, nil
 }
 
-// HelpText is the reply to `help`.
-func HelpText(clusters []string) string {
+// HelpText is the reply to `help`. writable names the clusters that admit
+// guarded verbs; empty means none does.
+func HelpText(clusters, writable []string) string {
 	var b strings.Builder
 	b.WriteString("*OME bot* runs read-only kubectl-ome commands against the fleet.\n")
 	b.WriteString("• `installed clusters` — every cluster in the registry and whether OME answers there\n")
@@ -251,6 +293,12 @@ func HelpText(clusters []string) string {
 	if len(clusters) > 0 {
 		b.WriteString("Clusters: " + strings.Join(clusters, ", ") + "\n")
 	}
-	b.WriteString("Nothing here changes a cluster; guarded verbs are refused.")
+	if len(writable) == 0 {
+		b.WriteString("Read verbs never change a cluster; no cluster here admits guarded verbs.")
+		return b.String()
+	}
+	b.WriteString("• guarded verbs (" + strings.Join(GuardedVerbs(), ", ") + ") run only on " +
+		strings.Join(writable, ", ") + ", only for the oncall, only with `--yes`; add `--dry-run=server` to preview\n")
+	b.WriteString("Read verbs never change a cluster.")
 	return b.String()
 }

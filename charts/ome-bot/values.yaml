@@ -122,6 +122,13 @@ config:
   #  inCluster: true
   #  namespace: kargo-proj-a
   #  recentFreight: 5
+  # The guarded kubectl-ome verbs (rollout pause|resume|promote|rollback|repin,
+  # traffic drain|undrain, migration start, instance release-held, runtime
+  # sync, scale) run only with this on, only on a registry entry with
+  # `writable: true`, only for an actor the relay cleared (`actor.canMutate`),
+  # and only with `--yes`. Off ⇒ every guarded verb answers mutations_off.
+  mutations:
+    enabled: false
 
 # The fleet registry, rendered verbatim into the config. Each entry names one
 # credential source:
@@ -129,7 +136,9 @@ config:
 #   kubeconfigPath          a kubeconfig mounted by other means
 #   inCluster: true         the pod's own ServiceAccount
 # Optional: role (hub|member|standalone), hub, kargoStage,
-# insecureSkipTLSVerify, certificateAuthorityData (base64).
+# insecureSkipTLSVerify, certificateAuthorityData (base64), and writable
+# (admits the guarded verbs once config.mutations.enabled is on; a
+# development cluster, never a production one).
 clusters: []
 #  - name: member-a
 #    provider: gke

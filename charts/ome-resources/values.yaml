@@ -50,6 +50,14 @@ ome:
     enabled: false
     clusterRoleName: ome-viewer
     group: "ClusterRole:ome-viewer"
+  # editor is the viewer plus patch on InferenceService, InferenceReplica and
+  # the InferenceReplica scale subresource: what kubectl-ome's guarded actions
+  # need, and nothing that creates or deletes. For a development cluster where
+  # an operator's bot may pause, promote, drain or scale; off by default.
+  editor:
+    enabled: false
+    clusterRoleName: ome-editor
+    group: "ClusterRole:ome-editor"
   multiclusterAccess:
     enabled: false
     # Empty installs only the ClusterRole, for bindings managed outside Helm.

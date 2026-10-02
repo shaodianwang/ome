@@ -21,6 +21,14 @@ const (
 	// ErrQuestion marks text meant for the answer worker, not a verb; the
 	// reply carries the question for the relay to hand on.
 	ErrQuestion = "question"
+	// A guarded verb changes a cluster. It runs only when mutations are
+	// switched on, the cluster is marked writable, the relay has cleared the
+	// actor, and the request carries --yes; each missing condition has its
+	// own class so the relay can say which.
+	ErrMutationsOff       = "mutations_off"
+	ErrClusterNotWritable = "cluster_not_writable"
+	ErrActorNotAllowed    = "actor_not_allowed"
+	ErrNeedsConfirmation  = "needs_confirmation"
 )
 
 // ParseError is a refusal with a machine-readable class.

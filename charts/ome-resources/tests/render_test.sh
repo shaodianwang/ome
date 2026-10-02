@@ -679,6 +679,24 @@ grep -Fqx '  - gateways' <<<"${multicluster_access}" ||
 grep -Fqx '  - httproutes' <<<"${multicluster_access}" ||
   fail "multicluster-access ClusterRole does not grant httproutes"
 
+# The editor role is the viewer plus the patch rights kubectl-ome's guarded
+# actions need, and nothing that creates or deletes. Off by default.
+if "${helm_bin}" template ome-resources "${chart_dir}" --namespace ome | grep -Fq 'name: ome-editor'; then
+  fail "the editor ClusterRole rendered without ome.editor.enabled"
+fi
+editor="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.editor.enabled=true \
+  --set ome.editor.group=ClusterRole:ome-editor \
+  --show-only templates/ome-controller/rbac/editor_role.yaml)"
+grep -Fq 'name: ome-editor' <<<"${editor}" || fail "editor ClusterRole did not render"
+grep -Fq 'inferencereplicas/scale' <<<"${editor}" || fail "editor ClusterRole does not grant the scale subresource"
+grep -Fq 'verbs: ["patch"]' <<<"${editor}" || fail "editor ClusterRole does not grant patch"
+grep -Fq 'name: "ClusterRole:ome-editor"' <<<"${editor}" || fail "editor ClusterRoleBinding does not bind the configured group"
+if grep -Eq '"(create|delete|deletecollection|update)"' <<<"${editor}"; then
+  fail "editor ClusterRole grants more than patch"
+fi
+
 # Placement input reads cannot grant writes to member-owned configuration.
 for resource in clusterservingruntimes servingruntimes clusterbasemodels basemodels controllerrevisions configmaps acceleratorquotas resourceflavors runtimeclasses; do
   input_rule="$(awk -v resource="${resource}" '

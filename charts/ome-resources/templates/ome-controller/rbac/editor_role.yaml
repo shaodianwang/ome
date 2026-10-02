@@ -1,0 +1,49 @@
+{{- if .Values.ome.editor.enabled }}
+---
+# Everything the viewer role reads, plus the patch rights kubectl-ome's
+# guarded actions need: the selected InferenceService, InferenceReplica or
+# the InferenceReplica scale subresource. Nothing here creates or deletes an
+# object; it is the role an operator's bot holds on a development cluster so
+# it can pause, promote, drain or scale what already exists. The binding
+# subject is the group named in values, as for the viewer role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Values.ome.editor.clusterRoleName }}
+  labels:
+    {{- include "ome.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["ome.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ome.io"]
+    resources: ["inferenceservices", "inferencereplicas", "inferencereplicas/scale"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events", "services", "endpoints", "configmaps", "namespaces", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "controllerrevisions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Values.ome.editor.clusterRoleName }}
+  labels:
+    {{- include "ome.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Values.ome.editor.clusterRoleName }}
+subjects:
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: {{ .Values.ome.editor.group | quote }}
+{{- end }}

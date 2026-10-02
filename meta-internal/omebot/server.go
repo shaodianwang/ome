@@ -20,6 +20,10 @@ import (
 type Actor struct {
 	EmployeeFBID int64  `json:"employeeFbid,omitempty"`
 	SlackUserID  string `json:"slackUserId,omitempty"`
+	// CanMutate is the relay's verdict that this person may run guarded
+	// verbs, such as membership of the oncall rotation. This service never
+	// derives it; the signed request carries it.
+	CanMutate bool `json:"canMutate,omitempty"`
 }
 
 // CommandRequest is the body of POST /v1/command.
@@ -47,7 +51,10 @@ type CommandResponse struct {
 	// this service ran nothing.
 	Question     string `json:"question,omitempty"`
 	QuestionMode string `json:"questionMode,omitempty"`
-	Error        string `json:"error,omitempty"`
+	// Mutation marks a reply that ran a guarded verb, so the relay can post
+	// it where the channel sees it.
+	Mutation bool   `json:"mutation,omitempty"`
+	Error    string `json:"error,omitempty"`
 	// ErrorClass is empty on success; see the Err* constants.
 	ErrorClass string `json:"errorClass,omitempty"`
 }
@@ -113,6 +120,7 @@ type auditEntry struct {
 	err       string
 	clusters  []string
 	exits     []int
+	mutation  bool
 }
 
 // SetReady flips the readiness probe once startup work is complete.
@@ -202,7 +210,7 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	resp, status := s.execute(r.Context(), req)
 	e := auditEntry{kind: "command", requestID: req.RequestID, actor: req.Actor, channel: req.ChannelID, surface: req.Surface,
-		text: req.Text, ok: resp.OK, errClass: resp.ErrorClass, err: resp.Error}
+		text: req.Text, ok: resp.OK, errClass: resp.ErrorClass, err: resp.Error, mutation: resp.Mutation}
 	if resp.ErrorClass == ErrQuestion {
 		// A question is the person's own words; the audit line never carries it.
 		e.text = ""
@@ -300,7 +308,11 @@ func (s *Server) execute(ctx context.Context, req CommandRequest) (CommandRespon
 		return refusal(class, err.Error()), http.StatusOK
 	}
 	if parsed.Kind == KindHelp {
-		return CommandResponse{OK: true, Text: HelpText(s.Config.ClusterNames())}, http.StatusOK
+		var writable []string
+		if s.Config.Mutations.Enabled {
+			writable = s.Config.WritableClusterNames()
+		}
+		return CommandResponse{OK: true, Text: HelpText(s.Config.ClusterNames(), writable)}, http.StatusOK
 	}
 	if parsed.Kind == KindQuestion {
 		return CommandResponse{
@@ -309,6 +321,24 @@ func (s *Server) execute(ctx context.Context, req CommandRequest) (CommandRespon
 			Error:        questionMsg,
 			ErrorClass:   ErrQuestion,
 			Text:         ":speech_balloon: " + questionMsg,
+		}, http.StatusOK
+	}
+	if parsed.Guarded {
+		cl, class, msg := s.mutationTarget(req.Actor, parsed)
+		if class != "" {
+			return refusal(class, msg), http.StatusOK
+		}
+		if !s.acquire() {
+			return refusal(ErrBusy, busyMsg), http.StatusTooManyRequests
+		}
+		defer s.release()
+		args := append(append([]string(nil), parsed.Verb...), parsed.Args...)
+		res := s.Runner.Run(ctx, cl.Name, s.Paths[cl.Name], args)
+		return CommandResponse{
+			OK:       res.ExitCode == 0,
+			Mutation: true,
+			Text:     ":warning: guarded action on " + cl.Name + "\n" + RenderResults(strings.Join(args, " "), []Result{res}),
+			Sections: []Result{res},
 		}, http.StatusOK
 	}
 	if !s.acquire() {
@@ -358,6 +388,31 @@ func (s *Server) execute(ctx context.Context, req CommandRequest) (CommandRespon
 	return CommandResponse{OK: ok, Text: RenderResults(strings.Join(args, " "), results), Sections: results}, http.StatusOK
 }
 
+// mutationTarget applies the conditions a guarded verb must meet and names
+// the first one that fails: the switch, then the cluster, then the actor,
+// then the confirmation. A caller who is not cleared learns nothing about
+// which clusters admit mutations beyond the one it named.
+func (s *Server) mutationTarget(actor Actor, p Parsed) (Cluster, string, string) {
+	verb := strings.Join(p.Verb, " ")
+	if !s.Config.Mutations.Enabled {
+		return Cluster{}, ErrMutationsOff, "guarded verbs are switched off on this bot"
+	}
+	cl, ok := s.Config.Cluster(p.Cluster)
+	if !ok {
+		return Cluster{}, ErrUnknownCluster, fmt.Sprintf("unknown cluster %q; `clusters` lists them", p.Cluster)
+	}
+	if !cl.Writable {
+		return Cluster{}, ErrClusterNotWritable, fmt.Sprintf("%s is read-only for this bot; guarded verbs run only on a cluster marked writable", cl.Name)
+	}
+	if !actor.CanMutate {
+		return Cluster{}, ErrActorNotAllowed, "guarded verbs are for the oncall; the relay did not clear you to run one"
+	}
+	if !p.Confirmed {
+		return Cluster{}, ErrNeedsConfirmation, fmt.Sprintf("`%s` changes %s; add `--yes` to run it, or `--dry-run=server --yes` to preview", verb, cl.Name)
+	}
+	return cl, "", ""
+}
+
 func refusal(class, msg string) CommandResponse {
 	return CommandResponse{Error: msg, ErrorClass: class, Text: ":no_entry: " + msg}
 }
@@ -378,6 +433,7 @@ func (s *Server) audit(e auditEntry, d time.Duration) {
 		"error", e.err,
 		"clusters", e.clusters,
 		"exit_codes", e.exits,
+		"mutation", e.mutation,
 		"duration_ms", d.Milliseconds(),
 	)
 }

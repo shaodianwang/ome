@@ -78,9 +78,55 @@ func TestServerFanoutAndSingleCluster(t *testing.T) {
 	if resp.OK || !strings.Contains(resp.Error, "unknown cluster") || resp.ErrorClass != ErrUnknownCluster {
 		t.Fatalf("unknown cluster: %+v", resp)
 	}
-	_, resp = post(t, h, `{"text":"rollout pause chat --cluster hub-a"}`, false)
-	if resp.OK || !strings.Contains(resp.Error, "not a read-only") || resp.ErrorClass != ErrNotAVerb {
-		t.Fatalf("guarded verb: %+v", resp)
+	_, resp = post(t, h, `{"actor":{"canMutate":true},"text":"rollout pause chat --cluster hub-a --yes"}`, false)
+	if resp.OK || !strings.Contains(resp.Error, "switched off") || resp.ErrorClass != ErrMutationsOff {
+		t.Fatalf("guarded verb with mutations off: %+v", resp)
+	}
+}
+
+func TestServerGuardedVerbs(t *testing.T) {
+	s, logs := toolServer(t)
+	s.Config.Mutations.Enabled = true
+	s.Config.Clusters[0].Writable = true // member-a
+	h := s.Handler()
+
+	for body, want := range map[string]string{
+		`{"actor":{"employeeFbid":7,"canMutate":true},"text":"rollout pause chat --cluster hub-a --yes"}`:   ErrClusterNotWritable,
+		`{"actor":{"employeeFbid":7,"canMutate":true},"text":"rollout pause chat --cluster nope --yes"}`:    ErrUnknownCluster,
+		`{"actor":{"employeeFbid":7},"text":"rollout pause chat --cluster member-a --yes"}`:                 ErrActorNotAllowed,
+		`{"actor":{"employeeFbid":7,"canMutate":true},"text":"rollout pause chat --cluster member-a"}`:      ErrNeedsConfirmation,
+		`{"actor":{"employeeFbid":7,"canMutate":true},"text":"get isvc --cluster member-a --yes"}`:          ErrForbiddenFlag,
+		`{"actor":{"employeeFbid":7,"canMutate":true},"text":"scale chat --component engine --replicas 2"}`: ErrNeedsCluster,
+	} {
+		rec, resp := post(t, h, body, true)
+		if rec.Code != 200 || resp.OK || resp.ErrorClass != want || resp.Mutation {
+			t.Errorf("%s: code %d resp %+v", body, rec.Code, resp)
+		}
+		if len(resp.Sections) != 0 {
+			t.Errorf("%s: a refused guarded verb ran something: %+v", body, resp.Sections)
+		}
+	}
+
+	rec, resp := post(t, h, `{"requestId":"r-m","actor":{"employeeFbid":7,"slackUserId":"U1","canMutate":true},"text":"scale chat --component engine --replicas 2 --cluster member-a --yes"}`, true)
+	if rec.Code != 200 || !resp.OK || !resp.Mutation || len(resp.Sections) != 1 || resp.Sections[0].Cluster != "member-a" {
+		t.Fatalf("guarded verb: code %d resp %+v", rec.Code, resp)
+	}
+	if !strings.Contains(resp.Sections[0].Output, "args: scale chat --component engine --replicas 2 --yes") {
+		t.Fatalf("args not forwarded: %q", resp.Sections[0].Output)
+	}
+	if !strings.HasPrefix(resp.Text, ":warning: guarded action on member-a") {
+		t.Errorf("text: %s", resp.Text)
+	}
+	audit := logs.String()
+	for _, want := range []string{`"kind":"command"`, `"request_id":"r-m"`, `"mutation":true`, `"actor_fbid":7`} {
+		if !strings.Contains(audit, want) {
+			t.Errorf("audit lacks %s: %s", want, audit)
+		}
+	}
+
+	_, resp = post(t, h, `{"text":"help"}`, true)
+	if !strings.Contains(resp.Text, "run only on member-a") {
+		t.Errorf("help does not name the writable cluster: %s", resp.Text)
 	}
 }
 

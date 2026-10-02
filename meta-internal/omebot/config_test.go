@@ -48,22 +48,37 @@ func TestParseValid(t *testing.T) {
 	}
 }
 
+func TestParseWritableAndMutations(t *testing.T) {
+	raw := strings.Replace(validConfig, "    role: member\n", "    role: member\n    writable: true\n", 1) + "mutations: {enabled: true}\n"
+	cfg, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.Mutations.Enabled || strings.Join(cfg.WritableClusterNames(), ",") != "member-a" {
+		t.Fatalf("mutations %+v writable %v", cfg.Mutations, cfg.WritableClusterNames())
+	}
+	if cfg, err := Parse([]byte(validConfig)); err != nil || cfg.Mutations.Enabled || len(cfg.WritableClusterNames()) != 0 {
+		t.Fatalf("defaults: cfg %+v err %v", cfg, err)
+	}
+}
+
 func TestParseRejects(t *testing.T) {
 	cases := map[string]string{
-		"unknown field":           strings.Replace(validConfig, "listen:", "listne:", 1),
-		"missing exec command":    strings.Replace(validConfig, "execCommand: /opt/cf/cloud_oss/cloud_oss\n", "", 1),
-		"two credential sources":  strings.Replace(validConfig, "    kubeconfigPath: /etc/kubeconfigs/hub-a\n", "    kubeconfigPath: /etc/kubeconfigs/hub-a\n    inCluster: true\n", 1),
-		"hmac without secret":     strings.Replace(validConfig, "auth: {mode: none}", "auth: {mode: hmac, maxSkewSeconds: 300}", 1),
-		"bad auth mode":           strings.Replace(validConfig, "auth: {mode: none}", "auth: {mode: basic}", 1),
-		"ca with insecure":        strings.Replace(validConfig, "    insecureSkipTLSVerify: true\n", "    insecureSkipTLSVerify: true\n    certificateAuthorityData: YWJj\n", 1),
-		"uppercase cluster name":  strings.Replace(validConfig, "name: member-a", "name: Member-A", 1),
-		"duplicate cluster names": strings.Replace(validConfig, "name: hub-a", "name: member-a", 1),
-		"zero timeout":            strings.Replace(validConfig, "commandSeconds: 25", "commandSeconds: 0", 1),
-		"env not key=value":       strings.Replace(validConfig, "listen: \":8080\"", "listen: \":8080\"\nenv: [HOME]", 1),
-		"zero maxInFlight":        strings.Replace(validConfig, "maxInFlight: 4", "maxInFlight: 0", 1),
-		"zero maxRequestBytes":    strings.Replace(validConfig, "maxRequestBytes: 65536", "maxRequestBytes: 0", 1),
-		"zero readHeaderSeconds":  strings.Replace(validConfig, "readHeaderSeconds: 10", "readHeaderSeconds: 0", 1),
-		"zero shutdownSeconds":    strings.Replace(validConfig, "shutdownSeconds: 10", "shutdownSeconds: 0", 1),
+		"mutations without a writable cluster": validConfig + "mutations: {enabled: true}\n",
+		"unknown field":                        strings.Replace(validConfig, "listen:", "listne:", 1),
+		"missing exec command":                 strings.Replace(validConfig, "execCommand: /opt/cf/cloud_oss/cloud_oss\n", "", 1),
+		"two credential sources":               strings.Replace(validConfig, "    kubeconfigPath: /etc/kubeconfigs/hub-a\n", "    kubeconfigPath: /etc/kubeconfigs/hub-a\n    inCluster: true\n", 1),
+		"hmac without secret":                  strings.Replace(validConfig, "auth: {mode: none}", "auth: {mode: hmac, maxSkewSeconds: 300}", 1),
+		"bad auth mode":                        strings.Replace(validConfig, "auth: {mode: none}", "auth: {mode: basic}", 1),
+		"ca with insecure":                     strings.Replace(validConfig, "    insecureSkipTLSVerify: true\n", "    insecureSkipTLSVerify: true\n    certificateAuthorityData: YWJj\n", 1),
+		"uppercase cluster name":               strings.Replace(validConfig, "name: member-a", "name: Member-A", 1),
+		"duplicate cluster names":              strings.Replace(validConfig, "name: hub-a", "name: member-a", 1),
+		"zero timeout":                         strings.Replace(validConfig, "commandSeconds: 25", "commandSeconds: 0", 1),
+		"env not key=value":                    strings.Replace(validConfig, "listen: \":8080\"", "listen: \":8080\"\nenv: [HOME]", 1),
+		"zero maxInFlight":                     strings.Replace(validConfig, "maxInFlight: 4", "maxInFlight: 0", 1),
+		"zero maxRequestBytes":                 strings.Replace(validConfig, "maxRequestBytes: 65536", "maxRequestBytes: 0", 1),
+		"zero readHeaderSeconds":               strings.Replace(validConfig, "readHeaderSeconds: 10", "readHeaderSeconds: 0", 1),
+		"zero shutdownSeconds":                 strings.Replace(validConfig, "shutdownSeconds: 10", "shutdownSeconds: 0", 1),
 	}
 	for name, raw := range cases {
 		if _, err := Parse([]byte(raw)); err == nil {

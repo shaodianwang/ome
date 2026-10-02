@@ -1,10 +1,11 @@
 # ome-bot
 
-The read-only tool server behind the OME Slack bot. It runs read-only
-`kubectl ome` commands against every cluster in its registry, reports which
-clusters run OME, runs a closed set of read-only tools (CI scripts and a
-built-in docs search), and reports the release pipeline from Kargo. Its
-callers own Slack, so this Deployment holds no Slack credential.
+The tool server behind the OME Slack bot. It runs read-only `kubectl ome`
+commands against every cluster in its registry, reports which clusters run
+OME, runs a closed set of read-only tools (CI scripts and a built-in docs
+search), reports the release pipeline from Kargo, and, on clusters an operator
+marks writable, runs kubectl-ome's guarded verbs for cleared, confirmed
+callers. Its callers own Slack, so this Deployment holds no Slack credential.
 
 ## API
 
@@ -23,10 +24,12 @@ the shared key in the file `config.auth.secretKey` inside `secrets.volume`.
 A refused request answers HTTP 200 with `ok: false` and an `errorClass`
 (`not_a_verb`, `forbidden_flag`, `unknown_cluster`, `needs_cluster`,
 `malformed`, `unknown_tool`, `subcommand_not_allowed`, `bad_args`,
-`timeout`). More than `config.maxInFlight` concurrent requests that run a
-process or probe clusters answer 429 `busy`; a body over
-`config.maxRequestBytes` answers 413. The audit line records the caller,
-the command or tool arguments and the outcome, never the output.
+`timeout`, and for guarded verbs `mutations_off`, `cluster_not_writable`,
+`actor_not_allowed`, `needs_confirmation`). More than `config.maxInFlight`
+concurrent requests that run a process or probe clusters answer 429 `busy`;
+a body over `config.maxRequestBytes` answers 413. The audit line records the
+caller, the command or tool arguments, whether it was a mutation and the
+outcome, never the output.
 
 Commands accepted in `text`: `help`, `installed clusters`, and the read-only
 kubectl-ome verbs (`get`, `status`, `rollout status|explain|history|validate`,
@@ -36,7 +39,27 @@ list|status|retry-blocks`, `migration status|history`, `runtime
 explain|effective|tree|history`, `autoscale status|explain`, `accelerator
 explain`, `admin doctor|recommendations`, `cluster status`, `logs`) with
 `--cluster <name>`. `get` and `status` without `--cluster` run on every
-cluster. Guarded verbs and credential-changing flags are refused.
+cluster. Credential-changing flags are refused.
+
+### Guarded verbs
+
+kubectl-ome's eleven actions that change a cluster (`rollout
+pause|resume|promote|rollback|repin`, `traffic drain|undrain`, `migration
+start`, `instance release-held`, `runtime sync`, `scale`) are parsed too, and
+run only when four conditions hold, each refused with its own class:
+
+| Condition | Refusal |
+|---|---|
+| `config.mutations.enabled` is true | `mutations_off` |
+| the request names `--cluster <name>` and that entry has `writable: true` | `needs_cluster`, `cluster_not_writable` |
+| the relay sent `actor.canMutate: true` (its own verdict, for example oncall membership) | `actor_not_allowed` |
+| the text carries `--yes`, kubectl-ome's own confirmation | `needs_confirmation` |
+
+A guarded verb never fans out, and `--yes` on a read verb is `forbidden_flag`.
+The reply of a guarded verb carries `mutation: true` so the relay can post it
+where the channel sees it; `--dry-run=server --yes` previews without
+persisting. The bot's own answer worker never issues these verbs; they exist
+for people typing explicit commands.
 
 ## Registry
 
@@ -44,6 +67,10 @@ cluster. Guarded verbs and credential-changing flags are refused.
 at startup into an exec-credential kubeconfig that runs `config.execCommand`,
 so the file carries no secret and the pod's own identity mints every token.
 Entries may instead name a mounted `kubeconfigPath` or set `inCluster: true`.
+`writable: true` admits the guarded verbs on that entry once
+`config.mutations.enabled` is on; the identity behind the kubeconfig must then
+hold a role that can patch OME objects there, which the read-only viewer role
+does not.
 
 ## Tools and docs
 

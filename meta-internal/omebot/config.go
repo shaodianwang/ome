@@ -46,6 +46,15 @@ type Config struct {
 	Docs *DocsConfig `json:"docs,omitempty"`
 	// Kargo enables GET /v1/release; nil disables it.
 	Kargo *KargoConfig `json:"kargo,omitempty"`
+	// Mutations switches the guarded verbs on. Off, every guarded verb is
+	// refused before any other check.
+	Mutations MutationsConfig `json:"mutations,omitempty"`
+}
+
+// MutationsConfig governs the guarded kubectl-ome verbs, the only way this
+// service changes a cluster.
+type MutationsConfig struct {
+	Enabled bool `json:"enabled"`
 }
 
 // ToolConfig is one entry of the tool registry. A call runs Command with
@@ -136,6 +145,9 @@ type Cluster struct {
 	Role       string `json:"role,omitempty"`
 	Hub        string `json:"hub,omitempty"`
 	KargoStage string `json:"kargoStage,omitempty"`
+	// Writable admits the guarded verbs on this cluster once mutations are
+	// enabled: a development cluster, never a production one.
+	Writable bool `json:"writable,omitempty"`
 
 	Server                   string   `json:"server,omitempty"`
 	InsecureSkipTLSVerify    bool     `json:"insecureSkipTLSVerify,omitempty"`
@@ -286,6 +298,9 @@ func (c *Config) Validate() error {
 	}
 	c.validateTools(add)
 	c.validateDocs(add)
+	if c.Mutations.Enabled && len(c.WritableClusterNames()) == 0 {
+		add("mutations.enabled needs at least one cluster with writable: true")
+	}
 	if k := c.Kargo; k != nil {
 		switch {
 		case k.InCluster && k.Cluster != "":
@@ -400,6 +415,17 @@ func (c *Config) ClusterNames() []string {
 	names := make([]string, 0, len(c.Clusters))
 	for _, cl := range c.Clusters {
 		names = append(names, cl.Name)
+	}
+	return names
+}
+
+// WritableClusterNames lists the clusters that admit guarded verbs.
+func (c *Config) WritableClusterNames() []string {
+	var names []string
+	for _, cl := range c.Clusters {
+		if cl.Writable {
+			names = append(names, cl.Name)
+		}
 	}
 	return names
 }

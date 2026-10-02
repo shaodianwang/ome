@@ -43,4 +43,7 @@ data:
     {{- with .Values.config.kargo }}
     kargo: {{- toYaml . | nindent 6 }}
     {{- end }}
+    {{- with .Values.config.mutations }}
+    mutations: {{- toYaml . | nindent 6 }}
+    {{- end }}
     clusters: {{- toYaml .Values.clusters | nindent 6 }}
