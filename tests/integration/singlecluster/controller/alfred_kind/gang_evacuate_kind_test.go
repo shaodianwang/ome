@@ -144,7 +144,7 @@ var _ = ginkgo.Describe("alfred evacuates a whole gang instance", func() {
 			rec, ok := nodeRecordFor(g, src)
 			g.Expect(ok).To(BeTrue(), "node record for %s", src)
 			g.Expect(rec.Workloads).To(BeEmpty())
-			g.Expect(rec.OMEGPUOccupantsPresent).To(BeFalse())
+			g.Expect(rec.OMEAcceleratorOccupantsPresent).To(BeFalse())
 			g.Expect(rec.SignaledAt).NotTo(BeNil())
 			g.Expect(rec.DrainedAt).NotTo(BeNil())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())

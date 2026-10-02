@@ -279,16 +279,16 @@ type nodeMaintenanceRecord struct {
 }
 
 type nodeRecord struct {
-	NodeUID                types.UID             `json:"nodeUID"`
-	State                  string                `json:"state"`
-	SuspectUntil           *time.Time            `json:"suspectUntil,omitempty"`
-	Workloads              []string              `json:"workloads"`
-	OMEGPUOccupantsPresent bool                  `json:"omeGpuOccupantsPresent"`
-	SignaledAt             *time.Time            `json:"signaledAt,omitempty"`
-	DrainedAt              *time.Time            `json:"drainedAt,omitempty"`
-	MaintenanceRequestedAt *time.Time            `json:"maintenanceRequestedAt,omitempty"`
-	MaintenanceDrainedAt   *time.Time            `json:"maintenanceDrainedAt,omitempty"`
-	Maintenance            nodeMaintenanceRecord `json:"maintenance"`
+	NodeUID                        types.UID             `json:"nodeUID"`
+	State                          string                `json:"state"`
+	SuspectUntil                   *time.Time            `json:"suspectUntil,omitempty"`
+	Workloads                      []string              `json:"workloads"`
+	OMEAcceleratorOccupantsPresent bool                  `json:"omeAcceleratorOccupantsPresent"`
+	SignaledAt                     *time.Time            `json:"signaledAt,omitempty"`
+	DrainedAt                      *time.Time            `json:"drainedAt,omitempty"`
+	MaintenanceRequestedAt         *time.Time            `json:"maintenanceRequestedAt,omitempty"`
+	MaintenanceDrainedAt           *time.Time            `json:"maintenanceDrainedAt,omitempty"`
+	Maintenance                    nodeMaintenanceRecord `json:"maintenance"`
 }
 
 // nodeRecordFor finds the reporter's health/maintenance record for node. The

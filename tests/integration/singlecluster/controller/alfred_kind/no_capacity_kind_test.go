@@ -71,7 +71,7 @@ var _ = ginkgo.Describe("alfred with no target capacity", func() {
 			rec, ok := nodeRecordFor(g, src)
 			g.Expect(ok).To(BeTrue(), "node record for %s", src)
 			g.Expect(rec.Workloads).To(ContainElement(workloadID(fix)))
-			g.Expect(rec.OMEGPUOccupantsPresent).To(BeTrue())
+			g.Expect(rec.OMEAcceleratorOccupantsPresent).To(BeTrue())
 			g.Expect(rec.SignaledAt).NotTo(BeNil())
 			g.Expect(rec.DrainedAt).To(BeNil())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())

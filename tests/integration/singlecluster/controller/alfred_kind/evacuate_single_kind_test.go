@@ -111,7 +111,7 @@ var _ = ginkgo.Describe("alfred evacuates a single-pod instance off an unhealthy
 			rec, ok := nodeRecordFor(g, src)
 			g.Expect(ok).To(BeTrue(), "node record for %s", src)
 			g.Expect(rec.Workloads).To(BeEmpty())
-			g.Expect(rec.OMEGPUOccupantsPresent).To(BeFalse())
+			g.Expect(rec.OMEAcceleratorOccupantsPresent).To(BeFalse())
 			g.Expect(rec.SignaledAt).NotTo(BeNil())
 			g.Expect(rec.DrainedAt).NotTo(BeNil())
 			g.Expect(*rec.DrainedAt).To(BeTemporally(">", *rec.SignaledAt))

@@ -108,7 +108,7 @@ var _ = ginkgo.Describe("alfred reads ColumnarV2 InferenceReplica status", func(
 			rec, ok := nodeRecordFor(g, src)
 			g.Expect(ok).To(BeTrue(), "node record for %s", src)
 			g.Expect(rec.Workloads).To(ContainElement(workloadID(fix)))
-			g.Expect(rec.OMEGPUOccupantsPresent).To(BeTrue())
+			g.Expect(rec.OMEAcceleratorOccupantsPresent).To(BeTrue())
 			recs := recsFor(recommendations(g), workloadID(fix))
 			named := 0
 			for _, r := range recs {
@@ -210,7 +210,7 @@ var _ = ginkgo.Describe("alfred reads ColumnarV2 InferenceReplica status", func(
 			rec, ok := nodeRecordFor(g, src)
 			g.Expect(ok).To(BeTrue(), "node record for %s", src)
 			g.Expect(rec.Workloads).To(BeEmpty())
-			g.Expect(rec.OMEGPUOccupantsPresent).To(BeFalse())
+			g.Expect(rec.OMEAcceleratorOccupantsPresent).To(BeFalse())
 			g.Expect(rec.SignaledAt).NotTo(BeNil())
 			g.Expect(rec.DrainedAt).NotTo(BeNil())
 			g.Expect(*rec.DrainedAt).To(BeTemporally(">", *rec.SignaledAt))

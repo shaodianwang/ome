@@ -197,7 +197,7 @@ var _ = ginkgo.Describe("alfred planned maintenance", func() {
 			g.Expect(rec.SignaledAt).To(BeNil(), "%s was signaled for repair", src)
 			g.Expect(rec.DrainedAt).To(BeNil(), "%s was reported drained for repair", src)
 			g.Expect(rec.Workloads).To(BeEmpty())
-			g.Expect(rec.OMEGPUOccupantsPresent).To(BeFalse())
+			g.Expect(rec.OMEAcceleratorOccupantsPresent).To(BeFalse())
 			g.Expect(rec.MaintenanceRequestedAt).NotTo(BeNil())
 			g.Expect(rec.MaintenanceDrainedAt).NotTo(BeNil())
 			g.Expect(*rec.MaintenanceDrainedAt).To(BeTemporally(">", *rec.MaintenanceRequestedAt))

@@ -72,7 +72,7 @@ var _ = ginkgo.Describe("alfred advisory-only cases", func() {
 			rec, ok := nodeRecordFor(g, src)
 			g.Expect(ok).To(BeTrue(), "node record for %s", src)
 			g.Expect(rec.Workloads).To(BeEmpty())
-			g.Expect(rec.OMEGPUOccupantsPresent).To(BeFalse())
+			g.Expect(rec.OMEAcceleratorOccupantsPresent).To(BeFalse())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("the node keeps reporting no OME occupant and the pod is untouched")
@@ -81,7 +81,7 @@ var _ = ginkgo.Describe("alfred advisory-only cases", func() {
 			rec, ok := nodeRecordFor(g, src)
 			g.Expect(ok).To(BeTrue(), "node record for %s", src)
 			g.Expect(rec.Workloads).To(BeEmpty())
-			g.Expect(rec.OMEGPUOccupantsPresent).To(BeFalse())
+			g.Expect(rec.OMEAcceleratorOccupantsPresent).To(BeFalse())
 			fresh := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(filler), fresh)).To(Succeed())
 			g.Expect(fresh.UID).To(Equal(filler.UID))
