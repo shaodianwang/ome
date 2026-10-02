@@ -544,8 +544,8 @@ func TestEscalation_UnschedulableGraceWarnsAfterAHoldWasRecorded(t *testing.T) {
 	}
 }
 
-// TestEscalation_UnschedulableGangPastGraceKeepsItsOperation: a gang is
-// not a disposable attempt — the abandon path consumes its
+// TestEscalation_UnschedulableGangPastGraceKeepsItsOperation: a gang
+// surge is not a disposable attempt — the abandon path consumes its
 // Failed-with-Operation continuation — so the grace escalation takes the
 // plain stamp instead of the disposition. The revision is still
 // blameless: a gang with nowhere to land says nothing about its pod

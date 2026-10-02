@@ -666,7 +666,7 @@ transitions:
   - id: T-gangtarget-deadline
     from: Update/GangSurgeTarget
     event: timer.operationDeadline
-    guard: the marker's own operation deadline elapsed with phase Creating and no pod admission-gated; a gang step is never disposable, so the stamp preserves the operation
+    guard: the marker's own operation deadline elapsed with phase Creating and no pod admission-gated; a gang surge step is never disposable, so the stamp preserves the operation
     to: Failed
     effects: [Phase Failed on the marker, LastFailure carrying the blamed pod's workload-caused waiting reason when one exists and the DeadlineExceeded diagnostic otherwise, so the cause survives the teardown that deletes the pod; the source's claim predicates match on revision and step, never phase, so the surge machine keeps driving]
     decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
@@ -713,7 +713,7 @@ transitions:
   - id: T-gangcleanup-deadline
     from: Update/GangSurgeTargetCleanup
     event: timer.operationDeadline
-    guard: the marker's own operation deadline elapsed with phase Creating and no pod admission-gated; a gang step is never disposable, so the stamp preserves the operation
+    guard: the marker's own operation deadline elapsed with phase Creating and no pod admission-gated; a gang surge step is never disposable, so the stamp preserves the operation
     to: Failed
     effects: [Phase Failed on the marker, LastFailure carrying the blamed pod's workload-caused waiting reason when one exists and the DeadlineExceeded diagnostic otherwise, so the abandon tail charges the ladder on the real cause; the cleanup claim matches on revision and step, never phase, so the retirement still completes]
     decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
@@ -853,7 +853,7 @@ transitions:
     event: timer.operationDeadline
     guard: the operation deadline elapsed and no pod is held by an admission scheduling gate
     to: Failed
-    effects: [a single-pod recreate is disposed and its operation cleared; a multi-pod recreate keeps the operation]
+    effects: [the recreate is disposed and its operation cleared, single-pod or gang; with a retry ladder configured the wave counts on the target revision's RetryBlock]
     decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-drain-stuck
     from: Update/Drain

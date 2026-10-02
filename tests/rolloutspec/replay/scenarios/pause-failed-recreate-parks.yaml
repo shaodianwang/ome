@@ -1,0 +1,68 @@
+# A paused Component whose only Update row is a gang recreate that ran out
+# its deadline. The attempt is disposed like a single pod's: the operation
+# is cleared and the row is Failed with no claim, so the pause has nothing
+# to re-drive and starts nothing. The unpause admits a fresh recreate at
+# the same target, which no block denies because no retry ladder is
+# configured.
+scenario: pause-failed-recreate-parks
+intentional: >-
+  a gang's recreate is a disposable attempt: its pods carry the attempt's
+  revision and nothing else consumes a Failed-with-Operation row of this
+  shape, so the deadline disposition clears the operation (with no
+  updateRetry configured it records no block) and the row waits at Failed
+  with no claim. The paused selection is still decided by the row's claim;
+  there is none here, so nothing is re-driven under the pause, and the
+  fresh start opens on the unpause.
+arrows:
+  - T-empty-create
+  - T-ready-recreate
+  - T-drain-deadline
+cells:
+  - instance/Update/Drain/timer.operationDeadline/before
+  - instance/Failed/spec.pauseTrue/before
+  - instance/Failed/spec.unpause/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the Create pass materializes the leader and its worker
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes, so the roll drains the gang for a recreate
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation and the drained members are deleted, so the roll recreates them at the new revision
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 5
+    note: the rebuilt gang never reports Ready and the deadline elapses, so the attempt is disposed; the operation is cleared and the row is Failed with no claim
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: the operator pauses; the row claims nothing, so nothing is re-driven under the pause
+    events:
+      - spec.pauseTrue: {}
+  - tick: 7
+    note: a further pass under pause starts nothing
+  - tick: 8
+    note: the unpause admits a fresh recreate at the same target, which no block denies because no retry ladder is configured; its drain deletes the pods of the failed attempt
+    events:
+      - spec.unpause: {}

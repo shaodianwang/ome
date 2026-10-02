@@ -159,6 +159,13 @@ type UpdateSelection struct {
 	// the same Instance.
 	PriorSurgeInFlight   int32
 	PriorUnavailInFlight int32
+	// RolledNotServing lists, in plan order, the Instances already on the
+	// target revision that do not serve it (ops.RolledInstanceNotServing).
+	// They are the roll's open work: each holds a slot in the budget of
+	// the strategy's arm ahead of any fresh start, and under
+	// SurgeThenDrain no source leaves rotation while they exceed the
+	// unavailability budget.
+	RolledNotServing []int32
 }
 
 // PlannedAction is one pass-level action selected for this reconcile.
@@ -638,6 +645,9 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 				"component", plan.Component, "instance", inst.Index, "target", target.Name)
 			continue
 		}
+		if workloadops.RolledInstanceNotServing(input.ObservedState.Instance(inst.Index), target.Name, updateByInstance[inst.Index], inst.TotalPods()) {
+			selection.RolledNotServing = append(selection.RolledNotServing, inst.Index)
+		}
 		decision := workloadops.EvaluateUpdateTrigger(input, inst, target, updateByInstance[inst.Index])
 		if decision.AdoptRevision {
 			logf.FromContext(ctx).V(1).Info("update not selected: adopting revision in place",
@@ -721,7 +731,8 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		"strategy", selection.Strategy, "surgeBudget", selection.SurgeBudget,
 		"unavailBudget", selection.UnavailBudget,
 		"priorSurgeInFlight", selection.PriorSurgeInFlight,
-		"priorUnavailInFlight", selection.PriorUnavailInFlight)
+		"priorUnavailInFlight", selection.PriorUnavailInFlight,
+		"rolledNotServing", selection.RolledNotServing)
 	return selection, retryBlockWait, nil
 }
 

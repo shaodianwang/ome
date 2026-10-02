@@ -695,6 +695,44 @@ func anyInFlightUpdateAt(statuses []workload.InstanceStatus, rev string) bool {
 	return false
 }
 
+// RolledInstanceNotServing reports whether row is an Instance the roll
+// already moved onto target that does not serve it: its pod set on that
+// revision is short of fully serving, or its runner container has
+// restarted since the row entered Ready. Nothing is left to retry for
+// such an Instance and nothing but a repair or a corrected revision
+// changes it, so it is the roll's open work: the update pass counts it
+// against the budget of the strategy's arm ahead of any fresh start, and
+// under SurgeThenDrain keeps every further source in rotation while the
+// count exceeds the unavailability budget. The restart is read even
+// while the container is Ready again, because a pod that keeps dying
+// under load is up between its crashes and the roll must not creep
+// forward in those windows. A row with an attempt in flight is anchored
+// by the in-flight counts instead, and a row a migration owns is the
+// record's.
+func RolledInstanceNotServing(row *workload.InstanceStatus, target string, pods []*corev1.Pod, desired int32) bool {
+	if row == nil || target == "" || row.RunningRevision != target {
+		return false
+	}
+	if workload.UpdateContinuation(row) || isMigrateOwnedStatus(row) {
+		return false
+	}
+	targetRev := query.RevisionFromName(target)
+	own := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if pod == nil || pod.DeletionTimestamp != nil {
+			continue
+		}
+		if podRev := query.RevisionFromPod(pod); !podRev.IsZero() && !podRev.Same(targetRev) {
+			continue
+		}
+		if _, restarted := RunnerRestartedSinceReady(pod, row.ReadySince); restarted {
+			return true
+		}
+		own = append(own, pod)
+	}
+	return !query.PodSetFullyServing(own, desired)
+}
+
 // Wreckage is per-instance rollout debris keyed to a SUPERSEDED
 // revision: state that no revision-diff update trigger can ever reach,
 // because the trigger's predicate is "this instance must move to a

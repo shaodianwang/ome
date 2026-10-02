@@ -244,9 +244,12 @@ the migration pair it names are still that verb's. A read that decides whether
 to *start* something on a row asks `ClaimOf` — the paused update selection
 (`anyUpdateContinuation`), the update and restart triggers and the wreckage scan
 (`isMigrateOwnedStatus`) — and a read that decides whether a pass may *advance*
-the row asks `Owner`. `pause-failed-update-continues` is the golden that tells
-them apart: a Failed row with a preserved Update is re-driven under pause,
-because its claim is an Update even though nobody owns it.
+the row asks `Owner`. `TestPlan_Paused_ReDrivesAFailedUpdateContinuation` holds
+the claim side: a Failed row that still claims an Update is re-driven under
+pause, because its claim is an Update even though nobody owns it. The golden
+`pause-failed-recreate-parks` holds the other side: a disposed recreate leaves
+a Failed row with no claim, so the pause starts nothing on it and the unpause
+admits the fresh start.
 
 Three tests in `tests/rolloutspec/owner_table_test.go` hold the table and the
 machine together:

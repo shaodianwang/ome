@@ -91,12 +91,23 @@ cells:
     event: gate.deny
     variants: [Pairing]
     outcome: defer
-    note: "the pairing drain gate runs when the replacement is past the promote bar and the source would leave rotation: a denial keeps the source serving at Step=Surge, records a RolloutHold with gate Pairing on the InferenceReplica, and requeues; the source leaves rotation on the first pass the gate admits. Every other gate is consulted only before a fresh dispatch"
+    note: "the pairing drain gate runs when the replacement is past the promote bar and the source would leave rotation: a denial keeps the source serving at Step=Surge, records a RolloutHold with gate Pairing on the InferenceReplica, and requeues; the source leaves rotation on the first pass the gate admits. Every other gate but the per-Component floor is consulted only before a fresh dispatch"
     placement: kind
     coverage:
       perm: [p1817, p1818, p1819]
       unit: [TestSurgeUpdate_DrainGateHoldsTheSourceUntilAllowed, TestGangSurgeUpdate_DrainGateHoldsTheSourceGang]
       kind: ["1x1 surge transition keeps the old pair serving until the new cohort serves on both sides"]
+    status: decided
+  - state: Update/Surge
+    event: gate.deny
+    variants: [Budget]
+    outcome: defer
+    note: "the per-Component floor withholds the drain: while the Instances already on the target revision that do not serve it - promoted Instances whose pods crash-loop or whose runner restarted since Ready - exceed the unavailability budget, the Component is below its floor and no source leaves rotation, single-pod or gang. The replacement keeps serving beside its source at Step=Surge, the Budget hold names those Instances and the revision, and the source leaves rotation on the first pass the floor holds again; a replacement that then crash-loops itself is disposed on the ladder like any failed attempt. The floor is read where the pairing drain gate is, at Step=Surge only"
+    placement: unit
+    coverage:
+      perm: []
+      unit: [TestCrashAfterPromotion_RollHoldsAtTheBudget]
+      kind: []
     status: decided
   - {state: Update/Surge, event: pod.ready, variants: [target], windows: [after], transition: T-surge-abandon-superseded, outcome: ignore, note: "the abandon already deleted the replacement and reset the source to Ready; a readiness event from the deleted generation is dropped", placement: perm, coverage: {perm: [], unit: [], kind: []}, status: current}
   - {state: Update/Surge, event: pod.ready, variants: [target], windows: [boundary], transition: T-surge-deadline, outcome: ignore, note: "the failed-while-serving guard skips an Instance whose live pods are all ContainersReady and in rotation, so a replacement that reached serving before the deadline write prevents the escalation and the surge advances instead", placement: kind, coverage: {perm: [], unit: [], kind: []}, status: current}

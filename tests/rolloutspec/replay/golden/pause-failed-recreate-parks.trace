@@ -31,23 +31,23 @@ tick=4 pod create name=svc-a-engine-0-leader-0 revision=367ef4b7 incarnation=2 o
 tick=4 pod create name=svc-a-engine-0-worker-0 revision=367ef4b7 incarnation=2 ordinal=0
 tick=4 hold cleared
 tick=4 pass result=after:5s
-tick=5 note the rebuilt gang never reports Ready and the deadline elapses, so the row fails with its Update preserved
+tick=5 note the rebuilt gang never reports Ready and the deadline elapses, so the attempt is disposed; the operation is cleared and the row is Failed with no claim
 tick=5 apply timer.operationDeadline to=t+30m1s now=t+30m1s
 tick=5 row=0 write no-op precondition=no-change
 tick=5 hold cleared
-tick=5 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
-tick=5 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout
+tick=5 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=nil lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
+tick=5 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout: attempt disposed terminal (no workload-caused evidence, relocation unavailable); operation-specific recovery decides whether another attempt is safe
 tick=5 pass result=after:5s
-tick=6 note the operator pauses; the Failed row still claims the Update, so the pass re-drives it under the pause
+tick=6 note the operator pauses; the row claims nothing, so nothing is re-driven under the pause
 tick=6 apply spec.pauseTrue paused=true freeze=false generation=2 now=t+30m1s
-tick=6 row=0 write incarnation=3 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#3{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
-tick=6 pod delete name=svc-a-engine-0-leader-0 grace=default
-tick=6 pod delete name=svc-a-engine-0-worker-0 grace=default
-tick=6 hold cleared
-tick=6 pass result=after:5s
-tick=6 row=0 write incarnation=3 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#3{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+30m1s lastProgressAt=t+30m1s deadline=nil} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
-tick=7 note a further pass under pause keeps driving the same continuation and starts nothing new
-tick=7 row=0 write incarnation=3 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#3{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 waiting=Paused strategy=RecreatePod started=t+30m1s lastProgressAt=t+30m1s deadline=nil} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
-tick=7 row=0 write no-op precondition=no-change
-tick=7 hold cleared
-tick=7 pass result=after:5s
+tick=6 pass result=none
+tick=7 note a further pass under pause starts nothing
+tick=7 pass result=none
+tick=8 note the unpause admits a fresh recreate at the same target, which no block denies because no retry ladder is configured; its drain deletes the pods of the failed attempt
+tick=8 apply spec.unpause paused=false freeze=false generation=3 now=t+30m1s
+tick=8 row=0 write incarnation=3 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#3{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
+tick=8 event Normal RecreateUpdateStarted OMENative component=engine instance=0 recreate (revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7, incarnation=3)
+tick=8 pod delete name=svc-a-engine-0-leader-0 grace=default
+tick=8 pod delete name=svc-a-engine-0-worker-0 grace=default
+tick=8 hold cleared
+tick=8 pass result=after:5s

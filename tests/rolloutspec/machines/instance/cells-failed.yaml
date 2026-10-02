@@ -1,9 +1,9 @@
 # Cells for the Failed state of the instance machine.
 #
 # Failed is the escalation pass's terminal stamp. It keeps its operation
-# for a gang surge, a multi-pod recreate and a Restart, and has it cleared
-# for a disposed single-pod Create or Update attempt; both shapes are live
-# here, so the operation-bearing events are real rather than n/a. A kept
+# for a gang surge and a Restart, and has it cleared for a disposed Create,
+# recreate or in-place Update attempt, single-pod or gang; both shapes are
+# live here, so the operation-bearing events are real rather than n/a. A kept
 # Restart operation is a record of a spent attempt rather than a claim: the
 # gang-member-loss trigger re-arms over it, and the operator reset mailbox
 # clears it outright. The escalation pass skips an already-Failed row, so
@@ -333,13 +333,13 @@ cells:
   - state: Failed
     event: spec.pauseTrue
     outcome: ignore
-    note: pause parks the update and create passes, so no corrective or retry attempt starts; a Failed row whose preserved operation is an Update is a continuation, not a start, and is re-driven under the pause; scale-down and the pod-loss repair keep running
+    note: pause parks the update and create passes, so no corrective or retry attempt starts; the paused selection is decided by the row's claim, so a Failed row that still claims an Update is a continuation, not a start - the escalation leaves that claim only on a gang surge, whose cycle the pause parks whole, while a disposed recreate or in-place attempt, single-pod or gang, is Failed with no claim and waits for the unpause; scale-down and the pod-loss repair keep running
     placement: unit
     coverage:
       perm: []
       unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot, TestPlan_Paused_ReDrivesAFailedUpdateContinuation, TestReconcile_PausedSkipsCreate, TestReconcile_PausedStillScalesDown]
       kind: []
-      replay: [pause-failed-update-continues]
+      replay: [pause-failed-recreate-parks]
     status: decided
   - state: Failed
     event: spec.pauseFreeze
@@ -354,12 +354,13 @@ cells:
   - state: Failed
     event: spec.unpause
     outcome: defer
-    note: clearing pause only un-parks the passes; the row leaves Failed through whichever trigger the next pass finds, a corrective revision or a due RetryBlock
+    note: clearing pause only un-parks the passes; the row leaves Failed through whichever trigger the next pass finds, a corrective revision, a due RetryBlock, or the same target when no ladder is configured
     placement: unit
     coverage:
       perm: []
       unit: [TestPlan_Create_AlwaysPlannedUnlessPaused]
       kind: []
+      replay: [pause-failed-recreate-parks]
     status: current
   - state: Failed
     event: spec.teardown

@@ -136,7 +136,7 @@ func DetectRestartTriggerWithPods(input workload.ReconcileInput, plan workload.C
 		}
 	} else {
 		for _, pod := range instancePods {
-			if reason, restarted := runnerRestartedSinceReady(pod, s.ReadySince); restarted {
+			if reason, restarted := RunnerRestartedSinceReady(pod, s.ReadySince); restarted {
 				return true, reason
 			}
 			if pod.Status.Phase == corev1.PodFailed {
@@ -651,7 +651,7 @@ func rebuildFollowsTarget(input workload.ReconcileInput, plan workload.Component
 	return rev != "" && rev != target.Name
 }
 
-// runnerRestartedSinceReady reports whether pod's runner container carries
+// RunnerRestartedSinceReady reports whether pod's runner container carries
 // restart evidence dated after readySince: a current run that began after the
 // Instance entered Ready, or a termination that finished after it. Either
 // proves the process group formed at Ready has lost this member's original
@@ -660,7 +660,7 @@ func rebuildFollowsTarget(input workload.ReconcileInput, plan workload.Component
 // restart is their recovery path and does not break the Instance's process
 // group. A nil readySince (Instance was last promoted before the field
 // existed) reports false; the anchor appears on the next Ready transition.
-func runnerRestartedSinceReady(pod *corev1.Pod, readySince *metav1.Time) (string, bool) {
+func RunnerRestartedSinceReady(pod *corev1.Pod, readySince *metav1.Time) (string, bool) {
 	if pod == nil || readySince == nil || readySince.IsZero() || pod.DeletionTimestamp != nil {
 		return "", false
 	}

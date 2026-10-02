@@ -95,18 +95,6 @@ var _ = ginkgo.Describe("behavior - a new revision that crash-loops is bounded (
 		crashUIDsSeen = map[types.UID]struct{}{}
 	})
 
-	// crashesAtStart reports whether the pod runs the crashing revision.
-	crashesAtStart := func(pod *corev1.Pod) bool {
-		for _, container := range pod.Spec.Containers {
-			for _, env := range container.Env {
-				if env.Name == "FAIL_AT" && env.Value == "startup" {
-					return true
-				}
-			}
-		}
-		return false
-	}
-
 	// enginePods returns the non-deleting engine pods.
 	enginePods := func(g Gomega) []*corev1.Pod {
 		snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, isvcName)
@@ -128,7 +116,7 @@ var _ = ginkgo.Describe("behavior - a new revision that crash-loops is bounded (
 		pods := enginePods(g)
 		alive := 0
 		for _, pod := range pods {
-			if crashesAtStart(pod) {
+			if podCrashesAtStart(pod) {
 				crashUIDsSeen[pod.UID] = struct{}{}
 				alive++
 			}
@@ -316,7 +304,7 @@ var _ = ginkgo.Describe("behavior - a new revision that crash-loops is bounded (
 			}
 			g.Expect(ir.Status.RolloutHold).To(BeNil(), "status.rolloutHold must clear once the rollout converges")
 			for _, pod := range enginePods(g) {
-				g.Expect(crashesAtStart(pod)).To(BeFalse(), "no crash-revision pod may remain: %s", pod.Name)
+				g.Expect(podCrashesAtStart(pod)).To(BeFalse(), "no crash-revision pod may remain: %s", pod.Name)
 			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})

@@ -103,7 +103,7 @@ const (
 // the fast escalator, DeadlineExceeded detail for the deadline
 // backstop) used for events and terminal diagnostics.
 //
-// Gang (multi-pod) UPDATE attempts must NOT be routed here — their
+// Gang SURGE attempts must NOT be routed here — their
 // Failed-with-Operation continuation drives the gang abandon path.
 // Callers keep the plain Failed-preserving-Operation stamp for those.
 func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.ReconcileInput, dd types.DispositionDeps, inst types.InstanceStatus, pods []*corev1.Pod, reason string) (DispositionOutcome, error) {
@@ -582,16 +582,21 @@ func relocationRecordMessage(fromNode, detail string) string {
 //     The disposition's Operation-clear is correct for gang creates
 //     too: a Failed-no-Operation gang create rebuilds via the ordinary
 //     trigger + RetryBlock gate.
-//   - Single-pod Update ops (no gang surge markers): YES — the same
-//     re-arming stampers apply.
-//   - Gang Update ops (SurgeIndex set / gang surge target step /
-//     multi-pod plan): NO. Their Failed-with-Operation continuation is
-//     what routes the dispatcher into abandonFailedGangSurge (surge
-//     teardown → RetryBlock → source reset); clearing the Operation
-//     here would strand the wedged surge gang.
+//   - Recreate and in-place Update ops, single-pod or gang (no gang
+//     surge markers): YES — the same re-arming stampers apply. A gang's
+//     recreate has no continuation of its own: left Failed with its
+//     Operation it is re-driven at the same target on the next pass,
+//     which rebuilds the crashing gang every stuck-pod grace with no
+//     attempt ever counted on the revision's ladder and no hold ever
+//     reported.
+//   - Gang surge Update ops (SurgeIndex set / gang surge target step):
+//     NO. Their Failed-with-Operation continuation is what routes the
+//     dispatcher into abandonFailedGangSurge (surge teardown →
+//     RetryBlock → source reset); clearing the Operation here would
+//     strand the wedged surge gang.
 //   - Restart / Migrate ops: NO — they take the plain
 //     Failed-preserving-Operation stamp.
-func disposableAttempt(s *types.InstanceStatus, desiredPods int32) bool {
+func disposableAttempt(s *types.InstanceStatus) bool {
 	if s == nil || s.Operation == nil {
 		return false
 	}
@@ -599,13 +604,9 @@ func disposableAttempt(s *types.InstanceStatus, desiredPods int32) bool {
 	case types.InstanceOperationCreate:
 		return true
 	case types.InstanceOperationUpdate:
-		if s.Operation.SurgeIndex != nil || s.Operation.Step == types.UpdateStepGangSurgeTarget || s.Operation.Step == types.UpdateStepGangSurgeTargetCleanup {
-			return false
-		}
-		// Multi-pod RECREATE/in-place updates (desiredPods > 1, no surge
-		// markers) also keep the Failed-with-Operation stamp: the
-		// disposition is conservative and owns only the single-pod shape.
-		return desiredPods <= 1
+		return s.Operation.SurgeIndex == nil &&
+			s.Operation.Step != types.UpdateStepGangSurgeTarget &&
+			s.Operation.Step != types.UpdateStepGangSurgeTargetCleanup
 	default:
 		return false
 	}

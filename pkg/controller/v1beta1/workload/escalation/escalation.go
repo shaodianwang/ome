@@ -123,9 +123,9 @@ type PassInput struct {
 // coordination layer would amplify it into a group-level failure. Such
 // an Instance is skipped untouched.
 //
-// Instances with a disposable in-flight attempt (single-pod-updateable
-// Create/Update Operations — see disposableAttempt) route through
-// DisposeExpiredAttempt; gang Update attempts keep the
+// Instances with a disposable in-flight attempt (Create, recreate and
+// in-place Update Operations — see disposableAttempt) route through
+// DisposeExpiredAttempt; gang surge attempts keep the
 // Failed-preserving-Operation stamp (the gang abandon path consumes the
 // continuation), and everything else takes the plain stamp for its path.
 //
@@ -245,7 +245,7 @@ func Run(ctx context.Context, in PassInput) error {
 		}
 		// FAST path.
 		if stuckInterrupts && rowEvidence.StuckPod != nil && ShouldCheckForStuckPods(&row, pods, currentHash, query.LabelRevisionHash) {
-			if disposableAttempt(&row, desired) {
+			if disposableAttempt(&row) {
 				// The disposition's writes are write-ahead-ordered; land
 				// the pending plain stamps first so the overall write +
 				// event order matches the unbatched pass.
@@ -303,7 +303,7 @@ func Run(ctx context.Context, in PassInput) error {
 			continue
 		}
 		op := row.Operation
-		if disposableAttempt(&row, desired) {
+		if disposableAttempt(&row) {
 			if err := stamps.flush(ctx); err != nil {
 				return fmt.Errorf("flush escalation stamps (component=%s): %w", plan.Component, err)
 			}

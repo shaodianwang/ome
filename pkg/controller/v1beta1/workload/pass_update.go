@@ -3,6 +3,8 @@ package workload
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -38,6 +40,13 @@ func executeUpdatePass(ctx context.Context, deps types.Deps, input types.Reconci
 	// reconcile reads fresh state.
 	anyUpdateRan := false
 	admission := newUpdateAdmission(input, selection, target)
+	// A surge source leaves rotation only while the Component is at its
+	// floor; below it every drain is withheld and the hold says why.
+	if hold := admission.drainWithheld(); hold != nil {
+		input.DrainGate = func([]string) (bool, types.RolloutHoldGate, string) {
+			return false, hold.Gate, hold.Reason
+		}
+	}
 	// Same memoized cached read Plan selected from — the pods handed to
 	// the Update op match the selection's evidence.
 	updateByInstance, listErr := snapshot.CachedPods(ctx)
@@ -142,10 +151,11 @@ func executeUpdatePass(ctx context.Context, deps types.Deps, input types.Reconci
 // numbers repairAdmission uses: the per-Component budget on the arm the
 // strategy uses (surge or unavailability), then the cross-Component
 // coordination gate. Starts already in flight from a prior wake-up are
-// anchored in the selection's Prior* counts; the pass's own starts are
-// charged here as they open, so every later consult in the pass
-// projects against the post-this-pass shape rather than firing every
-// Instance in one shot.
+// anchored in the selection's Prior* counts, and the Instances the roll
+// already moved onto the target that do not serve it hold a slot of the
+// same budget; the pass's own starts are charged here as they open, so
+// every later consult in the pass projects against the post-this-pass
+// shape rather than firing every Instance in one shot.
 type updateAdmission struct {
 	selection *UpdateSelection
 	target    *appsv1.ControllerRevision
@@ -180,18 +190,19 @@ func (a *updateAdmission) surge() bool {
 // Both layers project (prior + this pass + 1) against their budget, the
 // way the coordination group budget is projected.
 func (a *updateAdmission) admit(ctx context.Context, plan types.ComponentPlan, item UpdateItem) (bool, *types.RolloutHold) {
+	rolled := int32(len(a.selection.RolledNotServing))
 	if a.surge() {
-		if projected, denied := escalation.BudgetDenies(a.selection.SurgeBudget, a.selection.PriorSurgeInFlight, a.inFlightSurge); denied {
+		if projected, denied := escalation.BudgetDenies(a.selection.SurgeBudget, a.selection.PriorSurgeInFlight+rolled, a.inFlightSurge); denied {
 			return false, &types.RolloutHold{
 				Gate:   types.RolloutHoldGateBudget,
-				Reason: fmt.Sprintf("per-Component surge budget %d exhausted (would become %d)", a.selection.SurgeBudget, projected),
+				Reason: fmt.Sprintf("per-Component surge budget %d exhausted (would become %d)%s", a.selection.SurgeBudget, projected, a.rolledNotServingClause()),
 				Target: a.target.Name,
 			}
 		}
-	} else if projected, denied := escalation.BudgetDenies(a.selection.UnavailBudget, a.selection.PriorUnavailInFlight, a.inFlightUnavail); denied {
+	} else if projected, denied := escalation.BudgetDenies(a.selection.UnavailBudget, a.selection.PriorUnavailInFlight+rolled, a.inFlightUnavail); denied {
 		return false, &types.RolloutHold{
 			Gate:   types.RolloutHoldGateBudget,
-			Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted (would become %d)", a.selection.UnavailBudget, projected),
+			Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted (would become %d)%s", a.selection.UnavailBudget, projected, a.rolledNotServingClause()),
 			Target: a.target.Name,
 		}
 	}
@@ -222,6 +233,41 @@ func (a *updateAdmission) mechanism(item UpdateItem) types.UpdateStrategyType {
 		return types.UpdateStrategyRecreatePod
 	}
 	return a.selection.Strategy
+}
+
+// drainWithheld is the hold that keeps every surge source in rotation
+// this pass: the Instances already on the target revision that do not
+// serve it exceed the unavailability budget, so the Component is below
+// its floor and no further source may leave it. Nil under a non-surge
+// strategy, an uncapped budget, or a floor that still holds.
+func (a *updateAdmission) drainWithheld() *types.RolloutHold {
+	rolled := int32(len(a.selection.RolledNotServing))
+	if !a.surge() || a.selection.UnavailBudget == escalation.BudgetNoLimit || rolled <= a.selection.UnavailBudget {
+		return nil
+	}
+	return &types.RolloutHold{
+		Gate:   types.RolloutHoldGateBudget,
+		Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted%s; no source leaves rotation", a.selection.UnavailBudget, a.rolledNotServingClause()),
+		Target: a.target.Name,
+	}
+}
+
+// rolledNotServingClause names, for a denial, the Instances already on
+// the target revision that do not serve it; empty when there are none.
+func (a *updateAdmission) rolledNotServingClause() string {
+	rolled := a.selection.RolledNotServing
+	if len(rolled) == 0 {
+		return ""
+	}
+	indices := make([]string, 0, len(rolled))
+	for _, idx := range rolled {
+		indices = append(indices, strconv.Itoa(int(idx)))
+	}
+	noun := "Instance"
+	if len(rolled) > 1 {
+		noun = "Instances"
+	}
+	return fmt.Sprintf("; %s %s on revision %s not serving", noun, strings.Join(indices, ", "), a.target.Name)
 }
 
 // charge counts a fresh start the pass opened, so every later consult
