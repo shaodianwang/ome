@@ -1290,19 +1290,20 @@ shapes.
   `expect=heals` asserts the Instance is Ready and serving again on its
   running revision within the budget, with no new revision and
   `ome.io/reset-instances` never written; `expect=parked` (with
-  `lift=after-failed` and `issue=<n>`, the issue the self-heal is tracked
-  under) asserts the documented behaviour instead: the row stays `Failed` and
-  nothing of the Instance serves across the hold window after the lift, and
-  a row that heals fails the case as a stale park, so the flip to
-  `expect=heals` is forced the day the rule lands. `batch.py` lists
-  `expect=parked` cases in its PARKED DEBT table. The restore also runs from
-  the end-of-case cleanup (a no-op after the lift, harmless once the case's
-  ConfigMap is gone with the case). The generated `isvcs/gen-heal/` family
-  crosses the fault with topology, restart policy, lift phase and a rolling
-  group; every case states the intended `expect=heals`, and the
-  `lift=after-failed` half is parked (`notimpl=1` on the issue the headers
-  name) until a Failed row gets its exit — `isvcs/MANIFEST.md` states per
-  axis why the `after-settle` half heals as the controller stands.
+  `lift=after-failed` and `issue=<n>`, the issue such a park is tracked
+  under) asserts instead that the row stays `Failed` and nothing of the
+  Instance serves across the hold window after the lift, and a row that
+  heals fails the case as a stale park, so the flip to `expect=heals` is
+  forced the day the rule lands. `batch.py` lists `expect=parked` cases in
+  its PARKED DEBT table. The restore also runs from the end-of-case cleanup
+  (a no-op after the lift, harmless once the case's ConfigMap is gone with
+  the case). The generated `isvcs/gen-heal/` family crosses the fault with
+  topology, restart policy, lift phase and a rolling group, and every case
+  runs live with `expect=heals`: a repair parked at Failed resumes when its
+  rebuilt set comes up (and re-arms on the update retry ladder otherwise),
+  and a grouped engine's repair is admitted without the group's gate while
+  the Instance serves nothing — `isvcs/MANIFEST.md` states per axis how
+  each half heals.
 
 - **`fault=node:notready` with `lift=<phase>` and
   `expect=relocated|repaired|parked`** (rollout mode, `during=idle` only)
@@ -1440,14 +1441,14 @@ shapes.
   within the rotate budget the victim Instance is rebuilt (every pod new,
   Ready and serving) and a `RestartTriggered` event names it.
   `expect=held`: nothing rebuilds it across the hold window (`IDLE_HOLD_S`,
-  90 s scaled by `OME_TEST_TIMEOUT_MULT`) and a `RepairHeld` event names it —
-  the hold a rollout group keeps on repairs while no run is open; a silent
-  hold fails. Absent, `expect=` is derived from the spec: held when the
-  victim Component is a member of a `spec.rollout.groups` entry, repaired
-  otherwise; a family that asserts the repair on a grouped service states
-  `expect=repaired` (`isvcs/gen-crashloop-idle/` does on every cell: an
-  Instance that serves nothing is repaired without touching the budget or
-  the gate, whatever group it sits in). Either way no Component may ever
+  90 s scaled by `OME_TEST_TIMEOUT_MULT`) and a `RepairHeld` event names it
+  — the hold the budget or a rollout group's gate keeps on a repair that
+  takes serving capacity offline; a silent hold fails. Absent, `expect=` is
+  repaired: the break wedges the victim Instance's single or leader pod, so
+  the Instance serves nothing and its repair is admitted without touching
+  the budget or the gate, whatever group it sits in
+  (`isvcs/gen-crashloop-idle/` states `expect=repaired` on every cell).
+  Either way no Component may ever
   exceed N alive: a repair rebuilds in place. `form=load` under
   `restartPolicy: None` is kept alive by the
   kubelet alone between kills; whether a repair opens there is the product's

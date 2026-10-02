@@ -2039,9 +2039,9 @@ LIFT_PHASES_BY_FAULT = {"configkey": {"after-settle", "after-failed"}, "node": s
 LIFT_SETTLE_S = int(20 * TIMEOUT_MULT)
 # What a lifted cause comes to. configkey: heals (the Instance is Ready and
 # serving again on its running revision, no bump, no reset mailbox) or
-# parked (the Failed row stays Failed with the cause gone; the documented
-# behaviour, which the header ties to the issue it is tracked under with
-# issue=). node: relocated (rebuilt Ready and serving on another node while
+# parked (the Failed row stays Failed with the cause gone: a self-heal parked
+# on a tracked issue, which the header names with issue=; a row that heals
+# fails it as stale). node: relocated (rebuilt Ready and serving on another node while
 # the node is down, which needs the force-delete policy), repaired (Ready and
 # serving again once the kubelet is back) or parked (nothing rebuilds it
 # while the node is down, as configured without a force delete).
@@ -2106,9 +2106,10 @@ ROW_POLL_S = 2.0
 # instead of at the settling hook after the bump; no bump follows, and the
 # verdict reads what the product does about the fault on its own.
 IDLE_FAULTS = BREAK_FAULTS | LIFT_FAULTS | {READINESS_FAULT}
-# What a break at idle comes to: a repair that rebuilds the Instance, or the
-# hold a rollout group keeps on repairs. Derived from the spec when the header
-# does not state it (held when the victim Component is a group member).
+# What a break at idle comes to: a repair that rebuilds the Instance, or a
+# hold the header states. The break wedges the victim Instance's single or
+# leader pod, so the Instance serves nothing and its repair is admitted
+# without the Component's budget or a group's gate: repaired is the default.
 IDLE_BREAK_EXPECTS = {"repaired", "held"}
 IDLE_EXPECTS_ALL = IDLE_BREAK_EXPECTS | LIFT_EXPECTS | NODE_EXPECTS
 
@@ -5568,14 +5569,14 @@ def _crashloop_new(case_id, yaml_file, desc, hdr):
 
 
 # ── Persistent faults on the idle service (during=idle) ──────────────────────
-def _idle_break_expect(f, info, hdr):
+def _idle_break_expect(hdr):
     """What a break at idle is expected to come to: the header's expect=,
-    else held when the victim Component is a rollout-group member (a group
-    holds repairs while no run is open), else repaired."""
+    else repaired. The break leaves the victim Instance serving nothing, and
+    the repair of an Instance that serves nothing is admitted without its
+    Component's budget or a group's gate, whatever group it sits in."""
     if hdr.get("expect") in IDLE_BREAK_EXPECTS:
         return hdr["expect"]
-    comp = (f or {}).get("victimcomp") or BREAK_DEFAULT_COMP
-    return "held" if comp in (info.get("members") or []) else "repaired"
+    return "repaired"
 
 
 def _idle_break_checks(f, expect, rebuilt, rebuilt_at, events, verdict, notes, checks):
@@ -5664,7 +5665,8 @@ def _lift_checks(f, expect, lift, out, hdr, verdict, notes, checks):
     gone, heals and repaired need the Instance Ready and serving again on
     its running revision with no bump and no reset mailbox, and a parked
     Failed row must stay Failed with nothing serving across the hold window
-    — the documented behaviour, tied to the issue the header names."""
+    — the park the header ties to a tracked issue; a row that heals fails
+    it as stale."""
     inst, comp, kind = f["crash_inst"], f["crash_comp"], f["kind"]
     bite, cause = f.get("bite", "the fault"), f.get("cause", "the cause")
     if out.get("bitten_at") is None:
@@ -5756,10 +5758,10 @@ def _lift_checks(f, expect, lift, out, hdr, verdict, notes, checks):
         verdict = "FAIL"
         notes.append(f"{kind}: the Failed row healed {out['park_broken']:.0f}s after the lift — the park is stale ({issue})")
         checks.append(f"  ✗ {kind}: {comp} Instance {inst} left the park {out['park_broken']:.0f}s after the lift "
-                      f"(it served or its row left Failed): the documented behaviour changed, flip expect=heals ({issue})")
+                      f"(it served or its row left Failed): the park is stale, flip expect=heals ({issue})")
     else:
         checks.append(f"  ✓ {kind}: {comp} Instance {inst} stayed Failed with nothing serving across the {IDLE_HOLD_S}s hold "
-                      f"after the lift — the documented behaviour ({issue})")
+                      f"after the lift — the park the header names ({issue})")
     return verdict
 
 
@@ -6017,10 +6019,11 @@ def _readiness_checks(f, form, out, verdict, notes, checks):
 def _idle_fault(case_id, yaml_file, desc, hdr):
     """during=idle: fire the case's persistent fault on the settled service
     and never bump. A break is judged on what the product does about it on
-    its own: a repair rebuilds the Instance within the budget, or a rollout
-    group holds the repair and records the hold. A lift fault is judged on
-    what the Instance does once its cause is lifted. A fault whose apparatus
-    this cluster lacks records SKIP with the reason."""
+    its own: a repair rebuilds the Instance within the budget (an Instance
+    that serves nothing is repaired without touching its Component's budget
+    or a group's gate), or the hold the header expects is recorded. A lift
+    fault is judged on what the Instance does once its cause is lifted. A
+    fault whose apparatus this cluster lacks records SKIP with the reason."""
     lifecycle = {}
     if str(hdr.get("fault", "")).partition(":")[0] == "node":
         reason = _node_fault_capability()
@@ -6044,7 +6047,7 @@ def _idle_fault(case_id, yaml_file, desc, hdr):
     elif f["kind"] in LIFT_FAULTS:
         expect = hdr.get("expect")
     else:
-        expect = _idle_break_expect(f, ctx["info"], hdr)
+        expect = _idle_break_expect(hdr)
     print(f"  Phase 2: {f['kind']} fault on the idle service (expect {expect}; no bump follows)")
     _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
     ctx["trigger_ts"] = time.time()

@@ -297,13 +297,15 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     Component's budget or a group's gate, whatever group it sits in.
   - heal breaks the engine runner, so its coordination axis is a rollingUpdate
     group over the engine alone or, where a decoder exists, over engine and
-    decoder: the hold a group keeps on repairs while no run is open. Nothing
-    rolls, so the update strategy stays canonical and is not an axis.
+    decoder, whose gate admits a repair of an Instance that serves nothing
+    without a consult. Nothing rolls, so the update strategy stays canonical
+    and is not an axis.
     lift=after-failed waits for the row to escalate, so those cases carry a
     short instanceReadyTimeout on the victim (HEAL_FAILED_READY_TIMEOUT).
   - imagepull has one form (an image that never pulls has no after-Ready
     form) and runs each strategy at its canonical budget only; the idle half
-    carries no group, since a grouped repair's hold is its own family.
+    carries no group, since a repair under a group is the steady-state
+    crash-loop family's axis.
   - node:notready reads the fate of a Ready Instance on a dead node under
     the deployed force-delete policy, which the lanes set as a dimension.
     Without lifecycle.forceDelete (the chart default) nothing frees the pod
@@ -414,8 +416,9 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     pd-mn shape (the gang axis is engine-mn's, the sibling axis pd's); the
     update strategy is dormant (no roll is in flight: a move surges whatever
     the strategy and a repair rebuilds in place), so one canonical budget;
-    no rollout group (a group holds repairs while no run is open, the idle
-    family's parked cell). A crash at start and a pull failure reach the
+    no rollout group (a repair of an Instance that serves nothing is admitted
+    without a group's gate; the group axis is the steady-state crash-loop
+    family's). A crash at start and a pull failure reach the
     crash-loop repair under either restart policy and run under None; the
     after-Ready form is the one the policy decides and runs under
     RecreateInstanceOnPodRestart, the policy that promises its repair. The
@@ -566,8 +569,6 @@ PAUSE_PUSHES = ["", "fix"]
 PAUSE_GROUPS = ["none", "rolling"]
 PAUSE_BUDGET = (1, 1)
 UNPROMISED_REPAIR = {("load", "None")}
-# The grouped cells whose repair the group's gate holds today are parked,
-# through the issue= header key, on the issue that tracks it.
 
 
 # The steady-state and sibling crash-loop families. A service carries no group
@@ -588,7 +589,8 @@ IDLE_PHASE = "idle"
 # service and put back at the lift. Shapes as the crashloop family; nothing
 # rolls, so the strategy stays canonical; the coordination axis is a
 # rollingUpdate group over the victim engine (with the decoder where one
-# exists), the hold a group keeps on repairs while no run is open.
+# exists), whose gate a repair of an Instance that serves nothing is admitted
+# without.
 HEAL_LIFTS = ["after-settle", "after-failed"]
 HEAL_COORDS = ["none", "rolling"]
 # The ConfigMap each heal case carries beside its InferenceService: named
@@ -606,11 +608,6 @@ HEAL_CONFIG_VAR = "TEST_CONFIG_VALUE"
 # the escalation well inside that and leaves the heal watch after the lift
 # its own full budget.
 HEAL_FAILED_READY_TIMEOUT = "90s"
-# The issue the self-heal of a Failed row is tracked under: a repair that
-# escalates keeps its operation, and a Failed row with an operation has no
-# exit once its pods are runtime-ready, so the key's return starts the pods
-# but the row stays Failed. Every lift=after-failed cell is parked on it.
-HEAL_ISSUE = 1978
 
 # The node family: the kubelet under the highest-index engine Instance of a
 # settled service is stopped, and the lift starts it again. The outcome is
@@ -883,8 +880,7 @@ HAND_PINNED_KILL = {
 #   ("fault-move", kind, form, at, victim, topo, w, rp)
 #   ("fault-edit", kind, form, victim, edit, topo, w, strat, rp) / ("bad-edit", kind, topo, w, strat)
 # A park is added here as (key): (issue, reason, invariant scope) and
-# rendered into the header. The heal family's lift=after-failed cells are
-# parked on HEAL_ISSUE with a per-axis reason, filled in next to its emitter.
+# rendered into the header.
 PARKED = {}
 
 # Runner verbs/hooks this corpus needs but the runners do not implement yet.
@@ -1544,44 +1540,37 @@ def _heal_body(name, topo, n, w, life, d_life, co):
                       docs=[lib.configmap_doc(cm, {HEAL_CONFIG_KEY: HEAL_CONFIG_VALUE})])
 
 
-def _heal_reason(rp, co, topo):
+def _heal_reason(rp, co, lift, topo):
     where = "gang leader" if is_mn(topo) else "pod"
     out = (f"the engine runner's ConfigMap key is removed on the highest Instance's {where} and the "
-           f"runner restarted, so its next start waits in CreateContainerConfigError; the key is put "
-           f"back once that wait has held for the settle window, before any attempt escalates, and "
-           f"the kubelet's own retry starts the container")
-    if rp == "None" and co == "none":
-        out += (" on that pod, or on the one the crash-loop repair rebuilt when it opened first (the "
-                "stuck-pod clock counts from the pod's creation, and the victim is older than the grace)")
-    elif rp == "None":
-        out += (" on that pod: the group holds the crash-loop repair while no run is open, which "
-                "leaves the pod to the kubelet")
-    else:
-        out += " on the pod the runner-restart repair rebuilt, and the open repair promotes it"
+           f"runner restarted, so its next start waits in CreateContainerConfigError")
+    if rp == "None":
+        out += ("; the crash-loop repair opens as soon as the wait is seen (the stuck-pod clock counts from "
+                "the pod's creation, and the victim is older than the grace) and rebuilds the pod, which "
+                "waits on the same key")
         if co != "none":
-            out += ("; the group holds only a fresh crash-loop repair, and the runner-restart repair "
-                    "is not put to it, so it opens as with no group")
+            out += ("; the rolling group lists the engine, but a repair of an Instance that serves nothing "
+                    "is admitted without its gate, so the group holds nothing")
+    else:
+        out += "; the runner-restart repair rebuilds the pod, which waits on the same key"
+        if co != "none":
+            out += ("; the group gates only a fresh crash-loop repair of a pod set that still serves, and "
+                    "the runner-restart repair is not put to it, so it opens as with no group")
+    if lift == "after-settle":
+        out += ("; the key is put back once that wait has held for the settle window, before any attempt "
+                "escalates, and the kubelet's own retry starts the container on the rebuilt pod")
+        if rp == "None":
+            out += ", or on the victim itself where the key returns before the repair opens"
+        out += "; an open repair promotes the Instance"
+    else:
+        out += ("; the wait outlives the stuck-pod grace, or the attempt its Instance ready timeout, and "
+                "the escalation parks the repair at Failed with its Restart kept; the key is put back once "
+                "the row reads Failed, the kubelet's own retry starts the container, and the parked repair "
+                "resumes when its rebuilt set comes up (a set that stayed wedged would be rebuilt again on "
+                "the update retry ladder, where one is configured) and promotes the Instance")
     out += ("; the Instance is Ready and serving again on its running revision with no new revision "
             "and no reset mailbox")
     return out
-
-
-def _heal_parked_reason(rp, co):
-    out = ("parked: the repair that rebuilt the Instance keeps its operation when the row escalates "
-           "to Failed, and a Failed row with an operation has no exit once its pods are runtime-ready, "
-           "so the key's return starts the pods while the row stays Failed with nothing serving until "
-           "the reset mailbox")
-    if rp == "None" and co != "none":
-        out += ("; under a group with no run open the row does not even escalate: the only repair a "
-                "None policy opens is the crash-loop one, which the group holds, so the lift never "
-                "arrives and the park covers both rules")
-    return out
-
-
-PARKED.update({
-    ("heal", topo, w, rp, "after-failed", co): (HEAL_ISSUE, _heal_parked_reason(rp, co), "")
-    for topo, _n, w in CRASH_SHAPES for rp in RESTARTS for co in HEAL_COORDS
-})
 
 
 def emit_heal(add):
@@ -1599,7 +1588,7 @@ def emit_heal(add):
                     timeout = HEAL_FAILED_READY_TIMEOUT if lift == "after-failed" else None
                     life = lib.lifecycle(restart=RP_FULL[rp], ready_timeout=timeout)
                     d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
-                    add("gen-heal", desc, kv, None, _heal_reason(rp, co, topo), meta,
+                    add("gen-heal", desc, kv, None, _heal_reason(rp, co, lift, topo), meta,
                         cell=("heal", topo, w, rp, lift, co),
                         body=functools.partial(_heal_body, topo=topo, n=n, w=w, life=life,
                                                d_life=d_life, co=co))
@@ -1687,7 +1676,8 @@ def _node_reason(outcome, rp, mig, co):
         return out
     still = f"{NODE_NO_TRIGGER[rp]}; {NODE_NO_RELOCATION[mig]}"
     if co != "none":
-        still += "; the rolling group would hold a repair while no run is open, and none opens"
+        still += ("; the rolling group plays no part: no repair opens, and one for an Instance that serves "
+                  "nothing would be admitted without its gate")
     if outcome == "parked":
         return (f"the kubelet under the highest-index engine Instance is stopped; the node reads NotReady and "
                 f"no pod of the Instance on it serves; nothing may rebuild the Instance while the node is down: "
@@ -3719,7 +3709,8 @@ def emit_fault_delete(add):
 # An Instance is moved by request and, at a moment of the move, a pod breaks
 # or the source node dies. One gang width (the move copies the whole gang),
 # the canonical surge budget (no roll is in flight; the strategy is dormant),
-# no group (a group holds repairs while no run is open).
+# no group (a repair of an Instance that serves nothing is admitted without a
+# group's gate; the group axis is the steady-state crash-loop family's).
 MOVE_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1)]
 MOVE_MOMENTS = ["accept", "surge", "drain"]
 # (kind, form, the restart policy the cell runs under): a crash at start and
@@ -4440,8 +4431,9 @@ def manifest(rows):
         " the reason: pd-mn (the move copies a whole gang whatever the decoder"
         " does; the gang axis is engine-mn's, the sibling axis pd's); the update"
         " strategy (dormant: no roll is in flight, a move surges whatever the"
-        " strategy and a repair rebuilds in place); a rollout group (it holds"
-        " repairs while no run is open, the idle family's parked cell); the"
+        " strategy and a repair rebuilds in place); a rollout group (a repair"
+        " of an Instance that serves nothing is admitted without its gate; the"
+        " group axis is the steady-state crash-loop family's); the"
         " restart policy on a crash at start and a pull failure (both reach the"
         " crash-loop repair under either policy, so they run under None) while"
         " the after-Ready form runs under RecreateInstanceOnPodRestart, the one"
@@ -4502,17 +4494,19 @@ def manifest(rows):
 
 
 def heal_notes():
-    """Why each half of gen-heal is asserted or parked, read off the controller
-    (the restart trigger, the stuck-pod evidence and the escalation pass)."""
+    """How each half of gen-heal heals, read off the controller (the restart
+    trigger, the stuck-pod evidence, the escalation pass and the exits a
+    parked repair keeps)."""
     return [
         "",
-        "## gen-heal: which cells heal without the missing rule",
+        "## gen-heal: how each half heals",
         "",
-        "The family asserts the intended behaviour, `expect=heals`, on every"
-        " cell; the cells whose heal needs the exit a Failed row lacks are"
-        f" parked on #{HEAL_ISSUE} and listed above.",
+        "The family asserts `expect=heals` on every cell, and every cell runs"
+        " live. A rolling group changes nothing: a repair of an Instance that"
+        " serves nothing is admitted without the group's gate, and the"
+        " runner-restart repair is not put to it.",
         "",
-        "- `lift=after-settle` (asserted): the key returns once the"
+        "- `lift=after-settle`: the key returns once the"
         " CreateContainerConfigError wait has held for the settle window,"
         " before any attempt escalates. Under `None` the crash-loop repair"
         " opens as soon as the wait is seen (the stuck-pod clock counts from"
@@ -4520,21 +4514,22 @@ def heal_notes():
         " the pod, and the rebuilt pod waits on the same key; under"
         " `RecreateInstanceOnPodRestart` the runner-restart repair does the"
         " same. Either way the kubelet starts the container once the key is"
-        " back and the open repair promotes the Instance; where a group holds"
-        " the crash-loop repair (`None` with `co=rolling`), the kubelet's retry"
-        " on the untouched pod is the whole heal. The settle window"
+        " back and the open repair promotes the Instance. The settle window"
         " (`LIFT_SETTLE_S`, 20 s before `OME_TEST_TIMEOUT_MULT`) has to stay"
         " inside the deployment's `stuckPodGracePeriod` (60 s in the chart): a"
         " multiplier of 3 or more turns these cells into the after-failed"
         " shape.",
-        f"- `lift=after-failed` (parked on #{HEAL_ISSUE}): the repair keeps its"
-        " operation when the row escalates, and a Failed row with an operation"
-        " has no exit once its pods are runtime-ready, so the key's return"
-        " starts the pods while the row stays Failed. The `None` x `co=rolling`"
-        " cells additionally never escalate: the only repair a `None` policy"
-        " opens is the crash-loop one, which the group holds while no run is"
-        " open, so those four flip only when the grouped-repair hold is lifted"
-        " as well.",
+        "- `lift=after-failed`: the same repair opens, and the rebuilt pod's"
+        " wait outlives the stuck-pod grace (or the attempt its"
+        " `instanceReadyTimeout`, `HEAL_FAILED_READY_TIMEOUT`), so the"
+        " escalation parks the repair at Failed with its Restart kept. A parked"
+        " repair keeps two exits of its own: the restart pass resumes its"
+        " promote when the rebuilt set comes up, and re-arms it on"
+        " `lifecycle.updateRetry` while the set stays wedged. The key returns"
+        " once the row reads Failed, the kubelet's retry brings the rebuilt set"
+        " up, and the resume promotes the Instance on its running revision with"
+        " no reset mailbox and no new revision, whether or not a ladder is"
+        " configured.",
     ]
 
 

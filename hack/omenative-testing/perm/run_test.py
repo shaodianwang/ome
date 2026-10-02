@@ -3427,13 +3427,15 @@ class IdleBreakFaultTest(unittest.TestCase):
         finally:
             run._fault_fire = orig
 
-    def test_expectation_derives_from_group_membership(self):
-        f = run._fault_new("p999", {"fault": "crashloop:old", "form": "start", "during": "idle", "victimcomp": "decoder"})
-        self.assertEqual("held", run._idle_break_expect(f, {"members": ["engine", "decoder"]}, {}))
-        self.assertEqual("repaired", run._idle_break_expect(f, {"members": ["engine"]}, {}))
-        self.assertEqual("repaired", run._idle_break_expect(f, {"members": ["engine", "decoder"]}, {"expect": "repaired"}))
-        engine = run._fault_new("p999", {"fault": "crashloop:old", "form": "start", "during": "idle"})
-        self.assertEqual("held", run._idle_break_expect(engine, {"members": ["engine"]}, {}))
+    def test_expectation_is_the_headers_else_repaired_whatever_the_group(self):
+        """A break at idle leaves the victim Instance serving nothing, and
+        such a repair is admitted without the budget or a group's gate, so
+        the derived expectation is repaired; only the header states a hold."""
+        self.assertEqual("repaired", run._idle_break_expect({}))
+        self.assertEqual("repaired", run._idle_break_expect({"victimcomp": "decoder", "co": "rolling"}))
+        self.assertEqual("repaired", run._idle_break_expect({"expect": "repaired"}))
+        self.assertEqual("held", run._idle_break_expect({"expect": "held"}))
+        self.assertEqual("repaired", run._idle_break_expect({"expect": "heals"}), "a lift expectation is not a break's")
 
     def test_load_killer_is_registered_for_cleanup_and_stops_on_a_rebuild(self):
         f = run._fault_new("p999", {"fault": "crashloop:old", "form": "load", "during": "idle"})
@@ -4325,8 +4327,9 @@ class StrategySwitchFamilyTest(unittest.TestCase):
 class GeneratedHealAndImagepullFamiliesTest(unittest.TestCase):
     """The configkey heal family (gen-heal) and the imagepull family
     (gen-imagepull): every axis is crossed, each heal case carries its
-    ConfigMap and the victim's env reference, exactly the after-failed half of
-    the heal family is parked, and nothing in the imagepull family is."""
+    ConfigMap and the victim's env reference, the after-failed half of the
+    heal family carries the short ready timeout its escalation needs, and
+    no cell of either family is parked."""
 
     TOPOS = ("engine", "pd", "engine-mn", "pd-mn")
 
@@ -4387,26 +4390,41 @@ class GeneratedHealAndImagepullFamiliesTest(unittest.TestCase):
             else:
                 self.assertNotIn("rollout:", docs[0], n)
 
-    def test_heal_parks_exactly_the_after_failed_half(self):
+    def test_heal_runs_every_cell_live_and_times_the_after_failed_half(self):
+        """No heal cell is parked: a repair parked at Failed resumes when its
+        rebuilt set comes up, and a grouped engine's repair is admitted
+        without the group's gate while the Instance serves nothing. The
+        after-failed half carries the short ready timeout its escalation
+        needs and states the parked repair's exit; the after-settle half
+        carries neither."""
         g = generate_cases
         fam = self._family("gen-heal")
-        parked = {n for n, _kv, m in fam if "parked" in m}
-        self.assertEqual({n for n, kv, _m in fam if kv["lift"] == "after-failed"}, parked)
-        self.assertEqual(16, len(parked))
+        self.assertEqual(16, len([n for n, kv, _m in fam if kv["lift"] == "after-failed"]))
         for n, kv, m in fam:
             text = self.outputs[f"gen-heal/{n}.yaml"]
             engine = self._component_block(text.split("\n---\n")[0], "engine")
+            reason = text.splitlines()[1]
+            self.assertNotIn("parked", m, n)
+            self.assertNotIn("notimpl", kv, n)
+            self.assertNotIn("issue", kv, n)
+            self.assertTrue(reason.startswith("# reason: the engine runner's ConfigMap key is removed"), n)
+            self.assertIn("no reset mailbox", reason, n)
             if kv["lift"] == "after-failed":
-                self.assertEqual((1, g.HEAL_ISSUE), (kv["notimpl"], kv["issue"]), n)
-                self.assertNotIn("inv_xfail", kv)
                 self.assertIn(f'instanceReadyTimeout: "{g.HEAL_FAILED_READY_TIMEOUT}"', engine, n)
-                self.assertTrue(text.splitlines()[1].startswith("# reason: parked:"), n)
+                self.assertIn("parks the repair at Failed", reason, n)
+                self.assertIn("resumes when its rebuilt set comes up", reason, n)
             else:
-                self.assertNotIn("notimpl", kv, n)
                 self.assertNotIn("instanceReadyTimeout", text, n)
-        heal_parked = {k for k in g.PARKED if k[0] == "heal"}
-        self.assertEqual(16, len(heal_parked))
-        self.assertEqual({"after-failed"}, {k[4] for k in heal_parked})
+                self.assertIn("before any attempt escalates", reason, n)
+                self.assertNotIn("Failed", reason, n)
+            if kv["co"] == "rolling":
+                self.assertIn("group", reason, n)
+                self.assertNotIn("holds the crash-loop repair", reason, n)
+            if m["rp"] == "None":
+                self.assertIn("crash-loop repair", reason, n)
+            else:
+                self.assertIn("runner-restart repair", reason, n)
+        self.assertEqual([], [k for k in g.PARKED if k[0] == "heal"])
 
     def test_imagepull_family_crosses_every_axis(self):
         g = generate_cases
