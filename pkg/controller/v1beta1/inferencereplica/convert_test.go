@@ -2171,6 +2171,83 @@ func TestPromoteCurrentRevision_FullConvergePromotes(t *testing.T) {
 		"full convergence must persist the promoted CurrentRevision")
 }
 
+// TestPromoteCurrentRevision_RollbackOntoCurrentWithdrawsIt: the spec rolled
+// back onto the revision CurrentRevision already names while Instances still
+// run the revision being rolled back from. Current equal to update is what
+// every reader takes for "no rollout in flight", so the callback withdraws
+// CurrentRevision until every Instance is Ready on the target again, and
+// promotes it once they are.
+func TestPromoteCurrentRevision_RollbackOntoCurrentWithdrawsIt(t *testing.T) {
+	rolledBackTo, superseded := promotePriorRev, promoteTargetRev
+	rolledBack := func(rows ...v1beta1.OMENativeInstanceStatus) *v1beta1.InferenceReplica {
+		ir := baselineIR("llama-engine", "prod", int32(len(rows)))
+		ir.Status.CurrentRevision = rolledBackTo
+		ir.Status.UpdateRevision = rolledBackTo
+		ir.Status.InstanceStatuses = rows
+		return ir
+	}
+
+	t.Run("every Instance still on the superseded revision", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		ir := rolledBack(
+			v1beta1.OMENativeInstanceStatus{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating, RunningRevision: superseded},
+			v1beta1.OMENativeInstanceStatus{Index: 1, Phase: v1beta1.OMENativeInstanceUpdating, RunningRevision: superseded},
+			v1beta1.OMENativeInstanceStatus{Index: 2, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: superseded},
+			v1beta1.OMENativeInstanceStatus{Index: 3, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: superseded},
+		)
+		r, _ := newReconciler(t, ir)
+		promote := buildPromoteCurrentRevision(r.statusWriter(), r.Client, ir)
+		g.Expect(promote(context.Background(), rolledBackTo)).To(gomega.Succeed())
+		g.Expect(ir.Status.CurrentRevision).To(gomega.BeEmpty(),
+			"a rollback onto the current revision must withdraw it while every Instance runs the superseded one")
+		g.Expect(getFreshIR(t, r, ir).Status.CurrentRevision).To(gomega.BeEmpty(),
+			"the withdrawal must be persisted, not only mirrored")
+	})
+
+	t.Run("the last Instance never left the target", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		ir := rolledBack(
+			v1beta1.OMENativeInstanceStatus{Index: 0, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: superseded},
+			v1beta1.OMENativeInstanceStatus{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: superseded},
+			v1beta1.OMENativeInstanceStatus{Index: 2, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: rolledBackTo},
+		)
+		r, _ := newReconciler(t, ir)
+		promote := buildPromoteCurrentRevision(r.statusWriter(), r.Client, ir)
+		g.Expect(promote(context.Background(), rolledBackTo)).To(gomega.Succeed())
+		g.Expect(getFreshIR(t, r, ir).Status.CurrentRevision).To(gomega.BeEmpty(),
+			"one Instance on the target does not make the fleet converged while others run the superseded revision")
+	})
+
+	t.Run("a restart on the target is not a superseded Instance", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		ir := rolledBack(
+			v1beta1.OMENativeInstanceStatus{Index: 0, Phase: v1beta1.OMENativeInstanceRestarting, RunningRevision: rolledBackTo},
+			v1beta1.OMENativeInstanceStatus{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: rolledBackTo},
+		)
+		r, _ := newReconciler(t, ir)
+		before := getFreshIR(t, r, ir).ResourceVersion
+		promote := buildPromoteCurrentRevision(r.statusWriter(), r.Client, ir)
+		g.Expect(promote(context.Background(), rolledBackTo)).To(gomega.Succeed())
+		g.Expect(getFreshIR(t, r, ir).Status.CurrentRevision).To(gomega.Equal(rolledBackTo),
+			"a repair on the current revision is not a rollout; CurrentRevision stays")
+		g.Expect(getFreshIR(t, r, ir).ResourceVersion).To(gomega.Equal(before), "no write on a steady fleet")
+	})
+
+	t.Run("promoted again once every Instance is back", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		ir := rolledBack(
+			v1beta1.OMENativeInstanceStatus{Index: 0, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: rolledBackTo},
+			v1beta1.OMENativeInstanceStatus{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: rolledBackTo},
+		)
+		ir.Status.CurrentRevision = ""
+		r, _ := newReconciler(t, ir)
+		promote := buildPromoteCurrentRevision(r.statusWriter(), r.Client, ir)
+		g.Expect(promote(context.Background(), rolledBackTo)).To(gomega.Succeed())
+		g.Expect(getFreshIR(t, r, ir).Status.CurrentRevision).To(gomega.Equal(rolledBackTo),
+			"the rollback reports done only once every Instance is Ready on its target")
+	})
+}
+
 // TestPromoteCurrentRevision_AlreadyEqualNoWrite pins the no-op-write
 // discipline: a converged IR already on the target performs ZERO writes
 // (ResourceVersion unchanged), so a steady-state reconcile stays silent.

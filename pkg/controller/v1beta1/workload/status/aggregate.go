@@ -285,6 +285,44 @@ func RolloutComplete(insts []types.InstanceStatus, targetRevName string) bool {
 	return ReachedDesiredShape(insts, targetRevName, 0, int32(len(insts)))
 }
 
+// CurrentRevisionFor is the component-level revision rollup: what
+// status.currentRevision should name given the Instance rows. It is the
+// update revision once every Instance is Ready on it. It is withdrawn
+// (empty) when it already names the update revision while some Instance
+// still runs another: a fleet rolled back onto its last promoted revision
+// is in flight until the last superseded Instance returns, and current
+// equal to update is what every reader takes for "no rollout in flight".
+// Any other row shape leaves current as recorded, so a repair on the
+// current revision never moves it.
+func CurrentRevisionFor(insts []types.InstanceStatus, current, update string) string {
+	if update == "" {
+		return current
+	}
+	if RolloutComplete(insts, update) {
+		return update
+	}
+	if current == update && anyInstanceRunsAnother(insts, update) {
+		return ""
+	}
+	return current
+}
+
+// anyInstanceRunsAnother reports whether some Instance records a running
+// revision other than rev. A row that has not run anything yet names no
+// revision and does not count.
+func anyInstanceRunsAnother(insts []types.InstanceStatus, rev string) bool {
+	want := query.RevisionFromName(rev)
+	for _, inst := range insts {
+		if inst.RunningRevision == "" {
+			continue
+		}
+		if !query.RevisionFromName(inst.RunningRevision).Same(want) {
+			return true
+		}
+	}
+	return false
+}
+
 // CountersForInstance computes the per-Instance counter set from the
 // live pod bucket. availableByPod is the map returned by
 // AvailablePodSet; window is the Component's minReadySeconds rule.

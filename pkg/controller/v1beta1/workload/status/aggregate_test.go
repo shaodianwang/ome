@@ -104,6 +104,48 @@ func TestRolloutComplete(t *testing.T) {
 	}
 }
 
+// TestCurrentRevisionFor pins the rollup both ways: promoted once every
+// Instance is Ready on the update revision; withdrawn when current already
+// names the update revision while an Instance still runs another; left as
+// recorded on every other shape, a repair on the current revision included.
+func TestCurrentRevisionFor(t *testing.T) {
+	const prior, next = "isvc-engine-aaaaaaaa", "isvc-engine-bbbbbbbb"
+	row := func(phase types.InstancePhase, rev string) types.InstanceStatus {
+		return types.InstanceStatus{Phase: phase, RunningRevision: rev}
+	}
+	cases := []struct {
+		name            string
+		rows            []types.InstanceStatus
+		current, update string
+		want            string
+	}{
+		{"every Instance Ready on the update revision promotes it",
+			[]types.InstanceStatus{row(types.InstancePhaseReady, next), row(types.InstancePhaseReady, next)}, prior, next, next},
+		{"a forward roll in flight keeps the prior revision",
+			[]types.InstanceStatus{row(types.InstancePhaseReady, next), row(types.InstancePhaseUpdating, prior)}, prior, next, prior},
+		{"a rollback onto the current revision withdraws it while every Instance runs the superseded one",
+			[]types.InstanceStatus{row(types.InstancePhaseUpdating, next), row(types.InstancePhaseReady, next)}, prior, prior, ""},
+		{"one Instance still on the superseded revision is enough to withdraw",
+			[]types.InstanceStatus{row(types.InstancePhaseReady, prior), row(types.InstancePhaseReady, next)}, prior, prior, ""},
+		{"a repair on the current revision keeps it",
+			[]types.InstanceStatus{row(types.InstancePhaseRestarting, prior), row(types.InstancePhaseReady, prior)}, prior, prior, prior},
+		{"an Instance that has not run anything yet decides nothing",
+			[]types.InstanceStatus{row(types.InstancePhaseCreating, ""), row(types.InstancePhaseReady, prior)}, prior, prior, prior},
+		{"withdrawn stays withdrawn until every Instance is Ready on the update revision",
+			[]types.InstanceStatus{row(types.InstancePhaseReady, prior), row(types.InstancePhaseUpdating, next)}, "", prior, ""},
+		{"no update revision leaves current alone",
+			[]types.InstanceStatus{row(types.InstancePhaseReady, prior)}, prior, "", prior},
+		{"no Instances leave current alone", nil, prior, prior, prior},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := status.CurrentRevisionFor(tc.rows, tc.current, tc.update); got != tc.want {
+				t.Errorf("CurrentRevisionFor(current=%q, update=%q) = %q, want %q", tc.current, tc.update, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestReachedDesiredShape(t *testing.T) {
 	ready := func(rev string) types.InstanceStatus {
 		return types.InstanceStatus{Phase: types.InstancePhaseReady, RunningRevision: rev}

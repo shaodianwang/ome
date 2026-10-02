@@ -572,12 +572,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		if skipDeferredEffects {
 			return
 		}
-		// CurrentRevision promotion: component-level revision rollup against
+		// CurrentRevision rollup: component-level revision pair against
 		// the SPEC target (paired with the aggregator's UpdateRevision stamp;
 		// coordination reads their skew as RolloutInFlight, and canary
 		// rollback resolves stable revisions assuming CurrentRevision names
 		// the last fully-rolled-forward revision). Runs before the aggregator
-		// so the Ready condition below observes the promoted value. Conflict
+		// so the Ready condition below observes the rolled-up value. Conflict
 		// tolerance matches the aggregator: requeue, don't error.
 		if specTarget != nil {
 			if perr := buildPromoteCurrentRevision(r.statusWriter(), r.liveReader(), ir)(ctx, specTarget.Name); perr != nil {
@@ -610,10 +610,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// next pass, so a failed write must not skip it (symmetric with
 		// the non-nil-primary-error path).
 		r.sweepRevisions(ctx, ir)
-		if priorCurrentRevision != ir.Status.CurrentRevision && ir.Status.CurrentRevision != "" {
+		switch {
+		case priorCurrentRevision != ir.Status.CurrentRevision && ir.Status.CurrentRevision != "":
 			log.Info("Rollout complete; CurrentRevision promoted",
 				"previousCurrentRevision", priorCurrentRevision,
 				"currentRevision", ir.Status.CurrentRevision)
+		case priorCurrentRevision != "" && ir.Status.CurrentRevision == "":
+			log.Info("Rollout reopened; CurrentRevision withdrawn while an Instance still runs another revision",
+				"previousCurrentRevision", priorCurrentRevision,
+				"updateRevision", ir.Status.UpdateRevision)
 		}
 		if !priorAnyFailed && hasFailedInstance(ir.Status.InstanceStatuses) {
 			log.Info("Instance escalation observed; at least one Instance reached Phase=Failed")

@@ -90,8 +90,9 @@ var transitionWriteAllowlist = []allowedTransitionWrite{
 	},
 	{
 		file: "inferencereplica/convert.go", fn: "buildPromoteCurrentRevision", field: "CurrentRevision", count: 2,
-		why: "the ONE promotion decision site: stamps CurrentRevision = spec target iff " +
-			"RolloutComplete (persisted write), then mirrors the committed value onto the " +
+		why: "the ONE rollup decision site: stamps CurrentRevision from status.CurrentRevisionFor " +
+			"(the spec target once every Instance is Ready on it, withdrawn while an Instance still " +
+			"runs another revision; persisted write), then mirrors the committed value onto the " +
 			"caller's in-memory IR (second assignment) so the deferred aggregator observes it",
 	},
 	{
