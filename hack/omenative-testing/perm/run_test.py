@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import contextlib
 import copy
+import datetime
 import io
 import json
 import os
@@ -10434,3 +10435,618 @@ class CrashOnceTest(unittest.TestCase):
             self.assertEqual("new" if case.header["fault"].endswith(":new") else "running", side, case.id)
             self.assertEqual("crash at start" if case.header["form"] == "start" else "crash after Ready", kind, case.id)
             self.assertEqual("steady state" if case.header.get("during") == "idle" else "push", case.operation, case.id)
+
+
+class CanaryGateFaultHeaderTest(unittest.TestCase):
+    """The gate faults (fault=metric, fault=source) and the self-healing or
+    canary-side breaks: what the header grammar admits and refuses."""
+
+    BASE = "# p999: x mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=auto topo=engine"
+    PD = "# p999: x mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=2 canary=auto topo=pd"
+    ROUTER = "# p999: x mode=canary Ne=8 Nd=0 Nr=2 ceil_e=9 ceil_d=0 ceil_r=2 canary=auto topo=engine"
+    ROLLOUT = "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_fault_grammar(self):
+        for v in ("metric:new", "metric:idle", "metric:canary-serving@1", "source:idle", "source:canary-serving@2"):
+            self.assertTrue(run._fault_ok(v), v)
+        for v in ("metric:old", "metric:settling", "source:new", "source:rotating", "metric:canary-nowhere"):
+            self.assertFalse(run._fault_ok(v), v)
+        self.assertTrue(run._metric_on_new(run._fault_new("p999", {"fault": "metric:new", "form": "persist"})))
+        self.assertFalse(run._metric_on_new(run._fault_new("p999", {"fault": "metric:idle", "form": "persist"})))
+        self.assertTrue(run._fault_before_push(run._fault_new("p999", {"fault": "metric:idle", "form": "persist"})))
+        self.assertTrue(run._fault_before_push(run._fault_new("p999", {"fault": "source:idle", "form": "unreachable"})))
+        self.assertFalse(run._fault_before_push(run._fault_new("p999", {"fault": "metric:new", "form": "persist"})))
+        self.assertIn(run.METRIC_FAULT, run.HOOK_FAULTS)
+        self.assertIn(run.SOURCE_FAULT, run.HOOK_FAULTS)
+
+    def test_metric_breach_header(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=metric:idle form=persist analysis=pass health=pass failurelimit=1 nophase=RollingBack"))
+        self.assertEqual([], self._errs(self.BASE + " fault=metric:canary-serving@1 form=recover victim=stable analysis=pass health=pass failurelimit=1"))
+        self.assertEqual([], self._errs(self.BASE + " fault=metric:canary-serving@2 form=persist victim=canary analysis=breach health=pass failurelimit=1"))
+        self.assertEqual([], self._errs(self.BASE + " fault=metric:new form=recover analysis=pass failurelimit=6 minfails=1"))
+        self.assertEqual([], self._errs(self.PD + " fault=metric:canary-serving@1 form=persist victim=stable victimcomp=decoder analysis=pass failurelimit=1"))
+        self.assertTrue(any("needs mode=canary and analysis=" in e for e in self._errs(self.BASE + " fault=metric:idle form=persist")))
+        self.assertTrue(any("mode=canary" in e for e in self._errs(self.ROLLOUT + " fault=metric:idle form=persist analysis=pass")))
+        self.assertTrue(any("form=persist|recover" in e for e in self._errs(self.BASE + " fault=metric:idle analysis=pass")))
+        self.assertTrue(any("form=persist|recover" in e for e in self._errs(self.BASE + " fault=metric:idle form=start analysis=pass")))
+        self.assertTrue(any("victim=canary|stable" in e for e in self._errs(self.BASE + " fault=metric:canary-serving@1 form=persist analysis=pass")))
+        self.assertTrue(any("victim= does not apply" in e for e in self._errs(self.BASE + " fault=metric:new form=persist victim=canary analysis=breach")))
+        self.assertTrue(any("victims= does not apply" in e for e in self._errs(self.BASE + " fault=metric:idle form=persist victims=2 analysis=pass")))
+        self.assertTrue(any("lift= does not apply" in e for e in self._errs(self.BASE + " fault=metric:idle form=recover lift=after-settle analysis=pass")))
+        self.assertTrue(any("needs Nr>0" in e for e in self._errs(self.BASE + " fault=metric:canary-serving@1 form=persist victim=stable victimcomp=router analysis=pass")))
+
+    def test_source_header(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=source:canary-serving@1 form=unreachable lift=after-settle analysis=pass health=pass oninconclusive=hold nophase=Failed"))
+        self.assertEqual([], self._errs(self.BASE + " fault=source:idle form=garbage lift=never analysis=pass oninconclusive=rollbackonstall terminal=RolledBack"))
+        self.assertTrue(any("form=garbage|unreachable" in e for e in self._errs(self.BASE + " fault=source:idle lift=never analysis=pass")))
+        self.assertTrue(any("lift=after-settle|never" in e for e in self._errs(self.BASE + " fault=source:idle form=garbage analysis=pass")))
+        self.assertTrue(any("lift=after-settle|never" in e for e in self._errs(self.BASE + " fault=source:idle form=garbage lift=after-failed analysis=pass")))
+        self.assertTrue(any("victim knobs do not apply" in e for e in self._errs(self.BASE + " fault=source:idle form=garbage lift=never victimcomp=engine analysis=pass")))
+        self.assertTrue(any("malformed header value oninconclusive=later" in e for e in self._errs(self.BASE + " analysis=pass oninconclusive=later")))
+
+    def test_self_healing_and_canary_side_breaks(self):
+        self.assertEqual([], self._errs(self.ROUTER + " fault=crashloop:canary-serving@1 form=load victimcomp=router victims=1 lift=after-settle nophase=Failed"))
+        self.assertEqual([], self._errs(self.ROUTER + " fault=imagepull:idle victimcomp=router victims=1 lift=after-settle"))
+        self.assertEqual([], self._errs(self.PD + " fault=crashloop:canary-serving@2 form=load victim=canary victimcomp=decoder lift=after-settle"))
+        self.assertEqual([], self._errs(self.ROUTER + " bump=engine,router img=example.com/canary-test/missing:none imgcomp=router terminal=Stable"))
+        self.assertTrue(any("heals the harness's own break under a canary" in e
+                            for e in self._errs(self.ROLLOUT + " fault=crashloop:old form=start lift=after-settle")))
+        self.assertTrue(any("needs Nr>0" in e for e in self._errs(self.BASE + " fault=crashloop:canary-serving@1 form=load victimcomp=router")))
+
+
+class CanaryGateFaultTest(unittest.TestCase):
+    """The gate faults as the runner fires, tracks and judges them, on fixed
+    snapshots: the metric override through the pod proxy, the source edit
+    and its restore, the bite, the hold, the lift and the verdict rows."""
+
+    @staticmethod
+    def _pods(old="old", new="new"):
+        pods = {f"e{i}": {"alive": True, "hash": old, "inst": str(i), "comp": "engine", "runner": "default",
+                          "uid": f"u{i}", "ready": True, "serving": True} for i in range(3)}
+        pods["c7"] = {"alive": True, "hash": new, "inst": "7", "comp": "engine", "runner": "default", "uid": "c7",
+                      "ready": True, "serving": True}
+        pods["c8"] = {"alive": True, "hash": new, "inst": "8", "comp": "engine", "runner": "default", "uid": "c8",
+                      "ready": False, "serving": False}
+        return pods
+
+    def test_control_path_and_side_pods(self):
+        self.assertEqual(f"/api/v1/namespaces/{run.NS}/pods/e0:8080/proxy/-/perm/error-rate", run._metric_control_path("e0"))
+        self.assertTrue(run._metric_control_path("e0", "0.9", 45).endswith("/-/perm/error-rate?value=0.9&for=45"))
+        self.assertTrue(run._metric_control_path("e0", "0.9").endswith("/-/perm/error-rate?value=0.9"))
+        pods = self._pods()
+        self.assertEqual(["e0", "e1", "e2"], run._metric_side_pods(pods, {"old"}, "engine", "stable"))
+        self.assertEqual(["c7", "c8"], run._metric_side_pods(pods, {"old"}, "engine", "canary"))
+        self.assertEqual([], run._metric_side_pods(pods, {"old"}, "decoder", "stable"))
+
+    def test_canary_side_break_picks_a_ready_new_pod(self):
+        pods = self._pods()
+        self.assertEqual(["c7"], run._crashloop_pick_pods(pods, {"old"}, "engine", 2, new_side=True))
+        self.assertEqual(["e2", "e1"], run._crashloop_pick_pods(pods, {"old"}, "engine", 2))
+        f = run._fault_new("p999", {"fault": "crashloop:canary-serving@1", "form": "load", "victim": "canary"})
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")), \
+                mock.patch.object(run, "_crashloop_killer", lambda rec, stop: None):
+            run._fault_crashloop_fire(f, pods, {"old"})
+        self.assertIsNone(f["infra_fail"])
+        self.assertEqual(("c7", "new"), (f["crash_pod"], f["crash_hash"]))
+        run._crashloop_stop(f)
+        pods["c7"]["ready"] = False
+        g = run._fault_new("p999", {"fault": "imagepull:canary-serving@1", "victim": "canary"})
+        run._fault_crashloop_fire(g, pods, {"old"})
+        self.assertIn("no live Ready canary-revision engine pod", g["infra_fail"])
+
+    def test_metric_fire_sets_the_override_on_every_pod_of_the_side(self):
+        f = run._fault_new("p999", {"fault": "metric:canary-serving@1", "form": "recover", "victim": "stable"})
+        seen = []
+
+        def fake(*a, **k):
+            seen.append(a)
+            return subprocess.CompletedProcess(a, 0, "rate=0.9\nconfigured=0\noverride=true\nuntil=x\n", "")
+        with mock.patch.object(run, "kubectl", fake):
+            run._fault_metric_fire(f, self._pods(), {"old"})
+        self.assertIsNone(f["infra_fail"])
+        self.assertEqual(["e0", "e1", "e2"], f["metric_pods"])
+        self.assertEqual(("stable", "engine", ["old"], run.METRIC_BREACH_S), (f["metric_side"], f["metric_comp"], f["metric_hashes"], f["metric_for_s"]))
+        self.assertTrue(all(a[:2] == ("get", "--raw") and f"for={run.METRIC_BREACH_S}" in a[2] for a in seen))
+        g = run._fault_new("p999", {"fault": "metric:idle", "form": "persist"})
+        with mock.patch.object(run, "kubectl", fake):
+            run._fault_metric_fire(g, self._pods(), {"old"})
+        self.assertEqual(("stable", 0), (g["metric_side"], g["metric_for_s"]))
+        self.assertTrue(all("for=" not in a[2] for a in seen[3:]))
+        h = run._fault_new("p999", {"fault": "metric:canary-serving@1", "form": "persist", "victim": "canary"})
+        with mock.patch.object(run, "kubectl", fake):
+            run._fault_metric_fire(h, self._pods(), {"old"})
+        self.assertEqual(["c7", "c8"], h["metric_pods"])
+        none = run._fault_new("p999", {"fault": "metric:canary-serving@1", "form": "persist", "victim": "stable",
+                                       "victimcomp": "decoder"})
+        run._fault_metric_fire(none, self._pods(), {"old"})
+        self.assertIn("no live stable-side decoder pod", none["infra_fail"])
+
+    def test_metric_fire_gives_up_when_no_pod_answers(self):
+        f = run._fault_new("p999", {"fault": "metric:idle", "form": "persist"})
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "refused")), \
+                mock.patch.object(run, "METRIC_APPLY_S", 0), mock.patch.object(run.time, "sleep", lambda s: None):
+            run._fault_metric_fire(f, self._pods(), {"old"})
+        self.assertIn("took the override", f["infra_fail"])
+
+    @staticmethod
+    def _configmap(address):
+        data = {"canaryAnalysis": json.dumps({"bundledPrometheusAddress": address, "queryTimeout": "5s"})}
+        return json.dumps({"data": data})
+
+    def test_prometheus_service_and_source_addresses(self):
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, self._configmap("http://ome-prometheus.ome.svc:9090"), "")):
+            self.assertEqual((("ome", "ome-prometheus", 9090), None), run._prometheus_service())
+            self.assertEqual(("http://ome-prometheus.ome.svc:9090/-/healthy", None), run._source_address("garbage", "p999"))
+        self.assertEqual((f"http://p999-no-such-source.{run.NS}.svc:9090", None), run._source_address("unreachable", "p999"))
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, self._configmap(""), "")):
+            svc, err = run._prometheus_service()
+            self.assertIsNone(svc)
+            self.assertIn("no in-cluster bundled Prometheus", err)
+            addr, err = run._source_address("garbage", "p999")
+            self.assertIsNone(addr)
+            self.assertIn("names no bundled Prometheus", err)
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, self._configmap("http://prom.example.com:9090"), "")):
+            self.assertIsNone(run._prometheus_service()[0], "an address outside the cluster is not proxied")
+
+    def test_prometheus_max_reads_the_largest_series(self):
+        body = json.dumps({"data": {"result": [{"value": [1, "0.1"]}, {"value": [1, "0.9"]}]}})
+
+        def fake(*a, **k):
+            if a[:2] == ("get", "--raw"):
+                self.assertIn("/api/v1/namespaces/ome/services/ome-prometheus:9090/proxy/api/v1/query?query=", a[2])
+                self.assertIn("revision_hash%3D%22old%22", a[2])
+                return subprocess.CompletedProcess(a, 0, body, "")
+            return subprocess.CompletedProcess(a, 0, self._configmap("http://ome-prometheus.ome.svc:9090"), "")
+        with mock.patch.object(run, "kubectl", fake):
+            self.assertEqual(0.9, run._prometheus_max(run._metric_query("p999", "engine", "old")))
+        empty = json.dumps({"data": {"result": []}})
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(
+                a, 0, empty if a[:2] == ("get", "--raw") else self._configmap("http://ome-prometheus.ome.svc:9090"), "")):
+            self.assertIsNone(run._prometheus_max("x"))
+
+    def _spec(self, prometheus=None, present=False):
+        g = {"components": ["engine"], "canary": {"steps": [{"capacity": "10%", "traffic": 10}]}}
+        if present:
+            g["canary"]["prometheus"] = prometheus
+        return {"spec": {"rollout": {"groups": [g, {"components": ["router"], "blueGreen": {}}]}}}
+
+    def test_source_fire_points_the_group_at_the_address_and_restore_puts_it_back(self):
+        f = run._fault_new("p999", {"fault": "source:canary-serving@1", "form": "unreachable", "lift": "after-settle"})
+        f["source_members"], f["source_address"] = ["engine"], "http://nowhere.svc:9090"
+        patches = []
+
+        def fake(*a, **k):
+            if a[2:4] == ("get", "isvc"):
+                return subprocess.CompletedProcess(a, 0, json.dumps(self._spec()), "")
+            patches.append(json.loads(a[-1]))
+            return subprocess.CompletedProcess(a, 0, "", "")
+        with mock.patch.object(run, "kubectl", fake):
+            run._fault_source_fire(f)
+            self.assertIsNone(f["infra_fail"])
+            self.assertEqual((None, False, False), (f["source_original"], f["source_had_key"], f["source_restored"]))
+            groups = patches[-1]["spec"]["rollout"]["groups"]
+            self.assertEqual({"serverAddress": "http://nowhere.svc:9090"}, groups[0]["canary"]["prometheus"])
+            self.assertEqual({"components": ["router"], "blueGreen": {}}, groups[1], "the other group is written back as it was")
+            self.assertIn(("source", f), run._FAULT_CLEANUPS)
+            run._FAULT_CLEANUPS.remove(("source", f))
+            self.assertTrue(run._source_restore(f))
+            self.assertNotIn("prometheus", patches[-1]["spec"]["rollout"]["groups"][0]["canary"],
+                             "a source the case never declared is removed again")
+            self.assertTrue(f["source_restored"])
+            self.assertTrue(run._source_restore(f), "idempotent")
+        self.assertEqual(2, len(patches))
+        declared = run._fault_new("p999", {"fault": "source:idle", "form": "garbage", "lift": "never"})
+        declared["source_members"], declared["source_address"] = ["engine"], "http://x/-/healthy"
+        original = {"serverAddress": "http://ome-prometheus.ome.svc:9090"}
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(
+                a, 0, json.dumps(self._spec(original, True)) if a[2:4] == ("get", "isvc") else "", "")):
+            run._fault_source_fire(declared)
+        self.assertEqual((original, True), (declared["source_original"], declared["source_had_key"]))
+        run._FAULT_CLEANUPS.remove(("source", declared))
+        nogroup = run._fault_new("p999", {"fault": "source:idle", "form": "garbage", "lift": "never"})
+        nogroup["source_members"], nogroup["source_address"] = ["decoder"], "http://x"
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(self._spec()), "")):
+            run._fault_source_fire(nogroup)
+        self.assertIn("no canary group matches", nogroup["infra_fail"])
+
+    def test_inconclusive_result_is_read_from_the_metric_results(self):
+        can = {"metricResults": [{"name": "error_rate", "value": "0.01", "passed": True, "time": "2026-01-01T00:00:30Z"}]}
+        self.assertIsNone(run._inconclusive_result_at(can, 0))
+        stamp = datetime.datetime(2026, 1, 1, 0, 1, 0, tzinfo=datetime.timezone.utc).timestamp()
+        can = {"metricResults": [{"name": "error_rate", "passed": False, "message": "no such host", "time": "2026-01-01T00:01:00Z"}]}
+        self.assertEqual("no such host", run._inconclusive_result_at(can, stamp)["message"])
+        self.assertIsNone(run._inconclusive_result_at(can, stamp + 60), "a result older than the fault is the sample before it")
+        self.assertIsNone(run._inconclusive_result_at({"metricResults": [{"name": "x", "passed": False, "value": "0.9", "message": "breach"}]}, 0),
+                          "a breach has a value: it is conclusive")
+
+    def test_gate_threshold_reads_the_ladder(self):
+        steps = [{"capacity": "10%", "traffic": 10, "analysis": {"metrics": [{"name": "e", "threshold": "0.2"}]}}]
+        self.assertEqual(0.2, run._gate_threshold(steps))
+        self.assertEqual(0.05, run._gate_threshold([{"capacity": "100%", "traffic": 100}]))
+
+    def _ctx(self, pods=None):
+        return {"case_id": "p999", "trigger_ts": 100.0, "old_hashes": {"old"}, "pod_state": pods or self._pods(),
+                "N": {"engine": 8, "decoder": 0, "router": 2}, "canary_hook": "canary-serving"}
+
+    def test_metric_track_stable_side_is_seen_by_prometheus_and_never_counted(self):
+        f = run._fault_new("p999", {"fault": "metric:canary-serving@1", "form": "recover", "victim": "stable"})
+        f.update(fired=True, fired_ts=110.0, metric_side="stable", metric_comp="engine", metric_hashes=["old"],
+                 metric_pods=["e0", "e1", "e2"], metric_for_s=45)
+        track = run._gate_track_new()
+        ctx = self._ctx()
+        with mock.patch.object(run, "_prometheus_max", lambda q: 0.9):
+            run._gate_track(ctx, f, track, {}, 1, 110.0, 0, 0.05)
+        self.assertEqual((110.0, 0, 1, 110.0, 0.9), (track["fired_at"], track["fails_at_fire"], track["step_at_fire"], track["seen_at"], track["seen_value"]))
+        with mock.patch.object(run, "_metric_override_active", lambda pod: False):
+            run._gate_track(ctx, f, track, {}, 1, 170.0, 0, 0.05)
+        self.assertEqual(170.0, track["recovered_at"])
+        notes, checks = [], []
+        self.assertEqual("PASS", run._gate_fault_checks(ctx, f, track, "hold", 0, None, {"Paused", "Stable"}, "PASS", notes, checks))
+        self.assertTrue(any("never counted the stable side's breach" in c for c in checks))
+        self.assertTrue(any("breach lifted after its 45s window" in c for c in checks))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._gate_fault_checks(ctx, f, track, "hold", 1, None, set(), "PASS", notes, checks))
+        self.assertTrue(any("blamed the canary" in n for n in notes))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._gate_fault_checks(ctx, f, track, "hold", 0, "new", set(), "PASS", notes, checks))
+        self.assertTrue(any("healthy canary was rolled back" in n for n in notes))
+        unseen = run._gate_track_new()
+        unseen["fired_at"], unseen["fails_at_fire"] = 110.0, 0
+        self.assertEqual("PASS", run._gate_fault_checks(ctx, f, unseen, "hold", 0, None, set(), "PASS", [], []))
+        self.assertIn("Prometheus never showed", f["infra_fail"])
+
+    def test_metric_track_canary_side_is_counted_by_the_gate(self):
+        f = run._fault_new("p999", {"fault": "metric:canary-serving@1", "form": "persist", "victim": "canary"})
+        f.update(fired=True, fired_ts=110.0, metric_side="canary", metric_comp="engine", metric_hashes=["new"],
+                 metric_pods=["c7", "c8"], metric_for_s=0)
+        track = run._gate_track_new()
+        ctx = self._ctx()
+        run._gate_track(ctx, f, track, {}, 1, 110.0, 0, 0.05)
+        self.assertIsNone(track["seen_at"])
+        run._gate_track(ctx, f, track, {}, 1, 130.0, 1, 0.05)
+        self.assertEqual(130.0, track["seen_at"])
+        checks = []
+        self.assertEqual("PASS", run._gate_fault_checks(ctx, f, track, "hold", 1, "new", {"RolledBack"}, "PASS", [], checks))
+        self.assertTrue(any("no failing sample was counted before" in c for c in checks))
+        early = dict(track, fails_at_fire=1)
+        notes = []
+        self.assertEqual("FAIL", run._gate_fault_checks(ctx, f, early, "hold", 2, "new", set(), "PASS", notes, []))
+        self.assertTrue(any("before the breach landed" in n for n in notes))
+        never = run._gate_track_new()
+        never["fired_at"], never["fails_at_fire"] = 110.0, 0
+        notes = []
+        self.assertEqual("FAIL", run._gate_fault_checks(ctx, f, never, "hold", 0, None, set(), "PASS", notes, []))
+        self.assertTrue(any("never counted a failing sample" in n for n in notes))
+        born = run._fault_new("p999", {"fault": "metric:new", "form": "recover"})
+        born.update(fired=True, fired_ts=100.0)
+        self.assertEqual("canary", run._metric_side(born))
+
+    def _source_fault(self, lift):
+        f = run._fault_new("p999", {"fault": "source:canary-serving@1", "form": "unreachable", "lift": lift})
+        f.update(fired=True, fired_ts=110.0, source_members=["engine"], source_address="http://nowhere",
+                 source_original=None, source_had_key=False, source_restored=False)
+        return f
+
+    def test_source_track_holds_then_lifts_and_resumes(self):
+        f = self._source_fault("after-settle")
+        track = run._gate_track_new()
+        ctx = self._ctx()
+        run._gate_track(ctx, f, track, {}, 1, 110.0, 0, 0.05)
+        self.assertIsNone(track["bite_at"])
+        can = {"metricResults": [{"name": "error_rate", "passed": False, "message": "dial tcp: no such host",
+                                  "time": datetime.datetime.fromtimestamp(130.0, datetime.timezone.utc).isoformat()}]}
+        run._gate_track(ctx, f, track, can, 1, 130.0, 0, 0.05)
+        self.assertEqual((130.0, 1), (track["bite_at"], track["bite_step"]))
+        restored = []
+        with mock.patch.object(run, "_source_restore", lambda fault: restored.append(fault) or True):
+            run._gate_track(ctx, f, track, can, 1, 140.0, 0, 0.05)
+            self.assertEqual([], restored, "the hold has not settled yet")
+            run._gate_track(ctx, f, track, can, 1, 130.0 + run.LIFT_SETTLE_S, 0, 0.05)
+        self.assertEqual([f], restored)
+        self.assertEqual({1}, track["steps_while_broken"])
+        checks = []
+        self.assertEqual("PASS", run._gate_fault_checks(ctx, f, track, "hold", 0, None, {"Paused", "Stable"}, "PASS", [], checks))
+        self.assertTrue(any("the ladder held at step 1" in c for c in checks))
+        self.assertTrue(any("source was restored" in c for c in checks))
+        moved = dict(track, steps_while_broken={1, 2})
+        notes = []
+        self.assertEqual("FAIL", run._gate_fault_checks(ctx, f, moved, "hold", 0, None, set(), "PASS", notes, []))
+        self.assertTrue(any("ladder moved while the source was unusable" in n for n in notes))
+        notes = []
+        self.assertEqual("FAIL", run._gate_fault_checks(ctx, f, track, "hold", 1, None, set(), "PASS", notes, []))
+        self.assertTrue(any("counted as a breach" in n for n in notes))
+        silent = run._gate_track_new()
+        silent["fired_at"], silent["fails_at_fire"] = 110.0, 0
+        notes = []
+        self.assertEqual("FAIL", run._gate_fault_checks(ctx, f, silent, "hold", 0, None, set(), "PASS", notes, []))
+        self.assertTrue(any("never reported" in n for n in notes))
+
+    def test_source_lift_happens_anyway_once_the_gate_had_its_time(self):
+        f = self._source_fault("after-settle")
+        track = run._gate_track_new()
+        ctx = self._ctx()
+        with mock.patch.object(run, "_source_restore", lambda fault: True):
+            run._gate_track(ctx, f, track, {}, 1, 110.0, 0, 0.05)
+            run._gate_track(ctx, f, track, {}, 1, 110.0 + run.SOURCE_BITE_S, 0, 0.05)
+        self.assertIsNotNone(track["lifted_at"])
+        self.assertIn("restored anyway", f["notes"][-1])
+
+    def test_source_persistent_parks_or_rolls_back_as_the_policy_says(self):
+        f = self._source_fault("never")
+        track = run._gate_track_new()
+        track.update(fired_at=110.0, fails_at_fire=0, bite_at=130.0, bite_step=1, bite_message="no such host",
+                     steps_while_broken={1})
+        ctx = self._ctx()
+        ctx["canary_hook"] = "canary-failed"
+        run._gate_track(ctx, f, track, {"failed": {"reason": "AnalysisStalled"}}, 1, 300.0, 0, 0.05)
+        self.assertEqual({"at": 200.0, "step": 1, "reason": "AnalysisStalled"}, track["park"])
+        checks = []
+        self.assertEqual("PASS", run._gate_fault_checks(ctx, f, track, "hold", 0, None, {"Paused", "Failed"}, "PASS", [], checks))
+        self.assertTrue(any("parked Failed with reason AnalysisStalled" in c for c in checks))
+        wrong = dict(track, park={"at": 200.0, "step": 2, "reason": "AnalysisStalled"})
+        notes = []
+        self.assertEqual("FAIL", run._gate_fault_checks(ctx, f, wrong, "hold", 0, None, set(), "PASS", notes, []))
+        self.assertTrue(any("the park is at step 2" in n for n in notes))
+        capacity = dict(track, park={"at": 200.0, "step": 1, "reason": "CapacityTimeout"})
+        notes = []
+        self.assertEqual("FAIL", run._gate_fault_checks(ctx, f, capacity, "hold", 0, None, set(), "PASS", notes, []))
+        self.assertTrue(any("no park with reason AnalysisStalled" in n for n in notes))
+        checks = []
+        self.assertEqual("PASS", run._gate_fault_checks(ctx, f, dict(track, park=None), "rollbackonstall", 0, "new",
+                                                        {"Paused", "RollingBack", "RolledBack"}, "PASS", [], checks))
+        self.assertTrue(any("rolled the canary back instead of parking" in c for c in checks))
+        notes = []
+        self.assertEqual("FAIL", run._gate_fault_checks(ctx, f, track, "rollbackonstall", 0, None, {"Failed"}, "PASS", notes, []))
+        self.assertTrue(any("did not roll the canary back" in n for n in notes))
+
+    def test_break_heal_stops_the_killer_or_puts_the_image_back(self):
+        load = run._fault_new("p999", {"fault": "crashloop:canary-serving@1", "form": "load", "victimcomp": "router", "lift": "after-settle"})
+        load.update(fired=True, crash_pod="r1", crash_uid="u1", crash_comp="router", crash_inst="1", crash_hash="old", kills=1)
+        with mock.patch.object(run, "_crashloop_stop", lambda rec: None):
+            run._break_heal(load)
+        self.assertIsNotNone(load["healed_at"])
+        self.assertIn("killer stopped after 1 kill(s)", load["notes"][-1])
+        pull = run._fault_new("p999", {"fault": "imagepull:canary-serving@1", "victimcomp": "router", "lift": "after-settle"})
+        pull.update(fired=True, crash_pod="r1", crash_uid="u1", crash_comp="router", crash_inst="1", crash_hash="old",
+                    crash_image="nginx:1", kills=0)
+        patches = []
+        with mock.patch.object(run, "_crashloop_pod_state", lambda name: (True, True, "old", False, "u1")), \
+                mock.patch.object(run, "kubectl", lambda *a, **k: patches.append(a) or subprocess.CompletedProcess(a, 0, "", "")):
+            run._break_heal(pull)
+        self.assertEqual(1, len(patches))
+        self.assertIn('"image": "nginx:1"', patches[0][-1])
+        self.assertIn("pointed back at nginx:1", pull["notes"][-1])
+        gone = dict(pull, notes=[], healed_at=None)
+        with mock.patch.object(run, "_crashloop_pod_state", lambda name: (True, True, "old", False, "u2")), \
+                mock.patch.object(run, "kubectl", lambda *a, **k: patches.append(a) or subprocess.CompletedProcess(a, 0, "", "")):
+            run._break_heal(gone)
+        self.assertEqual(1, len(patches), "a pod a repair already replaced is left alone")
+        self.assertIn("already replaced", gone["notes"][-1])
+
+    def test_break_heal_tick_waits_for_the_bite_and_the_settle(self):
+        f = run._fault_new("p999", {"fault": "crashloop:canary-serving@1", "form": "load", "victimcomp": "router", "lift": "after-settle"})
+        f.update(fired=True, crash_pod="r1", crash_uid="u1", kills=0)
+        pods = {"r1": {"alive": True, "ready": True}}
+        ctx = {"fault": f, "pod_state": pods}
+        healed = []
+        with mock.patch.object(run, "_break_heal", lambda fault: healed.append(fault)):
+            run._break_heal_tick(ctx, 100.0)
+            self.assertIsNone(f.get("bite_ts"))
+            f["kills"] = 1
+            run._break_heal_tick(ctx, 101.0)
+            self.assertEqual(101.0, f["bite_ts"])
+            run._break_heal_tick(ctx, 101.0 + run.LIFT_SETTLE_S - 1)
+            self.assertEqual([], healed)
+            run._break_heal_tick(ctx, 101.0 + run.LIFT_SETTLE_S)
+        self.assertEqual([f], healed)
+        plain = run._fault_new("p999", {"fault": "crashloop:canary-serving@1", "form": "load"})
+        plain.update(fired=True, crash_pod="r1", kills=1)
+        with mock.patch.object(run, "_break_heal", lambda fault: healed.append(fault)):
+            run._break_heal_tick({"fault": plain, "pod_state": pods}, 500.0)
+        self.assertEqual([f], healed, "a break without the lift is never healed")
+
+    def test_healed_sibling_serves_again_in_place_or_rebuilt(self):
+        f = run._fault_new("p999", {"fault": "crashloop:canary-serving@1", "form": "load", "victimcomp": "router", "lift": "after-settle"})
+        f.update(fired=True, crash_pod="r1", crash_uid="u1", crash_comp="router", crash_inst="1", crash_hash="old", kills=1)
+        same = {"r1": {"alive": True, "comp": "router", "inst": "1", "hash": "old", "uid": "u1", "ready": True, "serving": True}}
+        checks, notes = [], []
+        self.assertEqual("PASS", run._break_victim_checks(f, f, same, {"old"}, [], {"engine"}, "PASS", notes, checks))
+        self.assertTrue(any("healed in place" in c for c in checks))
+        rebuilt = {"r1": {"alive": True, "comp": "router", "inst": "1", "hash": "old", "uid": "u9", "ready": True, "serving": True}}
+        checks = []
+        events = [("RestartTriggered", "OMENative component=router instance=1 restart triggered")]
+        self.assertEqual("PASS", run._break_victim_checks(f, f, rebuilt, {"old"}, events, {"engine"}, "PASS", [], checks))
+        self.assertTrue(any("rebuilt by a repair" in c for c in checks))
+        down = {"r1": {"alive": True, "comp": "router", "inst": "1", "hash": "old", "uid": "u1", "ready": False, "serving": False}}
+        notes = []
+        self.assertEqual("FAIL", run._break_victim_checks(f, f, down, {"old"}, [], {"engine"}, "PASS", notes, []))
+        self.assertTrue(any("not serving on its running revision after the heal" in n for n in notes))
+
+    def test_a_repair_of_a_canary_side_victim_is_reported_not_failed(self):
+        f = run._fault_new("p999", {"fault": "crashloop:canary-serving@1", "form": "load", "victim": "canary",
+                                    "victimcomp": "decoder", "lift": "after-settle"})
+        f.update(fired=True, crash_pod="d7", crash_uid="u7", crash_comp="decoder", crash_inst="7", crash_hash="new", kills=1)
+        pods = {"d7": {"alive": True, "comp": "decoder", "inst": "7", "hash": "new", "uid": "u8", "ready": True, "serving": True}}
+        events = [("RestartTriggered", "OMENative component=decoder instance=7 restart triggered")]
+        checks = []
+        self.assertEqual("PASS", run._break_victim_checks(f, f, pods, {"old"}, events, {"engine", "decoder"}, "PASS", [], checks))
+        self.assertTrue(any("a repair rebuilt canary-side" in c for c in checks))
+        stable_victim = dict(f, victim="stable", crash_hash="old")
+        notes = []
+        self.assertEqual("FAIL", run._break_victim_checks(stable_victim, stable_victim, pods, {"old"}, events, {"engine", "decoder"}, "PASS", notes, []))
+        self.assertTrue(any("was repaired after the bump" in n for n in notes))
+
+    def test_a_gate_fault_that_never_fired_fails_the_case(self):
+        notes = []
+        f = run._fault_new("p999", {"fault": "source:canary-serving@2", "form": "garbage", "lift": "never"})
+        self.assertEqual("FAIL", run._hook_fault_fired_checks(f, {"Pending", "Stable"}, "PASS", notes, []))
+        self.assertTrue(any("never fired" in n for n in notes))
+        heal = run._fault_new("p999", {"fault": "crashloop:canary-serving@2", "form": "load", "lift": "after-settle"})
+        self.assertEqual("FAIL", run._hook_fault_fired_checks(heal, set(), "PASS", [], []))
+        old = run._fault_new("p999", {"fault": "crashloop:canary-serving@2", "form": "load"})
+        self.assertEqual("PASS", run._hook_fault_fired_checks(old, set(), "PASS", [], []),
+                         "the older hook faults keep reporting a missed hook")
+        fired = dict(f, fired=True)
+        self.assertEqual("PASS", run._hook_fault_fired_checks(fired, set(), "PASS", [], []))
+        self.assertEqual("PASS", run._hook_fault_fired_checks(run._fault_new("p999", {"fault": "metric:new", "form": "persist"}), set(), "PASS", [], []))
+
+    def test_parked_sibling_is_judged_on_its_own(self):
+        pods = {"r0": {"alive": True, "comp": "router", "inst": "0", "hash": "old", "ready": True, "serving": True},
+                "r1": {"alive": True, "comp": "router", "inst": "1", "hash": "old", "ready": True, "serving": True},
+                "r2": {"alive": True, "comp": "router", "inst": "2", "hash": "new", "ready": False, "serving": False}}
+        ctx = self._ctx(pods)
+        track = {}
+        snapshot = {"router": {"hold": None, "rows": [{"index": 2, "phase": "Failed"}]}}
+        with mock.patch.object(run, "_ir_snapshot", lambda cid: snapshot), \
+                mock.patch.object(run, "_isvc_events_since", lambda cid, since: []):
+            run._sibling_park_track(ctx, {"router"}, track, 200.0)
+        self.assertIn("router", track["why"])
+        self.assertIn("row Failed", track["why"]["router"][0])
+        self.assertNotIn("served", track)
+        checks = []
+        self.assertEqual("PASS", run._sibling_park_checks(ctx, {"router"}, track, "PASS", [], checks))
+        self.assertTrue(any("whole on its running revision at the end (2/2; 1 attempt(s)" in c for c in checks))
+        pods["r2"].update(ready=True, serving=True)
+        with mock.patch.object(run, "_ir_snapshot", lambda cid: snapshot), \
+                mock.patch.object(run, "_isvc_events_since", lambda cid, since: []):
+            run._sibling_park_track(ctx, {"router"}, track, 300.0)
+        notes = []
+        self.assertEqual("FAIL", run._sibling_park_checks(ctx, {"router"}, track, "PASS", notes, []))
+        self.assertTrue(any("r2 served on the revision that cannot start" in n for n in notes))
+        notes = []
+        self.assertEqual("FAIL", run._sibling_park_checks(ctx, {"router"}, {}, "PASS", notes, []))
+        self.assertTrue(any("nothing said why its roll stopped" in n for n in notes))
+
+
+class GeneratedCanaryGateFamilyTest(unittest.TestCase):
+    """The gate-fault family generate_cases.py mints: every case a canary of
+    the engine unit with the operator's end state on line two, the rows and
+    shapes it fills, and its place in the pipeline."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-canary-fault-gate"]
+
+    def test_every_case_is_an_engine_unit_canary_with_an_end_state(self):
+        self.assertEqual(173, len(self.fam))
+        for name, kv, m in self.fam:
+            text = self.outputs[f"gen-canary-fault-gate/{name}.yaml"]
+            self.assertEqual("canary", kv["mode"], name)
+            self.assertEqual("auto", kv["canary"], name)
+            self.assertTrue(run._cell_ok(kv["cell"]), name)
+            self.assertIn(("- components: [engine, decoder]" if kv["Nd"] else "- components: [engine]"), text, name)
+            self.assertTrue(text.splitlines()[1].startswith("# reason: "), name)
+            self.assertIn("revision", text.splitlines()[1], name)
+            if m["gate"].startswith(("metric", "analysis")):
+                self.assertIn("revision_hash=\"{{.CanaryRevision}}\"", text, f"{name}: the gate reads the canary revision alone")
+                self.assertIn(gen_cases.CSR_METRICS_MN if kv["topo"].endswith("-mn") else gen_cases.CSR_METRICS, text, name)
+                self.assertIn("perm.test/error-rate", text, name)
+                self.assertEqual("None", m["rp"], f"{name}: the restart policy is not an axis of the gate rows")
+            else:
+                self.assertNotIn("analysis:", text, f"{name}: a sibling break rides a timed ladder")
+                self.assertNotIn(gen_cases.CSR_METRICS, text, name)
+
+    def test_the_ledger_rows_and_shapes(self):
+        rows = {m["gate"] for _n, _kv, m in self.fam}
+        self.assertEqual({f"metric breach, {f}, {s}" for f in ("one-shot", "persistent") for s in ("running", "new")}
+                         | {f"analysis source unusable, {f}" for f in ("one-shot", "persistent")}
+                         | {f"sibling broken, {f}, {s}" for f in ("one-shot", "persistent") for s in ("running", "new")}, rows)
+        by_shape = {}
+        for _n, _kv, m in self.fam:
+            by_shape.setdefault(m["shape"], set()).add(m["gate"])
+        self.assertEqual({f for f, *_ in generate_cases.GATE_SHAPES}, set(by_shape))
+        for shape, got in by_shape.items():
+            self.assertEqual(rows if "router" in shape else {r for r in rows if not r.startswith("sibling")}, got, shape)
+
+    def test_metric_rows_cross_side_form_and_position(self):
+        metric = [(kv, m) for _n, kv, m in self.fam if str(kv.get("fault", "")).startswith("metric:")]
+        self.assertEqual(48, len(metric))
+        for kv, m in metric:
+            side = "stable" if m["gate"].endswith("running") else "canary"
+            where = kv["fault"].partition(":")[2]
+            if where in ("new", "idle"):
+                self.assertNotIn("victim", kv)
+            else:
+                self.assertEqual(side, kv["victim"])
+            if side == "stable":
+                self.assertEqual(("pass", "pass", "RollingBack"), (kv["analysis"], kv["health"], kv["nophase"]))
+            elif kv["form"] == "persist":
+                self.assertEqual("breach", kv["analysis"])
+                self.assertEqual("pass" if where != "new" else None, kv.get("health"))
+            else:
+                self.assertEqual(("pass", 1), (kv["analysis"], kv["minfails"]))
+                self.assertGreaterEqual(kv["failurelimit"], generate_cases.METRIC_RECOVER_LIMIT)
+        positions = {kv["fault"].partition(":")[2] for kv, _m in metric if not kv["topo"].endswith("-mn")}
+        self.assertEqual({"idle", "new", "canary-serving@1", "canary-serving@2"}, positions)
+        self.assertEqual({"canary-serving@1"}, {kv["fault"].partition(":")[2] for kv, _m in metric if kv["topo"].endswith("-mn")})
+
+    def test_source_rows_cross_form_lift_policy_and_position(self):
+        source = [(kv, m) for _n, kv, m in self.fam if str(kv.get("fault", "")).startswith("source:")]
+        self.assertEqual(54, len(source))
+        for kv, m in source:
+            self.assertEqual(("pass", "pass"), (kv["analysis"], kv["health"]))
+            text = self.outputs[f"gen-canary-fault-gate/{_name_of(self.fam, kv)}.yaml"]
+            if kv["lift"] == "after-settle":
+                self.assertNotIn("terminal", kv)
+                self.assertEqual("RollingBack" if kv["oninconclusive"] == "rollbackonstall" else "Failed", kv["nophase"])
+                self.assertIn(f'readyTimeout: "{generate_cases.SOURCE_RESUME_READY_TIMEOUT}"', text)
+            else:
+                self.assertEqual("RolledBack" if kv["oninconclusive"] == "rollbackonstall" else "Failed", kv["terminal"])
+                self.assertIn(f'readyTimeout: "{generate_cases.SOURCE_PARK_READY_TIMEOUT}"', text)
+            self.assertIn(f"onInconclusive: {'RollbackOnStall' if kv['oninconclusive'] == 'rollbackonstall' else 'Hold'}", text)
+        self.assertEqual({"canary-serving@1"}, {kv["fault"].partition(":")[2] for kv, _m in source if kv["form"] == "garbage"})
+
+    def test_sibling_rows_name_the_sibling_and_heal_or_park_as_stated(self):
+        sibling = [(kv, m) for _n, kv, m in self.fam if m["gate"].startswith("sibling")]
+        self.assertEqual(71, len(sibling))
+        for kv, m in sibling:
+            sib = "decoder" if kv["Nd"] else "router"
+            if "imgcomp" in kv:
+                self.assertEqual(("router", f"engine,{'decoder,' if kv['Nd'] else ''}router", "Stable"),
+                                 (kv["imgcomp"], kv["bump"], kv["terminal"]))
+                self.assertEqual(kv["Nr"] + 1, kv["ceil_r"])
+                continue
+            self.assertEqual(sib, kv["victimcomp"])
+            if m["gate"].endswith("one-shot, running"):
+                self.assertEqual("after-settle", kv["lift"])
+                self.assertNotIn("victim", kv)
+            elif m["gate"].endswith("one-shot, new"):
+                self.assertEqual(("canary", "load", "after-settle"), (kv["victim"], kv["form"], kv["lift"]))
+            elif m["gate"].endswith("persistent, new"):
+                self.assertEqual(("new", "canary-failed"), (kv["fault"].partition(":")[2], kv["during"]))
+                self.assertIn(kv["verb"], ("rollback", "rebump-fix"))
+            else:
+                self.assertNotIn("lift", kv)
+                self.assertEqual(1, kv["victims"])
+        kinds = {(kv["fault"].partition(":")[0], kv.get("form"), m["rp"]) for kv, m in sibling
+                 if m["gate"] == "sibling broken, persistent, running"}
+        self.assertEqual(set(generate_cases.SIBLING_PERSIST_BREAKS), kinds)
+
+    def test_generated_headers_validate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, _kv, _m in self.fam:
+                path = root / "gen-canary-fault-gate" / f"{name}.yaml"
+                path.parent.mkdir(exist_ok=True)
+                path.write_text(self.outputs[f"gen-canary-fault-gate/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)
+
+    def test_family_is_a_canary_lane_on_the_soft_list(self):
+        sys.path.insert(0, str(HERE.parents[2] / ".buildkite"))
+        try:
+            import generate_pipeline as gp
+        finally:
+            sys.path.pop(0)
+        self.assertTrue(gp._eval_feature_is_canary("gen-canary-fault-gate"))
+        self.assertIn("gen-canary-fault-gate", gp._eval_soft_features())
+
+
+def _name_of(fam, kv):
+    return next(n for n, k, _m in fam if k is kv)

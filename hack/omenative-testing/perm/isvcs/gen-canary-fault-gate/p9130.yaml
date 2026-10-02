@@ -1,0 +1,27 @@
+# p9130: [gen] canary gate sibling router new pod killed once at mid engine router N=8 rp RecreateInstance  mode=canary Ne=8 Nd=0 Nr=2 ceil_e=9 ceil_d=0 ceil_r=3 fault=crashloop:canary-serving@1 co=none topo=engine canary=auto bump=engine,router form=load victim=canary victimcomp=router nophase=Failed cell=canary/Serving[soak]/siblingBroken[routerNewOnce] lift=after-settle
+# reason: one pod of the router's new revision, pushed beside the ladder, is killed once while the second step soaks on engine+router single (8 Instances), under restart policy RecreateInstanceOnPodRestart; the restart policy rebuilds the Instance and the step keeps its state across the capacity dip: the ladder walks every step to Stable and every Instance of every bumped member ends on its new revision serving
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9130 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

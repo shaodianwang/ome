@@ -128,6 +128,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import uuid
 from collections import defaultdict
 from pathlib import Path
@@ -2037,6 +2038,45 @@ CRASH_KILL_INTERVAL_S = float(os.environ.get("OME_TEST_CRASH_KILL_INTERVAL_S", "
 # be pulled, so it never starts again); the Components such a victim may be
 # drawn from (a router never carries the revision a roll targets here).
 BREAK_FAULTS = {"crashloop", "imagepull"}
+# The gate faults a canary case fires: the health metric breaches on one side
+# of the roll (fault=metric), or the analysis source becomes unusable
+# (fault=source). Both need an analysis gate to read them.
+METRIC_FAULT = "metric"
+SOURCE_FAULT = "source"
+GATE_FAULTS = {METRIC_FAULT, SOURCE_FAULT}
+# form= of a metric breach: kept for the whole case, or lifted once the
+# breach window has passed (the override expires in the pod); of an unusable
+# source: a name that resolves nowhere, or a server that answers with
+# something other than the Prometheus API. lift= of a source fault: restored
+# once the hold has settled, or kept to the end.
+METRIC_FORMS = {"persist", "recover"}
+SOURCE_FORMS = {"unreachable", "garbage"}
+SOURCE_LIFTS = {"after-settle", "never"}
+METRIC_SIDES = {"stable", "canary"}
+# The breach rate the override sets (well past the gate's threshold), how
+# long a one-shot breach lasts, and how long a pushed revision's own breach
+# lasts before it decays (fault=metric:new form=recover).
+METRIC_BREACH_RATE = "0.9"
+METRIC_BREACH_S = int(45 * TIMEOUT_MULT)
+METRIC_DECAY_S = 60
+# The metrics image's port and live-override endpoint
+# (hack/omenative-testing/metrics-server), reached through the apiserver's
+# pod proxy.
+METRICS_PORT = 8080
+METRIC_CONTROL_PATH = "/-/perm/error-rate"
+# How long a pod is given to take the override (its server listens only
+# after the fixture's startup delay), how long Prometheus is given to show
+# the breach on the side's revision, and how long the analysis is given to
+# report an unusable source after the fault.
+METRIC_APPLY_S = int(60 * TIMEOUT_MULT)
+METRIC_SEEN_S = int(120 * TIMEOUT_MULT)
+SOURCE_BITE_S = int(120 * TIMEOUT_MULT)
+# The controller ConfigMap block that names the bundled Prometheus.
+CANARY_ANALYSIS_CONFIG_KEY = "canaryAnalysis"
+BUNDLED_PROMETHEUS_KEY = "bundledPrometheusAddress"
+# A break at a canary hook may heal itself (lift=after-settle): the harness
+# takes its own break away LIFT_SETTLE_S after it has bitten.
+HEAL_LIFT = "after-settle"
 # stuck=held|failed (mode=scaledown|recreate): before the operation the
 # bumped members are pushed onto a revision that cannot be pulled (img=).
 # failed is the first failed attempt (an Instance row reads Failed, or the
@@ -2066,6 +2106,9 @@ HOLD_REASON_WAIT_S = int(90 * TIMEOUT_MULT)
 # imagepull has one form: an image that cannot be pulled never runs.
 IMAGEPULL_FORMS = {"start"}
 BREAK_VICTIM_COMPS = {"engine", "decoder"}
+# Under a canary the router in front of an engine ladder is a sibling a break
+# may hit too: the ladder never rolls it, so the repair owns the break.
+CANARY_BREAK_VICTIM_COMPS = BREAK_VICTIM_COMPS | {"router"}
 BREAK_DEFAULT_COMP = "engine"
 # readiness:<old|new> makes a pod run without ever passing readiness, through
 # the two switches the fixture runtimes' readiness probe reads (runtime/
@@ -2188,7 +2231,7 @@ KILL_VIAS = {"delete", "evict", "preempt"}
 FAULT_RETRY_S = 5.0
 # Hook faults fire once at a phase hook; armed faults are in place before the
 # trigger and have no hook to miss.
-HOOK_FAULTS = {"podkill", "ctrlrestart", "evict", "preempt"} | BREAK_FAULTS
+HOOK_FAULTS = {"podkill", "ctrlrestart", "evict", "preempt"} | BREAK_FAULTS | GATE_FAULTS
 ARMED_FAULTS = {"quota", "cordon", "taint"}
 # repeat=<n>: the fault is applied again each time what it took has come
 # back, n times in all, and then stops (the lift). A pod fault (a podkill,
@@ -3684,6 +3727,8 @@ def _run_fault_cleanups():
             _webhook_outage_lift(arg)
         elif kind == CONFLICT_FAULT:
             _conflict_writer_stop(arg)
+        elif kind == "source":
+            _source_restore(arg)
 
 
 def _lift_quota(case_id):
@@ -3761,6 +3806,12 @@ def _fault_ok(v):
         return param in (CRASHLOOP_VICTIM, CRASHLOOP_NEW, IDLE_FAULT_PHASE) or _canary_hook_ok(param)
     if kind == READINESS_FAULT:
         return param in READINESS_SIDES
+    if kind == METRIC_FAULT:
+        # The pushed revision's own metrics, the stable side before the push,
+        # or a side named by victim= at a canary hook.
+        return param in (CRASHLOOP_NEW, IDLE_FAULT_PHASE) or _canary_hook_ok(param)
+    if kind == SOURCE_FAULT:
+        return param == IDLE_FAULT_PHASE or _canary_hook_ok(param)
     if kind == "configkey":
         return param == CONFIGKEY_PARAM
     if kind == "node":
@@ -3815,9 +3866,16 @@ def _fault_on_new(f):
 
 def _fault_before_push(f):
     """True when the case's break lands on the idle service before the push
-    (fault=<kind>:idle under a canary): the stable side is already broken
-    when the push lands, and no phase hook fires it."""
-    return bool(f) and f.get("kind") in BREAK_FAULTS and f.get("param") == IDLE_FAULT_PHASE
+    (fault=<kind>:idle under a canary): the stable side is already broken,
+    its metrics already breach or the gate's source is already unusable when
+    the push lands, and no phase hook fires it."""
+    return bool(f) and f.get("kind") in BREAK_FAULTS | GATE_FAULTS and f.get("param") == IDLE_FAULT_PHASE
+
+
+def _metric_on_new(f):
+    """True when the pushed revision's own metrics breach (fault=metric:new):
+    the bump sets the canary's health, so no hook fires it."""
+    return bool(f) and f.get("kind") == METRIC_FAULT and f.get("param") == CRASHLOOP_NEW
 
 
 def _fault_fired_by_handler(f):
@@ -4211,6 +4269,12 @@ def _fault_fire_once(f, pod_state, pods_per_inst, old_hashes, inv=None):
     if f["kind"] in BREAK_FAULTS:
         _fault_crashloop_fire(f, pod_state, old_hashes, inv)
         return
+    if f["kind"] == METRIC_FAULT:
+        _fault_metric_fire(f, pod_state, old_hashes)
+        return
+    if f["kind"] == SOURCE_FAULT:
+        _fault_source_fire(f)
+        return
     if f["kind"] == "evict":
         _fault_evict_fire(f, pod_state, pods_per_inst, old_hashes)
         return
@@ -4270,22 +4334,29 @@ def _fault_fire_once(f, pod_state, pods_per_inst, old_hashes, inv=None):
     print(f"    ⚡ {f['notes'][-1]}")
 
 
-def _crashloop_pick_pods(pod_state, old_hashes, comp=BREAK_DEFAULT_COMP, count=1, inst=None):
+def _crashloop_pick_pods(pod_state, old_hashes, comp=BREAK_DEFAULT_COMP, count=1, inst=None, new_side=False):
     """The break victims: among the live pods of `comp` still on an old
     revision, the leader (or single) pods of the `count` highest Instance
     indexes, one per Instance, highest first. The highest index is what the
     roll reaches last, so the crash is observed on a settled row for as long
     as the roll takes to get there; several at once are the storm shape.
     `inst` aims the break at one Instance index instead (an operation whose
-    natural victim must differ from the broken Instance)."""
+    natural victim must differ from the broken Instance). `new_side` picks
+    among the Ready pods of a newer revision instead (a canary-side victim
+    under a canary: a pod that has served and breaks)."""
     def _idx(p):
         try:
             return int(p.get("inst", "0"))
         except (TypeError, ValueError):
             return 0
+
+    def on_side(p):
+        if old_hashes is None:
+            return True
+        return (p["hash"] not in old_hashes and bool(p.get("ready"))) if new_side else p["hash"] in old_hashes
     live = [(n, p) for n, p in sorted(pod_state.items())
             if p and p["alive"] and p.get("comp") == comp
-            and p.get("hash") and (old_hashes is None or p["hash"] in old_hashes)
+            and p.get("hash") and on_side(p)
             and p.get("runner", "default") in ("default", "leader")
             and (inst is None or str(p.get("inst", "0")) == str(inst))]
     picked, seen = [], set()
@@ -4374,10 +4445,12 @@ def _crashloop_stop(f):
 def _fault_crashloop_fire(f, pod_state, old_hashes, inv=None):
     comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
     count = max(1, int(f.get("victims") or 1))
-    victims = _crashloop_pick_pods(pod_state, old_hashes, comp, count, inst=f.get("inst") or None)
+    new_side = f.get("victim") == "canary"
+    victims = _crashloop_pick_pods(pod_state, old_hashes, comp, count, inst=f.get("inst") or None, new_side=new_side)
+    side = "Ready canary-revision" if new_side else "old-revision"
     if len(victims) < count:
-        f["infra_fail"] = (f"{f['kind']}: {len(victims)} live old-revision {comp} pod(s) to break, {count} asked"
-                           if victims else f"{f['kind']}: no live old-revision {comp} pod to break")
+        f["infra_fail"] = (f"{f['kind']}: {len(victims)} live {side} {comp} pod(s) to break, {count} asked"
+                           if victims else f"{f['kind']}: no live {side} {comp} pod to break")
         return
     _break_named_pods(f, pod_state, victims, inv)
 
@@ -4398,6 +4471,8 @@ def _break_named_pods(f, pod_state, victims, inv=None):
         victim = rec["crash_pod"]
         if f["kind"] != "crashloop" or f["form"] == "start":
             image = _break_image(f["kind"])
+            if f.get("lift") == HEAL_LIFT:
+                rec["crash_image"] = _pod_image(_get_pod(victim))   # what a heal puts back
             patch = {"spec": {"containers": [{"name": MAIN_CONTAINER, "image": image}]}}
             r = kubectl("-n", NS, "patch", "pod", victim, "--type=strategic", "-p", json.dumps(patch))
             if r.returncode != 0:
@@ -4993,18 +5068,24 @@ def _node_fault_capability():
     return None
 
 
-def _controller_lifecycle_config():
-    """(the lifecycle block of the deployed controller config as a dict, None),
-    an absent block reading as {}; or (None, why it could not be read)."""
+def _controller_config_block(key):
+    """(one JSON block of the deployed controller config as a dict, None), an
+    absent block reading as {}; or (None, why it could not be read)."""
     r = kubectl("-n", CTRL_NS, "get", "configmap", CTRL_CONFIGMAP, "-o", "json")
     if r.returncode != 0:
         return None, f"ConfigMap {CTRL_NS}/{CTRL_CONFIGMAP} could not be read: {(r.stderr or '').strip()[:120]}"
     try:
         data = json.loads(r.stdout).get("data") or {}
-        block = data.get(LIFECYCLE_CONFIG_KEY)
+        block = data.get(key)
         return (json.loads(block) if block else {}), None
     except (ValueError, TypeError, AttributeError) as e:
-        return None, f"ConfigMap {CTRL_NS}/{CTRL_CONFIGMAP} {LIFECYCLE_CONFIG_KEY} block is not JSON: {e}"
+        return None, f"ConfigMap {CTRL_NS}/{CTRL_CONFIGMAP} {key} block is not JSON: {e}"
+
+
+def _controller_lifecycle_config():
+    """The lifecycle block of the deployed controller config (see
+    _controller_config_block)."""
+    return _controller_config_block(LIFECYCLE_CONFIG_KEY)
 
 
 def _needs_unmet(needs, lifecycle, err):
@@ -5295,6 +5376,24 @@ def _break_victim_checks(f, rec, pod_state, old_hashes, events, bumped, verdict,
     if bumped is not None and comp not in bumped:
         sibling = f"sibling {where}"
         survivors = [n for n, p in pods if p.get("uid") and p["uid"] == rec.get("crash_uid")]
+        if f.get("lift") == HEAL_LIFT:
+            # A break the harness healed: the Instance serves again on its
+            # running revision, rebuilt by a repair or healed in place.
+            off = [n for n, p in pods if not p.get("hash") or p["hash"] not in (old_hashes or set())]
+            how = "healed in place (the same pod serves again)" if survivors else "rebuilt by a repair"
+            if not pods or down or off:
+                verdict = "FAIL"
+                notes.append(f"{kind} sibling Instance {comp}/{inst} is not serving on its running revision after the heal "
+                             f"(pods={len(pods)} not-serving={down} off-revision={off})")
+                checks.append(f"  ✗ {kind}: {sibling} (not bumped) must be Ready and serving on its running revision "
+                              f"after the heal; pods={len(pods)} not-serving={down} off-revision={off}")
+            else:
+                checks.append(f"  ✓ {kind}: {sibling} (not bumped) is Ready and serving on its running revision again, {how}")
+            checks.append(f"  ⓘ {kind}: a RestartTriggered event {'names' if repairs else 'does not name'} {sibling}"
+                          + (f": {repairs[0][:120]}" if repairs else " (the kubelet alone brought it back)"))
+            if rec.get("kills") is not None and f["form"] == "load":
+                checks.append(f"  ⓘ {kind}: runner killed {rec['kills']} time(s) before the heal")
+            return verdict
         if not pods or survivors or down:
             verdict = "FAIL"
             notes.append(f"{kind} sibling Instance {comp}/{inst} was not rebuilt to serving "
@@ -5322,7 +5421,11 @@ def _break_victim_checks(f, rec, pod_state, old_hashes, events, bumped, verdict,
                       f"pods={len(pods)} still old-revision={off} not-serving={down}")
     else:
         checks.append(f"  ✓ {kind}: {where} ended on the new revision with {len(pods)} pod(s) serving")
-    if repairs:
+    if repairs and f.get("victim") == "canary":
+        # A canary-side victim is on the roll target: a repair of it is the
+        # restart policy at work, not a rebuild of a superseded revision.
+        checks.append(f"  ⓘ {kind}: a repair rebuilt canary-side {where} after the break: {repairs[0][:120]}")
+    elif repairs:
         verdict = "FAIL"
         notes.append(f"{kind} Instance {comp}/{inst} was repaired after the bump: {repairs[0][:120]}")
         checks.append(f"  ✗ {kind}: a repair was recorded for {where} after the bump "
@@ -5356,6 +5459,517 @@ def _wait_break_bitten(ctx, f, budget_s):
         if _break_bitten(f, ctx["pod_state"]):
             return time.time() - t0
     return None
+
+
+def _break_heal(f):
+    """lift=after-settle on a break at a canary hook: take the harness's own
+    break away. A killer stops; a pod pointed at a break image is pointed
+    back at the image it ran, when it is still the pod the case broke (a
+    repair may have rebuilt it first, which leaves nothing to heal)."""
+    healed = []
+    for rec in _break_victims(f):
+        if f["kind"] == "crashloop" and f.get("form") == "load":
+            _crashloop_stop(rec)
+            healed.append(f"{rec['crash_pod']}: the killer stopped after {rec.get('kills', 0)} kill(s)")
+            continue
+        exists, alive, _rev, _running, uid = _crashloop_pod_state(rec["crash_pod"])
+        if not exists or not alive or uid != rec.get("crash_uid", uid):
+            healed.append(f"{rec['crash_pod']}: already replaced before the heal")
+            continue
+        image = rec.get("crash_image") or ""
+        if not image:
+            healed.append(f"{rec['crash_pod']}: the image it ran is unknown; left as broken")
+            continue
+        patch = {"spec": {"containers": [{"name": MAIN_CONTAINER, "image": image}]}}
+        r = kubectl("-n", NS, "patch", "pod", rec["crash_pod"], "--type=strategic", "-p", json.dumps(patch))
+        healed.append(f"{rec['crash_pod']}: pointed back at {image}" if r.returncode == 0
+                      else f"{rec['crash_pod']}: the heal patch failed: {r.stderr.strip()[:100]}")
+    f["healed_at"] = time.time()
+    f["notes"].append("break healed: " + "; ".join(healed))
+    print(f"    ⚡ {f['notes'][-1]}")
+
+
+def _break_heal_tick(ctx, now):
+    """Heal a self-healing break once it has bitten and held LIFT_SETTLE_S."""
+    f = ctx.get("fault")
+    if not f or f.get("kind") not in BREAK_FAULTS or f.get("lift") != HEAL_LIFT or not f.get("fired") \
+            or f.get("infra_fail") or f.get("healed_at"):
+        return
+    if f.get("bite_ts") is None:
+        if _break_bitten(f, ctx["pod_state"]):
+            f["bite_ts"] = now
+        return
+    if now - f["bite_ts"] >= LIFT_SETTLE_S:
+        _break_heal(f)
+
+
+# ── The health metric breaches on one side (fault=metric, canary) ───────────
+def _metric_control_path(pod, value=None, for_s=0):
+    """The apiserver pod-proxy path of one pod's live-override endpoint, with
+    the override to set (value=, and for= when bounded) or none, to read."""
+    path = f"/api/v1/namespaces/{NS}/pods/{pod}:{METRICS_PORT}/proxy{METRIC_CONTROL_PATH}"
+    if value is None:
+        return path
+    params = [f"value={value}"] + ([f"for={int(for_s)}"] if for_s else [])
+    return path + "?" + "&".join(params)
+
+
+def _metric_control(pod, value=None, for_s=0):
+    """Set or read one pod's live error-rate override through the apiserver
+    proxy. (ok, the endpoint's key=value body)."""
+    r = kubectl("get", "--raw", _metric_control_path(pod, value, for_s))
+    return r.returncode == 0, (r.stdout or "")
+
+
+def _metric_side_pods(pod_state, old_hashes, comp, side):
+    """Every live pod of comp on the named side: the stable revision's, or a
+    newer revision's."""
+    out = []
+    for name, p in sorted(pod_state.items()):
+        if not (p and p["alive"] and p.get("comp") == comp and p.get("hash")):
+            continue
+        if old_hashes is None or ((p["hash"] not in old_hashes) if side == "canary" else (p["hash"] in old_hashes)):
+            out.append(name)
+    return out
+
+
+def _fault_metric_fire(f, pod_state, old_hashes):
+    """fault=metric at a hook or at idle: set the breach rate on every live
+    pod of the side (victim=, the stable side at idle), bounded to
+    METRIC_BREACH_S under form=recover. A pod whose server is not listening
+    yet is asked again until METRIC_APPLY_S runs out."""
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+    side = f.get("victim") or ("stable" if f.get("param") == IDLE_FAULT_PHASE else "canary")
+    pods = _metric_side_pods(pod_state, old_hashes, comp, side)
+    if not pods:
+        f["infra_fail"] = f"{METRIC_FAULT}: no live {side}-side {comp} pod whose metrics could breach"
+        return
+    for_s = METRIC_BREACH_S if f.get("form") == "recover" else 0
+    applied, pending = [], list(pods)
+    deadline = time.time() + METRIC_APPLY_S
+    while pending and time.time() < deadline:
+        for name in list(pending):
+            ok, body = _metric_control(name, METRIC_BREACH_RATE, for_s)
+            if ok and "override=true" in body:
+                applied.append(name)
+                pending.remove(name)
+        if pending:
+            time.sleep(3)
+    f.update(metric_comp=comp, metric_side=side, metric_pods=applied, metric_missed=pending, metric_for_s=for_s,
+             metric_hashes=sorted({(pod_state.get(n) or {}).get("hash", "") for n in applied} - {""}))
+    if not applied:
+        f["infra_fail"] = f"{METRIC_FAULT}: none of the {len(pods)} {side}-side {comp} pod(s) took the override"
+        return
+    window = f" for {for_s}s" if for_s else " until the pod goes"
+    f["notes"].append(f"fault fired: {METRIC_FAULT} error rate {METRIC_BREACH_RATE}{window} on {len(applied)} "
+                      f"{side}-side {comp} pod(s) (revision {', '.join(f['metric_hashes']) or '?'})"
+                      + (f"; {len(pending)} pod(s) never answered" if pending else ""))
+    print(f"    ⚡ {f['notes'][-1]}")
+
+
+def _metric_override_active(pod):
+    """Whether a pod's override is still in force: True, False, or None when
+    the pod cannot be asked (gone, or not answering)."""
+    ok, body = _metric_control(pod)
+    if not ok:
+        return None
+    if "override=true" in body:
+        return True
+    return False if "override=false" in body else None
+
+
+def _prometheus_service():
+    """(namespace, service, port) of the bundled Prometheus the deployed
+    controller config names, or (None, why not)."""
+    block, err = _controller_config_block(CANARY_ANALYSIS_CONFIG_KEY)
+    if err:
+        return None, err
+    address = str((block or {}).get(BUNDLED_PROMETHEUS_KEY) or "")
+    m = re.match(r"^https?://([^./:]+)\.([^./:]+)\.svc(?:\.[^:/]*)?(?::([0-9]+))?/?$", address)
+    if not m:
+        return None, f"the deployed controller config names no in-cluster bundled Prometheus ({address or 'empty'})"
+    return (m.group(2), m.group(1), int(m.group(3) or 9090)), None
+
+
+def _prometheus_max(query):
+    """The largest value an instant query returns on the bundled Prometheus,
+    asked through the apiserver service proxy; None when it cannot be read
+    or returns no series."""
+    svc, err = _prometheus_service()
+    if err:
+        return None
+    ns, name, port = svc
+    r = kubectl("get", "--raw", f"/api/v1/namespaces/{ns}/services/{name}:{port}/proxy/api/v1/query?query="
+                + urllib.parse.quote(query, safe=""))
+    if r.returncode != 0:
+        return None
+    try:
+        results = (json.loads(r.stdout).get("data") or {}).get("result") or []
+        values = [float(item["value"][1]) for item in results if isinstance(item, dict) and item.get("value")]
+    except (ValueError, TypeError, KeyError, IndexError):
+        return None
+    return max(values) if values else None
+
+
+def _metric_query(case_id, comp, revision):
+    return f'max(canary_error_rate{{inferenceservice="{case_id}",component="{comp}",revision_hash="{revision}"}})'
+
+
+# ── The analysis source becomes unusable (fault=source, canary) ─────────────
+def _source_address(form, case_id):
+    """The address the case's analysis is pointed at: a name that resolves
+    nowhere (unreachable), or the bundled Prometheus on a path that is not
+    its API, so every query is answered with something that is not a sample
+    (garbage). (address, None) or (None, why it cannot be built)."""
+    if form == "unreachable":
+        return f"http://{case_id}-no-such-source.{NS}.svc:9090", None
+    block, err = _controller_config_block(CANARY_ANALYSIS_CONFIG_KEY)
+    if err:
+        return None, err
+    address = str((block or {}).get(BUNDLED_PROMETHEUS_KEY) or "")
+    if not address:
+        return None, "the deployed controller config names no bundled Prometheus to answer with garbage"
+    return address.rstrip("/") + "/-/healthy", None
+
+
+def _source_group_patch(spec, members, prometheus, present):
+    """The rollout groups with the canary group over `members` carrying
+    `prometheus` (removed when not present); None when no group matches."""
+    groups = (spec.get("rollout") or {}).get("groups") or []
+    for g in groups:
+        if isinstance(g.get("canary"), dict) and set(g.get("components") or []) == set(members):
+            if present:
+                g["canary"]["prometheus"] = prometheus
+            else:
+                g["canary"].pop("prometheus", None)
+            return groups
+    return None
+
+
+def _fault_source_fire(f):
+    """fault=source: point the driven group's analysis at the unusable
+    address, remembering the source it had so the lift and the end-of-case
+    cleanup can put it back."""
+    cid = f["case_id"]
+    address = f.get("source_address")
+    if not address:
+        f["infra_fail"] = f"{SOURCE_FAULT}: no address to point the analysis at"
+        return
+    r = kubectl("-n", NS, "get", "isvc", cid, "-o", "json")
+    if r.returncode != 0:
+        f["infra_fail"] = f"{SOURCE_FAULT}: cannot read the live spec: {r.stderr.strip()[:120]}"
+        return
+    spec = json.loads(r.stdout).get("spec", {})
+    groups = (spec.get("rollout") or {}).get("groups") or []
+    original = next(((g["canary"].get("prometheus"), "prometheus" in g["canary"]) for g in groups
+                     if isinstance(g.get("canary"), dict)
+                     and set(g.get("components") or []) == set(f.get("source_members") or [])), None)
+    if original is None:
+        f["infra_fail"] = f"{SOURCE_FAULT}: no canary group matches the driven unit {sorted(f.get('source_members') or [])}"
+        return
+    f["source_original"], f["source_had_key"] = original
+    f["source_restored"] = False
+    _FAULT_CLEANUPS.append(("source", f))   # registered BEFORE the source is replaced
+    groups = _source_group_patch(spec, f.get("source_members") or [], {"serverAddress": address}, True)
+    rr = kubectl("-n", NS, "patch", "isvc", cid, "--type=merge", "-p",
+                 json.dumps({"spec": {"rollout": {"groups": groups}}}))
+    if rr.returncode != 0:
+        f["infra_fail"] = f"{SOURCE_FAULT}: pointing the analysis at {address} failed: {rr.stderr.strip()[:120]}"
+        return
+    f["notes"].append(f"fault fired: {SOURCE_FAULT} form={f.get('form')} — the analysis source is now {address}")
+    print(f"    ⚡ {f['notes'][-1]}")
+
+
+def _source_restore(f):
+    """Put the analysis source back as the case declared it. Idempotent: the
+    one-shot form restores it at its time, the end-of-case cleanup again."""
+    if f.get("source_restored") or "source_original" not in f:
+        return True
+    cid = f["case_id"]
+    r = kubectl("-n", NS, "get", "isvc", cid, "-o", "json")
+    if r.returncode != 0:
+        return False
+    spec = json.loads(r.stdout).get("spec", {})
+    groups = _source_group_patch(spec, f.get("source_members") or [], f.get("source_original"), f.get("source_had_key"))
+    if groups is None:
+        return False
+    rr = kubectl("-n", NS, "patch", "isvc", cid, "--type=merge", "-p",
+                 json.dumps({"spec": {"rollout": {"groups": groups}}}))
+    if rr.returncode == 0:
+        f["source_restored"] = True
+        f["lifted_ts"] = time.time()
+    return rr.returncode == 0
+
+
+def _inconclusive_result_at(can, since_epoch):
+    """The first metric result of the unit's canary status that could not
+    be evaluated (no value, a message) and was recorded at or after
+    since_epoch; None when the gate still reads samples."""
+    for m in (can or {}).get("metricResults") or []:
+        if not isinstance(m, dict) or m.get("value") or not m.get("message") or m.get("passed"):
+            continue
+        stamp = str(m.get("time") or "")
+        try:
+            when = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            when = since_epoch
+        if when >= since_epoch - SOAK_OBSERVE_SLACK_S:
+            return m
+    return None
+
+
+def _gate_threshold(steps):
+    """The threshold of the first analysis metric in the ladder (the gate's
+    bound a breach must pass); 0.05 when the ladder carries none."""
+    for st in steps or []:
+        a = st.get("analysis") if isinstance(st, dict) else None
+        for m in (a or {}).get("metrics") or []:
+            try:
+                return float(m.get("threshold"))
+            except (TypeError, ValueError):
+                continue
+    return 0.05
+
+
+def _gate_track_new():
+    return {"fired_at": None, "fails_at_fire": None, "step_at_fire": None, "seen_at": None, "seen_value": None,
+            "probed_at": 0.0, "recover_probed_at": 0.0, "recovered_at": None, "recovered_gone": False,
+            "bite_at": None, "bite_message": "", "bite_step": None, "steps_while_broken": set(),
+            "lifted_at": None, "step_at_lift": None, "park": None}
+
+
+def _gate_track(ctx, f, track, can, step, now, failed_checks_peak, threshold):
+    """Per poll under a gate fault: when it fired and what the gate had
+    counted by then, then the fault's own observations (below)."""
+    if not f.get("fired") or f.get("infra_fail"):
+        return
+    if track["fired_at"] is None:
+        track["fired_at"], track["fails_at_fire"], track["step_at_fire"] = now, failed_checks_peak, step
+    rel = now - ctx["trigger_ts"]
+    if f["kind"] == METRIC_FAULT:
+        _metric_track(ctx, f, track, now, rel, failed_checks_peak, threshold)
+    else:
+        _source_track(ctx, f, track, can, step, now, rel)
+
+
+def _metric_side(f):
+    return f.get("metric_side") or ("canary" if _metric_on_new(f) else (f.get("victim") or "stable"))
+
+
+def _metric_track(ctx, f, track, now, rel, failed_checks_peak, threshold):
+    """A metric breach: that it reached the gate's source (the gate counted
+    it on the canary side; Prometheus shows it on the stable side's
+    revision, which the gate must not count), and under form=recover that
+    the override expired while the pods were still there."""
+    side = _metric_side(f)
+    if track["seen_at"] is None:
+        if side == "canary":
+            if failed_checks_peak > (track["fails_at_fire"] or 0):
+                track["seen_at"] = now
+                print(f"    metric: the gate counted the canary side's breach ({failed_checks_peak} failing sample(s), t={rel:.0f}s)")
+        elif now - track["probed_at"] >= 10 and now - track["fired_at"] <= METRIC_SEEN_S:
+            track["probed_at"] = now
+            worst = max((_prometheus_max(_metric_query(ctx["case_id"], f["metric_comp"], h)) or 0.0
+                         for h in f.get("metric_hashes") or []), default=0.0)
+            if worst > threshold:
+                track["seen_at"], track["seen_value"] = now, worst
+                print(f"    metric: Prometheus shows the stable side's breach ({worst:g} > {threshold:g}, t={rel:.0f}s)")
+    window = f.get("metric_for_s") or 0
+    if f.get("form") == "recover" and window and track["recovered_at"] is None and not track["recovered_gone"] \
+            and now - track["fired_at"] >= window + SOAK_OBSERVE_SLACK_S and now - track["recover_probed_at"] >= 10:
+        track["recover_probed_at"] = now
+        states = {pod: _metric_override_active(pod) for pod in f.get("metric_pods") or []
+                  if (ctx["pod_state"].get(pod) or {}).get("alive")}
+        if not states:
+            track["recovered_gone"] = True
+            print("    metric: every pod that carried the breach is gone before its window ended")
+        elif all(v is False for v in states.values()):
+            track["recovered_at"] = now
+            print(f"    metric: the breach window ended; {len(states)} pod(s) report the configured rate again (t={rel:.0f}s)")
+
+
+def _source_track(ctx, f, track, can, step, now, rel):
+    """An unusable source: the first sample the gate could not evaluate, the
+    steps the ladder sat on meanwhile, the lift once the hold has settled
+    (or once the gate has had SOURCE_BITE_S to report and did not), and the
+    park."""
+    if track["bite_at"] is None:
+        m = _inconclusive_result_at(can, f.get("fired_ts") or track["fired_at"])
+        if m:
+            track["bite_at"], track["bite_message"], track["bite_step"] = now, str(m.get("message") or ""), step
+            print(f"    source: the gate reports it cannot read health: {track['bite_message'][:100]} (step {step}, t={rel:.0f}s)")
+    if track["bite_at"] is not None and track["lifted_at"] is None and step is not None:
+        track["steps_while_broken"].add(step)
+    if ctx.get("canary_hook") == "canary-failed" and track["park"] is None:
+        track["park"] = {"at": rel, "step": step, "reason": str((can.get("failed") or {}).get("reason") or "")}
+        print(f"    source: parked at step {step} reason={track['park']['reason'] or 'none'} (t={rel:.0f}s)")
+    if f.get("lift") == HEAL_LIFT and track["lifted_at"] is None:
+        settled = track["bite_at"] is not None and now - track["bite_at"] >= LIFT_SETTLE_S
+        overdue = track["bite_at"] is None and now - track["fired_at"] >= SOURCE_BITE_S
+        if (settled or overdue) and _source_restore(f):
+            track["lifted_at"], track["step_at_lift"] = now, step
+            f["notes"].append(f"the analysis source was restored {now - track['fired_at']:.0f}s after the fault"
+                              + ("" if settled else " (the gate never reported it; restored anyway)"))
+            print(f"    ⚡ {f['notes'][-1]}")
+
+
+def _hook_fault_fired_checks(f, phases, verdict, notes, checks):
+    """A gate fault, a self-healing break or a canary-side break aimed at a
+    canary state must have fired: a hook the ladder never reached proves
+    nothing. (The older hook faults keep reporting a missed hook.)"""
+    if not f or f.get("fired") or f.get("infra_fail"):
+        return verdict
+    mine = f.get("kind") in GATE_FAULTS or (f.get("kind") in BREAK_FAULTS
+                                           and (f.get("lift") == HEAL_LIFT or f.get("victim") == "canary"))
+    where = str(f.get("param") or "")
+    if not mine or where.partition("@")[0] not in CANARY_HOOKS:
+        return verdict
+    verdict = "FAIL"
+    notes.append(f"{f['kind']}:{where} never fired")
+    checks.append(f"  ✗ fault {f['kind']}:{where} never fired: the canary never reached {where} (phases {sorted(phases)})")
+    return verdict
+
+
+def _gate_fault_checks(ctx, f, track, on_inconclusive, failed_checks_peak, rejected, phases, verdict, notes, checks):
+    """The operator's end state under a gate fault. A metric breach reached
+    the gate's source; on the stable side the gate never counted it and no
+    rollback followed, on the canary side nothing failed before it landed;
+    a one-shot breach lifted while its pods were there. An unusable source
+    was reported by the gate, held the ladder at its step, was never counted
+    as a breach, and then either came back (the ladder resumed) or ended the
+    run the policy decides: a park at that step with reason AnalysisStalled,
+    or a rollback under RollbackOnStall. The terminal's own checks follow."""
+    def ok(cond, msg_ok, msg_bad):
+        nonlocal verdict
+        if cond:
+            checks.append(f"  ✓ {msg_ok}")
+        else:
+            verdict = "FAIL"; notes.append(msg_bad); checks.append(f"  ✗ {msg_bad}")
+
+    if not f.get("fired") or f.get("infra_fail"):
+        return verdict
+    if f["kind"] == METRIC_FAULT:
+        side = _metric_side(f)
+        comp = f.get("metric_comp") or f.get("victimcomp") or BREAK_DEFAULT_COMP
+        where = f"{side}-side {comp}"
+        if track["seen_at"] is None:
+            if side == "canary":
+                ok(False, "", f"{METRIC_FAULT}: the gate never counted a failing sample after the {where} metrics breached "
+                              f"(peak {failed_checks_peak}, {track['fails_at_fire']} at the fault)")
+            else:
+                f["infra_fail"] = (f"{METRIC_FAULT}: Prometheus never showed the {where} breach on revision "
+                                   f"{', '.join(f.get('metric_hashes') or []) or '?'} within {METRIC_SEEN_S}s")
+            return verdict
+        checks.append(f"  ✓ {METRIC_FAULT}: the {where} breach reached the gate's source "
+                      f"{track['seen_at'] - track['fired_at']:.0f}s after the fault"
+                      + (f" (Prometheus read {track['seen_value']:g})" if side == "stable" else " (the gate counted it)"))
+        if side == "stable":
+            ok(failed_checks_peak == (track["fails_at_fire"] or 0),
+               f"{METRIC_FAULT}: the gate never counted the stable side's breach against the canary "
+               f"(failing samples stayed at {failed_checks_peak})",
+               f"{METRIC_FAULT}: the gate blamed the canary for the stable side's breach "
+               f"({failed_checks_peak} failing sample(s), {track['fails_at_fire']} at the fault)")
+            ok(not rejected, f"{METRIC_FAULT}: no rollback followed the stable side's breach",
+               f"{METRIC_FAULT}: a healthy canary was rolled back while the stable side was sick ({rejected})")
+        else:
+            ok((track["fails_at_fire"] or 0) == 0,
+               f"{METRIC_FAULT}: no failing sample was counted before the canary side breached",
+               f"{METRIC_FAULT}: {track['fails_at_fire']} failing sample(s) were counted before the breach landed")
+        if f.get("form") == "recover" and f.get("metric_for_s"):
+            if track["recovered_at"] is not None:
+                checks.append(f"  ✓ {METRIC_FAULT}: the breach lifted after its {f['metric_for_s']}s window; "
+                              f"the pods report the configured rate again")
+            elif track["recovered_gone"]:
+                checks.append(f"  ⓘ {METRIC_FAULT}: every pod that carried the breach was replaced before its window ended")
+            else:
+                checks.append(f"  ⓘ {METRIC_FAULT}: the end of the breach window was not observed within the case")
+        return verdict
+    label = f"{SOURCE_FAULT} ({f.get('form')})"
+    if track["bite_at"] is None:
+        ok(False, "", f"{label}: the gate never reported that it could not read health after the source went "
+                      f"(metricResults carried no unevaluated sample within the case)")
+        return verdict
+    checks.append(f"  ✓ {label}: the gate reported why it held {track['bite_at'] - track['fired_at']:.0f}s after the fault: "
+                  f"{track['bite_message'][:120]}")
+    ok(track["steps_while_broken"] <= {track["bite_step"]},
+       f"{label}: the ladder held at step {track['bite_step']} while the source was unusable",
+       f"{label}: the ladder moved while the source was unusable (steps {sorted(track['steps_while_broken'])})")
+    ok(failed_checks_peak == (track["fails_at_fire"] or 0),
+       f"{label}: an unusable source was never counted as a breach (failing samples stayed at {failed_checks_peak})",
+       f"{label}: an unusable source was counted as a breach ({failed_checks_peak} failing sample(s))")
+    if f.get("lift") == HEAL_LIFT:
+        ok(track["lifted_at"] is not None, f"{label}: the source was restored once the hold had settled",
+           f"{label}: the source was never restored")
+        return verdict
+    park = track["park"]
+    if on_inconclusive == "rollbackonstall":
+        ok(bool(rejected) and "Failed" not in phases,
+           f"{label}: the stall rolled the canary back instead of parking it (rejected {rejected})",
+           f"{label}: the stall did not roll the canary back (rejected {rejected or 'nothing'}, phases {sorted(phases)})")
+        return verdict
+    reason = park["reason"] if park else ""
+    ok(reason == "AnalysisStalled",
+       f"{label}: parked Failed with reason {reason} ({park['at']:.0f}s after the push)" if park else "",
+       f"{label}: no park with reason AnalysisStalled (park {park or 'never observed'})")
+    if park:
+        ok(park["step"] == track["bite_step"],
+           f"{label}: the park kept the step the source broke at (step {track['bite_step']})",
+           f"{label}: the park is at step {park['step']}, the source broke at step {track['bite_step']}")
+    return verdict
+
+
+def _sibling_park_track(ctx, parked, track, now):
+    """Per poll for a bumped member outside the canary unit whose revision
+    cannot start: a pod of its new revision that serves, and the first
+    moment status said why its roll stopped."""
+    old = ctx["old_hashes"]
+    for comp in sorted(parked):
+        for name, p in sorted(ctx["pod_state"].items()):
+            if p and p["alive"] and p.get("comp") == comp and p.get("hash") and p["hash"] not in old \
+                    and p.get("ready") and p.get("serving"):
+                track.setdefault("served", {}).setdefault(comp, name)
+    if now - track.get("why_probed_at", 0.0) < ROW_POLL_S * 5:
+        return
+    track["why_probed_at"] = now
+    snapshot = _ir_snapshot(ctx["case_id"])
+    events = _isvc_events_since(ctx["case_id"], ctx["trigger_ts"] or 0)
+    for comp in sorted(parked):
+        if comp in (track.get("why") or {}):
+            continue
+        status, said = _crash_new_why(snapshot, events, comp)
+        if status or said:
+            track.setdefault("why", {})[comp] = (status or said[0], now - ctx["trigger_ts"])
+            print(f"    sibling {comp}: status says why its roll stopped: {(status or said[0])[:120]}")
+
+
+def _sibling_park_checks(ctx, parked, track, verdict, notes, checks):
+    """A bumped sibling outside the canary unit whose revision cannot start
+    parks on its own: no pod of that revision ever served, status said why,
+    and it ends whole on its running revision; the ladder beside it is
+    judged without it."""
+    def ok(cond, msg_ok, msg_bad):
+        nonlocal verdict
+        if cond:
+            checks.append(f"  ✓ {msg_ok}")
+        else:
+            verdict = "FAIL"; notes.append(msg_bad); checks.append(f"  ✗ {msg_bad}")
+
+    for comp in sorted(parked):
+        served = (track.get("served") or {}).get(comp)
+        ok(not served, f"sibling {comp}: no pod of its unstartable revision ever served",
+           f"sibling {comp}: {served} served on the revision that cannot start")
+        why = (track.get("why") or {}).get(comp)
+        ok(why is not None,
+           f"sibling {comp}: status said why its roll stopped {why[1]:.0f}s after the push: {why[0][:120]}" if why else "",
+           f"sibling {comp}: nothing said why its roll stopped (no rolloutHold, no Failed row, no RetryHeld or "
+           f"InstanceFailed event names it)")
+        rolled, kept = _inst_rev_split(ctx, comp)
+        ok(kept == ctx["N"][comp],
+           f"sibling {comp}: whole on its running revision at the end ({kept}/{ctx['N'][comp]}; "
+           f"{rolled} attempt(s) on the unstartable one)",
+           f"sibling {comp}: {kept}/{ctx['N'][comp]} on its running revision at the end ({rolled} on the unstartable one)")
+        checks.append(f"  ⓘ sibling {comp}: left parked by design; the ladder beside it was judged on the unit alone")
+    return verdict
 
 
 # ── A break on the revision the push brings (fault=<kind>:new, canary) ──────
@@ -5636,7 +6250,7 @@ def _fault_tick(ctx):
     f = ctx.get("fault")
     if not f or f["kind"] not in HOOK_FAULTS:
         return
-    if ctx.get("trigger_ts") is None or _fault_fired_by_handler(f) or _fault_before_push(f):
+    if ctx.get("trigger_ts") is None or _fault_fired_by_handler(f) or _fault_before_push(f) or _metric_on_new(f):
         return
     if _fault_on_new(f) and not _fault_once(f):
         return   # armed by the push itself; a one-shot kill waits here for the pushed revision's first pod
@@ -9579,7 +10193,7 @@ HDR_VALIDATORS = {
     "analysis": lambda v: str(v).lower() in {"pass", "breach", "inconclusive"},
     "health": lambda v: str(v).lower() in {"pass", "breach", "inconclusive"},
     "errorrate": _numlike,
-    "oninconclusive": lambda v: str(v).lower() in {"hold", "rollback"},
+    "oninconclusive": lambda v: str(v).lower() in {"hold", "rollback", "rollbackonstall"},
     "failurelimit": _int_ge0,
     # minfails= is the least failing samples a PROMOTED analysis canary must have
     # accrued (the peak of status.canary.analysisFailedChecks) — the transient
@@ -9682,9 +10296,11 @@ HDR_VALIDATORS = {
     # up. victims= is how many Instances a break hits at once (default 1;
     # the storm shape under a canary). exitafter= is how many seconds a
     # pushed runner serves before it exits (fault=crashloop:new form=load).
-    # form= is also how a readiness:old victim's switch ends: kept or lifted,
-    # and how a competing writer writes: once, or until the operation completes.
-    "form": lambda v: v in CRASHLOOP_FORMS | READINESS_FORMS | CONFLICT_FORMS,
+    # form= is also how a readiness:old victim's switch ends: kept or lifted;
+    # how a competing writer writes: once, or until the operation completes;
+    # how long a metric breach lasts (persist, recover); and what an unusable
+    # analysis source answers with (unreachable, garbage).
+    "form": lambda v: v in CRASHLOOP_FORMS | READINESS_FORMS | CONFLICT_FORMS | METRIC_FORMS | SOURCE_FORMS,
     # target= is what a competing writer patches: the ISVC, or every
     # InferenceReplica of the case.
     "target": lambda v: v in CONFLICT_TARGETS,
@@ -9748,9 +10364,13 @@ HDR_VALIDATORS = {
     # ctrlrestart:<phase> (phase ∈ FAULT_PHASES, or idle: before the bump),
     # cordon:<target ∈ FAULT_TARGETS>, crashloop|imagepull:old (with form=),
     # and under a canary crashloop|imagepull:canary-<state> (the stable side
-    # breaks in that state), :idle (broken before the push) or :new (the
-    # push itself brings the broken revision); webhook|conflict:idle|settling
-    # (a window fault on the settled service or as the operation lands).
+    # breaks in that state, or the canary side with victim=canary), :idle
+    # (broken before the push) or :new (the push itself brings the broken
+    # revision); webhook|conflict:idle|settling (a window fault on the settled
+    # service or as the operation lands); metric:new|idle|canary-<state> (the
+    # health metric breaches on the pushed revision, on the stable side before
+    # the push, or on the side victim= names at a hook) and
+    # source:idle|canary-<state> (the analysis source becomes unusable).
     "fault": _fault_ok,
     # Fault-case contract knobs. blocked=1 (rollout/scaledown): the fault is
     # expected to HOLD the operation — assert parked-no-churn + capacity floor
@@ -9990,12 +10610,48 @@ def validate_case_file(path):
                                                      str(fields.get("prearm", ""))):
         errs.append(f"{path}:1: timeout= is the value verb=timeout-set (or prearm=timeout-set) writes")
     hook_verbs = {str(fields.get(k, "")) for k in ("verb", "verb2")} - {""}
-    if "victim" in fields and not at_move and not (str(fields.get("fault", "")).startswith(("podkill:", "evict:")) or "podkill" in hook_verbs):
+    sided_fault = fault_kind == METRIC_FAULT or (fault_kind in BREAK_FAULTS and _canary_hook_ok(fault_param))
+    if "victim" in fields and not at_move and not sided_fault and not (
+            str(fields.get("fault", "")).startswith(("podkill:", "evict:")) or "podkill" in hook_verbs):
         errs.append(f"{path}:1: victim= aims a podkill or an eviction (needs fault=podkill:<hook>, fault=evict:<hook> or verb=podkill), "
-                    f"or a move-moment fault (needs mode=migrate at=<moment>)")
-    if "victimcomp" in fields and fault_kind not in ("podkill", "evict") and fault_kind not in BREAK_FAULTS and "podkill" not in hook_verbs and fault_kind != READINESS_FAULT:
-        errs.append(f"{path}:1: victimcomp= aims a podkill, an eviction or a break at one Component "
-                    f"(needs fault=podkill:<phase>, fault=evict:<phase>, verb=podkill or fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM})")
+                    f"a move-moment fault (needs mode=migrate at=<moment>), or names the side a metric breach or a break "
+                    f"at a canary hook hits (victim=stable|canary)")
+    if "victimcomp" in fields and fault_kind not in ("podkill", "evict", METRIC_FAULT) and fault_kind not in BREAK_FAULTS \
+            and "podkill" not in hook_verbs and fault_kind != READINESS_FAULT:
+        errs.append(f"{path}:1: victimcomp= aims a podkill, an eviction, a break or a metric breach at one Component "
+                    f"(needs fault=podkill:<phase>, fault=evict:<phase>, verb=podkill, fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM} "
+                    f"or fault={METRIC_FAULT}:<hook>)")
+    if fault_kind in GATE_FAULTS:
+        if mode != "canary" or "analysis" not in fields:
+            errs.append(f"{path}:1: fault={fields.get('fault')} breaks what an analysis gate reads "
+                        f"(needs mode=canary and analysis=<expected outcome>)")
+        if fault_kind == METRIC_FAULT:
+            if str(fields.get("form", "")) not in METRIC_FORMS:
+                errs.append(f"{path}:1: fault={fields.get('fault')} needs form={'|'.join(sorted(METRIC_FORMS))} "
+                            f"(the breach is kept, or lifted after its window)")
+            if _canary_hook_ok(fault_param) and str(fields.get("victim", "")) not in METRIC_SIDES:
+                errs.append(f"{path}:1: fault={fields.get('fault')} needs victim={'|'.join(sorted(METRIC_SIDES))} "
+                            f"(the side whose metrics breach)")
+            if not _canary_hook_ok(fault_param) and "victim" in fields:
+                errs.append(f"{path}:1: fault={fields.get('fault')} names its side itself ({CRASHLOOP_NEW}: the pushed revision; "
+                            f"{IDLE_FAULT_PHASE}: the stable side) — victim= does not apply")
+            if "victims" in fields:
+                errs.append(f"{path}:1: victims= does not apply to fault={fields.get('fault')}: every pod of the side breaches")
+            if "lift" in fields:
+                errs.append(f"{path}:1: fault={fields.get('fault')} says how long it lasts with form=; lift= does not apply")
+        else:
+            if str(fields.get("form", "")) not in SOURCE_FORMS:
+                errs.append(f"{path}:1: fault={fields.get('fault')} needs form={'|'.join(sorted(SOURCE_FORMS))} "
+                            f"(a name that resolves nowhere, or a server that is not Prometheus)")
+            if str(fields.get("lift", "")) not in SOURCE_LIFTS:
+                errs.append(f"{path}:1: fault={fields.get('fault')} needs lift={'|'.join(sorted(SOURCE_LIFTS))} "
+                            f"(the source restored once the hold has settled, or kept to the end)")
+            if any(k in fields for k in ("victim", "victimcomp", "victims")):
+                errs.append(f"{path}:1: fault={fields.get('fault')} breaks the whole gate's source; victim knobs do not apply")
+    heals_itself = fault_kind in BREAK_FAULTS and str(fields.get("lift", "")) == HEAL_LIFT
+    if heals_itself and not (mode == "canary" and (fault_param == IDLE_FAULT_PHASE or _canary_hook_ok(fault_param))):
+        errs.append(f"{path}:1: lift={HEAL_LIFT} on fault={fields.get('fault')} heals the harness's own break under a canary "
+                    f"(mode=canary, fault={fault_kind}:canary-<state> or fault={fault_kind}:{IDLE_FAULT_PHASE})")
     via = str(fields.get("via", ""))
     if via and mode != "kill":
         errs.append(f"{path}:1: via={via} says how mode=kill removes the pod (mode=kill)")
@@ -10018,7 +10674,8 @@ def validate_case_file(path):
     if pending and lift not in PENDING_LIFTS:
         errs.append(f"{path}:1: fault={fields.get('fault')} holds a pod the cluster cannot place or admit and needs "
                     f"lift={'|'.join(sorted(PENDING_LIFTS))} (when the cause is removed)")
-    if lift in PENDING_LIFTS and fault_kind not in LIFT_FAULTS and not (pending or via == "preempt") and not _tight_cell(fields):
+    if lift in PENDING_LIFTS and fault_kind not in LIFT_FAULTS | GATE_FAULTS and not (pending or via == "preempt") \
+            and not _tight_cell(fields) and not heals_itself:
         errs.append(f"{path}:1: lift={lift} is when a pending cause is removed (fault={'|'.join(sorted(PENDING_FAULTS))} "
                     f"on a rollout or kill case, or via=preempt)")
     if (pending or via == "preempt") and fields.get("blocked"):
@@ -10079,9 +10736,11 @@ def validate_case_file(path):
             errs.append(f"{path}:1: target= names the object a competing writer patches (needs fault={CONFLICT_FAULT}:<phase>)")
         if lift == "after-window":
             errs.append(f"{path}:1: lift=after-window keeps the webhook unreachable across the hold window (needs fault={WEBHOOK_FAULT}:<phase>)")
-    if fault_kind in BREAK_FAULTS | {READINESS_FAULT} and "victimcomp" in fields and str(fields["victimcomp"]) not in BREAK_VICTIM_COMPS:
+    victim_comps = CANARY_BREAK_VICTIM_COMPS if mode == "canary" else BREAK_VICTIM_COMPS
+    if fault_kind in BREAK_FAULTS | {READINESS_FAULT} and "victimcomp" in fields and str(fields["victimcomp"]) not in victim_comps:
         errs.append(f"{path}:1: victimcomp={fields['victimcomp']}: a break victim is a pod of "
-                    f"{' or '.join(sorted(BREAK_VICTIM_COMPS))} (the Components a roll targets)")
+                    f"{' or '.join(sorted(victim_comps))} (the Components a roll targets"
+                    f"{'' if mode == 'canary' else '; under a canary the router too, as a sibling'})")
     break_param = str(fields.get("fault", "")).partition(":")[2] if fault_kind in BREAK_FAULTS else ""
     crash_new = str(fields.get("fault", "")) == f"crashloop:{CRASHLOOP_NEW}"
     packed = str(fields.get("pool", "")) == POOL_PACKED
@@ -10095,9 +10754,10 @@ def validate_case_file(path):
                 errs.append(f"{path}:1: {k}= does not combine with pool={POOL_PACKED}")
     if "inv_on" in fields and "J" in str(fields["inv_on"]).split(",") and str(fields.get("expect", "")) == "relocated":
         errs.append(f"{path}:1: inv_on=J asserts no auto-recovery record, and expect=relocated expects one")
-    if "form" in fields and fault_kind not in BREAK_FAULTS and fault_kind not in (READINESS_FAULT, CONFLICT_FAULT):
+    if "form" in fields and fault_kind not in BREAK_FAULTS | GATE_FAULTS and fault_kind not in (READINESS_FAULT, CONFLICT_FAULT):
         errs.append(f"{path}:1: form= says how a break victim fails (needs fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM} "
-                    f"or fault={READINESS_FAULT}:old) or how a competing writer writes (fault={CONFLICT_FAULT}:<phase>)")
+                    f"or fault={READINESS_FAULT}:old), how a competing writer writes (fault={CONFLICT_FAULT}:<phase>), how "
+                    f"long a metric breach lasts (fault={METRIC_FAULT}) or what an unusable source answers (fault={SOURCE_FAULT})")
     if fault_kind == "crashloop" and str(fields.get("form", "")) not in CRASHLOOP_FORMS:
         errs.append(f"{path}:1: fault={fields.get('fault')} needs form=start|load")
     if crash_new and mode == "rollout":
@@ -10166,9 +10826,9 @@ def validate_case_file(path):
         if str(fields.get("expect", "roll")) != "roll" or "break" in fields:
             errs.append(f"{path}:1: fault={fields.get('fault')} under mode=runtimerev needs an edit that rolls "
                         f"(expect=roll, no break=)")
-    if fault_kind in BREAK_FAULTS | {READINESS_FAULT}:
+    if fault_kind in BREAK_FAULTS | {READINESS_FAULT, METRIC_FAULT}:
         victim_comp = str(fields.get("victimcomp") or BREAK_DEFAULT_COMP)
-        count_key = {"engine": "Ne", "decoder": "Nd"}.get(victim_comp, "Ne")
+        count_key = {"engine": "Ne", "decoder": "Nd", "router": "Nr"}.get(victim_comp, "Ne")
         if fields.get(count_key, 0) == 0:
             errs.append(f"{path}:1: fault={fields.get('fault')} breaks a {victim_comp} pod (needs {count_key}>0)")
     if fault_kind == READINESS_FAULT:
@@ -10353,13 +11013,14 @@ def validate_case_file(path):
         errs.append(f"{path}:1: expect=fail is the migrate-mode bounded-failure contract — needs mode=migrate + fault=")
     if lift == 1 and not (mode == "migrate" and str(fields.get("fault", "")).startswith("quota:")):
         errs.append(f"{path}:1: lift=1 requires mode=migrate + fault=quota:<n>")
-    if lift in TIGHT_LIFTS and not (pending or via == "preempt") and fault_kind not in WINDOW_FAULTS:
+    if lift in TIGHT_LIFTS and not (pending or via == "preempt") and fault_kind not in WINDOW_FAULTS | {SOURCE_FAULT}:
         if mode != "rollout" or fault_kind not in TIGHT_FAULTS or during:
             errs.append(f"{path}:1: lift={lift} lifts a capacity squeeze on a rollout (needs mode=rollout and "
                         f"fault=quota:<n> or fault=cordon:all, no during=)")
         if fields.get("blocked"):
             errs.append(f"{path}:1: lift={lift} judges the wait itself; blocked=1 does not combine with it")
-    if lift in LIFT_PHASES and fault_kind not in LIFT_FAULTS and not (pending or via == "preempt"):
+    if lift in LIFT_PHASES and fault_kind not in LIFT_FAULTS | GATE_FAULTS and not (pending or via == "preempt") \
+            and not heals_itself:
         errs.append(f"{path}:1: lift={lift} lifts a persistent fault's cause "
                     f"(needs fault=configkey:{CONFIGKEY_PARAM} or fault=node:{NODE_PARAM})")
     if fault_kind in LIFT_FAULTS:
@@ -15536,7 +16197,14 @@ def _canary(case_id, yaml_file, desc, hdr):
     # intent, but a case can decouple them (e.g. multi-metric AND: the pods are
     # healthy yet a STRICT second threshold breaches, so health=pass but the
     # expected terminal is RolledBack).
-    health = str(hdr.get("health") or analysis_mode or "").lower()
+    fault = ctx.get("fault")
+    gate_fault = fault if fault and fault.get("kind") in GATE_FAULTS else None
+    # The pushed revision's own metrics breach (fault=metric:new): the bump
+    # carries the breach, which decays under form=recover.
+    if _metric_on_new(fault):
+        health = str(hdr.get("health") or "breach").lower()
+    else:
+        health = str(hdr.get("health") or analysis_mode or "").lower()
     analysis_extra = {
         "pass":         {"perm.test/error-rate": "0.01", "perm.test/emit": "true"},
         "breach":       {"perm.test/error-rate": "0.9", "perm.test/emit": "true"},
@@ -15547,6 +16215,8 @@ def _canary(case_id, yaml_file, desc, hdr):
     # pass/breach default.
     if hdr.get("errorrate") is not None and analysis_extra is not None:
         analysis_extra = {**analysis_extra, "perm.test/error-rate": str(hdr.get("errorrate"))}
+    if _metric_on_new(fault) and fault.get("form") == "recover" and analysis_extra is not None:
+        analysis_extra = {**analysis_extra, "perm.test/decay": str(METRIC_DECAY_S)}
     # Canary-state hook knobs (see HDR_VALIDATORS): a verb or a fault keyed on
     # a grid state, a partial-group bump, an unstartable image for the bumped
     # revision, and an expected terminal that overrides the derivation below.
@@ -15608,20 +16278,34 @@ def _canary(case_id, yaml_file, desc, hdr):
     new_break = _fault_on_new(fault)
     newbreak = {"bite": None, "park": None, "ready_seen": set(), "uids": {}, "peak_crash": 0,
                 "phases_before_exit": set()}
+    gate = _gate_track_new()
+    gate_threshold = _gate_threshold(cinfo.get("steps") or [])
+    sibpark = {}
+    if gate_fault and gate_fault["kind"] == SOURCE_FAULT:
+        # The source fault edits the driven group's analysis source; the
+        # address it points at is built before anything fires.
+        gate_fault["source_members"] = sorted(set(cinfo.get("members") or []) & ctx["configured"])
+        address, err = _source_address(gate_fault.get("form"), case_id)
+        if err:
+            _stop_watcher(ctx)
+            return _write_fail(case_id, desc, hdr, "INFRA-FAIL", f"{SOURCE_FAULT}: {err}")
+        gate_fault["source_address"] = address
     if _fault_before_push(fault):
-        # The stable side breaks on the idle service, and the push lands only
-        # once the break has visibly bitten.
+        # The stable side breaks, its metrics breach or the gate's source goes
+        # on the idle service; the push lands only once a break has visibly
+        # bitten (a breach and a lost source show once the gate samples).
         _fault_fire(fault, ctx["pod_state"], ctx["pods_per_inst"], ctx["old_hashes"])
         if fault["infra_fail"]:
             _stop_watcher(ctx)
             return _write_fail(case_id, desc, hdr, "INFRA-FAIL", fault["infra_fail"])
-        bitten = _wait_break_bitten(ctx, fault, BREAK_BITE_S)
-        if bitten is None:
-            _stop_watcher(ctx)
-            return _write_fail(case_id, desc, hdr, "INFRA-FAIL",
-                               f"{fault['kind']}: the break on the idle service did not bite within {BREAK_BITE_S}s")
-        fault["notes"].append(f"the break had bitten {bitten:.0f}s after it landed; the push follows")
-        print(f"    {fault['notes'][-1]}")
+        if fault["kind"] in BREAK_FAULTS:
+            bitten = _wait_break_bitten(ctx, fault, BREAK_BITE_S)
+            if bitten is None:
+                _stop_watcher(ctx)
+                return _write_fail(case_id, desc, hdr, "INFRA-FAIL",
+                                   f"{fault['kind']}: the break on the idle service did not bite within {BREAK_BITE_S}s")
+            fault["notes"].append(f"the break had bitten {bitten:.0f}s after it landed; the push follows")
+            print(f"    {fault['notes'][-1]}")
     # A plan edit left on the idle service is the plan the next run pins.
     nsteps = (len(cinfo.get("steps") or []) or 2) + (1 if prearm == "planedit" else 0)
     # Bump EVERY configured member of the canary group, not just the primary — a
@@ -15632,13 +16316,20 @@ def _canary(case_id, yaml_file, desc, hdr):
     group = (set(cinfo.get("members") or ctx["info"].get("members") or []) & ctx["configured"]) or {primary}
     if bump_members:
         # A partial bump: only the named members get the new revision, so the
-        # unit's target changes while the primary's own revision may not.
-        group = (bump_members & group) or group
+        # unit's target changes while the primary's own revision may not. A
+        # member outside the unit (a router beside an engine ladder) rolls on
+        # its own beside it.
+        group = (bump_members & ctx["configured"]) or group
     if proto_target is not None:
         # The protocol rides every engine and decoder revision: the patch
         # alone re-mints both, whatever the group lists.
         group = {"engine", "decoder"} & ctx["configured"]
     ctx["bumped"] = group
+    # A bumped member outside the canary unit whose revision cannot start
+    # (imgcomp= names it) parks on its own; the ladder is judged without it.
+    unit_members = set(cinfo.get("members") or []) & ctx["configured"]
+    parked_siblings = {c for c in (image_comps or set()) if c in group and c not in unit_members} if bad_image else set()
+    ctx["parked_siblings"] = parked_siblings
     # Components of every OTHER canary unit. Nothing bumps them, so they must
     # stay whole on their stable revision with no run of their own — the
     # real-cluster proof that one unit's ladder does not drive another's.
@@ -15684,6 +16375,12 @@ def _canary(case_id, yaml_file, desc, hdr):
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "rev bump patch failed: " + str(ctx.get("trigger_error") or ""))
     if new_break:
         _new_break_armed(fault, victim_comp, bad_image, armed_env, ctx["trigger_ts"])
+    if _metric_on_new(fault):
+        fault["fired"], fault["fired_ts"] = True, ctx["trigger_ts"]
+        fault["notes"].append(f"fault armed: {METRIC_FAULT}:{CRASHLOOP_NEW} form={fault.get('form')} — the pushed revision "
+                              f"breaches from its first sample"
+                              + (f" and recovers {METRIC_DECAY_S}s after it serves" if fault.get("form") == "recover" else ""))
+        print(f"    ⚡ {fault['notes'][-1]}")
     if {"engine", "decoder"} <= group:
         # Invariant E watches the canary cohort's engine:decoder ratio.
         ctx["inv"]["ratio"] = {"N": {c: N[c] for c in ("engine", "decoder")}, "tol": ratio_tol,
@@ -15847,10 +16544,15 @@ def _canary(case_id, yaml_file, desc, hdr):
         elif hook_fired_ts is not None and phase:
             after_hook_phases.add(phase)
         if fault and fault.get("kind") in BREAK_FAULTS and fault.get("fired") and not new_break \
-                and "floor_allowance" not in ctx:
+                and fault.get("victim") != "canary" and "floor_allowance" not in ctx:
             # The broken Instances are the fault's cost; the healthy ones must
             # hold the floor that remains.
             ctx["floor_allowance"] = {fault["crash_comp"]: len(_break_victims(fault))}
+        _break_heal_tick(ctx, now)
+        if gate_fault:
+            _gate_track(ctx, gate_fault, gate, can, step, now, failed_checks_peak, gate_threshold)
+        if parked_siblings:
+            _sibling_park_track(ctx, parked_siblings, sibpark, now)
         # Independent of the hook bookkeeping above: target_changed is true for
         # one sample only, and every sample after the verb lands in that chain.
         if verb_fired and verb in REBUMP_VERBS and target_changed and previous_canary_hash:
@@ -15961,9 +16663,12 @@ def _canary(case_id, yaml_file, desc, hdr):
         # old-pod drain finishes asynchronously a few seconds later. Wait for the
         # pods to actually settle (full roll, or 0 canary for a rollback) so we
         # don't snapshot mid-drain.
-        new_by_comp = {c: _inst_rev_split(ctx, c)[0] for c in group}
+        new_by_comp = {c: _inst_rev_split(ctx, c)[0] for c in group if c not in parked_siblings}
         pods_settled = _canary_pods_settled(expect, phase, new_by_comp, want,
                                             pre_final is not None and bool(stranded()))
+        if gate_fault and gate_fault["kind"] == SOURCE_FAULT and gate_fault.get("lift") == HEAL_LIFT \
+                and gate_fault.get("fired") and gate["lifted_at"] is None:
+            pods_settled = False   # the ladder is judged once the source is back
         if proto2_target is not None and not p2_fired:
             pods_settled = False   # the re-target must land before convergence counts
         if (_awaiting_pause_lift(verb, verb_fired, verb_lifted) or not prearm_lifted
@@ -16084,6 +16789,12 @@ def _canary(case_id, yaml_file, desc, hdr):
              f"second verb {verb2} never fired: the canary never reached {during2} after {verb} (phases={sorted(phases)})")
     if new_break:
         verdict = _new_break_checks(ctx, ctx["fault"], newbreak, phases, verdict, notes, checks)
+    verdict = _hook_fault_fired_checks(ctx.get("fault"), phases, verdict, notes, checks)
+    if gate_fault:
+        verdict = _gate_fault_checks(ctx, gate_fault, gate, on_inconclusive, failed_checks_peak, rejected, phases,
+                                     verdict, notes, checks)
+    if parked_siblings:
+        verdict = _sibling_park_checks(ctx, parked_siblings, sibpark, verdict, notes, checks)
     if policy == "manual" and _break_at_hook(ctx.get("fault")):
         checks.append(f"  ⓘ the manual gate was held {verbhold}s after the break before the harness promoted")
     if "planedit" in (verb, verb2) or prearm == "planedit":
@@ -16408,6 +17119,8 @@ def _canary(case_id, yaml_file, desc, hdr):
          f"canary revision carries 100% traffic at convergence (per-step: {weights})",
          f"canary revision traffic at convergence is {canary_pct}% (want 100); per-step: {weights}")
     for c in sorted(ctx.get("bumped") or {primary}):
+        if c in parked_siblings:
+            continue   # judged by the sibling-park checks above
         rolled, _ = _inst_rev_split(ctx, c)
         good(rolled == want[c],
              f"{c} fully rolled to canary revision ({rolled}/{want[c]})",

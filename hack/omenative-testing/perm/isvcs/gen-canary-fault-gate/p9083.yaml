@@ -1,0 +1,58 @@
+# p9083: [gen] canary gate source garbage never Hold at mid engine-mn W1 N=2  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 fault=source:canary-serving@1 co=none topo=engine-mn canary=auto form=garbage analysis=pass failurelimit=1 terminal=Failed cell=canary/Serving[analysis]/sourceUnusable[garbage] lift=never health=pass oninconclusive=hold
+# reason: the analysis source points at a server that answers with something other than the Prometheus API while the second step's analysis gate samples on engine gang (2 Instances of 1 leader + 1 worker); the gate reports that it cannot read health, holds the ladder at its step and counts no breach; the source never returns, so past the stall timeout the ladder parks Failed at that step with reason AnalysisStalled while the stable revision keeps serving every Instance the canary has not replaced, and nothing rolls back
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9083 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-metrics-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            readyTimeout: "150s"
+            steps:
+              - capacity: "10%"
+                traffic: 10
+                analysis:
+                  interval: "20s"
+                  failureLimit: 1
+                  initialDelay: "20s"
+                  onInconclusive: Hold
+                  metrics:
+                    - name: error_rate
+                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}",revision_hash="{{.CanaryRevision}}"})'
+                      operator: LTE
+                      threshold: "0.05"
+              - capacity: "30%"
+                traffic: 30
+                analysis:
+                  interval: "20s"
+                  failureLimit: 1
+                  initialDelay: "20s"
+                  onInconclusive: Hold
+                  metrics:
+                    - name: error_rate
+                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}",revision_hash="{{.CanaryRevision}}"})'
+                      operator: LTE
+                      threshold: "0.05"
+              - capacity: "60%"
+                traffic: 60
+                analysis:
+                  interval: "20s"
+                  failureLimit: 1
+                  initialDelay: "20s"
+                  onInconclusive: Hold
+                  metrics:
+                    - name: error_rate
+                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}",revision_hash="{{.CanaryRevision}}"})'
+                      operator: LTE
+                      threshold: "0.05"
+              - { capacity: "100%", traffic: 100 }

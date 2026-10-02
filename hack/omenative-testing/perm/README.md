@@ -69,6 +69,11 @@ scale behavior. Targets whatever cluster your kubeconfig points at — override 
 > `ome-prometheus` enabled in the cluster (chart `prometheus.enabled`, now the
 > default) scraping `$OME_TEST_NS`, and the `canary-metrics` image (built from
 > `dockerfiles/canary-metrics.Dockerfile` by the pipeline) pullable by the cluster.
+> The gate-fault cases (`fault=metric`, `fault=source`) also reach a pod's
+> metrics server and the bundled Prometheus through the apiserver proxy
+> (`kubectl get --raw /api/v1/namespaces/<ns>/pods/<pod>:8080/proxy/...` and
+> `.../services/<prometheus>:<port>/proxy/api/v1/query`), so the kubeconfig
+> needs `pods/proxy` and `services/proxy` on top of the usual verbs.
 
 The expansion roadmap (P1–P4, the feature taxonomy, deferred autoscaling) lives
 in [`../DESIGN.md`](../DESIGN.md). This file is the how-to-run reference.
@@ -89,6 +94,7 @@ perm/
 │   ├── csr.yaml            — single-pod ClusterServingRuntime (nginx + a startup sleep)
 │   ├── csr-multinode.yaml  — gang ClusterServingRuntime (leader + N workers, LeaderWorkerSet)
 │   ├── csr-metrics.yaml    — metrics-emitting ClusterServingRuntime (canary-analysis cases; Downward-API health)
+│   ├── csr-metrics-multinode.yaml — the same as a gang (leader + N workers, every pod emitting the gate metric)
 │   ├── cbm.yaml            — ClusterBaseModel (noop format, PVC-backed)
 │   └── pvc-and-seed.yaml   — 1Mi PVC + seed Job (writes config.json so the CBM validates)
 ├── isvcs/                 — generated case YAMLs (committed; `topo=` in each header)
@@ -97,6 +103,7 @@ perm/
 │   ├── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/ gen-crashloop-idle/ gen-crashloop-sibling/
 │   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/ gen-rollback/ gen-crashloop-new/ gen-crashloop-group/ gen-pause-repair/ gen-ops-held/ gen-runtime-edit-repair/ gen-migrate-bump/  — generated hot core (see isvcs/MANIFEST.md)
 │   ├── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary
+│   ├── gen-canary-fault-gate/  — generated: what a step's gates read breaks (a metric breach on either side, an unusable analysis source, a broken sibling)
 │   ├── gen-size/ gen-router-gang/  — generated small fleets (one and two Instances per Component) and the engine gang behind a router
 │   ├── gen-readiness/ gen-gang-member/ gen-tight/ gen-evict/ gen-preempt/ gen-pending/  — generated fault families (see isvcs/MANIFEST.md)
 │   ├── gen-packed-pool/   — generated: every node packed, a bad push then the fix, and the running revision broken then the fix
@@ -438,7 +445,20 @@ such as the recovery half of a podkill, carries both ids.
   reads the victims as above. Under `canary=manual` the harness holds its
   promote `verbhold=` seconds (default 45) after a break fired at a hook, so
   the broken stable side is observed while the gate holds, as an operator
-  would see it before promoting.
+  would see it before promoting. Under a canary `victimcomp=router` is
+  admitted too: the router in front of an engine ladder is a sibling the
+  ladder never rolls, so the repair owns its break (rebuilt, with a
+  `RestartTriggered` naming it). **`victim=canary`** aims a break at a Ready
+  pod of the canary revision instead (a canary-side sibling that breaks
+  after it served; a repair of it is reported, never failed, since it is on
+  the roll target). **`lift=after-settle`** on a break makes it heal itself:
+  `LIFT_SETTLE_S` after it has bitten the harness takes its own break away
+  (a `form=load` killer stops; a pod pointed at a break image is pointed
+  back at the image it ran, when a repair has not replaced it first), and
+  the verdict requires the Instance to be Ready and serving again on its
+  revision, rebuilt or healed in place (both are reported). A gate fault, a
+  self-healing break or a canary-side break whose hook the ladder never
+  reaches fails the case; the older hook faults keep reporting a missed hook.
   Every re-target verb (`rebump`, `rebump-fix`, `rtedit`) additionally
   asserts, at a live hook, that the run open when it fired closed as
   `Superseded`, that no Instance is left on a pre-re-target revision at
@@ -450,7 +470,14 @@ such as the recovery half of a podkill, carries both ids.
   revision an image so the capacity gate never opens. Name the harness's
   unpullable image for that, `example.com/canary-test/missing:none`
   (`runtime_fixtures.UNPULLABLE_IMAGE`): it is the one case image the deploy
-  step never side-loads, so it fails to pull offline as well as online.
+  step never side-loads, so it fails to pull offline as well as online. A
+  member named that is outside the canary unit (`bump=engine,router` with
+  the group naming the engine alone) rolls on its own beside the ladder;
+  with `imgcomp=router` it is a **parked sibling**: the ladder is judged on
+  the unit alone, and the sibling must never serve a pod of its unstartable
+  revision, must say why its roll stopped (a `rolloutHold`, a Failed row, or
+  a `RetryHeld`/`InstanceFailed` event naming it) and must end whole on its
+  running revision; it is left parked, as its line two says.
 - **`fault=crashloop:new` with `form=start|load`, `fault=imagepull:new`** —
   the push itself brings a broken revision. The break is armed on the runner
   of one bumped member (`victimcomp=`, default engine) before the push lands,
@@ -567,8 +594,13 @@ selects the intent and the expected terminal:
 | inconclusive | Rollback | auto-rollback → RolledBack |
 
 The query is `max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})`
-— MAX picks the worst (canary) pod, since the bundled Prometheus emits no
-revision label. Analysis-validation reject cases live in `isvcs/reject/`
+— MAX picks the worst pod of the Component, stable and canary alike. The
+bundled Prometheus stamps each pod's revision hash as `revision_hash`, so a
+gate that must read the canary alone adds `revision_hash="{{.CanaryRevision}}"`
+(`gen_cases.CANARY_QUERY`; the gate-fault family below runs on it, which is
+what keeps a breach on the stable side out of the gate). The step's
+`onInconclusive` policy is mirrored by `oninconclusive=hold|rollback|rollbackonstall`.
+Analysis-validation reject cases live in `isvcs/reject/`
 (p324–p328). Run them like any case: `python3 batch.py --conc 4 p330-p343`.
 
 `health=breach` with `analysis=pass` is the transient shape: the canary pods
@@ -580,6 +612,68 @@ promotion alone would also pass a run whose sampler never saw the breach. Pick
 the step's `initialDelay`, `interval`, `failureLimit`, bake (`pause.duration`)
 and `decay` against the two clocks involved: the step's clock starts when its
 last canary pod turns Ready, and the bundled Prometheus scrapes every 15s.
+
+### What a step's gates read breaks (`fault=metric`, `fault=source`)
+
+`isvcs/gen-canary-fault-gate/` (`p9050`+, `generate_cases.py`) breaks the
+inputs of a step's gates while the ladder walks, on the ledger's six shape
+families as the engine unit's ladder (the router, where present, is outside
+the group), at three positions: before the push (`:idle`), the second step's
+gate (`canary-serving@1`) and the last gate before the cutover
+(`canary-serving@2`); gangs run the mid-ladder position alone. Every case
+states the operator's end state on line two.
+
+- **`fault=metric:new|idle|canary-<state>[@step]` with `form=persist|recover`
+  and, at a hook, `victim=stable|canary`** — the health metric breaches the
+  gate's threshold on one side. At a hook or at idle the harness sets the
+  metrics image's live override (`GET /-/perm/error-rate?value=0.9[&for=45]`
+  through the apiserver pod proxy) on every live pod of that side of
+  `victimcomp=` (default engine): `persist` keeps it until the pod goes,
+  `recover` lets it expire after `METRIC_BREACH_S` (45 s scaled), and the
+  verdict reads the pods' own answer to confirm the lift while they are
+  still there. `metric:new` is the push itself: the bump carries the breach
+  (`health=breach`), decaying `METRIC_DECAY_S` (60 s) after the pod serves
+  under `recover`. The breach must reach the gate's source: on the stable
+  side Prometheus must show it on that revision (asked through the service
+  proxy with the case's own query; never seen is `INFRA-FAIL`), on the canary
+  side the gate must count a failing sample. Then the rows: on the **stable
+  side** the gate reads the canary revision alone, so it must never count the
+  breach (`analysisFailedChecks` stays where it was), never roll the healthy
+  canary back, and the ladder reaches `Stable` (`nophase=RollingBack`); on the
+  **canary side** nothing may have failed before the breach landed, and the
+  case ends as its gate policy says: `analysis=breach health=pass` rolls back
+  at the first failing sample (analysis-initiated, the rejected revision
+  recorded), `analysis=pass health=pass minfails=1` with a `failurelimit`
+  above the samples a 45 s breach can produce rides it out and promotes.
+- **`fault=source:idle|canary-<state>[@step]` with `form=unreachable|garbage`
+  and `lift=after-settle|never`** — the analysis source becomes unusable:
+  the driven group's `canary.prometheus.serverAddress` is pointed at a name
+  that resolves nowhere (`<case>-no-such-source.<ns>.svc`) or at the bundled
+  Prometheus on a path that is not its API (the address the controller's
+  `canaryAnalysis` block names, plus `/-/healthy`: every query is answered
+  with something that is not a sample). The gate must report it in
+  `metricResults` (an unevaluated sample with a message), hold the ladder at
+  that step and count no breach. `lift=after-settle` restores the declared
+  source `LIFT_SETTLE_S` after the hold was observed (or once the gate has
+  had `SOURCE_BITE_S` to report and did not, so the case still ends) and the
+  ladder must resume to `Stable`; `lift=never` keeps it, and the step's
+  `onInconclusive` decides the end: `Hold` parks `Failed` at that step with
+  reason `AnalysisStalled` past the stall timeout (the group's `readyTimeout`,
+  150 s in the family, with the stable revision still serving),
+  `RollbackOnStall` rolls back instead (analysis-initiated). The source is
+  restored by the end-of-case cleanup as well.
+- **The sibling rows** reuse the break grammar on the router of an engine
+  ladder and the decoder of a prefill/decode unit (admission makes engine and
+  decoder one unit, so the ladder owns the decoder's running-side break and
+  lands the fix on it; the router is never rolled, so the repair owns its
+  break): for good (`form=start` and a pull failure under `None`, `form=load`
+  under `RecreateInstanceOnPodRestart`), once (`lift=after-settle`: one kill,
+  or the image put back), on the new side as the fault-new breaks of the
+  decoder under both exits, as the router pushed beside the ladder onto an
+  unpullable image (the parked sibling above), and as one kill of a pod of
+  the sibling's new revision (`victim=canary`). The sibling rows run the
+  plain fixture runtime and a timed ladder: a break needs a shell to kill or
+  an image to swap, and the analysis gate changes nothing about a sibling.
 
 ### Scale & hung-Prometheus (`perf/`)
 
@@ -1947,7 +2041,11 @@ Four generators write into `isvcs/`; re-run one after editing it:
   broken Instance) and `isvcs/gen-canary-fault-new/` (the push brings a
   revision that crashes at start, crashes after Ready inside or past the first
   soak, or cannot be pulled; the ladder parks where it bites and a rollback or
-  a fix push lands), the small fleets and the engine gang behind a router
+  a fix push lands), what a step's gates read (`p9050`–`p9249`) →
+  `isvcs/gen-canary-fault-gate/` (the health metric breaches on the stable or
+  the canary side, once or for good; the analysis source becomes unreachable
+  or answers garbage and comes back or never does; a sibling Component breaks
+  once or for good on the running or the new side), the small fleets and the engine gang behind a router
   (`p8000`–`p8199`) → `isvcs/gen-size/` and `isvcs/gen-router-gang/`, the fault
   families (`p7000`–`p7399`) → `isvcs/gen-readiness/`, `isvcs/gen-gang-member/`,
   `isvcs/gen-tight/`, `isvcs/gen-evict/`, `isvcs/gen-preempt/` and `isvcs/gen-pending/`, the packed pool
@@ -2078,22 +2176,27 @@ The ledger's cell is (shape family, operation, fault row):
   when `imgcomp=` names the decoder or the router; `break=stuck` is
   `readiness never passes`; a runtime-rev `expect=recover` is `image pull`
   on the new revision; `analysis=breach` is `metric breach` (one-shot when
-  `health=breach` decays under `analysis=pass`); `analysis=inconclusive` is
-  `analysis source unusable`. The form is `one-shot` when the harness takes
-  the cause away again (`lift=`, `verb=quotalift`, a decaying breach) or
-  the controller heals it once (a pod delete, a controller restart), else
-  `persistent`; a pod delete, an eviction, a preemption or a controller
-  restart with `repeat=<n>` is `persistent` (it keeps happening until the
-  repetitions are spent). The side follows `victim=`, the break's `old` victim, and
-  run.py's component-blind podkill rule (the newest new-revision pod dies
-  mid-rotation under a replacement-first strategy, a settled pod otherwise).
+  `health=breach` decays under `analysis=pass`), as is `fault=metric:*` (the
+  side from `:new`, `:idle` or `victim=`, one-shot under `form=recover`);
+  `analysis=inconclusive` and `fault=source:*` are `analysis source unusable`
+  (one-shot under `lift=after-settle`). The form is `one-shot` when the
+  harness takes the cause away again (`lift=`, `verb=quotalift`, a decaying
+  or expiring breach, a break it heals) or the controller heals it once (a
+  pod delete, a controller restart), else `persistent`; a pod delete, an
+  eviction, a preemption or a controller restart with `repeat=<n>` is
+  `persistent` (it keeps happening until the repetitions are spent). The
+  side follows `victim=` (`canary` is the new side for a break too), the
+  break's `old` victim, and run.py's component-blind podkill rule (the newest
+  new-revision pod dies mid-rotation under a replacement-first strategy, a
+  settled pod otherwise).
   A case with two faults counts in both rows. A fault at a moment of a move
   (`mode=migrate at=`) sits on the `migrating` timing, and `victim=sibling`
   there puts it on the decoder as a sibling break.
 
 Cells the product does not need carry a written reason in `EXCLUDED_CELLS`
 (a steady state with no fault asserts nothing; a single-pod Instance has no
-gang member to lose; on a gang a hand-deleted pod is a lost member). The
+gang member to lose; on a gang a hand-deleted pod is a lost member; an
+engine-only service has no sibling Component to break). The
 report lists the empty cells biggest holes first (the fault rows,
 operations and shape families with no case anywhere, then counts per axis
 value, then every hole by name), crosses the operations and faults with the

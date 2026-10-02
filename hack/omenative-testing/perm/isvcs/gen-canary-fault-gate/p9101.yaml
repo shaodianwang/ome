@@ -1,0 +1,61 @@
+# p9101: [gen] canary gate source unreachable after-settle RollbackOnStall at mid engine router N=8  mode=canary Ne=8 Nd=0 Nr=2 ceil_e=9 ceil_d=0 ceil_r=2 fault=source:canary-serving@1 co=none topo=engine canary=auto form=unreachable analysis=pass failurelimit=1 nophase=RollingBack cell=canary/Serving[analysis]/sourceUnusable[unreachable] lift=after-settle health=pass oninconclusive=rollbackonstall
+# reason: the analysis source points at a name that resolves nowhere while the second step's analysis gate samples on engine+router single (8 Instances); the gate reports that it cannot read health, holds the ladder at its step and counts no breach; the source is restored 20s after the hold was observed and the ladder resumes: every Instance ends on the canary revision serving (a blip shorter than the stall timeout never rolls back)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9101 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-metrics, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            readyTimeout: "240s"
+            steps:
+              - capacity: "10%"
+                traffic: 10
+                analysis:
+                  interval: "20s"
+                  failureLimit: 1
+                  initialDelay: "20s"
+                  onInconclusive: RollbackOnStall
+                  metrics:
+                    - name: error_rate
+                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}",revision_hash="{{.CanaryRevision}}"})'
+                      operator: LTE
+                      threshold: "0.05"
+              - capacity: "30%"
+                traffic: 30
+                analysis:
+                  interval: "20s"
+                  failureLimit: 1
+                  initialDelay: "20s"
+                  onInconclusive: RollbackOnStall
+                  metrics:
+                    - name: error_rate
+                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}",revision_hash="{{.CanaryRevision}}"})'
+                      operator: LTE
+                      threshold: "0.05"
+              - capacity: "60%"
+                traffic: 60
+                analysis:
+                  interval: "20s"
+                  failureLimit: 1
+                  initialDelay: "20s"
+                  onInconclusive: RollbackOnStall
+                  metrics:
+                    - name: error_rate
+                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}",revision_hash="{{.CanaryRevision}}"})'
+                      operator: LTE
+                      threshold: "0.05"
+              - { capacity: "100%", traffic: 100 }

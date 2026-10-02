@@ -30,6 +30,11 @@ def engine(n=2, w=0, life=None):
     return [gen_cases.comp("engine", n, w, life if life is not None else gen_cases.lifecycle())]
 
 
+def engine_router(n=2, w=0, nr=2):
+    return [gen_cases.comp("engine", n, w, gen_cases.lifecycle()),
+            gen_cases.comp("router", nr, 0, gen_cases.lifecycle())]
+
+
 def pd(n=2, w=0, nr=2, life=None):
     return [gen_cases.comp("engine", n, w, life if life is not None else gen_cases.lifecycle()),
             gen_cases.comp("decoder", n, w, gen_cases.lifecycle()),
@@ -360,6 +365,42 @@ class FaultTest(unittest.TestCase):
         self.assertEqual([("analysis source unusable", "persistent", "-", "prometheus")],
                          self.fault(mode="canary", canary="auto", analysis="inconclusive", oninconclusive="hold", topo="engine"))
 
+    def test_gate_faults_name_their_rows_sides_and_forms(self):
+        canary = dict(mode="canary", canary="auto", analysis="pass", health="pass", failurelimit=1, topo="engine")
+        self.assertEqual([("metric breach", "persistent", "running", "engine")],
+                         self.fault(fault="metric:idle", form="persist", **canary))
+        self.assertEqual([("metric breach", "one-shot", "running", "engine")],
+                         self.fault(fault="metric:canary-serving@1", form="recover", victim="stable", **canary))
+        self.assertEqual([("metric breach", "persistent", "new", "engine")],
+                         self.fault(fault="metric:canary-serving@2", form="persist", victim="canary",
+                                    **dict(canary, analysis="breach")))
+        self.assertEqual([("metric breach", "one-shot", "new", "engine")],
+                         self.fault(fault="metric:new", form="recover", minfails=1, **dict(canary, failurelimit=6)))
+        self.assertEqual([("metric breach", "persistent", "new", "engine")],
+                         self.fault(fault="metric:new", form="persist", **dict(canary, analysis="breach")),
+                         "the pushed revision's own breach counts once, under the fault, not again under analysis=")
+        self.assertEqual([("analysis source unusable", "one-shot", "-", "unreachable")],
+                         self.fault(fault="source:canary-serving@1", form="unreachable", lift="after-settle",
+                                    oninconclusive="hold", **canary))
+        self.assertEqual([("analysis source unusable", "persistent", "-", "garbage")],
+                         self.fault(fault="source:idle", form="garbage", lift="never", oninconclusive="rollbackonstall",
+                                    terminal="RolledBack", **canary))
+
+    def test_a_break_the_harness_heals_is_one_shot_and_a_canary_side_victim_is_the_new_side(self):
+        router = dict(mode="canary", canary="auto", comps=engine_router(), topo="engine", **counts(2, 0, 2))
+        self.assertEqual([("sibling broken", "one-shot", "running", "router")],
+                         self.fault(fault="crashloop:canary-serving@1", form="load", victimcomp="router", lift="after-settle", **router))
+        self.assertEqual([("sibling broken", "persistent", "running", "router")],
+                         self.fault(fault="imagepull:idle", victimcomp="router", **router))
+        self.assertEqual([("sibling broken", "one-shot", "new", "decoder")],
+                         self.fault(fault="crashloop:canary-serving@2", form="load", victim="canary", victimcomp="decoder",
+                                    lift="after-settle", mode="canary", canary="auto", comps=pd(), topo="pd", **counts(2, 2, 2)))
+        case = self.corpus.write(mode="canary", canary="auto", bump="engine,router", img="example.com/x:none",
+                                 imgcomp="router", terminal="Stable", comps=engine_router(), topo="engine", **counts(2, 0, 2))
+        self.assertEqual([("sibling broken", "persistent", "new", "router")], case.faults)
+        self.assertTrue(self.corpus.write(fault="metric:new", form="recover", mode="canary", canary="auto", analysis="pass",
+                                          failurelimit=6, minfails=1, topo="engine").fault_lifted)
+
     def test_runtime_recovery_guards_break_the_new_revision(self):
         self.assertEqual([("image pull", "persistent", "new", "runtime image")],
                          self.fault(mode="runtimerev", rt="rt-x", expect="recover", topo="engine"))
@@ -529,14 +570,27 @@ class LedgerTest(unittest.TestCase):
         self.corpus = Corpus()
         self.addCleanup(self.corpus.close)
 
+    def test_an_engine_only_service_has_no_sibling_cell(self):
+        removed = [(family, op, row) for family, op, row in
+                   [(f, "canary", ("sibling broken", "persistent", "running")) for f in coverage.SHAPE_FAMILIES]
+                   if coverage.excluded(family, op, row)]
+        self.assertEqual([("engine single", "canary", ("sibling broken", "persistent", "running")),
+                          ("engine gang", "canary", ("sibling broken", "persistent", "running"))], removed)
+        self.assertFalse(coverage.excluded("engine+router single", "canary", ("sibling broken", "one-shot", "new")))
+
     def test_removed_cells_are_not_counted_empty(self):
         product = coverage.product_cells()
         self.assertNotIn(("engine single", "steady state", coverage.NO_FAULT), product)
         self.assertNotIn(("engine single", "push", ("gang member lost", "one-shot", "-")), product)
         self.assertNotIn(("engine gang", "push", ("pod deleted by hand", "one-shot", "-")), product)
         self.assertIn(("engine gang", "push", ("gang member lost", "one-shot", "-")), product)
+        self.assertNotIn(("engine single", "canary", ("sibling broken", "one-shot", "new")), product)
+        self.assertIn(("engine+router gang", "canary", ("sibling broken", "one-shot", "new")), product)
         raw = len(coverage.SHAPE_FAMILIES) * len(coverage.OPERATIONS) * len(coverage.all_fault_rows())
-        self.assertEqual(raw - 6 - 72 - 72, len(product))
+        # the steady state with no fault, a lost gang member on single pods, a
+        # hand-deleted pod on gangs, and the four sibling rows on the two
+        # engine-only families
+        self.assertEqual(raw - 6 - 72 - 72 - 96, len(product))
 
     def test_a_case_fills_its_cell_and_the_rest_stay_empty(self):
         self.corpus.write(fault="podkill:rotating", topo="engine")

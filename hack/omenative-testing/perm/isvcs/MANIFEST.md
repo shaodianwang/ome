@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **3814**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -25,6 +25,7 @@ Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) 
 | gen-canary-podkill | 16 | p5290..p5305 |
 | gen-canary-fault-old | 188 | p6400..p6587 |
 | gen-canary-fault-new | 52 | p6600..p6651 |
+| gen-canary-fault-gate | 173 | p9050..p9222 |
 | gen-rollback | 126 | p5800..p5925 |
 | gen-crashloop-new | 72 | p5000..p5071 |
 | gen-crashloop-group | 72 | p5400..p5471 |
@@ -56,10 +57,10 @@ Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| engine | 951 |
-| engine-mn | 891 |
-| pd | 1106 |
-| pd-mn | 693 |
+| engine | 1026 |
+| engine-mn | 915 |
+| pd | 1163 |
+| pd-mn | 710 |
 
 ### By update strategy
 
@@ -69,7 +70,7 @@ Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) 
 | InPlaceIfPossible | 452 |
 | InPlaceOnly | 281 |
 | RecreatePod | 834 |
-| SurgeThenDrain | 1812 |
+| SurgeThenDrain | 1985 |
 
 ### By failure verb / phase
 
@@ -90,6 +91,22 @@ Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) 
 | cordon:after-hold | 8 |
 | cordon:never | 8 |
 | crashloop:load | 212 |
+| crashloop:load:decoder:new:once@last | 2 |
+| crashloop:load:decoder:new:once@mid | 3 |
+| crashloop:load:decoder:once@idle | 2 |
+| crashloop:load:decoder:once@last | 2 |
+| crashloop:load:decoder:once@mid | 4 |
+| crashloop:load:decoder@idle | 1 |
+| crashloop:load:decoder@last | 1 |
+| crashloop:load:decoder@mid | 2 |
+| crashloop:load:router:new:once@last | 2 |
+| crashloop:load:router:new:once@mid | 3 |
+| crashloop:load:router:once@idle | 2 |
+| crashloop:load:router:once@last | 2 |
+| crashloop:load:router:once@mid | 4 |
+| crashloop:load:router@idle | 1 |
+| crashloop:load:router@last | 1 |
+| crashloop:load:router@mid | 2 |
 | crashloop:load@canary | 16 |
 | crashloop:load@capacity | 16 |
 | crashloop:load@delete | 8 |
@@ -110,6 +127,9 @@ Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:new:crashAfterSoak | 16 |
 | crashloop:new:crashInSoak | 16 |
 | crashloop:new:crashStart | 8 |
+| crashloop:new:decoder:crashAfterSoak | 2 |
+| crashloop:new:decoder:crashInSoak | 2 |
+| crashloop:new:decoder:crashStart | 2 |
 | crashloop:new:load | 36 |
 | crashloop:new:start | 36 |
 | crashloop:start | 266 |
@@ -117,6 +137,12 @@ Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:start+env@held | 4 |
 | crashloop:start+env@recreate | 2 |
 | crashloop:start+image | 6 |
+| crashloop:start:decoder@idle | 1 |
+| crashloop:start:decoder@last | 1 |
+| crashloop:start:decoder@mid | 2 |
+| crashloop:start:router@idle | 1 |
+| crashloop:start:router@last | 1 |
+| crashloop:start:router@mid | 2 |
 | crashloop:start@canary | 16 |
 | crashloop:start@capacity | 16 |
 | crashloop:start@delete | 8 |
@@ -150,8 +176,22 @@ Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) 
 | evict:rotating | 12 |
 | evict:steady | 8 |
 | image | 6 |
+| imagepull:decoder:once@idle | 1 |
+| imagepull:decoder:once@last | 1 |
+| imagepull:decoder:once@mid | 2 |
+| imagepull:decoder@idle | 1 |
+| imagepull:decoder@last | 1 |
+| imagepull:decoder@mid | 2 |
 | imagepull:idle | 8 |
+| imagepull:new:decoder:imagePull | 4 |
 | imagepull:new:imagePull | 12 |
+| imagepull:new:router:parked | 3 |
+| imagepull:router:once@idle | 1 |
+| imagepull:router:once@last | 1 |
+| imagepull:router:once@mid | 2 |
+| imagepull:router@idle | 1 |
+| imagepull:router@last | 1 |
+| imagepull:router@mid | 2 |
 | imagepull:settling | 48 |
 | imagepull@analysis | 8 |
 | imagepull@canary | 16 |
@@ -170,6 +210,18 @@ Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) 
 | imagepull@traffic | 16 |
 | imagepull@up1 | 8 |
 | kill | 187 |
+| metric:canary:persist@last | 3 |
+| metric:canary:persist@mid | 6 |
+| metric:canary:persist@new | 3 |
+| metric:canary:recover@last | 3 |
+| metric:canary:recover@mid | 6 |
+| metric:canary:recover@new | 3 |
+| metric:stable:persist@idle | 3 |
+| metric:stable:persist@last | 3 |
+| metric:stable:persist@mid | 6 |
+| metric:stable:recover@idle | 3 |
+| metric:stable:recover@last | 3 |
+| metric:stable:recover@mid | 6 |
 | move-at-last | 24 |
 | move-at-rotating | 26 |
 | move-at-settling | 26 |
@@ -239,6 +291,14 @@ Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) 
 | rtedit@canary-staging | 8 |
 | scale:down | 8 |
 | scale:up | 8 |
+| source:garbage:after-settle@mid | 6 |
+| source:garbage:never@mid | 6 |
+| source:unreachable:after-settle@idle | 6 |
+| source:unreachable:after-settle@last | 6 |
+| source:unreachable:after-settle@mid | 9 |
+| source:unreachable:never@idle | 6 |
+| source:unreachable:never@last | 6 |
+| source:unreachable:never@mid | 9 |
 | webhook:idle | 12 |
 | webhook:settling | 36 |
 
@@ -247,22 +307,22 @@ Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (unset — baseline) | 902 |
-| None | 1388 |
-| RecreateInstance | 1351 |
+| None | 1541 |
+| RecreateInstance | 1371 |
 
 ### By pause
 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 3347 |
+| off | 3520 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 3461 |
+| (no pause around a repair) | 3634 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -271,7 +331,7 @@ Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 3461 |
+| (no pause around a repair) | 3634 |
 | fix | 90 |
 | none | 90 |
 
@@ -281,7 +341,7 @@ Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 48 |
 | canary | 24 |
-| none | 2934 |
+| none | 3107 |
 | ratio | 16 |
 | rolling | 585 |
 | seq | 34 |
@@ -325,7 +385,7 @@ Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 2643 |
+| (no break) | 2816 |
 | decoder | 77 |
 | engine | 921 |
 
@@ -507,6 +567,32 @@ Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) 
 | podkill x3 under a scale-up | 18 |
 | preempt x2 at steady state | 6 |
 
+### By ledger fault row (canary-fault-gate)
+
+| value | cases |
+|---|---|
+| analysis source unusable, one-shot | 27 |
+| analysis source unusable, persistent | 27 |
+| metric breach, one-shot, new | 12 |
+| metric breach, one-shot, running | 12 |
+| metric breach, persistent, new | 12 |
+| metric breach, persistent, running | 12 |
+| sibling broken, one-shot, new | 10 |
+| sibling broken, one-shot, running | 24 |
+| sibling broken, persistent, new | 13 |
+| sibling broken, persistent, running | 24 |
+
+### By shape family (canary-fault-gate)
+
+| value | cases |
+|---|---|
+| engine gang | 8 |
+| engine single | 26 |
+| engine+decoder+router gang | 17 |
+| engine+decoder+router single | 57 |
+| engine+router gang | 16 |
+| engine+router single | 49 |
+
 ## Constraint ledger (tuples excluded during construction)
 
 - `pause` multiplies `mode=kill` and the pause-and-repair family (`pauseat=`); run.py consumes the pause header nowhere else, and a rollout case that pauses without `pauseat=` is rejected as a dead knob.
@@ -533,6 +619,8 @@ Total generated cases: **3641**. The whole-corpus per-PR cap (hand + generated) 
 - gen-canary-podkill deletes one old-revision engine pod at a manual gate, under the operator's pause, under a capacity gate held by an image that cannot start, and under that gate paused; the engine surge is 1 (the budget is dormant while the roll is held).
 - gen-canary-fault-old breaks the stable side at the step kinds that differ in mechanism: before the push (the push meets a broken fleet), the capacity step ahead of traffic, the second step's timed soak, the same step at a manual gate (promoted 30s after the break), the same step at an analysis gate, and the last gate before the cutover. Left out, with the reason: the first split, which gen-canary-crash drives with the same faults, victims and policies; the cutover itself (Promoting), where at most the surge budget of stable Instances is left and already draining, so a break has no settled row to land on (the last gate carries that claim); a traffic step apart from its soak, since every traffic step of the story ladder but the cutover soaks; the surge budget at the gates, where no capacity builds while they hold (surge 1 only); three victims at the manual gate, whose storm is the first split's under another release; the crash forms under the analysis gate, since the metrics image is a static binary with no shell to exec a kill into and no fixture image fails to start under its entrypoint (the pull failure alone breaks it); the analysis gate crossed with the other step kinds, since the gate changes only what ends a hold, not how a break meets it; and a missing ConfigMap key, whose reference both revisions share, so a push is never its fix (the idle configkey family lifts the cause instead).
 - gen-canary-fault-new arms the break on the pushed engine revision and crosses where it bites (a crash at start and a pull failure at staging; a crash after Ready inside the first soak and past it) with the exit at the park (a rollback, or a fix push that drops the broken runner), both shapes and both restart policies. Left out, with the reason: the surge budget where the ladder parks at its first capacity step, which asks one Instance (surge 1 only); the crash forms under the analysis gate (the metrics image carries no shell and no exit switch); the rollback exit under the analysis gate, whose terminal verdict requires an analysis sample a park before the first gate never yields (the fix exit walks the gated ladder); a missing ConfigMap key, which no verb arms on a template and whose bite is a container that never starts, the crash-at-start cell; and a manual policy, since a broken revision parks before any gate is reached.
+- gen-canary-fault-gate drives the engine unit's ladder on the ledger's six shape families (the router, where present, is outside the group and idle; single-pod fleets at 8 Instances, gangs at 2 Instances of 1 leader + 1 worker, SurgeThenDrain surge 1) and breaks what a step's gates read. The metric and source rows gate every step but the cutover on the canary-scoped error rate (`revision_hash="{{.CanaryRevision}}"`, the label the bundled Prometheus stamps from the pod's revision hash), so a breach on the stable side never reaches the gate by construction: a query that reads the whole Component blames the stable side and is not emitted. The stable side breaches through the metrics image's live override (every stable pod of the engine, kept or for 45 s) before the push, at the second step's gate and at the last gate; the canary side from birth (the push carries the breach, kept or decaying after 60 s) and at the same two gates (the override on every canary pod). The source is pointed at a name that resolves nowhere at the three positions, under both lifts (restored 20 s after the hold is observed, or never) and both stall policies (Hold parks Failed with reason AnalysisStalled at the step; RollbackOnStall rolls back), and at a server that is not Prometheus at the mid-ladder gate under Hold alone: the gate reads a non-answer the same way wherever it lands. Left out, with the reason: the restart policy on the metric and source rows (nothing restarts under a breach or a lost source; None throughout); the ladder positions other than mid-ladder on the gangs (a fleet of two has no stable Instance left at the last gate, and the gate reads a gang as it reads a single pod); the canary side's breach before the push (no canary pod exists yet; its birth breach is the push); Rollback as the stall policy (it reverts on the first unreadable sample, so a blip would revert a healthy canary by configuration, and the hand-written analysis cases carry that cell).
+- The sibling rows of gen-canary-fault-gate run on the shapes with a Component beside the engine unit: the router of an engine ladder (never rolled by the ladder, so the repair owns its break) and the decoder of a prefill/decode unit (admission makes engine and decoder one canary unit, so the ladder owns its running-side break and lands the fix on it). The running side breaks for good (a crash at start and a pull failure under None; a crash after Ready under RecreateInstanceOnPodRestart, the policy that repairs it) and once (`lift=after-settle`: a crash after Ready is one kill under both policies; a pull failure has its image put back 20 s after it bit, under None), at the three positions on single-pod fleets and mid-ladder on gangs, under the plain fixture runtime and timed soaks (a break needs a shell to kill or an image to swap; the analysis gate changes nothing about a sibling). The new side: the decoder of the unit carries the fault-new breaks (crash at start, pull failure, crash inside and past the first soak; a pull failure alone on the gang) under both exits; the router is pushed beside the ladder onto an image that cannot be pulled (`bump=<unit>,router imgcomp=router`), rolls on its own and is judged as a parked sibling while the ladder is judged on the unit; and a pod of the sibling's new revision (the decoder's canary, or a router pushed beside the ladder) is killed once mid-ladder and at the last gate under both restart policies. Left out, with the reason: a sibling on the engine-only shapes (there is none; the ledger removes those cells); a running-side crash after Ready under None for good (a container restart the kubelet owns, not a wedge: no repair is promised, as in every idle family); the decoder as a roll beside the ladder (admission names it in the engine's group); a fix push for the parked router (the crash-loop and fault-new families prove a fix lands on a parked roll); a router pushed beside the prefill/decode gang's ladder (that shape carries the unit's new-side break).
 - A rollback's `draining` hook is not emitted for an in-place strategy on a single-pod topology: an annotation-only diff is patched in place, so no pod of the starting revision ever drains and the hook never arrives (a gang falls back to a whole-gang recreate, which drains).
 - crashloop:new arms the engine's new revision, so its group axis (co=none | co=rolling) exists only on the PD topologies; it runs each strategy at its canonical budget and leaves InPlaceOnly out: form=load's exit switch is a pod-template env diff in-place cannot carry (the InPlaceIfPossible cell documents the fallback) and form=start's image patch lands the same way under either in-place type.
 - The group family runs a policy only where it has a peer: a one-member sequence is a blueGreen group and a ratio needs two Components, so engine-only runs blueGreen and the zero-budget rolling group alone; maintainRatio's tolerance is 50 at N=2 and 25 at N=4.

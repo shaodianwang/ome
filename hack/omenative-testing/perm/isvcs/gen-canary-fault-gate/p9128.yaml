@@ -1,0 +1,27 @@
+# p9128: [gen] canary gate sibling router pushed unpullable beside the ladder engine router N=8  mode=canary Ne=8 Nd=0 Nr=2 ceil_e=9 ceil_d=0 ceil_r=3 co=none topo=engine canary=auto bump=engine,router img=example.com/canary-test/missing:none terminal=Stable nophase=Failed cell=canary/Staging/siblingBroken[routerParked] imgcomp=router
+# reason: the router is pushed beside the engine ladder onto an image that cannot be pulled on engine+router single (8 Instances); the router rolls on its own, never promotes a pod of that revision, keeps every router Instance serving on its running revision and says why it stopped (a hold, a Failed row or a RetryHeld or InstanceFailed event naming it), while the engine ladder walks every step to Stable unaffected; the router is left parked, as the status says
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9128 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

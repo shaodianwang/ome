@@ -82,6 +82,18 @@ runners (run.py + the KIND CI lane) already implement:
                           the soak, an image that cannot be pulled); the
                           ladder stops where it bites, says why, and a
                           rollback or a fix push lands
+    gen-canary-fault-gate/ p9050+ what a step's gates read breaks while the
+                          ladder walks: the health metric breaches on the
+                          stable side (the gate must not blame the canary)
+                          or on the canary side (the gate aborts or rides it
+                          out), the analysis source becomes unreachable or
+                          answers garbage (the ladder holds with a reason
+                          and resumes, parks or rolls back as the policy
+                          says), and a sibling Component (the router beside
+                          an engine ladder, the decoder of a prefill/decode
+                          unit) breaks once or for good, on the running or
+                          the new side; across the canary-capable shapes
+                          and the ladder positions
     gen-rollback/  p5800+  rollouts rolled back: the starting revision is
                           re-applied at a named moment of the new revision's
                           roll (rollback=1 during=settling|rotating|draining|
@@ -564,6 +576,7 @@ GEN_BLOCKS = {
     "gen-canary-podkill": (5290, 5400),
     "gen-canary-fault-old": (6400, 6600),
     "gen-canary-fault-new": (6600, 6800),
+    "gen-canary-fault-gate": (9050, 9250),
     "gen-rollback": (5800, 6000),
     "gen-crashloop-new": (5000, 5200),
     "gen-crashloop-group": (5400, 5800),
@@ -673,6 +686,8 @@ SIBLING_SHAPES = [("pd", 4, 0), ("pd-mn", 2, 1)]
 UNPROMISED_REPAIR = {("load", "None")}
 GROUP_NAMES = {"bluegreen": "blueGreen", "rolling": "rollingUpdate", "seq": "Sequential", "canary": "canary"}
 IDLE_PHASE = "idle"
+IDLE_FAULT_HOOK = "idle"
+CRASHLOOP_NEW_HOOK = "new"
 
 # The heal family: the engine runner's ConfigMap key is removed on the idle
 # service and put back at the lift. Shapes as the crashloop family; nothing
@@ -2329,6 +2344,393 @@ def emit_canary_fault_new(add):
                                 cell=("fault-new", name, exit_verb, topo, surge, rp, gate),
                                 coord=story_group(case_comps, story_ladder("auto", gate), ready_timeout=HELD_READY_TIMEOUT),
                                 runtime=(lib.CSR_METRICS if gate else None))
+
+
+# ── gen-canary-fault-gate: what a step's gates read breaks ──────────────────
+# The canary-capable shapes the family runs: the ledger's six families, each
+# as the engine unit's ladder (the router, where present, is outside the
+# group and idle). Single-pod fleets run the story size; gangs run two
+# Instances of one leader and one worker, where the ladder's 60 percent step
+# already asks for the whole fleet.
+# (ledger family, topo, Instances, gang width, router count)
+GATE_SHAPES = [
+    ("engine single", "engine", STORY_N, 0, 0),
+    ("engine gang", "engine-mn", 2, 1, 0),
+    ("engine+router single", "engine", STORY_N, 0, lib.NR),
+    ("engine+router gang", "engine-mn", 2, 1, lib.NR),
+    ("engine+decoder+router single", "pd", STORY_N, 0, lib.NR),
+    ("engine+decoder+router gang", "pd-mn", 2, 1, lib.NR),
+]
+# Ladder positions: before the push (the fault meets the idle service), the
+# second step's analysis gate (mid-ladder) and the third step's, the last
+# gate before the cutover. A gang fleet of two has one stable Instance left
+# at the second step and none at the third, so gangs run the mid-ladder
+# position alone.
+GATE_POSITIONS = {"idle": IDLE_FAULT_HOOK, "mid": "canary-serving@1", "last": "canary-serving@2"}
+GATE_POSITIONS_GANG = ["mid"]
+GATE_STATE = {"idle": "Idle", "new": "Staging", "mid": "Serving[analysis]", "last": "Serving[lastGate]"}
+# The sibling rows run a timed ladder: the same positions are a soak.
+SOAK_STATE = {"idle": "Idle", "new": "Staging", "mid": "Serving[soak]", "last": "Serving[lastSoak]"}
+# The metric rows: the side whose metrics breach and whether the breach is
+# kept or lifts (the override expires in the pod; a pushed revision's own
+# breach decays). The canary side's breach from birth is the push itself
+# (fault=metric:new).
+METRIC_SIDES = ["stable", "canary"]
+METRIC_FORMS = ["persist", "recover"]
+# Failing samples a one-shot canary breach may accrue before it lifts: the
+# gate samples every 20 s, the override lasts 45 s (METRIC_BREACH_S) and a
+# scrape may lag by one interval, so the budget stays above three.
+METRIC_RECOVER_LIMIT, METRIC_DECAY_LIMIT = 4, 6
+# The source rows: how the source becomes unusable, whether it comes back,
+# and what the step's policy does with a stall.
+SOURCE_FORMS = ["unreachable", "garbage"]
+SOURCE_LIFTS = ["after-settle", "never"]
+SOURCE_POLICIES = ["Hold", "RollbackOnStall"]
+# The stall timeout (the group's readyTimeout) a persistent outage parks
+# at, inside the case budget, and the one a restored source never reaches.
+SOURCE_PARK_READY_TIMEOUT, SOURCE_RESUME_READY_TIMEOUT = "150s", "240s"
+# The sibling rows: the break kinds a running-side sibling takes for good
+# (a crash after Ready under the policy that repairs it) and once (healed
+# by the harness LIFT_SETTLE_S after it bit), and the new-side breaks of a
+# prefill/decode unit's decoder (the fault-new kinds under the fix and the
+# rollback exits).
+SIBLING_PERSIST_BREAKS = [("crashloop", "start", "None"), ("imagepull", None, "None"),
+                          ("crashloop", "load", "RecreateInstance")]
+SIBLING_ONESHOT_BREAKS = [("crashloop", "load", "None"), ("crashloop", "load", "RecreateInstance"),
+                          ("imagepull", None, "None")]
+SIBLING_NEW_GANG_BREAKS = ["imagePull"]
+GATE_RP = "None"
+
+
+def gate_shape_sibling(nr, topo):
+    """The sibling Component a shape has beside the engine unit: the decoder
+    of a prefill/decode unit, else the router in front of an engine ladder;
+    None on an engine-only shape."""
+    if is_pd(topo):
+        return "decoder"
+    return "router" if nr else None
+
+
+def gate_comps(topo, n, w, nr, rp, ann=None, router_ann=False):
+    """The fleet of one shape: the engine (and a decoder) surging one, the
+    router on the fixture default lifecycle under the same restart policy;
+    `ann` goes on the unit's pods (the metrics knobs), on the router too
+    when router_ann is set (a router the case rolls)."""
+    e_life = lib.lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, restart=RP_FULL[rp])
+    cs = [lib.comp("engine", n, w, e_life, ann=dict(ann) if ann else None)]
+    if is_pd(topo):
+        cs.append(lib.comp("decoder", n, w, e_life, ann=dict(ann) if ann else None))
+    if nr:
+        cs.append(lib.comp("router", nr, 0, lib.lifecycle(restart=RP_FULL[rp]),
+                           ann=(dict(ann) if ann and router_ann else None)))
+    return cs
+
+
+def gate_group(topo):
+    """The engine unit's group: engine and decoder together on a
+    prefill/decode service (the pair rolls as one unit), the engine alone
+    otherwise; the router stays outside."""
+    return ["engine", "decoder"] if is_pd(topo) else ["engine"]
+
+
+def gate_kv(topo, n, nr, router_rolls=False):
+    kv = dict(mode="canary", Ne=n, Nd=(n if is_pd(topo) else 0), Nr=nr,
+              ceil_e=n + 1, ceil_d=(n + 1 if is_pd(topo) else 0),
+              ceil_r=(nr + 1 if router_rolls else nr))
+    return kv
+
+
+def gate_ladder(failure_limit=1, on_inconclusive=None):
+    """The story ladder gated on the canary-scoped error rate on every step
+    but the cutover."""
+    spec = lib.analysis_spec(failure_limit=failure_limit, on_inconclusive=on_inconclusive,
+                             metrics=[lib.err_metric(query=lib.CANARY_QUERY)])
+    return [lib.astep(nc, tw, spec) for nc, tw in STORY_LADDER[:-1]] + [lib.astep(*STORY_LADDER[-1])]
+
+
+def gate_runtime(topo, metrics):
+    if not metrics:
+        return None
+    return lib.CSR_METRICS_MN if is_mn(topo) else lib.CSR_METRICS
+
+
+def _gate_positions(topo):
+    return GATE_POSITIONS_GANG if is_mn(topo) else list(GATE_POSITIONS)
+
+
+def _gate_when(pos, gated=True):
+    if gated:
+        return {"idle": "before the push lands", "new": "from the pushed revision's first sample",
+                "mid": "while the second step's analysis gate samples",
+                "last": "while the last gate before the cutover samples"}[pos]
+    return {"idle": "before the push lands", "new": "with the push",
+            "mid": "while the second step soaks", "last": "while the last step before the cutover soaks"}[pos]
+
+
+def _gate_shape_words(family, n, w):
+    return f"{family} ({n} Instance{'s' if n > 1 else ''}" + (f" of 1 leader + {w} worker" if w else "") + ")"
+
+
+def _metric_reason(side, form, pos, family, n, w):
+    shape = _gate_shape_words(family, n, w)
+    lasts = {"persist": "for the rest of the case", "recover": f"for {lib_seconds('METRIC_BREACH_S')}s and then recovers"}[form]
+    if side == "stable":
+        return (f"the running revision's error rate breaches the gate's threshold {_gate_when(pos)} ({lasts}) on "
+                f"{shape}; the gate reads the canary revision alone, so it never counts the stable side's breach, "
+                f"never rolls the healthy canary back, and the ladder walks every gated step to Stable with every "
+                f"Instance on the canary revision serving")
+    if pos == "new":
+        if form == "persist":
+            return (f"the pushed revision's error rate breaches the gate's threshold from its first sample on {shape}; "
+                    f"the first failing sample aborts the ladder: the canary drains back to the stable revision, which "
+                    f"kept serving throughout, and the rejected revision is recorded")
+        return (f"the pushed revision's error rate breaches the gate's threshold at first and recovers "
+                f"{lib_seconds('METRIC_DECAY_S')}s after it serves on {shape}; the gate counts the failing samples under its "
+                f"budget, never rolls back, and promotes once the samples pass: every Instance ends on the canary revision")
+    if form == "persist":
+        return (f"the canary revision's error rate breaches the gate's threshold {_gate_when(pos)} on {shape}, with no "
+                f"failing sample before it; the first failing sample aborts the ladder: the canary drains back to the "
+                f"stable revision, which kept serving throughout, and the rejected revision is recorded")
+    return (f"the canary revision's error rate breaches the gate's threshold {_gate_when(pos)} for "
+            f"{lib_seconds('METRIC_BREACH_S')}s and recovers on {shape}; the gate counts the failing samples under its "
+            f"budget, never rolls back, and promotes once the samples pass again: every Instance ends on the canary revision")
+
+
+def lib_seconds(name):
+    """A runner constant's unscaled value, for the words on line two."""
+    return {"METRIC_BREACH_S": 45, "METRIC_DECAY_S": 60, "LIFT_SETTLE_S": 20}[name]
+
+
+def _source_reason(form, lift, policy, pos, family, n, w):
+    shape = _gate_shape_words(family, n, w)
+    how = {"unreachable": "points at a name that resolves nowhere",
+           "garbage": "points at a server that answers with something other than the Prometheus API"}[form]
+    out = (f"the analysis source {how} {_gate_when(pos)} on {shape}; the gate reports that it cannot read health, "
+           f"holds the ladder at its step and counts no breach")
+    if lift == "after-settle":
+        return out + (f"; the source is restored {lib_seconds('LIFT_SETTLE_S')}s after the hold was observed and the "
+                      f"ladder resumes: every Instance ends on the canary revision serving"
+                      + (" (a blip shorter than the stall timeout never rolls back)" if policy == "RollbackOnStall" else ""))
+    if policy == "Hold":
+        return out + ("; the source never returns, so past the stall timeout the ladder parks Failed at that step with "
+                      "reason AnalysisStalled while the stable revision keeps serving every Instance the canary has "
+                      "not replaced, and nothing rolls back")
+    return out + ("; the source never returns, so past the stall timeout the fail-safe policy rolls the canary back "
+                  "instead of parking it: the canary drains to the stable revision and the rejected revision is recorded")
+
+
+def _sibling_how(kind, form):
+    return {("crashloop", "start"): "crashes at every start", ("crashloop", "load"): "dies after Ready",
+            ("imagepull", None): "sits in ImagePullBackOff"}[(kind, form)]
+
+
+def _sibling_running_reason(sib, kind, form, rp, pos, oneshot, family, n, w, unit):
+    shape = _gate_shape_words(family, n, w)
+    how = _sibling_how(kind, form)
+    when = _gate_when(pos, gated=False)
+    if oneshot:
+        heal = {"load": "the runner is killed once and left alone",
+                None: f"the image is put back {lib_seconds('LIFT_SETTLE_S')}s after the break bit"}.get(form,
+                                                                                                        f"the image is put back {lib_seconds('LIFT_SETTLE_S')}s after the break bit")
+        comes = ("rebuilt by the restart policy" if rp == "RecreateInstance"
+                 else "brought back by the kubelet alone, or rebuilt by the repair where one opened")
+        return (f"one running-revision {sib} pod {how} once {when} ({heal}) on {shape}, under restart policy "
+                f"{RP_FULL[rp]}; the engine ladder walks every step to Stable, the {sib} Instance is Ready and serving "
+                f"again on its running revision ({comes}), and the status reported the break while it lasted")
+    if unit:
+        return (f"one running-revision {sib} Instance {how} {when} on {shape}, under restart policy {RP_FULL[rp]}; the "
+                f"{sib} is part of the engine unit, so the ladder lands the fix on it: it ends on the canary revision "
+                f"serving with no repair recorded for it after the push, and the healthy Instances keep serving above N-1")
+    return (f"one running-revision {sib} Instance {how} {when} on {shape}, under restart policy {RP_FULL[rp]}; the "
+            f"{sib} is not rolled by the engine ladder, so the repair owns it: it is rebuilt, Ready and serving on its "
+            f"running revision with a RestartTriggered event naming it, the other {sib} Instance keeps serving, and the "
+            f"ladder walks every step to Stable")
+
+
+def _sibling_new_reason(name, exit_verb, family, n, w):
+    shape = _gate_shape_words(family, n, w)
+    how = {"crashStart": "dies at every start", "imagePull": "cannot be pulled",
+           "crashInSoak": f"passes readiness and exits {CRASH_EXIT_IN_SOAK_S}s later, inside the first soak",
+           "crashAfterSoak": f"passes readiness and exits {CRASH_EXIT_AFTER_SOAK_S}s later, past the first soak"}[name]
+    then = {"rollback": "a rollback drains both sides back and holds at RolledBack with the rejected revision recorded",
+            "rebump-fix": "a fix push that drops the broken runner lands on engine and decoder alike, with nothing left on the broken revision"}[exit_verb]
+    return (f"the pushed decoder revision {how} while the engine's canary is up on {shape}; the unit's step waits on "
+            f"the decoder's capacity and parks where it bit with a reason naming the gate, no traffic names the broken "
+            f"revision at the park while the stable side keeps serving, nothing promotes it, and then {then}")
+
+
+def _sibling_park_reason(family, n, w):
+    shape = _gate_shape_words(family, n, w)
+    return (f"the router is pushed beside the engine ladder onto an image that cannot be pulled on {shape}; the "
+            f"router rolls on its own, never promotes a pod of that revision, keeps every router Instance serving on "
+            f"its running revision and says why it stopped (a hold, a Failed row or a RetryHeld or InstanceFailed event "
+            f"naming it), while the engine ladder walks every step to Stable unaffected; the router is left parked, as "
+            f"the status says")
+
+
+def _sibling_new_oneshot_reason(sib, rp, pos, family, n, w, router_rolls):
+    shape = _gate_shape_words(family, n, w)
+    side = ("the router's new revision, pushed beside the ladder," if router_rolls
+            else "the decoder's canary revision")
+    return (f"one pod of {side} is killed once {_gate_when(pos, gated=False)} on {shape}, under restart policy {RP_FULL[rp]}; "
+            f"{'the restart policy rebuilds the Instance' if rp == 'RecreateInstance' else 'the kubelet restarts the runner'} "
+            f"and the step keeps its state across the capacity dip: the ladder walks every step to Stable and every "
+            f"Instance of every bumped member ends on its new revision serving")
+
+
+def _gate_cell(pos, event, variant, gated=True):
+    return f"canary/{(GATE_STATE if gated else SOAK_STATE)[pos]}/{event}[{variant}]"
+
+
+def emit_canary_fault_gate(add):
+    for family, topo, n, w, nr in GATE_SHAPES:
+        positions = _gate_positions(topo)
+        group = gate_group(topo)
+        shape = shape_tag(topo, w) + (" router" if nr and not is_pd(topo) else "")
+        # The metric rows: both sides, both forms, every position.
+        for side in METRIC_SIDES:
+            for form in METRIC_FORMS:
+                for pos in positions + (["new"] if side == "canary" and not is_mn(topo) else []):
+                    if side == "canary" and pos == "idle":
+                        continue   # the canary side does not exist before the push; its birth breach is :new
+                    kv = gate_kv(topo, n, nr)
+                    hook = {"new": CRASHLOOP_NEW_HOOK, "idle": IDLE_FAULT_HOOK}.get(pos, GATE_POSITIONS.get(pos))
+                    kv.update(canary="auto", fault=f"metric:{hook}", form=form, co="none", topo=topo)
+                    if pos not in ("new", "idle"):
+                        kv["victim"] = side
+                    if side == "stable":
+                        kv.update(analysis="pass", health="pass", failurelimit=1, nophase="RollingBack")
+                    elif form == "persist":
+                        kv.update(analysis="breach", failurelimit=1)
+                        if pos != "new":
+                            kv["health"] = "pass"
+                    else:
+                        limit = METRIC_DECAY_LIMIT if pos == "new" else METRIC_RECOVER_LIMIT
+                        kv.update(analysis="pass", failurelimit=limit, minfails=1)
+                        if pos != "new":
+                            kv["health"] = "pass"
+                    kv["cell"] = _gate_cell(pos, "metricBreach", side)
+                    case_comps = gate_comps(topo, n, w, nr, GATE_RP, ann=lib.METRICS_ANN)
+                    limit = kv["failurelimit"]
+                    desc = f"{GEN_MARK} canary gate metric {side} {form} at {pos} {shape} N={n}"
+                    meta = dict(strat="SurgeThenDrain", verb=f"metric:{side}:{form}@{pos}", rp=GATE_RP,
+                                gate=f"metric breach, {'one-shot' if form == 'recover' else 'persistent'}, "
+                                     f"{'running' if side == 'stable' else 'new'}", shape=family)
+                    add("gen-canary-fault-gate", desc, kv, case_comps, _metric_reason(side, form, pos, family, n, w), meta,
+                        cell=("gate-metric", side, form, pos, topo, nr),
+                        coord=lib.canary_block(gate_ladder(limit), components=group),
+                        runtime=gate_runtime(topo, True))
+        # The source rows: unreachable at every position under both lifts and
+        # both stall policies; garbage at mid-ladder under both lifts (the
+        # gate reads a non-answer the same way, whatever the position).
+        for form in SOURCE_FORMS:
+            for pos in (positions if form == "unreachable" else ["mid"]):
+                for lift in SOURCE_LIFTS:
+                    for policy in (SOURCE_POLICIES if form == "unreachable" and not is_mn(topo) else ["Hold"]):
+                        kv = gate_kv(topo, n, nr)
+                        hook = IDLE_FAULT_HOOK if pos == "idle" else GATE_POSITIONS[pos]
+                        kv.update(canary="auto", fault=f"source:{hook}", form=form, lift=lift, analysis="pass",
+                                  health="pass", failurelimit=1, oninconclusive=policy.lower(), co="none", topo=topo)
+                        if lift == "after-settle":
+                            kv["nophase"] = "RollingBack" if policy == "RollbackOnStall" else "Failed"
+                            ready_timeout = SOURCE_RESUME_READY_TIMEOUT
+                        else:
+                            kv["terminal"] = "RolledBack" if policy == "RollbackOnStall" else "Failed"
+                            ready_timeout = SOURCE_PARK_READY_TIMEOUT
+                        kv["cell"] = _gate_cell(pos, "sourceUnusable", form)
+                        case_comps = gate_comps(topo, n, w, nr, GATE_RP, ann=lib.METRICS_ANN)
+                        desc = (f"{GEN_MARK} canary gate source {form} {lift} {policy} at {pos} {shape} N={n}")
+                        meta = dict(strat="SurgeThenDrain", verb=f"source:{form}:{lift}@{pos}", rp=GATE_RP,
+                                    gate=f"analysis source unusable, {'one-shot' if lift == 'after-settle' else 'persistent'}",
+                                    shape=family)
+                        add("gen-canary-fault-gate", desc, kv, case_comps,
+                            _source_reason(form, lift, policy, pos, family, n, w), meta,
+                            cell=("gate-source", form, lift, policy, pos, topo, nr),
+                            coord=lib.canary_block(gate_ladder(1, policy), components=group, ready_timeout=ready_timeout),
+                            runtime=gate_runtime(topo, True))
+        # The sibling rows: a Component beside the engine's ladder breaks.
+        sib = gate_shape_sibling(nr, topo)
+        if not sib:
+            continue
+        unit = sib in group
+        for pos in positions:
+            hook = IDLE_FAULT_HOOK if pos == "idle" else GATE_POSITIONS[pos]
+            for oneshot, breaks in ((False, SIBLING_PERSIST_BREAKS), (True, SIBLING_ONESHOT_BREAKS)):
+                for kind, form, rp in breaks:
+                    kv = gate_kv(topo, n, nr)
+                    kv.update(canary="auto", fault=f"{kind}:{hook}", victimcomp=sib, victims=1, nophase="Failed",
+                              co="none", topo=topo)
+                    if form:
+                        kv["form"] = form
+                    if oneshot:
+                        kv["lift"] = "after-settle"
+                    label = kind if kind == "imagepull" else f"{kind}:{form}"
+                    kv["cell"] = _gate_cell(pos, "siblingBroken", f"{sib}{'Once' if oneshot else ''}", gated=False)
+                    case_comps = gate_comps(topo, n, w, nr, rp)
+                    desc = (f"{GEN_MARK} canary gate sibling {sib} {label} {'once' if oneshot else 'persists'} at {pos} "
+                            f"{shape} N={n} rp {rp}")
+                    meta = dict(strat="SurgeThenDrain", verb=f"{label}:{sib}{':once' if oneshot else ''}@{pos}", rp=rp,
+                                gate=f"sibling broken, {'one-shot' if oneshot else 'persistent'}, running", shape=family)
+                    add("gen-canary-fault-gate", desc, kv, case_comps,
+                        _sibling_running_reason(sib, kind, form, rp, pos, oneshot, family, n, w, unit), meta,
+                        cell=("gate-sibling-running", sib, kind, form, rp, pos, oneshot, topo, nr),
+                        coord=lib.canary_block(story_ladder("auto"), components=group))
+        # The new side. A prefill/decode unit's decoder breaks on the pushed
+        # revision (the fault-new kinds, under both exits); the router is
+        # pushed beside the ladder onto an image that cannot be pulled.
+        if unit:
+            names = SIBLING_NEW_GANG_BREAKS if is_mn(topo) else [b[0] for b in NEW_BREAKS]
+            for name, kind, form, exit_after in NEW_BREAKS:
+                if name not in names:
+                    continue
+                for exit_verb, terminal in NEW_BREAK_EXITS:
+                    kv = gate_kv(topo, n, nr)
+                    kv.update(canary="auto", fault=f"{kind}:{CRASHLOOP_NEW_HOOK}", victimcomp="decoder",
+                              during="canary-failed", verb=exit_verb, terminal=terminal, co="none", topo=topo)
+                    if form:
+                        kv["form"] = form
+                    if exit_after:
+                        kv["exitafter"] = exit_after
+                    kv["cell"] = f"canary/{NEW_BREAK_STATE[name]}/siblingBroken[{name}],{NEW_BREAK_EXIT_CELL[exit_verb]}"
+                    case_comps = gate_comps(topo, n, w, nr, GATE_RP)
+                    desc = f"{GEN_MARK} canary gate sibling decoder pushed {name} exit {exit_verb} {shape} N={n}"
+                    meta = dict(strat="SurgeThenDrain", verb=f"{kind}:new:decoder:{name}", rp=GATE_RP,
+                                gate="sibling broken, persistent, new", shape=family)
+                    add("gen-canary-fault-gate", desc, kv, case_comps, _sibling_new_reason(name, exit_verb, family, n, w),
+                        meta, cell=("gate-sibling-new", name, exit_verb, topo),
+                        coord=lib.canary_block(story_ladder("auto"), components=group, ready_timeout=HELD_READY_TIMEOUT))
+        if nr and not is_pd(topo) or (nr and not is_mn(topo)):
+            kv = gate_kv(topo, n, nr, router_rolls=True)
+            kv.update(canary="auto", bump=",".join(group + ["router"]), img=runtime_fixtures.UNPULLABLE_IMAGE,
+                      imgcomp="router", terminal="Stable", nophase="Failed", co="none", topo=topo,
+                      cell=_gate_cell("new", "siblingBroken", "routerParked", gated=False))
+            case_comps = gate_comps(topo, n, w, nr, GATE_RP)
+            desc = f"{GEN_MARK} canary gate sibling router pushed unpullable beside the ladder {shape} N={n}"
+            meta = dict(strat="SurgeThenDrain", verb="imagepull:new:router:parked", rp=GATE_RP,
+                        gate="sibling broken, persistent, new", shape=family)
+            add("gen-canary-fault-gate", desc, kv, case_comps, _sibling_park_reason(family, n, w), meta,
+                cell=("gate-sibling-park", topo),
+                coord=lib.canary_block(story_ladder("auto"), components=group))
+        # The new side, once: a pod of the sibling's new revision is killed
+        # once mid-ladder (the decoder's canary; a router pushed beside the
+        # ladder) and comes back under the restart policy.
+        for pos in [p for p in positions if p != "idle"]:
+            for rp in (RESTARTS if not is_mn(topo) else [GATE_RP]):
+                router_rolls = not unit
+                kv = gate_kv(topo, n, nr, router_rolls=router_rolls)
+                kv.update(canary="auto", fault=f"crashloop:{GATE_POSITIONS[pos]}", form="load", victim="canary",
+                          victimcomp=sib, lift="after-settle", nophase="Failed", co="none", topo=topo,
+                          cell=_gate_cell(pos, "siblingBroken", f"{sib}NewOnce", gated=False))
+                if router_rolls:
+                    kv["bump"] = ",".join(group + ["router"])
+                case_comps = gate_comps(topo, n, w, nr, rp)
+                desc = f"{GEN_MARK} canary gate sibling {sib} new pod killed once at {pos} {shape} N={n} rp {rp}"
+                meta = dict(strat="SurgeThenDrain", verb=f"crashloop:load:{sib}:new:once@{pos}", rp=rp,
+                            gate="sibling broken, one-shot, new", shape=family)
+                add("gen-canary-fault-gate", desc, kv, case_comps,
+                    _sibling_new_oneshot_reason(sib, rp, pos, family, n, w, router_rolls), meta,
+                    cell=("gate-sibling-new-once", sib, rp, pos, topo),
+                    coord=lib.canary_block(story_ladder("auto"), components=group))
 
 
 # ── gen-rollback: the starting revision re-applied mid-roll ─────────────────
@@ -4746,6 +5148,7 @@ def build_outputs():
     emit_canary_podkill(add)
     emit_canary_fault_old(add)
     emit_canary_fault_new(add)
+    emit_canary_fault_gate(add)
     emit_rollback(add)
     emit_crashloop_new(add)
     emit_crashloop_group(add)
@@ -4875,6 +5278,9 @@ def manifest(rows):
     lines += table("By runtime edit (fault-edit)", tally(lambda kv, m: m["rtedit"], where=lambda kv, m: "rtedit" in m))
     lines += table_if("By story (packed-pool)", "side")
     lines += table_if("By repeating fault and operation (gen-repeat)", "loop")
+    lines += table_if("By ledger fault row (canary-fault-gate)", "gate")
+    lines += table("By shape family (canary-fault-gate)",
+                   tally(lambda kv, m: m["shape"], where=lambda kv, m: "shape" in m))
     parked_rows = [(f, n, m["parked"]) for f, n, _kv, m in rows if "parked" in m]
     if parked_rows:
         lines += ["### Parked cells (XFAIL on a tracked issue)", "",
@@ -5036,6 +5442,63 @@ def manifest(rows):
         " ConfigMap key, which no verb arms on a template and whose bite is a"
         " container that never starts, the crash-at-start cell; and a manual"
         " policy, since a broken revision parks before any gate is reached.",
+        "- gen-canary-fault-gate drives the engine unit's ladder on the ledger's six"
+        " shape families (the router, where present, is outside the group and idle;"
+        f" single-pod fleets at {STORY_N} Instances, gangs at 2 Instances of 1 leader + 1"
+        " worker, SurgeThenDrain surge 1) and breaks what a step's gates read. The"
+        " metric and source rows gate every step but the cutover on the canary-scoped"
+        " error rate (`revision_hash=\"{{.CanaryRevision}}\"`, the label the bundled"
+        " Prometheus stamps from the pod's revision hash), so a breach on the stable"
+        " side never reaches the gate by construction: a query that reads the whole"
+        " Component blames the stable side and is not emitted. The stable side"
+        " breaches through the metrics image's live override (every stable pod of"
+        " the engine, kept or for 45 s) before the push, at the second step's gate"
+        " and at the last gate; the canary side from birth (the push carries the"
+        " breach, kept or decaying after 60 s) and at the same two gates (the"
+        " override on every canary pod). The source is pointed at a name that"
+        " resolves nowhere at the three positions, under both lifts (restored 20 s"
+        " after the hold is observed, or never) and both stall policies (Hold parks"
+        " Failed with reason AnalysisStalled at the step; RollbackOnStall rolls"
+        " back), and at a server that is not Prometheus at the mid-ladder gate under"
+        " Hold alone: the gate reads a non-answer the same way wherever it lands."
+        " Left out, with the reason: the restart policy on the metric and source"
+        " rows (nothing restarts under a breach or a lost source; None throughout);"
+        " the ladder positions other than mid-ladder on the gangs (a fleet of two"
+        " has no stable Instance left at the last gate, and the gate reads a gang"
+        " as it reads a single pod); the canary side's breach before the push (no"
+        " canary pod exists yet; its birth breach is the push); Rollback as the"
+        " stall policy (it reverts on the first unreadable sample, so a blip would"
+        " revert a healthy canary by configuration, and the hand-written analysis"
+        " cases carry that cell).",
+        "- The sibling rows of gen-canary-fault-gate run on the shapes with a"
+        " Component beside the engine unit: the router of an engine ladder (never"
+        " rolled by the ladder, so the repair owns its break) and the decoder of a"
+        " prefill/decode unit (admission makes engine and decoder one canary unit,"
+        " so the ladder owns its running-side break and lands the fix on it). The"
+        " running side breaks for good (a crash at start and a pull failure under"
+        " None; a crash after Ready under RecreateInstanceOnPodRestart, the policy"
+        " that repairs it) and once (`lift=after-settle`: a crash after Ready is"
+        " one kill under both policies; a pull failure has its image put back 20 s"
+        " after it bit, under None), at the three positions on single-pod fleets"
+        " and mid-ladder on gangs, under the plain fixture runtime and timed soaks"
+        " (a break needs a shell to kill or an image to swap; the analysis gate"
+        " changes nothing about a sibling). The new side: the decoder of the unit"
+        " carries the fault-new breaks (crash at start, pull failure, crash inside"
+        " and past the first soak; a pull failure alone on the gang) under both"
+        " exits; the router is pushed beside the ladder onto an image that cannot"
+        " be pulled (`bump=<unit>,router imgcomp=router`), rolls on its own and is"
+        " judged as a parked sibling while the ladder is judged on the unit; and a"
+        " pod of the sibling's new revision (the decoder's canary, or a router"
+        " pushed beside the ladder) is killed once mid-ladder and at the last gate"
+        " under both restart policies. Left out, with the reason: a sibling on the"
+        " engine-only shapes (there is none; the ledger removes those cells); a"
+        " running-side crash after Ready under None for good (a container restart"
+        " the kubelet owns, not a wedge: no repair is promised, as in every idle"
+        " family); the decoder as a roll beside the ladder (admission names it in"
+        " the engine's group); a fix push for the parked router (the crash-loop and"
+        " fault-new families prove a fix lands on a parked roll); a router pushed"
+        " beside the prefill/decode gang's ladder (that shape carries the unit's"
+        " new-side break).",
         "- A rollback's `draining` hook is not emitted for an in-place strategy on a"
         " single-pod topology: an annotation-only diff is patched in place, so no"
         " pod of the starting revision ever drains and the hook never arrives (a"

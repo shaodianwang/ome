@@ -1,0 +1,29 @@
+# p9143: [gen] canary gate sibling router crashloop:load persists at mid engine-mn W1 router N=2 rp RecreateInstance  mode=canary Ne=2 Nd=0 Nr=2 ceil_e=3 ceil_d=0 ceil_r=2 fault=crashloop:canary-serving@1 co=none topo=engine-mn canary=auto form=load victims=1 victimcomp=router nophase=Failed cell=canary/Serving[soak]/siblingBroken[router]
+# reason: one running-revision router Instance dies after Ready while the second step soaks on engine+router gang (2 Instances of 1 leader + 1 worker), under restart policy RecreateInstanceOnPodRestart; the router is not rolled by the engine ladder, so the repair owns it: it is rebuilt, Ready and serving on its running revision with a RestartTriggered event naming it, the other router Instance keeps serving, and the ladder walks every step to Stable
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9143 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

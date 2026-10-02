@@ -585,10 +585,18 @@ COUNTERS["canary"] = 330
 # Downward-API annotations (perm.test/error-rate, perm.test/emit), so one bump
 # both rolls the revision and makes the canary pods PASS / BREACH / read
 # INCONCLUSIVE. The query reduces a vector to MAX (worst pod), so it catches the
-# canary pod even at a partial step; the bundled Prometheus emits no revision
-# label, hence inferenceservice+component scoping only.
+# canary pod even at a partial step; scoped to the InferenceService and the
+# Component, it reads every pod of the Component, stable and canary alike.
 CSR_METRICS = "ome-coordtest-metrics"
+# The gang form of the metrics runtime: 1 leader + N workers, every pod
+# emitting the gate metric under the same health knobs.
+CSR_METRICS_MN = "ome-coordtest-metrics-multinode"
 ERR_QUERY = 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'
+# The canary-scoped form of the gate query: the bundled Prometheus stamps each
+# pod's revision hash as `revision_hash`, so the query names the canary
+# revision alone and a breach on the stable side never reaches the gate.
+CANARY_QUERY = ('max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}",'
+                'revision_hash="{{.CanaryRevision}}"})')
 # Downward-API health knobs (stable starts healthy) + prometheus scrape opt-in.
 METRICS_ANN = {"perm.test/error-rate": "0.0", "perm.test/emit": "true",
                "prometheus.io/scrape": "true", "prometheus.io/port": "8080",

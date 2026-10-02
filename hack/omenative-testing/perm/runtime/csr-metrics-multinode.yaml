@@ -1,0 +1,54 @@
+# Multi-node metrics-emitting ClusterServingRuntime for canary ANALYSIS tests on
+# a gang: each Instance is 1 leader + N worker pods, every pod running the
+# canary-metrics image with the same Downward-API health knobs as
+# csr-metrics.yaml (perm.test/error-rate, perm.test/emit, perm.test/decay), so
+# the analysis query reads the gang the way it reads a single-pod Instance.
+# routerConfig stays single-pod (routers are not multi-node).
+apiVersion: ome.io/v1beta1
+kind: ClusterServingRuntime
+metadata:
+  name: ome-coordtest-metrics-multinode
+  labels:
+    ome-coordtest/managed: "true"
+spec:
+  schedulerName: ${OME_EVAL_SCHEDULER}
+  disabled: false
+  protocolVersions: [openAI]
+  supportedModelFormats:
+    - autoSelect: false
+      modelArchitecture: TestArchitecture
+      modelFormat:    { name: noop, operator: Equal, version: "1.0.0", weight: 1 }
+      modelFramework: { name: noop, operator: Equal,                  weight: 1 }
+      priority: 1
+
+  engineConfig: &mnMetricsComponent
+    nodeSelector: { kubernetes.io/arch: ${OME_EVAL_NODE_ARCH} }
+    leader:
+      runner: &mnMetricsRunner
+        name:  ome-container
+        image: ${OME_EVAL_METRICS_IMAGE}
+        env:
+          - { name: TEST_STARTUP_DELAY, value: "15" }   # stretch Ready so the watcher catches peaks
+          - { name: TEST_RPS,           value: "20" }
+          - name: TEST_ERROR_RATE
+            valueFrom: { fieldRef: { fieldPath: "metadata.annotations['perm.test/error-rate']" } }
+          - name: TEST_EMIT_METRICS
+            valueFrom: { fieldRef: { fieldPath: "metadata.annotations['perm.test/emit']" } }
+          - name: TEST_ERROR_RATE_DECAY_S
+            valueFrom: { fieldRef: { fieldPath: "metadata.annotations['perm.test/decay']" } }
+        ports: [ { containerPort: 8080, name: http, protocol: TCP } ]
+        startupProbe:   { httpGet: { path: /, port: 8080 }, periodSeconds: 2, failureThreshold: 30 }
+        readinessProbe: { httpGet: { path: /, port: 8080 }, periodSeconds: 2, failureThreshold: 2 }
+        livenessProbe:  { httpGet: { path: /, port: 8080 }, periodSeconds: 5, failureThreshold: 3 }
+        resources:
+          requests: { cpu: 50m,  memory: 64Mi }
+          limits:   { cpu: 200m, memory: 128Mi }
+    worker:
+      runner: *mnMetricsRunner
+
+  decoderConfig: *mnMetricsComponent
+
+  # Router is single-pod (not gang-scheduled).
+  routerConfig:
+    nodeSelector: { kubernetes.io/arch: ${OME_EVAL_NODE_ARCH} }
+    runner: *mnMetricsRunner

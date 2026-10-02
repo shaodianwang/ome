@@ -6,6 +6,13 @@
 // series). It also emits real app_requests_total counters from a self-driving
 // traffic loop, so the image is a genuine metrics server, not a static file.
 //
+// A running pod's rate can be changed without a restart through the control
+// endpoint (/-/perm/error-rate): a harness sets a breach on the pods of one
+// side of a rollout, for a bounded window or until the pod goes, and reads the
+// rate back. The endpoint accepts its parameters on GET because the harness
+// reaches a pod through the apiserver's pod proxy, which `kubectl get --raw`
+// issues as GET.
+//
 // Stdlib only: the exposition format is hand-written, so the image has no module
 // dependencies and builds to a static scratch binary.
 package main
@@ -19,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -42,6 +50,92 @@ func envInt(key string, def int) int {
 		return n
 	}
 	return def
+}
+
+// controlPath is the live rate override: GET with value=<rate> sets the rate
+// every pod-side reading uses from then on, for=<seconds> bounds the override
+// (the configured rate returns when it expires), clear=1 drops it, and a GET
+// with no parameter reports the rate in force.
+const controlPath = "/-/perm/error-rate"
+
+// rateOverride is the live override of the configured error rate: the rate a
+// control request set and, when it was bounded, the moment it expires. The
+// zero value means no override.
+type rateOverride struct {
+	mu    sync.Mutex
+	set   bool
+	rate  float64
+	until time.Time
+}
+
+// current returns the override rate while one is in force; the second value
+// is false once it has expired or was never set.
+func (o *rateOverride) current(now time.Time) (float64, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.set {
+		return 0, false
+	}
+	if !o.until.IsZero() && now.After(o.until) {
+		o.set = false
+		return 0, false
+	}
+	return o.rate, true
+}
+
+func (o *rateOverride) apply(rate float64, forS int, now time.Time) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.set, o.rate, o.until = true, rate, time.Time{}
+	if forS > 0 {
+		o.until = now.Add(time.Duration(forS) * time.Second)
+	}
+}
+
+func (o *rateOverride) clear() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.set = false
+}
+
+// controlHandler serves controlPath: it applies value=/for=/clear= and then
+// reports, as key=value lines, the rate in force, the configured rate, whether
+// an override is active and when it expires. An unparsable value is a 400.
+func controlHandler(override *rateOverride, configured float64, effective func() float64) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		now := time.Now()
+		if q.Get("clear") != "" {
+			override.clear()
+		}
+		if v := q.Get("value"); v != "" {
+			rate, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				http.Error(w, "value must be a number", http.StatusBadRequest)
+				return
+			}
+			forS := 0
+			if f := q.Get("for"); f != "" {
+				n, err := strconv.Atoi(f)
+				if err != nil || n < 0 {
+					http.Error(w, "for must be a non-negative number of seconds", http.StatusBadRequest)
+					return
+				}
+				forS = n
+			}
+			override.apply(rate, forS, now)
+			log.Printf("error-rate override: %g for %ds", rate, forS)
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		_, active := override.current(now)
+		fmt.Fprintf(w, "rate=%g\nconfigured=%g\noverride=%t\n", effective(), configured, active)
+		override.mu.Lock()
+		until := override.until
+		override.mu.Unlock()
+		if active && !until.IsZero() {
+			fmt.Fprintf(w, "until=%s\n", until.UTC().Format(time.RFC3339))
+		}
+	}
 }
 
 // runProxy forwards every request to target after a fixed delay — a stand-in for
@@ -97,9 +191,14 @@ func main() {
 		time.Sleep(time.Duration(startupDelay) * time.Second)
 	}
 	serveStart := time.Now()
+	override := &rateOverride{}
 	// currentRate applies the decay relative to serving start (≈ Ready), so the
-	// recovery lines up with when the analysis begins sampling.
+	// recovery lines up with when the analysis begins sampling. A live override
+	// wins over both while it is in force.
 	currentRate := func() float64 {
+		if rate, ok := override.current(time.Now()); ok {
+			return rate
+		}
 		if decayS > 0 && time.Since(serveStart) > time.Duration(decayS)*time.Second {
 			return 0
 		}
@@ -128,6 +227,7 @@ func main() {
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
+	mux.HandleFunc(controlPath, controlHandler(override, errorRate, currentRate))
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		if emit {

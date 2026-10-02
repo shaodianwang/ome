@@ -142,6 +142,8 @@ NOT_DERIVABLE = [
 EXCLUDED_CELLS = [
     ("no operation and no fault leaves nothing to assert",
      lambda family, operation, row: operation == "steady state" and row == NO_FAULT),
+    ("an engine-only service has no sibling Component to break",
+     lambda family, operation, row: row[0] == "sibling broken" and family in ("engine single", "engine gang")),
     ("a single-pod Instance has no gang member to lose",
      lambda family, operation, row: row[0] == "gang member lost" and family.endswith("single")),
     ("on a gang a pod deleted by hand is a lost gang member",
@@ -176,7 +178,7 @@ HEADER_VALUES = {
     "unit": set(COMPONENTS),
     "analysis": {"pass", "breach", "inconclusive"},
     "health": {"pass", "breach", "inconclusive"},
-    "oninconclusive": {"hold", "rollback"},
+    "oninconclusive": {"hold", "rollback", "rollbackonstall"},
     "expect": {"reject", "roll", "noroll", "recover", "fail"} | IDLE_EXPECTS | BROKEN_UP_EXPECTS,
     "break": {"stuck"},
     "remove": {"decoder", "router"},
@@ -196,8 +198,10 @@ HEADER_VALUES = {
     "victim": {"stable", "canary", "moved", "peer", "sibling"},
     "victimcomp": set(COMPONENTS),
     "imgcomp": set(COMPONENTS),
-    # how a crash victim fails, how a readiness switch ends, or how a competing writer writes
-    "form": {"start", "load", "persist", "recover", "once"},
+    # how a break victim fails, how a readiness switch ends, how a competing
+    # writer writes, whether a metric breach stays or lifts, and what an
+    # unusable analysis source answers with
+    "form": {"start", "load", "persist", "recover", "once", "unreachable", "garbage"},
     # what a competing writer patches: the ISVC, or every InferenceReplica of the case
     "target": {"isvc", "ir"},
     "nophase": {"Pending", "Canarying", "Paused", "Promoting", "RollingBack", "RolledBack", "Failed"},
@@ -249,6 +253,11 @@ def _fault(v):
         return param in ("old", "new", "idle") or _hook(param)
     if kind == "readiness":
         return param in ("old", "new")   # a serving pod stops passing readiness, or a pushed revision never does
+    if kind == "metric":
+        # the pushed revision's own metrics, the stable side before the push, or the side victim= names at a hook
+        return param in ("new", "idle") or _hook(param)
+    if kind == "source":
+        return param == "idle" or _hook(param)   # the analysis source goes before the push or at a hook
     if kind == "cordon":
         return param in ("source", "all")   # the source node, or every node (a roll with no room)
     return {"configkey": "missing", "node": "notready"}.get(kind) == param
@@ -660,14 +669,23 @@ def classify_faults(h, mode, pods, strategy, verbs):
     elif kind == "crashloop":
         component = break_component(h)
         crash = "crash at start" if h.get("form") == "start" else "crash after Ready"
-        side = "new" if param == "new" else "running"
-        # once=1: the runner is killed exactly once and the kubelet starts it again
-        form = "one-shot" if h.get("once") else "persistent"
+        side = "new" if param == "new" or h.get("victim") == "canary" else "running"
+        # once=1 (the runner is killed exactly once and the kubelet starts it again)
+        # and a break the harness heals again (lift=after-settle) are the one-shot form
+        form = "one-shot" if h.get("once") or lifted else "persistent"
         faults.append(("sibling broken" if component != "engine" else crash, form, side, component))
     elif kind == "imagepull":
         component = break_component(h)
-        side = "new" if param == "new" else "running"
-        faults.append(("sibling broken" if component != "engine" else "image pull", "persistent", side, component))
+        side = "new" if param == "new" or h.get("victim") == "canary" else "running"
+        faults.append(("sibling broken" if component != "engine" else "image pull", "one-shot" if lifted else "persistent", side, component))
+    elif kind == "metric":
+        # the health metric breaches on the pushed revision (new), the stable side before the push (idle),
+        # or the side victim= names at a hook; recover is the breach that lifts again
+        side = "new" if param == "new" or h.get("victim") == "canary" else "running"
+        faults.append(("metric breach", "one-shot" if h.get("form") == "recover" else "persistent", side,
+                       str(h.get("victimcomp", "engine"))))
+    elif kind == "source":
+        faults.append(("analysis source unusable", "one-shot" if lifted else "persistent", "-", str(h.get("form", ""))))
     elif kind == "configkey":
         faults.append(("config missing", "one-shot" if lifted else "persistent", "running", str(h.get("victimcomp", "engine"))))
     elif kind == "node":
@@ -701,7 +719,7 @@ def classify_faults(h, mode, pods, strategy, verbs):
         faults.append(("readiness never passes", "persistent", "new", "engine"))
     if mode == "runtimerev" and h.get("expect") == "recover" and h.get("break") != "stuck":
         faults.append(("image pull", "persistent", "new", "runtime image"))
-    if h.get("analysis") == "breach" or h.get("health") == "breach":
+    if (h.get("analysis") == "breach" or h.get("health") == "breach") and kind != "metric":
         faults.append(("metric breach", "one-shot" if h.get("analysis") == "pass" else "persistent", "new", "canary metric"))
     if h.get("analysis") == "inconclusive":
         faults.append(("analysis source unusable", "persistent", "-", "prometheus"))
@@ -716,9 +734,10 @@ def break_component(h):
 
 def fault_lifted(h, verbs):
     """The harness takes the cause away again: a lift phase, a quota lift verb,
-    or a metric breach that decays while the analysis still promotes."""
+    a metric breach that decays or expires while the analysis still promotes."""
     return (h.get("lift") not in (None, "never") or "quotalift" in verbs
-            or (h.get("health") == "breach" and h.get("analysis") == "pass"))
+            or (h.get("health") == "breach" and h.get("analysis") == "pass")
+            or (str(h.get("fault", "")).startswith("metric:") and h.get("form") == "recover"))
 
 
 def classify_group(groups):
@@ -830,7 +849,7 @@ def classify_canary_steps(h, step_chunks, verbs):
     if h.get("terminal") == "Failed" or (h.get("analysis") == "inconclusive" and h.get("oninconclusive") == "hold"):
         kinds.add("abort")
     if (h.get("rollback") or "rollback" in verbs or h.get("analysis") == "breach"
-            or h.get("oninconclusive") == "rollback"):
+            or h.get("oninconclusive") == "rollback" or h.get("terminal") == "RolledBack"):
         kinds.add("rollback mid-ladder")
     if verbs & {"rebump", "rebump-fix", "rtedit", "pairing"} or h.get("proto2"):
         kinds.add("re-target mid-ladder")

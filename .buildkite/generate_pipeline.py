@@ -367,6 +367,7 @@ EVAL_SOFT_FEATURES: list[dict[str, str]] = [
         "gen-canary-podkill",
         "gen-canary-fault-old",
         "gen-canary-fault-new",
+        "gen-canary-fault-gate",
         "gen-rollback",
         "gen-crashloop-new",
         "gen-crashloop-group",
