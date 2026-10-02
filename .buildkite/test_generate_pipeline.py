@@ -472,13 +472,22 @@ class TestChartImageOrdering(unittest.TestCase):
 
 
 class TestReleaseMarkerEmission(unittest.TestCase):
-    def test_marker_step_is_after_the_final_wait_gate(self):
+    def test_marker_is_the_last_step_and_names_every_other_top_level_key(self):
+        # Off main there is no eval lane, so the single document carries the
+        # marker itself, after every step it gates on.
         yaml_text = gp.generate_pipeline()
         self.assertEqual(yaml_text.count('key: "chart-ome-release"'), 1)
-        wait_index = yaml_text.rfind("  - wait\n")
-        marker_index = yaml_text.rfind('key: "chart-ome-release"')
-        self.assertGreater(wait_index, 0)
-        self.assertGreater(marker_index, wait_index)
+        keys = gp._top_level_keys(yaml_text)
+        self.assertEqual(keys[-1], "chart-ome-release")
+        self.assertNotIn("- wait", yaml_text)
+        marker = yaml_text[yaml_text.index('key: "chart-ome-release"'):]
+        gates = re.findall(r'^      - "([^"]+)"$', marker.split("secrets:")[0], re.M)
+        self.assertEqual(gates, keys[:-1])
+        self.assertNotIn(gp.UPLOAD_STEP_KEY, keys)
+
+    def test_marker_refuses_an_empty_gate(self):
+        with self.assertRaisesRegex(RuntimeError, "keys it gates on"):
+            gp._release_marker_step([])
 
     def test_component_chart_steps_export_version_artifacts(self):
         for chart in gp.RELEASE_MARKER_CHARTS:
@@ -1412,11 +1421,12 @@ class TestAlfredKindGroup(PipelineTestCase):
 
 
 class TestPipelineDependenciesResolve(PipelineTestCase):
-    """Every depends_on in the rendered pipeline names an emitted key.
+    """Every depends_on names a key emitted by the same or an earlier upload.
 
     A dependency on a key no step emits fails the whole upload rather than
     one lane, so a step dropped by a branch condition or a kill switch must
-    take its dependents with it.
+    take its dependents with it, and a document may not lean on a key that
+    a later upload would bring.
     """
 
     def _keys_and_dependencies(self, yaml_text):
@@ -1439,21 +1449,26 @@ class TestPipelineDependenciesResolve(PipelineTestCase):
                     index += 1
         return keys, targets
 
-    def test_every_dependency_names_an_emitted_key(self):
+    def test_every_dependency_names_a_key_of_the_same_or_an_earlier_upload(self):
         cases = itertools.product(("main", "feature/anything"), (True, False), (True, False))
         for branch, kind, alfred in cases:
             with self.subTest(branch=branch, kind=kind, alfred=alfred):
                 self.patch_attr("BRANCH", branch)
                 self.patch_attr("GKE_KIND_ENABLED", kind)
                 self.patch_attr("GKE_ALFRED_ENABLED", alfred)
-                keys, targets = self._keys_and_dependencies(gp.generate_pipeline())
-                self.assertTrue(keys, "no step keys found; did the YAML shape change?")
-                self.assertTrue(targets, "no depends_on found; did the YAML shape change?")
-                dangling = targets - keys
-                self.assertEqual(
-                    dangling, set(),
-                    f"{sorted(dangling)} are depended on but no step emits them",
-                )
+                uploaded: set[str] = set()
+                for index, document in enumerate(gp.generate_pipeline_batches(), start=1):
+                    keys, targets = self._keys_and_dependencies(document)
+                    self.assertTrue(keys, f"upload {index}: no step keys found; did the YAML shape change?")
+                    if index == 1:
+                        self.assertTrue(targets, "no depends_on found; did the YAML shape change?")
+                    uploaded |= keys
+                    dangling = targets - uploaded
+                    self.assertEqual(
+                        dangling, set(),
+                        f"upload {index}: {sorted(dangling)} are depended on but no step "
+                        "of this or an earlier upload emits them",
+                    )
 
 
 if __name__ == "__main__":
@@ -1681,3 +1696,233 @@ class TestEvalSoftFeatures(unittest.TestCase):
                 seen_hard += 1
         self.assertGreater(seen_soft, 0)
         self.assertGreater(seen_hard, 0)
+
+
+
+class TestPipelineUploads(PipelineTestCase):
+    """The build is uploaded as documents of at most UPLOAD_JOB_LIMIT jobs: the
+    entrypoint's (every step that is not an eval lane, ending with the upload
+    step), one per eval group, then the release marker, which names every
+    other top-level key of the build."""
+
+    LANE_KEY = re.compile(r'^\s*key: "(omenative-e2e-(?!kind-gke)[^"]+)"$', re.M)
+    EVAL_ENV = {
+        "GKE_EVAL_CASE_CONCURRENCY": "4",
+        "GKE_EVAL_TARGET_WAVES": "4",
+        "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        with mock.patch.dict(os.environ, cls.EVAL_ENV), mock.patch.object(gp, "BRANCH", "main"):
+            cls.children = gp._eval_children()
+            cls.batches = gp.generate_pipeline_batches()
+
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, self.EVAL_ENV)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.patch_attr("BRANCH", "main")
+
+    def marker_dependencies(self, document):
+        marker = document[document.index('key: "chart-ome-release"'):]
+        return re.findall(r'^\s*- "([^"]+)"$', marker.split("secrets:")[0], re.M)
+
+    def assert_uploads_are_well_formed(self, batches, children):
+        for index, document in enumerate(batches, start=1):
+            self.assertLessEqual(gp._job_count(document), gp.UPLOAD_JOB_LIMIT, f"upload {index}")
+            self.assertTrue(document.startswith("steps:\n"), f"upload {index}")
+        # Every eval job is uploaded exactly once, none of them by the entrypoint.
+        expected = sorted(child["key"] for _, _, child in children)
+        seen = [key for document in batches for key in self.LANE_KEY.findall(document)]
+        self.assertEqual(sorted(seen), expected)
+        self.assertEqual(len(seen), len(set(seen)))
+        self.assertEqual(self.LANE_KEY.findall(batches[0]), [])
+        # The marker is the last step of the last upload and depends on every
+        # other top-level step and group, the eval groups among them.
+        self.assertEqual(sum(d.count('key: "chart-ome-release"') for d in batches), 1)
+        self.assertEqual(gp._top_level_keys(batches[-1]), ["chart-ome-release"])
+        gates = self.marker_dependencies(batches[-1])
+        every = [key for document in batches for key in gp._top_level_keys(document)]
+        self.assertEqual(gates, every[:-1])
+        groups = [key for document in batches[1:-1] for key in gp._top_level_keys(document)]
+        self.assertEqual(len(groups), len(batches) - 2)
+        self.assertTrue(all(key.startswith("omenative-e2e-kind-gke") for key in groups), groups)
+        self.assertTrue(set(groups) <= set(gates))
+        self.assertIn(gp.UPLOAD_STEP_KEY, gates)
+        self.assertNotIn("- wait", "".join(batches))
+
+    def test_job_count_and_top_level_keys_read_the_generated_shape(self):
+        document = (
+            'steps:\n'
+            '  - label: "a"\n    key: "a"\n'
+            '  - wait\n'
+            '  - group: "g"\n    key: "g"\n    steps:\n'
+            '      - label: "b"\n        key: "b"\n'
+            '      - label: "c"\n        key: "c"\n'
+        )
+        self.assertEqual(gp._job_count(document), 4)
+        self.assertEqual(gp._top_level_keys(document), ["a", "g"])
+        # Every generated step and group carries a key, so the job count of a
+        # document is its keys less its groups.
+        for index, document in enumerate(self.batches, start=1):
+            keys = len(re.findall(r'^\s*key: "', document, re.M))
+            groups = len(re.findall(r'^\s*- group: ', document, re.M))
+            self.assertEqual(gp._job_count(document), keys - groups, f"upload {index}")
+
+    def test_first_upload_is_what_the_entrypoint_prints(self):
+        self.assertEqual(self.batches[0], gp.generate_pipeline())
+        keys = gp._top_level_keys(self.batches[0])
+        self.assertEqual(keys[-1], gp.UPLOAD_STEP_KEY)
+        self.assertNotIn("chart-ome-release", keys)
+        step = self.batches[0][self.batches[0].index(f'key: "{gp.UPLOAD_STEP_KEY}"'):]
+        self.assertIn(f"sh {gp.UPLOAD_SCRIPT}", step)
+        self.assertIn(f'"{gp.UPLOAD_BATCH_DIR}/*"', step)
+        self.assertIn(f'image: "{gp.PIPELINE_UPLOAD_IMAGE}"', step)
+        self.assertIn("mount-buildkite-agent: true", step)
+        later = len(self.batches) - 1
+        jobs = sum(gp._job_count(document) for document in self.batches[1:])
+        self.assertIn(
+            f'- label: ":gear: Upload eval lanes and release marker ({later} uploads, {jobs} jobs)"',
+            self.batches[0],
+        )
+
+    def test_todays_corpus_uploads_within_the_limit_and_the_total_is_pinned(self):
+        self.assert_uploads_are_well_formed(self.batches, self.children)
+        self.assertGreater(len(self.batches), 2)
+        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 1514)
+
+    def test_a_corpus_three_times_larger_still_uploads_within_the_limit(self):
+        tripled = [
+            (scheduler, feature, {**child, "key": f"{child['key']}-copy-{copy}"})
+            for scheduler, feature, child in self.children
+            for copy in range(3)
+        ]
+        self.patch_attr("_eval_children", lambda: tripled)
+        batches = gp.generate_pipeline_batches()
+        self.assert_uploads_are_well_formed(batches, tripled)
+        self.assertGreater(len(batches), len(self.batches))
+
+    def test_a_smaller_limit_cuts_a_scheduler_between_families_and_labels_the_slices(self):
+        self.patch_attr("UPLOAD_JOB_LIMIT", 400)
+        batches = gp.generate_pipeline_batches()
+        self.assert_uploads_are_well_formed(batches, self.children)
+        self.assertEqual(
+            sum(gp._job_count(document) for document in batches),
+            sum(gp._job_count(document) for document in self.batches),
+        )
+        labels = re.findall(r'^  - group: "([^"]+)"$', "".join(batches[1:-1]), re.M)
+        self.assertEqual(len(labels), len(batches) - 2)
+        pattern = re.compile(
+            r'^:test_tube: OMENative YAML E2E \(KIND on GKE\) \[(\d+)/(\d+): '
+            r'(default scheduler|' + re.escape(gp.EVAL_GANG_SCHEDULER) + r')(, [a-z0-9-]+( to [a-z0-9-]+)?)?\]$'
+        )
+        for index, label in enumerate(labels, start=1):
+            match = pattern.match(label)
+            self.assertIsNotNone(match, label)
+            self.assertEqual((int(match.group(1)), int(match.group(2))), (index, len(labels)))
+            # Every slice here is a part of its scheduler, so each names its families.
+            self.assertIsNotNone(match.group(4), label)
+        self.assertEqual(labels[0].count("default scheduler"), 1)
+
+    def test_eval_batches_keep_order_cut_per_scheduler_and_between_families(self):
+        def job(scheduler, feature, number):
+            return (scheduler, feature, {"key": f"{feature}-{scheduler or 'default'}-{number}"})
+
+        families = (("a", 3), ("b", 3), ("c", 4), ("d", 2))
+        children = [
+            job(scheduler, feature, number)
+            for scheduler in ("", gp.EVAL_GANG_SCHEDULER)
+            for feature, size in families
+            for number in range(size)
+        ]
+        batches = gp._eval_batches(children, 5)
+        self.assertEqual([child for batch in batches for child in batch], children)
+        self.assertEqual([len(batch) for batch in batches], [3, 3, 4, 2, 3, 3, 4, 2])
+        for batch in batches:
+            self.assertEqual(len({scheduler for scheduler, _, _ in batch}), 1)
+        # At or under the limit a scheduler's jobs stay in one batch.
+        self.assertEqual([len(batch) for batch in gp._eval_batches(children, 12)], [12, 12])
+        # A family alone above the limit is cut between its jobs.
+        big = [job("", "big", number) for number in range(12)]
+        self.assertEqual([len(batch) for batch in gp._eval_batches(big, 5)], [5, 5, 2])
+        self.assertEqual(gp._eval_batches([], 5), [])
+        with self.assertRaisesRegex(RuntimeError, "positive"):
+            gp._eval_batches(children, 0)
+
+    def test_a_single_eval_group_keeps_the_plain_key(self):
+        default_only = [item for item in self.children if item[0] == ""]
+        self.patch_attr("_eval_children", lambda: default_only)
+        groups = gp._gke_eval_groups()
+        self.assertEqual([group["key"] for group in groups], ["omenative-e2e-kind-gke"])
+        self.assertEqual(groups[0]["group"], ":test_tube: OMENative YAML E2E (KIND on GKE)")
+        self.assertEqual(groups[0]["notify"], [{"github_commit_status": {"context": "omenative-e2e-kind-gke"}}])
+
+    def test_every_eval_group_posts_its_own_commit_status(self):
+        for group in gp._gke_eval_groups():
+            self.assertEqual(group["notify"], [{"github_commit_status": {"context": group["key"]}}])
+
+    def test_generation_refuses_an_upload_above_the_limit(self):
+        self.patch_attr("UPLOAD_JOB_LIMIT", 50)
+        with self.assertRaisesRegex(RuntimeError, "upload 1 of .* carries .* jobs"):
+            gp.generate_pipeline_batches()
+
+    def test_batch_dir_mode_writes_every_document_and_a_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"MSL_BK_PIPELINE_PRIORITY": "7"}
+        ):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                gp.main(["--batch-dir", tmp])
+            manifest = [line.split() for line in out.getvalue().splitlines()]
+            self.assertEqual(
+                manifest,
+                [[f"batch-{index:02d}.yml", str(gp._job_count(document))]
+                 for index, document in enumerate(self.batches, start=1)],
+            )
+            for (name, _), document in zip(manifest, self.batches):
+                self.assertEqual((Path(tmp) / name).read_text(), "priority: 7\n" + document)
+            self.assertIn("pipeline upload plan:", err.getvalue())
+            self.assertIn(f"{len(self.batches)} uploads", err.getvalue())
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                gp.main([])
+            self.assertEqual(out.getvalue(), "priority: 7\n" + self.batches[0])
+
+    def test_upload_script_uploads_every_later_document_in_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stubs = root / "bin"
+            stubs.mkdir()
+            log = root / "uploads.log"
+            agent = stubs / "buildkite-agent"
+            agent.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG"\n')
+            agent.chmod(0o755)
+            (stubs / "python3").symlink_to(sys.executable)
+            batch_dir = root / "batches"
+            env = {
+                **os.environ,
+                "PATH": f"{stubs}:{os.environ.get('PATH', '')}",
+                "STUB_LOG": str(log),
+                "OME_PIPELINE_BATCH_DIR": str(batch_dir),
+                "BUILDKITE_BRANCH": "main",
+                "BUILDKITE_COMMIT": "HEAD",
+            }
+            result = subprocess.run(
+                ["sh", str(gp.REPO_ROOT / gp.UPLOAD_SCRIPT)],
+                env=env, cwd=tmp, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            manifest = [line.split() for line in (batch_dir / "manifest.txt").read_text().splitlines()]
+            self.assertEqual(len(manifest), len(self.batches))
+            uploads = [line.split() for line in log.read_text().splitlines()]
+            self.assertEqual(
+                uploads,
+                [["pipeline", "upload", str(batch_dir / name)] for name, _ in manifest[1:]],
+            )
+            self.assertIn(f"skip {manifest[0][0]} ({manifest[0][1]} jobs)", result.stdout)
+            for name, count in manifest[1:]:
+                self.assertIn(f"upload {name} ({count} jobs)", result.stdout)
+                self.assertEqual(gp._job_count((batch_dir / name).read_text()), int(count))
+            total = sum(int(count) for _, count in manifest[1:])
+            self.assertIn(f"uploaded {len(manifest) - 1} documents, {total} jobs", result.stdout)

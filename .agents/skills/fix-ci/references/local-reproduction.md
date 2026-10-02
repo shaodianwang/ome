@@ -43,7 +43,7 @@ is that shim's territory, not the test's.
 | `oep-status-drift` | `make oep-status` |
 | `internal-tokens` | `python3 -m unittest hack/check_internal_tokens_test.py && python3 hack/check_internal_tokens.py --tree` |
 | `git-author-email` | `bash hack/check-git-author-email.sh --current` (your config) or `--revision origin/main..HEAD` (the commits) |
-| pipeline generation | `python3 .buildkite/generate_pipeline.py >/dev/null`; `BUILDKITE_BRANCH=main python3 .buildkite/generate_pipeline.py` for the main-only shape |
+| pipeline generation | `python3 .buildkite/generate_pipeline.py >/dev/null` (prints the entrypoint's document; the upload plan goes to stderr); `BUILDKITE_BRANCH=main python3 .buildkite/generate_pipeline.py --batch-dir <dir>` writes every document of the main-only shape |
 
 For a drift step, commit whatever the target changed. If the target changes
 nothing locally, compare toolchain versions with the CI image (`go version`,

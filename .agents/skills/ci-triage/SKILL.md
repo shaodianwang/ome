@@ -79,7 +79,7 @@ build number. Full step table: `.agents/skills/fix-ci/references/pipeline-steps.
 | KIND on GKE | group `integration-test-kind-gke`, children `kind-gke-<slug>`, plus `package-kind-test-image` | GKE queue | hard |
 | KIND advisory | group `integration-test-kind-mc-gke` (`kind-gke-mc-placement`, `kind-gke-mc-quota`), `kind-gke-quarantine` | GKE queue | soft-fail |
 | Images, charts | `build-<image>`, `mirror-<image>`, `chart-<chart>`, `chart-ome-release` | `tw-cpu-x86` | hard; push only on `main` |
-| main only | group `omenative-e2e-kind-gke` (`omenative-e2e-<feature>-<topology>[-i-of-n]`), `package-kind-eval-image`, group `integration-test-kind-upgrade` (`kind-gke-upgrade-identity`) | GKE queue | hard |
+| main only | groups `omenative-e2e-kind-gke-<i>-of-<n>` (`omenative-e2e-<feature>-<topology>[-i-of-n]`, uploaded by `upload-eval-lanes`), `package-kind-eval-image`, group `integration-test-kind-upgrade` (`kind-gke-upgrade-identity`) | GKE queue | hard |
 
 The GKE queue is whatever `GKE_KIND_QUEUE` names, default `gke-tpu-v7x`;
 `.buildkite/README-gke-kind.md` documents the dedicated `gke-kind-x86` design.

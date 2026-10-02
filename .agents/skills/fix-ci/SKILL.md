@@ -63,9 +63,11 @@ Runs on every PR and on `main` (step key = GitHub context):
 | KIND, advisory | group `integration-test-kind-mc-gke` (`kind-gke-mc-placement`, `kind-gke-mc-quota`), `kind-gke-quarantine` | soft-fail |
 | Images, charts | `build-<image>`, `mirror-<image>`, `chart-<chart>` | build validates Dockerfiles on PRs; push and mirror only on `main` |
 
-`main` only: `omenative-e2e-kind-gke` (children `omenative-e2e-<feature>-<topology>`),
-`integration-test-kind-upgrade` (`kind-gke-upgrade-identity`), `package-kind-eval-image`,
-`chart-ome-release`. Kill switches read at pipeline upload: `GKE_KIND_ENABLED`,
+`main` only: `upload-eval-lanes` (uploads the eval groups and the marker as
+further pipeline documents), groups `omenative-e2e-kind-gke-<i>-of-<n>`
+(children `omenative-e2e-<feature>-<topology>`), `integration-test-kind-upgrade`
+(`kind-gke-upgrade-identity`), `package-kind-eval-image`, `chart-ome-release`
+(depends on every other step and group). Kill switches read at pipeline upload: `GKE_KIND_ENABLED`,
 `GKE_EVAL_ENABLED`, `GKE_UPGRADE_ENABLED` (default on). A KIND group posts one
 GitHub context for the whole group; the failing child is only visible as a
 Buildkite job with `step_key` `kind-gke-<slug>`.

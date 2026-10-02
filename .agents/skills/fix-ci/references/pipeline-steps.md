@@ -8,13 +8,23 @@ variables from the build environment; render it locally with
 `python3 .buildkite/generate_pipeline.py` (add `BUILDKITE_BRANCH=main` for the
 main-only shape).
 
+The build is uploaded in several documents because Buildkite caps the jobs of
+one upload (`UPLOAD_JOB_LIMIT` in the generator, below the organization's
+limit). The entrypoint uploads what the generator prints: every step that is
+not an eval lane, ending on `main` with `upload-eval-lanes`, which runs
+`.buildkite/upload_pipeline_batches.sh`: it writes every document
+(`--batch-dir`, attached as artifacts) and uploads the rest in order, one eval
+group per document and the release marker last. Both logs print the job count
+per upload and the total.
+
 ## GitHub commit statuses
 
 `_gh_status(key)` attaches `notify: github_commit_status: context: <key>` to a
 step, so the GitHub context equals the step key. Groups attach one notify for
 the group key (`integration-test-kind-gke`, `integration-test-kind-mc-gke`,
-`integration-test-kind-upgrade`, `omenative-e2e-kind-gke`); their children post
-nothing of their own, and the quarantine group posts nothing at all.
+`integration-test-kind-upgrade`, `omenative-e2e-kind-gke-<i>-of-<n>`); their
+children post nothing of their own, and the quarantine group posts nothing at
+all.
 `buildkite/ome` is Buildkite's pipeline rollup; its `target_url` carries the
 build number.
 
@@ -22,7 +32,7 @@ build number.
 
 | Preset | Conditions | Used by |
 |---|---|---|
-| infra retry | `exit_status: 125` or `signal_reason: agent_stop`, limit 2; never matches exit 1 | `git-author-email`, `internal-tokens`, `lint`, `vet`, `test`, `rollout-behavior-lock`, `integration-test`, `scheduler-test`, `muse-rust-checks`, `helm-lint`, every `kind-gke-<slug>` child |
+| infra retry | `exit_status: 125` or `signal_reason: agent_stop`, limit 2; never matches exit 1 | `git-author-email`, `internal-tokens`, `lint`, `vet`, `test`, `rollout-behavior-lock`, `integration-test`, `scheduler-test`, `muse-rust-checks`, `helm-lint`, `upload-eval-lanes`, every `kind-gke-<slug>` child |
 | auto retry | any non-zero exit, limit 2 | every `*-drift` step, `package-kind-test-image`, `package-kind-eval-image`, `build-*`, `mirror-*`, `chart-ome-release` |
 | none | | `perf-test`, `kind-gke-mc-*`, `kind-gke-quarantine`, `kind-gke-upgrade-identity`, `omenative-e2e-*`, `chart-<chart>` |
 
@@ -111,6 +121,7 @@ is a dependency state, not a failure of their own.
 | Key | Gate | Notes |
 |---|---|---|
 | `package-kind-eval-image` | `GKE_EVAL_ENABLED` | after the manager, agent, canary-metrics and kind-ci mirrors |
-| group `omenative-e2e-kind-gke` → `omenative-e2e-<feature>-<topology>[-i-of-n]` | `GKE_EVAL_ENABLED` | deployed OMENative eval over the case YAMLs in `hack/omenative-testing/perm/isvcs/`; 180 minute timeout; results archive uploaded as an artifact |
+| `upload-eval-lanes` | `GKE_EVAL_ENABLED` | last step of the entrypoint's upload; uploads the eval groups and then the release marker as further documents |
+| groups `omenative-e2e-kind-gke-<i>-of-<n>` → `omenative-e2e-<feature>-<topology>[-i-of-n]` | `GKE_EVAL_ENABLED` | deployed OMENative eval over the case YAMLs in `hack/omenative-testing/perm/isvcs/`, one group per upload (per scheduler, cut between families when a scheduler's jobs exceed the limit); 180 minute timeout; results archive uploaded as an artifact |
 | group `integration-test-kind-upgrade` → `kind-gke-upgrade-identity` | `GKE_UPGRADE_ENABLED` and `GKE_KIND_ENABLED` | operator-upgrade identity gate; skips loudly when the previous images were not baked |
-| `chart-ome-release` | `build.branch == "main"` | after a `wait` barrier: the release marker for the control-plane charts and images |
+| `chart-ome-release` | `build.branch == "main"` | uploaded last; depends on every other top-level step and group by key (a soft-failing step completes before it without blocking it): the release marker for the control-plane charts and images |

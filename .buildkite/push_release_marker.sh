@@ -2,8 +2,9 @@
 # Package an atomic OME release marker and push it to ECR on main.
 #
 # Each component chart uploads its exact version as a Buildkite artifact after
-# publication succeeds. The final wait gate in generate_pipeline.py ensures
-# those artifacts and every hard test result exist before this script runs.
+# publication succeeds. The marker step depends on every other step and group
+# of the build (generate_pipeline.py names them), so those artifacts and every
+# hard test result exist before this script runs.
 # For local validation, pass --dry-run and provide the versions as space-
 # separated name=version pairs in OME_RELEASE_CHART_VERSIONS.
 set -eu

@@ -19,8 +19,17 @@ switch: every image step builds and republishes its hash tag, which is
 also how base-image and tool refreshes reach an image whose inputs have
 not changed.
 
+Buildkite caps the jobs of one pipeline upload (UPLOAD_JOB_LIMIT), so the
+build is uploaded as several documents. The entrypoint uploads what this
+script prints: every step that is not an eval lane, ending with the step
+that runs upload_pipeline_batches.sh. That step writes every document
+(--batch-dir) and uploads the rest in order: one eval group per document,
+then the release marker, which names every other step and group of the
+build as a dependency.
+
 Usage:
-    python3 .buildkite/generate_pipeline.py | buildkite-agent pipeline upload
+    python3 .buildkite/generate_pipeline.py > generated-pipeline.yml
+    python3 .buildkite/generate_pipeline.py --batch-dir <dir>
 
 Environment variables read at runtime:
     BUILDKITE_BRANCH          – current branch name
@@ -38,10 +47,12 @@ Environment variables read at runtime:
 
 from __future__ import annotations
 
+import argparse
 import base64
 import datetime
 import functools
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -96,6 +107,19 @@ BUILD_QUEUE = "tw-cpu-x86"
 # its CPU node pool via the per-step kubernetes plugin. Flip GKE_KIND_QUEUE to a
 # dedicated GKE CPU queue (e.g. gke-kind-x86) once infra provisions one.
 GKE_QUEUE = os.environ.get("GKE_KIND_QUEUE", "gke-tpu-v7x")
+# Buildkite rejects one pipeline upload carrying more jobs than the
+# organization's limit of 1500. Every upload stays at or below this count; the
+# gap to the limit is headroom for whatever else Buildkite counts against it
+# (the uploading job, retried jobs, the steps other jobs upload into the build).
+UPLOAD_JOB_LIMIT = 1000
+# The step in the first upload that uploads the others, the script it runs and
+# where that script writes every document (attached as artifacts).
+UPLOAD_STEP_KEY = "upload-eval-lanes"
+UPLOAD_SCRIPT = ".buildkite/upload_pipeline_batches.sh"
+UPLOAD_BATCH_DIR = ".buildkite/artifacts/pipeline-batches"
+# The image the pipeline entrypoint generates in; the upload step runs the
+# same generator, so it runs in the same image.
+PIPELINE_UPLOAD_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/astral/uv:python3.12-bookworm"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 KIND_SUITE_DIR = REPO_ROOT / "tests/integration/singlecluster/controller/omenative_coordination_kind"
 MC_KIND_SUITE_DIR = REPO_ROOT / "tests/integration/multicluster/scaleout_kind"
@@ -654,6 +678,19 @@ def _yaml_block(obj, indent: int = 0) -> str:
                 lines.append(f"{pad}- {json.dumps(item)}")
         return "\n".join(lines)
     return f"{pad}{json.dumps(obj)}"
+
+
+def _job_count(yaml_text: str) -> int:
+    """The jobs Buildkite counts in a pipeline document: every command step
+    (the generator starts each one with its label) and every wait step. A
+    group is a container for its children, not a job of its own."""
+    return len(re.findall(r"^\s*- (?:label: |wait\s*$)", yaml_text, re.M))
+
+
+def _top_level_keys(yaml_text: str) -> list[str]:
+    """The keys of a document's top-level steps and groups, in order: the
+    generator renders those at four spaces and a group's children at eight."""
+    return re.findall(r'^    key: "([^"]+)"$', yaml_text, re.M)
 
 
 def _gh_status(key: str, indent: int = 12) -> str:
@@ -1518,8 +1555,10 @@ def _split_eval_cases(
     return shards
 
 
-def _gke_eval_group() -> str:
-    """Main-only deployed OMENative eval, split into named feature/topology jobs."""
+def _eval_children() -> list[tuple[str, str, dict]]:
+    """Every job of the main-only deployed OMENative eval as (scheduler,
+    feature, step), in upload order: scheduler-major, then the named
+    feature/topology lanes with their shards."""
     plugins = _gke_kind_plugins(_kind_ci_image(f"eval-{COMMIT[:8]}"), shared_model=True)
     configured_pod_budget = (
         os.environ.get("GKE_EVAL_POD_BUDGET")
@@ -1562,13 +1601,13 @@ def _gke_eval_group() -> str:
             if not cases:
                 # Nothing fits the cap: say so in the build instead of dropping
                 # the twin silently.
-                children.append({
+                children.append((scheduler, feature, {
                     "label": f":information_source: {feature} / {topology} [{scheduler}]{variant_part} needs more than {GKE_EVAL_SCHEDULER_MAX_WORKERS} nodes ({len(skipped)} cases skipped)",
                     "key": f"omenative-e2e-{slug}-skipped",
                     "command": "echo 'whole-node gang placement: cases above the node cap are not run in this twin: "
                     + " ".join(skipped) + "'",
                     "agents": {"queue": BUILD_QUEUE},
-                })
+                }))
                 continue
             workers = max(2, max(peaks[c] for c in cases))
             pod_budget = str(workers)
@@ -1622,14 +1661,74 @@ def _gke_eval_group() -> str:
                 scheduler and (topology in soft or not GKE_EVAL_SCHEDULER_HARD_FAIL)
             ):
                 child["soft_fail"] = True
-            children.append(child)
-    group = {
-        "group": ":test_tube: OMENative YAML E2E (KIND on GKE)",
-        "key": "omenative-e2e-kind-gke",
-        "notify": [{"github_commit_status": {"context": "omenative-e2e-kind-gke"}}],
-        "steps": children,
+            children.append((scheduler, feature, child))
+    return children
+
+
+def _eval_batches(
+    children: list[tuple[str, str, dict]], limit: int = UPLOAD_JOB_LIMIT
+) -> list[list[tuple[str, str, dict]]]:
+    """Cut the eval jobs, order kept, into runs of at most `limit`: one per
+    scheduler dimension, and a dimension above the limit into near-equal
+    parts cut between families (a family alone above the limit is cut
+    between its jobs)."""
+    if limit < 1:
+        raise RuntimeError("the jobs per pipeline upload must be positive")
+    batches: list[list[tuple[str, str, dict]]] = []
+    for _, dimension in itertools.groupby(children, key=lambda item: item[0]):
+        jobs = list(dimension)
+        parts = -(-len(jobs) // limit)
+        target = -(-len(jobs) // parts)
+        current: list[tuple[str, str, dict]] = []
+        for _, family in itertools.groupby(jobs, key=lambda item: item[1]):
+            members = list(family)
+            if current and len(current) + len(members) > target:
+                batches.append(current)
+                current = []
+            while len(members) > limit:
+                batches.append(members[:limit])
+                members = members[limit:]
+            current.extend(members)
+        if current:
+            batches.append(current)
+    return batches
+
+
+def _gke_eval_groups() -> list[dict]:
+    """The eval jobs as group steps, one per pipeline upload. A single group
+    keeps the plain key; several are numbered, and each label names its
+    scheduler and, when the scheduler's jobs span more than one group, the
+    families it carries."""
+    children = _eval_children()
+    batches = _eval_batches(children, UPLOAD_JOB_LIMIT)
+    per_scheduler = {
+        scheduler: len(list(jobs))
+        for scheduler, jobs in itertools.groupby(children, key=lambda item: item[0])
     }
-    return _yaml_block([group], 2)
+    groups = []
+    for index, batch in enumerate(batches, start=1):
+        key = "omenative-e2e-kind-gke"
+        label = ":test_tube: OMENative YAML E2E (KIND on GKE)"
+        if len(batches) > 1:
+            scheduler = batch[0][0]
+            part = scheduler or "default scheduler"
+            if len(batch) < per_scheduler[scheduler]:
+                first, last = batch[0][1], batch[-1][1]
+                part += f", {first}" if first == last else f", {first} to {last}"
+            key += f"-{index}-of-{len(batches)}"
+            label += f" [{index}/{len(batches)}: {part}]"
+        groups.append({
+            "group": label,
+            "key": key,
+            "notify": [{"github_commit_status": {"context": key}}],
+            "steps": [child for _, _, child in batch],
+        })
+    return groups
+
+
+def _gke_eval_group() -> str:
+    """Every eval group rendered one after another, as the uploads carry them."""
+    return "\n".join(_yaml_block([group], 2) for group in _gke_eval_groups())
 
 
 def _drift_check_step(key: str, label: str, make_target: str, apt_packages: str = "") -> str:
@@ -2277,8 +2376,40 @@ def _push_chart_step(chart: str, depends_on: str | list[str] = "test") -> str:
     )
 
 
-def _release_marker_step() -> str:
-    """Publish the Kargo-facing marker after the pipeline's final wait gate."""
+def _upload_batches_step(uploads: int, jobs: int) -> str:
+    """The last step of the first upload: it generates every document again
+    and uploads those after the first, the eval groups and then the release
+    marker, so they exist in the build before anything waits on them."""
+    return textwrap.dedent(
+        f"""\
+          - label: ":gear: Upload eval lanes and release marker ({uploads} uploads, {jobs} jobs)"
+            key: "{UPLOAD_STEP_KEY}"
+{_gh_status(UPLOAD_STEP_KEY)}
+{_infra_retry()}
+            command: |
+              sh {UPLOAD_SCRIPT}
+            artifact_paths:
+              - "{UPLOAD_BATCH_DIR}/*"
+            agents:
+              queue: "{BUILD_QUEUE}"
+            plugins:
+{_tw_docker_plugin(PIPELINE_UPLOAD_IMAGE, indent=14)}
+        """
+    )
+
+
+def _release_marker_step(depends_on: list[str]) -> str:
+    """Publish the Kargo-facing marker once every gate it names has passed.
+
+    The marker is the last step of the last upload and names every other
+    top-level step and group of the build as a dependency. That list is the
+    whole gate, because a wait step would only order it after the steps
+    uploaded before it: a hard failure anywhere skips the marker, and a
+    soft-failing step completes before it without blocking it.
+    """
+    if not depends_on:
+        raise RuntimeError("the release marker needs the keys it gates on")
+    deps = "\n".join(f'              - "{key}"' for key in depends_on)
     return textwrap.dedent(
         f"""\
           - label: ":helm: Publish qualified OME release marker"
@@ -2286,6 +2417,8 @@ def _release_marker_step() -> str:
             if: build.branch == "main"
 {_gh_status("chart-ome-release")}
 {_auto_retry()}
+            depends_on:
+{deps}
             secrets:
               - "PROD_ECR_AUTH_TOKEN"
             env:
@@ -2340,20 +2473,70 @@ def cd_steps() -> str:
 # ---------------------------------------------------------------------------
 
 
-def generate_pipeline() -> str:
-    pipeline = ci_steps()
-    pipeline += "\n" + cd_steps()
-    if BRANCH == "main" and GKE_EVAL_ENABLED:
-        pipeline += "\n" + _gke_eval_group()
+def generate_pipeline_batches() -> list[str]:
+    """The pipeline as the documents the build uploads, in upload order.
+
+    The first document is the entrypoint's upload: every step that is not an
+    eval lane and, when there are eval lanes, the step that uploads the rest.
+    Each eval group is a document of its own, and the release marker is the
+    last document, so every key it depends on exists in the build before it
+    is uploaded. A dependency may only name a key from the same or an earlier
+    document.
+    """
+    first = ci_steps()
+    first += "\n" + cd_steps()
     # GKE_KIND_ENABLED too: this step depends on package-kind-test-image,
     # which only exists in the pipeline when that switch is on.
     if BRANCH == "main" and GKE_UPGRADE_ENABLED and GKE_KIND_ENABLED:
-        pipeline += "\n" + _gke_upgrade_identity_step()
-    # The marker has no explicit dependencies, so Buildkite's wait barrier
-    # orders it after every preceding step and group. Soft-failing diagnostics
-    # still complete before the marker but do not block it.
-    pipeline += "\n  - wait\n\n" + textwrap.indent(_release_marker_step(), "  ")
-    return pipeline
+        first += "\n" + _gke_upgrade_identity_step()
+    groups = _gke_eval_groups() if BRANCH == "main" and GKE_EVAL_ENABLED else []
+    later = ["steps:\n" + _yaml_block([group], 2) for group in groups]
+    if later:
+        # The upload step's label counts what follows it: the groups and the
+        # marker's own document.
+        jobs = sum(_job_count(document) for document in later) + 1
+        first += "\n" + textwrap.indent(_upload_batches_step(len(later) + 1, jobs), "  ")
+    gates = _top_level_keys(first) + [group["key"] for group in groups]
+    marker = textwrap.indent(_release_marker_step(gates), "  ")
+    if later:
+        later.append("steps:\n" + marker)
+    else:
+        first += "\n" + marker
+    batches = [first, *later]
+    for index, document in enumerate(batches, start=1):
+        count = _job_count(document)
+        if count > UPLOAD_JOB_LIMIT:
+            raise RuntimeError(
+                f"pipeline upload {index} of {len(batches)} carries {count} jobs, "
+                f"above the {UPLOAD_JOB_LIMIT} one upload may carry"
+            )
+    return batches
+
+
+def generate_pipeline() -> str:
+    """The first document: what the pipeline entrypoint uploads."""
+    return generate_pipeline_batches()[0]
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" + ("" if count == 1 else "s")
+
+
+def _upload_plan(batches: list[str]) -> str:
+    """One line per upload for the log: its job count and what it carries."""
+    total = sum(_job_count(document) for document in batches)
+    lines = [
+        f"pipeline upload plan: {_plural(len(batches), 'upload')}, {_plural(total, 'job')}, "
+        f"at most {UPLOAD_JOB_LIMIT} per upload"
+    ]
+    for index, document in enumerate(batches, start=1):
+        if index == 1:
+            carries = "the entrypoint: every step that is not an eval lane"
+        else:
+            carries = f"{UPLOAD_STEP_KEY}: " + ", ".join(_top_level_keys(document))
+        jobs = _plural(_job_count(document), "job")
+        lines.append(f"  {index}/{len(batches)}  {jobs:>9}  {carries}")
+    return "\n".join(lines) + "\n"
 
 
 def _priority_prefix() -> str:
@@ -2375,11 +2558,30 @@ def _priority_prefix() -> str:
         return ""
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     if os.environ.get("OME_PIPELINE_MODE"):
         sys.stderr.write("OME_PIPELINE_MODE is no longer supported\n")
         raise SystemExit(2)
-    sys.stdout.write(_priority_prefix() + generate_pipeline())
+    parser = argparse.ArgumentParser(description="Generate the Buildkite pipeline for OME.")
+    parser.add_argument(
+        "--batch-dir",
+        metavar="DIR",
+        help="write every upload document to DIR as batch-NN.yml and print one "
+        "manifest line per document (file name, job count) instead of the "
+        "first document",
+    )
+    args = parser.parse_args(argv)
+    batches = generate_pipeline_batches()
+    sys.stderr.write(_upload_plan(batches))
+    if args.batch_dir is None:
+        sys.stdout.write(_priority_prefix() + batches[0])
+        return
+    directory = Path(args.batch_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    for index, document in enumerate(batches, start=1):
+        name = f"batch-{index:02d}.yml"
+        (directory / name).write_text(_priority_prefix() + document)
+        sys.stdout.write(f"{name} {_job_count(document)}\n")
 
 
 if __name__ == "__main__":
