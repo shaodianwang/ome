@@ -55,8 +55,22 @@ deploy_tag_from_image_ids() {
   printf 'kind-%s\n' "$digest"
 }
 
-# Keep the content-derived tag helper directly testable without executing a
-# cluster deployment when this file is sourced.
+# derive_image gives dst its own image id over src's filesystem. A tag that
+# merely aliases src shares its id, and the runtime names a container's image
+# by whichever reference of that id it lists first, so an in-place image change
+# between two aliases is never confirmed by the pod status.
+derive_image() {
+  local src="$1" dst="$2" container
+  container="$(docker create "$src")" || return 1
+  if ! docker commit --change "LABEL ome.eval/derived-from=${src}" "$container" "$dst" >/dev/null; then
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    return 1
+  fi
+  docker rm -f "$container" >/dev/null
+}
+
+# Keep the content-derived tag and image helpers directly testable without
+# executing a cluster deployment when this file is sourced.
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
 fi
@@ -549,7 +563,10 @@ if [ "$OFFLINE" -eq 1 ]; then
     [ -n "$image" ] || continue
     case "$image" in
       *nginxinc/nginx-unprivileged:*)
-        docker image tag "$NGINX_IMAGE" "$image"
+        # The archive carries one nginx image; every other nginx tag a case
+        # names is derived from it rather than aliased, so a roll between the
+        # two moves to a distinct image id the runtime reports by that name.
+        derive_image "$NGINX_IMAGE" "$image"
         kind_load "$image"
         ;;
       *)

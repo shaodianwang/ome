@@ -8089,7 +8089,7 @@ def _pause_repair(case_id, yaml_file, desc, hdr):
         _pause_annotation(case_id, pmode)
     print(f"  Phase 3: {f['kind']} fault on the {'paused' if paused_since else 'idle'} service "
           f"(pause {pmode} {moment} the repair; {'fix pushed while paused' if push else 'nothing pushed'})")
-    _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"])
+    _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
     ctx["trigger_ts"] = fault_ts = time.time()
     if paused_since is not None:
         out["pause_lead_s"] = fault_ts - paused_since
@@ -12475,7 +12475,7 @@ def _runtimerev_repair(case_id, yaml_file, desc, hdr, csr):
     edit = hdr.get("edit", "material")
     kind = edit if edit in ("image", "resources") else "env"
     print(f"  Phase 2: {f['kind']} fault on the settled service; the runtime edit waits for the repair")
-    _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"])
+    _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
     fault_ts = time.time()
     if f["infra_fail"]:
         return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
@@ -12494,6 +12494,7 @@ def _runtimerev_repair(case_id, yaml_file, desc, hdr, csr):
     opened, opened_at, rebuilding, last_poll = "", None, "", 0.0
     while time.time() - fault_ts < budget and not ctx["closed"]:
         _read_one(ctx)
+        _break_allowance_tick(ctx)
         rebuilding = _repair_rebuilding(victim_pods(), pre_uids)
         if rebuilding:
             break
@@ -12542,6 +12543,7 @@ def _runtimerev_repair(case_id, yaml_file, desc, hdr, csr):
     state, stable = "ROTATING", None
     while time.time() - edit_ts < budget and not ctx["closed"]:
         _read_one(ctx)
+        _break_allowance_tick(ctx)
         seen_uids |= {p["uid"] for _n, p in victim_pods() if p.get("uid")}
         if converged():
             if stable is None:
@@ -16294,7 +16296,7 @@ def _canary(case_id, yaml_file, desc, hdr):
         # The stable side breaks, its metrics breach or the gate's source goes
         # on the idle service; the push lands only once a break has visibly
         # bitten (a breach and a lost source show once the gate samples).
-        _fault_fire(fault, ctx["pod_state"], ctx["pods_per_inst"], ctx["old_hashes"])
+        _fault_fire(fault, ctx["pod_state"], ctx["pods_per_inst"], ctx["old_hashes"], inv=ctx.get("inv"))
         if fault["infra_fail"]:
             _stop_watcher(ctx)
             return _write_fail(case_id, desc, hdr, "INFRA-FAIL", fault["infra_fail"])

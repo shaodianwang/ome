@@ -1844,6 +1844,99 @@ func TestReconcile_OpenRepair_TargetMovesAfterThePodsExist(t *testing.T) {
 	}
 }
 
+// TestReconcile_OpenRepair_PeersStayInRotationWhileTheTargetMoves: three
+// Instances, the repair of one has rebuilt its pod set and that set is still
+// starting when the target moves. The open repair owns the Component's
+// wake-ups until it finishes, so no healthy peer leaves rotation while the
+// repaired Instance serves nothing: the peers stay untouched on the running
+// revision, no roll opens and no pod is added. Once the rebuilt set is up the
+// repair finishes on the revision its pods carry, and the roll then lands the
+// target on every Instance within its budget, with exactly the one repair on
+// record. Every strategy the engine rolls a single-pod Instance under, both
+// restart policies.
+//
+// Cells: instance/Restart/Drain/spec.revision/before
+func TestReconcile_OpenRepair_PeersStayInRotationWhileTheTargetMoves(t *testing.T) {
+	const replicas = 3
+	const victim = int32(replicas - 1)
+	peers := []int32{0, 1}
+	for _, sc := range offTargetStrategies[:3] {
+		for _, policy := range []workloadtypes.RestartPolicy{workloadtypes.RestartPolicyNone, workloadtypes.RestartPolicyRecreateInstance} {
+			t.Run(fmt.Sprintf("%s/%s", sc.strategy, policy), func(t *testing.T) {
+				h := offTargetCrashHarness(t, false, sc.strategy, sc.surge, sc.unavail, policy, replicas)
+				before := h.instance(victim).Incarnation
+				breakWholeInstance(t, h, victim, crashAtStart)
+				h.events = nil
+				podsRebuilt := func() bool {
+					pods := h.podsOf(victim)
+					return h.repairInFlight() && len(pods) == 1 && pods[0].Spec.Containers[0].Image == goodImage
+				}
+				if !h.run(6, podsRebuilt) {
+					h.dumpState("after the crash")
+					t.Fatalf("the repair never rebuilt the pod set")
+				}
+				// The rebuilt pod stays in its startup window for as long as
+				// the story needs: the readiness it is held on is lifted below.
+				rebuilt := h.podsOf(victim)[0].Name
+				h.readinessFails[rebuilt] = true
+
+				h.setTarget(h.revFixed, fixedImage)
+				peersUntouched := func() {
+					if s := h.instance(victim); s == nil || s.Phase != workloadtypes.InstancePhaseRestarting {
+						h.dumpState("repair left")
+						t.Fatalf("the open repair must keep driving the repaired Instance: %+v", s)
+					}
+					for _, s := range h.irStatuses() {
+						if s.Operation != nil && s.Operation.Type == workloadtypes.InstanceOperationUpdate {
+							h.dumpState("roll opened")
+							t.Fatalf("a roll opened on instance %d while the repair was open", s.Index)
+						}
+					}
+					for _, peer := range peers {
+						if !h.untouchedOn(peer, h.revV1) || !h.instanceInRotation(peer) {
+							h.dumpState("peer left rotation")
+							t.Fatalf("instance %d left rotation while the repaired instance %d served nothing", peer, victim)
+						}
+					}
+					if n := len(h.livePods()); n != replicas {
+						h.dumpState("pod added")
+						t.Fatalf("%d live pods during the open repair, want %d: nothing surges beside a repair", n, replicas)
+					}
+				}
+				h.runWithInvariant(6, func() bool { return false }, peersUntouched)
+
+				delete(h.readinessFails, rebuilt)
+				if !h.run(20, func() bool { return h.repairedAbove(victim, before) }) {
+					h.dumpState("open repair after the push")
+					t.Fatalf("the repair did not finish on the pods it had created")
+				}
+				if s := h.instance(victim); s.RunningRevision != h.revV1.Name {
+					t.Fatalf("repaired row records %q, want %s: the repair finishes on the revision its pods carry", s.RunningRevision, h.revV1.Name)
+				}
+				h.requirePodsRender(victim, h.revV1, goodImage)
+
+				withinBudget := func() {
+					if h.repairInFlight() {
+						h.dumpState("second repair")
+						t.Fatalf("a repair opened during the roll")
+					}
+					rollStaysWithinBudget(t, h, sc.strategy, sc.surge, sc.unavail)
+				}
+				if !h.runWithInvariant(100, func() bool { return h.settledOn(h.revFixed, replicas) }, withinBudget) {
+					h.dumpState("roll after the repair")
+					t.Fatalf("the roll did not land the target on every Instance")
+				}
+				if n := h.restartsRecorded(); n != 1 {
+					t.Fatalf("restarts recorded = %d, want exactly the repair that was already open: %v", n, h.events)
+				}
+				if h.sawEvent(workloadtypes.EventReasonRepairHeld) {
+					t.Fatalf("a repair was announced held: %v", h.events)
+				}
+			})
+		}
+	}
+}
+
 // landedOn lists the Instances Ready on rev with no operation, lowest
 // index first: the Instances whose roll to rev is finished.
 func (h *recoveryHarness) landedOn(rev *appsv1.ControllerRevision) []int32 {

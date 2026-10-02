@@ -28,6 +28,28 @@ tag="$(deploy_tag_from_image_ids "$manager_a" "$agent_a")"
 
 test_dir="$(mktemp -d)"
 trap 'rm -rf -- "$test_dir"' EXIT
+derive_bin="${test_dir}/derive-bin"
+derive_log="${test_dir}/derive.log"
+mkdir -p "$derive_bin"
+cat >"${derive_bin}/docker" <<'FAKE'
+#!/usr/bin/env bash
+printf 'docker %s\n' "$*" >>"$DERIVE_LOG"
+[ "${1:-}" = "create" ] && echo container-1
+exit 0
+FAKE
+chmod +x "${derive_bin}/docker"
+DERIVE_LOG="$derive_log" PATH="${derive_bin}:$PATH" \
+  derive_image example.com/web:base example.com/web:alt
+grep -Fqx "docker create example.com/web:base" "$derive_log" ||
+  fail "the derived image was not created from its source"
+grep -Fqx "docker commit --change LABEL ome.eval/derived-from=example.com/web:base container-1 example.com/web:alt" "$derive_log" ||
+  fail "the derived image was not committed under its own id and the case tag"
+grep -Fqx "docker rm -f container-1" "$derive_log" ||
+  fail "the scratch container of the derived image was not removed"
+if grep -Fq "docker image tag" "$derive_log" || grep -Fq "docker tag" "$derive_log"; then
+  fail "the case image must be derived, not aliased: an alias shares the source image id"
+fi
+
 fake_bin="${test_dir}/bin"
 fake_log="${test_dir}/commands.log"
 mkdir -p "$fake_bin"

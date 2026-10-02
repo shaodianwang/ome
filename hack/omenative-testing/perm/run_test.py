@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import ast
 import contextlib
 import copy
 import datetime
@@ -1214,6 +1215,16 @@ class LabelTruthInvariantTest(unittest.TestCase):
         key = ("F", "label-template-mismatch", "engine", "engine-3")
         self.assertEqual([key], list(inv["viol"]))
         self.assertIn("image: revision 'img:1' vs pod 'img:2'", inv["viol"][key]["detail"])
+
+    def test_every_fault_fire_threads_the_watcher_state(self):
+        """A break patches a live pod's spec, and the record that keeps
+        invariant F from judging that pod is the watcher state the fire is
+        handed: every verb that fires a fault passes it."""
+        tree = ast.parse(Path(run.__file__).read_text())
+        missing = sorted(node.lineno for node in ast.walk(tree)
+                         if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_fault_fire"
+                         and not any(keyword.arg == "inv" for keyword in node.keywords))
+        self.assertEqual([], missing, "run.py lines firing a fault without the watcher state")
 
     def test_a_break_records_its_victim_on_the_watcher_state(self):
         """The fire path is what fills the set: an imagepull break patching a
@@ -7896,6 +7907,52 @@ class HandlerSmokeTest(unittest.TestCase):
                 stack.enter_context(mock.patch.object(run, name, value))
             handler(*(["p999", Path("p999.yaml"), "desc", ctx["hdr"]]))
         return finished
+
+    def test_runtime_edit_on_an_open_repair_lowers_the_floor_by_the_broken_instance(self):
+        """The edit lands while the repair's replacement pod is in its startup
+        window, so the healthy Instances alone hold the floor: it is lowered by
+        the broken Instance, as every break verb lowers it, and the pod the verb
+        broke itself is recorded on the watcher state for invariant F."""
+        hdr = {"Ne": 3, "Nd": 0, "Nr": 0, "ceil_e": 4, "ceil_d": 0, "ceil_r": 0, "fault": "crashloop:old",
+               "form": "start", "during": run.REPAIR_HOOK, "topo": "engine", "rt": "ome-coordtest-rt-p999",
+               "expect": "roll", "edit": "image", "img": "example.com/app:alt"}
+        pods = {f"p999-engine-{i}-0": _rec("engine", i, "old") for i in range(3)}
+        ctx = _ctx_for(hdr, pods)
+        fired_with = []
+
+        def fire(f, pod_state, ppi, old_hashes, inv=None):
+            fired_with.append(inv)
+            f.update(fired=True, crash_pod="p999-engine-2-0", crash_inst="2", crash_comp="engine", crash_hash="old",
+                     crash_uid=pods["p999-engine-2-0"]["uid"])
+            pod_state["p999-engine-2-0"]["ready"] = False
+
+        def bump(ctx_, csr, comps, material, kind="env", image=None):
+            ctx_["trigger_ts"] = time.time()
+            return True
+
+        def script(ctx_, n):
+            edited = ctx_.get("trigger_ts")
+            if edited is None:
+                if ctx_["fault"]["fired"]:
+                    # The repair rebuilt the victim: a new pod, still starting.
+                    ctx_["pod_state"]["p999-engine-2-0"] = _rec("engine", 2, "old", ready=False, uid="engine-2-rebuilt")
+                return
+            if time.time() - edited < 0.3:
+                return
+            for i in range(3):
+                uid = "engine-2-rolled" if i == 2 else None
+                ctx_["pod_state"][f"p999-engine-{i}-0"] = _rec("engine", i, "new", uid=uid)
+        fleet = _FakeFleet(ctx, script)
+        handler = lambda case_id, yaml_file, desc, hdr_: run._runtimerev_repair(case_id, yaml_file, desc, hdr_, hdr_["rt"])
+        out = self._run(handler, ctx, fleet, {
+            "_fault_fire": fire, "_bump_runtime": bump, "FLOOR_SUSTAIN_S": 0.1,
+            "_crashloop_checks": lambda f, pod_state, old, ts, verdict, notes, checks, bumped=None, surges=None: verdict,
+            "_wait_rows_settled": lambda *a: (True, "")})
+        self.assertTrue(any("engine capacity floor held: min ready 2 ≥ N-maxUnavailable-1broken=2" in c
+                            for c in out["checks"]), out["checks"])
+        self.assertEqual(("CONVERGED", "PASS"), (out["state"], out["verdict"]), out["checks"])
+        self.assertEqual({"engine": 1}, ctx.get("floor_allowance"))
+        self.assertEqual([ctx["inv"]], fired_with, "the break must record its victim on the watcher state")
 
     def test_idle_readiness_recover(self):
         hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 2, "ceil_d": 0, "ceil_r": 0, "fault": "readiness:old",
