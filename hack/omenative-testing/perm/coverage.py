@@ -309,7 +309,7 @@ HEADER_CHECKS = {
     # repeat=<n>: the fault is applied again each time what it took has come back, n times, then stops
     "repeat": lambda v: isinstance(v, int) and v >= 2,
     "rollback": _flag, "readd": _flag, "dup": _flag, "hint": _flag, "hold": _flag, "pkill": _flag, "fixfirst": _flag,
-    "blocked": _flag, "infeasible": _flag, "notimpl": _flag, "floor_hard": _flag, "floor_soft": _flag,
+    "once": _flag, "blocked": _flag, "infeasible": _flag, "notimpl": _flag, "floor_hard": _flag, "floor_soft": _flag,
     "order_soft": _flag,
     "fault": _fault, "during": _during, "during2": _hook, "edit": _edit, "lift": _lift,
     "inst": lambda v: _int_list(v) or v == "last", "errorrate": _number, "timeout": _duration, "cell": _cells, "bump": _members,
@@ -661,7 +661,9 @@ def classify_faults(h, mode, pods, strategy, verbs):
         component = break_component(h)
         crash = "crash at start" if h.get("form") == "start" else "crash after Ready"
         side = "new" if param == "new" else "running"
-        faults.append(("sibling broken" if component != "engine" else crash, "persistent", side, component))
+        # once=1: the runner is killed exactly once and the kubelet starts it again
+        form = "one-shot" if h.get("once") else "persistent"
+        faults.append(("sibling broken" if component != "engine" else crash, form, side, component))
     elif kind == "imagepull":
         component = break_component(h)
         side = "new" if param == "new" else "running"

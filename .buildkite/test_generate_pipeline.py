@@ -1208,7 +1208,11 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-conflict", "engine-mn", "")], 2)
         self.assertEqual(shard_counts[("gen-conflict", "pd", "")], 1)
         self.assertEqual(shard_counts[("gen-conflict", "pd-mn", "")], 1)
-        self.assertEqual(job_count, 615)
+        self.assertEqual(shard_counts[("gen-crash-once", "engine", "")], 3)
+        self.assertEqual(shard_counts[("gen-crash-once", "engine-mn", "")], 3)
+        self.assertEqual(shard_counts[("gen-crash-once", "pd", "")], 2)
+        self.assertEqual(shard_counts[("gen-crash-once", "pd-mn", "")], 2)
+        self.assertEqual(job_count, 625)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin

@@ -368,6 +368,7 @@ EVAL_SOFT_FEATURES: list[dict[str, str]] = [
         "gen-repeat",
         "gen-webhook",
         "gen-conflict",
+        "gen-crash-once",
     )
 ]
 

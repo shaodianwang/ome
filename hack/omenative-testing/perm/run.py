@@ -3785,6 +3785,7 @@ def _fault_new(case_id, hdr):
             "victims": int(hdr.get("victims") or 1),
             "exitafter": int(hdr.get("exitafter") or 0),
             "fixfirst": bool(hdr.get("fixfirst")),
+            "once": bool(hdr.get("once")),
             "member": str(hdr.get("kill") or ""),
             "target": str(hdr.get("target") or ""),
             "at": str(hdr.get("at") or ""),
@@ -4204,6 +4205,9 @@ def _fault_fire(f, pod_state, pods_per_inst, old_hashes, inv=None):
 def _fault_fire_once(f, pod_state, pods_per_inst, old_hashes, inv=None):
     f["fired"] = True
     f["fired_ts"] = time.time()
+    if _fault_once(f):
+        _once_fire(f, pod_state, old_hashes)   # leaves fired False until a pod is in the form's state
+        return
     if f["kind"] in BREAK_FAULTS:
         _fault_crashloop_fire(f, pod_state, old_hashes, inv)
         return
@@ -4450,6 +4454,305 @@ def _fault_readiness_fire(f, pod_state, old_hashes):
     f["notes"].append(f"fault fired: readiness switch set in {victim} ({f['crash_comp']} instance {f['crash_inst']}): "
                       f"the pod keeps running and stops passing readiness")
     print(f"    ⚡ {f['notes'][-1]}")
+
+
+# ── A crash that happens exactly once (once=1) ──────────────────────────────
+# The runner of one pod is killed once through exec (PID 1 of the fixture
+# container: the startup shell before the pod is Ready, nginx after) and the
+# kubelet starts it again; nothing kills it twice. form=start lands during
+# the pod's first start, form=load once it is Ready. On the running revision
+# (crashloop:old) the victim is the break rule's pod, at idle or as a push
+# lands; on the pushed revision (crashloop:new) it is the first pod the push
+# brings up. The verdict is the operator's end state after a fault that
+# heals by itself.
+ONCE_POLL_S = 2.0
+# The events that say a one-shot restart was escalated instead of absorbed.
+ONCE_ESCALATION_EVENTS = {"InstanceFailed", "RepairHeld", "RetryHeld"}
+
+
+def _fault_once(f):
+    """True when the case's crash happens exactly once (once=1)."""
+    return bool(f) and f.get("kind") == "crashloop" and bool(f.get("once"))
+
+
+def _pod_main_state(name):
+    """(running, ready, restart count, uid) of a pod's main container, read
+    live; None when the pod is gone or unreadable."""
+    obj = _get_pod(name)
+    if obj is None:
+        return None
+    uid = (obj.get("metadata") or {}).get("uid", "")
+    for cs in (obj.get("status") or {}).get("containerStatuses") or []:
+        if cs.get("name") == MAIN_CONTAINER:
+            return (bool((cs.get("state") or {}).get("running")), bool(cs.get("ready")),
+                    int(cs.get("restartCount") or 0), uid)
+    return False, False, 0, uid
+
+
+def _once_candidate(f, pod_state, old_hashes):
+    """The pod a one-shot crash aims at, by the watcher's state, or None
+    until one qualifies: on the pushed revision the first live single or
+    leader pod of the victim Component on the new revision; on the running
+    revision the break rule's victim. form=start wants it not yet Ready,
+    form=load wants it Ready."""
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+    want_ready = f.get("form") == "load"
+    if f.get("param") == CRASHLOOP_NEW:
+        fresh = [(n, p) for n, p in sorted(pod_state.items())
+                 if p and p["alive"] and p.get("comp") == comp and p.get("runner", "default") in ("default", "leader")
+                 and _pod_on_new(p, old_hashes) and bool(p.get("ready")) == want_ready]
+        return min(fresh, key=lambda x: (x[1].get("created", ""), x[0]))[0] if fresh else None
+    victim = _crashloop_pick_pod(pod_state, old_hashes, comp)
+    if not victim or bool(pod_state[victim].get("ready")) != want_ready:
+        return None
+    return victim
+
+
+def _once_due(f, pod_state, old_hashes):
+    """(pod, its main-container state) once the aimed pod is in the state the
+    form needs, read live at most every ONCE_POLL_S: form=start the
+    container running, not Ready and never restarted; form=load Ready.
+    (None, None) until then."""
+    now = time.time()
+    if now - f.get("once_poll", 0.0) < ONCE_POLL_S:
+        return None, None
+    f["once_poll"] = now
+    pod = _once_candidate(f, pod_state, old_hashes)
+    state = _pod_main_state(pod) if pod else None
+    if state is None:
+        return None, None
+    running, ready, restarts, _uid = state
+    due = running and ready if f.get("form") == "load" else running and not ready and restarts == 0
+    return (pod, state) if due else (None, None)
+
+
+def _once_fire(f, pod_state, old_hashes):
+    """Kill the aimed pod's runner exactly once and record it; False while no
+    pod is in the state the form needs (the caller asks again)."""
+    pod, state = _once_due(f, pod_state, old_hashes)
+    if not pod:
+        f["fired"] = False
+        return False
+    _running, _ready, restarts, uid = state
+    watched = pod_state.get(pod) or {}
+    f.update(crash_pod=pod, crash_inst=str(watched.get("inst", "0")),
+             crash_comp=watched.get("comp", f.get("victimcomp") or BREAK_DEFAULT_COMP),
+             crash_hash=watched.get("hash", ""), crash_uid=uid or watched.get("uid", ""),
+             crash_restarts=restarts, kills=0, fired=True, fired_ts=time.time())
+    r = kubectl("-n", NS, "exec", pod, "-c", MAIN_CONTAINER, "--", "sh", "-c", "kill 1")
+    if r.returncode != 0:
+        f["infra_fail"] = f"once: killing the runner of {pod} failed: {r.stderr.strip()[:120]}"
+        return True
+    f["kills"] = 1
+    moment = "at its first start, before Ready" if f.get("form") == "start" else "after Ready"
+    f["notes"].append(f"fault fired: crashloop once form={f.get('form')} on {pod} "
+                      f"({f['crash_comp']} instance {f['crash_inst']}, killed {moment}; restarts before: {restarts})")
+    print(f"    ⚡ {f['notes'][-1]}")
+    return True
+
+
+def _once_start_tick(f, pod_state):
+    """Before the fleet has settled: a one-shot crash at start on the running
+    revision lands during the first start of its victim, the only revision
+    there is, so the phase hooks after the bump never see it unfired."""
+    if _fault_once(f) and not f["fired"] and f.get("form") == "start" and f.get("param") == CRASHLOOP_VICTIM:
+        _once_fire(f, pod_state, None)
+
+
+def _once_observe(case_id, f, pod_state, old_hashes, expect_new, N, configured, settle_s):
+    """The end state a one-shot crash is judged on: the victim Instance's pods
+    (serving, on the expected revision, the victim pod replaced or not), the
+    live restart count of the pod that was killed, the repairs and the
+    escalations recorded for the Instance since the kill, and whether every
+    row settled with no operation open."""
+    comp, inst = f["crash_comp"], f["crash_inst"]
+    pods = _instance_pods(pod_state, comp, inst)
+    on_revision = bool(pods) and all(
+        _pod_on_new(p, old_hashes) if expect_new else p.get("hash") in (old_hashes or set()) for _n, p in pods)
+    state = _pod_main_state(f["crash_pod"])
+    same_pod = bool(state) and state[3] == f.get("crash_uid")
+    restarts = state[2] if same_pod else 0
+    rebuilt = bool(pods) and not any(p.get("uid") == f.get("crash_uid") for _n, p in pods)
+    events = _isvc_events_since(case_id, f.get("fired_ts") or 0)
+    settled, why = _wait_rows_settled(case_id, N, configured, settle_s)
+    return {
+        "fired": bool(f.get("fired")), "kills": int(f.get("kills") or 0),
+        "bitten": bool(f.get("restart_seen")) or rebuilt or restarts > int(f.get("crash_restarts") or 0),
+        "restarts": restarts, "rebuilt": rebuilt,
+        "serving": bool(pods) and all(p.get("ready") and p.get("serving") for _n, p in pods),
+        "on_revision": on_revision, "expect_new": expect_new,
+        "repairs": [m for reason, m in events if reason == "RestartTriggered" and _event_names_instance(m, comp, inst)],
+        "escalations": [f"{reason}: {m}" for reason, m in events
+                        if reason in ONCE_ESCALATION_EVENTS and _event_names_instance(m, comp, inst)],
+        "rows_settled": settled, "rows_why": why,
+    }
+
+
+def _once_checks(f, out, verdict, notes, checks):
+    """The one-shot verdict. The kill must have landed and left a restart
+    behind (apparatus otherwise). Then the operator's end state: the Instance
+    Ready and serving on the revision it should run, nothing escalated to
+    Failed or held, every row settled, and a repair only where the restart
+    policy promises one: none under a push of the running revision (the roll
+    owns the Instance) or under restart policy None; under
+    RecreateInstanceOnPodRestart one rebuild, required for a settled pod that
+    restarted after Ready, allowed and reported otherwise, never two."""
+    comp, inst, form = f["crash_comp"], f["crash_inst"], f.get("form")
+    side, op, rp = out["side"], out["op"], out["rp"]
+    who = f"{comp} Instance {inst}"
+    label = f"crash once ({'at start' if form == 'start' else 'after Ready'}, {'pushed' if side == 'new' else 'running'} revision)"
+    if not out["fired"] or not out["kills"]:
+        f["infra_fail"] = f"once: no pod was in the state a form={form} kill needs before the case ended (the kill never landed)"
+        return verdict
+    if not out["bitten"]:
+        f["infra_fail"] = f"once: the kill of {f.get('crash_pod')} left no restart behind (restart count unchanged, pod not replaced)"
+        return verdict
+    checks.append(f"  ✓ {label}: {who}'s runner was killed once; "
+                  + (f"its pod was replaced" if out["rebuilt"] else f"the same pod restarted (restart count {out['restarts']})"))
+    bad = []
+
+    def fail(note, line):
+        bad.append(note)
+        checks.append(f"  ✗ {label}: {line}")
+
+    revision = "new" if out["expect_new"] else "running"
+    if out["serving"] and out["on_revision"]:
+        checks.append(f"  ✓ {label}: {who} is Ready and serving on the {revision} revision")
+    elif not out["serving"]:
+        fail(f"{who} not Ready and serving at the end", f"{who} did not end Ready and serving (a crash that heals by itself must leave the Instance serving)")
+    else:
+        fail(f"{who} on the wrong revision", f"{who} serves, but not on the {revision} revision it should run")
+    if out["escalations"]:
+        fail(f"{who}'s one restart was escalated", f"a one-shot restart of {who} was escalated or held: {out['escalations'][0][:160]}")
+    else:
+        checks.append(f"  ✓ {label}: nothing escalated {who} to Failed or held it")
+    repairs = out["repairs"]
+    if op == "push" and side == "old":
+        if repairs:
+            fail(f"{who} was repaired after the bump", f"a repair was recorded for {who} after the bump; its revision was not the roll target, so the roll owns it: {repairs[0][:160]}")
+        else:
+            checks.append(f"  ✓ {label}: no RestartTriggered event named {who} after the bump (the roll owned it)")
+    elif rp == "None":
+        if repairs:
+            fail(f"{who} was repaired under restart policy None", f"restart policy None promises no repair for a container the kubelet restarts, yet one was recorded for {who}: {repairs[0][:160]}")
+        else:
+            checks.append(f"  ✓ {label}: no repair under restart policy None (the kubelet's restart was enough)")
+    elif len(repairs) > 1:
+        fail(f"{who} was repaired {len(repairs)} times", f"{who} was rebuilt {len(repairs)} times for one restart: {repairs[0][:120]} … {repairs[-1][:120]}")
+    elif repairs:
+        checks.append(f"  ✓ {label}: RecreateInstanceOnPodRestart rebuilt {who} once: {repairs[0][:160]}")
+    elif op == "idle" and form == "load":
+        fail(f"{who} was not rebuilt under RecreateInstanceOnPodRestart", f"RecreateInstanceOnPodRestart promises a rebuild for a runner that restarts after Ready, and none was recorded for {who}")
+    else:
+        checks.append(f"  ⓘ {label}: RecreateInstanceOnPodRestart recorded no rebuild of {who} "
+                      + ("for a restart before its first Ready" if form == "start" else "for a restart of the pushed revision's pod mid-roll")
+                      + " (reported, not judged)")
+    if out["rows_settled"]:
+        checks.append(f"  ✓ {label}: every Instance row settled (Ready, no operation open)")
+    else:
+        fail("a row was left mid-operation", f"a row did not settle after the restart ({out['rows_why']}) — left mid-operation")
+    if out.get("new_hash"):
+        fail("a new revision appeared", "a new revision appeared on a service nobody bumped")
+    if bad:
+        verdict = "FAIL"
+        notes.extend(f"once: {b}" for b in bad)
+    return verdict
+
+
+def _once_push_checks(f, case_id, pod_state, old_hashes, hdr, N, configured, verdict, notes, checks):
+    """After a converged push: the one-shot verdict over the roll's end state
+    (the victim ends on the new revision on either side)."""
+    if not _fault_once(f) or f.get("infra_fail"):
+        return verdict
+    if not f.get("fired"):
+        f["infra_fail"] = (f"once: no pod was in the state a form={f.get('form')} kill needs before the roll "
+                           f"converged (the kill never landed)")
+        return verdict
+    out = _once_observe(case_id, f, pod_state, old_hashes, True, N, configured, ROWS_SETTLE_S)
+    out.update(side=("new" if f.get("param") == CRASHLOOP_NEW else "old"), op="push",
+               rp=str(hdr.get("restart") or "RecreateInstance"))
+    return _once_checks(f, out, verdict, notes, checks)
+
+
+def _idle_once(ctx, f, hdr):
+    """A one-shot crash on the idle service. form=load fires now, on the Ready
+    victim; form=start fired during the victim's first start. The Instance
+    must come back Ready and serving on its own (rebuilt where the restart
+    policy promises it), then hold through IDLE_HOLD_S with nothing rebuilt
+    again, nothing escalated, no new revision."""
+    case_id, N, configured = ctx["case_id"], ctx["N"], ctx["configured"]
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+    print(f"  Phase 2: crash once form={f.get('form')} on the idle service's {comp} (no bump follows)")
+    if f.get("form") == "load":
+        deadline = time.time() + BREAK_BITE_S
+        while not f["fired"] and time.time() < deadline and not ctx["closed"]:
+            _read_one(ctx)
+            _once_fire(f, ctx["pod_state"], ctx["old_hashes"])
+    if not f["fired"]:
+        f["infra_fail"] = f"once: no {comp} pod was in the state a form={f.get('form')} kill needs (the kill never landed)"
+        return "INFRA-FAIL", "INFRA-FAIL", [], []
+    if f["infra_fail"]:
+        return "INFRA-FAIL", "INFRA-FAIL", [], []
+    ctx["trigger_ts"] = t0 = f["fired_ts"]
+    comp, inst, pod = f["crash_comp"], f["crash_inst"], f["crash_pod"]
+    budget = _idle_budget(ctx)
+    seen = {f["crash_uid"]}
+    rebuilds, left_at, stable, last_poll, state = 0, None, None, 0.0, "WATCHING"
+
+    def pods():
+        return _instance_pods(ctx["pod_state"], comp, inst)
+
+    def count_rebuilds():
+        nonlocal rebuilds
+        for _n, p in pods():
+            if p.get("uid") and p["uid"] not in seen and p.get("runner", "default") in ("default", "leader"):
+                seen.add(p["uid"])
+                rebuilds += 1
+
+    print(f"  Phase 3: watching {comp} Instance {inst} come back Ready and serving (≤{budget}s)")
+    while time.time() - t0 < budget and not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        count_rebuilds()
+        p = ctx["pod_state"].get(pod)
+        if left_at is None and p is not None and not p["ready"]:
+            left_at = now - t0
+        if now - last_poll >= ONCE_POLL_S:
+            last_poll = now
+            live = _pod_main_state(pod)
+            if live and live[3] == f["crash_uid"] and live[2] > int(f.get("crash_restarts") or 0):
+                f["restart_seen"] = True
+        bitten = bool(f.get("restart_seen")) or rebuilds > 0 or left_at is not None
+        back = bitten and bool(pods()) and all(q.get("ready") and q.get("serving") for _n, q in pods())
+        stable = (stable or now) if back else None
+        if back and now - stable >= STABILITY_S:
+            ctx["converged_at"] = stable - t0
+            state = "HEALED"
+            break
+    if state == "HEALED":
+        print(f"  Phase 4: holding {IDLE_HOLD_S}s — nothing may rebuild {comp} Instance {inst} again")
+        hold_end = time.time() + IDLE_HOLD_S
+        while time.time() < hold_end and not ctx["closed"]:
+            _read_one(ctx)
+            count_rebuilds()
+    else:
+        state = "NOT_HEALED"
+    out = _once_observe(case_id, f, ctx["pod_state"], ctx["old_hashes"], False, N, configured, ROWS_SETTLE_S)
+    out.update(side="old", op="idle", rp=str(hdr.get("restart") or "RecreateInstance"), rebuilds=rebuilds,
+               new_hash=any(p and p["alive"] and p.get("hash") and p["hash"] not in ctx["old_hashes"]
+                            for p in ctx["pod_state"].values()))
+    verdict, notes, checks = "PASS", [], []
+    if state != "HEALED":
+        verdict = "FAIL"
+        notes.append(f"once: {comp} Instance {inst} did not come back Ready and serving within {budget}s")
+        checks.append(f"  ✗ crash once: {comp} Instance {inst} never came back Ready and serving within {budget}s after the kill")
+    if rebuilds > 1:
+        verdict = "FAIL"
+        notes.append(f"once: {comp} Instance {inst} was rebuilt {rebuilds} times")
+        checks.append(f"  ✗ crash once: {comp} Instance {inst} got {rebuilds} generations of new pods for one restart")
+    verdict = _once_checks(f, out, verdict, notes, checks)
+    verdict = _idle_peak_checks(ctx, verdict, notes, checks)
+    return state, verdict, notes, checks
 
 
 def _get_pod(name):
@@ -4966,6 +5269,8 @@ def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, chec
     the recorder drops an object's events past a burst, the rows do not."""
     if not f or f.get("kind") not in BREAK_FAULTS or not f.get("fired") or f.get("infra_fail"):
         return verdict
+    if _fault_once(f):
+        return verdict   # a crash that happens once is judged by _once_checks
     if _fault_on_new(f):
         return verdict   # a break on the pushed revision is judged by _new_break_checks
     events = _isvc_events_since(f["case_id"], trigger_ts or 0)
@@ -5331,8 +5636,10 @@ def _fault_tick(ctx):
     f = ctx.get("fault")
     if not f or f["kind"] not in HOOK_FAULTS:
         return
-    if ctx.get("trigger_ts") is None or _fault_fired_by_handler(f) or _fault_on_new(f) or _fault_before_push(f):
+    if ctx.get("trigger_ts") is None or _fault_fired_by_handler(f) or _fault_before_push(f):
         return
+    if _fault_on_new(f) and not _fault_once(f):
+        return   # armed by the push itself; a one-shot kill waits here for the pushed revision's first pod
     if _fault_repeats(f):
         _repeat_observe(f, ctx["pod_state"])
     if f["fired"]:
@@ -6912,6 +7219,8 @@ def _idle_fault(case_id, yaml_file, desc, hdr):
         expect = hdr.get("expect")
     else:
         expect = _idle_break_expect(hdr)
+    if _fault_once(f):
+        return _finish(case_id, desc, hdr, ctx, *_idle_once(ctx, f, hdr))
     print(f"  Phase 2: {f['kind']} fault on the idle service (expect {expect}; no bump follows)")
     _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
     ctx["trigger_ts"] = time.time()
@@ -9384,6 +9693,10 @@ HDR_VALIDATORS = {
     # fixfirst=1 (a break on the running revision, after a bump): the broken
     # Instance is not the last of its Component to land the fix.
     "fixfirst": lambda v: v == 1,
+    # once=1 (fault=crashloop:old|new with form=): the runner is killed exactly
+    # once through exec and the kubelet starts it again; the verdict is the
+    # operator's end state after a crash that heals by itself.
+    "once": lambda v: v == 1,
     "imgcomp": lambda v: v in COMPS,
     "ratio_tol": lambda v: isinstance(v, int) and 0 <= v <= 100,
     "xcheck": lambda v: v == "sectraffic",
@@ -9793,6 +10106,19 @@ def validate_case_file(path):
         if str(fields.get("victimcomp") or BREAK_DEFAULT_COMP) != BREAK_DEFAULT_COMP and str(fields.get("co", "none")) == "none":
             errs.append(f"{path}:1: victimcomp={fields.get('victimcomp')} under fault=crashloop:{CRASHLOOP_NEW} names a member "
                         f"the push bumps (needs a group: co=rolling|ratio|percomp|seq|bluegreen)")
+    if "once" in fields:
+        # A one-shot crash: the running revision's pod at idle or under a
+        # push, or the pushed revision's first pod; nothing else rides it.
+        if fault_kind != "crashloop" or mode != "rollout":
+            errs.append(f"{path}:1: once=1 is a crash that happens exactly once (needs mode=rollout and "
+                        f"fault=crashloop:{CRASHLOOP_VICTIM}|{CRASHLOOP_NEW} with form=start|load)")
+        if during and during != IDLE_FAULT_PHASE:
+            errs.append(f"{path}:1: once=1 fires on the idle service (during={IDLE_FAULT_PHASE}) or under a push (no during=)")
+        if crash_new and during:
+            errs.append(f"{path}:1: once=1 on fault=crashloop:{CRASHLOOP_NEW} is the pushed revision's first pod (no during=)")
+        for k in ("expect", "victims", "fixfirst", "pauseat", "pause", "push", "rollback", "edit", "lift", "blocked"):
+            if k in fields:
+                errs.append(f"{path}:1: {k}= does not combine with once=1 (the verdict is the operator's end state after one restart)")
     if "fixfirst" in fields:
         if fault_kind not in BREAK_FAULTS or crash_new or during == IDLE_FAULT_PHASE:
             errs.append(f"{path}:1: fixfirst=1 reads where the fix landed first after a break on the running revision "
@@ -10514,6 +10840,7 @@ def _setup_and_ready(case_id, yaml_file, hdr):
     last_wait = None
     while time.time() - t0 < budget and not ctx["closed"]:
         agg = _read_one(ctx)
+        _once_start_tick(ctx["fault"], ctx["pod_state"])   # a one-shot crash at start lands on the first start
         if all(agg.get(c, (0, 0, 0))[1] == N[c] for c in configured):
             ir_items = _fetch_initial_ir_items(case_id)
             settled, wait = _initial_rollout_settled(
@@ -16618,7 +16945,7 @@ def run_case(case_id):
     if reason:
         print(f"  ⓘ {fault_kind} fault unavailable here: {reason}")
         return _write_fail(case_id, desc, hdr, "SKIP", f"{fault_kind} fault unavailable here: {reason}")
-    if str(hdr.get("fault", "")) == f"crashloop:{CRASHLOOP_NEW}":
+    if str(hdr.get("fault", "")) == f"crashloop:{CRASHLOOP_NEW}" and not hdr.get("once"):
         return _crashloop_new(case_id, yaml_file, desc, hdr)
     if str(hdr.get("fault", "")) == f"{READINESS_FAULT}:new":
         return _readiness_new_roll(case_id, yaml_file, desc, hdr)
@@ -16963,6 +17290,7 @@ def run_case(case_id):
             if state == "INIT":
                 initial_pods_ready = all(
                     agg.get(c, (0, 0, 0))[1] == N[c] for c in configured)
+                _once_start_tick(fault, pod_state)   # a one-shot crash at start lands on the first start
             elif state == "ROTATING":
                 tnow = now - trigger_ts
                 # Fault phase hook: settling fires on the first ROTATING
@@ -17244,6 +17572,7 @@ def run_case(case_id):
     if state == "CONVERGED":
         verdict = _crashloop_checks(fault, pod_state, old_hashes, trigger_ts, verdict, notes, checks,
                                     bumped=bumped, surges=inv.get("surges"))
+        verdict = _once_push_checks(fault, case_id, pod_state, old_hashes, hdr, N, configured, verdict, notes, checks)
         verdict = _gang_member_checks(fault, pod_state, trigger_ts, hdr, verdict, notes, checks)
     # Check 6b': a repeating fault across its window, and the end state once
     # it stopped. The roll's own pods are what the operation explains: every

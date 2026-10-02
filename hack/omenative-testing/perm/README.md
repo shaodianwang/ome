@@ -104,7 +104,8 @@ perm/
 │   ├── gen-fault-scale/ gen-fault-delete/  — generated: a scale or a delete on a service with a broken Instance
 │   ├── gen-fault-move/ gen-fault-edit/  — generated faults crossed with a move and with a runtime edit
 │   ├── gen-repeat/            — generated: faults that keep repeating until they are lifted (`repeat=<n>`)
-│   └── gen-webhook/ gen-conflict/  — generated window faults: the admission webhook unreachable, a competing writer
+│   ├── gen-webhook/ gen-conflict/  — generated window faults: the admission webhook unreachable, a competing writer
+│   └── gen-crash-once/  — generated: a crash that happens exactly once (once=1), at start or after Ready, on either revision
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -1249,6 +1250,43 @@ shapes.
   topology, strategy (SurgeThenDrain, RecreatePod and InPlaceIfPossible at
   their canonical budgets), restart policy and, on PD, a rolling group.
 
+- **`once=1`** (with `fault=crashloop:old|new` and `form=start|load`, rollout
+  mode) is a crash that happens exactly once: the runner of one pod is
+  killed once with `kubectl exec … kill 1` — the fixture's startup shell
+  before the pod is Ready, nginx after — and the kubelet starts the
+  container again; nothing kills it twice and no template changes.
+  `form=start` lands during the pod's first start (the container running,
+  not yet Ready, never restarted) and `form=load` once it is Ready. On the
+  running revision (`crashloop:old`) the victim is the break rule's pod,
+  on the idle service (`during=idle`; a crash at start then fires while
+  the initial fleet comes up, the only start the running revision has) or
+  as a push lands (`settling`); on the pushed revision (`crashloop:new`)
+  it is the first single or leader pod of `victimcomp=` the push brings
+  up, in the state the form needs. A kill that never finds a pod in that
+  state is `INFRA-FAIL`, not a product failure. The verdict is the
+  operator's end state after a fault that heals by itself: the Instance
+  Ready and serving on the revision it should run (the running one at
+  idle, the new one after a push on either side), no `InstanceFailed`,
+  `RepairHeld` or `RetryHeld` event naming it, every row settled with no
+  operation open, and a repair only where the restart policy promises one
+  — none for the running revision under a push (its revision is not the
+  roll target, so the roll owns it), none under `restartPolicy: None`
+  (the kubelet's restart is the whole story), and under
+  `RecreateInstanceOnPodRestart` one rebuild, required for a settled pod
+  that restarted after Ready, reported for a restart before its first
+  Ready or on the pushed revision mid-roll, and never two. At idle the
+  Instance must also come back on its own within the budget and then hold
+  through `IDLE_HOLD_S` with no second generation of pods and no new
+  revision; under a push `floor_slack=1` allows for the one Instance the
+  kill takes while it restarts, and the usual rollout checks judge the
+  roll. The generated `isvcs/gen-crash-once/` family (`p8400`+) crosses
+  both forms with the running revision at idle and under a push and the
+  pushed revision under a push, the six shape families of the coverage
+  ledger (the engine alone, behind a router and with a decoder and a
+  router, single-pod and as a gang), both restart policies and the surge
+  and drain-first strategies; the one-shot forms of the readiness and
+  config-key faults are not driven yet.
+
 - **`fault=imagepull:old`** is the same break with an image that cannot be
   pulled: the victim's live pod is pointed at the harness's unpullable
   reference (`runtime_fixtures.UNPULLABLE_IMAGE`, the one image no deploy
@@ -1935,7 +1973,10 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `isvcs/gen-fault-move/` (a break, or the loss of the source node, at accept,
   at surge or at drain of a move, on the moved Instance, a peer or the decoder)
   and `isvcs/gen-fault-edit/` (a break of the running revision as the edit of
-  the inherited runtime lands, and a bad edit followed by its fix), plus
+  the inherited runtime lands, and a bad edit followed by its fix), the
+  crash that happens exactly once (`p8400`–`p8599`) → `isvcs/gen-crash-once/`
+  (`once=1`: one kill of the runner, at start or after Ready, on the running
+  revision at idle and under a push and on the pushed revision), plus
   `isvcs/MANIFEST.md` (per-dimension counts, the
   constraint ledger with every omitted cell and its reason, missing-hook
   catalog). The story families are canary lanes in CI: the pipeline gives

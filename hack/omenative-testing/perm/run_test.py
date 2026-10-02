@@ -10268,3 +10268,169 @@ class GeneratedRepeatFamilyTest(unittest.TestCase):
         for name, kv, _m in self.fam:
             kind = kv.get("fault", "").partition(":")[0]
             self.assertEqual(name in exclusive, kind == "ctrlrestart" or kv.get("via") == "preempt", name)
+
+
+class CrashOnceTest(unittest.TestCase):
+    """once=1: the runner killed exactly once; the verdict is the operator's
+    end state after a crash that heals by itself."""
+
+    BASE = "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 restart=None topo=engine"
+    REPAIR = "OMENative component=engine instance=1 restart triggered: runner restarted"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_header_rides_a_crashloop_break_on_either_side(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=start once=1 during=idle"))
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=load once=1 floor_slack=1"))
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:new form=start once=1"))
+        for bad in (" fault=imagepull:old once=1",
+                    " fault=crashloop:old form=load once=1 during=settling",
+                    " fault=crashloop:old form=load once=1 during=idle expect=repaired",
+                    " fault=crashloop:old form=load once=1 fixfirst=1"):
+            self.assertTrue(any("once=1" in e for e in self._errs(self.BASE + bad)), bad)
+
+    def test_candidate_follows_the_side_and_the_form(self):
+        pods = {
+            "e0": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "runner": "default", "ready": True, "created": "1"},
+            "e1": {"alive": True, "hash": "old", "inst": "1", "comp": "engine", "runner": "default", "ready": True, "created": "2"},
+            "n2": {"alive": True, "hash": "new", "inst": "2", "comp": "engine", "runner": "default", "ready": False, "created": "4"},
+            "n3": {"alive": True, "hash": "new", "inst": "3", "comp": "engine", "runner": "default", "ready": False, "created": "3"},
+            "w3": {"alive": True, "hash": "new", "inst": "3", "comp": "engine", "runner": "worker", "ready": False, "created": "3"},
+        }
+        old = run._fault_new("p999", {"fault": "crashloop:old", "form": "load", "once": 1})
+        self.assertEqual("e1", run._once_candidate(old, pods, {"old"}),
+                         "the running side: the break rule's highest old-revision pod, Ready for form=load")
+        old["form"] = "start"
+        self.assertIsNone(run._once_candidate(old, pods, {"old"}), "a Ready pod cannot crash at start")
+        new = run._fault_new("p999", {"fault": "crashloop:new", "form": "start", "once": 1})
+        self.assertEqual("n3", run._once_candidate(new, pods, {"old"}),
+                         "the pushed side: the earliest new-revision single or leader pod, not yet Ready")
+        new["form"] = "load"
+        self.assertIsNone(run._once_candidate(new, pods, {"old"}), "form=load waits for a new-revision pod to be Ready")
+        pods["n2"]["ready"] = True
+        self.assertEqual("n2", run._once_candidate(new, pods, {"old"}))
+
+    def test_start_tick_fires_only_for_a_crash_at_first_start_of_the_running_revision(self):
+        calls = []
+        orig = run._once_fire
+        run._once_fire = lambda f, ps, oh: calls.append((f["param"], f["form"]))
+        try:
+            for hdr in ({"fault": "crashloop:old", "form": "start", "once": 1},
+                        {"fault": "crashloop:old", "form": "load", "once": 1},
+                        {"fault": "crashloop:new", "form": "start", "once": 1},
+                        {"fault": "crashloop:old", "form": "start"}):
+                run._once_start_tick(run._fault_new("p999", hdr), {})
+            self.assertEqual([("old", "start")], calls)
+        finally:
+            run._once_fire = orig
+
+    def test_tick_lets_a_one_shot_kill_wait_for_the_pushed_revision(self):
+        fired = []
+        orig = run._fault_fire
+        run._fault_fire = lambda *a, **k: fired.append(a)
+        try:
+            once = run._fault_new("p999", {"fault": "crashloop:new", "form": "load", "once": 1})
+            run._fault_tick({"fault": once, "trigger_ts": 1.0, "pod_state": {}, "pods_per_inst": {}, "old_hashes": {"old"}})
+            self.assertEqual(1, len(fired), "a one-shot kill on the pushed revision is a hook fault, not an armed one")
+            plain = run._fault_new("p999", {"fault": "crashloop:new", "form": "load"})
+            run._fault_tick({"fault": plain, "trigger_ts": 1.0, "pod_state": {}, "pods_per_inst": {}, "old_hashes": {"old"}})
+            self.assertEqual(1, len(fired), "a persistent break on the pushed revision is armed by the push")
+        finally:
+            run._fault_fire = orig
+
+    def _f(self, form="load", param="old"):
+        return {"kind": "crashloop", "param": param, "form": form, "once": True, "fired": True, "kills": 1,
+                "crash_comp": "engine", "crash_inst": "1", "crash_pod": "e1", "crash_uid": "u1", "notes": []}
+
+    def _out(self, **over):
+        out = {"fired": True, "kills": 1, "bitten": True, "restarts": 1, "rebuilt": False, "serving": True,
+               "on_revision": True, "expect_new": False, "repairs": [], "escalations": [], "rows_settled": True,
+               "rows_why": "settled", "side": "old", "op": "idle", "rp": "None", "new_hash": False}
+        out.update(over)
+        return out
+
+    def test_verdict_is_the_operators_end_state(self):
+        notes, checks = [], []
+        self.assertEqual("PASS", run._once_checks(self._f(), self._out(), "PASS", notes, checks))
+        self.assertTrue(any("Ready and serving on the running revision" in c for c in checks))
+        for over, words in (
+            ({"serving": False}, "did not end Ready and serving"),
+            ({"on_revision": False}, "not on the running revision"),
+            ({"escalations": ["InstanceFailed: component=engine instance=1 x"]}, "escalated or held"),
+            ({"rows_settled": False, "rows_why": "engine/1: Restarting with an operation open"}, "left mid-operation"),
+            ({"new_hash": True}, "new revision appeared"),
+            ({"repairs": [self.REPAIR]}, "restart policy None promises no repair"),
+        ):
+            notes, checks = [], []
+            self.assertEqual("FAIL", run._once_checks(self._f(), self._out(**over), "PASS", notes, checks), words)
+            self.assertTrue(any(words in c for c in checks), (words, checks))
+
+    def test_a_rebuild_is_owed_only_where_the_policy_promises_it(self):
+        f, one = self._f(), [self.REPAIR]
+        # a settled pod restarted after Ready: RecreateInstanceOnPodRestart owes one rebuild
+        self.assertEqual("PASS", run._once_checks(f, self._out(rp="RecreateInstance", repairs=one, rebuilt=True), "PASS", [], []))
+        checks = []
+        self.assertEqual("FAIL", run._once_checks(f, self._out(rp="RecreateInstance"), "PASS", [], checks))
+        self.assertTrue(any("promises a rebuild" in c for c in checks))
+        notes = []
+        self.assertEqual("FAIL", run._once_checks(f, self._out(rp="RecreateInstance", repairs=one * 2), "PASS", notes, []))
+        self.assertTrue(any("2 times" in n for n in notes))
+        # a restart before the first Ready: whether it counts is reported
+        checks = []
+        self.assertEqual("PASS", run._once_checks(self._f(form="start"), self._out(rp="RecreateInstance"), "PASS", [], checks))
+        self.assertTrue(any("reported, not judged" in c for c in checks))
+        # under a push the roll owns the running revision's Instance: no repair under either policy
+        notes = []
+        self.assertEqual("FAIL", run._once_checks(f, self._out(op="push", rp="RecreateInstance", expect_new=True, repairs=one), "PASS", notes, []))
+        self.assertTrue(any("after the bump" in n for n in notes))
+        self.assertEqual("PASS", run._once_checks(f, self._out(op="push", rp="RecreateInstance", expect_new=True, rebuilt=True), "PASS", [], []))
+        # the pushed revision's pod: one rebuild allowed and reported, two not
+        pushed = self._f(param="new")
+        new_side = dict(op="push", side="new", rp="RecreateInstance", expect_new=True)
+        self.assertEqual("PASS", run._once_checks(pushed, self._out(**new_side), "PASS", [], []))
+        self.assertEqual("PASS", run._once_checks(pushed, self._out(repairs=one, **new_side), "PASS", [], []))
+        self.assertEqual("FAIL", run._once_checks(pushed, self._out(repairs=one * 2, **new_side), "PASS", [], []))
+
+    def test_a_kill_that_never_landed_is_apparatus_not_product(self):
+        f = self._f()
+        self.assertEqual("PASS", run._once_checks(f, self._out(fired=False, kills=0), "PASS", [], []))
+        self.assertIn("never landed", f["infra_fail"])
+        f = self._f()
+        self.assertEqual("PASS", run._once_checks(f, self._out(bitten=False), "PASS", [], []))
+        self.assertIn("left no restart behind", f["infra_fail"])
+
+    def test_generated_family_crosses_the_rows_the_ledger_was_missing(self):
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-crash-once"]
+        self.assertEqual(120, len(fam))
+        self.assertTrue(all(kv["once"] == 1 and kv["fault"] in ("crashloop:old", "crashloop:new") for _n, kv, _m in fam))
+        cells = {(kv["fault"], kv["form"], kv.get("during", "push"), kv["restart"], kv["topo"], kv["Nr"] > 0, m["strat"])
+                 for _n, kv, m in fam}
+        self.assertEqual(120, len(cells), "every case is its own cell")
+        idle = [kv for _n, kv, _m in fam if kv.get("during") == "idle"]
+        self.assertEqual(24, len(idle))
+        self.assertTrue(all(kv["fault"] == "crashloop:old" for kv in idle), "the pushed side needs a push")
+        pushed = [kv for _n, kv, _m in fam if "during" not in kv]
+        self.assertEqual({"crashloop:old", "crashloop:new"}, {kv["fault"] for kv in pushed})
+        self.assertTrue(all(kv["floor_slack"] == 1 for kv in pushed), "the kill takes one Instance out while it restarts")
+        self.assertEqual(6, len({(kv["topo"], kv["Nd"] > 0, kv["Nr"] > 0) for _n, kv, _m in fam}), "six shape families")
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, _kv, _m in fam:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(outputs[f"gen-crash-once/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)
+
+    def test_ledger_reads_once_as_the_one_shot_form(self):
+        import coverage
+        cases = coverage.load_cases(coverage.ISVCS / "gen-crash-once")
+        self.assertEqual(120, len(cases))
+        for case in cases:
+            kind, form, side = case.fault_rows()[0]
+            self.assertEqual("one-shot", form, case.id)
+            self.assertEqual("new" if case.header["fault"].endswith(":new") else "running", side, case.id)
+            self.assertEqual("crash at start" if case.header["form"] == "start" else "crash after Ready", kind, case.id)
+            self.assertEqual("steady state" if case.header.get("during") == "idle" else "push", case.operation, case.id)

@@ -1,0 +1,13 @@
+# p8415: [gen] crash once start new engine N=4 RecreatePod u1 rp RecreateInstance  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 restart=RecreateInstance fault=crashloop:new co=none topo=engine form=start once=1 floor_slack=1
+# reason: the pod of the first engine Instance the push brings up has its runner killed once, during its first start, before it was ever Ready; the kubelet starts the container again and nothing kills it twice; the RecreatePod roll lands the new revision on every engine Instance within its budget; RecreateInstanceOnPodRestart reads a runner restart, and whether one before the first Ready counts is reported: a rebuild is allowed once, named by a RestartTriggered event, never twice; at the end the Instance is Ready and serving on the revision it should run, no row reads Failed, no hold or retry ladder was opened for it, the rows settle with no operation open, and every pod carries the label of what it runs; the floor allows for the one Instance the kill takes while it restarts
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8415 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

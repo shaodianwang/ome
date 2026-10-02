@@ -260,6 +260,19 @@ runners (run.py + the KIND CI lane) already implement:
                           shapes: the controller's status writes conflict and
                           are retried without a lost decision, a double apply
                           or a hot loop
+    gen-crash-once/ p8400+  a crash that happens exactly once (once=1): a
+                          pod's runner is killed once through exec and the
+                          kubelet starts it again, at its first start
+                          (form=start) or after it is Ready (form=load), on
+                          the running revision at steady state and under a
+                          push and on the pushed revision's first pod under
+                          a push, crossed with six shape families (the
+                          engine alone, behind a router, with a decoder and
+                          a router; single-pod and gang) x restartPolicy x
+                          the surge and drain-first strategies; the Instance
+                          ends Ready and serving on the revision it should
+                          run, nothing is escalated or held, the push lands,
+                          and a repair runs only where the policy promises it
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -576,6 +589,7 @@ GEN_BLOCKS = {
     "gen-repeat": (8700, 8900),
     "gen-webhook": (8900, 8960),
     "gen-conflict": (8960, 9050),
+    "gen-crash-once": (8400, 8600),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -4546,6 +4560,130 @@ def emit_fault_edit(add):
                     cell=("bad-edit", kind, topo, w, strat), dedicated=True)
 
 
+# ── gen-crash-once: a crash that happens exactly once ──────────────────────
+# A pod's runner is killed once through exec and the kubelet starts it again:
+# at its first start (form=start, before it was ever Ready) or after it is
+# Ready (form=load). The running revision's pod at steady state and under a
+# push, and the pushed revision's first pod under a push. Six shape
+# families (the engine alone, behind a router, and with a decoder and a
+# router, each single-pod and as a gang at one width), both restart
+# policies, the surge and the drain-first strategies under a push (an
+# in-place push starts no pod of the new revision to crash at start), no
+# group (a one-shot restart is no fleet change for a group to pace). The
+# operator's end state is the verdict: the Instance is Ready and serving
+# again on the revision it should run, nothing was escalated to Failed or
+# held, the push landed, and a repair ran only where the restart policy
+# promises one.
+CRASH_ONCE_SHAPES = [("engine", 4, 0, False), ("engine-mn", 2, 1, False),
+                     ("engine", 4, 0, True), ("engine-mn", 2, 1, True),
+                     ("pd", 4, 0, True), ("pd-mn", 2, 1, True)]
+CRASH_ONCE_SIDES = ["old", "new"]
+CRASH_ONCE_STRATS = [("SurgeThenDrain", 1, 0), ("RecreatePod", 0, 1)]
+CRASH_ONCE_IDLE_STRAT = CRASH_ONCE_STRATS[0]
+
+
+def _crash_once_counts(topo, n, router):
+    if is_pd(topo):
+        return counts(topo, n)
+    return dict(Ne=n, Nd=0, Nr=(lib.NR if router else 0))
+
+
+def _crash_once_ceilings(topo, n, router, strat, surge):
+    ce = n + surge_count(n, surge) if strat == "SurgeThenDrain" else n
+    if is_pd(topo):
+        return dict(ceil_e=ce, ceil_d=n, ceil_r=lib.NR)
+    return dict(ceil_e=ce, ceil_d=0, ceil_r=(lib.NR if router else 0))
+
+
+def _crash_once_comps(topo, n, w, router, life, rp):
+    cs = comps(topo, n, w, life, d_life=(lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None))
+    if router and not is_pd(topo):
+        cs.append(lib.comp("router", lib.NR, 0, lib.lifecycle()))
+    return cs
+
+
+def _crash_once_victim(side, form, topo):
+    pod = "the leader pod of" if is_mn(topo) else "the pod of"
+    who = (f"{pod} the first engine Instance the push brings up" if side == "new"
+           else f"{pod} the engine's highest Instance")
+    when = ("during its first start, before it was ever Ready" if form == "start"
+            else "once it is Ready and serving")
+    return f"{who} has its runner killed once, {when}; the kubelet starts the container again and nothing kills it twice"
+
+
+def _crash_once_policy_words(side, form, rp, op):
+    if op == "push" and side == "old":
+        return ("the Instance is off the target from the bump, so the roll owns it: no repair is recorded for it "
+                "after the bump under either restart policy and it ends on the new revision like its peers")
+    if rp == "None":
+        return ("restart policy None promises no repair for a container the kubelet restarts: no RestartTriggered "
+                "event names the Instance and its pod keeps its identity")
+    if form == "load":
+        return ("RecreateInstanceOnPodRestart reads the runner's restart after Ready as its trigger: the Instance is "
+                "rebuilt whole exactly once, named by one RestartTriggered event, and never rebuilt again")
+    return ("RecreateInstanceOnPodRestart reads a runner restart, and whether one before the first Ready counts is "
+            "reported: a rebuild is allowed once, named by a RestartTriggered event, never twice")
+
+
+def _crash_once_untouched(topo, router):
+    if is_pd(topo):
+        return "decoder and router stay as they were"
+    return "the router stays as it was" if router else ""
+
+
+def _crash_once_reason(side, form, rp, op, strat, topo, router):
+    out = _crash_once_victim(side, form, topo)
+    if op == "idle":
+        out += "; nothing is pushed"
+    else:
+        out += f"; the {strat} roll lands the new revision on every engine Instance within its budget"
+        if side == "old":
+            out += " and the restarted pod is the last the roll reaches"
+    out += f"; {_crash_once_policy_words(side, form, rp, op)}"
+    out += ("; at the end the Instance is Ready and serving on the revision it should run, no row reads Failed, "
+            "no hold or retry ladder was opened for it, the rows settle with no operation open, and every pod "
+            "carries the label of what it runs")
+    if op == "push":
+        out += "; the floor allows for the one Instance the kill takes while it restarts"
+    untouched = _crash_once_untouched(topo, router)
+    if untouched:
+        out += f"; {untouched}"
+    return out
+
+
+def emit_crash_once(add):
+    for topo, n, w, router in CRASH_ONCE_SHAPES:
+        shape = shape_tag(topo, w) + ("+router" if router and not is_pd(topo) else "")
+        for form in CRASH_FORMS:
+            for rp in RESTARTS:
+                strat, surge, unavail = CRASH_ONCE_IDLE_STRAT
+                kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, 0),
+                          restart=rp, fault="crashloop:old", form=form, once=1, during=IDLE_PHASE, co="none", topo=topo)
+                meta = dict(strat="(dormant: nothing rolls)", verb=f"crashonce:old:{form}", rp=rp, victim="engine",
+                            oneshot=f"{form} on the running revision at idle")
+                desc = f"{GEN_MARK} crash once {form} idle {shape} N={n} rp {rp}"
+                life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                add("gen-crash-once", desc, kv, _crash_once_comps(topo, n, w, router, life, rp),
+                    _crash_once_reason("old", form, rp, "idle", strat, topo, router), meta,
+                    cell=("crash-once", "idle", "old", form, topo, w, router, rp))
+        for side in CRASH_ONCE_SIDES:
+            for form in CRASH_FORMS:
+                for rp in RESTARTS:
+                    for strat, surge, unavail in CRASH_ONCE_STRATS:
+                        kv = dict(**_crash_once_counts(topo, n, router),
+                                  **_crash_once_ceilings(topo, n, router, strat, surge),
+                                  restart=rp, fault=f"crashloop:{side}", form=form, once=1, floor_slack=1,
+                                  co="none", topo=topo)
+                        meta = dict(strat=strat, verb=f"crashonce:{side}:{form}", rp=rp, victim="engine",
+                                    oneshot=f"{form} on the {'pushed' if side == 'new' else 'running'} revision under a push")
+                        desc = (f"{GEN_MARK} crash once {form} {side} {shape} N={n} {strat} "
+                                f"{budget_tag(strat, surge, unavail)} rp {rp}")
+                        life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                        add("gen-crash-once", desc, kv, _crash_once_comps(topo, n, w, router, life, rp),
+                            _crash_once_reason(side, form, rp, "push", strat, topo, router), meta,
+                            cell=("crash-once", "push", side, form, topo, w, router, rp, strat))
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 def build_outputs():
     """{relative path under isvcs/: file text} — the entire owned output set."""
@@ -4633,6 +4771,7 @@ def build_outputs():
     emit_repeat(add)
     emit_webhook(add)
     emit_conflict(add)
+    emit_crash_once(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -4730,6 +4869,7 @@ def manifest(rows):
                    tally(lambda kv, m: m["budget"], where=lambda kv, m: "budget" in m))
     lines += table("By operation on a service with a broken Instance",
                    tally(lambda kv, m: m["op"], where=lambda kv, m: "op" in m))
+    lines += table_if("By one-shot crash (gen-crash-once)", "oneshot")
     lines += table("By move moment (fault-move)", tally(lambda kv, m: m["at"], where=lambda kv, m: "at" in m))
     lines += table("By move victim (fault-move)", tally(lambda kv, m: m["who"], where=lambda kv, m: "who" in m))
     lines += table("By runtime edit (fault-edit)", tally(lambda kv, m: m["rtedit"], where=lambda kv, m: "rtedit" in m))
