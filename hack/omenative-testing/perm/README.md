@@ -1304,18 +1304,36 @@ shapes.
   its Component to land the fix, read from the creation time of each
   Instance's first new-revision pod (so it judges the strategies that
   rebuild pods). Its capacity is already lost, so a roll that reaches it
-  last leaves the operator short for the whole roll. The generated
+  last leaves the operator short for the whole roll. The order needs two
+  peers to be read: the break lands as the bump does, once the roll has
+  taken its first Instance, so with a single peer the broken Instance's
+  place is the break's timing, not the roll's order, and the verdict reports
+  the claim as not measurable instead of failing it. The generated
   `isvcs/gen-crashloop-group/` family carries it: the running-revision crash
   under each group policy (blueGreen, Sequential, maintainRatio) on the
   shapes that have a peer for it, and under the zero budgets of a plain
   rolling group (maxUnavailable 0 with maxSurge 1, maxSurge 0 with
   maxUnavailable 1), crossed with both forms, both drain orders and both
-  restart policies. Each case's second line says what the policy's own rule
-  lets it assert: blueGreen flips traffic only once the whole new set is
-  complete and cannot replace the broken Instance ahead of the set, so those
-  cases assert the per-budget roll and the order, and read the flip as
-  status only; Sequential's component order and maintainRatio's band are
-  the ordinary ordering and ratio checks.
+  restart policies. The gang shape runs two gangs under the surge strategy
+  and three under the drain-first one: with maxUnavailable 1 the dark gang
+  waits for the slot the roll's first gang holds, so with two gangs the only
+  peer precedes it by construction, while with three it is rebuilt ahead of
+  the peer still waiting (the victim is the highest index, as on the
+  single-pod shapes). Three gangs with the decoder and the router are 14
+  pods, above the gang scheduler twin's node cap, so those cells run on the
+  default scheduler only, as the family's gang surge cells already do. Each
+  case's second line says what the policy's own rule lets it assert:
+  blueGreen flips traffic only once the whole new set is complete and cannot
+  replace the broken Instance ahead of the set, so those cases assert the
+  per-budget roll and the order, and read the flip as status only;
+  Sequential's component order and maintainRatio's band are the ordinary
+  ordering and ratio checks. Under a break the band is read net of the
+  broken Instance as well as raw, and each sample is the better of the two
+  readings: the broken Instance's lost capacity is the fault's, not the
+  gate's, and the gate paces the raw counts, so a deviation that either
+  reading keeps within tolerance is not the gate's. The band is measured,
+  not waived, so the gate's pacing of the healthy Instances stays asserted
+  on the break cells.
 
 - **`fault=crashloop:new` with `form=start|load`** is the other side: the
   push itself brings a revision whose pods crash. The crash is armed on the

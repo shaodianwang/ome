@@ -6894,6 +6894,15 @@ class CrashloopNewFaultTest(unittest.TestCase):
         checks = []
         self.assertEqual("PASS", run._crashloop_fix_order(f, alone, {"old"}, "PASS", [], checks))
         self.assertTrue(any("not measurable" in c for c in checks))
+        # One peer gives no order to read: the roll takes its first Instance
+        # before the break lands, so the broken one is first or second by
+        # the break's timing. Reported, never failed, whichever way it fell.
+        for victim_at in ("2026-10-02T10:02:00Z", "2026-10-02T10:00:00Z"):
+            pair = {"e0": first["e0"], "e3": dict(first["e3"], created=victim_at)}
+            notes, checks = [], []
+            self.assertEqual("PASS", run._crashloop_fix_order(f, pair, {"old"}, "PASS", notes, checks), victim_at)
+            self.assertEqual([], notes)
+            self.assertTrue(any("not measurable with one peer" in c and "peer 0=" in c for c in checks), checks)
         # The old-side verdict wires the claim in only when the header asks.
         full = dict(f, fired=True, infra_fail=None, form="start", case_id="p999", crash_hash="old", kills=0)
         healed = {n: dict(p, ready=True, serving=True) for n, p in last.items() if p["alive"]}
@@ -6960,6 +6969,18 @@ class CrashloopNewFaultTest(unittest.TestCase):
             text = outputs[f"gen-crashloop-group/{name}.yaml"]
             reason = text.splitlines()[1]
             self.assertRegex(reason, r"never (the )?last", "the order claim is stated on line 2")
+            if kv["topo"] == "pd-mn" and m["strat"] == "RecreatePod":
+                # The drain-first gang cells run three gangs: the roll holds
+                # the one slot with its first gang when the break lands, so
+                # the dark gang must be rebuilt ahead of the peer still waiting.
+                self.assertEqual((3, 3, 3, 3), (kv["Ne"], kv["Nd"], kv["ceil_e"], kv["ceil_d"]), name)
+                self.assertIn("three gangs", reason, name)
+                self.assertIn("minReplicas: 3", text, name)
+            else:
+                self.assertEqual(2 if kv["topo"] == "pd-mn" else 4, kv["Ne"], name)
+                self.assertNotIn("three gangs", reason, name)
+            if kv["co"] == "ratio":
+                self.assertIn("net of the broken Instance", reason, "the band is measured net of the fault's loss")
             if kv["co"] == "bluegreen":
                 self.assertIn("flip cannot replace it ahead of the set", reason, "the contradiction and what the case asserts instead")
             if kv["co"] == "seq":
@@ -6976,6 +6997,119 @@ class CrashloopNewFaultTest(unittest.TestCase):
                                  "the group rolls the decoder under the same strategy")
                 self.assertIn("- components: [engine, decoder]" if kv["co"] in ("bluegreen", "ratio", "rolling")
                               else "- components: [engine]", text)
+
+
+class RatioBandTest(unittest.TestCase):
+    """The RatioBalanced band under a break on the running revision: each
+    sample is the better of the raw reading and the one net of the broken
+    Instance, the break's victims are out of the band until they serve on
+    the roll target, and the verdict reads the sustained deviation."""
+
+    N = {"engine": 3, "decoder": 3, "router": 2}
+    PAIR = ("engine", "decoder")
+
+    def test_reading_nets_out_the_broken_instance_where_that_reads_better(self):
+        # gang 0 in the drain slot, gang 2 broken: raw 1:3 is 67% off, net 1 of 2 against 3 of 3 is 50%
+        self.assertEqual((0.5, 1, 3, True),
+                         run._ratio_band_reading({"engine": 1, "decoder": 3}, self.N, self.PAIR, {"engine": (1, 0)}))
+        # both members one down with the broken gang out: raw 2:2 is level, and the net reading is not better
+        dev, ca, cb, net = run._ratio_band_reading({"engine": 2, "decoder": 2}, self.N, self.PAIR, {"engine": (1, 0)})
+        self.assertEqual((0.0, 2, 2, False), (round(dev, 6), ca, cb, net))
+        # no break: the raw reading, as always
+        dev, ca, cb, net = run._ratio_band_reading({"engine": 2, "decoder": 3}, self.N, self.PAIR)
+        self.assertEqual((0.333333, 2, 3, False), (round(dev, 6), ca, cb, net))
+        dev, ca, cb, net = run._ratio_band_reading({"engine": 2, "decoder": 3}, self.N, self.PAIR, {})
+        self.assertEqual((0.333333, 2, 3, False), (round(dev, 6), ca, cb, net))
+
+    def test_reading_leaves_out_a_victim_that_is_up_between_kills(self):
+        # form=load: the old pod is Ready between kills and counts in the raw
+        # ready; the net reading leaves it out with its Instance
+        dev, ca, cb, net = run._ratio_band_reading({"engine": 3, "decoder": 3}, self.N, self.PAIR, {"engine": (1, 1)})
+        self.assertEqual((0.0, 3, 3, False), (round(dev, 6), ca, cb, net))
+        dev, ca, cb, net = run._ratio_band_reading({"engine": 2, "decoder": 3}, self.N, self.PAIR, {"engine": (1, 1)})
+        self.assertEqual((0.333333, 2, 3, False), (round(dev, 6), ca, cb, net), "raw 2:3 beats net 1 of 2 against 3")
+
+    def test_two_gangs_under_a_drain_first_roll_are_not_rescued_by_the_net_reading(self):
+        # gang 0 in the slot and gang 1 broken: nothing serves either way,
+        # which is why those cells run three gangs
+        n2 = {"engine": 2, "decoder": 2, "router": 2}
+        self.assertEqual((1.0, 0, 2, False), run._ratio_band_reading({"engine": 0, "decoder": 2}, n2, self.PAIR, {"engine": (1, 0)}))
+        self.assertEqual((1.0, 0, 1, False), run._ratio_band_reading({"engine": 0, "decoder": 1}, n2, self.PAIR, {"engine": (1, 0)}))
+
+    def test_reading_caps_a_surge_peak_and_reads_the_other_side_too(self):
+        dev, ca, cb, net = run._ratio_band_reading({"engine": 4, "decoder": 3}, self.N, self.PAIR)
+        self.assertEqual((0.0, 3, 3, False), (round(dev, 6), ca, cb, net), "a surge peak is spare capacity")
+        self.assertIsNone(run._ratio_band_reading({"engine": 0, "decoder": 0}, self.N, self.PAIR))
+        self.assertEqual(9.99, run._ratio_band_reading({"engine": 2, "decoder": 0}, self.N, self.PAIR)[0])
+        # a broken decoder: raw 3:1 is 200% off, net 3 of 3 against 1 of 2 is 100%
+        self.assertEqual((1.0, 3, 1, True),
+                         run._ratio_band_reading({"engine": 3, "decoder": 1}, self.N, self.PAIR, {"decoder": (1, 0)}))
+        # a side of one Instance has no net reading
+        n1 = {"engine": 1, "decoder": 1, "router": 0}
+        self.assertEqual((1.0, 0, 1, False), run._ratio_band_reading({"engine": 0, "decoder": 1}, n1, self.PAIR, {"engine": (1, 0)}))
+
+    @staticmethod
+    def _pod(comp, inst, hash_, ready, runner="leader", newanno=False):
+        return {"alive": True, "ready": ready, "comp": comp, "inst": str(inst), "hash": hash_,
+                "runner": runner, "newanno": newanno}
+
+    def test_break_out_lasts_until_the_victim_serves_on_the_target(self):
+        f = {"kind": "crashloop", "fired": True, "crash_comp": "engine", "crash_inst": "2"}
+        ppi = {"engine": 2, "decoder": 2, "router": 1}
+        modes = {"engine": "surge", "decoder": "surge"}
+        dark = {"e2l": self._pod("engine", 2, "old", False), "e2w": self._pod("engine", 2, "old", True, "worker"),
+                "e1l": self._pod("engine", 1, "old", True), "e1w": self._pod("engine", 1, "old", True, "worker")}
+        self.assertEqual({"engine": (1, 0)}, run._break_out(f, dark, {"old"}, modes, ppi))
+        between_kills = dict(dark, e2l=self._pod("engine", 2, "old", True))
+        self.assertEqual({"engine": (1, 1)}, run._break_out(f, between_kills, {"old"}, modes, ppi),
+                         "an old pod up between kills is whole and Ready, and still the fault's")
+        rebuilt_short = {"e2l": self._pod("engine", 2, "new", True)}
+        self.assertEqual({"engine": (1, 0)}, run._break_out(f, rebuilt_short, {"old"}, modes, ppi),
+                         "a gang with its worker still to come is not whole")
+        rebuilt = {"e2l": self._pod("engine", 2, "new", True), "e2w": self._pod("engine", 2, "new", True, "worker")}
+        self.assertEqual({}, run._break_out(f, rebuilt, {"old"}, modes, ppi), "whole and Ready on the target: its own again")
+        gone = {"e1l": self._pod("engine", 1, "old", True)}
+        self.assertEqual({"engine": (1, 0)}, run._break_out(f, gone, {"old"}, modes, ppi), "no pod at all is still out")
+        # not fired, not a break, or the fire failed before it named a victim: nothing is out
+        self.assertEqual({}, run._break_out(dict(f, fired=False), dark, {"old"}, modes, ppi))
+        self.assertEqual({}, run._break_out(dict(f, kind="podkill"), dark, {"old"}, modes, ppi))
+        self.assertEqual({}, run._break_out({"kind": "imagepull", "fired": True}, dark, {"old"}, modes, ppi))
+        self.assertEqual({}, run._break_out(None, dark, {"old"}, modes, ppi))
+        # every victim of a storm counts, and an in-place roll reads the annotation
+        storm = dict(f, extra_victims=[{"crash_comp": "engine", "crash_inst": "1"}])
+        self.assertEqual({"engine": (2, 1)}, run._break_out(storm, dark, {"old"}, modes, ppi))
+        inplace = {"e2l": self._pod("engine", 2, "old", True, newanno=True),
+                   "e2w": self._pod("engine", 2, "old", True, "worker", newanno=True)}
+        self.assertEqual({}, run._break_out(f, inplace, {"old"}, {"engine": "inplace"}, ppi))
+        self.assertEqual({"engine": (1, 1)}, run._break_out(f, inplace, {"old"}, modes, ppi),
+                         "under a rebuild the same old hash is not the target")
+
+    def test_sustained_reads_the_deviation_that_held_for_the_window(self):
+        spike = [(0.0, 0.0, 3, 3, False), (10.0, 0.667, 1, 3, False), (12.0, 0.5, 1, 3, True),
+                 (31.0, 0.0, 3, 3, False), (40.0, 0.0, 3, 3, False)]
+        dev, at = run._ratio_band_sustained(spike)
+        self.assertEqual((0.5, (12.0, 0.5, 1, 3, True)), (dev, at), "the 67% sample held two seconds, the 50% one nineteen")
+        brief = [(0.0, 0.0, 3, 3, False), (10.0, 0.667, 1, 3, False), (12.0, 0.0, 3, 3, False), (40.0, 0.0, 3, 3, False)]
+        self.assertEqual((0.0, None), run._ratio_band_sustained(brief))
+        self.assertEqual((0.0, None), run._ratio_band_sustained([]))
+
+    def test_verdict_fails_only_a_sustained_deviation_and_names_the_net_reading(self):
+        held = [(0.0, 0.0, 3, 3, False), (10.0, 0.5, 1, 3, True), (31.0, 0.0, 3, 3, False), (40.0, 0.0, 3, 3, False)]
+        notes, checks = [], []
+        self.assertEqual("PASS", run._ratio_band_verdict(self.PAIR, 50, held, (1, 3), 0.667, "PASS", notes, checks))
+        self.assertEqual([], notes)
+        self.assertTrue(any("band held" in c and "net of the broken Instance" in c and "1 sample(s) read net" in c
+                            for c in checks), checks)
+        broken = [(0.0, 0.0, 3, 3, False), (10.0, 1.0, 0, 3, True), (31.0, 0.0, 3, 3, False), (40.0, 0.0, 3, 3, False)]
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._ratio_band_verdict(self.PAIR, 50, broken, (0, 3), 1.0, "PASS", notes, checks))
+        self.assertTrue(any("RatioBalanced band violated" in n and "engine 0 : decoder 3 net of the broken Instance" in n
+                            for n in notes), notes)
+        raw = [(0.0, 0.0, 3, 3, False), (10.0, 0.667, 1, 3, False), (31.0, 0.0, 3, 3, False), (40.0, 0.0, 3, 3, False)]
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._ratio_band_verdict(self.PAIR, 50, raw, (1, 3), 0.667, "PASS", notes, checks))
+        self.assertFalse(any("net of the broken Instance" in c for c in checks), checks)
+        self.assertEqual("PASS", run._ratio_band_verdict(self.PAIR, 50, [], None, 0.0, "PASS", [], []))
 
 
 class PauseRepairTest(unittest.TestCase):

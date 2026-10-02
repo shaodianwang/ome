@@ -6211,7 +6211,11 @@ def _crashloop_fix_order(f, pod_state, old_hashes, verdict, notes, checks):
     land the fix. Its capacity is already lost, so a roll that replaces it
     first gives it back soonest; one that reaches it last leaves the
     operator short for the whole roll. Read from pod creation times, so it
-    judges strategies that rebuild pods (surge and recreate)."""
+    judges strategies that rebuild pods (surge and recreate). The order
+    needs two peers to be read at all: the break lands as the bump does,
+    once the roll has taken its first Instance, so with a single peer the
+    broken Instance is first or second by the break's timing, not by the
+    roll's order, and the claim is reported as not measurable."""
     inst, comp, kind = f["crash_inst"], f["crash_comp"], f["kind"]
     first = _first_new_pod_by_instance(pod_state, comp, old_hashes)
     mine = first.get(str(inst))
@@ -6219,6 +6223,13 @@ def _crashloop_fix_order(f, pod_state, old_hashes, verdict, notes, checks):
     if mine is None or not peers:
         checks.append(f"  ⓘ {kind}: fix order on {comp} Instance {inst} not measurable "
                       f"(new pods: mine={mine}, peers={len(peers)})")
+        return verdict
+    if len(peers) == 1:
+        (peer, when), = peers.items()
+        checks.append(f"  ⓘ {kind}: fix order on {comp} Instance {inst} not measurable with one peer "
+                      f"(the roll takes its first Instance before the break lands, so with one peer the broken "
+                      f"Instance's place is the break's timing, not the roll's order; mine={mine}, "
+                      f"peer {peer}={when})")
         return verdict
     last_peer = max(peers.values())
     if mine <= last_peer:
@@ -6229,6 +6240,127 @@ def _crashloop_fix_order(f, pod_state, old_hashes, verdict, notes, checks):
         notes.append(f"{kind} Instance {comp}/{inst} was the last to land the fix ({mine} after every peer, last {last_peer})")
         checks.append(f"  ✗ {kind}: broken {comp} Instance {inst} was the last to land the fix "
                       f"({mine}; every peer landed by {last_peer}) — its lost capacity came back last")
+    return verdict
+
+
+def _break_out(f, pod_state, old_hashes, modes, pods_per_inst):
+    """{comp: (taken, ready_now)} for the Instances a break took, while
+    their lost capacity is still the fault's: from the break until the
+    Instance is whole and Ready on the roll target again. Empty when no
+    break has fired or every victim serves on the target. ready_now counts
+    the victims whole and Ready at this moment (an old pod up between
+    kills), which the band's net reading leaves out with the Instance. A
+    victim replaced on a fresh index (a gang surge) stays out to the end,
+    which discounts at most that one Instance of its side."""
+    out = {}
+    if not f or f.get("kind") not in BREAK_FAULTS or not f.get("fired"):
+        return out
+    old = old_hashes or set()
+    for rec in _break_victims(f):
+        comp, inst = rec.get("crash_comp"), rec.get("crash_inst")
+        if not comp or inst is None:
+            continue
+        pods = [p for _n, p in _instance_pods(pod_state, comp, inst)]
+        ppi = max(1, pods_per_inst.get(comp, 1))
+        whole = len(pods) >= ppi and all(p.get("ready") for p in pods)
+        if modes.get(comp) == "inplace":
+            on_target = bool(pods) and all(p.get("newanno") for p in pods)
+        else:
+            on_target = bool(pods) and all(p.get("hash") and p["hash"] not in old for p in pods)
+        if whole and on_target:
+            continue
+        taken, ready_now = out.get(comp, (0, 0))
+        out[comp] = (taken + 1, ready_now + (1 if whole else 0))
+    return out
+
+
+def _ratio_band_reading(ready, n, pair, out=None):
+    """One sample of the RatioBalanced band: (dev, ready_a, ready_b, net),
+    or None while neither side serves. ready and n are per-Component Ready
+    and steady Instance counts; each side is capped at its N (a surge peak
+    is spare capacity, not an imbalance) and dev is how far ready_a:ready_b
+    sits from N_a:N_b, 9.99 when b serves nothing. out is a break's
+    {comp: (taken, ready_now)} (_break_out): a side with an Instance out is
+    read net of it as well — that Instance left out of the side's count and
+    of its N — and the better of the two readings is the sample, net=True
+    when the net one is. The broken Instance's lost capacity is the fault's,
+    not the gate's, and the gate paces the raw counts, so a deviation that
+    either reading keeps within tolerance is not the gate's."""
+    a, b = pair
+
+    def reading(ra, rb, na, nb):
+        if na <= 0 or nb <= 0:
+            return None
+        ca, cb = min(ra, na), min(rb, nb)
+        if ca <= 0 and cb <= 0:
+            return None
+        dev = 9.99 if cb == 0 else abs((ca / cb) / (na / nb) - 1.0)
+        return dev, ca, cb
+
+    raw = reading(ready.get(a, 0), ready.get(b, 0), n.get(a, 0), n.get(b, 0))
+    if raw is None:
+        return None
+    best, net = raw, False
+    if out and (out.get(a) or out.get(b)):
+        ta, ya = out.get(a, (0, 0))
+        tb, yb = out.get(b, (0, 0))
+        alt = reading(ready.get(a, 0) - ya, ready.get(b, 0) - yb, n.get(a, 0) - ta, n.get(b, 0) - tb)
+        if alt is not None and alt[0] < best[0]:
+            best, net = alt, True
+    return best[0], best[1], best[2], net
+
+
+def _ratio_band_sustained(samples, window=RATIO_SUSTAIN_S):
+    """The worst band deviation that persisted for `window` seconds, with
+    the sample it started at: each sample's reading holds until the next,
+    so from each one walk forward while the deviation stays at least as
+    large and measure the span to the drop. (0.0, None) when none did."""
+    sust_dev, sust_at = 0.0, None
+    ns = len(samples)
+    for i in range(ns):
+        ti, di = samples[i][0], samples[i][1]
+        j = i
+        while j + 1 < ns and samples[j + 1][1] >= di:
+            j += 1
+        end_t = samples[j + 1][0] if j + 1 < ns else samples[-1][0]
+        if end_t - ti >= window and di > sust_dev:
+            sust_dev, sust_at = di, samples[i]
+    return sust_dev, sust_at
+
+
+def _ratio_band_verdict(pair, ratio_tol, samples, worst, dev_max, verdict, notes, checks):
+    """Check 8: the RatioBalanced band held throughout the roll. Asserted on
+    the worst deviation that persisted RATIO_SUSTAIN_S, not the
+    instantaneous spike: the gate is eventually consistent (engine and
+    decoder run on separate dispatchers whose peer status lags a
+    reconcile), so a cross-dispatcher overshoot of a second or two is the
+    gate's own contract and only a deviation held off-band for the window
+    is a gate failure. Under a break on the running revision each sample is
+    the better of the raw reading and the one net of the broken Instance
+    (_ratio_band_reading): the band is measured, not waived, so the gate's
+    pacing of the healthy Instances stays asserted on the break cells,
+    while the broken Instance's lost capacity, the fault's and nothing the
+    gate can pace, counts against neither side. Samples are (t, dev,
+    ready_a, ready_b, net); the instantaneous worst is printed so the spike
+    stays visible."""
+    a, b = pair
+    tol = (ratio_tol or 0) / 100.0
+    sust_dev, at = _ratio_band_sustained(samples)
+    sust_pct = min(sust_dev, 9.99) * 100
+    inst_pct = min(dev_max, 9.99) * 100
+    inst_worst = f"{a} {worst[0]} : {b} {worst[1]}" if worst else "n/a"
+    sust_worst = (f"{a} {at[2]} : {b} {at[3]}" + (" net of the broken Instance" if at[4] else "")) if at else "n/a"
+    net_n = sum(1 for smp in samples if smp[4])
+    net_note = f"; {net_n} sample(s) read net of the broken Instance" if net_n else ""
+    if sust_dev > tol + RATIO_EPS:
+        verdict = "FAIL"
+        notes.append(f"RatioBalanced band violated: SUSTAINED dev {sust_pct:.0f}% > tol {ratio_tol}% "
+                     f"(worst sustained [{sust_worst}], instant {inst_pct:.0f}%)")
+        checks.append(f"  ✗ RatioBalanced band violated: sustained [{sust_worst}] dev {sust_pct:.0f}% > tol {ratio_tol}% "
+                      f"(held ≥{RATIO_SUSTAIN_S:.0f}s) — CheckRatio gate not holding{net_note}")
+    else:
+        checks.append(f"  ✓ RatioBalanced band held: sustained dev {sust_pct:.0f}% ≤ tol {ratio_tol}% [{sust_worst}]; "
+                      f"instant spike {inst_pct:.0f}% [{inst_worst}] debounced (by-design cross-dispatcher transient){net_note}")
     return verdict
 
 
@@ -17833,12 +17965,7 @@ def run_case(case_id):
     # CheckRatio gate must hold within ratioTolerancePercent. Only meaningful for a
     # 2-member RatioBalanced group.
     rp = [c for c in COMPS if c in bumped and N[c] > 0]
-    if pacing == "RatioBalanced" and len(rp) == 2:
-        ratio_pair = (rp[0], rp[1])
-        ratio_target = N[rp[0]] / N[rp[1]]
-    else:
-        ratio_pair = None
-        ratio_target = 1.0
+    ratio_pair = (rp[0], rp[1]) if pacing == "RatioBalanced" and len(rp) == 2 else None
     print(f"  Coordination: policy={policy or 'none'} pacing={pacing or '-'} members={members or '[]'} "
           f"order={order or '[]'} soak={soak}s")
     print(f"  Strategy: " + " ".join(f"{c}={info['strat'].get(c, '?')}" for c in sorted(configured)))
@@ -17895,7 +18022,7 @@ def run_case(case_id):
     done_ts = {}                     # comp → secs-post-trigger when it first fully rotated
     ratio_dev_max = 0.0              # worst INSTANTANEOUS serving-ratio deviation (info only)
     ratio_worst = None               # (ready_a, ready_b) at the worst instantaneous deviation
-    ratio_samples = []               # (tsecs, dev, ready_a, ready_b) time series → sustained-dev check
+    ratio_samples = []               # (tsecs, dev, ready_a, ready_b, net) time series → sustained-dev check
     gang_mixed_since = {}            # (comp, inst) → ts an Instance went mixed-revision (multi-node gang)
     gang_worst = {}                  # (comp, inst) → longest mixed-revision span observed (s)
     min_ready = {}                   # comp → min READY Instances seen mid-roll (capacity floor, Check 10)
@@ -18141,24 +18268,17 @@ def run_case(case_id):
                 # RatioBalanced: track the worst serving-ratio deviation between the
                 # two paired members. CheckRatio must keep serving(a):serving(b)
                 # within ratioTolerancePercent of N(a):N(b); a large swing means the gate
-                # is not holding (e.g. the IR-path bypass let one race ahead).
+                # is not holding (e.g. the IR-path bypass let one race ahead). Each
+                # side is capped at its steady N (a surge peak is spare capacity, not
+                # an imbalance; a side below N still registers) and a break's victim
+                # is netted out where that reads better (_ratio_band_reading).
                 if ratio_pair:
-                    ready_a = agg.get(ratio_pair[0], (0, 0, 0))[1]
-                    ready_b = agg.get(ratio_pair[1], (0, 0, 0))[1]
-                    # Cap each side's ready at its steady N before measuring the
-                    # deviation. SurgeThenDrain transiently lifts the surging side to
-                    # N+1 (surge headroom) — extra capacity, not an imbalance: the peer
-                    # still has its full N, so nothing is under-served. RatioBalanced
-                    # guards against UNDER-serving a side; a side BELOW N is not capped
-                    # up, so a real trough still registers here (and is also caught by
-                    # the capacity-floor check). Capping only neutralizes the benign
-                    # over-capacity surge peak, whose timing across the two independent
-                    # gang rollouts is not synchronized.
-                    ca = min(ready_a, N[ratio_pair[0]])
-                    cb = min(ready_b, N[ratio_pair[1]])
-                    if ca > 0 or cb > 0:
-                        dev = 9.99 if cb == 0 else abs((ca / cb) / ratio_target - 1.0)
-                        ratio_samples.append((tnow, dev, ca, cb))
+                    out = _break_out(fault, pod_state, old_hashes, modes, pods_per_inst)
+                    sample = _ratio_band_reading({c: agg.get(c, (0, 0, 0))[1] for c in ratio_pair},
+                                                 N, ratio_pair, out)
+                    if sample:
+                        dev, ca, cb, net = sample
+                        ratio_samples.append((tnow, dev, ca, cb, net))
                         if dev > ratio_dev_max:
                             ratio_dev_max = dev
                             ratio_worst = (ca, cb)
@@ -18449,42 +18569,12 @@ def run_case(case_id):
         else:
             checks.append(f"  ⚠ Sequential but <2 bumped members in order ({seq}) — ordering not exercised")
 
-    # Check 8: RatioBalanced serving-ratio band held throughout the roll —
-    # asserted on the worst deviation that PERSISTED >= RATIO_SUSTAIN_S, not the
-    # instantaneous spike. The gate is eventually-consistent: engine/decoder run
-    # on separate dispatchers whose peer status lags a reconcile, so when both
-    # move opposite directions there's a bounded ~1-2s cross-dispatcher overshoot
-    # (e.g. 3:5) that self-corrects next reconcile to the intended floor (3:4).
-    # That transient is by-design (the gate's own contract); only a deviation
-    # held off-band for >= the window is a real gate failure. Surge-only rolls
-    # keep serving ≈ N so this stays ~0. The instantaneous worst is still printed
-    # so the spike stays visible — it's just not asserted on.
+    # Check 8: RatioBalanced serving-ratio band held throughout the roll
+    # (_ratio_band_verdict: the sustained deviation, net of a break's victim
+    # where that reads better; surge-only rolls keep serving ≈ N so it stays ~0).
     if state == "CONVERGED" and ratio_pair:
-        a, b = ratio_pair
-        tol = (ratio_tol or 0) / 100.0
-        # Worst deviation sustained >= RATIO_SUSTAIN_S. Each watch sample's state
-        # holds until the next sample, so from each sample walk forward while dev
-        # stays >= this sample's dev and measure the span to the drop-below point.
-        sust_dev, sust_pair = 0.0, None
-        ns = len(ratio_samples)
-        for i in range(ns):
-            ti, di = ratio_samples[i][0], ratio_samples[i][1]
-            j = i
-            while j + 1 < ns and ratio_samples[j + 1][1] >= di:
-                j += 1
-            end_t = ratio_samples[j + 1][0] if j + 1 < ns else ratio_samples[-1][0]
-            if end_t - ti >= RATIO_SUSTAIN_S and di > sust_dev:
-                sust_dev, sust_pair = di, (ratio_samples[i][2], ratio_samples[i][3])
-        sust_pct = min(sust_dev, 9.99) * 100
-        inst_pct = min(ratio_dev_max, 9.99) * 100
-        inst_worst = f"{a} {ratio_worst[0]} : {b} {ratio_worst[1]}" if ratio_worst else "n/a"
-        sust_worst = f"{a} {sust_pair[0]} : {b} {sust_pair[1]}" if sust_pair else "n/a"
-        if sust_dev > tol + RATIO_EPS:
-            verdict = "FAIL"
-            notes.append(f"RatioBalanced band violated: SUSTAINED dev {sust_pct:.0f}% > tol {ratio_tol}% (worst sustained [{sust_worst}], instant {inst_pct:.0f}%)")
-            checks.append(f"  ✗ RatioBalanced band violated: sustained [{sust_worst}] dev {sust_pct:.0f}% > tol {ratio_tol}% (held ≥{RATIO_SUSTAIN_S:.0f}s) — CheckRatio gate not holding")
-        else:
-            checks.append(f"  ✓ RatioBalanced band held: sustained dev {sust_pct:.0f}% ≤ tol {ratio_tol}% [{sust_worst}]; instant spike {inst_pct:.0f}% [{inst_worst}] debounced (by-design cross-dispatcher transient)")
+        verdict = _ratio_band_verdict(ratio_pair, ratio_tol, ratio_samples, ratio_worst, ratio_dev_max,
+                                      verdict, notes, checks)
 
     # Check 9: multi-node gang atomicity — each leader+worker Instance must roll
     # as a UNIT (all pods recreate/upgrade together, never split across revisions).

@@ -114,7 +114,9 @@ runners (run.py + the KIND CI lane) already implement:
                           group policy (blueGreen, Sequential, maintainRatio)
                           and under the zero budgets of a rolling group; the
                           fix lands within the policy's own rule and never
-                          last on the broken Instance (fixfirst=1)
+                          last on the broken Instance (fixfirst=1); the gang
+                          drain-first cells run three gangs so that order
+                          can be read
     gen-pause-repair/ p6000+  a crash loop on the settled service, then the
                           operator pauses or freezes the service before the
                           repair opens, while it is in flight or after it has
@@ -804,14 +806,28 @@ NEW_CRASH_STRATS = [("SurgeThenDrain", 1, 0), ("RecreatePod", 0, 1), ("InPlaceIf
 # The group family: a running-revision crash under each group policy on the
 # shapes that have a peer for it, the two drain orders, and the zero-budget
 # cells of a plain rolling group (maxUnavailable 0 with maxSurge 1, maxSurge
-# 0 with maxUnavailable 1) on the single-pod shapes.
+# 0 with maxUnavailable 1) on the single-pod shapes. The gang shape runs two
+# gangs under the surge strategy and three under the drain-first one: the
+# break lands as the bump does, once the roll has taken its first gang, and
+# the dark gang then waits for that one slot (maxUnavailable 1), so with two
+# gangs the only peer precedes the broken gang by construction and the order
+# claim has nothing to read; with three the dark gang is rebuilt ahead of
+# the peer still waiting, and the victim is the highest index as on the
+# single-pod shapes (index 3 of 4). Three gangs with the decoder and the
+# router are 14 pods, above the gang scheduler twin's node cap, so those
+# cells run on the default scheduler only, as the family's gang surge cells
+# (also 14 pods at their peak) already do.
 GROUP_CRASH_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("pd-mn", 2, 1)]
+GROUP_CRASH_MN_DRAIN_N = 3
 GROUP_CRASH_POLICIES = {"engine": ["bluegreen"], "pd": ["bluegreen", "seq", "ratio"], "pd-mn": ["bluegreen", "seq", "ratio"]}
 GROUP_CRASH_STRATS = [("SurgeThenDrain", 1, 0), ("RecreatePod", 0, 1)]
 BUDGET_ZERO_SHAPES = [("engine", 4, 0), ("pd", 4, 0)]
 # maintainRatio tolerance by fleet size: at N=2 one crashing Instance is
-# already half the engine, so the band must admit 1:2.
-RATIO_TOL_BY_N = {2: 50, 4: 25}
+# already half the engine, so the band must admit 1:2; at N=3 the roll holds
+# one healthy gang in the drain slot while the broken one is dark, so the
+# healthy engine runs 1 of 2 against a full decoder and the band must admit
+# 1:2 there too.
+RATIO_TOL_BY_N = {2: 50, 3: 50, 4: 25}
 
 # The ops-held family: an operation lands on a Component stuck on a revision
 # that cannot be pulled. One size per shape (the engine's victim order and
@@ -2878,7 +2894,8 @@ def _group_rule(co, strat, tol):
         return ("Sequential rolls the engine to completion before the decoder starts (the ordering check), and "
                 "inside the engine the broken Instance lands first or at least never last")
     if co == "ratio":
-        return (f"maintainRatio keeps engine:decoder serving within {tol}% (the ratio check); the broken Instance "
+        return (f"maintainRatio keeps engine:decoder serving within {tol}% (the ratio check, read net of the broken "
+                f"Instance as well as raw: its lost capacity is the fault's, not the gate's); the broken Instance "
                 f"is already out of the serving count, so it comes back first or at least never last")
     zero = ("maxUnavailable 0 with maxSurge 1: every drain follows a Ready surge replacement"
             if strat == "SurgeThenDrain" else
@@ -2886,13 +2903,18 @@ def _group_rule(co, strat, tol):
     return f"a rolling group under the zero budget ({zero}), and the broken Instance, already down, is rebuilt first or at least never last"
 
 
-def _group_reason(form, co, strat, tol):
+def _group_reason(form, co, strat, tol, three_gangs=False):
     how = ("one old-revision engine pod is pointed at an image with no shell as the bump lands, so it crashes at "
            "every start and is never Ready again"
            if form == "start" else
            "one old-revision engine pod has its runner killed every few seconds while it is up, so it dies after "
            "Ready and comes back between crashes")
-    return (f"{how}; the bump is the fix and lands on every Instance within the group's own rule: {_group_rule(co, strat, tol)}; "
+    gangs = ("; three gangs, because the drain-first roll has taken its first gang before the break lands and the "
+             "dark gang then waits for that one slot: with two gangs the only peer precedes the broken gang by "
+             "construction, with three the dark gang must be rebuilt ahead of the peer still waiting"
+             if three_gangs else "")
+    return (f"{how}; the bump is the fix and lands on every Instance within the group's own rule: {_group_rule(co, strat, tol)}"
+            f"{gangs}; "
             f"the healthy peers never leave rotation beyond the budget, no repair is recorded for the broken Instance, "
             f"and it ends on the new revision serving; floor waived — the crash itself costs settled capacity "
             f"for the length of the roll")
@@ -2906,8 +2928,17 @@ def _group_for(co, n):
     return lib.coord_for(co, comps=members)
 
 
+def _group_n(topo, n, strat):
+    """The fleet size a group cell runs: the shape's own, except the gang
+    shape under a drain-first strategy, which needs three gangs for the
+    order claim to be readable (see GROUP_CRASH_MN_DRAIN_N)."""
+    return GROUP_CRASH_MN_DRAIN_N if is_mn(topo) and strat != "SurgeThenDrain" else n
+
+
 def _emit_group_cell(add, topo, n, w, strat, surge, unavail, rp, form, co):
     members = ["engine", "decoder"] if is_pd(topo) else ["engine"]
+    three_gangs = is_mn(topo) and _group_n(topo, n, strat) != n
+    n = _group_n(topo, n, strat)
     kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge),
               fault="crashloop:old", form=form, floor_soft=1, fixfirst=1, co=co, topo=topo)
     if is_pd(topo):
@@ -2920,7 +2951,7 @@ def _emit_group_cell(add, topo, n, w, strat, surge, unavail, rp, form, co):
     life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
     coord = _group_for(co, n) if is_pd(topo) else lib.coord_for(co, comps=tuple(members))
     add("gen-crashloop-group", desc, kv, comps(topo, n, w, life, d_life=life if is_pd(topo) else None),
-        _group_reason(form, co, strat, tol), meta,
+        _group_reason(form, co, strat, tol, three_gangs=three_gangs), meta,
         cell=("crashloop-group", form, topo, w, n, strat, surge, unavail, rp, co), coord=coord)
 
 
