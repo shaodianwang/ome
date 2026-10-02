@@ -33,9 +33,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import runtime_fixtures
-# The runner owns the names of the manager's namespace and webhook Service
-# and how an outage marks the Service; the sweep reads them from it.
-from run import CTRL_NS, WEBHOOK_OUTAGE_ANNO, WEBHOOK_SERVICE, restore_webhook_service
+# The runner owns how an outage marks the webhook configurations it cuts
+# and how they are put back; the sweep reads both from it.
+from run import WEBHOOK_OUTAGE_ANNO, restore_webhook_configurations
 
 HERE = Path(__file__).parent.resolve()
 # Cluster + namespace come from the environment so the harness isn't pinned to one
@@ -413,12 +413,13 @@ def sweep_preempt_apparatus():
 
 
 def sweep_webhook_outage():
-    """Point the webhook Service back at the manager when a webhook case died
-    before its cleanup: the outage annotation on the Service holds the
-    selector it had, and the runner restores from it."""
-    done = restore_webhook_service()
+    """Point the webhooks back at the manager's Service when a webhook case
+    died before its cleanup: the outage annotation on each cut configuration
+    holds the service reference every webhook had, and the runner restores
+    from it."""
+    done = restore_webhook_configurations()
     if done:
-        print(f"=== sweeping leftover webhook outage ({CTRL_NS}/{WEBHOOK_SERVICE}, {WEBHOOK_OUTAGE_ANNO}): {done} ===")
+        print(f"=== sweeping leftover webhook outage ({WEBHOOK_OUTAGE_ANNO} on the webhook configurations): {done} ===")
 
 
 def sweep_pending_taints():

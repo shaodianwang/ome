@@ -262,8 +262,9 @@ runners (run.py + the KIND CI lane) already implement:
                           reason, the old revision keeps serving, and a
                           corrective edit lands
     gen-webhook/   p8900+  the admission webhook made unreachable
-                          (fault=webhook:idle|settling: its Service pointed at
-                          no pod) on the settled service, as a push lands and
+                          (fault=webhook:idle|settling: its webhooks pointed
+                          at a Service that does not exist) on the settled
+                          service, as a push lands and
                           as a scale-up lands, for a bounded time
                           (lift=after-hold) or across the hold window
                           (lift=after-window), on every shape family: the
@@ -4721,13 +4722,13 @@ def emit_fault_move(add):
 
 # ── gen-webhook / gen-conflict: the admission webhook unreachable, a competing writer ──
 # A window fault holds a cluster condition over the settled service, a push
-# or a scale-up: the admission webhook unreachable (its Service pointed at no
-# pod, so every write the webhooks intercept is refused until it is pointed
-# back) or a competing writer bumping the resourceVersion the controller's
-# status writes carry. Every shape family of the coverage ledger at one gang
-# width: the engine alone, the engine behind a router, the prefill/decode
-# pair, each single-pod and as gangs. (topo, N, W, routers on an engine-only
-# shape.)
+# or a scale-up: the admission webhook unreachable (every webhook that names
+# its Service pointed at a Service that does not exist, so every write the
+# webhooks intercept is refused until they are pointed back) or a competing
+# writer bumping the resourceVersion the controller's status writes carry.
+# Every shape family of the coverage ledger at one gang width: the engine
+# alone, the engine behind a router, the prefill/decode pair, each
+# single-pod and as gangs. (topo, N, W, routers on an engine-only shape.)
 WINDOW_SHAPES = [("engine", 4, 0, 0), ("engine-mn", 2, 1, 0), ("engine", 4, 0, lib.NR), ("engine-mn", 2, 1, lib.NR),
                  ("pd", 4, 0, 0), ("pd-mn", 2, 1, 0)]
 WINDOW_OPS = ["steady", "push", "scale"]
@@ -4807,19 +4808,19 @@ def _window_end(op):
 
 def _webhook_window(op, lift):
     if lift == "after-window":
-        return "the webhook stays unreachable across the hold window, then its Service is pointed back"
+        return "the webhook stays unreachable across the hold window, then its webhooks are pointed back"
     if op == "steady":
-        return "the webhook is pointed back after the settle window"
-    return "the webhook is pointed back once the status has said why (or the reason wait has run out)"
+        return "the webhooks are pointed back after the settle window"
+    return "the webhooks are pointed back once the status has said why (or the reason wait has run out)"
 
 
 def _webhook_reason(op, lift, topo, w, nr, strat):
     shape = _window_shape(topo, w, nr)
     if op == "steady":
-        out = (f"the admission webhook is made unreachable on the settled service ({shape}): its Service is pointed "
-               f"at no pod, so every write the webhooks intercept is refused while status writes pass; "
-               f"{_window_claims(op)}; the manager's reconciles stay bounded; {_webhook_window(op, lift)}, it must answer "
-               f"again and {_window_end(op)}")
+        out = (f"the admission webhook is made unreachable on the settled service ({shape}): its webhooks are pointed "
+               f"at a Service that does not exist, so every write the webhooks intercept is refused while status writes pass; "
+               f"{_window_claims(op)}; the manager's reconciles stay bounded; {_webhook_window(op, lift)}, admission must "
+               f"answer again and {_window_end(op)}")
     elif op == "push":
         pod = ("the surge beside a running Instance" if strat == "SurgeThenDrain"
                else "the replacement of the drained Instance")
@@ -5805,8 +5806,9 @@ def manifest(rows):
         " restarting while a repair is open, as in the one-shot family. The"
         " cluster-wide forms (the manager restarts, the preemptions) run one at a"
         " time after the pool, as every such case does.",
-        "- gen-webhook points the admission webhook's Service at no pod on the"
-        " settled service, as a push lands and as a scale-up lands, for a"
+        "- gen-webhook points the admission webhook's configurations at a Service"
+        " that does not exist on the settled service, as a push lands and as a"
+        " scale-up lands, for a"
         " bounded time (lift=after-hold: pointed back once the status has said"
         " why a write waits, or after the settle window at idle) or across the"
         " hold window (lift=after-window), on every shape family of the"

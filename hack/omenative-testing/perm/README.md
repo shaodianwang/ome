@@ -1402,13 +1402,24 @@ shapes.
   the initial fleet comes up, the only start the running revision has) or
   as a push lands (`settling`); on the pushed revision (`crashloop:new`)
   it is the first single or leader pod of `victimcomp=` the push brings
-  up, in the state the form needs. A kill that never finds a pod in that
-  state is `INFRA-FAIL`, not a product failure. The verdict is the
+  up, in the state the form needs. The aimed pod is read on the clock,
+  every `ONCE_POLL_S`, not on pod events (a starting pod raises none
+  between its container running and Ready), and after the kill the
+  victim is read live until its restart count rises, so a roll that later
+  retires its gang at a fresh index cannot hide the restart. A kill that
+  never finds a pod in that state is `INFRA-FAIL`, not a product failure,
+  and the verdict says what the watcher first saw: the aimed pod already
+  Ready at first sight (Ready before the harness could read it), or not
+  Ready and still missed (the harness's own miss). A kill whose restart
+  was never read live and that no repair named is the same apparatus
+  failure; under a push the roll's own replacement of the Instance proves
+  nothing, at idle a rebuild nobody asked for does. The verdict is the
   operator's end state after a fault that heals by itself: the Instance
   Ready and serving on the revision it should run (the running one at
-  idle, the new one after a push on either side), no `InstanceFailed`,
-  `RepairHeld` or `RetryHeld` event naming it, every row settled with no
-  operation open, and a repair only where the restart policy promises one
+  idle, the new one after a push on either side; read at the index its
+  gang surge left it at), no `InstanceFailed`, `RepairHeld` or
+  `RetryHeld` event naming it, every row settled with no operation open,
+  and a repair only where the restart policy promises one
   — none for the running revision under a push (its revision is not the
   roll target, so the roll owns it), none under `restartPolicy: None`
   (the kubelet's restart is the whole story), and under
@@ -1856,14 +1867,19 @@ shapes.
 - **`fault=webhook:idle|settling` with `lift=after-hold|after-window`**
   (rollout mode with `during=idle`, rollout mode as a push lands, or
   `mode=scaledown` as a scale lands) makes the admission webhook
-  unreachable. The manager pod serves admission itself, so the verb points
-  the webhook Service (`ome-webhook-server-service` in the manager's
-  namespace; `OME_TEST_WEBHOOK_SERVICE`, `OME_TEST_CTRL_NS`) at a selector no
-  pod carries and leaves the manager running: every write the webhook
-  configurations intercept with `failurePolicy: Fail` (an InferenceService
-  or InferenceReplica spec write, the create of an InferenceService pod) is
-  refused with the apiserver's own words until the selector is put back,
-  while status writes pass. The selector it had rides the Service's
+  unreachable. The manager pod serves admission itself behind the webhook
+  Service (`ome-webhook-server-service` in the manager's namespace;
+  `OME_TEST_WEBHOOK_SERVICE`, `OME_TEST_CTRL_NS`), and the apiserver keeps
+  its connection to that pod warm, so a Service pointed at no pod keeps
+  answering. The verb leaves the Service alone and points every webhook of
+  the Validating/MutatingWebhookConfigurations that name it at a Service
+  that does not exist (`perm-webhook-outage-<case>`, checked absent first),
+  the manager still running: the apiserver fails to resolve the Service on
+  every call, so every write the webhooks intercept with `failurePolicy:
+  Fail` (an InferenceService or InferenceReplica spec write, the create of
+  an InferenceService pod) is refused with the apiserver's own words until
+  the webhooks are pointed back, while status writes pass. The service
+  reference each webhook had rides the configuration's
   `perm.test/webhook-outage` annotation, so the end-of-case cleanup and
   `batch.py`'s end-of-run sweep both restore it. `idle` starts the outage on
   the settled service (nothing follows); `settling` starts it right after
@@ -1935,9 +1951,9 @@ shapes.
   kubectl -n $OME_TEST_NS delete pod -l perm.test/filler --ignore-not-found
   kubectl delete priorityclass -l perm.test/fault --ignore-not-found
   kubectl get nodes -o name | xargs -r -n1 kubectl taint nodes perm.test/pending:NoSchedule- 2>/dev/null
-  # a webhook Service left pointed away carries perm.test/webhook-outage with the selector it had;
-  # batch.py's sweep restores it, or put that selector back by hand
-  kubectl -n "${OME_TEST_CTRL_NS:-ome}" get service ome-webhook-server-service -o jsonpath='{.metadata.annotations.perm\.test/webhook-outage}'
+  # a webhook configuration left cut carries perm.test/webhook-outage with the service reference each webhook had;
+  # batch.py's sweep restores it, or put the references back by hand
+  kubectl get validatingwebhookconfiguration,mutatingwebhookconfiguration -o custom-columns='KIND:.kind,NAME:.metadata.name,OUTAGE:.metadata.annotations.perm\.test/webhook-outage'
   ```
 
 ## Verdicts

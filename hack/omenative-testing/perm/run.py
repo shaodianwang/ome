@@ -1973,10 +1973,11 @@ def invariant_checks(inv, verdict, notes, checks):
 #                        for the manager, and its webhook, to come back, so
 #                        the arm is the restarted manager's.
 #   webhook:<phase>    — at idle (with during=idle) or as the operation lands
-#                        (settling): point the admission webhook's Service at
-#                        no pod until lift=after-hold|after-window, then put
-#                        it back; every write the webhooks intercept is
-#                        refused meanwhile, status writes pass.
+#                        (settling): point every webhook that names the
+#                        admission Service at a Service that does not exist
+#                        until lift=after-hold|after-window, then put them
+#                        back; every write the webhooks intercept is refused
+#                        meanwhile, status writes pass.
 #   conflict:<phase>   — at the same phases: a competing writer patches an
 #                        annotation of target=isvc|ir once (form=once) or at
 #                        CONFLICT_RATE_HZ until the operation completes
@@ -2335,14 +2336,16 @@ CONFLICT_TARGETS = {"isvc", "ir"}
 CONFLICT_ANNO = "perm.test/conflict-writer"
 CONFLICT_RATE_HZ = float(os.environ.get("OME_TEST_CONFLICT_RATE_HZ", "2"))
 # The webhook Service the chart installs beside the manager, in the
-# manager's namespace. The manager pod serves admission itself, so the
-# outage points the Service at a selector no pod carries and leaves the
-# manager running; the selector it had rides the Service's outage
+# manager's namespace. The manager pod serves admission itself and the
+# apiserver keeps its connection to it warm, so the outage leaves the
+# Service alone and points every webhook of the Validating/Mutating
+# WebhookConfigurations that name it at a Service that does not exist; the
+# service reference each webhook had rides the configuration's outage
 # annotation, where the end-of-case cleanup and batch.py's end-of-run sweep
 # both find it.
 WEBHOOK_SERVICE = os.environ.get("OME_TEST_WEBHOOK_SERVICE", "ome-webhook-server-service")
 WEBHOOK_OUTAGE_ANNO = "perm.test/webhook-outage"
-WEBHOOK_OUTAGE_LABEL = "perm.test/webhook-outage"
+WEBHOOK_CONFIGURATION_KINDS = ("validatingwebhookconfiguration", "mutatingwebhookconfiguration")
 # The manager's metrics Service and port name, read through the apiserver's
 # service proxy for the reconcile counters a webhook case reports.
 CTRL_METRICS_SERVICE = os.environ.get("OME_TEST_CTRL_METRICS_SERVICE", "ome-controller-manager-service:metrics")
@@ -3775,7 +3778,7 @@ _FAULT_CLEANUPS = []
 def _run_fault_cleanups():
     """Idempotent failure-path-safe fault teardown (quota delete, uncordon,
     killer stop, ConfigMap key restore, kubelet start, readiness switch
-    lift, webhook Service restore, competing writer stop)."""
+    lift, webhook configurations restore, competing writer stop)."""
     while _FAULT_CLEANUPS:
         kind, arg = _FAULT_CLEANUPS.pop()
         if kind == "quota":
@@ -4630,8 +4633,12 @@ def _fault_readiness_fire(f, pod_state, old_hashes):
 # the pod's first start, form=load once it is Ready. On the running revision
 # (crashloop:old) the victim is the break rule's pod, at idle or as a push
 # lands; on the pushed revision (crashloop:new) it is the first pod the push
-# brings up. The verdict is the operator's end state after a fault that
-# heals by itself.
+# brings up. The aimed pod is asked on the clock, every ONCE_POLL_S, not on
+# pod events: a pod raises none between its container running and Ready,
+# the window a kill at start has. After the kill the victim is read live
+# until its restart count rises, because a roll that retires its gang at a
+# fresh index leaves nothing at the index to read at the end. The verdict
+# is the operator's end state after a fault that heals by itself.
 ONCE_POLL_S = 2.0
 # The events that say a one-shot restart was escalated instead of absorbed.
 ONCE_ESCALATION_EVENTS = {"InstanceFailed", "RepairHeld", "RetryHeld"}
@@ -4656,23 +4663,52 @@ def _pod_main_state(name):
     return False, False, 0, uid
 
 
+def _once_new_side_pods(pod_state, comp, old_hashes):
+    """The live single or leader pods of comp on the pushed revision, the
+    first the push brought up first."""
+    fresh = [(n, p) for n, p in pod_state.items()
+             if p and p["alive"] and p.get("comp") == comp and p.get("runner", "default") in ("default", "leader")
+             and _pod_on_new(p, old_hashes)]
+    return [n for n, _p in sorted(fresh, key=lambda x: (x[1].get("created", ""), x[0]))]
+
+
+def _once_aim(f, pod_state, old_hashes):
+    """The pod the kill is aimed at, before its readiness is asked: the
+    break rule's victim on the running revision, the first single or leader
+    pod the push brought up on the pushed one. None until one exists."""
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+    if f.get("param") == CRASHLOOP_NEW:
+        fresh = _once_new_side_pods(pod_state, comp, old_hashes)
+        return fresh[0] if fresh else None
+    return _crashloop_pick_pod(pod_state, old_hashes, comp)
+
+
 def _once_candidate(f, pod_state, old_hashes):
     """The pod a one-shot crash aims at, by the watcher's state, or None
     until one qualifies: on the pushed revision the first live single or
-    leader pod of the victim Component on the new revision; on the running
-    revision the break rule's victim. form=start wants it not yet Ready,
-    form=load wants it Ready."""
+    leader pod of the victim Component on the new revision in the state the
+    form needs; on the running revision the break rule's victim. form=start
+    wants it not yet Ready, form=load wants it Ready."""
     comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
     want_ready = f.get("form") == "load"
     if f.get("param") == CRASHLOOP_NEW:
-        fresh = [(n, p) for n, p in sorted(pod_state.items())
-                 if p and p["alive"] and p.get("comp") == comp and p.get("runner", "default") in ("default", "leader")
-                 and _pod_on_new(p, old_hashes) and bool(p.get("ready")) == want_ready]
-        return min(fresh, key=lambda x: (x[1].get("created", ""), x[0]))[0] if fresh else None
+        fresh = [n for n in _once_new_side_pods(pod_state, comp, old_hashes) if bool(pod_state[n].get("ready")) == want_ready]
+        return fresh[0] if fresh else None
     victim = _crashloop_pick_pod(pod_state, old_hashes, comp)
     if not victim or bool(pod_state[victim].get("ready")) != want_ready:
         return None
     return victim
+
+
+def _once_note_first_sight(f, pod_state, old_hashes):
+    """The first time the watcher shows the pod the kill aims at, and
+    whether it was already Ready then: what a kill that never lands is
+    explained by."""
+    if "once_first_seen" in f:
+        return
+    pod = _once_aim(f, pod_state, old_hashes)
+    if pod:
+        f["once_first_seen"] = {"pod": pod, "ready": bool(pod_state[pod].get("ready")), "at": time.time()}
 
 
 def _once_due(f, pod_state, old_hashes):
@@ -4696,6 +4732,7 @@ def _once_due(f, pod_state, old_hashes):
 def _once_fire(f, pod_state, old_hashes):
     """Kill the aimed pod's runner exactly once and record it; False while no
     pod is in the state the form needs (the caller asks again)."""
+    _once_note_first_sight(f, pod_state, old_hashes)
     pod, state = _once_due(f, pod_state, old_hashes)
     if not pod:
         f["fired"] = False
@@ -4721,36 +4758,86 @@ def _once_fire(f, pod_state, old_hashes):
 def _once_start_tick(f, pod_state):
     """Before the fleet has settled: a one-shot crash at start on the running
     revision lands during the first start of its victim, the only revision
-    there is, so the phase hooks after the bump never see it unfired."""
-    if _fault_once(f) and not f["fired"] and f.get("form") == "start" and f.get("param") == CRASHLOOP_VICTIM:
+    there is, so the phase hooks after the bump never see it unfired; once
+    it has fired the victim is read live until its restart shows."""
+    if not (_fault_once(f) and f.get("form") == "start" and f.get("param") == CRASHLOOP_VICTIM):
+        return
+    if f["fired"]:
+        _once_bite_tick(f)
+    else:
         _once_fire(f, pod_state, None)
 
 
-def _once_observe(case_id, f, pod_state, old_hashes, expect_new, N, configured, settle_s):
+def _once_bite_tick(f):
+    """After the kill: read the victim live at most every ONCE_POLL_S until
+    its restart count rises (the kill landed) or it is gone or replaced
+    unseen. Latches restart_seen; a roll that retires the victim's gang at
+    a fresh index later leaves nothing at the index to read, so the end
+    state cannot be the first reading."""
+    if not f.get("fired") or f.get("restart_seen") or f.get("victim_gone") or not f.get("crash_pod"):
+        return
+    now = time.time()
+    if now - f.get("once_poll", 0.0) < ONCE_POLL_S:
+        return
+    f["once_poll"] = now
+    live = _pod_main_state(f["crash_pod"])
+    if live is None or live[3] != f.get("crash_uid"):
+        f["victim_gone"] = True
+        return
+    if live[2] > int(f.get("crash_restarts") or 0):
+        f.update(restart_seen=True, bitten_restarts=live[2], bitten_at=now - (f.get("fired_ts") or now))
+        print(f"    the kill landed: {f['crash_pod']} restart count {live[2]} ({f['bitten_at']:.0f}s after the kill)")
+
+
+def _once_never_landed(f, when):
+    """The apparatus failure for a kill that never found its pod, with what
+    the watcher first saw: a pod already Ready at first sight was Ready
+    before the harness could read it; one first seen not Ready should have
+    been killed, so the miss is the harness's own."""
+    seen = f.get("once_first_seen")
+    if not seen:
+        why = "the pod to aim at was never observed"
+    elif seen["ready"]:
+        why = f"{seen['pod']} was already Ready when first observed"
+    elif f.get("form") == "start":
+        why = f"{seen['pod']} was first observed not Ready, yet no read found it running before it was Ready"
+    else:
+        why = f"{seen['pod']} was first observed not Ready and never read Ready"
+    return f"once: no pod was in the state a form={f.get('form')} kill needs before {when} (the kill never landed: {why})"
+
+
+def _once_observe(case_id, f, pod_state, old_hashes, expect_new, N, configured, settle_s, surges=None):
     """The end state a one-shot crash is judged on: the victim Instance's pods
-    (serving, on the expected revision, the victim pod replaced or not), the
-    live restart count of the pod that was killed, the repairs and the
-    escalations recorded for the Instance since the kill, and whether every
-    row settled with no operation open."""
+    at the index its gang surges left it at (serving, on the expected
+    revision, the victim pod replaced or not); whether the kill landed (its
+    restart read live, a repair naming the Instance, or at idle a rebuild
+    nobody asked for; under a push the roll's own replacement proves
+    nothing); the repairs and the escalations recorded for the Instance
+    since the kill; and whether every row settled with no operation open."""
     comp, inst = f["crash_comp"], f["crash_inst"]
-    pods = _instance_pods(pod_state, comp, inst)
+    events = _isvc_events_since(case_id, f.get("fired_ts") or 0)
+    chain = _victim_index_chain(comp, inst, surges, events)
+    final = chain[-1]
+    pods = _instance_pods(pod_state, comp, final)
     on_revision = bool(pods) and all(
         _pod_on_new(p, old_hashes) if expect_new else p.get("hash") in (old_hashes or set()) for _n, p in pods)
     state = _pod_main_state(f["crash_pod"])
     same_pod = bool(state) and state[3] == f.get("crash_uid")
-    restarts = state[2] if same_pod else 0
+    restarts = state[2] if same_pod else int(f.get("bitten_restarts") or 0)
     rebuilt = bool(pods) and not any(p.get("uid") == f.get("crash_uid") for _n, p in pods)
-    events = _isvc_events_since(case_id, f.get("fired_ts") or 0)
+    repairs = [m for reason, m in events
+               if reason == "RestartTriggered" and any(_event_names_instance(m, comp, i) for i in chain)]
     settled, why = _wait_rows_settled(case_id, N, configured, settle_s)
     return {
         "fired": bool(f.get("fired")), "kills": int(f.get("kills") or 0),
-        "bitten": bool(f.get("restart_seen")) or rebuilt or restarts > int(f.get("crash_restarts") or 0),
-        "restarts": restarts, "rebuilt": rebuilt,
+        "bitten": (bool(f.get("restart_seen")) or restarts > int(f.get("crash_restarts") or 0)
+                   or bool(repairs) or (rebuilt and not expect_new)),
+        "restarts": restarts, "rebuilt": rebuilt, "final": final,
         "serving": bool(pods) and all(p.get("ready") and p.get("serving") for _n, p in pods),
         "on_revision": on_revision, "expect_new": expect_new,
-        "repairs": [m for reason, m in events if reason == "RestartTriggered" and _event_names_instance(m, comp, inst)],
+        "repairs": repairs,
         "escalations": [f"{reason}: {m}" for reason, m in events
-                        if reason in ONCE_ESCALATION_EVENTS and _event_names_instance(m, comp, inst)],
+                        if reason in ONCE_ESCALATION_EVENTS and any(_event_names_instance(m, comp, i) for i in chain)],
         "rows_settled": settled, "rows_why": why,
     }
 
@@ -4766,16 +4853,23 @@ def _once_checks(f, out, verdict, notes, checks):
     restarted after Ready, allowed and reported otherwise, never two."""
     comp, inst, form = f["crash_comp"], f["crash_inst"], f.get("form")
     side, op, rp = out["side"], out["op"], out["rp"]
-    who = f"{comp} Instance {inst}"
+    final = str(out.get("final") or inst)
+    who = f"{comp} Instance {inst}" + (f" (replaced at Instance {final} by its gang surge)" if final != str(inst) else "")
     label = f"crash once ({'at start' if form == 'start' else 'after Ready'}, {'pushed' if side == 'new' else 'running'} revision)"
     if not out["fired"] or not out["kills"]:
-        f["infra_fail"] = f"once: no pod was in the state a form={form} kill needs before the case ended (the kill never landed)"
+        f["infra_fail"] = _once_never_landed(f, "the case ended")
         return verdict
     if not out["bitten"]:
-        f["infra_fail"] = f"once: the kill of {f.get('crash_pod')} left no restart behind (restart count unchanged, pod not replaced)"
+        f["infra_fail"] = (f"once: the kill of {f.get('crash_pod')} left no restart behind (its restart count never rose "
+                           f"while it lived, and no repair named {comp} Instance {inst})")
         return verdict
-    checks.append(f"  ✓ {label}: {who}'s runner was killed once; "
-                  + (f"its pod was replaced" if out["rebuilt"] else f"the same pod restarted (restart count {out['restarts']})"))
+    if f.get("restart_seen") or out["restarts"] > int(f.get("crash_restarts") or 0):
+        how = f"the kubelet restarted it (restart count {out['restarts']})"
+    elif out["repairs"]:
+        how = "a repair named it"
+    else:
+        how = "its pod was replaced"
+    checks.append(f"  ✓ {label}: {who}'s runner was killed once; {how}")
     bad = []
 
     def fail(note, line):
@@ -4826,16 +4920,16 @@ def _once_checks(f, out, verdict, notes, checks):
     return verdict
 
 
-def _once_push_checks(f, case_id, pod_state, old_hashes, hdr, N, configured, verdict, notes, checks):
+def _once_push_checks(f, case_id, pod_state, old_hashes, hdr, N, configured, verdict, notes, checks, surges=None):
     """After a converged push: the one-shot verdict over the roll's end state
-    (the victim ends on the new revision on either side)."""
+    (the victim ends on the new revision on either side, at the index its
+    gang surge left it at)."""
     if not _fault_once(f) or f.get("infra_fail"):
         return verdict
     if not f.get("fired"):
-        f["infra_fail"] = (f"once: no pod was in the state a form={f.get('form')} kill needs before the roll "
-                           f"converged (the kill never landed)")
+        f["infra_fail"] = _once_never_landed(f, "the roll converged")
         return verdict
-    out = _once_observe(case_id, f, pod_state, old_hashes, True, N, configured, ROWS_SETTLE_S)
+    out = _once_observe(case_id, f, pod_state, old_hashes, True, N, configured, ROWS_SETTLE_S, surges=surges)
     out.update(side=("new" if f.get("param") == CRASHLOOP_NEW else "old"), op="push",
                rp=str(hdr.get("restart") or "RecreateInstance"))
     return _once_checks(f, out, verdict, notes, checks)
@@ -4856,7 +4950,8 @@ def _idle_once(ctx, f, hdr):
             _read_one(ctx)
             _once_fire(f, ctx["pod_state"], ctx["old_hashes"])
     if not f["fired"]:
-        f["infra_fail"] = f"once: no {comp} pod was in the state a form={f.get('form')} kill needs (the kill never landed)"
+        f["infra_fail"] = _once_never_landed(f, "the fleet settled" if f.get("form") == "start"
+                                             else f"the {BREAK_BITE_S}s bite window ran out")
         return "INFRA-FAIL", "INFRA-FAIL", [], []
     if f["infra_fail"]:
         return "INFRA-FAIL", "INFRA-FAIL", [], []
@@ -4864,7 +4959,7 @@ def _idle_once(ctx, f, hdr):
     comp, inst, pod = f["crash_comp"], f["crash_inst"], f["crash_pod"]
     budget = _idle_budget(ctx)
     seen = {f["crash_uid"]}
-    rebuilds, left_at, stable, last_poll, state = 0, None, None, 0.0, "WATCHING"
+    rebuilds, left_at, stable, state = 0, None, None, "WATCHING"
 
     def pods():
         return _instance_pods(ctx["pod_state"], comp, inst)
@@ -4884,11 +4979,7 @@ def _idle_once(ctx, f, hdr):
         p = ctx["pod_state"].get(pod)
         if left_at is None and p is not None and not p["ready"]:
             left_at = now - t0
-        if now - last_poll >= ONCE_POLL_S:
-            last_poll = now
-            live = _pod_main_state(pod)
-            if live and live[3] == f["crash_uid"] and live[2] > int(f.get("crash_restarts") or 0):
-                f["restart_seen"] = True
+        _once_bite_tick(f)
         bitten = bool(f.get("restart_seen")) or rebuilds > 0 or left_at is not None
         back = bitten and bool(pods()) and all(q.get("ready") and q.get("serving") for _n, q in pods())
         stable = (stable or now) if back else None
@@ -4904,7 +4995,8 @@ def _idle_once(ctx, f, hdr):
             count_rebuilds()
     else:
         state = "NOT_HEALED"
-    out = _once_observe(case_id, f, ctx["pod_state"], ctx["old_hashes"], False, N, configured, ROWS_SETTLE_S)
+    out = _once_observe(case_id, f, ctx["pod_state"], ctx["old_hashes"], False, N, configured, ROWS_SETTLE_S,
+                        surges=(ctx.get("inv") or {}).get("surges"))
     out.update(side="old", op="idle", rp=str(hdr.get("restart") or "RecreateInstance"), rebuilds=rebuilds,
                new_hash=any(p and p["alive"] and p.get("hash") and p["hash"] not in ctx["old_hashes"]
                             for p in ctx["pod_state"].values()))
@@ -6580,6 +6672,8 @@ def _fault_tick(ctx):
     if _fault_repeats(f):
         _repeat_observe(f, ctx["pod_state"])
     if f["fired"]:
+        if _fault_once(f):
+            _once_bite_tick(f)   # the victim is read live until its restart shows
         _repeat_tick(f, ctx)
         return
     if f.get("retry_at") and time.time() < f["retry_at"]:
@@ -8471,14 +8565,19 @@ def _pause_repair_checks(f, contract, out, verdict, notes, checks):
     return verdict
 
 
-def _victim_index_now(comp, inst, surges, events):
-    """The index the broken Instance stands at now: its own, or the one the
-    gang surges that replaced it left it at, read from the status rows'
-    surge claims first and from the ISVC events second (the recorder drops
-    an object's events past a burst; the rows do not)."""
+def _victim_index_chain(comp, inst, surges, events):
+    """The indices the broken Instance passed through: its own, then every
+    index a gang surge replaced it at, read from the status rows' surge
+    claims first and from the ISVC events second (the recorder drops an
+    object's events past a burst; the rows do not)."""
     pairs = [(src, dst) for c, src, dst, _rev in (surges or []) if c == comp]
     pairs += [pair for pair in _gang_surge_replacements(events, comp) if pair not in pairs]
-    return _follow_gang_surges(inst, pairs)[-1]
+    return _follow_gang_surges(inst, pairs)
+
+
+def _victim_index_now(comp, inst, surges, events):
+    """The index the broken Instance stands at now (see _victim_index_chain)."""
+    return _victim_index_chain(comp, inst, surges, events)[-1]
 
 
 def _pause_repair_end_state(agg, pod_state, ppi, N, configured, bumped, comp, inst, final, pre_uids, expected, old_hashes, push):
@@ -9787,14 +9886,18 @@ def _pending_roll(case_id, yaml_file, desc, hdr):
 # A window fault holds a cluster condition over the settled service, a push
 # or a scale-up for a bounded time and reads how the controller behaves under
 # it and once it is gone. The admission webhook is the manager's own listener
-# behind WEBHOOK_SERVICE, so the outage points that Service at a selector no
-# pod carries and leaves the manager running: every write the webhook
-# configurations intercept with failurePolicy Fail (an InferenceService or
+# behind WEBHOOK_SERVICE, and the apiserver keeps its connection to the
+# manager pod warm, so a Service pointed at no pod keeps answering; the
+# outage instead points every webhook of the configurations that name the
+# Service at a Service that does not exist and leaves the manager running:
+# the apiserver fails to resolve it on every call, so every write the
+# webhooks intercept with failurePolicy Fail (an InferenceService or
 # InferenceReplica spec write, the create of an InferenceService pod) is
-# refused with the apiserver's own words until the selector is put back,
-# while status writes pass. The competing writer patches an annotation of
-# the ISVC or of the case's InferenceReplicas, so the controller's next
-# status write carries a stale resourceVersion and has to be retried.
+# refused with the apiserver's own words until the webhooks are pointed
+# back, while status writes pass. The competing writer patches an
+# annotation of the ISVC or of the case's InferenceReplicas, so the
+# controller's next status write carries a stale resourceVersion and has to
+# be retried.
 WRITE_BLOCKED_WORDS = ("webhook", "admission")
 # The counters controller-runtime exports per controller, and the part of a
 # controller's name that marks it as one of the OMENative ones.
@@ -9809,115 +9912,175 @@ RATE_MIN_WINDOW_S = 30.0
 WINDOW_REASON_POLL_S = INV_TICK_S
 
 
-def _webhook_service():
-    """(the webhook Service object, "") or (None, why it cannot be read)."""
-    r = kubectl("-n", CTRL_NS, "get", "service", WEBHOOK_SERVICE, "-o", "json")
-    if r.returncode != 0:
-        lines = (r.stderr or "").strip().splitlines()
-        return None, (lines[-1] if lines else "not found")[:160]
-    try:
-        return json.loads(r.stdout), ""
-    except Exception as e:
-        return None, f"not JSON: {e}"
+def _webhook_configurations():
+    """(kind, configuration) for every validating and mutating webhook
+    configuration of the cluster, or (None, why they cannot be read)."""
+    found = []
+    for kind in WEBHOOK_CONFIGURATION_KINDS:
+        r = kubectl("get", kind, "-o", "json")
+        if r.returncode != 0:
+            lines = (r.stderr or "").strip().splitlines()
+            return None, f"{kind}: {(lines[-1] if lines else 'unreadable')[:160]}"
+        try:
+            items = json.loads(r.stdout).get("items") or []
+        except Exception as e:
+            return None, f"{kind}: not JSON: {e}"
+        found.extend((kind, item) for item in items)
+    return found, ""
+
+
+def _webhook_entries(configuration):
+    """{webhook name: the clientConfig.service it names} for every webhook
+    of one configuration that calls WEBHOOK_SERVICE in CTRL_NS."""
+    out = {}
+    for hook in configuration.get("webhooks") or []:
+        service = (hook.get("clientConfig") or {}).get("service") or {}
+        if hook.get("name") and service.get("namespace") == CTRL_NS and service.get("name") == WEBHOOK_SERVICE:
+            out[hook["name"]] = dict(service)
+    return out
+
+
+def _webhook_cuts(configurations):
+    """[(kind, name, entries)] of the configurations with a webhook to cut."""
+    out = []
+    for kind, item in configurations:
+        entries = _webhook_entries(item)
+        if entries:
+            out.append((kind, (item.get("metadata") or {}).get("name", ""), entries))
+    return out
 
 
 def _webhook_capability():
-    """None when the webhook Service can be pointed away here, else why not."""
-    svc, err = _webhook_service()
-    if svc is None:
-        return f"the webhook Service {CTRL_NS}/{WEBHOOK_SERVICE} cannot be read: {err}"
-    if not ((svc.get("spec") or {}).get("selector") or {}):
-        return f"the webhook Service {CTRL_NS}/{WEBHOOK_SERVICE} has no selector to point away"
+    """None when a webhook configuration names the manager's Service here,
+    else why the outage cannot be driven."""
+    configurations, err = _webhook_configurations()
+    if configurations is None:
+        return f"the webhook configurations cannot be read: {err}"
+    if not _webhook_cuts(configurations):
+        return f"no webhook configuration names the Service {CTRL_NS}/{WEBHOOK_SERVICE}"
     return None
 
 
-def _webhook_outage_patch(case_id, selector):
-    """The merge patch that points the Service at a label no pod carries:
-    every key of the selector it had dropped, the marker key added, and the
-    selector it had kept in the outage annotation."""
-    kept = json.dumps({"case": case_id, "selector": selector}, sort_keys=True)
+def _webhook_outage_service(case_id):
+    """The Service the cut points the webhooks at: a name no object in the
+    manager's namespace carries (the start checks), so the apiserver fails
+    to resolve it on every call instead of reusing its warm connection to
+    the manager pod."""
+    return f"perm-webhook-outage-{case_id}"
+
+
+def _service_absent(name):
+    """(True, "") when no Service `name` exists in the manager's namespace;
+    (False, why) when one does or the read failed."""
+    r = kubectl("-n", CTRL_NS, "get", "service", name, "-o", "name")
+    if r.returncode == 0:
+        return False, f"a Service {CTRL_NS}/{name} exists"
+    err = (r.stderr or "").strip()
+    if "NotFound" in err or "not found" in err:
+        return True, ""
+    return False, f"{CTRL_NS}/{name} could not be read: {(err.splitlines()[-1] if err else 'unreadable')[:160]}"
+
+
+def _webhook_cut_patch(case_id, entries, away):
+    """The strategic merge patch that points each named webhook of one
+    configuration at `away` (the list merges on the webhook name, so the
+    service name is all that changes) and keeps the service reference each
+    had in the outage annotation."""
+    kept = json.dumps({"case": case_id, "webhooks": entries}, sort_keys=True)
     return {"metadata": {"annotations": {WEBHOOK_OUTAGE_ANNO: kept}},
-            "spec": {"selector": {**{k: None for k in selector}, WEBHOOK_OUTAGE_LABEL: case_id}}}
+            "webhooks": [{"name": name, "clientConfig": {"service": {"name": away}}} for name in sorted(entries)]}
 
 
-def _webhook_restore_patch(selector):
-    """The merge patch that puts the selector back and drops the marker key
-    and the outage annotation."""
+def _webhook_restore_patch(entries):
+    """The strategic merge patch that puts each webhook's service reference
+    back and drops the outage annotation."""
     return {"metadata": {"annotations": {WEBHOOK_OUTAGE_ANNO: None}},
-            "spec": {"selector": {WEBHOOK_OUTAGE_LABEL: None, **selector}}}
+            "webhooks": [{"name": name, "clientConfig": {"service": service}} for name, service in sorted(entries.items())]}
 
 
 def _webhook_outage_start(f):
-    """Make the admission webhook unreachable: point its Service at a
-    selector no pod carries. The restore is registered before the Service
-    changes, and a Service another case left pointed away is an apparatus
-    error, never pointed away twice."""
-    svc, err = _webhook_service()
-    if svc is None:
-        f["infra_fail"] = f"webhook: the Service {CTRL_NS}/{WEBHOOK_SERVICE} cannot be read: {err}"
+    """Make the admission webhook unreachable: point every webhook of the
+    configurations that name the manager's Service at a Service that does
+    not exist, so the apiserver fails each call at once and the failure
+    policy decides the write (refused under Fail). The restore is registered
+    before anything changes, and a configuration another case left cut is an
+    apparatus error, never cut twice."""
+    configurations, err = _webhook_configurations()
+    if configurations is None:
+        f["infra_fail"] = f"webhook: the webhook configurations cannot be read: {err}"
         return
-    kept = ((svc.get("metadata") or {}).get("annotations") or {}).get(WEBHOOK_OUTAGE_ANNO)
-    if kept:
-        f["infra_fail"] = (f"webhook: {CTRL_NS}/{WEBHOOK_SERVICE} is already pointed away ({str(kept)[:120]}); "
-                           f"the end-of-run sweep restores it")
+    cut_before = [f"{kind}/{(item.get('metadata') or {}).get('name', '')}" for kind, item in configurations
+                  if ((item.get("metadata") or {}).get("annotations") or {}).get(WEBHOOK_OUTAGE_ANNO)]
+    if cut_before:
+        f["infra_fail"] = f"webhook: {', '.join(cut_before)} already pointed away; the end-of-run sweep restores it"
         return
-    selector = (svc.get("spec") or {}).get("selector") or {}
-    if not selector:
-        f["infra_fail"] = f"webhook: the Service {CTRL_NS}/{WEBHOOK_SERVICE} has no selector to point away"
+    cuts = _webhook_cuts(configurations)
+    if not cuts:
+        f["infra_fail"] = f"webhook: no webhook configuration names the Service {CTRL_NS}/{WEBHOOK_SERVICE}"
         return
-    f.update(webhook_selector=dict(selector), webhook_restored=False,
-             cause=f"the admission webhook unreachable ({CTRL_NS}/{WEBHOOK_SERVICE} pointed at no pod)")
-    _FAULT_CLEANUPS.append((WEBHOOK_FAULT, f))   # registered BEFORE the Service changes
-    r = kubectl("-n", CTRL_NS, "patch", "service", WEBHOOK_SERVICE, "--type=merge",
-                "-p", json.dumps(_webhook_outage_patch(f["case_id"], selector)))
-    if r.returncode != 0:
-        f["infra_fail"] = f"webhook: pointing {CTRL_NS}/{WEBHOOK_SERVICE} away failed: {(r.stderr or '').strip()[:160]}"
+    away = _webhook_outage_service(f["case_id"])
+    absent, why = _service_absent(away)
+    if not absent:
+        f["infra_fail"] = f"webhook: {why}; the cut needs a Service name nothing carries"
         return
+    f.update(webhook_cuts=cuts, webhook_away=away, webhook_restored=False,
+             cause=f"the admission webhook unreachable (its webhooks pointed at {CTRL_NS}/{away}, a Service that does not exist)")
+    _FAULT_CLEANUPS.append((WEBHOOK_FAULT, f))   # registered BEFORE anything changes
+    for kind, name, entries in cuts:
+        r = kubectl("patch", kind, name, "--type=strategic", "-p",
+                    json.dumps(_webhook_cut_patch(f["case_id"], entries, away)))
+        if r.returncode != 0:
+            f["infra_fail"] = f"webhook: pointing {kind}/{name} away failed: {(r.stderr or '').strip()[:160]}"
+            return
     f["outage_ts"] = time.time()
-    f["notes"].append(f"fault fired: webhook outage — {CTRL_NS}/{WEBHOOK_SERVICE} selector "
-                      f"{json.dumps(selector, sort_keys=True)} replaced by {WEBHOOK_OUTAGE_LABEL}={f['case_id']}")
+    hooks = sum(len(entries) for _kind, _name, entries in cuts)
+    where = ", ".join(f"{kind}/{name}" for kind, name, _entries in cuts)
+    f["notes"].append(f"fault fired: webhook outage — {hooks} webhook(s) of {where} pointed from "
+                      f"{CTRL_NS}/{WEBHOOK_SERVICE} at {CTRL_NS}/{away}, a Service that does not exist")
     print(f"    ⚡ {f['notes'][-1]}")
 
 
 def _webhook_outage_lift(f):
-    """Point the webhook Service back at the manager: the selector it had,
-    the marker key and the outage annotation dropped. Idempotent; True once
+    """Point every cut webhook back at the manager's Service and drop the
+    outage annotation. Idempotent; True once every configuration is
     restored."""
     if f.get("webhook_restored"):
         return True
-    selector = f.get("webhook_selector") or {}
-    if not selector:
+    cuts = f.get("webhook_cuts") or []
+    if not cuts:
         return False
-    r = kubectl("-n", CTRL_NS, "patch", "service", WEBHOOK_SERVICE, "--type=merge",
-                "-p", json.dumps(_webhook_restore_patch(selector)))
-    if r.returncode == 0:
+    restored = True
+    for kind, name, entries in cuts:
+        r = kubectl("patch", kind, name, "--type=strategic", "-p", json.dumps(_webhook_restore_patch(entries)))
+        restored = restored and r.returncode == 0
+    if restored:
         f["webhook_restored"] = True
         f["lift_ts"] = time.time()
-    return r.returncode == 0
+    return restored
 
 
-def restore_webhook_service():
-    """Put the webhook Service back when a case left it pointed away (the
-    outage annotation holds the selector it had): batch.py's end-of-run
-    sweep. Returns what was done, "" when nothing was left to do."""
-    svc, _err = _webhook_service()
-    if svc is None:
-        return ""
-    kept = ((svc.get("metadata") or {}).get("annotations") or {}).get(WEBHOOK_OUTAGE_ANNO)
-    if not kept:
-        return ""
-    try:
-        selector = json.loads(kept).get("selector") or {}
-    except Exception:
-        selector = {}
-    if not selector:
-        return (f"{CTRL_NS}/{WEBHOOK_SERVICE} carries {WEBHOOK_OUTAGE_ANNO} with no selector to restore; "
-                f"left for a hand")
-    r = kubectl("-n", CTRL_NS, "patch", "service", WEBHOOK_SERVICE, "--type=merge",
-                "-p", json.dumps(_webhook_restore_patch(selector)))
-    if r.returncode != 0:
-        return f"restoring {CTRL_NS}/{WEBHOOK_SERVICE} failed: {(r.stderr or '').strip()[:160]}"
-    return f"restored {CTRL_NS}/{WEBHOOK_SERVICE} selector {json.dumps(selector, sort_keys=True)}"
+def restore_webhook_configurations():
+    """Point back every webhook configuration a case left cut (its outage
+    annotation holds the service reference each webhook had): batch.py's
+    end-of-run sweep. Returns what was done, "" when nothing was left to do."""
+    configurations, _err = _webhook_configurations()
+    done = []
+    for kind, item in configurations or []:
+        meta = item.get("metadata") or {}
+        kept = (meta.get("annotations") or {}).get(WEBHOOK_OUTAGE_ANNO)
+        if not kept:
+            continue
+        try:
+            entries = json.loads(kept).get("webhooks") or {}
+        except Exception:
+            entries = {}
+        if not entries:
+            done.append(f"{kind}/{meta.get('name')} carries {WEBHOOK_OUTAGE_ANNO} with nothing to restore; left for a hand")
+            continue
+        r = kubectl("patch", kind, meta.get("name", ""), "--type=strategic", "-p", json.dumps(_webhook_restore_patch(entries)))
+        done.append(f"restored {kind}/{meta.get('name')} ({len(entries)} webhook(s))" if r.returncode == 0
+                    else f"restoring {kind}/{meta.get('name')} failed: {(r.stderr or '').strip()[:160]}")
+    return "; ".join(done)
 
 
 def _webhook_probe(case_id):
@@ -10247,15 +10410,15 @@ def _window_close(ctx, f, win):
     appeared or left, the controller's events, the reconcile counters)."""
     t0 = win["fault_ts"]
     if win["kind"] == WEBHOOK_FAULT:
-        print(f"  Phase 4: lift — {CTRL_NS}/{WEBHOOK_SERVICE} pointed back at the manager")
+        print(f"  Phase 4: lift — the webhooks pointed back at {CTRL_NS}/{WEBHOOK_SERVICE}")
         if not _webhook_outage_lift(f):
-            f["infra_fail"] = f"webhook: {CTRL_NS}/{WEBHOOK_SERVICE} could not be restored"
+            f["infra_fail"] = "webhook: the webhook configurations could not be restored"
         else:
             win["lifted_at"] = time.time() - t0
             if _wait_webhook_admits(ctx["case_id"], CTRL_READY_S):
                 win["answered_at"] = time.time() - t0
             else:
-                f["infra_fail"] = f"webhook: admission did not answer within {CTRL_READY_S}s of the Service being restored"
+                f["infra_fail"] = f"webhook: admission did not answer within {CTRL_READY_S}s of the webhooks being pointed back"
     else:
         if win["form"] == "persist":
             print("  Phase 4: the competing writer stops")
@@ -10534,10 +10697,10 @@ def _window_checks(f, win, state, verdict, notes, checks):
     what = {"push": "the push", "scale": "the scale", "idle": "the steady service"}[op]
     if kind == WEBHOOK_FAULT:
         if win["refused_at"] is None:
-            f["infra_fail"] = (f"{label}: admission kept answering with {CTRL_NS}/{WEBHOOK_SERVICE} pointed away "
-                               f"for {win['window_s'] or 0:.0f}s — the outage never bit")
+            f["infra_fail"] = (f"{label}: admission kept answering with the webhooks pointed at a Service that does "
+                               f"not exist for {win['window_s'] or 0:.0f}s — the outage never bit")
             return verdict
-        checks.append(f"  ✓ {label}: admission refused {win['refused_at']:.0f}s after the Service was pointed away: {win['refusal'][:120]}")
+        checks.append(f"  ✓ {label}: admission refused {win['refused_at']:.0f}s after the webhooks were pointed away: {win['refusal'][:120]}")
     else:
         if not f.get("writes"):
             f["infra_fail"] = (f"{label}: the competing writer wrote nothing ({f.get('refused_writes', 0)} refused"
@@ -18554,6 +18717,8 @@ def run_case(case_id):
                 # consumption (events are processed every iteration below; the slow
                 # tick runs only between bursts, when pod_state is already current).
                 _inv_tick(inv, pod_state, pods_per_inst)
+                if state == "INIT":
+                    _once_start_tick(fault, pod_state)   # a starting pod raises no event until Ready: the kill at start is asked here
 
                 if state == "INIT" and initial_pods_ready:
                     ir_items = _fetch_initial_ir_items(case_id)
@@ -18608,10 +18773,12 @@ def run_case(case_id):
                             print(f"\n  Phase 3: watching rotation (peak ≤ {ce}/{cd}/{cr}; bumped {sorted(bumped)} → {goal})")
                         state = "ROTATING"
 
-                # A held push changes no pod, and a repeating fault waits on
-                # the manager or a pod coming back, which may raise no watch
-                # event either: the fault hook and the hold are ticked here.
-                if state == "ROTATING" and (hold or _fault_repeats(fault)):
+                # A held push changes no pod, a repeating fault waits on the
+                # manager or a pod coming back, and a one-shot kill waits for
+                # a pod in the state its form needs and then for its restart;
+                # none of those need raise a watch event, so the fault hook
+                # and the hold are ticked here.
+                if state == "ROTATING" and (hold or _fault_repeats(fault) or _fault_once(fault)):
                     _fault_tick({"fault": fault, "trigger_ts": trigger_ts, "old_hashes": old_hashes,
                                  "pod_state": pod_state, "pods_per_inst": pods_per_inst, "inv": inv})
                 if state == "ROTATING" and hold:
@@ -19016,7 +19183,8 @@ def run_case(case_id):
     if state == "CONVERGED":
         verdict = _crashloop_checks(fault, pod_state, old_hashes, trigger_ts, verdict, notes, checks,
                                     bumped=bumped, surges=inv.get("surges"))
-        verdict = _once_push_checks(fault, case_id, pod_state, old_hashes, hdr, N, configured, verdict, notes, checks)
+        verdict = _once_push_checks(fault, case_id, pod_state, old_hashes, hdr, N, configured, verdict, notes, checks,
+                                    surges=inv.get("surges"))
         verdict = _gang_member_checks(fault, pod_state, trigger_ts, hdr, verdict, notes, checks)
     # Check 6b': a repeating fault across its window, and the end state once
     # it stopped. The roll's own pods are what the operation explains: every

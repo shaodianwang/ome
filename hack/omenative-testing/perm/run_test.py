@@ -1664,109 +1664,172 @@ class WindowFaultHeaderTest(unittest.TestCase):
         self.assertTrue(coverage._lift("after-window"))
 
 
-SERVICE = {"metadata": {"name": "ome-webhook-server-service", "annotations": {"meta.helm.sh/release-name": "ome"}},
-           "spec": {"selector": {"control-plane": "ome-controller-manager"}}}
+def _webhook_configuration(name, hooks):
+    """A webhook configuration as the apiserver returns it: each hook names
+    a (service name, namespace, path)."""
+    return {"metadata": {"name": name, "annotations": {"meta.helm.sh/release-name": "ome"}},
+            "webhooks": [{"name": hook, "failurePolicy": "Fail",
+                          "clientConfig": {"caBundle": "Cg==",
+                                           "service": {"name": svc, "namespace": ns, "path": path, "port": 443}}}
+                         for hook, svc, ns, path in hooks]}
+
+
+VALIDATING = [_webhook_configuration("inferenceservice.ome.io",
+                                     [("inferenceservice.validator", run.WEBHOOK_SERVICE, run.CTRL_NS, "/validate-isvc")]),
+              _webhook_configuration("other.example.io",
+                                     [("other.validator", "other-webhook", run.CTRL_NS, "/validate-other")])]
+MUTATING = [_webhook_configuration("inferenceservice.ome.io",
+                                   [("inferenceservice.pod-mutator", run.WEBHOOK_SERVICE, run.CTRL_NS, "/mutate-pods")])]
+ISVC_SERVICE = {"name": run.WEBHOOK_SERVICE, "namespace": run.CTRL_NS, "path": "/validate-isvc", "port": 443}
+POD_SERVICE = {"name": run.WEBHOOK_SERVICE, "namespace": run.CTRL_NS, "path": "/mutate-pods", "port": 443}
+AWAY = "perm-webhook-outage-p999"
+NOT_FOUND = f'Error from server (NotFound): services "{AWAY}" not found\n'
+
+
+def _cluster_kubectl(calls, validating=VALIDATING, mutating=MUTATING, away_exists=False):
+    """A kubectl serving the webhook configurations, the absence (or not) of
+    the outage Service, and taking every patch."""
+    def kubectl(*a, **k):
+        calls.append((a, len(run._FAULT_CLEANUPS)))
+        if a[0] == "get" and a[1] == "validatingwebhookconfiguration":
+            return subprocess.CompletedProcess(a, 0, json.dumps({"items": validating}), "")
+        if a[0] == "get" and a[1] == "mutatingwebhookconfiguration":
+            return subprocess.CompletedProcess(a, 0, json.dumps({"items": mutating}), "")
+        if "get" in a and "service" in a:
+            if away_exists:
+                return subprocess.CompletedProcess(a, 0, f"service/{AWAY}\n", "")
+            return subprocess.CompletedProcess(a, 1, "", NOT_FOUND)
+        return subprocess.CompletedProcess(a, 0, "", "")
+    return kubectl
+
+
+def _patches(calls):
+    """[(kind, name, body)] of the patch calls, in order."""
+    return [(a[1], a[2], json.loads(a[a.index("-p") + 1])) for a, _n in calls if a[0] == "patch"]
 
 
 class WebhookOutageVerbTest(unittest.TestCase):
-    """The outage points the webhook Service at a selector no pod carries,
-    keeps the selector it had in the outage annotation, registers the
-    restore first, and the lift (and the end-of-run sweep) put it back."""
+    """The outage points every webhook that names the manager's Service at a
+    Service that does not exist, keeps the reference each had in the
+    configuration's outage annotation, registers the restore first, and the
+    lift (and the end-of-run sweep) put every reference back. A Service
+    pointed at no pod is not a cut: the apiserver keeps its connection to
+    the manager pod warm and admission keeps answering."""
 
-    def test_patches_drop_the_old_selector_and_keep_it_in_the_annotation(self):
-        patch = run._webhook_outage_patch("p999", {"control-plane": "ome-controller-manager"})
-        self.assertEqual({"control-plane": None, run.WEBHOOK_OUTAGE_LABEL: "p999"}, patch["spec"]["selector"])
+    def test_cut_patch_points_each_hook_away_and_keeps_what_it_had(self):
+        entries = {"inferenceservice.validator": ISVC_SERVICE}
+        patch = run._webhook_cut_patch("p999", entries, AWAY)
+        self.assertEqual([{"name": "inferenceservice.validator", "clientConfig": {"service": {"name": AWAY}}}],
+                         patch["webhooks"], "a strategic merge keyed by the webhook name touches the service name alone")
         kept = json.loads(patch["metadata"]["annotations"][run.WEBHOOK_OUTAGE_ANNO])
-        self.assertEqual({"case": "p999", "selector": {"control-plane": "ome-controller-manager"}}, kept)
-        back = run._webhook_restore_patch({"control-plane": "ome-controller-manager"})
-        self.assertEqual({run.WEBHOOK_OUTAGE_LABEL: None, "control-plane": "ome-controller-manager"}, back["spec"]["selector"])
+        self.assertEqual({"case": "p999", "webhooks": entries}, kept)
+        back = run._webhook_restore_patch(entries)
+        self.assertEqual([{"name": "inferenceservice.validator", "clientConfig": {"service": ISVC_SERVICE}}], back["webhooks"])
         self.assertIsNone(back["metadata"]["annotations"][run.WEBHOOK_OUTAGE_ANNO])
+        self.assertEqual(AWAY, run._webhook_outage_service("p999"))
 
-    def test_start_registers_the_restore_before_the_service_changes(self):
+    def test_entries_are_the_hooks_naming_the_managers_service(self):
+        self.assertEqual({"inferenceservice.validator": ISVC_SERVICE}, run._webhook_entries(VALIDATING[0]))
+        self.assertEqual({}, run._webhook_entries(VALIDATING[1]), "a webhook of another Service is left alone")
+        elsewhere = _webhook_configuration("x", [("x.validator", run.WEBHOOK_SERVICE, "another-namespace", "/x")])
+        self.assertEqual({}, run._webhook_entries(elsewhere), "the same Service name in another namespace is not the manager's")
+
+    def test_start_cuts_every_configuration_naming_the_service_and_registers_the_restore_first(self):
         f = run._fault_new("p999", {"fault": "webhook:settling", "lift": "after-hold"})
         calls, saved = [], list(run._FAULT_CLEANUPS)
-
-        def kubectl(*a, **k):
-            calls.append((a, len(run._FAULT_CLEANUPS)))
-            if "get" in a:
-                return subprocess.CompletedProcess(a, 0, json.dumps(SERVICE), "")
-            return subprocess.CompletedProcess(a, 0, "", "")
         try:
-            with mock.patch.object(run, "kubectl", kubectl):
+            with mock.patch.object(run, "kubectl", _cluster_kubectl(calls)):
                 run._fault_fire(f, {}, {}, set())
             self.assertTrue(f["fired"])
             self.assertIsNone(f["infra_fail"])
-            patch_call = [c for c in calls if "patch" in c[0]][0]
-            self.assertEqual(("-n", run.CTRL_NS, "patch", "service", run.WEBHOOK_SERVICE, "--type=merge"), patch_call[0][:6])
-            self.assertEqual(len(saved) + 1, patch_call[1], "the restore is registered before the patch")
-            self.assertEqual(json.loads(patch_call[0][7])["spec"]["selector"][run.WEBHOOK_OUTAGE_LABEL], "p999")
-            self.assertEqual({"control-plane": "ome-controller-manager"}, f["webhook_selector"])
-            self.assertIn("unreachable", f["cause"])
+            self.assertEqual(AWAY, f["webhook_away"])
+            self.assertIn("does not exist", f["cause"])
+            patches = _patches(calls)
+            self.assertEqual([("validatingwebhookconfiguration", "inferenceservice.ome.io"),
+                              ("mutatingwebhookconfiguration", "inferenceservice.ome.io")],
+                             [(k, n) for k, n, _b in patches], "both configurations naming the Service, not the other one")
+            for _k, _n, body in patches:
+                self.assertEqual([AWAY], [h["clientConfig"]["service"]["name"] for h in body["webhooks"]])
+            self.assertEqual({"case": "p999", "webhooks": {"inferenceservice.pod-mutator": POD_SERVICE}},
+                             json.loads(patches[1][2]["metadata"]["annotations"][run.WEBHOOK_OUTAGE_ANNO]))
+            first_patch = [c for c in calls if c[0][0] == "patch"][0]
+            self.assertEqual(("patch", "validatingwebhookconfiguration", "inferenceservice.ome.io", "--type=strategic"),
+                             first_patch[0][:4])
+            self.assertEqual(len(saved) + 1, first_patch[1], "the restore is registered before the first patch")
+            self.assertIn("2 webhook(s)", f["notes"][-1])
+            self.assertIn(AWAY, f["notes"][-1])
             calls.clear()
-            with mock.patch.object(run, "kubectl", kubectl):
+            with mock.patch.object(run, "kubectl", _cluster_kubectl(calls)):
                 self.assertTrue(run._webhook_outage_lift(f))
                 self.assertTrue(run._webhook_outage_lift(f))
                 run._run_fault_cleanups()
-            patches = [c for c in calls if "patch" in c[0]]
-            self.assertEqual(1, len(patches), "a restored Service is not patched twice")
-            self.assertEqual({run.WEBHOOK_OUTAGE_LABEL: None, "control-plane": "ome-controller-manager"},
-                             json.loads(patches[0][0][7])["spec"]["selector"])
+            restored = _patches(calls)
+            self.assertEqual(2, len(restored), "each cut configuration is restored once, never twice")
+            self.assertEqual([ISVC_SERVICE], [h["clientConfig"]["service"] for h in restored[0][2]["webhooks"]])
+            self.assertEqual([POD_SERVICE], [h["clientConfig"]["service"] for h in restored[1][2]["webhooks"]])
+            self.assertTrue(all(b["metadata"]["annotations"][run.WEBHOOK_OUTAGE_ANNO] is None for _k, _n, b in restored))
         finally:
             run._FAULT_CLEANUPS[:] = saved
 
-    def test_start_refuses_a_service_without_a_selector_or_already_pointed_away(self):
+    def test_start_refuses_when_nothing_names_the_service_one_is_cut_already_or_the_away_service_exists(self):
         saved = list(run._FAULT_CLEANUPS)
         try:
-            bare = {"metadata": {"name": "x"}, "spec": {}}
-            with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(bare), "")):
+            def start(**over):
                 f = run._fault_new("p999", {"fault": "webhook:idle", "lift": "after-hold", "during": "idle"})
-                run._webhook_outage_start(f)
-                self.assertIn("no selector", f["infra_fail"])
-                self.assertIn("no selector", run._webhook_capability())
-            away = {"metadata": {"name": "x", "annotations": {run.WEBHOOK_OUTAGE_ANNO: "{}"}},
-                    "spec": {"selector": {run.WEBHOOK_OUTAGE_LABEL: "p1"}}}
-            with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(away), "")):
-                f = run._fault_new("p999", {"fault": "webhook:idle", "lift": "after-hold", "during": "idle"})
-                run._webhook_outage_start(f)
-                self.assertIn("already pointed away", f["infra_fail"])
+                with mock.patch.object(run, "kubectl", _cluster_kubectl([], **over)):
+                    run._webhook_outage_start(f)
+                return f
+            self.assertIn("no webhook configuration names", start(validating=[VALIDATING[1]], mutating=[])["infra_fail"])
+            with mock.patch.object(run, "kubectl", _cluster_kubectl([], validating=[VALIDATING[1]], mutating=[])):
+                self.assertIn("no webhook configuration names", run._webhook_capability())
+            cut = copy.deepcopy(MUTATING[0])
+            cut["metadata"]["annotations"][run.WEBHOOK_OUTAGE_ANNO] = json.dumps({"case": "p1", "webhooks": {}})
+            self.assertIn("already pointed away", start(mutating=[cut])["infra_fail"])
+            self.assertIn("exists", start(away_exists=True)["infra_fail"])
             with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "not found")):
                 self.assertIn("cannot be read", run._webhook_capability())
                 self.assertIn("cannot be read", run._fault_capability(run.WEBHOOK_FAULT))
+            with mock.patch.object(run, "kubectl", _cluster_kubectl([])):
+                self.assertIsNone(run._webhook_capability())
             self.assertIsNone(run._fault_capability(run.CONFLICT_FAULT))
             self.assertEqual(saved, run._FAULT_CLEANUPS, "a refused start registers nothing")
         finally:
             run._FAULT_CLEANUPS[:] = saved
 
-    def test_sweep_restores_from_the_annotation_and_batch_calls_it(self):
-        kept = json.dumps({"case": "p999", "selector": {"control-plane": "ome-controller-manager"}})
-        away = {"metadata": {"name": "x", "annotations": {run.WEBHOOK_OUTAGE_ANNO: kept}},
-                "spec": {"selector": {run.WEBHOOK_OUTAGE_LABEL: "p999"}}}
+    def test_sweep_restores_every_cut_configuration_from_its_annotation_and_batch_calls_it(self):
+        cut_v = copy.deepcopy(VALIDATING[0])
+        cut_v["webhooks"][0]["clientConfig"]["service"]["name"] = AWAY
+        cut_v["metadata"]["annotations"][run.WEBHOOK_OUTAGE_ANNO] = json.dumps(
+            {"case": "p999", "webhooks": {"inferenceservice.validator": ISVC_SERVICE}})
+        cut_m = copy.deepcopy(MUTATING[0])
+        cut_m["webhooks"][0]["clientConfig"]["service"]["name"] = AWAY
+        cut_m["metadata"]["annotations"][run.WEBHOOK_OUTAGE_ANNO] = json.dumps(
+            {"case": "p999", "webhooks": {"inferenceservice.pod-mutator": POD_SERVICE}})
         calls = []
-
-        def kubectl(*a, **k):
-            calls.append(a)
-            if "get" in a:
-                return subprocess.CompletedProcess(a, 0, json.dumps(away), "")
-            return subprocess.CompletedProcess(a, 0, "", "")
-        with mock.patch.object(run, "kubectl", kubectl):
-            done = run.restore_webhook_service()
-        self.assertIn("restored", done)
-        patch = [c for c in calls if "patch" in c][0]
-        self.assertEqual({run.WEBHOOK_OUTAGE_LABEL: None, "control-plane": "ome-controller-manager"},
-                         json.loads(patch[7])["spec"]["selector"])
+        with mock.patch.object(run, "kubectl", _cluster_kubectl(calls, validating=[cut_v, VALIDATING[1]], mutating=[cut_m])):
+            done = run.restore_webhook_configurations()
+        self.assertIn("restored validatingwebhookconfiguration/inferenceservice.ome.io", done)
+        self.assertIn("restored mutatingwebhookconfiguration/inferenceservice.ome.io", done)
+        restored = _patches(calls)
+        self.assertEqual([("validatingwebhookconfiguration", "inferenceservice.ome.io"),
+                          ("mutatingwebhookconfiguration", "inferenceservice.ome.io")], [(k, n) for k, n, _b in restored])
+        self.assertEqual([ISVC_SERVICE], [h["clientConfig"]["service"] for h in restored[0][2]["webhooks"]])
+        self.assertIsNone(restored[0][2]["metadata"]["annotations"][run.WEBHOOK_OUTAGE_ANNO])
         calls.clear()
-        with mock.patch.object(run, "kubectl", lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0, json.dumps(SERVICE), "")):
-            self.assertEqual("", run.restore_webhook_service())
-        self.assertFalse(any("patch" in c for c in calls), "a Service that was never pointed away is left alone")
+        with mock.patch.object(run, "kubectl", _cluster_kubectl(calls)):
+            self.assertEqual("", run.restore_webhook_configurations())
+        self.assertEqual([], _patches(calls), "a configuration that was never cut is left alone")
         out = io.StringIO()
-        with mock.patch.object(batch, "restore_webhook_service", lambda: "restored x"), contextlib.redirect_stdout(out):
+        with mock.patch.object(batch, "restore_webhook_configurations", lambda: "restored x"), contextlib.redirect_stdout(out):
             batch.sweep_webhook_outage()
         self.assertIn("restored x", out.getvalue())
         self.assertTrue(batch.cluster_wide_fault({"fault": "webhook:settling"}), "a webhook case runs alone")
         self.assertFalse(batch.cluster_wide_fault({"fault": "conflict:settling"}), "a competing writer stays in the pool")
 
     def test_probe_reads_the_apiservers_words(self):
-        refusal = 'Error from server (InternalError): Internal error occurred: failed calling webhook "x": no endpoints available'
+        refusal = ('Error from server (InternalError): Internal error occurred: failed calling webhook '
+                   f'"inferenceservice.validator": failed to call webhook: Post "https://{AWAY}.{run.CTRL_NS}.svc:443/validate-isvc": '
+                   f'service "{AWAY}" not found')
         with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", refusal + "\n")):
             answers, words = run._webhook_probe("p999")
         self.assertFalse(answers)
@@ -1775,6 +1838,11 @@ class WebhookOutageVerbTest(unittest.TestCase):
         with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")):
             self.assertEqual((True, ""), run._webhook_probe("p999"))
         self.assertFalse(run._names_admission("Instance 2 waiting on QuotaExceeded"))
+        probe = []
+        with mock.patch.object(run, "kubectl", lambda *a, **k: probe.append(a) or subprocess.CompletedProcess(a, 1, "", refusal)):
+            run._webhook_probe("p999")
+        self.assertIn("--dry-run=server", probe[0], "the probe is a server-side dry run: admission runs, nothing changes")
+        self.assertEqual(("-n", run.NS, "patch", "isvc", "p999"), probe[0][:5])
 
 
 class ConflictWriterTest(unittest.TestCase):
@@ -11315,6 +11383,195 @@ class CrashOnceTest(unittest.TestCase):
             self.assertEqual("new" if case.header["fault"].endswith(":new") else "running", side, case.id)
             self.assertEqual("crash at start" if case.header["form"] == "start" else "crash after Ready", kind, case.id)
             self.assertEqual("steady state" if case.header.get("during") == "idle" else "push", case.operation, case.id)
+
+
+def _gang_pod(name, inst, runner, ready, uid, hash_="old"):
+    return {"alive": True, "hash": hash_, "inst": inst, "comp": "engine", "runner": runner, "ready": ready,
+            "serving": ready, "created": inst, "uid": uid}
+
+
+class CrashOnceApparatusTest(unittest.TestCase):
+    """The kill lands on a gang leader and the verdict sees it: the victim
+    is read live after the kill until its restart shows, the Instance is
+    followed to the index a gang surge left it at, the kill at first start
+    is asked on the clock rather than on pod events, and a kill that never
+    lands says what the watcher first saw."""
+
+    GANG = {
+        "p1-engine-0-leader-0": _gang_pod("p1-engine-0-leader-0", "0", "leader", True, "u0l"),
+        "p1-engine-0-worker-0": _gang_pod("p1-engine-0-worker-0", "0", "worker", True, "u0w"),
+        "p1-engine-1-leader-0": _gang_pod("p1-engine-1-leader-0", "1", "leader", False, "u1l"),
+        "p1-engine-1-worker-0": _gang_pod("p1-engine-1-worker-0", "1", "worker", False, "u1w"),
+    }
+    REPAIR = "OMENative component=engine instance=1 restart triggered: runner restarted"
+    SURGE = "OMENative component=engine instance=1 gang surge to revision r2 (surge-index=2)"
+
+    @staticmethod
+    def _pod_json(name, uid, running=True, ready=False, restarts=0):
+        state = {"running": {"startedAt": "t"}} if running else {"waiting": {"reason": "ContainerCreating"}}
+        return json.dumps({"metadata": {"name": name, "uid": uid},
+                           "status": {"containerStatuses": [{"name": run.MAIN_CONTAINER, "state": state,
+                                                             "ready": ready, "restartCount": restarts}]}})
+
+    def _fired(self, **over):
+        f = {"case_id": "p1", "kind": "crashloop", "param": "old", "form": "start", "once": True, "fired": True,
+             "kills": 1, "fired_ts": 0.0, "once_poll": 0.0, "crash_comp": "engine", "crash_inst": "1",
+             "crash_pod": "p1-engine-1-leader-0", "crash_uid": "u1l", "crash_restarts": 0, "notes": []}
+        f.update(over)
+        return f
+
+    def test_the_kill_aims_at_the_leader_of_the_highest_gang_instance(self):
+        f = run._fault_new("p1", {"fault": "crashloop:old", "form": "start", "once": 1})
+        self.assertEqual("p1-engine-1-leader-0", run._once_aim(f, self.GANG, None))
+        self.assertEqual("p1-engine-1-leader-0", run._once_candidate(f, self.GANG, None))
+        f["form"] = "load"
+        self.assertEqual("p1-engine-1-leader-0", run._once_aim(f, self.GANG, None), "the aim is read before readiness")
+        self.assertIsNone(run._once_candidate(f, self.GANG, None), "form=load waits for the leader to be Ready")
+
+    def test_fire_execs_the_kill_into_the_main_container_of_the_aimed_pod(self):
+        calls = []
+
+        def kubectl(*a, **k):
+            calls.append(a)
+            if "get" in a:
+                return subprocess.CompletedProcess(a, 0, self._pod_json("p1-engine-1-leader-0", "u1l"), "")
+            return subprocess.CompletedProcess(a, 0, "", "")
+        f = run._fault_new("p1", {"fault": "crashloop:old", "form": "start", "once": 1})
+        with mock.patch.object(run, "kubectl", kubectl):
+            self.assertTrue(run._once_fire(f, self.GANG, None))
+        self.assertEqual([("-n", run.NS, "exec", "p1-engine-1-leader-0", "-c", run.MAIN_CONTAINER, "--", "sh", "-c", "kill 1")],
+                         [a for a in calls if "exec" in a],
+                         "PID 1 of the fixture container is the runner: the startup shell (TERM trapped to exit) before Ready, nginx after")
+        self.assertEqual(("p1-engine-1-leader-0", "u1l", 0, 1, True),
+                         (f["crash_pod"], f["crash_uid"], f["crash_restarts"], f["kills"], f["fired"]))
+        self.assertIn("before Ready", f["notes"][-1])
+
+    def test_a_container_still_being_created_is_not_due(self):
+        calls = []
+
+        def kubectl(*a, **k):
+            calls.append(a)
+            return subprocess.CompletedProcess(a, 0, self._pod_json("p1-engine-1-leader-0", "u1l", running=False), "")
+        f = run._fault_new("p1", {"fault": "crashloop:old", "form": "start", "once": 1})
+        with mock.patch.object(run, "kubectl", kubectl):
+            self.assertFalse(run._once_fire(f, self.GANG, None))
+        self.assertFalse(f["fired"])
+        self.assertEqual([], [a for a in calls if "exec" in a], "nothing is killed before the container runs")
+        self.assertEqual(("p1-engine-1-leader-0", False), (f["once_first_seen"]["pod"], f["once_first_seen"]["ready"]))
+
+    def test_the_bite_is_read_live_until_the_restart_shows(self):
+        f = self._fired()
+        states = iter([(True, False, 0, "u1l"), (True, False, 1, "u1l")])
+        with mock.patch.object(run, "_pod_main_state", lambda name: next(states)), mock.patch.object(run, "ONCE_POLL_S", 0.0):
+            run._once_bite_tick(f)
+            self.assertFalse(f.get("restart_seen"))
+            run._once_bite_tick(f)
+            self.assertTrue(f["restart_seen"])
+            self.assertEqual(1, f["bitten_restarts"])
+            run._once_bite_tick(f)   # latched: nothing is read again (the iterator is spent)
+        unfired = self._fired(fired=False)
+        reads = []
+        with mock.patch.object(run, "_pod_main_state", lambda name: reads.append(name)), mock.patch.object(run, "ONCE_POLL_S", 0.0):
+            run._once_bite_tick(unfired)
+            gone = self._fired()
+            run._once_bite_tick(gone)
+            run._once_bite_tick(gone)
+        self.assertEqual(["p1-engine-1-leader-0"], reads, "nothing before the kill; a victim that is gone is read once")
+        self.assertTrue(gone["victim_gone"])
+        self.assertFalse(gone.get("restart_seen"))
+        replaced = self._fired()
+        with mock.patch.object(run, "_pod_main_state", lambda name: (True, True, 0, "another-uid")), mock.patch.object(run, "ONCE_POLL_S", 0.0):
+            run._once_bite_tick(replaced)
+        self.assertTrue(replaced["victim_gone"], "a pod of the same name with another UID is not the victim")
+
+    def test_start_tick_and_fault_tick_keep_reading_the_bite_after_the_kill(self):
+        ticks = []
+        with mock.patch.object(run, "_once_bite_tick", lambda f: ticks.append(f["case_id"])):
+            fired = run._fault_new("p1", {"fault": "crashloop:old", "form": "start", "once": 1})
+            fired["fired"] = True
+            run._once_start_tick(fired, {})
+            self.assertEqual(["p1"], ticks)
+            pushed = run._fault_new("p2", {"fault": "crashloop:new", "form": "load", "once": 1})
+            pushed["fired"] = True
+            run._fault_tick({"fault": pushed, "trigger_ts": 1.0, "pod_state": {}, "pods_per_inst": {}, "old_hashes": {"old"}})
+            self.assertEqual(["p1", "p2"], ticks)
+            plain = run._fault_new("p3", {"fault": "crashloop:old", "form": "load"})
+            plain["fired"] = True
+            run._fault_tick({"fault": plain, "trigger_ts": 1.0, "pod_state": {}, "pods_per_inst": {}, "old_hashes": {"old"}})
+            self.assertEqual(["p1", "p2"], ticks, "a persistent break is not read for a bite")
+
+    def _after_the_roll(self):
+        """The roll retired index 1; its replacement stands at index 2, Ready
+        and serving on the new revision."""
+        return {
+            "p1-engine-0-leader-0": _gang_pod("p1-engine-0-leader-0", "0", "leader", True, "n0l", "new"),
+            "p1-engine-0-worker-0": _gang_pod("p1-engine-0-worker-0", "0", "worker", True, "n0w", "new"),
+            "p1-engine-2-leader-0": _gang_pod("p1-engine-2-leader-0", "2", "leader", True, "n2l", "new"),
+            "p1-engine-2-worker-0": _gang_pod("p1-engine-2-worker-0", "2", "worker", True, "n2w", "new"),
+        }
+
+    def _observe(self, f, pods, expect_new, surges=None, events=()):
+        with mock.patch.object(run, "_pod_main_state", lambda name: None), \
+                mock.patch.object(run, "_isvc_events_since", lambda c, s: list(events)), \
+                mock.patch.object(run, "_wait_rows_settled", lambda *a, **k: (True, "")):
+            return run._once_observe("p1", f, pods, {"old"}, expect_new, {"engine": 2}, {"engine"}, 1, surges=surges)
+
+    def test_observe_follows_the_victim_to_the_index_its_gang_surge_left_it_at(self):
+        after, surges = self._after_the_roll(), [("engine", "1", "2", "new")]
+        seen = self._observe(self._fired(restart_seen=True, bitten_restarts=1), after, True, surges=surges)
+        self.assertEqual(("2", True, True, True, 1), (seen["final"], seen["bitten"], seen["serving"], seen["on_revision"], seen["restarts"]))
+        blind = self._observe(self._fired(), after, True, surges=surges)
+        self.assertEqual(("2", False), (blind["final"], blind["bitten"]), "under a push the roll's replacement is no proof the kill landed")
+        repaired = self._observe(self._fired(), after, True, surges=surges, events=[("RestartTriggered", self.REPAIR)])
+        self.assertEqual((True, 1), (repaired["bitten"], len(repaired["repairs"])), "a repair naming the Instance is proof")
+        from_events = self._observe(self._fired(restart_seen=True), after, True, events=[("RecreateUpdateStarted", self.SURGE)])
+        self.assertEqual("2", from_events["final"], "the surge chain is read from the ISVC events when the rows kept no claim")
+        unmoved = self._observe(self._fired(restart_seen=True), self.GANG, True)
+        self.assertEqual(("1", False), (unmoved["final"], unmoved["serving"]))
+        rebuilt_at_idle = {n: dict(p, uid="r" + p["uid"], ready=True, serving=True) for n, p in self.GANG.items()}
+        idle = self._observe(self._fired(), rebuilt_at_idle, False)
+        self.assertEqual((True, True), (idle["rebuilt"], idle["bitten"]), "at idle a rebuild nobody asked for is proof")
+
+    def test_the_verdict_names_the_index_the_victim_moved_to(self):
+        f = self._fired(restart_seen=True)
+        out = {"fired": True, "kills": 1, "bitten": True, "restarts": 1, "rebuilt": False, "serving": True,
+               "on_revision": True, "expect_new": True, "repairs": [], "escalations": [], "rows_settled": True,
+               "rows_why": "", "side": "old", "op": "push", "rp": "None", "final": "2"}
+        checks = []
+        self.assertEqual("PASS", run._once_checks(f, out, "PASS", [], checks))
+        text = "\n".join(checks)
+        self.assertIn("replaced at Instance 2 by its gang surge", text)
+        self.assertIn("restart count 1", text)
+        f = self._fired()
+        self.assertEqual("PASS", run._once_checks(f, dict(out, bitten=False, restarts=0), "PASS", [], []))
+        self.assertIn("never rose while it lived", f["infra_fail"])
+
+    def test_a_kill_that_never_landed_says_what_the_watcher_first_saw(self):
+        f = run._fault_new("p1", {"fault": "crashloop:old", "form": "start", "once": 1})
+        self.assertIn("never observed", run._once_never_landed(f, "the roll converged"))
+        f["once_first_seen"] = {"pod": "p1-engine-3-default-0", "ready": True, "at": 1.0}
+        words = run._once_never_landed(f, "the roll converged")
+        for part in ("form=start", "before the roll converged", "p1-engine-3-default-0", "already Ready when first observed"):
+            self.assertIn(part, words)
+        f["once_first_seen"]["ready"] = False
+        self.assertIn("first observed not Ready", run._once_never_landed(f, "the roll converged"))
+        g = run._fault_new("p1", {"fault": "crashloop:old", "form": "start", "once": 1})
+        run._once_note_first_sight(g, self.GANG, None)
+        self.assertEqual(("p1-engine-1-leader-0", False), (g["once_first_seen"]["pod"], g["once_first_seen"]["ready"]))
+        ready = {n: dict(p, ready=True, serving=True) for n, p in self.GANG.items()}
+        h = run._fault_new("p1", {"fault": "crashloop:old", "form": "start", "once": 1})
+        run._once_note_first_sight(h, ready, None)
+        self.assertTrue(h["once_first_seen"]["ready"])
+        run._once_note_first_sight(h, self.GANG, None)
+        self.assertTrue(h["once_first_seen"]["ready"], "the first sight is kept")
+        pushed = run._fault_new("p1", {"fault": "crashloop:new", "form": "start", "once": 1})
+        run._once_note_first_sight(pushed, self._after_the_roll(), {"old"})
+        self.assertEqual("p1-engine-0-leader-0", pushed["once_first_seen"]["pod"], "the pushed side aims at the first new pod")
+        unfired = run._fault_new("p1", {"fault": "crashloop:old", "form": "start", "once": 1})
+        unfired["once_first_seen"] = {"pod": "p1-engine-3-default-0", "ready": True, "at": 1.0}
+        self.assertEqual("PASS", run._once_push_checks(unfired, "p1", {}, {"old"}, {}, {"engine": 4}, {"engine"}, "PASS", [], []))
+        self.assertIn("already Ready when first observed", unfired["infra_fail"])
+        self.assertIn("before the roll converged", unfired["infra_fail"])
 
 
 class CanaryGateFaultHeaderTest(unittest.TestCase):
