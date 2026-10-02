@@ -14849,6 +14849,20 @@ def _survivor_changes(pre, now, old_hashes):
     return needless, rolled
 
 
+def _ready_indices(ctx, comp):
+    """The indices of the Component's Instances that hold a Ready pod set,
+    read the way aggregate counts a Ready Instance: a full set with every
+    pod Ready. A row's phase is not that reading: under SurgeThenDrain a
+    row that reads Failed still serves through its source."""
+    ppi = max(1, ctx["pods_per_inst"].get(comp, 1))
+    by_idx = defaultdict(list)
+    for p in ctx["pod_state"].values():
+        if p and p["alive"] and p["comp"] == comp:
+            by_idx[str(p.get("inst", "0"))].append(p)
+    return {idx for idx, pods in by_idx.items()
+            if len(pods) >= ppi and sum(1 for q in pods if q["ready"]) >= ppi}
+
+
 def _pods_by_index(ctx, comp):
     """{index: [(uid, hash)]} of the Component's alive pods."""
     out = defaultdict(list)
@@ -14972,6 +14986,7 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
                   for c in configured}
     pre_pods = {c: _pods_by_index(ctx, c) for c in configured}
     pre_ready = {c: ctx["agg"].get(c, (0, 0, 0))[1] for c in configured}
+    ready_at_op = {c: _ready_indices(ctx, c) for c in configured}
     control_uids = {c: {u for pods in pre_pods[c].values() for u, _h in pods} for c in controls}
     expected_victims = {c: _scale_victims(rows_at_op[c], N[c] - target[c]) for c in scaled if target[c] < N[c]}
     rows_after_op = {c: None for c in configured}
@@ -14995,11 +15010,12 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     floor_since, floor_sust = {}, {}
     # The healthy survivors keep serving: under held the ladder is frozen,
     # so their count is exact; under failed a drain-first strategy may take
-    # one more Instance into its next attempt.
+    # one more Instance into its next attempt. A victim is Ready by its
+    # pods, not its row: a SurgeThenDrain row that reads Failed still serves
+    # through its source, and removing the Instance costs that pod.
     floor = {}
     for c in configured:
-        going = len(expected_victims.get(c, []))
-        going_ready = sum(1 for idx, ph in rows_at_op[c] if ph == "Ready" and idx in expected_victims.get(c, []))
+        going_ready = sum(1 for idx in expected_victims.get(c, []) if idx in ready_at_op[c])
         drains_first = ctx["info"]["strat"].get(c) in {"RecreatePod"} | IN_PLACE_TYPES
         extra = (resolve_max_unavailable(ctx["info"]["max_unavail"].get(c, 0), N[c])
                  if stuck == "failed" and c in bumped and drains_first else 0)

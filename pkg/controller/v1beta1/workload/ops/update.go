@@ -190,6 +190,16 @@ func UpdateWithPods(ctx context.Context, deps workload.Deps, input workload.Reco
 		return false, fmt.Errorf("choose update mode (instance=%d): %w", inst.Index, err)
 	}
 
+	// A surge keeps the serving source in rotation while its replacement
+	// comes up. An Instance that was never promoted has no such source, and
+	// a surge beside the pod set its disposed attempt left behind would only
+	// add a second replacement; its re-drive rebuilds the set in place. The
+	// recreate stamp pins that mechanism on the attempt.
+	if mode == updateModeSurge && SurgeHasNoSource(observed) {
+		mode = updateModeRecreate
+		plan.UpdateStrategy.Type = workload.UpdateStrategyRecreatePod
+	}
+
 	// Status stamping is per-mode: recreate bumps Incarnation atomically
 	// with the Updating transition; in-place must NOT bump (same
 	// materialization); surge advances ActiveOrdinal (single-pod) or
@@ -232,6 +242,16 @@ const (
 // RunningPodSpecFunc loads the PodSpec recorded by an Instance's running
 // revision on demand. nil with no error is no recorded baseline.
 type RunningPodSpecFunc func() (*corev1.PodSpec, error)
+
+// SurgeHasNoSource reports whether a fresh start on the row has nothing a
+// surge could keep in rotation: the Instance was never promoted, so no pod
+// of its is a serving source, and the attempt that built its pod set has
+// been disposed. Such a start runs as a recreate under every strategy, so
+// the update pass reads it here to consult the admission gate for a
+// rebuild rather than a surge.
+func SurgeHasNoSource(s *workload.InstanceStatus) bool {
+	return s != nil && s.RunningRevision == "" && s.Phase == workload.InstancePhaseFailed && s.Operation == nil
+}
 
 // InPlaceFallsBackToRecreate reports whether an in-place strategy runs as
 // a recreate on this Instance. A multi-pod Instance always rebuilds under

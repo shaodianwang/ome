@@ -306,7 +306,7 @@ cells:
     outcome: ignore
     note: a scale-up adds fresh indices and leaves this row's index in the desired set exactly as it was
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestScaleWhilePushFailed_ScaleUpStaysUnderTheCeiling], kind: []}
     status: current
   - state: Failed
     event: spec.replicasDown
@@ -318,7 +318,7 @@ cells:
     placement: unit
     coverage:
       perm: []
-      unit: [TestPlan_ScaleDown_SelectsExtras, TestPlan_FullPrecedenceOrder]
+      unit: [TestPlan_ScaleDown_SelectsExtras, TestPlan_FullPrecedenceOrder, TestScaleWhilePushFailed_ScaleDownRemovesTheStuckInstanceFirst]
       kind: []
       replay: [failed-scaledown]
     status: current
@@ -530,7 +530,7 @@ cells:
     outcome: transition
     to: Create/CreatePods
     guard: the Backoff block for the same target is due and no authorized attempt at that revision is in flight
-    note: a due block only stops denying; the row then re-enters through whichever path its strategy resolves — the Create pass when no pod remains, otherwise Surge, Drain or InPlace — and the block flips to RetryInProgress at attempt-stamp time, after the budget and coordination gates admit the start
+    note: a due block only stops denying; the row then re-enters through whichever path its strategy resolves — the Create pass when no pod remains, otherwise Surge, Drain or InPlace, except that an Instance never promoted has no serving source for a surge to keep and re-enters as a recreate under every strategy — and the block flips to RetryInProgress at attempt-stamp time, after the budget and coordination gates admit the start
     invariants: [retryblock.gates.fresh.attempts, one.operation.per.instance]
     placement: perm
     coverage:

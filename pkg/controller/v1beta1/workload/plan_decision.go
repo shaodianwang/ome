@@ -693,17 +693,8 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		}
 		row := input.ObservedState.Instance(inst.Index)
 		startingFresh := !types.UpdateContinuation(row)
-		// The gate's serving count needs every pod of an Instance in
-		// rotation, so a Ready Instance with a member parked is already
-		// inside the gate's unavailability, and a drain-first start on it
-		// skips the consult for its own outage; the per-Component budget
-		// still charges the start when a routed member serves.
 		pods := updateByInstance[inst.Index]
-		gateExempt := types.RecreateOfDarkRow(row, strategy) ||
-			(startingFresh && strategy != types.UpdateStrategySurgeThenDrain &&
-				row != nil && row.Phase == types.InstancePhaseReady &&
-				(evidence.PodSetServesNothing(pods) || evidence.PodSetUnavailableOnParkedMember(pods, inst.TotalPods())))
-		// The mechanism the start runs on: the shared rule the update op
+		// The mechanism the start runs on: the shared rules the update op
 		// dispatches on, judged against the same target and the same
 		// recorded running revision (a snapshot read, memoized per revision).
 		recreateFallback := false
@@ -713,8 +704,21 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 			if ferr != nil {
 				return UpdateSelection{}, 0, fmt.Errorf("workload.Reconcile: resolve update mechanism (instance=%d): %w", inst.Index, ferr)
 			}
-			recreateFallback = fallback
+			recreateFallback = fallback || workloadops.SurgeHasNoSource(row)
 		}
+		mechanism := strategy
+		if recreateFallback {
+			mechanism = types.UpdateStrategyRecreatePod
+		}
+		// The gate's serving count needs every pod of an Instance in
+		// rotation, so a Ready Instance with a member parked is already
+		// inside the gate's unavailability, and a drain-first start on it
+		// skips the consult for its own outage; the per-Component budget
+		// still charges the start when a routed member serves.
+		gateExempt := types.RecreateOfDarkRow(row, mechanism) ||
+			(startingFresh && mechanism != types.UpdateStrategySurgeThenDrain &&
+				row != nil && row.Phase == types.InstancePhaseReady &&
+				(evidence.PodSetServesNothing(pods) || evidence.PodSetUnavailableOnParkedMember(pods, inst.TotalPods())))
 		dark := startingFresh && replacesDarkPodSet(row, pods)
 		logf.FromContext(ctx).V(1).Info("update selected",
 			"component", plan.Component, "instance", inst.Index, "target", target.Name,

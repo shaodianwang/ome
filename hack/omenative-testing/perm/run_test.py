@@ -5019,6 +5019,23 @@ class StuckOperationTest(unittest.TestCase):
         self.assertIn("Failed row(s) 0", run._push_unlanded({"engine": failed}, {"engine"})["engine"])
         self.assertEqual("", run._push_unlanded({}, {"engine"})["engine"])
 
+    def test_ready_indices_read_the_pods_not_the_row_phase(self):
+        """Under SurgeThenDrain the Instance whose push failed still serves
+        through its source beside the wedged replacement, so it is Ready for
+        the floor; a RecreatePod Instance drained for its attempt is not, and
+        a gang counts only with every member Ready."""
+        def pod(inst, ready, comp="engine"):
+            return {"comp": comp, "inst": inst, "alive": True, "ready": ready, "hash": "x", "uid": f"{comp}-{inst}-{ready}"}
+        single = {"pods_per_inst": {"engine": 1}, "pod_state": {
+            "e-0-0": pod("0", True), "e-0-1": pod("0", False),
+            "e-1-0": pod("1", True), "e-2-0": pod("2", False), "gone": None}}
+        self.assertEqual({"0", "1"}, run._ready_indices(single, "engine"))
+        gang = {"pods_per_inst": {"engine": 2}, "pod_state": {
+            "l0": pod("0", True), "w0": pod("0", False),
+            "l1": pod("1", True), "w1": pod("1", True)}}
+        self.assertEqual({"1"}, run._ready_indices(gang, "engine"))
+        self.assertEqual(set(), run._ready_indices(gang, "decoder"))
+
     def test_scale_victims_take_the_broken_rows_first_then_the_highest_index(self):
         rows = [("0", "Ready"), ("1", "Failed"), ("2", "Ready")]
         self.assertEqual(["1"], run._scale_victims(rows, 1))

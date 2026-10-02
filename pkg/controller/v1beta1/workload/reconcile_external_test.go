@@ -6889,3 +6889,306 @@ func TestPreemptedPod_ReturnsAndSaysWhyUntilPlaced(t *testing.T) {
 		}
 	}
 }
+
+// An operator scales a Component whose push has failed: the pushed
+// revision cannot be pulled, so its first attempt ended with an Instance
+// row at Failed while the retry ladder is still running. The scale lands
+// on that fleet. A scale-down removes the stuck Instance first and leaves
+// the serving Instances' pods alone; a scale-up adds exactly one Instance
+// and never has more pods alive than the replica count plus the surge
+// budget. In both the healthy Instances keep serving and the status keeps
+// reporting the push that has not landed.
+
+// pushRetryLadder is the retry ladder the deployed chart configures: three
+// attempts, a minute apart at first.
+var pushRetryLadder = &workloadtypes.RetryPolicy{MaxAttempts: 3, InitialDelay: time.Minute, MaxDelay: 30 * time.Minute, Multiplier: 2}
+
+// newFailedPushHarness is three single-pod Instances serving v1 under
+// SurgeThenDrain with maxSurge=1 and maxUnavailable=0, pushed onto the
+// bad revision until Instance 0 reads Failed: its surge replacement sat in
+// ImagePullBackOff past the stuck-pod grace and the attempt was disposed,
+// while its v1 pod kept serving beside its peers.
+func newFailedPushHarness(t *testing.T) *recoveryHarness {
+	t.Helper()
+	h := newRecoveryHarness(t, false)
+	h.atomicStatus = true
+	h.podGrace = recoveryStepFloor
+	h.replicas = 3
+	maxSurge, maxUnavailable := intstr.FromInt(1), intstr.FromInt(0)
+	h.lifecycle.UpdateStrategy = &workloadtypes.UpdateStrategy{
+		Type:          workloadtypes.UpdateStrategySurgeThenDrain,
+		RollingUpdate: &workloadtypes.RollingUpdate{MaxSurge: &maxSurge, MaxUnavailable: &maxUnavailable},
+	}
+	h.retryPolicy = pushRetryLadder
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(40, func() bool { return h.settledOn(h.revV1, 3) }) {
+		h.dumpState("initial create")
+		t.Fatalf("three instances never settled on v1")
+	}
+	h.setTarget(h.revBad, badImage)
+	failed := func() bool {
+		row := h.instance(0)
+		return row != nil && row.Phase == workloadtypes.InstancePhaseFailed
+	}
+	if !h.run(40, failed) {
+		h.dumpState("push")
+		t.Fatalf("the push onto the unpullable revision never failed its first attempt")
+	}
+	if got := len(h.servingPods()); got != 3 {
+		h.dumpState("push")
+		t.Fatalf("serving pods after the failed attempt = %d, want the three v1 pods", got)
+	}
+	return h
+}
+
+// servingPodOnV1 is the v1 pod of Instance idx that is in rotation, or
+// nil when the Instance serves nothing on v1.
+func (h *recoveryHarness) servingPodOnV1(idx int32) *corev1.Pod {
+	for _, pod := range h.podsOf(idx) {
+		if pod.Spec.Containers[0].Image == goodImage && podreadiness.IsServing(pod) {
+			return pod
+		}
+	}
+	return nil
+}
+
+// requireServingOnV1 asserts that Instance idx still serves through the
+// very pod it served through before the operation.
+func (h *recoveryHarness) requireServingOnV1(idx int32, before types.UID) {
+	h.t.Helper()
+	pod := h.servingPodOnV1(idx)
+	if pod == nil {
+		h.dumpState("serving lost")
+		h.t.Fatalf("instance %d no longer serves on v1", idx)
+	}
+	if pod.UID != before {
+		h.dumpState("pod replaced")
+		h.t.Fatalf("instance %d serves through a different pod than before the operation", idx)
+	}
+}
+
+// TestScaleWhilePushFailed_ScaleDownRemovesTheStuckInstanceFirst: a scale
+// from three to two while Instance 0 is Failed removes Instance 0, the
+// stuck one, and nothing else. Instances 1 and 2 keep the v1 pods they
+// serve through, the serving count never drops below two, and the retry
+// block for the pushed revision stays on the status.
+//
+// Cells: instance/Failed/spec.replicasDown/before
+func TestScaleWhilePushFailed_ScaleDownRemovesTheStuckInstanceFirst(t *testing.T) {
+	h := newFailedPushHarness(t)
+	before := map[int32]types.UID{}
+	for _, idx := range []int32{1, 2} {
+		pod := h.servingPodOnV1(idx)
+		if pod == nil {
+			t.Fatalf("instance %d does not serve on v1 before the scale", idx)
+		}
+		before[idx] = pod.UID
+	}
+
+	h.replicas = 2
+	h.setTarget(h.revBad, badImage)
+	atRest := func() bool {
+		rows := h.irStatuses()
+		if len(rows) != 2 || h.instance(0) != nil || len(h.podsOf(0)) != 0 {
+			return false
+		}
+		for _, row := range rows {
+			if row.Phase == workloadtypes.InstancePhaseDeleting {
+				return false
+			}
+		}
+		return true
+	}
+	keepServing := func() {
+		t.Helper()
+		if got := len(h.servingPods()); got < 2 {
+			h.dumpState("scale-down")
+			t.Fatalf("serving pods dropped to %d during the scale-down; the two healthy Instances must keep serving", got)
+		}
+		for idx, uid := range before {
+			h.requireServingOnV1(idx, uid)
+		}
+	}
+	if !h.runWithInvariant(40, atRest, keepServing) {
+		h.dumpState("scale-down")
+		t.Fatalf("the component never came to rest at two instances with the stuck one gone")
+	}
+	for i := 0; i < 4; i++ {
+		h.step()
+		keepServing()
+		if !atRest() {
+			h.dumpState("after the scale-down")
+			t.Fatalf("the component left its two-instance shape after the scale-down")
+		}
+	}
+	if h.findBlock(h.revBad.Name) == nil {
+		t.Fatalf("the status stopped reporting the push that has not landed: no retry block for %s", h.revBad.Name)
+	}
+}
+
+// TestScaleWhilePushFailed_ScaleUpStaysUnderTheCeiling: a scale from three
+// to four while Instance 0 is Failed adds exactly one Instance, index 3,
+// rendered from the pushed revision, and at no point are more pods alive
+// than the four replicas plus the surge budget of one. The three v1 pods
+// keep serving until the ladder is spent and the revision is Held.
+//
+// Cells: instance/Failed/spec.replicasUp/before
+func TestScaleWhilePushFailed_ScaleUpStaysUnderTheCeiling(t *testing.T) {
+	h := newFailedPushHarness(t)
+	before := map[int32]types.UID{}
+	for _, idx := range []int32{0, 1, 2} {
+		pod := h.servingPodOnV1(idx)
+		if pod == nil {
+			t.Fatalf("instance %d does not serve on v1 before the scale", idx)
+		}
+		before[idx] = pod.UID
+	}
+
+	h.replicas = 4
+	h.setTarget(h.revBad, badImage)
+	const ceiling = 4 + 1
+	underTheCeiling := func() {
+		t.Helper()
+		if alive := len(h.livePods()); alive > ceiling {
+			h.dumpState("over the ceiling")
+			t.Fatalf("%d pods alive, more than the %d the replica count plus the surge budget allow", alive, ceiling)
+		}
+		for idx, uid := range before {
+			h.requireServingOnV1(idx, uid)
+		}
+		for _, row := range h.irStatuses() {
+			if row.Index > 3 {
+				h.dumpState("extra index")
+				t.Fatalf("instance %d exists; a scale from three to four adds index 3 only", row.Index)
+			}
+		}
+		for _, pod := range h.livePods() {
+			if pod.Spec.Containers[0].Image == goodImage && pod.Labels["ome.io/instance-index"] == "3" {
+				t.Fatalf("the new instance was rendered from the running revision instead of the pushed one")
+			}
+		}
+	}
+	held := h.runWithInvariant(80, func() bool { return h.heldOn(h.revBad.Name) }, underTheCeiling)
+	if !held {
+		h.dumpState("ladder")
+		t.Fatalf("the pushed revision was never Held after the scale-up")
+	}
+	h.settle(4)
+	underTheCeiling()
+	if h.instance(3) == nil {
+		h.dumpState("after Held")
+		t.Fatalf("the scale-up never added instance 3")
+	}
+	for _, row := range h.irStatuses() {
+		if row.Phase == workloadtypes.InstancePhaseFailed && row.Index != 0 && row.Index != 3 {
+			h.dumpState("after Held")
+			t.Fatalf("instance %d reads Failed; only the stuck instance and the new one may", row.Index)
+		}
+	}
+}
+
+// A two-pod gang (leader plus worker) is pushed onto a revision that
+// cannot be pulled under RecreatePod. The first gang is drained and its
+// replacement parks in ImagePullBackOff. The attempt must end the way a
+// single-pod attempt ends: disposed by the stuck-pod grace or the
+// operation deadline, counted on the revision's retry ladder, the row
+// left at Failed with the pull failure as its reason, and after the last
+// attempt the revision Held so nothing more is tried. The other gang
+// keeps serving throughout, and a corrected push lands on both.
+
+// gangPushEnding is how the attempt is ended: by the fast escalator on
+// the parked pod, or by the operation deadline with fast escalation off.
+type gangPushEnding struct {
+	name       string
+	stuckGrace time.Duration
+	deadline   time.Duration
+}
+
+var gangPushEndings = []gangPushEnding{
+	{name: "stuck-pod grace", stuckGrace: 30 * time.Second},
+	{name: "operation deadline", stuckGrace: 0, deadline: 2 * time.Minute},
+}
+
+// newGangPushHarness is two leader-plus-worker gangs serving v1 under
+// RecreatePod with maxUnavailable=1.
+func newGangPushHarness(t *testing.T, ending gangPushEnding) *recoveryHarness {
+	t.Helper()
+	h := newRecoveryHarness(t, true)
+	h.replicas = 2
+	h.stuckGrace = ending.stuckGrace
+	maxSurge, maxUnavailable := intstr.FromInt(0), intstr.FromInt(1)
+	h.lifecycle.UpdateStrategy = &workloadtypes.UpdateStrategy{
+		Type:          workloadtypes.UpdateStrategyRecreatePod,
+		RollingUpdate: &workloadtypes.RollingUpdate{MaxSurge: &maxSurge, MaxUnavailable: &maxUnavailable},
+	}
+	if ending.deadline > 0 {
+		h.lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: ending.deadline}
+	}
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(40, func() bool { return h.settledOn(h.revV1, 2) }) {
+		h.dumpState("initial create")
+		t.Fatalf("two gangs never settled on v1")
+	}
+	return h
+}
+
+// TestGangPush_UnpullableRevisionIsHeldWithinTheLadder pins the ladder
+// for a gang: every attempt at the unpullable revision ends within its
+// grace or deadline and is counted, the revision is Held at the bound
+// with the pull failure as its reason, the stuck gang's row reads Failed
+// with no attempt in flight, the healthy gang never leaves rotation, and
+// a corrected push converges both gangs.
+//
+// Cells: instance/Update/Drain/pod.waiting[ImagePullBackOff]/before
+func TestGangPush_UnpullableRevisionIsHeldWithinTheLadder(t *testing.T) {
+	for _, ending := range gangPushEndings {
+		t.Run(ending.name, func(t *testing.T) {
+			h := newGangPushHarness(t, ending)
+			h.setTarget(h.revBad, badImage)
+			seen := map[types.UID]struct{}{}
+			sawFailed := false
+			held := h.runWithInvariant(160, func() bool { return h.heldOn(h.revBad.Name) }, func() {
+				h.trackPodsOnImage(badImage, seen)()
+				if got := len(h.servingPods()); got < 2 {
+					h.dumpState("serving lost")
+					t.Fatalf("serving pods dropped to %d; the healthy gang must keep serving while the other is retried", got)
+				}
+				if row := h.instance(0); row != nil && row.Phase == workloadtypes.InstancePhaseFailed {
+					sawFailed = true
+				}
+			})
+			if !held {
+				h.dumpState("never held")
+				t.Fatalf("the unpullable revision was never Held: the gang's attempts are not counted on the ladder")
+			}
+			if !sawFailed {
+				t.Fatalf("no pass ever showed the stuck gang's row at Failed")
+			}
+			block := h.findBlock(h.revBad.Name)
+			if block.AttemptsStarted != h.retryPolicy.MaxAttempts || block.Reason != "ImagePullBackOff" {
+				t.Fatalf("held block: got (attempts=%d, reason=%q) want (%d, ImagePullBackOff)", block.AttemptsStarted, block.Reason, h.retryPolicy.MaxAttempts)
+			}
+			if want := 2 * int(h.retryPolicy.MaxAttempts); len(seen) != want {
+				h.dumpState("attempts")
+				t.Fatalf("%d pods were made on the unpullable revision, want %d: one gang per attempt of the ladder", len(seen), want)
+			}
+			h.settle(4)
+			row := h.instance(0)
+			if row == nil || row.Phase != workloadtypes.InstancePhaseFailed || row.Operation != nil ||
+				row.LastFailure == nil || row.LastFailure.Reason != "ImagePullBackOff" {
+				h.dumpState("held row")
+				t.Fatalf("the stuck gang must park at Failed with no attempt in flight and the pull failure as its reason, got %+v", row)
+			}
+			if peer := h.instance(1); peer == nil || peer.Phase != workloadtypes.InstancePhaseReady || peer.RunningRevision != h.revV1.Name {
+				h.dumpState("peer")
+				t.Fatalf("the healthy gang must still be Ready on v1, got %+v", peer)
+			}
+
+			h.setTarget(h.revFixed, fixedImage)
+			if !h.run(80, func() bool { return h.settledOn(h.revFixed, 2) && len(h.badPods()) == 0 }) {
+				h.dumpState("corrected push")
+				t.Fatalf("the corrected push did not land on both gangs after the unpullable revision was Held")
+			}
+		})
+	}
+}
