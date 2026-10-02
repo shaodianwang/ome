@@ -422,7 +422,7 @@ cells:
     guard: the row is not fully serving and its operation carries no other authority's waiting token except an operator pause, which a fact about the Instance takes the row from; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
     note: an unplaceable recreated pod holds Phase C on the runtime-ready check, and the hold pass records the Unschedulable waiting token on the Restart operation, which parks the clock so the repair is not failed for a placement the cluster cannot give it. The scheduler's message reaches LastFailure once per hold. Past the configured grace the attempt is failed with that message and no RetryBlock, since an unplaceable pod proves nothing about the pod template (ops/restart.go, escalation.go)
     placement: kind
-    coverage: {perm: [], unit: [TestEscalation_UnschedulableRestartHoldsThenFailsPastGrace], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_UnschedulableRestartHoldsThenFailsPastGrace, TestPreemptedPod_ReturnsAndSaysWhyUntilPlaced], kind: []}
     status: decided
   - state: Restart/Drain
     event: pod.containersNotReady

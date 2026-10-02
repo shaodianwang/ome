@@ -1270,6 +1270,24 @@ type recoveryHarness struct {
 	// holds records every rollout hold the update pass reported, in
 	// order; a pass that reported none appends nothing.
 	holds []workloadtypes.RolloutHold
+
+	// component is the Component the loop drives. Every Component runs
+	// the same loop, so a story names one only to run under its pod
+	// names, labels and InferenceReplica.
+	component workloadtypes.ComponentType
+	// unschedulableGrace is the input's UnschedulableGrace.
+	unschedulableGrace time.Duration
+	// placementHeld is a cluster with no room: the scheduler model leaves
+	// every pod it has not yet placed Pending with
+	// PodScheduled=False/Unschedulable carrying placementMessage, and
+	// places them on the pass after the hold lifts.
+	placementHeld    bool
+	placementMessage string
+	// exitsCleanOnStop names the pods whose process exits 0 on SIGTERM:
+	// the kubelet model reports them Succeeded while they terminate and
+	// removes them on the pass after, as a kubelet publishes a pod it
+	// stopped.
+	exitsCleanOnStop map[string]bool
 }
 
 func recoveryPodSpec(image string) *corev1.PodSpec {
@@ -1294,6 +1312,13 @@ func newRecoveryHarness(t *testing.T, multiPod bool) *recoveryHarness {
 // container name chosen by the test.
 func newRecoveryHarnessFor(t *testing.T, multiPod bool, container string) *recoveryHarness {
 	t.Helper()
+	return newComponentRecoveryHarness(t, multiPod, container, workloadtypes.ComponentEngine)
+}
+
+// newComponentRecoveryHarness is newRecoveryHarnessFor driving the named
+// Component.
+func newComponentRecoveryHarness(t *testing.T, multiPod bool, container string, component workloadtypes.ComponentType) *recoveryHarness {
+	t.Helper()
 	scheme := makeScheme(t)
 	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
 		Name: recoveryOwner, Namespace: recoveryNS, UID: "uid-1",
@@ -1310,6 +1335,7 @@ func newRecoveryHarnessFor(t *testing.T, multiPod bool, container string) *recov
 		stepFloor:        recoveryStepFloor,
 		terminatingUntil: map[string]time.Time{},
 		container:        container,
+		component:        component,
 		crashes:          map[string]int{},
 		lastCrash:        map[string]time.Time{},
 		servedPasses:     map[string]int{},
@@ -1335,7 +1361,7 @@ func newRecoveryHarnessFor(t *testing.T, multiPod bool, container string) *recov
 func (h *recoveryHarness) revisionKey() revision.Key {
 	return revision.Key{
 		Namespace: recoveryNS,
-		Name:      recoveryOwner + "-" + string(workloadtypes.ComponentEngine),
+		Name:      recoveryOwner + "-" + string(h.component),
 	}
 }
 
@@ -1398,10 +1424,14 @@ func (h *recoveryHarness) kubelet() {
 			continue
 		}
 		if pod.DeletionTimestamp != nil {
+			if h.exitsCleanOnStop[pod.Name] && pod.Status.Phase != corev1.PodSucceeded {
+				h.reportStoppedClean(pod)
+				continue
+			}
 			h.finishTermination(pod)
 			continue
 		}
-		unbound := len(h.nodeNames) > 0 && pod.Spec.NodeName == ""
+		unbound := len(h.nodeNames) > 0 && pod.Spec.NodeName == "" && !h.placementHeld
 		if pod.CreationTimestamp.IsZero() || unbound {
 			if pod.CreationTimestamp.IsZero() {
 				// PodStuckInTerminalWaiting measures stuck age from CreationTimestamp
@@ -1413,6 +1443,16 @@ func (h *recoveryHarness) kubelet() {
 			}
 			if err := h.c.Update(h.ctx, pod); err != nil {
 				h.t.Fatalf("kubelet stamp creation %s: %v", pod.Name, err)
+			}
+		}
+		if h.unplaced(pod) {
+			if h.placementHeld {
+				h.reportUnschedulable(pod)
+				continue
+			}
+			if _, _, refused := workloadtypes.PodUnschedulable(pod); refused {
+				// The room is back: the scheduler binds the pod it refused.
+				setPodScheduled(pod, corev1.ConditionTrue, "", "", h.clk.Now())
 			}
 		}
 		image := pod.Spec.Containers[0].Image
@@ -1878,6 +1918,114 @@ func (h *recoveryHarness) finishTermination(pod *corev1.Pod) {
 		h.t.Fatalf("kubelet finish termination %s: %v", pod.Name, err)
 	}
 	delete(h.terminatingUntil, pod.Name)
+	delete(h.exitsCleanOnStop, pod.Name)
+}
+
+// reportStoppedClean is the kubelet publishing a terminating pod whose
+// process exited 0 on SIGTERM: phase Succeeded, the container Terminated
+// with exit 0, readiness withdrawn. The object leaves on the next pass; a
+// kubelet removes a pod it has stopped without waiting out the grace.
+func (h *recoveryHarness) reportStoppedClean(pod *corev1.Pod) {
+	h.t.Helper()
+	now := h.clk.Now()
+	pod.Status.Phase = corev1.PodSucceeded
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  pod.Spec.Containers[0].Name,
+		Image: pod.Spec.Containers[0].Image,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode:   0,
+			Reason:     "Completed",
+			FinishedAt: metav1.NewTime(now),
+		}},
+	}}
+	setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, now)
+	setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, now)
+	h.terminatingUntil[pod.Name] = now
+	if err := h.c.Status().Update(h.ctx, pod); err != nil {
+		h.t.Fatalf("kubelet report stopped %s: %v", pod.Name, err)
+	}
+}
+
+// preempt is the scheduler taking the pod of runner at idx for a pod of
+// higher priority: the DisruptionTarget condition lands, then a graceful
+// delete under the pod's own grace. The process exits clean on SIGTERM,
+// so with podGrace set the kubelet model reports the pod Succeeded on its
+// next pass and removes it on the one after; with none the object is
+// gone at once.
+func (h *recoveryHarness) preempt(idx int32, runner string) {
+	h.t.Helper()
+	pod := h.podOf(idx, runner)
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type:               corev1.DisruptionTarget,
+		Status:             corev1.ConditionTrue,
+		Reason:             corev1.PodReasonPreemptionByScheduler,
+		Message:            "preempted by a pod of higher priority",
+		LastTransitionTime: metav1.NewTime(h.clk.Now()),
+	})
+	if err := h.c.Status().Update(h.ctx, pod); err != nil {
+		h.t.Fatalf("stamp DisruptionTarget on %s: %v", pod.Name, err)
+	}
+	if h.exitsCleanOnStop == nil {
+		h.exitsCleanOnStop = map[string]bool{}
+	}
+	h.exitsCleanOnStop[pod.Name] = true
+	if err := h.c.Delete(h.ctx, pod); err != nil {
+		h.t.Fatalf("preempt %s: %v", pod.Name, err)
+	}
+}
+
+// holdPlacement is a cluster with no room from now on: the scheduler
+// model refuses every pod it has not yet placed with message.
+func (h *recoveryHarness) holdPlacement(message string) {
+	h.placementHeld, h.placementMessage = true, message
+}
+
+// releasePlacement is the room coming back: the pods the scheduler
+// refused are placed on the next kubelet pass.
+func (h *recoveryHarness) releasePlacement() {
+	h.placementHeld = false
+}
+
+// unplaced reports whether the scheduler model has yet to bind the pod:
+// nothing has reported on it, or the scheduler refused it.
+func (h *recoveryHarness) unplaced(pod *corev1.Pod) bool {
+	if pod.Status.Phase == "" {
+		return true
+	}
+	_, _, refused := workloadtypes.PodUnschedulable(pod)
+	return refused
+}
+
+// reportUnschedulable is the scheduler model refusing a pod: Pending,
+// nothing started, PodScheduled=False with the Unschedulable reason and
+// the placement message.
+func (h *recoveryHarness) reportUnschedulable(pod *corev1.Pod) {
+	h.t.Helper()
+	pod.Status.Phase = corev1.PodPending
+	pod.Status.ContainerStatuses = nil
+	setPodScheduled(pod, corev1.ConditionFalse, corev1.PodReasonUnschedulable, h.placementMessage, h.clk.Now())
+	if err := h.c.Status().Update(h.ctx, pod); err != nil {
+		h.t.Fatalf("scheduler refuse %s: %v", pod.Name, err)
+	}
+}
+
+// setPodScheduled writes the PodScheduled condition, moving its transition
+// time only when the status changes, as the scheduler writes it.
+func setPodScheduled(pod *corev1.Pod, status corev1.ConditionStatus, reason, message string, now time.Time) {
+	for i := range pod.Status.Conditions {
+		cond := &pod.Status.Conditions[i]
+		if cond.Type != corev1.PodScheduled {
+			continue
+		}
+		if cond.Status != status {
+			cond.LastTransitionTime = metav1.NewTime(now)
+		}
+		cond.Status, cond.Reason, cond.Message = status, reason, message
+		return
+	}
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type: corev1.PodScheduled, Status: status, Reason: reason, Message: message, LastTransitionTime: metav1.NewTime(now),
+	})
 }
 
 // useNodes turns on the node model with the named nodes, each with a
@@ -2017,7 +2165,7 @@ func (h *recoveryHarness) surgeOpen(idx int32) bool {
 }
 
 func (h *recoveryHarness) irKey() types.NamespacedName {
-	return types.NamespacedName{Namespace: recoveryNS, Name: recoveryOwner + "-" + string(workloadtypes.ComponentEngine)}
+	return types.NamespacedName{Namespace: recoveryNS, Name: recoveryOwner + "-" + string(h.component)}
 }
 
 func (h *recoveryHarness) irStatuses() []workloadtypes.InstanceStatus {
@@ -2066,7 +2214,7 @@ func (h *recoveryHarness) removeInstance() func(ctx context.Context, idx int32) 
 // mutateInstance is the harness's status-write seam: the IR round-trip
 // for every index, except those mutateErr rejects.
 func (h *recoveryHarness) mutateInstance() func(context.Context, int32, func(*workloadtypes.InstanceStatus) bool) error {
-	delegate := roundTripMutateInstance(h.c, h.isvc, workloadtypes.ComponentEngine)
+	delegate := roundTripMutateInstance(h.c, h.isvc, h.component)
 	return func(ctx context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
 		if err := h.mutateErr[idx]; err != nil {
 			return err
@@ -2082,7 +2230,7 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 		EventTarget: h.isvc,
 		Key: workloadtypes.Key{
 			Namespace: recoveryNS,
-			Component: workloadtypes.ComponentEngine,
+			Component: h.component,
 			OwnerName: recoveryOwner,
 		},
 		DesiredSpec: h.desired,
@@ -2092,15 +2240,16 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 			CurrentRevision:  h.currentRevision,
 			UpdateRevision:   h.target.Name,
 		},
-		MutateInstance:    h.mutateInstance(),
-		RemoveInstance:    h.removeInstance(),
-		UpdateGate:        h.gate,
-		UpdateRetryPolicy: h.retryPolicy,
-		StuckPodGrace:     h.stuckGrace,
-		ForceDelete:       h.forceDelete,
-		Requeue:           h.requeue,
-		Clock:             h.clk,
-		RepairBatchSize:   h.repairBatchSize,
+		MutateInstance:     h.mutateInstance(),
+		RemoveInstance:     h.removeInstance(),
+		UpdateGate:         h.gate,
+		UpdateRetryPolicy:  h.retryPolicy,
+		StuckPodGrace:      h.stuckGrace,
+		UnschedulableGrace: h.unschedulableGrace,
+		ForceDelete:        h.forceDelete,
+		Requeue:            h.requeue,
+		Clock:              h.clk,
+		RepairBatchSize:    h.repairBatchSize,
 
 		AbandonedReplacementGrace: h.abandonGrace,
 		DrainHolds:                &workloadtypes.DrainHolds{},
@@ -2232,7 +2381,7 @@ func (h *recoveryHarness) pass() (ctrl.Result, error) {
 		deps.Recorder = h.recorder
 	}
 	in := h.buildInput()
-	plan, err := workload.BuildPlan(workloadtypes.ComponentEngine, h.desired, in.ObservedState)
+	plan, err := workload.BuildPlan(h.component, h.desired, in.ObservedState)
 	if err != nil {
 		h.t.Fatalf("BuildPlan: %v", err)
 	}
@@ -6607,5 +6756,136 @@ func TestPause_LandsOnAnOpenGangRestart_APushDuringTheHoldRollsItAfterTheUnpause
 	}
 	if h.restartEvents() != 1 {
 		t.Fatalf("the roll after the unpause repaired the gang again; events = %v", h.events)
+	}
+}
+
+// A pod the scheduler preempts on a settled Component comes back, and the
+// row says why for as long as the pod cannot be placed. The row leaves
+// Ready in the pass that observes the loss; the replacement is created as
+// soon as the name is free, under restart policy None as under
+// RecreateInstanceOnPodRestart; while the cluster has no room the row
+// carries the Unschedulable wait with the scheduler's message and reads
+// Failed at no point inside the configured grace; the Instance the
+// scheduler did not take keeps serving on the pod it had; once the room
+// is back the pod that waited is placed and the row returns Ready with no
+// operation open. Every Component runs the same loop, so the story runs
+// for the engine, the decoder and the router, with the kubelet publishing
+// the stopped pod as Succeeded first and with the pod gone at once.
+//
+// Cells: instance/Ready/pod.phaseTerminal[Succeeded]/before, instance/Ready/pod.deleted[source]/before, instance/Create/CreatePods/pod.unschedulable[source]/before, instance/Restart/Drain/pod.unschedulable[source]/before
+func TestPreemptedPod_ReturnsAndSaysWhyUntilPlaced(t *testing.T) {
+	const noRoom = "0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 Insufficient cpu."
+	components := []workloadtypes.ComponentType{workloadtypes.ComponentEngine, workloadtypes.ComponentDecoder, workloadtypes.ComponentRouter}
+	stories := []struct {
+		name         string
+		policy       workloadtypes.RestartPolicy
+		stoppedFirst bool
+	}{
+		{"policy None, the kubelet reports the stopped pod first", workloadtypes.RestartPolicyNone, true},
+		{"policy None, the pod is gone at once", workloadtypes.RestartPolicyNone, false},
+		{"RecreateInstanceOnPodRestart, the kubelet reports the stopped pod first", workloadtypes.RestartPolicyRecreateInstance, true},
+		{"RecreateInstanceOnPodRestart, the pod is gone at once", workloadtypes.RestartPolicyRecreateInstance, false},
+	}
+	for _, component := range components {
+		for _, story := range stories {
+			t.Run(string(component)+"/"+story.name, func(t *testing.T) {
+				h := newComponentRecoveryHarness(t, false, "main", component)
+				h.recorder = record.NewFakeRecorder(64)
+				h.replicas = 2
+				policy := story.policy
+				h.lifecycle.RestartPolicy = &policy
+				h.unschedulableGrace = 15 * time.Minute
+				if story.stoppedFirst {
+					h.podGrace = 30 * time.Second
+				}
+				h.setTarget(h.revV1, goodImage)
+				if !h.run(30, func() bool { return h.settledOn(h.revV1, 2) }) {
+					h.dumpState("initial create")
+					t.Fatalf("the Component never settled on v1")
+				}
+				victim, sibling := h.podOf(0, ""), h.podOf(1, "")
+				untouched := func() {
+					if s := h.instance(0); s != nil && s.Phase == workloadtypes.InstancePhaseFailed {
+						h.dumpState("failed inside the grace")
+						t.Fatalf("the Instance read Failed while the scheduler's wait was inside the grace: %+v", s.LastFailure)
+					}
+					if s := h.instance(1); s == nil || s.Phase != workloadtypes.InstancePhaseReady || s.Operation != nil {
+						t.Fatalf("the Instance the scheduler did not take left Ready: %+v", s)
+					}
+					if pods := h.podsOf(1); len(pods) != 1 || pods[0].UID != sibling.UID {
+						t.Fatalf("the pod of the Instance the scheduler did not take was replaced")
+					}
+				}
+
+				h.holdPlacement(noRoom)
+				h.preempt(0, "")
+				h.step()
+				// The loss is owned by the Create pass under None and by the restart
+				// pass under RecreateInstanceOnPodRestart, and the row says so in
+				// the pass that observed it.
+				wantPhase := workloadtypes.InstancePhaseCreating
+				if story.policy == workloadtypes.RestartPolicyRecreateInstance {
+					wantPhase = workloadtypes.InstancePhaseRestarting
+				}
+				if s := h.instance(0); s == nil || s.Phase != wantPhase {
+					h.dumpState("after the loss")
+					t.Fatalf("the row reads %+v after the pass that observed its pod taken, want phase %s", s, wantPhase)
+				}
+				replaced := func() bool {
+					pods := h.podsOf(0)
+					return len(pods) == 1 && pods[0].UID != victim.UID
+				}
+				if !h.runWithInvariant(3, replaced, untouched) {
+					h.dumpState("waiting for the replacement")
+					t.Fatalf("no replacement pod was created within three passes of the loss")
+				}
+				replacement := h.podOf(0, "")
+				if replacement.Name != victim.Name {
+					t.Fatalf("the replacement is %s, want the stable name %s", replacement.Name, victim.Name)
+				}
+
+				h.step()
+				s := h.instance(0)
+				if s == nil || s.Operation == nil || s.Operation.Waiting != workloadtypes.WaitingReasonUnschedulable {
+					h.dumpState("after the scheduler's verdict")
+					t.Fatalf("the row does not report the Unschedulable wait after the pass that read the scheduler's verdict: %+v", s)
+				}
+				if s.LastFailure == nil || s.LastFailure.Reason != workloadtypes.WaitingReasonUnschedulable ||
+					s.LastFailure.PodName != replacement.Name || s.LastFailure.Message != noRoom {
+					t.Fatalf("the row's record does not name the held pod and the scheduler's message: %+v", s.LastFailure)
+				}
+				h.runWithInvariant(6, func() bool { return false }, func() {
+					untouched()
+					if s := h.instance(0); s == nil || s.Operation == nil || s.Operation.Waiting != workloadtypes.WaitingReasonUnschedulable {
+						t.Fatalf("the wait left the row while the cluster still had no room: %+v", s)
+					}
+				})
+
+				h.releasePlacement()
+				if !h.runWithInvariant(10, func() bool { return h.settledOn(h.revV1, 2) }, untouched) {
+					h.dumpState("after the room came back")
+					t.Fatalf("the Instance did not return Ready once its pod could be placed")
+				}
+				if pods := h.podsOf(0); len(pods) != 1 || pods[0].UID != replacement.UID {
+					t.Fatalf("the pod that was placed is not the one that waited")
+				}
+				wantRepairs := 0
+				if story.policy == workloadtypes.RestartPolicyRecreateInstance {
+					wantRepairs = 1
+				}
+				if h.restartEvents() != wantRepairs {
+					t.Fatalf("%d repair(s) opened, want %d; events = %v", h.restartEvents(), wantRepairs, h.events)
+				}
+				// Under None the story must have driven the reading it names: the
+				// Create pass recycles a stopped pod still occupying its name and
+				// rebuilds a name with no pod behind it without one. A repair
+				// drains the pod set itself and announces no recycle.
+				if story.policy == workloadtypes.RestartPolicyNone &&
+					h.sawEvent(workloadtypes.EventReasonTerminalPodRecycled) != story.stoppedFirst {
+					t.Fatalf("terminal-pod recycle seen = %v, want %v; events = %v",
+						!story.stoppedFirst, story.stoppedFirst, h.events)
+				}
+			})
+		}
 	}
 }
