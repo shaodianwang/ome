@@ -442,7 +442,7 @@ class GeneratedCorpusTest(unittest.TestCase):
         # sub-shards, so the corpus total bounds nothing physical; the ceiling
         # exists to force a conscious decision when the corpus grows past it.
         n = sum(1 for _ in (HERE / "isvcs").glob("**/*.yaml"))
-        self.assertLessEqual(n, 7000)
+        self.assertLessEqual(n, 8000)
 
     def test_parked_cell_emits_xfail_header_and_reason(self):
         """A PARKED entry must turn its cell into notimpl=1 issue=N with the
@@ -5613,6 +5613,64 @@ class StuckOperationTest(unittest.TestCase):
         self.assertTrue(any("does not combine" in e for e in self._errs(self.SCALE + " stuck=held fault=podkill:settling" + self.IMG)))
         self.assertTrue(any("does not combine" in e for e in self._errs(self.RECREATE + " stuck=held during=rollout" + self.IMG)))
 
+    ER_UP = "# p999: x mode=scaledown Ne=3 Nd=0 Nr=2 ceil_e=4 ceil_d=0 ceil_r=3 to_e=4 topo=engine"
+    PD_DELETE = "# p999: x mode=recreate Ne=3 Nd=3 Nr=2 ceil_e=3 ceil_d=4 ceil_r=2 topo=pd"
+
+    def test_header_takes_a_break_kind_and_a_sibling_push(self):
+        for kind in ("crash-start", "crash-load", "configkey", "stuck"):
+            self.assertEqual([], self._errs(self.SCALE + f" stuck=held break={kind}"), kind)
+            self.assertEqual([], self._errs(self.RECREATE + f" stuck=failed break={kind}"), kind)
+        self.assertEqual([], self._errs(self.ER_UP + " stuck=held break=crash-start bump=router victimcomp=router"))
+        self.assertEqual([], self._errs(self.PD_DELETE + " stuck=held break=crash-start bump=decoder victimcomp=decoder"))
+        self.assertTrue(any("is one of" in e for e in self._errs(self.SCALE + " stuck=held break=node")))
+        self.assertTrue(any("one or the other" in e for e in self._errs(self.SCALE + " stuck=held break=crash-start" + self.IMG)))
+        self.assertTrue(any("names the bumped member" in e
+                            for e in self._errs(self.ER_UP + " stuck=held break=crash-start bump=engine victimcomp=router")))
+        self.assertTrue(any("not a configured Component" in e for e in self._errs(self.SCALE + " stuck=held break=crash-start bump=decoder")))
+        self.assertTrue(any("bump= names the members" in e for e in self._errs(self.SCALE + " bump=engine")))
+
+    def test_a_scale_beside_the_push_is_the_sibling_form(self):
+        self.assertTrue(run._stuck_sibling_form({"engine"}, {"router"}))
+        self.assertFalse(run._stuck_sibling_form({"engine"}, {"engine"}))
+        self.assertFalse(run._stuck_sibling_form({"engine", "decoder"}, {"engine"}))
+        self.assertFalse(run._stuck_sibling_form(set(), {"engine"}))
+        held_router = {"stuck": "held", "break": "crash-start", "victimcomp": "router"}
+        self.assertEqual("", run._stuck_victim_error(held_router, {"router"}))
+        self.assertIn("not a member the push bumps", run._stuck_victim_error(held_router, {"engine"}))
+        self.assertEqual("", run._stuck_victim_error({"stuck": "held", "img": "x"}, {"engine", "decoder"}))
+
+    def test_fresh_instances_are_judged_by_whom_the_push_bumped(self):
+        old = {"aaa"}
+        # A pushed member: nothing starts while held; what starts is on the pushed revision only.
+        self.assertEqual([("", "  ✓ engine: while held the scale-up started nothing across 60s — the new index waits as an empty slot")],
+                         run._stuck_fresh_verdict("engine", {}, old, "held", True, "HELD_UP", 60))
+        fails = run._stuck_fresh_verdict("engine", {"3": ["bbb"]}, old, "held", True, "HELD_UP", 60)
+        self.assertEqual(1, len(fails))
+        self.assertIn("while held", fails[0][0])
+        fails = run._stuck_fresh_verdict("engine", {"3": ["aaa"]}, old, "failed", True, "LADDER_SPENT", 60)
+        self.assertIn("started on the running revision", fails[0][0])
+        self.assertEqual([""], [f for f, _l in run._stuck_fresh_verdict("engine", {"3": ["bbb"]}, old, "failed", True, "LADDER_SPENT", 60)])
+        # A member the push left alone: the running revision, the only one it has.
+        ok = run._stuck_fresh_verdict("engine", {"3": ["aaa"]}, old, "held", False, "CONVERGED", 60)
+        self.assertEqual([""], [f for f, _l in ok])
+        self.assertIn("the only one engine has", ok[0][1])
+        bad = run._stuck_fresh_verdict("engine", {"3": ["bbb"]}, old, "held", False, "CONVERGED", 60)
+        self.assertIn("never pushed", bad[0][0])
+        self.assertEqual([], run._stuck_fresh_verdict("engine", {}, old, "held", False, "WATCHING", 60),
+                         "nothing started on the sibling form is the convergence check's to report")
+
+    def test_rolled_survivors_and_a_frozen_sibling(self):
+        self.assertEqual(("", ""), run._stuck_rolled_verdict("engine", [], "held", True, "the scale"))
+        self.assertIn("hold did not freeze", run._stuck_rolled_verdict("engine", ["1"], "held", True, "the scale")[1])
+        self.assertEqual("", run._stuck_rolled_verdict("engine", ["1"], "failed", True, "the scale")[0])
+        self.assertIn("nothing pushed engine", run._stuck_rolled_verdict("engine", ["1"], "failed", False, "the scale")[1])
+        same = {"0": [("u0", "aaa")], "1": [("u1", "bbb")]}
+        self.assertEqual("", run._stuck_frozen_verdict("router", same, same, "held")[0])
+        changed = {"0": [("u0", "aaa")], "1": [("u9", "bbb")]}
+        self.assertIn("hold did not freeze", run._stuck_frozen_verdict("router", same, changed, "held")[1])
+        self.assertEqual("", run._stuck_frozen_verdict("router", same, changed, "failed")[0])
+        self.assertIn("+1 -1", run._stuck_frozen_verdict("router", same, changed, "failed")[1])
+
     def test_stuck_signal_reads_the_ladder_and_the_rows(self):
         held = self._ir("engine", rows=[(0, "Ready"), (1, "Failed")],
                         blocks=[{"targetRevision": "rev-b", "state": "Held", "attemptsStarted": 3}])
@@ -8412,13 +8470,13 @@ class CrashloopNewFaultTest(unittest.TestCase):
         self.assertEqual(2, run._crash_new_allowance(spec(2, 1), "engine", 4))
         self.assertEqual(0, run._crash_new_allowance({}, "engine", 4))
 
-    def test_a_drain_first_load_form_allows_the_start_admitted_beside_the_promoted_crash(self):
+    def test_a_load_form_allows_the_start_admitted_beside_the_promoted_crash(self):
         # form=load: the crashing pod passes readiness and is promoted, and
         # with minReadySeconds at zero the roll admits the next Instance's
-        # start while the promoted one is still healthy; when it crashes two
-        # Instances are off at once, the floor a Deployment reaches too. The
-        # surge strategy promotes the replacement beside its source and keeps
-        # the strict budget; form=start never promotes anything.
+        # start while the promoted one still looks healthy — a drain under a
+        # drain-first strategy, a surge under the surge one; when it crashes
+        # two Instances are off at once, the floor a Deployment reaches too.
+        # form=start never promotes anything.
         def spec(strat, surge, unavail):
             return {"engine": {"lifecycle": {"updateStrategy": {
                 "type": strat, "rollingUpdate": {"maxSurge": surge, "maxUnavailable": unavail}}}}}
@@ -8427,17 +8485,48 @@ class CrashloopNewFaultTest(unittest.TestCase):
         self.assertEqual(2, run._crash_new_allowance(spec("InPlaceOnly", 0, 1), "engine", 4, form="load"))
         self.assertEqual(3, run._crash_new_allowance(spec("RecreatePod", 0, 2), "engine", 4, form="load"))
         self.assertEqual(1, run._crash_new_allowance(spec("RecreatePod", 0, 1), "engine", 4, form="start"))
-        self.assertEqual(1, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0), "engine", 4, form="load"))
-        self.assertEqual(1, run._crash_new_allowance(spec("", 0, 1), "engine", 4, form="load"),
-                         "a strategy the spec does not name keeps the strict budget")
+        self.assertEqual(2, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0), "engine", 4, form="load"),
+                         "the surge for the next Instance is admitted while the first promoted pod still looks healthy")
+        self.assertEqual(1, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0), "engine", 4, form="start"))
+        self.assertEqual(2, run._crash_new_allowance(spec("", 0, 1), "engine", 4, form="load"),
+                         "a strategy the spec does not name is the default one and admits the same start")
         self.assertEqual(1, run._crash_new_allowance(spec("RecreatePod", 0, 1), "engine", 4))
+
+    def test_a_crash_after_ready_allows_budget_plus_one_under_every_strategy(self):
+        # The decided contract: at most budget plus one Instances off the
+        # running revision, the extra one being the start admitted while the
+        # first promoted pod looked healthy. Under SurgeThenDrain maxSurge 1
+        # two off and two on the crashing revision at once pass, a third does
+        # not; RecreatePod maxUnavailable 1 stays at two; a larger budget scales.
+        def spec(strat, surge, unavail):
+            return {"engine": {"lifecycle": {"updateStrategy": {
+                "type": strat, "rollingUpdate": {"maxSurge": surge, "maxUnavailable": unavail}}}}}
+        self.assertEqual(2, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0), "engine", 4, form="load"))
+        ctx = {"N": {"engine": 4, "decoder": 0, "router": 0}}
+        out = self._good_out()
+        out["hold"].update(peak_off=2, off_span=0.0, min_running=2, peak_crash=2)
+        notes, checks = [], []
+        self.assertEqual("PASS", run._crash_new_checks(ctx, {"form": "load", "infra_fail": None}, out, "engine", {"engine"}, 2,
+                                                       "PASS", notes, checks), notes)
+        self.assertTrue(any("at most 2 engine Instance(s) off the running revision (budget 2)" in c for c in checks), checks)
+        self.assertTrue(any("never more than 2 engine Instance(s) on the crashing revision at once" in c for c in checks), checks)
+        out["hold"].update(peak_off=3, off_span=run.FLOOR_SUSTAIN_S + 1, peak_crash=3, min_running=1)
+        notes = []
+        self.assertEqual("FAIL", run._crash_new_checks(ctx, {"form": "load", "infra_fail": None}, out, "engine", {"engine"}, 2,
+                                                       "PASS", notes, []))
+        self.assertTrue(any("3 engine Instance(s) off the running revision, budget 2" in n for n in notes), notes)
+        self.assertTrue(any("3 crash-revision engine Instances alive at once, budget 2" in n for n in notes), notes)
+        self.assertEqual(2, run._crash_new_allowance(spec("RecreatePod", 0, 1), "engine", 4, form="load"))
+        self.assertEqual(3, run._crash_new_allowance(spec("SurgeThenDrain", 2, 0), "engine", 6, form="load"))
+        self.assertEqual(4, run._crash_new_allowance(spec("RecreatePod", 0, 3), "engine", 8, form="load"))
 
     def test_allowance_table_by_strategy_fleet_and_form(self):
         # form=start never promotes anything: the budget everywhere. form=load:
-        # a drain-first strategy admits one start beside the promoted crash on
-        # any fleet; the surge strategy keeps the strict budget unless it rolls
-        # the whole fleet inside the crash window — a fleet of two at the
-        # fixture's 15s startup and 20s crash exit — where the whole fleet is off.
+        # every strategy admits one start beside the promoted crash on any
+        # fleet; the surge strategy rolls a fleet of two whole inside the crash
+        # window — at the fixture's 15s startup and 20s crash exit — which is
+        # the same two, and a larger fleet whole only where the roll outruns
+        # the crash by more than that one start.
         def spec(strat, surge, unavail, min_ready=None):
             life = {"updateStrategy": {"type": strat, "rollingUpdate": {"maxSurge": surge, "maxUnavailable": unavail}}}
             if min_ready is not None:
@@ -8448,36 +8537,38 @@ class CrashloopNewFaultTest(unittest.TestCase):
             table = {(strat, n, form): run._crash_new_allowance(spec(strat, *budgets), "engine", n, form=form)
                      for strat, budgets in strategies.items() for n in (2, 3, 4) for form in ("start", "load")}
             want = {(strat, n, "start"): 1 for strat in strategies for n in (2, 3, 4)}
-            want.update({(strat, n, "load"): 2 for strat in ("RecreatePod", "InPlaceIfPossible") for n in (2, 3, 4)})
-            want.update({("SurgeThenDrain", 2, "load"): 2, ("SurgeThenDrain", 3, "load"): 1, ("SurgeThenDrain", 4, "load"): 1})
+            want.update({(strat, n, "load"): 2 for strat in strategies for n in (2, 3, 4)})
             self.assertEqual(want, table)
-            self.assertEqual(1, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0, min_ready=10), "engine", 2, form="load"),
-                             "minReadySeconds that holds the second promotion past the crash window keeps the strict budget")
-            self.assertEqual(2, run._crash_new_allowance(spec("SurgeThenDrain", 2, 0), "engine", 2, form="load"),
-                             "a budget already covering the fleet is the allowance")
+            self.assertEqual(2, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0, min_ready=10), "engine", 2, form="load"),
+                             "minReadySeconds that holds the second promotion past the crash window leaves budget plus one")
+            self.assertEqual(3, run._crash_new_allowance(spec("SurgeThenDrain", 2, 0), "engine", 2, form="load"),
+                             "budget plus one, whether or not the fleet can show it")
             with mock.patch.object(run, "RUNNER_STARTUP_S", 5):
                 self.assertEqual(4, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0), "engine", 4, form="load"),
                                  "a fixture that comes up faster rolls a larger fleet inside the window")
-                self.assertEqual(1, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0), "engine", 5, form="load"))
+                self.assertEqual(2, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0), "engine", 5, form="load"))
             with mock.patch.object(run, "CRASH_EXIT_AFTER_S", 10):
-                self.assertEqual(1, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0), "engine", 2, form="load"),
-                                 "a crash that shows before the second Instance is up keeps the strict budget")
+                self.assertEqual(2, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0), "engine", 2, form="load"),
+                                 "a crash that shows before the second Instance is up leaves budget plus one")
 
     def test_case_allowance_notes_where_the_instances_beyond_the_budget_come_from(self):
         def spec(strat, surge, unavail):
             return {"engine": {"lifecycle": {"updateStrategy": {
                 "type": strat, "rollingUpdate": {"maxSurge": surge, "maxUnavailable": unavail}}}}}
-        whole = ("allowance 2 = the whole fleet of 2: under SurgeThenDrain at minReadySeconds 0 the roll of the "
-                 "1 Instance(s) after the first promoted one, about 15s each, completes inside its 20s crash window "
+        whole = ("allowance 3 = the whole fleet of 3: under SurgeThenDrain at minReadySeconds 0 the roll of the "
+                 "2 Instance(s) after the first promoted one, about 5s each, completes inside its 20s crash window "
                  "(form=load), before its first restart is visible")
-        beside = ("allowance 2 = budget 1 + the start a drain-first strategy admits while the promoted crashing "
-                  "Instance is still healthy (form=load, minReadySeconds 0)")
-        rows = (("SurgeThenDrain", 1, 0, 2, 2, [whole]), ("SurgeThenDrain", 1, 0, 4, 1, []),
-                ("RecreatePod", 0, 1, 2, 2, [beside]), ("RecreatePod", 0, 1, 4, 2, [beside]))
-        with mock.patch.object(run, "RUNNER_STARTUP_S", 15), mock.patch.object(run, "CRASH_EXIT_AFTER_S", 20):
-            for strat, surge, unavail, n, want, notes in rows:
+        beside = ("allowance 2 = budget 1 + the start admitted while the first promoted crashing Instance still "
+                  "looked healthy (form=load, minReadySeconds 0: a drain under a drain-first strategy, a surge under "
+                  "the surge one)")
+        rows = (("SurgeThenDrain", 1, 0, 2, 15, 2, [beside]), ("SurgeThenDrain", 1, 0, 4, 15, 2, [beside]),
+                ("SurgeThenDrain", 1, 0, 3, 5, 3, [whole]),
+                ("RecreatePod", 0, 1, 2, 15, 2, [beside]), ("RecreatePod", 0, 1, 4, 15, 2, [beside]))
+        with mock.patch.object(run, "CRASH_EXIT_AFTER_S", 20):
+            for strat, surge, unavail, n, startup, want, notes in rows:
                 f = {"form": "load", "notes": []}
-                with mock.patch.object(run, "_isvc_spec", lambda cid, _s=spec(strat, surge, unavail): _s):
+                with mock.patch.object(run, "RUNNER_STARTUP_S", startup), \
+                        mock.patch.object(run, "_isvc_spec", lambda cid, _s=spec(strat, surge, unavail): _s):
                     self.assertEqual(want, run._crash_new_case_allowance({"case_id": "p999", "N": {"engine": n}}, f, "engine"),
                                      (strat, n))
                 self.assertEqual(notes, f["notes"], (strat, n))
@@ -10535,7 +10626,7 @@ class GeneratedFaultFamiliesTest(unittest.TestCase):
         # The API admits no count below one for a Component without KEDA
         # autoscaling, so the family's deepest scale is to one; on the gang
         # fleet of two that is the scale-down row already.
-        rows = self.by_folder["gen-ops-held"]
+        rows = [(n, kv, m) for n, kv, m in self.by_folder["gen-ops-held"] if "break" not in kv]
         self.assertEqual(112, len(rows))
         self.assertEqual({"scale-down", "scale-one", "delete", "scale-up"}, {m["op"] for _n, _kv, m in rows})
         for name, kv, meta in rows:
@@ -10552,6 +10643,43 @@ class GeneratedFaultFamiliesTest(unittest.TestCase):
         self.assertEqual(48, len(gang))
         self.assertEqual({"scale-down", "delete", "scale-up"}, {m["op"] for _kv, m in gang})
         self.assertEqual({1}, {kv["to_e"] for kv, m in gang if m["op"] == "scale-down"})
+
+    def test_ops_held_break_rows_fill_one_case_per_cell(self):
+        # One case per ledger cell (shape x operation x kind, the sibling as
+        # its own kind), each kind at one stuck state under one strategy so
+        # the rows meet both states under both strategies.
+        rows = [(n, kv, m) for n, kv, m in self.by_folder["gen-ops-held"] if "break" in kv]
+        self.assertEqual(84, len(rows))
+        self.assertEqual(196, len(self.by_folder["gen-ops-held"]))
+        cells = {(kv["break"], m["op"], kv["topo"], kv["Nr"], m["victim"]) for _n, kv, m in rows}
+        self.assertEqual(84, len(cells))
+        self.assertEqual({"held", "failed"}, {kv["stuck"] for _n, kv, _m in rows})
+        self.assertEqual({"SurgeThenDrain", "RecreatePod"}, {m["strat"] for _n, _kv, m in rows})
+        self.assertEqual({("crash-start", "held"), ("crash-load", "held"), ("configkey", "failed"), ("stuck", "failed")},
+                         {(kv["break"], kv["stuck"]) for _n, kv, m in rows if m["victim"] == "engine"})
+        self.assertEqual({"scale-down": 28, "delete": 28, "scale-up": 28}, dict(collections.Counter(m["op"] for _n, _kv, m in rows)))
+        for name, kv, m in rows:
+            text = self.outputs[f"gen-ops-held/{name}.yaml"]
+            self.assertEqual("none", kv["co"], name)
+            self.assertNotIn("img", kv, name)
+            self.assertEqual(m["op"] == "delete", kv["mode"] == "recreate", name)
+            self.assertIn(f'instanceReadyTimeout: "{generate_cases.OPS_HELD_BREAK_READY_TIMEOUT}"', text, name)
+            reason = text.splitlines()[1]
+            if m["victim"] == "engine":
+                self.assertNotIn("bump", kv, name)
+                self.assertNotIn("victimcomp", kv, name)
+            else:
+                self.assertEqual("crash-start", kv["break"], name)
+                self.assertEqual((m["victim"], m["victim"]), (kv["bump"], kv["victimcomp"]), name)
+                if m["op"] != "delete":
+                    self.assertIn("is not the scale's to take", reason, name)
+            if kv["break"] == "configkey":
+                self.assertIn("kind: ConfigMap", text, name)
+                self.assertIn("configMapKeyRef", text, name)
+            else:
+                self.assertNotIn("kind: ConfigMap", text, name)
+            self.assertIn("the status keeps reporting the push" if m["op"] != "delete" else "comes back clean", reason, name)
+        self.assertEqual({"engine", "router", "decoder"}, {m["victim"] for _n, kv, m in rows if kv["topo"] in ("engine", "pd")})
 
     def test_family_sizes_and_id_blocks(self):
         self.assertEqual(60, len(self.by_folder["gen-readiness"]))

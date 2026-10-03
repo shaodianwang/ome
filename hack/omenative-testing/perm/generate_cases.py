@@ -165,7 +165,12 @@ runners (run.py + the KIND CI lane) already implement:
                           attempt has failed; stuck=held: the retry ladder
                           is spent), crossed with shape x strategy x group;
                           the stuck Instances go first, survivors stay
-                          untouched, the unlanded push stays visible
+                          untouched, the unlanded push stays visible; the
+                          break rows park the push on the held moment's
+                          other kinds (break=crash-start|crash-load|
+                          configkey|stuck) and, on the sibling rows, on
+                          the router or decoder beside the engine the
+                          operation works on
     gen-runtime-edit-repair/ p6900+  a repair of a crash-looping Instance and
                           an edit of the inherited runtime overlap, in both
                           orders (mode=runtimerev with a break: during=repair
@@ -371,6 +376,12 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     without KEDA autoscaling (minReplicas 0 is refused), and the case reads
     the count the controller accepted instead of assuming it. On the gang
     fleet of two, to one is down by one, so that cell is the scale-down row.
+    The break rows fill one case per ledger cell (shape x operation x
+    kind): each kind is read at one stuck state under one strategy,
+    chosen so the rows meet both states under both strategies; the
+    sibling rows take the crash at start, as the rollback and edit
+    families do, and scale or delete the engine beside the sibling's
+    parked push.
   - runtime-edit-repair lands an edit on an open repair only where a repair
     opens: a crash at start reaches the crash-loop repair under every restart
     policy, a crash after Ready reaches the runner-restart trigger only under
@@ -3891,17 +3902,17 @@ def emit_rollback(add):
 
 
 # ── gen-crashloop-new: the push brings a revision whose pods crash ──────────
-# The strategies that drain an Instance before its replacement is up: under
-# form=load the roll admits the next start while the promoted crashing
-# Instance is still healthy (minReadySeconds is zero), so the case allows
-# one Instance beyond the budget, as a Deployment would reach too. The surge
-# strategy keeps the strict budget, except on a fleet it rolls whole inside
-# the crash window: each further Instance takes one startup to come up and
-# the first crash shows CRASH_EXIT_AFTER_S after the first promotion, so a
-# fleet of two is replaced before any restart is visible and the case allows
-# the whole fleet. The timings are the fixture runtime's startup delay
-# (TEST_STARTUP_DELAY in runtime/csr*.yaml) and run.py's crash exit default.
-DRAIN_FIRST_STRATS = {"RecreatePod", "InPlaceIfPossible"}
+# Under form=load the roll admits the next start while the promoted crashing
+# Instance still looks healthy (minReadySeconds is zero): a drain under a
+# drain-first strategy, a surge under the surge one; so the case allows one
+# Instance beyond the budget under every strategy, as a Deployment would
+# reach too. The surge strategy may roll a small fleet whole inside the
+# crash window instead: each further Instance takes one startup to come up
+# and the first crash shows CRASH_EXIT_AFTER_S after the first promotion,
+# so a fleet of two is replaced before any restart is visible and the case
+# allows the whole fleet. The timings are the fixture runtime's startup
+# delay (TEST_STARTUP_DELAY in runtime/csr*.yaml) and run.py's crash exit
+# default.
 RUNNER_STARTUP_S, CRASH_EXIT_AFTER_S = 15, 20
 
 
@@ -3910,13 +3921,16 @@ def _surge_roll_fits_crash_window(n):
 
 
 def _crash_new_allowance(form, strat, budget, n):
+    """How many Instances may be off the running revision at once under a
+    push whose revision crashes: the budget; one more when the promoted
+    pods are Ready then die, whatever the strategy (the start admitted
+    while the first promoted one still looked healthy); the whole fleet
+    where the surge strategy rolls it inside the crash window."""
     if form != "load":
         return budget
-    if strat in DRAIN_FIRST_STRATS:
-        return budget + 1
     if strat == "SurgeThenDrain" and _surge_roll_fits_crash_window(n):
-        return max(budget, n)
-    return budget
+        return max(budget + 1, n)
+    return budget + 1
 
 
 def _crash_new_reason(form, strat, co, budget, n):
@@ -3934,7 +3948,7 @@ def _crash_new_reason(form, strat, co, budget, n):
              f"is visible to withhold the last drain on")
     lands = {"SurgeThenDrain": ("the surge replacement never joins rotation, so no source is drained"
                                 if form == "start" else whole if _surge_roll_fits_crash_window(n) else
-                                "the promoted Instance crashes, so no further source is drained"),
+                                "the surge replacement is promoted and its source drained" + admitted),
              "RecreatePod": ("the first Instance drained is rebuilt on the crashing revision and stays the only one off"
                              if form == "start" else
                              "the first Instance drained is rebuilt on the crashing revision" + admitted),
@@ -4461,6 +4475,141 @@ def emit_ops_held(add):
                             _ops_held_reason(stuck, op, strat, topo, co, nr), meta,
                             cell=("ops-held", stuck, op, topo, w, strat, co, nr),
                             coord=lib.coord_for(co) if co != "none" else None)
+    _emit_ops_held_breaks(add)
+
+
+# The break rows of the ops-held family: the push carries one of the held
+# moment's other kinds (stuck= with break=) and the operation lands on the
+# parked push. One case per ledger cell (shape x operation x kind): (kind,
+# the stuck state it is read at, the strategy), chosen so the rows meet
+# both states under both strategies. The sibling row pushes the member
+# beside the engine (the router in front of an engine fleet, the decoder
+# of a prefill/decode service) onto the crash at start, as the rollback
+# and edit families do, and lands the operation on the engine.
+OPS_HELD_BREAKS = [("crash-start", "held", "SurgeThenDrain"), ("crash-load", "held", "RecreatePod"),
+                   ("configkey", "failed", "RecreatePod"), ("stuck", "failed", "SurgeThenDrain")]
+OPS_HELD_BREAK_OPS = ["scale-down", "delete", "scale-up"]
+OPS_HELD_SIBLING_BREAK = ("crash-start", "held", "SurgeThenDrain")
+OPS_HELD_CONFIG_SUFFIX = "-config"
+# The pushed member's Instance ready timeout under a break: a revision that
+# never comes up parks its row Failed within the stuck wait.
+OPS_HELD_BREAK_READY_TIMEOUT = READINESS_NEW_TIMEOUT
+OPS_HELD_BREAK_HOW = {"crash-start": "an image with no shell, so its pods crash at every start",
+                      "crash-load": ("the fixture runtime's exit switch, so its pods pass readiness, are promoted and exit "
+                                     "a few seconds later, every time the kubelet starts them"),
+                      "configkey": "a ConfigMap key the ConfigMap lacks, so its pods wait in CreateContainerConfigError",
+                      "stuck": "a readiness probe that never passes, so its pods run and never become Ready"}
+
+
+def _ops_held_sibling(topo, nr):
+    """The member beside the engine a shape carries: the decoder of a
+    prefill/decode service, the router in front of an engine fleet, None
+    on the engine alone."""
+    return "decoder" if is_pd(topo) else ("router" if nr else None)
+
+
+def _ops_held_break_reason(kind, stuck, op, strat, topo, nr, victim):
+    sibling = victim != "engine"
+    how = (f"the {victim} is pushed onto a revision whose runner carries {OPS_HELD_BREAK_HOW[kind]}; " +
+           ("its first attempt has failed (an Instance row reads Failed, the retry ladder is still running)"
+            if stuck == "failed" else
+            "every attempt of the retry ladder has failed and the push is held (only a new revision or a release lifts it)"))
+    if sibling:
+        fleet = "the engine, which the push never touched, keeps every Instance serving on its running revision"
+    elif strat == "SurgeThenDrain":
+        fleet = "the running Instances kept serving beside the broken replacements"
+    elif kind == "crash-load":
+        fleet = "the Instance each attempt drained served briefly on the pushed revision and crash-loops there"
+    else:
+        fleet = "the Instance each attempt drained is dark on the pushed revision"
+    if op == "delete":
+        what = ("then the service is deleted: every pod goes, broken ones included, no pod stays Terminating and no "
+                "finalizer wedges, and the same name comes back clean on fresh pods with nothing of the push left")
+    elif sibling and op == "scale-down":
+        what = (f"then the engine is scaled down by one: the highest index goes, as on a healthy fleet, the survivors "
+                f"keep their pods on the running revision, and the {victim}'s parked push is not the scale's to take: "
+                f"its pods stay as they were under the hold")
+    elif sibling:
+        what = (f"then the engine is scaled up by one: the new Instance comes up on the engine's running revision, the "
+                f"only one it has, and serves; the survivors stay as they were and the {victim}'s parked push is not "
+                f"the scale's to take: its pods stay as they were under the hold")
+    elif op == "scale-down":
+        what = ("then the engine is scaled down by one: the Instances that are not Ready go first, then the highest "
+                "index, so a broken Instance is removed before a healthy one; the survivors keep their pods on the "
+                "running revision")
+    else:
+        what = ("then the engine is scaled up by one: " +
+                ("while held nothing starts (the new index waits as an empty slot) and nothing is rendered from the "
+                 "running revision" if stuck == "held" else
+                 "the new Instance is admitted on the pushed revision when the retry window allows it, never on the "
+                 "running revision, and is broken like its peers") +
+                "; the survivors stay as they were")
+    out = f"{how}; {fleet}; {what}"
+    if op != "delete":
+        out += "; the healthy survivors keep serving throughout and the status keeps reporting the push that has not landed"
+        if stuck == "held":
+            out += ", the hold itself"
+    if is_pd(topo) and not sibling:
+        out += "; decoder and router are neither pushed nor scaled and stay as they were"
+    elif is_pd(topo) or (nr and not sibling):
+        out += "; the router is neither pushed nor scaled and stays as it is"
+    if is_mn(topo):
+        out += "; each Instance is a gang, counted whole"
+    return out
+
+
+def _ops_held_configkey_body(name, topo, n, w, nr, life):
+    """The case body of a missing-key row: the engine runner reads one key of
+    a ConfigMap named after the case, carried as a second document."""
+    cm = f"{name}{OPS_HELD_CONFIG_SUFFIX}"
+    cs = comps(topo, n, w, life, nr=nr)
+    cs[0]["runner"] = lib.configmap_env(cm, HEAL_CONFIG_KEY, HEAL_CONFIG_VAR, gang=is_mn(topo))
+    return lib.render(name, cs, docs=[lib.configmap_doc(cm, {HEAL_CONFIG_KEY: HEAL_CONFIG_VALUE})])
+
+
+def _emit_ops_held_breaks(add):
+    def one(topo, n, w, nr, kind, stuck, strat, op, victim):
+        surge, unavail = OPS_HELD_STRATS[strat]
+        target = _ops_held_target(op, n)
+        reach = max(n, target or 0)
+        sibling = victim != "engine"
+        kv = dict(**counts(topo, n, nr), ceil_e=reach + (0 if sibling else surge),
+                  ceil_d=((n + surge) if victim == "decoder" else (n if is_pd(topo) else 0)),
+                  ceil_r=router_count(topo, nr) + (surge if victim == "router" else 0))
+        if op == "delete":
+            kv["mode"] = "recreate"
+        else:
+            kv["mode"] = "scaledown"
+            kv["to_e"] = target
+        kv.update(stuck=stuck, co="none", topo=topo)
+        kv["break"] = kind
+        if sibling:
+            kv.update(bump=victim, victimcomp=victim)
+        meta = dict(strat=strat, verb=f"push:{stuck}:{kind}" + (f":{victim}" if sibling else ""),
+                    stuck=stuck, op=op, kind=kind, victim=victim)
+        desc = (f"{GEN_MARK} stuck {stuck} {kind}" + (f" on {victim}" if sibling else "")
+                + f" {op} {shape_tag(topo, w, nr)} N={n} {strat}")
+        broken = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, ready_timeout=OPS_HELD_BREAK_READY_TIMEOUT)
+        life = lib.lifecycle() if sibling else broken
+        d_life = broken if victim == "decoder" else None
+        r_life = broken if victim == "router" else None
+        reason = _ops_held_break_reason(kind, stuck, op, strat, topo, nr, victim)
+        cell = ("ops-held-break", kind, stuck, op, topo, w, nr, victim)
+        if kind == "configkey":
+            add("gen-ops-held", desc, kv, None, reason, meta, cell=cell,
+                body=functools.partial(_ops_held_configkey_body, topo=topo, n=n, w=w, nr=nr, life=life))
+        else:
+            add("gen-ops-held", desc, kv, comps(topo, n, w, life, d_life=d_life, r_life=r_life, nr=nr), reason, meta, cell=cell)
+
+    for topo, n, w, nr in OPS_HELD_SHAPES:
+        for kind, stuck, strat in OPS_HELD_BREAKS:
+            for op in OPS_HELD_BREAK_OPS:
+                one(topo, n, w, nr, kind, stuck, strat, op, "engine")
+        sibling = _ops_held_sibling(topo, nr)
+        if sibling:
+            kind, stuck, strat = OPS_HELD_SIBLING_BREAK
+            for op in OPS_HELD_BREAK_OPS:
+                one(topo, n, w, nr, kind, stuck, strat, op, sibling)
 
 
 # ── gen-runtime-edit-repair: a repair and a runtime edit overlap ────────────

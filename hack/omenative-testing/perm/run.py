@@ -8841,14 +8841,13 @@ def _surge_count(n, surge):
         return 0
 
 
-# The strategies that drain an Instance before its replacement is up. Under
-# form=load the replacement passes readiness and is promoted, and with
-# minReadySeconds at zero the roll admits the next Instance's start while
-# the promoted one is still healthy; when it crashes two Instances are off
-# at once, the floor a Deployment reaches too. The surge strategy promotes
-# the replacement beside its source and keeps the strict budget, except on
-# a fleet it rolls whole inside the crash window (_surge_roll_fits_crash_window).
-DRAIN_FIRST_STRATEGIES = {"RecreatePod", "InPlaceIfPossible", "InPlaceOnly"}
+# Under form=load the replacement passes readiness and is promoted, and
+# with minReadySeconds at zero the roll admits the next Instance's start
+# while the promoted one still looks healthy: a drain under a drain-first
+# strategy, a surge under the surge one; when it crashes two Instances are
+# off at once, the floor a Deployment reaches too. The surge strategy may
+# roll a small fleet whole inside the crash window instead
+# (_surge_roll_fits_crash_window).
 SURGE_STRATEGY = "SurgeThenDrain"
 
 
@@ -8866,10 +8865,11 @@ def _crash_new_allowance_why(spec, comp, n, form=None):
     """(allowance, budget, why): how many Instances of a Component may be
     off the running revision at once while a push whose revision crashes
     rolls. The budget is the larger of its surge and unavailability
-    budgets, resolved against n; under form=load the allowance may exceed
-    it, and why says where the Instances beyond it come from: the one
-    start a drain-first strategy admits beside the promoted crash
-    (DRAIN_FIRST_STRATEGIES), or the whole fleet a surge roll replaces
+    budgets, resolved against n; under form=load the allowance is one more
+    under every strategy, and why says where the Instances beyond the
+    budget come from: the start admitted while the first promoted crashing
+    Instance still looked healthy (a drain under a drain-first strategy, a
+    surge under the surge one), or the whole fleet a surge roll replaces
     inside the crash window (_surge_roll_fits_crash_window)."""
     lifecycle = (((spec or {}).get(comp) or {}).get("lifecycle") or {})
     strategy = lifecycle.get("updateStrategy") or {}
@@ -8880,14 +8880,15 @@ def _crash_new_allowance_why(spec, comp, n, form=None):
         min_ready = int(lifecycle.get("minReadySeconds") or 0)
     except (TypeError, ValueError):
         min_ready = 0
-    if form == "load" and kind in DRAIN_FIRST_STRATEGIES:
-        return budget + 1, budget, (f"budget {budget} + the start a drain-first strategy admits while the promoted "
-                                    f"crashing Instance is still healthy (form={form}, minReadySeconds {min_ready})")
-    if form == "load" and kind == SURGE_STRATEGY and n > budget and _surge_roll_fits_crash_window(n, min_ready):
+    if form == "load" and kind == SURGE_STRATEGY and n > budget + 1 and _surge_roll_fits_crash_window(n, min_ready):
         return n, budget, (f"the whole fleet of {n}: under {SURGE_STRATEGY} at minReadySeconds {min_ready} the roll "
                            f"of the {n - 1} Instance(s) after the first promoted one, about {RUNNER_STARTUP_S}s each, "
                            f"completes inside its {CRASH_EXIT_AFTER_S}s crash window (form={form}), before its first "
                            f"restart is visible")
+    if form == "load":
+        return budget + 1, budget, (f"budget {budget} + the start admitted while the first promoted crashing Instance "
+                                    f"still looked healthy (form={form}, minReadySeconds {min_ready}: a drain under a "
+                                    f"drain-first strategy, a surge under the surge one)")
     return budget, budget, ""
 
 
@@ -14201,8 +14202,11 @@ def validate_case_file(path):
         errs.append(f"{path}:1: mode=scaledown needs a to_e/to_d/to_r target")
     if "stuck" in fields:
         if mode not in STUCK_MODES:
-            errs.append(f"{path}:1: stuck= lands an operation on a Component stuck on an unpullable revision "
+            errs.append(f"{path}:1: stuck= lands an operation on a Component stuck on a broken revision "
                         f"(mode={'|'.join(sorted(STUCK_MODES))})")
+        if "bump" in fields and "victimcomp" in fields and str(fields["victimcomp"]) not in str(fields["bump"]).split(","):
+            errs.append(f"{path}:1: victimcomp={fields['victimcomp']} under stuck= names the bumped member whose runner "
+                        f"carries the break (bump={fields['bump']})")
         if "img" not in fields and "break" not in fields:
             errs.append(f"{path}:1: stuck={fields['stuck']} needs img=<unpullable image> (the revision the push cannot pull) "
                         f"or break={'|'.join(sorted(STUCK_BREAKS))} (the break the pushed revision carries)")
@@ -14520,10 +14524,10 @@ def validate_case_file(path):
         if k in fields and mode != "canary":
             errs.append(f"{path}:1: {k}= is a canary-mode knob (mode=canary)")
     if "bump" in fields:
-        if mode not in ("rollout", "canary") and not (mode == "migrate" and "stuck" in fields):
+        if mode not in ("rollout", "canary") and not (mode in STUCK_MODES and "stuck" in fields):
             errs.append(f"{path}:1: bump= names the members a rollout or a canary bumps (mode=rollout|canary), "
-                        f"or the members a stuck push bumps beside a move (mode=migrate stuck=)")
-        if mode in ("rollout", "migrate"):
+                        f"or the members a stuck push bumps beside an operation (mode={'|'.join(sorted(STUCK_MODES))} stuck=)")
+        if mode != "canary":
             for m in str(fields["bump"]).split(","):
                 count_key = {"engine": "Ne", "decoder": "Nd", "router": "Nr"}.get(m)
                 if count_key and fields.get(count_key, 0) == 0:
@@ -18553,9 +18557,11 @@ def _replica_patch(targets):
 
 
 def _drive_stuck(ctx, hdr):
-    """Push the bumped members onto the header's unpullable image and wait
-    for the stuck state the header names. Returns the signal that reached
-    it, "" when the budget ended first, None when the push itself failed."""
+    """Push the bumped members onto the header's broken revision (img=, an
+    image that cannot be pulled, or break=, one of the held moment's kinds
+    on the victim member) and wait for the stuck state the header names.
+    Returns the signal that reached it, "" when the budget ended first,
+    None when the push itself failed."""
     stuck = str(hdr.get("stuck"))
     bumped = _bumped(ctx)
     image = str(hdr.get("img") or "")
@@ -18599,12 +18605,100 @@ def _stuck_break(hdr, bumped):
     return kind, victim
 
 
+def _stuck_victim_error(hdr, bumped):
+    """Why the stuck push cannot carry its break: victimcomp= names a member
+    the push does not bump. "" when it can."""
+    _kind, victim = _stuck_break(hdr, bumped)
+    if victim not in bumped:
+        return f"victimcomp={victim} is not a member the push bumps ({sorted(bumped)})"
+    return ""
+
+
+def _stuck_sibling_form(scaled, bumped):
+    """Whether a scale lands beside the parked push rather than on it: it
+    touches no member the push bumps, so the scaled member is read as a
+    plain scale and the pushed member as frozen under its hold."""
+    return bool(scaled) and not (set(scaled) & set(bumped))
+
+
+def _stuck_fresh_verdict(comp, fresh, old_hashes, stuck, pushed, state, budget):
+    """The verdict lines for the Instances a scale-up started on comp;
+    fresh is {index: [revision hashes]} of the indices that did not exist
+    at the scale. On a pushed member a new Instance is rendered from the
+    pushed revision only, and none at all while held; on a member the push
+    left alone (the sibling form) the new Instance comes up on the running
+    revision, the only one it has. [(failure note or "", check line)]."""
+    out = []
+    on_running = sorted(idx for idx, hashes in fresh.items() if any(h in old_hashes for h in hashes))
+    off_running = sorted(idx for idx, hashes in fresh.items() if any(h not in old_hashes for h in hashes))
+    if not pushed:
+        if off_running:
+            out.append((f"{comp}: new Instance(s) {off_running} started on a revision the scale never pushed",
+                        f"  ✗ {comp}: new Instance(s) {off_running} came up on a revision {comp} never had — the scale "
+                        f"renders from the running revision, the only one {comp} has"))
+        elif fresh:
+            out.append(("", f"  ✓ {comp}: new Instance(s) {sorted(fresh)} came up on the running revision, the only one {comp} has"))
+        return out
+    if on_running:
+        out.append((f"{comp}: new Instance(s) {on_running} started on the running revision",
+                    f"  ✗ {comp}: new Instance(s) {on_running} came up on the running revision — a new Instance is "
+                    f"rendered from the pushed revision only"))
+    if stuck == "held":
+        if fresh:
+            out.append((f"{comp}: the scale-up started Instance(s) {sorted(fresh)} while held",
+                        f"  ✗ {comp}: while held the scale-up started new Instance(s) {sorted(fresh)} (pushed-revision "
+                        f"pods) — a held revision admits no new Instance"))
+        else:
+            out.append(("", f"  ✓ {comp}: while held the scale-up started nothing across {budget}s — the new index waits as an empty slot"))
+    elif fresh:
+        out.append(("", f"  ⓘ {comp}: the retry window admitted new Instance(s) {sorted(fresh)} on the pushed revision; "
+                        f"they are stuck like their peers"))
+    else:
+        out.append(("", f"  ⓘ {comp}: no new Instance was admitted before the ladder was spent ({state})"))
+    return out
+
+
+def _stuck_rolled_verdict(comp, rolled, stuck, pushed, op_words):
+    """The verdict line for survivors whose running-revision pods gave way
+    to another revision across the operation: on a member the push left
+    alone nothing may roll them; on a pushed member the hold freezes the
+    roll, and under failed the ladder's next attempt may take one,
+    reported. (failure note or "", check line or "")."""
+    if not rolled:
+        return "", ""
+    if not pushed:
+        return (f"{comp}: survivors {rolled} left the running revision after {op_words}",
+                f"  ✗ {comp}: surviving Instance(s) {rolled} left the running revision after {op_words} — nothing pushed {comp}")
+    if stuck == "held":
+        return (f"{comp}: the held roll took survivors {rolled} after {op_words}",
+                f"  ✗ {comp}: surviving Instance(s) {rolled} were taken onto the pushed revision after {op_words} — "
+                f"the hold did not freeze the roll")
+    return "", f"  ⓘ {comp}: the retry ladder took surviving Instance(s) {rolled} into its next attempt after {op_words}"
+
+
+def _stuck_frozen_verdict(comp, pre, now, stuck):
+    """The verdict line for a pushed member the operation left alone (the
+    sibling form); pre/now are {index: [(uid, hash)]} of its alive pods at
+    the operation and after it. Under held the hold freezes its roll, so
+    its pod set stays as it was; under failed the ladder may take another
+    attempt, reported. (failure note or "", check line)."""
+    before = {u for pods in pre.values() for u, _h in pods}
+    after = {u for pods in now.values() for u, _h in pods}
+    churn = f"+{len(after - before)} -{len(before - after)}"
+    if before == after:
+        return "", f"  ✓ {comp} (pushed, not scaled) kept its pod set across the operation ({len(after)} pod(s))"
+    if stuck == "held":
+        return (f"{comp}: the held push's pods changed under the operation ({churn})",
+                f"  ✗ {comp} (pushed, not scaled) changed its pod set under the operation ({churn}) — the hold did not freeze its roll")
+    return "", f"  ⓘ {comp} (pushed, not scaled): the retry ladder took another attempt under the operation ({churn})"
+
+
 def _stuck_reached_checks(stuck, reached, after_s, verdict, notes, checks):
     if reached:
         checks.append(f"  ✓ {stuck}: reached {after_s:.0f}s after the push — {reached}")
         return verdict
     notes.append(f"the push never reached {stuck} within budget; the operation was not applied")
-    checks.append(f"  ✗ {stuck}: the push onto the unpullable revision never reached {stuck} within budget "
+    checks.append(f"  ✗ {stuck}: the push onto the broken revision never reached {stuck} within budget "
                   f"({after_s:.0f}s) — the operation had nothing to land on")
     return "FAIL"
 
@@ -18643,9 +18737,9 @@ def _stuck_move(case_id, yaml_file, desc, hdr):
     N, configured, ppi = ctx["N"], ctx["configured"], ctx["pods_per_inst"]
     bumped = _bumped(ctx)
     kind, victim = _stuck_break(hdr, bumped)
-    if victim not in bumped:
-        return _finish(case_id, desc, hdr, ctx, "CASE_ERROR", "FAIL",
-                       [f"victimcomp={victim} is not a member the push bumps ({sorted(bumped)})"], [])
+    bad = _stuck_victim_error(hdr, bumped)
+    if bad:
+        return _finish(case_id, desc, hdr, ctx, "CASE_ERROR", "FAIL", [bad], [])
     ctx["modes"] = update_modes(ctx["info"], configured, "env" if kind in ("crash-load", "configkey", "stuck") else None)
     mcomp = "engine" if "engine" in configured else sorted(configured)[0]
     verdict, notes, checks = "PASS", [], []
@@ -18752,9 +18846,11 @@ def _stuck_move(case_id, yaml_file, desc, hdr):
 
 
 def _stuck_scale(case_id, yaml_file, desc, hdr):
-    """A scale lands on a Component stuck on a revision that cannot be
-    pulled (stuck=failed: the first attempt has failed; stuck=held: the
-    retry ladder is spent). What the engine promises and the verdict reads:
+    """A scale lands on a Component stuck on a broken revision (stuck=failed:
+    the first attempt has failed; stuck=held: the retry ladder is spent),
+    the push broken by an image that cannot be pulled (img=) or by break=
+    (crash-start, crash-load, configkey, stuck) on the member victimcomp=
+    names. What the engine promises and the verdict reads:
     a scale-down removes Instances that are not Ready first, highest index
     first within each tier, and never rebuilds a survivor on the running
     revision; a scale to one, the least count the API admits, takes every
@@ -18765,7 +18861,12 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     revision when the retry window admits it, never on the running
     revision; the healthy survivors keep serving throughout; the sibling
     Components the push never touched stay as they were; and the status
-    keeps reporting the push that has not landed."""
+    keeps reporting the push that has not landed. A scale that touches no
+    bumped member (bump= names a sibling the scale leaves alone) is the
+    sibling form: the scaled member is read as a plain scale, its new
+    Instance on the running revision, the only one it has, and the pushed
+    member's pod set stays as it was under held (the ladder may still take
+    an attempt under failed, reported)."""
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
     if err:
         return _write_fail(case_id, desc, hdr, *err)
@@ -18778,7 +18879,11 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     scaled = {c for c in configured if target[c] != N[c]}
     controls = configured - scaled - bumped
     direction = "up" if any(target[c] > N[c] for c in scaled) else "down"
+    sibling = _stuck_sibling_form(scaled, bumped)
     verdict, notes, checks = "PASS", [], []
+    bad = _stuck_victim_error(hdr, bumped)
+    if bad:
+        return _finish(case_id, desc, hdr, ctx, "CASE_ERROR", "FAIL", [bad], [])
     reached = _drive_stuck(ctx, hdr)
     if reached is None:
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", ctx.get("trigger_error") or "isvc bump failed")
@@ -18797,6 +18902,7 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     expected_victims = {c: _scale_victims(rows_at_op[c], N[c] - target[c]) for c in scaled if target[c] < N[c]}
     rows_after_op = {c: None for c in configured}
     print(f"  Phase 3: scale {' '.join(f'{c} {N[c]}→{target[c]}' for c in sorted(scaled))} while {stuck}"
+          + (f" (the {', '.join(sorted(bumped))} push, which the scale leaves alone)" if sibling else "")
           + (f" (expected to go first: {expected_victims})" if expected_victims else ""))
     rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
                  "-p", json.dumps(_replica_patch({c: target[c] for c in scaled})))
@@ -18806,10 +18912,11 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     op_ts = time.time()
     want = dict(target)
     budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in configured))
-    if direction == "up":
+    if direction == "up" and not sibling:
         # held: nothing may start; the window is the hold's. failed: the
         # ladder decides when (and whether) the new Instance is admitted,
-        # so the watch runs until the ladder is spent.
+        # so the watch runs until the ladder is spent. A scale beside the
+        # push converges like a plain one, on the rotate budget.
         budget = IDLE_HOLD_S if stuck == "held" else min(MAX_BUDGET_S, STUCK_HELD_WAIT_S)
     print(f"  Phase 4: watching the {direction} land on the {stuck} Component (≤{budget}s)")
     min_ready = dict(pre_ready)
@@ -18860,7 +18967,7 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
                 ladder_done = _stuck_signal(by_comp, bumped, "held")
                 if ladder_done:
                     print(f"    the ladder is spent {now - op_ts:.0f}s after the scale: {ladder_done}")
-        if direction == "up":
+        if direction == "up" and not sibling:
             if stuck == "failed" and ladder_done and now - op_ts >= STABILITY_S:
                 state = "LADDER_SPENT"
                 break
@@ -18874,7 +18981,7 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
                 break
         else:
             stable = None
-    if direction == "up" and state == "WATCHING":
+    if direction == "up" and not sibling and state == "WATCHING":
         state = "HELD_UP" if stuck == "held" else "WINDOW_ENDED"
 
     # Checks.
@@ -18886,7 +18993,7 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✓ {c} peak {ctx['peaks'][c]} ≤ ceiling {ceil[c]}")
     by_comp = _ir_by_component(case_id)
     now_pods = {c: _pods_by_index(ctx, c) for c in configured}
-    if direction == "down":
+    if direction == "down" or sibling:
         if state != "CONVERGED":
             verdict = "FAIL"
             got = " ".join(f"{c}={ctx.get('measures', {}).get(c, (0, 0, 0))[0]}/{want[c]}" for c in sorted(scaled))
@@ -18895,6 +19002,7 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
         else:
             got = " ".join(f"{c} {ctx.get('measures', {}).get(c, (0, 0, 0))[0]}/{want[c]}" for c in sorted(scaled))
             checks.append(f"  ✓ converged on the accepted count at {ctx['converged_at']:.1f}s ({got})")
+    if direction == "down":
         for c in sorted(scaled):
             rows_now = {str(r.get("index", "?")) for r in _instance_rows((by_comp.get(c) or {}).get("status") or {})}
             pre_indices = {idx for idx, _ph in rows_at_op[c]}
@@ -18925,31 +19033,20 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
                 checks.append(f"  ✗ {c}: surviving Instance(s) {needless} lost their running-revision pods to the scale and were rebuilt on the same revision — a needless recreate")
             else:
                 checks.append(f"  ✓ {c}: no survivor was rebuilt on the running revision")
-            if rolled and stuck == "held":
+            fail, line = _stuck_rolled_verdict(c, rolled, stuck, c in bumped, "the scale")
+            if fail:
                 verdict = "FAIL"
-                notes.append(f"{c}: the held roll took survivors {rolled} after the scale")
-                checks.append(f"  ✗ {c}: surviving Instance(s) {rolled} were taken onto the pushed revision after the scale — the hold did not freeze the roll")
-            elif rolled:
-                checks.append(f"  ⓘ {c}: the retry ladder took surviving Instance(s) {rolled} into its next attempt after the scale")
+                notes.append(fail)
+            if line:
+                checks.append(line)
     else:
         fresh = {c: new_index_seen.get(c, {}) for c in scaled}
-        on_running = {c: [idx for idx, hashes in fresh[c].items() if any(h in ctx["old_hashes"] for h in hashes)] for c in scaled}
         for c in sorted(scaled):
-            if on_running[c]:
-                verdict = "FAIL"
-                notes.append(f"{c}: new Instance(s) {on_running[c]} started on the running revision")
-                checks.append(f"  ✗ {c}: new Instance(s) {on_running[c]} came up on the running revision — a new Instance is rendered from the pushed revision only")
-            if stuck == "held":
-                if fresh[c]:
+            for fail, line in _stuck_fresh_verdict(c, fresh[c], ctx["old_hashes"], stuck, c in bumped, state, budget):
+                if fail:
                     verdict = "FAIL"
-                    notes.append(f"{c}: the scale-up started Instance(s) {sorted(fresh[c])} while held")
-                    checks.append(f"  ✗ {c}: while held the scale-up started new Instance(s) {sorted(fresh[c])} (pushed-revision pods) — a held revision admits no new Instance")
-                else:
-                    checks.append(f"  ✓ {c}: while held the scale-up started nothing across {budget}s — the new index waits as an empty slot")
-            elif fresh[c]:
-                checks.append(f"  ⓘ {c}: the retry window admitted new Instance(s) {sorted(fresh[c])} on the pushed revision; they are stuck like their peers")
-            else:
-                checks.append(f"  ⓘ {c}: no new Instance was admitted before the ladder was spent ({state})")
+                    notes.append(fail)
+                checks.append(line)
             needless, rolled = _survivor_changes(pre_pods[c], now_pods[c], ctx["old_hashes"])
             if needless:
                 verdict = "FAIL"
@@ -18957,12 +19054,20 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
                 checks.append(f"  ✗ {c}: Instance(s) {needless} lost their running-revision pods to the scale-up and were rebuilt on the same revision")
             else:
                 checks.append(f"  ✓ {c}: the scale-up left every running-revision Instance untouched")
-            if rolled and stuck == "held":
+            fail, line = _stuck_rolled_verdict(c, rolled, stuck, c in bumped, "the scale-up")
+            if fail:
                 verdict = "FAIL"
-                notes.append(f"{c}: the held roll took Instances {rolled} after the scale-up")
-                checks.append(f"  ✗ {c}: Instance(s) {rolled} were taken onto the pushed revision after the scale-up — the hold did not freeze the roll")
-            elif rolled:
-                checks.append(f"  ⓘ {c}: the retry ladder took Instance(s) {rolled} into its next attempt after the scale-up")
+                notes.append(fail)
+            if line:
+                checks.append(line)
+    # The pushed members the scale left alone (the sibling form): frozen
+    # under held; the ladder may still take an attempt under failed.
+    for c in sorted(bumped - scaled):
+        fail, line = _stuck_frozen_verdict(c, pre_pods[c], now_pods[c], stuck)
+        if fail:
+            verdict = "FAIL"
+            notes.append(fail)
+        checks.append(line)
     # The healthy survivors kept serving.
     for c in sorted(configured):
         mr, sust = min_ready.get(c, 0), floor_sust.get(c, 0.0)
@@ -19830,9 +19935,12 @@ def _recreate(case_id, yaml_file, desc, hdr):
                             and ctx["fault"]["kind"] in BROKEN_OP_PENDING) else None
     lift = str(hdr.get("lift") or "")
     if hdr.get("stuck"):
-        # The delete lands on a Component stuck on a revision that cannot be
-        # pulled: everything must still go, stuck pods included, and the
-        # same name must come back clean.
+        # The delete lands on a Component stuck on a broken revision:
+        # everything must still go, stuck pods included, and the same name
+        # must come back clean.
+        bad = _stuck_victim_error(hdr, _bumped(ctx))
+        if bad:
+            return _finish(case_id, desc, hdr, ctx, "CASE_ERROR", "FAIL", [bad], [])
         reached = _drive_stuck(ctx, hdr)
         if reached is None:
             return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", ctx.get("trigger_error") or "isvc bump failed")

@@ -772,5 +772,40 @@ class RuntimeEditBreakCellsTest(unittest.TestCase):
         self.assertEqual([("config missing", "persistent", "running", "engine")], c.faults)
 
 
+
+class StuckBreakCellsTest(unittest.TestCase):
+    """The cells a scale or a delete on a push parked by a break fills: the
+    kind's row on the new side, persistent, on the engine; the sibling row
+    when bump= and victimcomp= name the router or the decoder; the timing
+    is the hold's floor under held and rotating under failed."""
+
+    def setUp(self):
+        self.corpus = Corpus()
+        self.addCleanup(self.corpus.close)
+
+    def test_a_break_under_a_scale_or_a_delete_is_the_new_side(self):
+        down = self.corpus.write(mode="scaledown", to_e=2, stuck="held", topo="engine", **counts(3), **{"break": "crash-start"})
+        self.assertEqual(("scale down", ""), (down.operation, down.second_operation))
+        self.assertEqual([("crash at start", "persistent", "new", "engine")], down.faults)
+        self.assertEqual("held floor", down.timing)
+        up = self.corpus.write(mode="scaledown", to_e=4, stuck="failed", topo="engine", **counts(3), **{"break": "stuck"})
+        self.assertEqual(("scale up", [("readiness never passes", "persistent", "new", "engine")], "rotating"),
+                         (up.operation, up.faults, up.timing))
+        delete = self.corpus.write(mode="recreate", stuck="held", topo="engine", **counts(3), **{"break": "configkey"})
+        self.assertEqual(("delete", [("config missing", "persistent", "new", "engine")]), (delete.operation, delete.faults))
+        self.assertEqual([("crash after Ready", "persistent", "new", "engine")],
+                         self.corpus.write(mode="recreate", stuck="held", topo="engine", **counts(3), **{"break": "crash-load"}).faults)
+
+    def test_a_sibling_push_parked_beside_the_operation_is_the_sibling_row(self):
+        router = self.corpus.write(mode="scaledown", to_e=4, stuck="held", topo="engine", comps=engine_router(3),
+                                   bump="router", victimcomp="router", **counts(3, 0, 2), **{"break": "crash-start"})
+        self.assertEqual(("scale up", "engine+router single"), (router.operation, router.shape_family))
+        self.assertEqual([("sibling broken", "persistent", "new", "router")], router.faults)
+        decoder = self.corpus.write(mode="recreate", stuck="held", topo="pd-mn", comps=pd(2, 1),
+                                    bump="decoder", victimcomp="decoder", **counts(2, 2, 2), **{"break": "crash-start"})
+        self.assertEqual(("delete", "engine+decoder+router gang"), (decoder.operation, decoder.shape_family))
+        self.assertEqual([("sibling broken", "persistent", "new", "decoder")], decoder.faults)
+
+
 if __name__ == "__main__":
     unittest.main()

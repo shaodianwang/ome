@@ -1089,13 +1089,22 @@ cell holds it at its count on the same pods, and the gang invariants
 
 ### Operations on a stuck Component (`stuck=held|failed`)
 
-`stuck=held|failed` with `img=<unpullable image>` (`mode=scaledown` and
-`mode=recreate`) lands the mode's operation on a Component that is stuck
-on a revision it cannot pull. After the initial settle the runner pushes
-every bumped member (the coordination group's members, else the engine)
-onto `img=` — name the harness's unpullable reference,
-`example.com/canary-test/missing:none` (`runtime_fixtures.UNPULLABLE_IMAGE`)
-— and waits, reading the InferenceReplica: `stuck=failed` is the first
+`stuck=held|failed` with `img=<unpullable image>` or `break=<kind>`
+(`mode=scaledown` and `mode=recreate`) lands the mode's operation on a
+Component that is stuck on a broken revision. After the initial settle the
+runner pushes every bumped member (`bump=`, else the coordination group's
+members, else the engine) onto the broken revision: `img=` names the
+harness's unpullable reference, `example.com/canary-test/missing:none`
+(`runtime_fixtures.UNPULLABLE_IMAGE`);
+`break=crash-start|crash-load|configkey|stuck` puts one of the held
+moment's kinds on the runner of the member `victimcomp=` names (default:
+the one bumped member, else the engine) — the shell-less image, the
+fixture runtime's exit switch, a ConfigMap key the ConfigMap lacks (the
+case gives that runner a `configMapKeyRef` env and carries the ConfigMap
+as a second document) or the readiness switch — and the pushed member's
+`instanceReadyTimeout` bounds each attempt so a revision that never comes
+up parks its row `Failed` within the wait. The runner then waits, reading
+the InferenceReplica: `stuck=failed` is the first
 failed attempt (an Instance row reads `Failed`, or the retry block for the
 pushed revision records a started attempt), `stuck=held` is the retry
 ladder spent (a retry block in state `Held`, or the hold the status derives
@@ -1140,6 +1149,17 @@ Then the operation, judged on what the engine promises:
   its peers; the watch runs until the ladder is spent and reports whether
   the window admitted it.
 
+A scale that touches no bumped member — `bump=router victimcomp=router` in
+front of an engine fleet, `bump=decoder victimcomp=decoder` on a
+prefill/decode service, the engine scaled — is the sibling form: the
+engine's scale is read as a plain one (a scale-down takes the highest
+index, a scale-up's new Instance comes up on the running revision, the
+only one the engine has, and the survivors keep their pods), the pushed
+sibling's pod set stays as it was under `held` (the hold freezes its roll;
+under `failed` the ladder may take another attempt, reported `ⓘ`), and
+the sibling's push stays reported. A delete under either form takes
+everything.
+
 On every operation the Components the push never touched (a PD decoder and
 router with no group, the router with one) must stay as they were, and the
 status must keep reporting the push that has not landed: the update
@@ -1148,7 +1168,15 @@ Failed row says why; under `held` the hold itself must still be reported
 (only a new revision or a release lifts it). The generated
 `isvcs/gen-ops-held/` family crosses the two stuck kinds with the four
 operations, the surge and the drain-first strategies, the engine, PD and
-gang shapes, and a rolling group on PD.
+gang shapes, and a rolling group on PD; its break rows add one case per
+ledger cell for the held moment's other kinds under a scale-down, a
+scale-up and a delete on the six shape families — each kind read at one
+stuck state under one strategy (the crash at start held under the surge
+strategy, the crash after Ready held under the drain-first one, the
+missing key failed under the drain-first one, the readiness switch failed
+under the surge one), so the rows meet both states under both strategies
+— and the sibling form with the crash at start on the router or the
+decoder, held, under the surge strategy.
 
 ### A runtime edit and a repair overlapping (`mode=runtimerev` with a break)
 
@@ -1629,20 +1657,22 @@ cell on the six shape families (the surge strategy, the env edit):
   keeps serving at that floor (debounced like the capacity floor), and
   never more than that many Instances carry the crashing revision at once
   — the allowance is the larger of maxSurge and maxUnavailable, plus one
-  under a drain-first strategy (RecreatePod, or in-place resolving to a
-  recreate) with `form=load`: the promoted crashing Instance admits the
-  next start before it crashes (minReadySeconds is zero), so two are off
-  at once at the floor, as a Deployment reaches too, while the surge
-  strategy keeps the strict budget, except on a fleet it rolls whole inside
-  the crash window: each further Instance takes one startup to come up
+  with `form=load` under every strategy: the promoted crashing Instance
+  still looks healthy when the roll admits the next start (a drain under
+  a drain-first strategy, a surge under the surge one; minReadySeconds is
+  zero), so two are off at once at the floor, as a Deployment reaches too
+  — at most budget plus one Instances off the running revision, the extra
+  one being that start — and on a fleet the surge strategy rolls whole
+  inside the crash window the whole fleet is the allowance: each further
+  Instance takes one startup to come up
   (`RUNNER_STARTUP_S`, the fixture's `TEST_STARTUP_DELAY`, 15) and the
   first crash shows `CRASH_EXIT_AFTER_S` (20) after the first promotion,
   so on a fleet of two the second promote and drain land before any
   restart is visible and the whole fleet is the allowance
   (`_surge_roll_fits_crash_window`: `(N - 1) × (startup + minReadySeconds)
   < crash exit`; the verdict's note states it), while a larger fleet,
-  whose first crash is visible before the roll completes, keeps the strict
-  budget; status says why the roll stopped — a `rolloutHold` on
+  whose first crash is visible before the roll completes, keeps budget
+  plus one; status says why the roll stopped — a `rolloutHold` on
   the victim Component from the retry ladder (`RetryBlock`, `Held`) or the
   budget (`Budget`), or one of its Instance rows at `Failed`, and a
   `RetryHeld` or `InstanceFailed` event naming it — within the rotate
