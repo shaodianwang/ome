@@ -7574,7 +7574,7 @@ class PlainRollbackTest(unittest.TestCase):
         self.assertEqual(6, len(shapes))
         self.assertEqual(shapes, {(kv["topo"], kv["Nr"]) for _n, kv, _m in held})
         engine_rows = [(n, kv, m) for n, kv, m in running if "victimcomp" not in kv]
-        self.assertEqual({(f, fo, li) for f, fo, li in generate_cases.ROLLBACK_FAULT_ROWS},
+        self.assertEqual({(f, form, li) for f, form, li in generate_cases.ROLLBACK_FAULT_ROWS},
                          {(m["fault"], m["form"], m["lift"]) for _n, _kv, m in engine_rows})
         self.assertEqual(set(run.ROLLBACK_FAULT_HOOKS), {kv["during"] for _n, kv, _m in engine_rows})
         self.assertEqual({"SurgeThenDrain", "RecreatePod", "InPlaceIfPossible"}, {m["strat"] for _n, _kv, m in engine_rows})
