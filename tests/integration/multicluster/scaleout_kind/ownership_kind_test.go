@@ -1,13 +1,22 @@
 package scaleout_kind
 
 import (
+	"slices"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
+	"knative.dev/pkg/apis"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
+	"github.com/ome-projects/ome/pkg/placement/protocol"
 	"github.com/ome-projects/ome/tests/integration/multicluster"
 )
 
@@ -121,3 +130,157 @@ var _ = ginkgo.Describe("Multi-cluster ownership (KIND)", func() {
 		}).WithTimeout(10 * time.Second).WithPolling(time.Second).Should(gomega.Succeed())
 	})
 })
+
+// Adoption changes execution authority without changing the serving templates.
+type adoptionIdentity struct {
+	ServiceUID      types.UID
+	ReplicaUID      types.UID
+	CurrentRevision string
+	UpdateRevision  string
+	PodUIDs         []string
+}
+
+func adoptionIdentityOn(g gomega.Gomega, member memberReg, key client.ObjectKey) adoptionIdentity {
+	service := &v1beta1.InferenceService{}
+	g.Expect(member.c.client.Get(member.c.ctx, key, service)).To(gomega.Succeed())
+	g.Expect(service.DeletionTimestamp.IsZero()).To(gomega.BeTrue())
+	replica := &v1beta1.InferenceReplica{}
+	g.Expect(member.c.client.Get(member.c.ctx,
+		client.ObjectKey{Namespace: key.Namespace, Name: key.Name + "-engine"}, replica)).To(gomega.Succeed())
+	g.Expect(replica.DeletionTimestamp.IsZero()).To(gomega.BeTrue())
+	g.Expect(replica.Status.CurrentRevision).NotTo(gomega.BeEmpty())
+	g.Expect(replica.Status.UpdateRevision).To(gomega.Equal(replica.Status.CurrentRevision))
+	pods := enginePodsOn(g, member.c, key.Namespace, key.Name)
+	g.Expect(pods).To(gomega.HaveLen(1))
+	g.Expect(readyEnginePodsOn(g, member.c, key.Namespace, key.Name)).To(gomega.Equal(1))
+	identity := adoptionIdentity{
+		ServiceUID: service.UID, ReplicaUID: replica.UID,
+		CurrentRevision: replica.Status.CurrentRevision, UpdateRevision: replica.Status.UpdateRevision,
+	}
+	for _, pod := range pods {
+		g.Expect(pod.DeletionTimestamp.IsZero()).To(gomega.BeTrue())
+		identity.PodUIDs = append(identity.PodUIDs, string(pod.UID))
+	}
+	slices.Sort(identity.PodUIDs)
+	return identity
+}
+
+var _ = ginkgo.DescribeTable("Direct ClusterAffinity adoption (KIND)",
+	func(mode v1beta1.PlacementMode) {
+		env := setupSpecEnv()
+		model, runtime := env.seedModelRuntimeOnMembers()
+		members := env.members
+		if mode == v1beta1.PlacementModeSingle {
+			members = members[:1]
+		}
+		key := client.ObjectKey{Namespace: env.isvcNS, Name: env.isvcName}
+		before := map[string]adoptionIdentity{}
+		ginkgo.By("serving member-local workloads before creating a hub source")
+		for _, member := range members {
+			local := env.createMemberOwnedISVC(member, model, runtime)
+			gomega.Expect(protocol.IsAffinityMember(local)).To(gomega.BeFalse())
+			gomega.Eventually(func(g gomega.Gomega) {
+				before[member.wcName] = adoptionIdentityOn(g, member, key)
+			}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
+		}
+
+		ginkgo.By("creating an explicit source that cannot overwrite the unowned members")
+		source := env.createSource(model, runtime, mode, 1, func(s *v1beta1.InferenceService) {
+			names := make([]string, 0, len(members))
+			for _, member := range members {
+				names = append(names, member.wcName)
+			}
+			s.Spec.Placement.ClusterAffinity = []v1beta1.ClusterAffinityTerm{{
+				MatchFields: []v1beta1.ClusterSelectorRequirement{{
+					Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: names,
+				}},
+			}}
+			if mode == v1beta1.PlacementModeSplit {
+				s.Spec.Placement.Split = &v1beta1.SplitSpec{
+					Replicas: ptr.To(int32(len(members))), MaxReplicasPerCluster: 1,
+				}
+			}
+		})
+		assertIdentity := func(g gomega.Gomega) {
+			for _, member := range members {
+				g.Expect(cmp.Diff(before[member.wcName], adoptionIdentityOn(g, member, key))).
+					To(gomega.BeEmpty(), "adoption must preserve the serving workload on %s", member.wcName)
+			}
+		}
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(controlCluster.client.Get(controlCluster.ctx, key, source)).To(gomega.Succeed())
+			condition := source.Status.GetCondition(v1beta1.PlacementBackendReady)
+			g.Expect(condition).NotTo(gomega.BeNil())
+			g.Expect(condition.Status).To(gomega.Equal(corev1.ConditionUnknown))
+			g.Expect(condition.Reason).To(gomega.Equal("BackendUnknown"))
+			assertIdentity(g)
+		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
+
+		ginkgo.By("handing ownership to the source one member at a time")
+		for i, member := range members {
+			gomega.Eventually(func(g gomega.Gomega) {
+				local := &v1beta1.InferenceService{}
+				g.Expect(member.c.client.Get(member.c.ctx, key, local)).To(gomega.Succeed())
+				g.Expect(local.UID).To(gomega.Equal(before[member.wcName].ServiceUID))
+				base := local.DeepCopy()
+				if local.Labels == nil {
+					local.Labels = map[string]string{}
+				}
+				if local.Annotations == nil {
+					local.Annotations = map[string]string{}
+				}
+				local.Labels[placement.PlacementOriginLabel] = string(source.UID)
+				local.Labels[placement.PlacementControlPlaneLabel] = controlPlaneID
+				local.Annotations[placement.PlacementOriginUIDAnnotation] = string(source.UID)
+				g.Expect(member.c.client.Patch(member.c.ctx, local,
+					client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))).To(gomega.Succeed())
+			}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
+			if i+1 < len(members) {
+				gomega.Consistently(func(g gomega.Gomega) {
+					assertIdentity(g)
+					unowned := &v1beta1.InferenceService{}
+					next := members[i+1]
+					g.Expect(next.c.client.Get(next.c.ctx, key, unowned)).To(gomega.Succeed())
+					g.Expect(unowned.Labels[placement.PlacementOriginLabel]).To(gomega.BeEmpty())
+					g.Expect(unowned.Annotations[placement.PlacementOriginUIDAnnotation]).To(gomega.BeEmpty())
+					g.Expect(protocol.IsAffinityMember(unowned)).To(gomega.BeFalse())
+				}).WithTimeout(3 * placementRequeue).WithPolling(pollInterval).Should(gomega.Succeed())
+			}
+		}
+
+		assertAdopted := func(g gomega.Gomega) {
+			assertIdentity(g)
+			g.Expect(controlCluster.client.Get(controlCluster.ctx, key, source)).To(gomega.Succeed())
+			for _, conditionType := range []apis.ConditionType{
+				v1beta1.PlacementConverged, v1beta1.PlacementSatisfied,
+			} {
+				condition := source.Status.GetCondition(conditionType)
+				g.Expect(condition).NotTo(gomega.BeNil())
+				g.Expect(condition.Status).To(gomega.Equal(corev1.ConditionTrue))
+			}
+			g.Expect(source.Status.Placement).NotTo(gomega.BeNil())
+			g.Expect(source.Status.Placement.Plan).NotTo(gomega.BeNil())
+			for _, member := range members {
+				derived := &v1beta1.InferenceService{}
+				g.Expect(member.c.client.Get(member.c.ctx, key, derived)).To(gomega.Succeed())
+				g.Expect(derived.Spec.Placement).To(gomega.BeNil())
+				g.Expect(derived.Annotations[constants.PlacementPolicy]).To(gomega.Equal(string(v1beta1.PlacementPolicyClusterAffinity)))
+				policy, err := protocol.FromDerived(derived)
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+				g.Expect(policy).NotTo(gomega.BeNil())
+				g.Expect(policy.SourceUID).To(gomega.Equal(source.UID))
+				g.Expect(policy.PlanID).To(gomega.Equal(source.Status.Placement.Plan.ID))
+				replica := &v1beta1.InferenceReplica{}
+				g.Expect(member.c.client.Get(member.c.ctx,
+					client.ObjectKey{Namespace: key.Namespace, Name: key.Name + "-engine"}, replica)).To(gomega.Succeed())
+				g.Expect(cmp.Diff(policy, replica.Spec.PlacementExecution)).To(gomega.BeEmpty())
+			}
+		}
+		ginkgo.By("converging with the same pods, replica identities and serving revisions")
+		gomega.Eventually(assertAdopted).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
+		gomega.Consistently(assertAdopted).WithTimeout(3 * placementRequeue).WithPolling(pollInterval).Should(gomega.Succeed())
+	},
+	ginkgo.Entry("Single retains its existing home", v1beta1.PlacementModeSingle),
+	ginkgo.Entry("All retains both existing homes", v1beta1.PlacementModeAll),
+	ginkgo.Entry("Split retains both exact shares", v1beta1.PlacementModeSplit),
+)

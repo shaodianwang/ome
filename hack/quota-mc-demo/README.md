@@ -41,10 +41,12 @@ carry. `status.sh` shows which are missing.
 
 ### 1. Label the WorkloadClusters
 
-`spec.placement.requirements` is matched against `WorkloadCluster` labels and
-**nothing else**, and an ISVC that declares no requirement matches *no* cluster.
-A registered cluster carries no labels of its own, so without this step nothing
-is ever placed and the failure is silent.
+Every hub fixture explicitly selects `policy: ClusterAffinity` and a placement
+mode. Its `clusterAffinity` terms select `WorkloadCluster` labels through
+`matchExpressions`. Label both members before applying a source; an unmatched
+selector leaves its replica floor unsatisfied. Omitting `clusterAffinity`
+selects every registered member, so keep the selector when restricting the
+demo to TPU members.
 
 ```sh
 kubectl --kubeconfig "$HUB" label workloadcluster \
@@ -53,15 +55,15 @@ kubectl --kubeconfig "$HUB" label workloadcluster \
   member-b-tpu accelerator=tpu7x zone=b --overwrite
 ```
 
-`accelerator` is what every fixture here requires; `zone` tells the two apart so
-one can be singled out with `clusterSelector`. The quota plane never reads
-either.
+`accelerator` is what every fixture here requires; `zone` lets an additional
+`matchExpressions` entry select just one member. The quota plane never reads
+either label.
 
 > [!WARNING]
 > These objects are GitOps-managed, and the GitOps controller runs outside the
 > fleet, so its sync policy is not readable from the hub. A hand-applied label
 > shows as drift and is reverted on the next sync if self-heal is on — after
-> which nothing is placed and, again, nothing reports an error. Re-read the
+> which the source cannot satisfy its placement floor. Re-read the
 > first block of `status.sh` immediately before demoing, and put the labels in
 > the GitOps source for anything past a demo window.
 
@@ -282,11 +284,10 @@ kubectl --kubeconfig "$MEMBER_B" -n ome-mc-test \
 kubectl --kubeconfig "$MEMBER_B" get aq mc-demo.serving -o wide
 ```
 
-`ADMITTED` pins at exactly 16 and stays there. The point worth landing: **from
-the hub this looks healthy.** The derived objects exist, both candidates are
-listed, nothing is `Degraded` — only `readyReplicas` is short. A quota refusal
-is not an error condition anywhere up the stack; it is a workload waiting, and
-the only place it is visible is the pod's scheduling gate.
+`ADMITTED` pins at exactly 16 and stays there. The hub keeps five desired
+replicas on each member and reports `PlacementSatisfied=False` while admission
+falls short. Inspect the per-home desired, admitted and ready counts, then the
+pod scheduling gates to distinguish quota exhaustion from other causes.
 
 Run it *after* Part 2 and it is starker: `mc-demo-fits` already holds 8 of the
 16, so only two of the five fit and three stay gated. Delete `mc-demo-fits` and
@@ -301,22 +302,23 @@ kubectl --kubeconfig "$HUB" \
   apply -f hack/quota-mc-demo/fixtures/22-isvc-split.yaml
 ```
 
-8 replicas is 32 chips — the entire budgeted fleet — and no member has room for
-more than 4. A converged 4/4 is evidence of real apportionment rather than an
-even division chosen up front.
+8 replicas is 32 chips — the entire budget in this example. Unweighted
+`Split` divides that floor equally across the two selected members, assigning
+four replicas to each. The explicit `maxReplicasPerCluster: 4` bounds each
+home at that share.
 
-Give it a couple of reconcile cycles. `Packed` does not know either member's
-budget, so it over-requests the whole deficit on both, lets each Kueue arbitrate,
-and trims to what actually admitted — a `get pods -w` during convergence shows 8
-pods per member with half gated before settling to 4. That transient is the
-mechanism, not a fault.
+Kueue checks each share against the member's quota. With both sixteen-chip
+shares available, expect four Running pods per member and
+`PlacementSatisfied=True`. If one member cannot admit its four replicas,
+the hub reports the shortfall and keeps the requested distribution; it does
+not move the missing replicas to the other member. Use `SplitByCapacity`
+when shares should follow published capacity.
 
 ## Optional — a runtime that actually uses the TPU
 
 `01-runtime.yaml` is a sleep container: it claims chips so quota has something to
-count, and never touches the accelerator. `40-runtime-tpu-jax.yaml` is the real
-thing — JAX on live `tpu7x` silicon behind an OpenAI-shaped API. Verified on
-member B.
+count, and never touches the accelerator. `40-runtime-tpu-jax.yaml` runs JAX
+on `tpu7x` hardware behind an OpenAI-shaped API.
 
 ```sh
 # Through a mirror: mirror_images < .../40-runtime-tpu-jax.yaml | kubectl ... apply -f -
@@ -335,24 +337,16 @@ $ curl -s localhost:8080/health
 matmul on a TPU device per request. **There is no model** — the response text
 describes the mesh it ran on. Real chips, real JAX, no weights.
 
-Serving an actual LLM is deliberately out of scope. The production path on this
-fleet is the production TPU serving image at `tensor-parallel-size=16`
-with 500–800Gi of memory, a Ray leader/worker bootstrap, an XLA warm-cache
-tarball and a checkpoint mounted from a per-cluster GCS bucket over the gcsfuse
-CSI driver. One replica is 16 chips — an entire member's share — so it cannot
-demonstrate a quota ceiling, and it is neither minimal nor portable between the
-two members.
+Serving an LLM is outside this demo's scope. The echo runtime exercises
+scheduling and TPU initialization without checkpoint storage or model loading.
 
 Three things this fixture pair pins down, each of which fails quietly if dropped:
 
-- **`2x2x2`, not a single pod.** A lone 4-chip pod works on a `2x2x1`
-  single-host pool, which only one member has; the other carries `2x2x2` and
-  larger, where one pod half-claims a two-host slice. 1 leader + 1 worker = 2
-  pods = 8 chips is the smallest shape both members can schedule.
+- **`2x2x2` topology.** One leader and one worker occupy two hosts with four
+  chips each. Both members need a node pool that supports this shape.
 - **`topologyKey: cloud.google.com/gke-tpu-partition-2x2x2-id`** co-locates the
-  gang in one slice. Confirmed: both pods landed on
-  partition `12f1a232…`, pool `b2p1-blk1-sblk134-2x2x2-00`. Without it they can
-  split across slices and libtpu never forms a mesh.
+  gang in one slice. Without it the pods can split across slices and libtpu
+  cannot form a mesh.
 - **`global=16` is cores, not chips.** tpu7x is two cores per chip, so 16 cores
   = 8 chips = 2 hosts × 4. A host that failed to join reports `global=8` rather
   than an error.
@@ -362,9 +356,27 @@ Three things this fixture pair pins down, each of which fails quietly if dropped
 > label and hold 8 real chips while charging no budget. Placement stamps that
 > label from the ISVC's own `ome.io/local-queue` annotation and nothing else —
 > the operator-wide fallback is empty, since a LocalQueue is named for its leaf.
-> Add the annotation and place it from the hub (see the comment in
-> `41-isvc-tpu-jax.yaml`) to have it charge a leaf. At 8 chips a replica, a
-> 16-chip share funds two.
+> At eight chips per replica, a sixteen-chip share funds two.
+
+To run this service through the hub, install its namespaced runtime on every
+selected member, add the following fields to the source manifest, and apply
+the source to the hub. Creating a source alone does not adopt an existing
+member service with the same name; its local ownership remains protected.
+
+```yaml
+metadata:
+  annotations:
+    ome.io/local-queue: mc-demo.serving
+spec:
+  placement:
+    policy: ClusterAffinity
+    mode: All
+    clusterAffinity:
+      - matchExpressions:
+          - key: accelerator
+            operator: In
+            values: [tpu7x]
+```
 
 ## Cleanup
 
@@ -438,11 +450,8 @@ engine does not.
 
 **Why single-pod and not a multi-host gang.** A gang drags in `PodGroup`s, a
 topology key and `ome-scheduler`'s co-location plugin, none of which the quota
-plane touches. The admission story is identical and the failure surface is far
-smaller. It also sidesteps the one real gap here: OME stamps the queue-name
-label but no pod-group label, so Kueue funds a service **pod by pod** rather than
-all-or-nothing. For a single-pod runtime that is the natural unit; a multi-host
-gang would want group semantics and does not get them today.
+plane touches. The single-pod runtime keeps the demo focused on per-replica
+quota admission; each admitted replica consumes exactly four chips.
 
 **Why the runtime's nodeSelector is exactly the flavor's node labels.** Kueue
 assigns a workload to a flavor only if the pod's own node selection is compatible

@@ -1,67 +1,28 @@
-# A service no single member has the budget for, distributed across both.
-#
-#   kubectl --kubeconfig "$HUB" \
-#     apply -f hack/quota-mc-demo/fixtures/10-tree-explicit.yaml
-#   kubectl --kubeconfig "$HUB" \
-#     apply -f hack/quota-mc-demo/fixtures/22-isvc-split.yaml
-#
-# This is the fixture the fleet exists for. Eight replicas is 32 chips — the
-# whole budgeted fleet — and 10-tree-explicit hands each member 16, so the only
-# apportionment that fits is 4 and 4. Neither member could run all eight, which
-# is what makes a converged placement evidence of real apportionment rather
-# than an even division chosen up front.
-#
-# Expect 4 Running pods on each member, and the derived copy on each carrying
-# only that member's share:
-#
-#   kubectl --kubeconfig "$MEMBER_B" -n ome-mc-test \
-#     get isvc mc-demo-split -o jsonpath='{.spec.engine.minReplicas}/{.spec.engine.maxReplicas}{"\n"}'
-#   kubectl --kubeconfig "$HUB" -n ome-mc-test \
-#     get isvc mc-demo-split -o jsonpath='{range .status.placement.candidates[*]}{.cluster}={.readyReplicas}{"\n"}{end}'
-#
-# HOW IT GETS THERE, WHICH IS VISIBLE AND LOOKS ALARMING
-#
-# Packed (spread: false, the default) does not know either member's budget. On
-# the first pass nothing is admitted anywhere, so it over-requests the entire
-# deficit on every candidate in preference order: both members are asked for 8.
-# Kueue funds the 4 each can pay for and gates the other 4. On the next pass the
-# admitted total has reached the desired 8, so the trim regime pins each home to
-# what it actually holds and the surplus pods are removed.
-#
-# So a `get pods -w` during convergence shows 8 pods per member, half of them
-# gated, settling to 4. That transient IS the mechanism — over-request, let each
-# member's Kueue arbitrate, converge on the answer — and not a bug to explain
-# away. Give it a reconcile cycle before reading the result.
-#
-# spread: true short-circuits it by asking for a flat ceil(8/2) = 4 up front,
-# which reaches the same place without the transient and without consulting
-# quota at all. Use Packed when the point is that quota decided.
-#
-# This consumes every budgeted chip in the fleet. Run it alone.
+# Eight replicas divide equally across the two selected members: four per home.
+# Each home consumes its sixteen-chip quota share. Run this fixture alone.
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata:
   name: mc-demo-split
   namespace: ome-mc-test
   annotations:
-    # The leaf this workload charges. Placement resolves the queue from this
-    # first and the operator-configured placement.localQueue second, and that
-    # default is empty on purpose: a LocalQueue is named for its leaf, so no one
-    # fleet-wide name can address more than one tenant. Until the
-    # ISVC->(queue, priority) resolver lands, a workload names its own leaf.
+    # Charge the AcceleratorQuota leaf that supplies the member LocalQueue.
     ome.io/local-queue: mc-demo.serving
   labels:
     ome.io/mc-demo: "true"
 spec:
-  # See 20-isvc-fits.yaml: the typed field is what selects OMENative. The
-  # top-level annotation is not read by the reconciler.
   deploymentMode: OMENative
   placement:
+    policy: ClusterAffinity
     mode: Split
-    requirements: accelerator=tpu7x
+    clusterAffinity:
+      - matchExpressions:
+          - key: accelerator
+            operator: In
+            values: [tpu7x]
     split:
       replicas: 8
-      spread: false
+      maxReplicasPerCluster: 4
   runtime:
     name: mc-demo-tpu
   engine:
