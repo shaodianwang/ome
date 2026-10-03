@@ -220,13 +220,18 @@ func servingAnchor(row *v1beta1.OMENativeInstanceStatus, pod *corev1.Pod, since 
 // loop dated after anchor, and names the death. The latest recorded
 // termination, the current one or the one before the current run, dates
 // the death; a run with no termination recorded is a start, not a death.
-// Three faces read as the loop: the kubelet backing off the next restart,
-// a death of a run that a restart inside the window began, so the pod has
-// died twice since the step began, and a death of the rebuilt pod of an
-// Instance the workload already rebuilt for a death inside the step, the
-// Instance's second death under one restart policy's repair. Sidecars and
-// init containers never count; the kubelet restarts them in place without
-// touching the serving process.
+// Two faces read as the loop: a death of a run that a restart inside the
+// window began, so the pod has died twice since the Instance served,
+// whether the kubelet has restarted it again or is backing off; and a
+// death of the rebuilt pod of an Instance the workload already rebuilt for
+// a death inside the step, the Instance's second death under one restart
+// policy's repair. The kubelet's back-off alone names no loop: it
+// remembers a crash from before the anchor as well, a boot crash or an
+// exit in the second the Instance entered Ready, which neither the
+// workload nor this reading dates after the Instance served, so the death
+// it backs off from is that run's one death inside the window. Sidecars
+// and init containers never count; the kubelet restarts them in place
+// without touching the serving process.
 func runnerCrashLooping(pod *corev1.Pod, row *v1beta1.OMENativeInstanceStatus, anchor, since time.Time) (string, bool) {
 	for i := range pod.Status.ContainerStatuses {
 		status := &pod.Status.ContainerStatuses[i]
@@ -244,17 +249,15 @@ func runnerCrashLooping(pod *corev1.Pod, row *v1beta1.OMENativeInstanceStatus, a
 				priorRuns--
 			}
 		}
-		if waiting := status.State.Waiting; waiting != nil && waiting.Reason == constants.StateReasonCrashLoopBackOff {
-			if died == nil || died.FinishedAt.Time.After(anchor) {
-				return crashDetail(status.Name, waiting.Reason, died), true
-			}
-			return "", false
-		}
 		if died == nil || !died.FinishedAt.Time.After(anchor) {
 			return "", false
 		}
 		if priorRuns >= 1 && died.StartedAt.Time.After(anchor) {
-			return crashDetail(status.Name, died.Reason, died), true
+			reason := died.Reason
+			if waiting := status.State.Waiting; waiting != nil && waiting.Reason == constants.StateReasonCrashLoopBackOff {
+				reason = waiting.Reason
+			}
+			return crashDetail(status.Name, reason, died), true
 		}
 		if rebuiltForDeathAfter(row, since) && died.FinishedAt.Time.After(row.LastFailure.Time.Time) {
 			return crashDetail(status.Name, died.Reason, died), true

@@ -627,3 +627,86 @@ func TestDispatch_RebuiltPodDyingAgainInsideItsSoakParksAtTheStep(t *testing.T) 
 		t.Fatal("the park must be announced with an event")
 	}
 }
+
+// TestDispatch_FirstDeathAtTheInstanceReadyStampIsOneDeath replays the
+// surged canary Instance whose runner exits as the surge completes: the row
+// enters Ready as the old pod finishes draining, in the same second the new
+// runner dies, and the kubelet restarts it in that second too. Neither the
+// workload nor the canary dates that death after the Instance served. The
+// restarted runner serves and dies again, and the kubelet backs off: that
+// is the step's first death, a restart the soak waits out; the policy's
+// rebuild answers it, and the rebuilt pod's own death parks the step.
+func TestDispatch_FirstDeathAtTheInstanceReadyStampIsOneDeath(t *testing.T) {
+	t0 := time.Unix(100000, 0)
+	w := armTimedCanaryWire(t, 20*time.Second, t0)
+
+	// The surge completes ten seconds after the split served, as the runner
+	// dies and is restarted in place; the restarted runner serves and dies
+	// thirty-one seconds later, and the kubelet backs off.
+	stamp := t0.Add(10 * time.Second)
+	w.mutateRow(t, 3, func(row *v1beta1.OMENativeInstanceStatus) { row.ReadySince = &metav1.Time{Time: stamp} })
+	w.setRunner(t, "target-3", runnerInCrashLoopBackOff(stamp, stamp.Add(31*time.Second)), false)
+	w.dispatchAt(t, stamp.Add(32*time.Second))
+	if cs, phase := w.status(); cs.CurrentStep != 0 || phase != v1beta1.RolloutPhasePaused {
+		t.Fatalf("one death after the Instance served is a restart, not a loop, got step %d phase %q (%+v)", cs.CurrentStep, phase, cs)
+	}
+
+	// The policy rebuilds the Instance for that death; the replacement
+	// serves twenty seconds later and the soak measures from it.
+	w.rebuildInstance(t, "target-3", 3, stamp.Add(31*time.Second), stamp.Add(33*time.Second))
+	w.dispatchAt(t, stamp.Add(34*time.Second))
+	w.rebuiltServes(t, "target-3", 3, stamp.Add(53*time.Second))
+	w.dispatchAt(t, stamp.Add(60*time.Second))
+	if cs, phase := w.status(); cs.CurrentStep != 0 || phase != v1beta1.RolloutPhasePaused {
+		t.Fatalf("the rebuilt pod is soaking, got step %d phase %q", cs.CurrentStep, phase)
+	}
+
+	// The replacement dies inside its soak: the Instance's second death.
+	w.setRunner(t, "target-3", runnerStillDead(stamp.Add(63*time.Second)), false)
+	w.dispatchAt(t, stamp.Add(64*time.Second))
+	if cs, phase := w.status(); phase != v1beta1.RolloutPhaseFailed || cs.CurrentStep != 0 {
+		t.Fatalf("the rebuilt pod's death parks the soaking step, got step %d phase %q", cs.CurrentStep, phase)
+	}
+}
+
+// TestDispatch_DyingPodAndRebuildStampInOnePassIsOneDeath: the pass that
+// reads the pod's first death also sees the policy's rebuild stamp on the
+// row, and the next pass sees only the rebuilt pod. One death, carried by
+// the pod and by the row, is one restart: step 0 stays Paused until a
+// second death inside the soak.
+func TestDispatch_DyingPodAndRebuildStampInOnePassIsOneDeath(t *testing.T) {
+	t0 := time.Unix(100000, 0)
+	w := armTimedCanaryWire(t, 20*time.Second, t0)
+
+	died := t0.Add(10 * time.Second)
+	w.setRunner(t, "target-3", runnerDied(died), false)
+	w.mutateRow(t, 3, func(row *v1beta1.OMENativeInstanceStatus) {
+		row.Phase = v1beta1.OMENativeInstanceRestarting
+		row.Incarnation = 2
+		exit := int32(1)
+		row.LastFailure = &v1beta1.InstanceTermination{PodName: "target-3", ContainerName: constants.MainContainerName,
+			Reason: constants.StateReasonError, ExitCode: &exit, Time: metav1.NewTime(died)}
+	})
+	w.dispatchAt(t, died.Add(time.Second))
+	if cs, phase := w.status(); cs.CurrentStep != 0 || phase != v1beta1.RolloutPhasePaused {
+		t.Fatalf("the dying pod and the rebuild's stamp carry one death, got step %d phase %q (%+v)", cs.CurrentStep, phase, cs)
+	}
+
+	w.rebuildInstance(t, "target-3", 3, died, died.Add(2*time.Second))
+	w.dispatchAt(t, died.Add(3*time.Second))
+	if cs, phase := w.status(); cs.CurrentStep != 0 || phase != v1beta1.RolloutPhasePaused {
+		t.Fatalf("the rebuilt pod alone carries no death, got step %d phase %q", cs.CurrentStep, phase)
+	}
+
+	w.rebuiltServes(t, "target-3", 3, died.Add(20*time.Second))
+	w.dispatchAt(t, died.Add(35*time.Second))
+	if cs, phase := w.status(); cs.CurrentStep != 0 || phase != v1beta1.RolloutPhasePaused {
+		t.Fatalf("the rebuilt pod is soaking, got step %d phase %q", cs.CurrentStep, phase)
+	}
+
+	w.setRunner(t, "target-3", runnerStillDead(died.Add(38*time.Second)), false)
+	w.dispatchAt(t, died.Add(39*time.Second))
+	if cs, phase := w.status(); phase != v1beta1.RolloutPhaseFailed || cs.CurrentStep != 0 {
+		t.Fatalf("a second death inside the soak parks the soaking step, got step %d phase %q", cs.CurrentStep, phase)
+	}
+}
