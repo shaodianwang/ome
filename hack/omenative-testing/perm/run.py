@@ -17802,6 +17802,76 @@ def _promote_held_after_podkill(verb, verb_fired, verb_ts, hold_s, now):
     return verb == "podkill" and verb_fired and now - verb_ts < hold_s
 
 
+def _podkill_fault_at_hold(fault, hook, step):
+    """A podkill fault aimed at the hold the ladder is at: its hook names the
+    current grid state and, where it names one, the current step."""
+    return bool(fault) and fault.get("kind") == "podkill" and not fault.get("infra_fail") \
+        and _hook_due(str(fault.get("param") or ""), hook, step)
+
+
+def _podkill_dip_over(fault, pod_state, pods_per_inst):
+    """Whether the dip a podkill fault made has closed: the deleted pod is
+    gone and its Instance is whole again on Ready pods, or the roll retired
+    the Instance (no pod of its index left, none leaving)."""
+    if not fault.get("fired"):
+        return False
+    comp, inst = fault.get("victim_comp", ""), str(fault.get("victim_inst", ""))
+    mine = _instance_pods(pod_state, comp, inst)
+    if any(p.get("uid") and p["uid"] == fault.get("victim_uid") for _n, p in mine):
+        return False
+    if len(mine) >= pods_per_inst.get(comp, 1) and all(p.get("ready") for _n, p in mine):
+        return True
+    leaving = any(p and not p["alive"] and p.get("comp") == comp and str(p.get("inst", "0")) == inst
+                  for p in pod_state.values())
+    return not mine and not leaving
+
+
+def _promote_held_after_podkill_fault(fault, hook, step, pod_state, pods_per_inst, hold_s, now):
+    """Under a manual gate the harness's promote waits for a podkill fault
+    aimed at the hold: for the deletion to fire, then for the dip it made to
+    close, so the step is promoted with its capacity back instead of racing
+    the deletion inside the controller (hold, kill, dip, capacity back,
+    promote, cutover). The wait is bounded: hold_s after the deletion (after
+    the hold began, while the fault has not fired) the promote is issued
+    anyway and the fault's notes say the capacity was still down, so the
+    product is still judged. The hold covers the fault's first deletion; its
+    bookkeeping lands on the fault record."""
+    if not _podkill_fault_at_hold(fault, hook, step):
+        return False
+    if fault.get("hold_back_at") is not None or fault.get("hold_expired_at") is not None:
+        return False
+    fault.setdefault("hold_since", now)
+    if _podkill_dip_over(fault, pod_state, pods_per_inst):
+        fault["hold_back_at"] = now
+        return False
+    anchor = fault.get("fired_ts") if fault.get("fired") else fault["hold_since"]
+    if now - anchor < hold_s:
+        return True
+    fault["hold_expired_at"] = now
+    if fault.get("fired"):
+        fault["notes"].append(f"the manual gate's hold ran out {hold_s}s after the deletion with "
+                              f"{fault.get('victim_comp')} Instance {fault.get('victim_inst')} still short; "
+                              f"the promote was issued with the capacity down")
+    else:
+        fault["notes"].append(f"the manual gate's hold ran out {hold_s}s after the gate was reached and the "
+                              f"podkill at {fault.get('param')} had not fired; the promote was issued")
+    return False
+
+
+def _podkill_hold_summary(fault):
+    """How the manual gate's hold for a podkill fault ended, for the verdict;
+    None when no hold was taken. A hold that ran out is told by the fault's
+    own notes."""
+    if not fault or fault.get("hold_since") is None or fault.get("hold_expired_at") is not None:
+        return None
+    where = f"{fault.get('victim_comp')} Instance {fault.get('victim_inst')}"
+    if fault.get("hold_back_at") is not None:
+        held = fault["hold_back_at"] - (fault.get("fired_ts") or fault["hold_since"])
+        return (f"the manual gate was held {held:.0f}s after the deletion, until {where} was whole again, "
+                f"before the harness promoted")
+    return "the manual gate was still held for the podkill when the run ended"
+
+
 def _break_at_hook(fault):
     """A break that fired at a canary hook (not before the push, not on the
     pushed revision)."""
@@ -18531,7 +18601,9 @@ def _canary(case_id, yaml_file, desc, hdr):
                           canary_hash and promote_ready and step is not None and step > promoted_step and
                           not (verb == "promote-stale" and stale_held is None) and
                           not _promote_held_after_podkill(verb, verb_fired, verb_ts, verbhold, now) and
-                          not _promote_held_after_break(fault, verbhold, now))
+                          not _promote_held_after_break(fault, verbhold, now) and
+                          not _promote_held_after_podkill_fault(fault, ctx["canary_hook"], step, ctx["pod_state"],
+                                                                ctx["pods_per_inst"], verbhold, now))
         if should_promote:
             rr = kubectl("-n", NS, "annotate", "isvc", case_id,
                          f"{PROMOTE_ANNO}={canary_hash}", "--overwrite")
@@ -18687,6 +18759,9 @@ def _canary(case_id, yaml_file, desc, hdr):
         verdict = _sibling_park_checks(ctx, parked_siblings, sibpark, verdict, notes, checks)
     if policy == "manual" and _break_at_hook(ctx.get("fault")):
         checks.append(f"  ⓘ the manual gate was held {verbhold}s after the break before the harness promoted")
+    podkill_hold = _podkill_hold_summary(ctx.get("fault")) if policy == "manual" else None
+    if podkill_hold:
+        checks.append(f"  ⓘ {podkill_hold}")
     if "planedit" in (verb, verb2) or prearm == "planedit":
         served = not _plan_edit_untouched(traffic_by_step)
         if _plan_edit_served_expected(prearm == "planedit"):

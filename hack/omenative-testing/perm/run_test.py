@@ -6442,6 +6442,102 @@ class PodkillVerbTest(unittest.TestCase):
         self.assertFalse(run._promote_held_after_podkill("podkill", False, 0.0, 30, 20.0))
         self.assertFalse(run._promote_held_after_podkill("pause", True, 10.0, 30, 20.0))
 
+    @staticmethod
+    def _fault(**over):
+        f = {"kind": "podkill", "param": "canary-serving", "fired": False, "infra_fail": None, "notes": []}
+        f.update(over)
+        return f
+
+    @staticmethod
+    def _pod(comp, inst, uid, ready, alive=True):
+        return {"comp": comp, "inst": str(inst), "uid": uid, "ready": ready, "alive": alive,
+                "hash": "new", "serving": ready}
+
+    def test_manual_promote_waits_for_a_podkill_fault_at_the_hold(self):
+        ppi = {"engine": 1}
+        f = self._fault()
+        pods = {"e0": self._pod("engine", 0, "u-stable", True), "e1": self._pod("engine", 1, "u-canary", True)}
+
+        def held(now):
+            return run._promote_held_after_podkill_fault(f, "canary-serving", 0, pods, ppi, 45, now)
+
+        self.assertTrue(held(100.0), "the hold begins with the deletion still to fire")
+        self.assertEqual(100.0, f["hold_since"])
+        f.update(fired=True, fired_ts=102.0, victim_comp="engine", victim_inst="1", victim_uid="u-canary")
+        self.assertTrue(held(103.0), "the deleted pod is still alive in the watch")
+        pods["e1"]["alive"] = False
+        self.assertTrue(held(105.0), "nothing has replaced the deleted pod")
+        pods["e1b"] = self._pod("engine", 1, "u-new", False)
+        self.assertTrue(held(110.0), "the replacement is not Ready")
+        pods["e1b"]["ready"] = True
+        self.assertFalse(held(120.0), "the dip is over: the promote goes")
+        self.assertEqual(120.0, f["hold_back_at"])
+        self.assertIn("held 18s after the deletion, until engine Instance 1 was whole again", run._podkill_hold_summary(f))
+        pods["e1b"]["ready"] = False
+        self.assertFalse(held(130.0), "the hold covers the deletion once")
+        self.assertEqual([], f["notes"])
+
+    def test_no_podkill_fault_at_the_hold_holds_nothing(self):
+        pods = {"e0": self._pod("engine", 0, "u0", True)}
+        ppi = {"engine": 1}
+
+        def held(fault, hook="canary-serving", step=0):
+            return run._promote_held_after_podkill_fault(fault, hook, step, pods, ppi, 45, 100.0)
+
+        self.assertFalse(held(None))
+        self.assertFalse(held(self._fault(kind="ctrlrestart")))
+        self.assertFalse(held(self._fault(param="canary-draining")), "a podkill after the cutover is not aimed at the hold")
+        self.assertFalse(held(self._fault(param="canary-serving@1")), "a podkill at the next step's hold is not aimed at this one")
+        self.assertTrue(held(self._fault(param="canary-serving@1"), step=1))
+        self.assertFalse(held(self._fault(), hook="canary-staging"))
+        self.assertFalse(held(self._fault(fired=True, infra_fail="podkill: no live pod to delete")))
+        self.assertIsNone(run._podkill_hold_summary(self._fault()))
+        self.assertIsNone(run._podkill_hold_summary(None))
+
+    def test_the_hold_for_a_podkill_fault_runs_out(self):
+        ppi = {"engine": 1}
+        f = self._fault(fired=True, fired_ts=100.0, victim_comp="engine", victim_inst="1", victim_uid="u-canary")
+        pods = {"e0": self._pod("engine", 0, "u0", True), "e1": self._pod("engine", 1, "u-canary", True, alive=False)}
+
+        def held(now):
+            return run._promote_held_after_podkill_fault(f, "canary-serving", 0, pods, ppi, 45, now)
+
+        self.assertTrue(held(120.0))
+        self.assertTrue(held(144.0))
+        self.assertFalse(held(145.0), "hold_s after the deletion the promote is issued")
+        self.assertEqual(145.0, f["hold_expired_at"])
+        self.assertEqual(1, len(f["notes"]))
+        self.assertIn("ran out 45s after the deletion with engine Instance 1 still short", f["notes"][0])
+        self.assertIsNone(run._podkill_hold_summary(f), "the fault's own note tells how the hold ended")
+        pods["e1b"] = self._pod("engine", 1, "u-new", True)
+        self.assertFalse(held(150.0), "a budget that ran out is not re-armed by the pod's return")
+        self.assertEqual(1, len(f["notes"]))
+        g = self._fault()
+        self.assertTrue(run._promote_held_after_podkill_fault(g, "canary-serving", 0, pods, ppi, 45, 200.0))
+        self.assertFalse(run._promote_held_after_podkill_fault(g, "canary-serving", 0, pods, ppi, 45, 245.0),
+                         "a deletion that never fires releases the hold hold_s after the gate was reached")
+        self.assertIn("had not fired", g["notes"][0])
+        still = self._fault(fired=True, fired_ts=100.0, victim_comp="engine", victim_inst="1", victim_uid="u-canary",
+                            hold_since=99.0)
+        self.assertIn("still held", run._podkill_hold_summary(still))
+
+    def test_the_dip_closes_on_a_whole_instance_or_a_retired_one(self):
+        f = {"kind": "podkill", "fired": True, "victim_comp": "engine", "victim_inst": "2", "victim_uid": "u-a"}
+        gang = {"engine": 2}
+        pods = {"a": self._pod("engine", 2, "u-a", True), "b": self._pod("engine", 2, "u-b", True)}
+        self.assertFalse(run._podkill_dip_over(f, pods, gang), "the killed member is still alive")
+        pods["a"]["alive"] = False
+        self.assertFalse(run._podkill_dip_over(f, pods, gang), "the gang is short a member")
+        pods["c"] = self._pod("engine", 2, "u-c", False)
+        self.assertFalse(run._podkill_dip_over(f, pods, gang), "the new member is not Ready")
+        pods["c"]["ready"] = True
+        self.assertTrue(run._podkill_dip_over(f, pods, gang))
+        leaving = {"a": self._pod("engine", 2, "u-a", True, alive=False)}
+        self.assertFalse(run._podkill_dip_over(f, leaving, gang), "a pod of the index is still leaving")
+        self.assertTrue(run._podkill_dip_over(f, {"x": self._pod("engine", 0, "u-x", True)}, gang),
+                        "the roll retired the Instance")
+        self.assertFalse(run._podkill_dip_over(dict(f, fired=False), pods, gang))
+
     def test_hold_survival_reads_the_state_the_verb_found(self):
         self.assertTrue(run._prehold_survived(0, "canary-staging", 0, "canary-staging"))
         self.assertFalse(run._prehold_survived(0, "canary-failed", 0, "canary-staging"))

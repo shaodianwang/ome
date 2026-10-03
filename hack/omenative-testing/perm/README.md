@@ -435,7 +435,12 @@ such as the recovery half of a podkill, carries both ids.
 - **`fault=<kind>:canary-<state>`** — the existing faults (`podkill`,
   `ctrlrestart`, `quota:<n>`, `cordon:source`) fired at a canary hook instead
   of `rotating`/`settling`; `victim=canary|stable` aims a podkill at the newest
-  canary pod or at an old-revision pod. The break faults
+  canary pod or at an old-revision pod. Under `canary=manual` a podkill aimed
+  at the hold the ladder is at holds the harness's promote until the deleted
+  pod's Instance is whole again on Ready pods (hold, kill, dip, capacity
+  back, promote, cutover); the wait is bounded by `verbhold=` seconds after
+  the deletion, after which the promote is issued anyway and the verdict
+  notes the capacity was still down. The break faults
   (`crashloop:canary-<state>` with `form=start|load`, `imagepull:canary-<state>`)
   break the stable side in that state: `victims=<n>` (default 1) breaks that
   many old-revision Instances of `victimcomp=` at once, highest index first,
