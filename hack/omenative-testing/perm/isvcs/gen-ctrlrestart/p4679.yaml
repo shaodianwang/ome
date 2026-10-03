@@ -1,0 +1,15 @@
+# p4679: [gen] ctrlrestart edit engine-mn W1 N=2 SurgeThenDrain s1  Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 fault=ctrlrestart:settling co=none topo=engine-mn during=rotating edit=strategy:RecreatePod
+# reason: the engine is bumped under SurgeThenDrain and its strategy edited to RecreatePod at the first pod of the new revision on engine alone as gangs of 1 leader + 1 worker, and as it lands the manager pod is deleted; the restarted manager carries nothing in memory and resumes the operation from status: nothing is created twice (peaks within the ceiling, no index collision) and nothing is deleted twice (every Component ends at its count); the roll completes under the edited strategy with every Instance on the new revision and the edit on the live spec, with every row settled and no hold left behind; each Instance is a gang, created and drained whole
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p4679 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }

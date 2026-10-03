@@ -6688,6 +6688,238 @@ class NodeHookLiftAndVerdictTest(unittest.TestCase):
         self.assertNotIn("completed with", text)
 
 
+class GeneratedCtrlHookFamilyTest(unittest.TestCase):
+    """gen-ctrlrestart, the hook half: the manager pod is deleted as a
+    rollback, a strategy edit, a scale-up and a delete land and at the first
+    pod of a runtime edit's new revision, on the six ledger shapes."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-ctrlrestart" and m.get("half") == "hook"]
+
+    def test_counts_shapes_ops_and_ids(self):
+        self.assertEqual(30, len(self.fam))
+        shapes = {(t, generate_cases.router_count(t, nr)) for t, _n, _w, nr in generate_cases.DISRUPT_SHAPES}
+        self.assertEqual(shapes, {(kv["topo"], kv["Nr"]) for _n, kv, _m in self.fam})
+        self.assertEqual({op: 6 for op in generate_cases.CTRL_HOOK_OPS},
+                         dict(collections.Counter(m["op"] for _n, _kv, m in self.fam)))
+        ids = sorted(int(n[1:]) for n, _kv, _m in self.fam)
+        lo, hi = generate_cases.GEN_BLOCKS["gen-ctrlrestart"]
+        self.assertEqual((4668, 4697), (ids[0], ids[-1]), "minted after the first half, inside the family's block")
+        self.assertLess(ids[-1], hi)
+
+    def test_every_row_names_its_hook_and_carries_no_pod_knob(self):
+        for name, kv, m in self.fam:
+            op = m["op"]
+            hook = generate_cases.CTRL_HOOK_AT.get(op, generate_cases.HOOK_PHASE)
+            self.assertEqual(f"ctrlrestart:{hook}", kv["fault"], name)
+            for k in ("repeat", "lift", "needs", "victim", "victimcomp", "floor_slack", "floor_soft", "order_soft"):
+                self.assertNotIn(k, kv, name)
+            self.assertEqual({"rollback": None, "edit": None, "runtime": "runtimerev", "scaleup": "scaledown",
+                              "delete": "recreate"}[op], kv.get("mode"), name)
+            if op == "rollback":
+                self.assertEqual((1, "rotating"), (kv["rollback"], kv["during"]), name)
+            if op == "edit":
+                self.assertEqual(("strategy:RecreatePod", "rotating"), (kv["edit"], kv["during"]), name)
+            if op == "runtime":
+                self.assertEqual(("env", "roll", f"ome-coordtest-rt-{name}"), (kv["edit"], kv["expect"], kv["rt"]), name)
+            if op == "scaleup":
+                self.assertEqual((kv["Ne"] + 1, kv["Ne"] + 1), (kv["to_e"], kv["ceil_e"]), name)
+            if op == "delete":
+                self.assertEqual(kv["Ne"], kv["ceil_e"], name)
+            reason = self.outputs[f"gen-ctrlrestart/{name}.yaml"].splitlines()[1]
+            self.assertIn("the manager pod is deleted", reason, name)
+            self.assertIn("resumes the operation from status", reason, name)
+            self.assertIn("nothing is deleted twice", reason, name)
+            self.assertIn("no hold left behind", reason, name)
+            self.assertNotIn("again each time", reason, name)
+            if kv["topo"].endswith("-mn"):
+                self.assertIn("each Instance is a gang", reason, name)
+
+    def test_every_row_validates_as_a_case_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, _kv, _m in self.fam:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(self.outputs[f"gen-ctrlrestart/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)
+
+
+class CtrlHookHeaderTest(unittest.TestCase):
+    """fault=ctrlrestart:<hook> at a hook of a rollback, a mid-roll edit, a
+    runtime edit or a delete, and repeat= under those, a scale-down, a move
+    and a canary: the forms the validator takes, the knobs it refuses and
+    the driver each form reaches."""
+
+    BASE = "# p999: x Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine co=none"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_the_hook_op_case_predicate(self):
+        self.assertTrue(run._ctrl_hook_op_case({"rollback": 1, "during": "rotating", "fault": "ctrlrestart:settling"}))
+        self.assertTrue(run._ctrl_hook_op_case({"edit": "strategy:RecreatePod", "during": "rotating", "fault": "ctrlrestart:settling"}))
+        self.assertTrue(run._ctrl_hook_op_case({"mode": "runtimerev", "fault": "ctrlrestart:rotating"}))
+        self.assertTrue(run._ctrl_hook_op_case({"mode": "recreate", "fault": "ctrlrestart:settling", "repeat": 3}))
+        self.assertFalse(run._ctrl_hook_op_case({"fault": "ctrlrestart:settling"}), "a push keeps the rollout driver")
+        self.assertFalse(run._ctrl_hook_op_case({"mode": "scaledown", "to_e": 5, "fault": "ctrlrestart:settling"}),
+                         "the scale driver owns a scale")
+        self.assertFalse(run._ctrl_hook_op_case({"mode": "migrate", "fault": "ctrlrestart:migrating"}))
+        self.assertFalse(run._ctrl_hook_op_case({"mode": "canary", "fault": "ctrlrestart:canary-serving"}))
+        self.assertFalse(run._ctrl_hook_op_case({"during": "idle", "fault": "ctrlrestart:idle", "repeat": 3}))
+        self.assertFalse(run._ctrl_hook_op_case({"rollback": 1, "during": "rotating", "fault": "evict:settling"}))
+
+    def test_every_remaining_operation_takes_the_restart_at_its_hook(self):
+        base = self.BASE
+        self.assertEqual([], self._errs(base + " rollback=1 during=rotating fault=ctrlrestart:settling"))
+        self.assertEqual([], self._errs(base + " rollback=1 during=rotating fault=ctrlrestart:settling repeat=3"))
+        self.assertEqual([], self._errs(base + " edit=strategy:RecreatePod during=rotating fault=ctrlrestart:settling"))
+        self.assertEqual([], self._errs(base + " edit=strategy:RecreatePod during=rotating fault=ctrlrestart:settling repeat=3"))
+        runtime = base.replace("x Ne", "x mode=runtimerev rt=ome-coordtest-rt-p999 edit=env expect=roll Ne")
+        self.assertEqual([], self._errs(runtime + " fault=ctrlrestart:rotating"))
+        self.assertEqual([], self._errs(runtime + " fault=ctrlrestart:draining repeat=3"))
+        delete = base.replace("x Ne", "x mode=recreate Ne").replace("ceil_e=5", "ceil_e=4")
+        self.assertEqual([], self._errs(delete + " fault=ctrlrestart:settling"))
+        self.assertEqual([], self._errs(delete + " fault=ctrlrestart:settling repeat=3"))
+        self.assertEqual([], self._errs(base.replace("x Ne", "x mode=scaledown to_e=5 Ne") + " fault=ctrlrestart:settling"))
+        self.assertEqual([], self._errs(base.replace("x Ne", "x mode=scaledown to_e=3 Ne").replace("ceil_e=5", "ceil_e=4")
+                                        + " fault=ctrlrestart:settling repeat=3"))
+        self.assertEqual([], self._errs(base.replace("x Ne", "x mode=migrate mig=Auto inst=0 Ne") + " fault=ctrlrestart:migrating repeat=3"))
+        self.assertEqual([], self._errs("# p999: x mode=canary canary=auto Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine co=none "
+                                        "fault=ctrlrestart:canary-serving repeat=3"))
+
+    def test_the_hook_the_operation_offers_and_the_knobs_that_do_not_combine(self):
+        base = self.BASE
+        self.assertTrue(any("fires at fault=ctrlrestart:settling" in e
+                            for e in self._errs(base.replace("x Ne", "x mode=recreate Ne") + " fault=ctrlrestart:rotating")))
+        self.assertTrue(any("fires at fault=ctrlrestart:settling" in e
+                            for e in self._errs(base + " rollback=1 during=rotating fault=ctrlrestart:draining")))
+        self.assertTrue(any("once the rollback has fired" in e
+                            for e in self._errs(base + " rollback=1 during=held break=stuck fault=ctrlrestart:settling")))
+        for knob in ("victim=stable", "floor_slack=1", "lift=after-settle", "needs=forcedelete", "once=1"):
+            self.assertTrue(any("does not combine with fault=ctrlrestart:settling" in e
+                                for e in self._errs(base + " rollback=1 during=rotating fault=ctrlrestart:settling " + knob)), knob)
+        self.assertTrue(any("again at the request" in e
+                            for e in self._errs(base.replace("x Ne", "x mode=migrate mig=Auto inst=0 Ne")
+                                                + " fault=ctrlrestart:settling repeat=3")))
+        self.assertTrue(any("again at a grid state" in e
+                            for e in self._errs("# p999: x mode=canary canary=auto Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine "
+                                                "co=none fault=ctrlrestart:settling repeat=3")))
+        self.assertTrue(any("needs a phase hook" in e
+                            for e in self._errs(base.replace("x Ne", "x mode=recreate Ne") + " fault=ctrlrestart:idle repeat=3")))
+
+    def test_run_case_routes_a_restart_at_a_rollback_or_an_edit_to_the_hook_op_driver(self):
+        routed = []
+        orig = (run._hook_op, run.find_isvc, run.parse_header, run.duplicate_id_errors, run.collect_case_files)
+        run._hook_op = lambda *a: routed.append("hook") or 0
+        run.find_isvc = lambda cid: Path("p999.yaml")
+        run.duplicate_id_errors = lambda cases: []
+        run.collect_case_files = lambda: []
+        try:
+            run.parse_header = lambda p: ("x", {"Ne": 4, "rollback": 1, "during": "rotating", "fault": "ctrlrestart:settling"})
+            run.run_case("p999")
+            run.parse_header = lambda p: ("x", {"Ne": 4, "edit": "strategy:RecreatePod", "during": "rotating",
+                                                "fault": "ctrlrestart:settling", "repeat": 3})
+            run.run_case("p999")
+        finally:
+            (run._hook_op, run.find_isvc, run.parse_header, run.duplicate_id_errors, run.collect_case_files) = orig
+        self.assertEqual(["hook", "hook"], routed)
+
+
+class CtrlHookWatchAndVerdictTest(unittest.TestCase):
+    """The hook-op watch under a manager restart and the verdict block it
+    feeds: the window held open while repetitions are owed, the manager's
+    return noted, and each branch of the checks."""
+
+    def _fault(self, **more):
+        f = {"kind": "ctrlrestart", "param": "settling", "hook_op": True, "fired": True, "fired_ts": 100.0,
+             "ctrl_pods": ["ome-controller-manager-a"], "notes": [], "infra_fail": None, "repeat": 0, "fired_count": 1}
+        f.update(more)
+        return f
+
+    def test_pending_is_a_repeating_restart_with_repetitions_owed(self):
+        self.assertTrue(run._repeat_pending(self._fault(repeat=3, fired_count=1)))
+        self.assertFalse(run._repeat_pending(self._fault(repeat=3, fired_count=3)))
+        self.assertFalse(run._repeat_pending(self._fault(repeat=0)))
+        self.assertFalse(run._repeat_pending(self._fault(repeat=3, fired_count=1, fired=False)))
+        self.assertFalse(run._repeat_pending(self._fault(repeat=3, fired_count=1, ctrl_gated=True)))
+        self.assertFalse(run._repeat_pending(self._fault(repeat=3, fired_count=1, infra_fail="x")))
+        self.assertFalse(run._repeat_pending(dict(self._fault(repeat=3, fired_count=1), kind="evict")))
+        self.assertFalse(run._repeat_pending(None))
+
+    def test_the_watch_holds_the_window_until_the_repetitions_are_spent(self):
+        f = self._fault(repeat=3, fired_count=1)
+        reads = []
+
+        def read(c):
+            reads.append(1)
+            if len(reads) == 4:
+                f["fired_count"] = 3   # the last repetition landed
+        ctx = {"trigger_ts": time.time(), "closed": False}
+        with mock.patch.object(run, "_read_one", read), mock.patch.object(run, "STABILITY_S", 0), \
+                mock.patch.object(run, "REPEAT_CYCLE_S", 0):
+            self.assertEqual("CONVERGED", run._hook_op_watch(ctx, f, lambda: True, 30))
+            self.assertGreaterEqual(len(reads), 4, "the window stayed open for the repetitions")
+            self.assertIn("converged_at", ctx)
+            # the span runs out with repetitions still owed: an operation that held its end converged
+            f = self._fault(repeat=3, fired_count=1)
+            with mock.patch.object(run, "_read_one", lambda c: None):
+                self.assertEqual("CONVERGED", run._hook_op_watch({"trigger_ts": time.time() - 0.5, "closed": False}, f, lambda: True, 1))
+                self.assertEqual("ROTATE_TIMEOUT", run._hook_op_watch({"trigger_ts": time.time() - 0.5, "closed": False}, f, lambda: False, 1))
+
+    def test_the_manager_return_is_noted_for_a_one_shot_restart(self):
+        f = self._fault()
+        with mock.patch.object(run, "_ctrl_back", return_value=False):
+            run._ctrl_back_tick(f, 130.0)
+            self.assertIsNone(f.get("ctrl_back_at"))
+        with mock.patch.object(run, "_ctrl_back", return_value=True) as back:
+            run._ctrl_back_tick(f, 160.0)
+            self.assertEqual(160.0, f["ctrl_back_at"])
+            run._ctrl_back_tick(f, 170.0)
+            back.assert_called_once()
+            repeating = self._fault(repeat=3)
+            run._ctrl_back_tick(repeating, 160.0)
+            self.assertNotIn("ctrl_back_at", repeating, "a repeating restart records the return per cycle")
+            plain = self._fault(hook_op=False)
+            run._ctrl_back_tick(plain, 160.0)
+            self.assertNotIn("ctrl_back_at", plain, "the push and scale drivers keep their own reading")
+
+    def _verdict(self, f, completed=True, state="CONVERGED", converged_at=120.0):
+        notes, checks = [], []
+        verdict = run._ctrl_hook_checks(f, "the rollback", "settling", completed, state, converged_at, "PASS", notes, checks)
+        return verdict, notes, "\n".join(checks)
+
+    def test_the_one_shot_restart_passes_once_fired_back_and_completed(self):
+        verdict, notes, text = self._verdict(self._fault(ctrl_back_at=160.0))
+        self.assertEqual(("PASS", []), (verdict, notes))
+        self.assertIn("deleted as the rollback landed", text)
+        self.assertIn("Ready again under new names 60s after the restart", text)
+        self.assertIn("completed 120s after the trigger with the manager restart in its window", text)
+
+    def test_each_branch(self):
+        verdict, notes, text = self._verdict(self._fault(ctrl_gated=True))
+        self.assertEqual(("PASS", []), (verdict, notes))
+        self.assertIn("gated off here", text)
+        verdict, notes, _text = self._verdict(self._fault(fired=False))
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("never fired", notes[0])
+        verdict, notes, text = self._verdict(self._fault())
+        self.assertEqual("PASS", verdict)
+        self.assertIn("not read Ready under new names", text)
+        verdict, notes, text = self._verdict(self._fault(repeat=3, fired_count=3))
+        self.assertEqual("PASS", verdict)
+        self.assertNotIn("Ready again", text)
+        self.assertIn("manager restarts in its window", text)
+        verdict, notes, _text = self._verdict(self._fault(ctrl_back_at=160.0), completed=False, state="ROTATE_TIMEOUT")
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("did not complete", notes[0])
+        self.assertEqual("PASS", self._verdict(self._fault(infra_fail="x"), completed=False, state="INFRA-FAIL")[0])
+        self.assertEqual("PASS", self._verdict(self._fault(ctrl_back_at=160.0), completed=False, state="INFRA-FAIL")[0])
+
+
 class GeneratedCtrlRestartFamilyTest(unittest.TestCase):
     """gen-ctrlrestart: the manager pod is deleted under an operation in
     flight. One runner mode and one hook per condition, crossed with the
@@ -6696,7 +6928,7 @@ class GeneratedCtrlRestartFamilyTest(unittest.TestCase):
 
     def _rows(self):
         outputs, rows = generate_cases.build_outputs()
-        return outputs, [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-ctrlrestart"]
+        return outputs, [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-ctrlrestart" and m.get("half") != "hook"]
 
     def test_generated_family_crosses_every_axis(self):
         outputs, fam = self._rows()
@@ -13831,7 +14063,13 @@ class GeneratedRepeatFamilyTest(unittest.TestCase):
         if kv.get("mode") == "kill":
             return "steady"
         if kv.get("mode") == "scaledown":
-            return "scale-up"
+            return "scale-up" if kv["to_e"] > kv["Ne"] else "scale-down"
+        if kv.get("mode") in ("migrate", "recreate", "canary", "runtimerev"):
+            return {"migrate": "move", "recreate": "delete", "canary": "canary", "runtimerev": "runtime"}[kv["mode"]]
+        if kv.get("rollback") == 1:
+            return "rollback"
+        if kv.get("edit"):
+            return "edit"
         return "steady" if kv.get("during") == "idle" else "push"
 
     def _row(self, kv):
@@ -13845,12 +14083,13 @@ class GeneratedRepeatFamilyTest(unittest.TestCase):
         return "gang member lost" if kv["topo"].endswith("-mn") else "pod deleted by hand"
 
     def test_counts_and_cells(self):
-        self.assertEqual(126, len(self.fam))
+        self.assertEqual(168, len(self.fam))
         cells = {(self._row(kv), self._operation(kv), self._family(kv)) for _n, kv, _m in self.fam}
         families = {"engine single", "engine gang", "engine+router single", "engine+router gang",
                     "engine+decoder+router single", "engine+decoder+router gang"}
         ops = {"steady", "push", "scale-up"}
-        self.assertEqual({(f, o) for f in families for o in ops},
+        ctrl_ops = ops | {"rollback", "edit", "runtime", "scale-down", "move", "delete", "canary"}
+        self.assertEqual({(f, o) for f in families for o in ctrl_ops},
                          {(f, o) for r, o, f in cells if r == "controller restart"})
         self.assertEqual({(f, o) for f in families for o in ops},
                          {(f, o) for r, o, f in cells if r == "evicted or preempted"})
@@ -13861,7 +14100,7 @@ class GeneratedRepeatFamilyTest(unittest.TestCase):
         by_row = {}
         for _n, kv, _m in self.fam:
             by_row[self._row(kv)] = by_row.get(self._row(kv), 0) + 1
-        self.assertEqual({"pod deleted by hand": 24, "gang member lost": 36, "evicted or preempted": 42, "controller restart": 24}, by_row)
+        self.assertEqual({"pod deleted by hand": 24, "gang member lost": 36, "evicted or preempted": 42, "controller restart": 66}, by_row)
 
     def test_every_cell_repeats_and_states_the_window_and_the_lift(self):
         for name, kv, m in self.fam:
@@ -13888,7 +14127,16 @@ class GeneratedRepeatFamilyTest(unittest.TestCase):
             kind = kv["fault"].partition(":")[0]
             if kind == "ctrlrestart":
                 self.assertNotIn("floor_slack", kv, name)
-                self.assertEqual("idle" if op == "steady" else "settling", kv["fault"].partition(":")[2], name)
+                hook = {"steady": "idle", "runtime": "rotating", "move": "migrating", "canary": "canary-serving"}.get(op, "settling")
+                self.assertEqual(hook, kv["fault"].partition(":")[2], name)
+                self.assertEqual(generate_cases.REPEAT_N, kv["repeat"], name)
+                for k in ("victim", "lift", "needs", "order_soft", "floor_soft"):
+                    self.assertNotIn(k, kv, name)
+                if op == "canary":
+                    self.assertEqual("auto", kv["canary"], name)
+                    self.assertIn("canary:", self.outputs[f"gen-repeat/{name}.yaml"], name)
+                if op == "move":
+                    self.assertEqual(("Auto", 0, kv["Ne"] + 1), (kv["mig"], kv["inst"], kv["ceil_e"]), name)
                 continue
             self.assertEqual(1, kv["floor_slack"], name)
             if kv["topo"].startswith("pd"):
@@ -13916,7 +14164,7 @@ class GeneratedRepeatFamilyTest(unittest.TestCase):
 
     def test_cluster_wide_cells_run_exclusively(self):
         exclusive = [n for n, kv, _m in self.fam if batch.cluster_wide_fault({k: str(v) for k, v in kv.items()})]
-        self.assertEqual(30, len(exclusive), "24 manager restarts and 6 preemptions run one at a time")
+        self.assertEqual(72, len(exclusive), "66 manager restarts and 6 preemptions run one at a time")
         for name, kv, _m in self.fam:
             kind = kv.get("fault", "").partition(":")[0]
             self.assertEqual(name in exclusive, kind == "ctrlrestart" or kv.get("via") == "preempt", name)
@@ -16316,10 +16564,13 @@ class HookOperationTest(unittest.TestCase):
                         {"mode": "runtimerev", "Ne": 4, "fault": "quota:0", "lift": "after-settle"},
                         {"mode": "recreate", "Ne": 4, "fault": "webhook:settling", "lift": "after-hold"},
                         {"mode": "recreate", "Ne": 4},
-                        {"mode": "runtimerev", "Ne": 4, "fault": "crashloop:old", "form": "start"}):
+                        {"mode": "runtimerev", "Ne": 4, "fault": "crashloop:old", "form": "start"},
+                        {"mode": "recreate", "Ne": 4, "fault": "ctrlrestart:settling"},
+                        {"mode": "runtimerev", "Ne": 4, "fault": "ctrlrestart:rotating", "repeat": 3}):
                 run.run_mode_case("p999", "x.yaml", "d", hdr, hdr["mode"])
         self.assertEqual([("hook", "recreate"), ("hook", "runtimerev"), ("pending", "runtimerev"), ("pending", "runtimerev"),
-                          ("window", "recreate"), ("recreate", None), ("runtimerev", None)], routed)
+                          ("window", "recreate"), ("recreate", None), ("runtimerev", None),
+                          ("hook", "recreate"), ("hook", "runtimerev")], routed)
         with mock.patch.object(run, "_hook_op", lambda *a: routed.append(("hook", a[3].get("to_e")))), \
                 mock.patch.object(run, "_pending_scale", lambda *a: routed.append(("pscale", None))), \
                 mock.patch.object(run, "_fault_new", lambda *a: None), mock.patch.object(run, "apply_runtime_fixtures", lambda: None), \

@@ -851,5 +851,65 @@ class NodeHookCellsTest(unittest.TestCase):
                          (pd_single.shape_family, pd_single.operation, pd_single.faults))
 
 
+class CtrlHookCellsTest(unittest.TestCase):
+    """fault=ctrlrestart:<hook> files under the operation it lands on, on the
+    controller-restart row: one-shot without repeat=, persistent with it,
+    timed at the fault's own hook (the grid state under a canary, the
+    request under a move)."""
+
+    def setUp(self):
+        self.corpus = Corpus()
+        self.addCleanup(self.corpus.close)
+
+    def test_the_one_shot_forms_at_the_remaining_operations(self):
+        back = self.corpus.write(rollback=1, during="rotating", fault="ctrlrestart:settling", topo="engine", **counts(4, ceil_e=5))
+        self.assertEqual(("rollback", "push", [("controller restart", "one-shot", "-", "manager")], "settling"),
+                         (back.operation, back.second_operation, back.faults, back.timing))
+        edit = self.corpus.write(edit="strategy:RecreatePod", during="rotating", fault="ctrlrestart:settling", topo="engine",
+                                 **counts(4, ceil_e=5))
+        self.assertEqual(("strategy or policy edit", [("controller restart", "one-shot", "-", "manager")]), (edit.operation, edit.faults))
+        runtime = self.corpus.write(mode="runtimerev", rt="x", edit="env", expect="roll", fault="ctrlrestart:rotating", topo="engine",
+                                    **counts(4, ceil_e=5))
+        self.assertEqual(("runtime edit", [("controller restart", "one-shot", "-", "manager")], "rotating"),
+                         (runtime.operation, runtime.faults, runtime.timing))
+        up = self.corpus.write(mode="scaledown", to_e=5, fault="ctrlrestart:settling", topo="engine", **counts(4, ceil_e=5))
+        self.assertEqual(("scale up", [("controller restart", "one-shot", "-", "manager")]), (up.operation, up.faults))
+        delete = self.corpus.write(mode="recreate", fault="ctrlrestart:settling", topo="engine", **counts(4, ceil_e=4))
+        self.assertEqual(("delete", [("controller restart", "one-shot", "-", "manager")]), (delete.operation, delete.faults))
+        self.assertEqual([], [p for c in (back, edit, runtime, up, delete) for p in c.problems])
+
+    def test_repeat_is_the_persistent_form_under_every_remaining_operation(self):
+        persistent = [("controller restart", "persistent", "-", "manager")]
+        back = self.corpus.write(rollback=1, during="rotating", fault="ctrlrestart:settling", repeat=3, topo="engine", **counts(4, ceil_e=5))
+        self.assertEqual(("rollback", persistent), (back.operation, back.faults))
+        edit = self.corpus.write(edit="strategy:RecreatePod", during="rotating", fault="ctrlrestart:settling", repeat=3, topo="engine",
+                                 **counts(4, ceil_e=5))
+        self.assertEqual(("strategy or policy edit", persistent), (edit.operation, edit.faults))
+        runtime = self.corpus.write(mode="runtimerev", rt="x", edit="env", expect="roll", fault="ctrlrestart:rotating", repeat=3,
+                                    topo="engine", **counts(4, ceil_e=5))
+        self.assertEqual(("runtime edit", persistent), (runtime.operation, runtime.faults))
+        down = self.corpus.write(mode="scaledown", to_e=3, fault="ctrlrestart:settling", repeat=3, topo="engine", **counts(4, ceil_e=4))
+        self.assertEqual(("scale down", persistent), (down.operation, down.faults))
+        move = self.corpus.write(mode="migrate", mig="Auto", inst=0, fault="ctrlrestart:migrating", repeat=3, topo="engine",
+                                 **counts(4, ceil_e=5))
+        self.assertEqual(("migrate", "", persistent, "migrating"), (move.operation, move.second_operation, move.faults, move.timing))
+        delete = self.corpus.write(mode="recreate", fault="ctrlrestart:settling", repeat=3, topo="engine", **counts(4, ceil_e=4))
+        self.assertEqual(("delete", persistent), (delete.operation, delete.faults))
+        canary = self.corpus.write(mode="canary", canary="auto", fault="ctrlrestart:canary-serving", repeat=3, topo="engine",
+                                   **counts(4, ceil_e=5))
+        self.assertEqual(("canary", persistent), (canary.operation, canary.faults))
+        self.assertTrue(canary.timing.startswith("canary"), canary.timing)
+        self.assertEqual([], [p for c in (back, edit, runtime, down, move, delete, canary) for p in c.problems])
+
+    def test_the_six_shape_families(self):
+        gang = self.corpus.write(mode="recreate", fault="ctrlrestart:settling", topo="engine-mn",
+                                 comps=engine_router(2, 1, 2), **counts(2, 0, 2, ceil_e=2))
+        self.assertEqual(("engine+router gang", "delete"), (gang.shape_family, gang.operation))
+        pd_single = self.corpus.write(mode="scaledown", to_e=3, fault="ctrlrestart:settling", repeat=3, topo="pd",
+                                      comps=pd(4, 0, 2), **counts(4, 4, 2, ceil_e=4))
+        self.assertEqual(("engine+decoder+router single", "scale down", [("controller restart", "persistent", "-", "manager")]),
+                         (pd_single.shape_family, pd_single.operation, pd_single.faults))
+
+
 if __name__ == "__main__":
     unittest.main()

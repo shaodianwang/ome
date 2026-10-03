@@ -5759,6 +5759,17 @@ def _fault_repeats(f):
     return bool(f) and int(f.get("repeat") or 0) >= REPEAT_MIN
 
 
+def _repeat_pending(f):
+    """True while a repeating manager restart still owes repetitions: the
+    operation's window stays open for them, so a short operation finishes
+    under the first restart and the later ones land on its settled end,
+    which must stay settled. Spent, gated off or failed as apparatus,
+    nothing is pending."""
+    return (_fault_repeats(f) and f.get("kind") == "ctrlrestart" and bool(f.get("fired"))
+            and not f.get("ctrl_gated") and not f.get("infra_fail")
+            and int(f.get("fired_count") or 0) < int(f["repeat"]))
+
+
 def _repeat_retrying(f, now):
     """True while a repeating fault's next repetition is waiting out a
     refusal by the disruption budget: refused, and the retry window
@@ -8625,6 +8636,7 @@ def _fault_tick(ctx):
         if _fault_once(f):
             _once_bite_tick(f)   # the victim is read live until its restart shows
         _node_lift_tick(ctx, f, time.time())
+        _ctrl_back_tick(f, time.time())
         _repeat_tick(f, ctx)
         return
     if f.get("hook_op") and not f.get("hook_op_fired"):
@@ -8710,6 +8722,19 @@ def _ctrl_back(f, now):
     pods = _ctrl_pods_state()
     gone = set(f.get("ctrl_pods") or [])
     return bool(pods) and all(ready for _n, ready in pods) and not ({n for n, _r in pods} & gone)
+
+
+def _ctrl_back_tick(f, now):
+    """After a one-shot manager restart at a hook of an operation: note when
+    the manager is Ready again under new names (a repeating restart records
+    that on each cycle)."""
+    if f.get("kind") != "ctrlrestart" or not f.get("hook_op") or not f.get("fired") or _fault_repeats(f) \
+            or f.get("ctrl_gated") or f.get("infra_fail") or f.get("ctrl_back_at") is not None:
+        return
+    if _ctrl_back(f, now):
+        f["ctrl_back_at"] = now
+        f["notes"].append(f"the manager is Ready again under new names {now - f['fired_ts']:.0f}s after the restart")
+        print(f"    ⟳ {f['notes'][-1]}")
 
 
 def _repeat_back(f, cycle, pod_state, pods_per_inst, now):
@@ -13567,6 +13592,27 @@ HOOK_FAULT_MODES = {"rollout", "scaledown", "runtimerev", "recreate", "migrate"}
 # land.
 HOOK_OP_HOOKS = {"rollback": {"settling"}, "edit": {"settling"}, "scale": {"settling"}, "delete": {"settling"},
                  "runtime": WINDOW_ROLL_HOOKS}
+# The manager restarted at a hook of an operation beyond the push and the
+# scale the plain drivers own (fault=ctrlrestart:<hook>): as a rollback or
+# a mid-roll edit lands once it has fired at its own hook, at a hook of the
+# roll under a runtime edit, as a delete lands. The restart loses no pod:
+# the operation must resume from the status a fresh manager reads and
+# complete with nothing created or deleted twice. repeat= deletes the
+# manager again each time it is Ready, and the window stays open until the
+# repetitions are spent.
+CTRL_HOOK_OPS = {"rollback", "edit", "runtime", "delete"}
+CTRL_HOOK_HOOKS = {"rollback": {"settling"}, "edit": {"settling"}, "runtime": WINDOW_ROLL_HOOKS, "delete": {"settling"}}
+CTRL_HOOK_MODES = {"rollout", "runtimerev", "recreate"}
+
+
+def _ctrl_hook_op_case(hdr):
+    """True for a manager restart at a hook of a rollback, a mid-roll edit,
+    a runtime edit or a delete (the hook-op driver's); the push, the scale,
+    the move, the canary and the idle service keep their own drivers."""
+    kind, _, param = str(hdr.get("fault", "") or "").partition(":")
+    mode = str(hdr.get("mode", "rollout") or "rollout")
+    return (kind == "ctrlrestart" and param != IDLE_FAULT_PHASE and mode in CTRL_HOOK_MODES
+            and _window_operation(hdr) in CTRL_HOOK_OPS)
 # A node loss at a hook of an operation in flight (fault=node:<hook>): the
 # kubelet under the victim is stopped at a hook of the roll under a push or
 # a runtime edit, as a rollback, an edit, a scale or a delete lands, or at a
@@ -13601,11 +13647,15 @@ def _hook_op_pods(st, ppi):
 
 
 def _hook_op_watch(ctx, f, done, budget):
-    """Watch the operation complete after an eviction at its hook: done()
-    sustained STABILITY_S. The window grows by REPEAT_CYCLE_S per
-    repetition and stays open while a repetition is waiting out a refusal
-    by the disruption budget (the fleet is whole only because the next
-    eviction is refused)."""
+    """Watch the operation complete after an eviction or a manager restart
+    at its hook: done() sustained STABILITY_S. The window grows by
+    REPEAT_CYCLE_S per repetition and stays open while a repetition is
+    waiting out a refusal by the disruption budget (the fleet is whole only
+    because the next eviction is refused), and while a repeating manager
+    restart still owes repetitions (they land on the operation's settled
+    end, which must stay settled; an operation that held its end to the
+    span's close converged, and the restarts still owed are the repeat
+    checks' finding)."""
     t0 = ctx["trigger_ts"]
     span = budget + REPEAT_CYCLE_S * int(f.get("repeat") or 0)
     stable = None
@@ -13619,12 +13669,65 @@ def _hook_op_watch(ctx, f, done, budget):
             break
         if done() and not retrying:
             stable = stable or now
-            if now - stable >= STABILITY_S:
+            if now - stable >= STABILITY_S and not _repeat_pending(f):
                 ctx["converged_at"] = stable - t0
                 return "CONVERGED"
         else:
             stable = None
+    if stable is not None and _repeat_pending(f) and time.time() - stable >= STABILITY_S:
+        ctx["converged_at"] = stable - t0
+        return "CONVERGED"
     return "ROTATE_TIMEOUT"
+
+
+def _ctrl_hook_checks(f, what, hook, completed, state, converged_at, verdict, notes, checks):
+    """The verdict of a manager restart at a hook of an operation. Gated
+    off, the operation ran with no restart (a note; the cell proves
+    nothing). Fired, the manager pods it deleted are named and, for a
+    one-shot restart, the manager read Ready again under new names (a
+    repeating restart records that per cycle in the repeat checks); the
+    operation must complete within its budget plus the manager's return
+    and the repetitions' cycles."""
+    if f.get("infra_fail") or f.get("skip"):
+        return verdict
+    where = f"as {what} landed" if hook == "settling" else f"at {hook} of {what}"
+    if f.get("ctrl_gated"):
+        checks.append(f"  ⓘ ctrlrestart: the manager restart is gated off here (OME_TEST_ALLOW_CTRL_RESTART=1 not set); "
+                      f"{what} ran with no restart and this cell proves nothing")
+    elif not f.get("fired"):
+        verdict = "FAIL"
+        notes.append(f"ctrlrestart:{hook} never fired")
+        checks.append(f"  ✗ ctrlrestart: the manager was never deleted {where}")
+    else:
+        checks.append(f"  ✓ ctrlrestart: the manager pod(s) {' '.join(f.get('ctrl_pods') or [])} deleted {where}")
+        if not _fault_repeats(f):
+            if f.get("ctrl_back_at") is not None:
+                checks.append(f"  ✓ ctrlrestart: the manager is Ready again under new names "
+                              f"{f['ctrl_back_at'] - f['fired_ts']:.0f}s after the restart")
+            else:
+                checks.append("  ⓘ ctrlrestart: the manager was not read Ready under new names before the watch ended")
+    if completed:
+        checks.append(f"  ✓ {what} completed {converged_at or 0:.0f}s after the trigger with the manager restart"
+                      f"{'s' if _fault_repeats(f) else ''} in its window")
+    elif state != "INFRA-FAIL":
+        verdict = "FAIL"
+        notes.append(f"{what} did not complete under the manager restart ({state})")
+        checks.append(f"  ✗ {what} did not complete within budget under the manager restart ({state}) — "
+                      f"the restarted manager did not resume it from status")
+    return verdict
+
+
+def _wait_webhook_admits_apply(yaml_file, budget_s):
+    """Block until the admission webhooks answer for a create of the case's
+    manifest (a server-side dry-run apply runs admission without creating
+    anything), the probe for a service the operation has deleted."""
+    deadline = time.time() + budget_s
+    while time.time() < deadline:
+        r = kubectl("-n", NS, "apply", "--dry-run=server", "-f", str(yaml_file))
+        if r.returncode == 0:
+            return True
+        time.sleep(2)
+    return False
 
 
 def _hook_op(case_id, yaml_file, desc, hdr):
@@ -13637,7 +13740,11 @@ def _hook_op(case_id, yaml_file, desc, hdr):
     left mid-operation. The preemption closes every node to the case: the
     Instance waits with reason Unschedulable, nothing settled is taken down
     to make room, and the operation completes once the lift opens the nodes
-    (lift=after-settle) or the wait holds to the end (lift=never)."""
+    (lift=after-settle) or the wait holds to the end (lift=never). The
+    manager restart (fault=ctrlrestart:<hook>) loses no pod: the operation
+    must resume from the status a fresh manager reads and complete, once
+    or, under repeat=, with the manager deleted again each time it is
+    Ready."""
     kind = str(hdr.get("fault", "")).partition(":")[0]
     reason = _fault_capability(kind)
     if reason:
@@ -13665,6 +13772,8 @@ def _hook_op(case_id, yaml_file, desc, hdr):
                        [f"trigger failed: {st['error']}"], [f"  ✗ trigger failed: {st['error']}"])
     N0, target, rb, medit, mv = st["N0"], st["target"], st["rb"], st["medit"], st["mv"]
     acting, done, budget = st["acting"], st["done"], st["budget"]
+    if kind == "ctrlrestart":
+        budget = min(MAX_BUDGET_S, budget + CTRL_READY_S)   # the operation waits on the manager's return
     if kind == "node":
         budget = _node_hook_budget(ctx, f, budget)
         comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
@@ -13712,6 +13821,12 @@ def _hook_op(case_id, yaml_file, desc, hdr):
         if op != "delete" and not f.get("infra_fail"):
             f["reset_used"] = RESET_ANNO in (_isvc_annotations(case_id) or {})
         verdict = _node_hook_checks(f, what, completed, state, verdict, notes, checks)
+    elif kind == "ctrlrestart":
+        again = f" and again each time it is Ready ({f['repeat']} in all)" if _fault_repeats(f) else ""
+        print(f"  Phase 3: watching {what} complete under the manager restart{again} (≤{budget}s)")
+        state = _hook_op_watch(ctx, f, done, budget)
+        completed = state == "CONVERGED"
+        verdict = _ctrl_hook_checks(f, what, hook, completed, state, ctx.get("converged_at"), verdict, notes, checks)
     else:
         print(f"  Phase 3: watching {what} complete after the eviction (≤{budget}s)")
         state = _hook_op_watch(ctx, f, done, budget)
@@ -13752,6 +13867,12 @@ def _hook_op(case_id, yaml_file, desc, hdr):
     if completed and op != "delete":
         want = {c: (target[c] if op == "scale" else N0[c]) for c in COMPS}
         verdict = _repeat_end_checks(case_id, want, configured, verdict, notes, checks)
+    if op == "delete" and completed and kind == "ctrlrestart" and f.get("fired") and not f.get("ctrl_gated"):
+        # The re-apply is admitted by the restarted manager's webhook: wait for it to answer.
+        if not _wait_ctrl_ready(CTRL_READY_S) or not _wait_webhook_admits_apply(yaml_file, CTRL_READY_S):
+            notes.append("the manager or its webhook did not come back before the recreate")
+            checks.append(f"  ✗ ctrlrestart: no Ready manager with an answering webhook within {CTRL_READY_S}s before the recreate")
+            return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", notes, checks)
     if op == "delete" and completed:
         return _window_recreate(case_id, yaml_file, desc, hdr, ctx, state, verdict, notes, checks)
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
@@ -14853,30 +14974,34 @@ def validate_case_file(path):
                 errs.append(f"{path}:1: repeat= keeps taking the pod; pause= is lifted once and does not combine with it")
             if via == "preempt" and lift != "after-settle":
                 errs.append(f"{path}:1: repeat= with via=preempt needs lift=after-settle (the fillers are dropped so the pod lands again)")
-        elif mode == "migrate" and fault_kind in ("podkill", "evict"):
+        elif mode == "migrate" and fault_kind in ("podkill", "evict", "ctrlrestart"):
             if fault_param != WINDOW_MOVE_PHASE:
                 errs.append(f"{path}:1: repeat= under a move applies fault={fault_kind} again at the request (fault={fault_kind}:{WINDOW_MOVE_PHASE})")
-        elif mode in ("rollout", "scaledown", "runtimerev") and fault_kind in REPEAT_FAULTS:
+        elif (mode in ("rollout", "scaledown", "runtimerev") or (mode == "recreate" and fault_kind == "ctrlrestart")) \
+                and fault_kind in REPEAT_FAULTS:
             idle_restart = fault_kind == "ctrlrestart" and fault_param == IDLE_FAULT_PHASE and during == IDLE_FAULT_PHASE and mode == "rollout"
             if not idle_restart and (fault_param not in REPEAT_PHASES or during == IDLE_FAULT_PHASE):
                 errs.append(f"{path}:1: repeat= with fault={fields.get('fault')} needs a phase hook "
                             f"({'|'.join(sorted(REPEAT_PHASES))}), or fault=ctrlrestart:{IDLE_FAULT_PHASE} "
                             f"during={IDLE_FAULT_PHASE} for the manager restarting on the settled service")
-            at_hook_op = fault_kind == "evict" and (fields.get("rollback") == 1 or _midroll_edit(fields.get("edit")) is not None)
+            at_hook_op = fault_kind in ("evict", "ctrlrestart") and (fields.get("rollback") == 1 or _midroll_edit(fields.get("edit")) is not None)
             if any(k in fields for k in ("stuck", "blocked", "pauseat")) or (
                     not at_hook_op and (fields.get("rollback") == 1 or _midroll_edit(fields.get("edit")) is not None)):
-                errs.append(f"{path}:1: repeat= rides a plain push, a scale, a runtime edit, or an eviction at a hook of a rollback "
-                            f"or a mid-roll edit; stuck=, blocked= and pauseat= do not combine with it")
-        elif mode == "canary" and fault_kind in CANARY_REPEAT_FAULTS:
-            # A pod deleted by hand or evicted again each time it is back, at a grid state of the ladder.
+                errs.append(f"{path}:1: repeat= rides a plain push, a scale, a runtime edit, a delete under a manager restart, "
+                            f"or an eviction or a manager restart at a hook of a rollback or a mid-roll edit; "
+                            f"stuck=, blocked= and pauseat= do not combine with it")
+        elif mode == "canary" and fault_kind in CANARY_REPEAT_FAULTS | {"ctrlrestart"}:
+            # A pod deleted by hand or evicted again each time it is back, or the
+            # manager deleted again each time it is Ready, at a grid state of the ladder.
             if not _canary_hook_ok(fault_param):
                 errs.append(f"{path}:1: repeat= under a canary applies fault={fault_kind} again at a grid state "
                             f"(fault={fault_kind}:canary-<state>[@step])")
         else:
             errs.append(f"{path}:1: repeat= is the persistent form of a kill (mode=kill) or of "
                         f"fault={'|'.join(sorted(REPEAT_FAULTS))}:<hook> under a push, a scale or a runtime edit "
-                        f"(mode=rollout|scaledown|runtimerev), of fault=podkill|evict:{WINDOW_MOVE_PHASE} under a move, "
-                        f"or of fault={'|'.join(sorted(CANARY_REPEAT_FAULTS))}:canary-<state> under a canary")
+                        f"(mode=rollout|scaledown|runtimerev), of fault=ctrlrestart:settling under a delete (mode=recreate), "
+                        f"of fault=podkill|evict|ctrlrestart:{WINDOW_MOVE_PHASE} under a move, "
+                        f"or of fault={'|'.join(sorted(CANARY_REPEAT_FAULTS))}|ctrlrestart:canary-<state> under a canary")
     # A window fault: the admission webhook unreachable, or a competing
     # writer, on the settled service (idle, with during=idle), as an
     # operation lands (settling), at a hook of the roll a push or a runtime
@@ -14946,6 +15071,23 @@ def validate_case_file(path):
         if hop == "delete" and fault_kind == "preempt":
             errs.append(f"{path}:1: fault={fields.get('fault')} holds a pod the operation places, and a delete places "
                         f"nothing until its recreate (an eviction is the pod fault a delete meets)")
+    # The manager restarted at a hook of an operation beyond the push and
+    # the scale (fault=ctrlrestart:<hook>): as a rollback or a mid-roll edit
+    # lands once it has fired, at a hook of the roll under a runtime edit,
+    # as a delete lands. Each fires at the hook the operation offers; the
+    # restart loses no pod, so no victim, lift or slack knob applies.
+    if _ctrl_hook_op_case(fields):
+        hop = _window_operation(fields)
+        if fault_param not in CTRL_HOOK_HOOKS[hop]:
+            errs.append(f"{path}:1: fault={fields.get('fault')} at a hook of {WINDOW_WHAT[hop]} fires at "
+                        f"fault=ctrlrestart:{'|'.join(sorted(CTRL_HOOK_HOOKS[hop]))}")
+        if hop == "rollback" and during not in WINDOW_ROLLBACK_HOOKS:
+            errs.append(f"{path}:1: a manager restart over a rollback fires once the rollback has fired at "
+                        f"during={'|'.join(sorted(WINDOW_ROLLBACK_HOOKS))}")
+        for k in ("once", "form", "victim", "victimcomp", "floor_slack", "lift", "needs", "stuck", "pauseat", "break", "at"):
+            if k in fields:
+                errs.append(f"{path}:1: {k}= does not combine with fault=ctrlrestart:{fault_param} at a hook of "
+                            f"{WINDOW_WHAT[hop]} (the restart loses no pod; the operation's completion is the verdict)")
     # A node loss at a hook of an operation in flight (fault=node:<hook>): a
     # roll's own hooks under a push or a runtime edit, the moment a rollback,
     # an edit, a scale or a delete lands, or a canary grid state. The lift
@@ -23220,7 +23362,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     mode_fault = str(hdr.get("fault", "")).partition(":")[0]
     if mode in ("migrate", "recreate", "runtimerev") and mode_fault in WINDOW_FAULTS:
         return _window_op(case_id, yaml_file, desc, hdr)
-    if mode in ("recreate", "runtimerev") and mode_fault in HOOK_OP_FAULTS:
+    if mode in ("recreate", "runtimerev") and (mode_fault in HOOK_OP_FAULTS or _ctrl_hook_op_case(hdr)):
         return _hook_op(case_id, yaml_file, desc, hdr)
     if mode in NODE_HOOK_MODES and _node_hook_fault(_fault_new(case_id, hdr)):
         return _hook_op(case_id, yaml_file, desc, hdr)
@@ -23366,7 +23508,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                         print(f"\n  Phase 3: draining to targets (peak must stay ≤ {ce}/{cd}/{cr})")
                         state = "DRAINING"
                 if state == "DRAINING" and progressed and stable_since is not None and now - stable_since >= STABILITY_S \
-                        and not _repeat_retrying(fault, now):
+                        and not _repeat_retrying(fault, now) and not _repeat_pending(fault):
                     state = "CONVERGED"
                     converged_at = stable_since - trigger_ts
                     print(f"\n  ✓ CONVERGED (drained) at {converged_at:.1f}s post-trigger")
@@ -23720,7 +23862,7 @@ def run_case(case_id):
         return _window_op(case_id, yaml_file, desc, hdr)
     if _tight_cell(hdr):
         return _tight_roll(case_id, yaml_file, desc, hdr)
-    if fault_kind in HOOK_OP_FAULTS and _window_operation(hdr) in ("rollback", "edit"):
+    if (fault_kind in HOOK_OP_FAULTS or _ctrl_hook_op_case(hdr)) and _window_operation(hdr) in ("rollback", "edit"):
         return _hook_op(case_id, yaml_file, desc, hdr)
     if _node_hook_fault(_fault_new(case_id, hdr)):
         return _hook_op(case_id, yaml_file, desc, hdr)
@@ -23949,7 +24091,7 @@ def run_case(case_id):
                         print(f"  ✗ the roll completed on the new revision before the {rb['hook']} hook was reached")
                         break
                 if state == "ROTATING" and progressed and stable_since is not None and now - stable_since >= STABILITY_S \
-                        and not _repeat_retrying(fault, now):
+                        and not _repeat_retrying(fault, now) and not _repeat_pending(fault):
                     settled_ir, why_ir = (True, "") if not rb else _rollback_ir_settled(
                         _fetch_initial_ir_items(case_id), N, configured, bumped, old_hashes)
                     if settled_ir:

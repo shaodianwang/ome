@@ -1,0 +1,18 @@
+# p8843: [gen] repeat ctrlrestart scaledown engine +router N=4 x3  mode=scaledown Ne=4 Nd=0 Nr=2 ceil_e=4 ceil_d=0 ceil_r=2 fault=ctrlrestart:settling co=none topo=engine to_e=3 repeat=3
+# reason: the engine is scaled from N to N-1 on engine behind a router, single-pod, and as it lands the manager pod is deleted, and again each time it is Ready, 3 times in all, the window held open until the restarts are spent so the later ones land on the operation's settled end; the restarted manager carries nothing in memory and resumes the operation from status: nothing is created twice (peaks within the ceiling, no index collision) and nothing is deleted twice (every Component ends at its count); the scale completes with the engine at N-1 and the survivors on their own pods; across the window no repair opens, the pods created are those the operation explains and no pod comes back on a revision the service never pushed; after the last restart every row is Ready with no operation open and no hold; the router is a negative control (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8843 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

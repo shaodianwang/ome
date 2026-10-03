@@ -1927,6 +1927,24 @@ cell on the six shape families (the surge strategy, the env edit):
   it the case passes with a note and proves nothing. A restart while a
   crash-loop repair is open needs a second fault slot the runner lacks and
   is listed in the manifest's missing hooks.
+  **`fault=ctrlrestart:<hook>` beside the remaining operations** is the
+  hook-op driver's: `ctrlrestart:settling` beside `rollback=1
+  during=<hook>` or a mid-roll `edit=` (the manager is deleted as the
+  rollback or the edit lands, once it has fired at its own hook), under
+  `mode=recreate` (as the delete lands) and `mode=scaledown` with `to_e`
+  above N (as the scale-up lands, the scale driver's), and
+  `ctrlrestart:settling|rotating|draining` under `mode=runtimerev` (a hook
+  of the roll the edit starts). The restart loses no pod, so no victim,
+  lift or slack knob combines with it; the floor and the order are judged
+  in full. The operation must complete within its budget plus the
+  manager's return (`CTRL_READY_S`), the rows settle and nothing is held;
+  the checks name the manager pods deleted and, for a one-shot restart,
+  when the manager read Ready again under new names. A delete waits for
+  the restarted manager's webhook to admit a server-side dry-run apply
+  before the same-name recreate. The hook half of `isvcs/gen-ctrlrestart/`
+  (from p4668) runs the one-shot form of a rollback, a strategy edit, a
+  runtime edit, a scale-up and a delete on the six shape families; the
+  persistent form is `repeat=` in `isvcs/gen-repeat/` (below).
 
 - **`fault=readiness:old` with `form=persist|recover`** (rollout mode,
   `during=idle` only) makes one serving pod of the running revision — the
@@ -2222,9 +2240,16 @@ cell on the six shape families (the surge strategy, the env edit):
   `fault=podkill:<phase>` or `fault=evict:<phase>` under a push or a scale
   (`mode=scaledown`; `victim=stable` keeps the deleter on the running
   revision's pods, `victimcomp=engine` on the Component the operation works
-  on), and `fault=ctrlrestart:<phase>` under a push or a scale, or
+  on), `fault=ctrlrestart:<phase>` under a push, a scale, a runtime edit
+  or a delete (`mode=recreate`), beside `rollback=1` or a mid-roll `edit=`
+  at their hook, `fault=ctrlrestart:migrating` under a move and
+  `fault=ctrlrestart:canary-<state>` under a canary, or
   `fault=ctrlrestart:idle during=idle` for the manager restarting on the
-  settled service. A pod fault is due again once the Instance it took is
+  settled service. A repeating manager restart holds the operation's
+  window open until its repetitions are spent (the hook-op, scale, roll,
+  move and canary watches alike), so a short operation finishes under the
+  first restart and the later ones land on its settled end, which must
+  stay settled. A pod fault is due again once the Instance it took is
   whole, Ready and serving on new pods — the deleter takes the pod that came
   back, the same Instance, as long as it still fits the aim — or once the
   roll has retired that Instance (a gang surge abandoned, a source drained)
@@ -2640,7 +2665,9 @@ Four generators write into `isvcs/`; re-run one after editing it:
   (`p8700`–`p8899`) → `isvcs/gen-repeat/` (a pod deleted by hand, a gang
   member lost, an eviction or a preemption applied again each time what it
   took has come back, and the manager deleted again each time it is Ready,
-  at steady state, under a push and under a scale-up).
+  at steady state, under a push and under a scale-up, and the manager
+  again under a rollback, a strategy edit, a runtime edit, a scale-down, a
+  move, a delete and a canary from p8826).
 
 A generator owns exactly the case ids it mints. A gen-* folder whose id
 block is full mints from a continuation block (`GEN_CONTINUATIONS` in

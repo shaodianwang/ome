@@ -1,0 +1,20 @@
+# p8832: [gen] repeat ctrlrestart canary engine N=4 x3  mode=canary Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=ctrlrestart:canary-serving co=none topo=engine canary=auto repeat=3
+# reason: the engine is bumped under a two-step canary ladder with automatic promotion on engine alone, single-pod, and while the first step serves its canary the manager pod is deleted, and again each time it is Ready, 3 times in all, the window held open until the restarts are spent so the later ones land on the operation's settled end; the restarted manager carries nothing in memory and resumes the operation from status: nothing is created twice (peaks within the ceiling, no index collision) and nothing is deleted twice (every Component ends at its count); the step clock and the run are status, so the ladder resumes at the same step, the timed hold elapses and the run promotes to Stable with every member on the canary revision; across the window no repair opens, the pods created are those the operation explains and no pod comes back on a revision the service never pushed; after the last restart every row is Ready with no operation open and no hold
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8832 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

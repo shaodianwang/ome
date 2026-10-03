@@ -79,7 +79,11 @@ runners (run.py + the KIND CI lane) already implement:
                           mid-drain, mid-migration, mid-canary and
                           mid-scale-down, crossed with topology x strategy
                           (x a rolling group on PD rolls); the operation
-                          resumes from status and converges
+                          resumes from status and converges; and, from
+                          p4668, the same restart as a rollback, a strategy
+                          edit, a scale-up and a delete land and at the
+                          first pod of a runtime edit's new revision, on the
+                          six ledger shapes
     gen-canary-crash/    p5200+  a canary rolls the fix while the running
                           revision breaks under it (crashloop start|load,
                           imagepull, one or several Instances at once)
@@ -258,10 +262,13 @@ runners (run.py + the KIND CI lane) already implement:
                           deleted again each time it is Ready, on the six
                           shape families at steady state (mode=kill, or the
                           manager on the idle service), under a push and
-                          under a scale-up; the service keeps its floor, the
-                          status says why, nothing is rebuilt on a wrong
-                          revision, and after the lift every Instance is Ready
-                          with no row or hold left behind
+                          under a scale-up, and the manager again under a
+                          rollback, a strategy edit, a runtime edit, a
+                          scale-down, a move, a delete and a canary; the
+                          service keeps its floor, the status says why,
+                          nothing is rebuilt on a wrong revision, and after
+                          the lift every Instance is Ready with no row or
+                          hold left behind
     gen-fault-move/ p7800+  a fault at a moment of a move: an Instance is
                           moved by request and, as the request is accepted,
                           as its replacement pod appears or as its source
@@ -2618,6 +2625,85 @@ def emit_ctrlrestart(add):
                         case_comps if case_comps is not None else comps(topo, n, w, life, d_life=d_life, nr=nr),
                         _ctrl_reason(cond, strat, topo, co, nr), meta,
                         cell=("ctrlrestart", cond, topo, w, strat, co, nr), coord=coord)
+
+
+# ── gen-ctrlrestart, the hook half: the manager restarts under the remaining operations ──
+# The operations the hook families drive beyond the push, the scale-down,
+# the move and the canary the first half owns: a rollback and a mid-roll
+# edit once they have fired, a runtime edit, a scale-up and a delete, on the
+# six ledger shapes, each with the manager pod deleted at the operation's
+# hook (fault=ctrlrestart:<hook>): the first pod of the new revision under
+# a runtime edit, the moment the others land. The restart loses no pod, so
+# the operation must resume from status and complete with nothing created
+# or deleted twice. The persistent form (repeat=) is the repeating
+# family's, beside its push and scale-up rows.
+CTRL_HOOK_OPS = ["rollback", "edit", "runtime", "scaleup", "delete"]
+CTRL_HOOK_AT = {"runtime": "rotating", "move": "migrating", "canary": "canary-serving"}
+CTRL_HOOK_ROLLS = {"rollback", "edit", "runtime"}
+CTRL_HOOK_WORDS = {"rollback": "the rollback", "edit": "the roll under its edit", "runtime": "the runtime edit",
+                   "scaledown": "the scale-down", "move": "the move", "delete": "the delete", "canary": "the canary"}
+# The repeating restart under the remaining operations, on the repeating
+# family's shapes: the first half's push and scale-up rows plus these.
+REPEAT_CTRL_OPS = ["rollback", "edit", "runtime", "scaledown", "move", "delete", "canary"]
+
+
+def _ctrl_hook_end(op):
+    """What the operation owes once the restarted manager has resumed it."""
+    if op == "move":
+        return ("the replacement comes up at a distinct index, the source drains once, the request is consumed "
+                "exactly once and the ledger reaches Completed")
+    if op == "canary":
+        return ("the step clock and the run are status, so the ladder resumes at the same step, the timed hold "
+                "elapses and the run promotes to Stable with every member on the canary revision")
+    return _op_end(op)
+
+
+def _ctrl_hook_reason(op, topo, w, nr, n=None):
+    """What the operator does, where the manager pod is deleted and what the
+    controller promises; n names the repetitions of the persistent form."""
+    resumes = ("the restarted manager carries nothing in memory and resumes the operation from status: nothing is "
+               "created twice (peaks within the ceiling, no index collision) and nothing is deleted twice (every "
+               "Component ends at its count)")
+    at = {"runtime": "at the first pod of the new revision", "move": "at the migration accept",
+          "canary": "while the first step serves its canary"}.get(op, "as it lands")
+    does = {"move": "engine Instance 0 is moved by request",
+            "canary": "the engine is bumped under a two-step canary ladder with automatic promotion"}.get(op) \
+        or _op_does(op, False, topo)
+    out = f"{does} on {shape_words(topo, w, nr)}, and {at} the manager pod is deleted"
+    if n:
+        out += (f", and again each time it is Ready, {n} times in all, the window held open until the restarts are "
+                f"spent so the later ones land on the operation's settled end")
+    out += f"; {resumes}; {_ctrl_hook_end(op)}"
+    if n:
+        out += ("; across the window no repair opens, the pods created are those the operation explains and no pod "
+                "comes back on a revision the service never pushed; after the last restart every row is Ready with "
+                "no operation open and no hold")
+    else:
+        out += ", with every row settled and no hold left behind"
+    if is_mn(topo):
+        out += "; each Instance is a gang, created and drained whole"
+    if op == "canary":
+        if is_pd(topo):
+            out += "; decoder and router are group members on their default surge lifecycle and walk the ladder too"
+        elif nr:
+            out += "; the router is a group member on its default surge lifecycle and walks the ladder too"
+        return out
+    return out + _op_controls(topo, nr, op)
+
+
+def emit_ctrlrestart_hooks(add):
+    """The hook half of gen-ctrlrestart, minted after the first half."""
+    for topo, n, w, nr in DISRUPT_SHAPES:
+        for op in CTRL_HOOK_OPS:
+            strat, surge, unavail = _op_strategy(op, False)
+            hook = CTRL_HOOK_AT.get(op, HOOK_PHASE)
+            kv = dict(_op_kv(op, topo, n, nr, False), fault=f"ctrlrestart:{hook}", co="none", topo=topo)
+            desc = (f"{GEN_MARK} ctrlrestart {op} {shape_tag(topo, w, nr)} N={n}"
+                    + (f" {strat} {budget_tag(strat, surge, unavail)}" if op in CTRL_HOOK_ROLLS else ""))
+            meta = dict(strat=strat if op in CTRL_HOOK_ROLLS else "(dormant: nothing rolls)", verb=f"ctrlrestart:{op}",
+                        faultop=f"ctrlrestart {op}", op=op, hook=hook, half="hook")
+            add("gen-ctrlrestart", desc, kv, _op_comps(op, topo, n, w, nr, False), _ctrl_hook_reason(op, topo, w, nr),
+                meta, cell=("ctrl-hook", op, topo, w, nr), dedicated=(op == "runtime"))
 # ── gen-canary-*: operator stories driven through a canary ──────────────────
 # Every story family walks the same ladder: four steps of capacity ahead of
 # traffic with a timed soak in place of an analysis gate, on a
@@ -5372,6 +5458,50 @@ def _repeat_ctrl_reason(op, shape, strat, n):
     return out
 
 
+def emit_repeat_ctrl_ops(add):
+    """The manager deleted again each time it is Ready under a rollback, a
+    mid-roll edit, a runtime edit, a scale-down, a move, a delete and a
+    canary, minted after the repeating family's first pass."""
+    n = REPEAT_N
+    for shape in REPEAT_SHAPES:
+        label, topo, size, w, router = shape
+        nr = lib.NR if router else 0
+        tag = _repeat_shape_tag(shape)
+        for op in REPEAT_CTRL_OPS:
+            strat, surge, unavail = _op_strategy(op, False)
+            hook = CTRL_HOOK_AT.get(op, HOOK_PHASE)
+            life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+            coord = None
+            if op == "move":
+                # The replacement surges at a new index whatever the strategy.
+                kv = dict(mode="migrate", **counts(topo, size, nr), **ceilings(topo, size, "SurgeThenDrain", 1, nr),
+                          mig="Auto", inst=0)
+                case_comps = comps(topo, size, w, life, nr=nr)
+            elif op == "canary":
+                # Decoder and router are group members on their default surge lifecycle.
+                kv = dict(mode="canary", **counts(topo, size, nr), **ceilings(topo, size, "SurgeThenDrain", 1, nr),
+                          canary="auto")
+                if is_pd(topo):
+                    kv.update(ceil_d=size + 1, ceil_r=lib.NR + 1)
+                elif nr:
+                    kv.update(ceil_r=nr + 1)
+                case_comps = comps(topo, size, w, life, nr=nr)
+                coord = lib.canary_block(lib.canary_steps("auto", *CTRL_CANARY_STEPS),
+                                         components=[c["comp"] for c in case_comps])
+            else:
+                kv = _op_kv(op, topo, size, nr, False)
+                case_comps = _op_comps(op, topo, size, w, nr, False)
+            kv.update(fault=f"ctrlrestart:{hook}", co="none", topo=topo, repeat=n)
+            rolls = op in CTRL_HOOK_ROLLS or op == "canary"
+            desc = (f"{GEN_MARK} repeat ctrlrestart {op} {tag} N={size}"
+                    + (f" {strat} {budget_tag(strat, surge, unavail)}" if op in CTRL_HOOK_ROLLS else "") + f" x{n}")
+            add("gen-repeat", desc, kv, case_comps, _ctrl_hook_reason(op, topo, w, nr, n=n),
+                dict(strat=strat if rolls else "(dormant: nothing rolls)", verb=f"repeat:ctrlrestart:{op}",
+                     loop=f"ctrlrestart x{n} under {CTRL_HOOK_WORDS[op]}", op=op, hook=hook),
+                cell=("repeat", "ctrlrestart", op, label, strat if op in CTRL_HOOK_ROLLS else None, None, None),
+                coord=coord, dedicated=(op == "runtime"))
+
+
 def emit_repeat(add):
     n = REPEAT_N
     for shape in REPEAT_SHAPES:
@@ -8106,6 +8236,7 @@ def build_outputs():
     emit_node_relocation(add)
     emit_node_hooks(add)
     emit_ctrlrestart(add)
+    emit_ctrlrestart_hooks(add)
     emit_canary_crash(add)
     emit_canary_retarget(add)
     emit_canary_podkill(add)
@@ -8136,6 +8267,7 @@ def build_outputs():
     emit_fault_edit(add)
     emit_packed_pool(add)
     emit_repeat(add)
+    emit_repeat_ctrl_ops(add)
     emit_webhook(add)
     emit_conflict(add)
     emit_crash_once(add)
@@ -8232,7 +8364,8 @@ def manifest(rows):
     lines += table("By lift (preempt, pending and webhook families)",
                    tally(lambda kv, m: m["lift"], where=lambda kv, m: "lift" in m))
     lines += table_if("By window operation (webhook and conflict families)", "winop")
-    lines += table_if("By operation under a pre-armed cause or a hook fault (pending, evict and preempt families)", "faultop")
+    lines += table_if("By operation under a pre-armed cause or a hook fault (pending, evict, preempt, node-hook and "
+                      "ctrlrestart-hook families)", "faultop")
     lines += table_if("By competing-writer form (conflict)", "cform")
     lines += table_if("By competing-writer target (conflict)", "target")
     lines += table("By percent budget (gen-budget)",
@@ -8373,7 +8506,14 @@ def manifest(rows):
         " crash-loop repair is open is not emitted. The strategy axis is live"
         " for the two rollout conditions and dormant under a migration and a"
         " scale-down, where both strategies still run for the family's symmetry;"
-        " a rolling group is crossed in on the PD rollout conditions only.",
+        " a rolling group is crossed in on the PD rollout conditions only. The"
+        " hook half (from p4668) deletes the manager as a rollback, a strategy"
+        " edit, a scale-up and a delete land and at the first pod of a runtime"
+        " edit's new revision, on the six ledger shapes under the surge"
+        " strategy (the edit's roll switches to RecreatePod): the restart"
+        " loses no pod, so the floor and the order are judged in full and the"
+        " operation must complete with nothing created or deleted twice. Its"
+        " persistent form is the repeating family's.",
         "- The gen-canary-* families drive operator stories through a canary at small size:"
         f" {STORY_N} single-pod Instances, SurgeThenDrain with the engine surge"
         f" at {' and '.join(str(s) for s in STORY_SURGES)}, a four-step ladder"
@@ -8772,7 +8912,12 @@ def manifest(rows):
         " slowest), then stops, and the case reads the window and the end state"
         " after the lift. It runs on the six shape families at steady state"
         " (mode=kill; the manager on the idle service), under a push with the"
-        " surge and the drain-first strategy and under a scale-up by one. The"
+        " surge and the drain-first strategy and under a scale-up by one; the"
+        " manager is deleted again each time it is Ready under a rollback, a"
+        " strategy edit, a runtime edit, a scale-down, a move, a delete and a"
+        " two-step canary too (from p8826), the window held open until the"
+        " restarts are spent so the later ones land on the operation's settled"
+        " end. The"
         " loop takes the same Instance again once it is back (the deleter hits"
         " the pod that came back), the running revision's pods under the push"
         " (victim=stable), and the engine on the prefill/decode shapes"
