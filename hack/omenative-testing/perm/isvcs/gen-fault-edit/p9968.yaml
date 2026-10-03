@@ -1,0 +1,96 @@
+# p9968: [gen] fault-edit imagePullOnce on engine before the edit pd-mn W1 N=2 SurgeThenDrain  mode=runtimerev Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=3 ceil_r=3 fault=imagepull:old co=none topo=pd-mn during=idle rt=ome-coordtest-rt-p9968 expect=roll edit=env lift=after-settle
+# reason: the operator edits the runtime every Component inherits (a new runner env) while one old-revision engine pod sits in ImagePullBackOff on pd-mn W1, the break landed on the settled service and the status reacted to it first; the image is put back 20s after the edit has fired; engine, decoder and router each roll onto their own new revision, and the roll owns the broken Instance: it ends on the edited revision serving with no repair recorded for it after the edit, the healthy Instances hold the floor lowered by the one broken Instance, nothing exceeds its ceiling and no Instance row is left mid-operation; each Instance is a gang, replaced whole
+# Multi-node test ClusterServingRuntime — each Instance is a gang of
+# 1 leader + N worker pods (LeaderWorkerSet). Same nginx + 15s artificial
+# startup as the single-pod runtime, but split into leader.runner +
+# worker.runner so engine.leader / engine.worker ISVCs resolve their
+# containers. routerConfig stays single-pod (routers aren't multi-node).
+apiVersion: ome.io/v1beta1
+kind: ClusterServingRuntime
+metadata:
+  name: ome-coordtest-rt-p9968
+  labels:
+    ome-coordtest/managed: "true"
+spec:
+  schedulerName: ${OME_EVAL_SCHEDULER}
+  disabled: false
+  protocolVersions: [openAI]
+  supportedModelFormats:
+    - autoSelect: false
+      modelArchitecture: TestArchitecture
+      modelFormat:    { name: noop, operator: Equal, version: "1.0.0", weight: 1 }
+      modelFramework: { name: noop, operator: Equal,                  weight: 1 }
+      priority: 1
+
+  engineConfig: &mnComponent
+    nodeSelector: { kubernetes.io/arch: ${OME_EVAL_NODE_ARCH} }
+    leader:
+      runner: &mnRunner
+        name:  ome-container
+        image: ${OME_EVAL_NGINX_IMAGE}
+        # The trap keeps sh (PID 1 until the exec) responsive to pod deletion.
+        # The kubelet delivers the image's declared stop signal — nginx images
+        # declare SIGQUIT, not SIGTERM — and an untrapped PID-1 shell ignores it,
+        # leaving a deleted pod Terminating for its full termination grace.
+        # Cap nginx workers (NOT 'auto'): 'auto' = one worker per NODE core,
+        # ignoring the CPU cgroup quota — on a 144-core gang node that's ~144
+        # workers → OOM at 128Mi (and thrash at 200m CPU). The image conf already
+        # sets worker_processes (so -g would be a duplicate directive); instead
+        # sed a copy into /tmp (the conf is read-only) and nginx -c it, which
+        # preserves the image's writable pid path + its 8080 server.
+        command: ["sh", "-c", "trap 'exit 0' QUIT TERM INT; sleep ${TEST_STARTUP_DELAY:-15} & wait $! && sed 's/^worker_processes.*/worker_processes 2;/' /etc/nginx/nginx.conf > /tmp/nginx.conf || exit 1; [ -n \"${TEST_EXIT_AFTER}\" ] || exec nginx -c /tmp/nginx.conf -g 'daemon off;'; nginx -c /tmp/nginx.conf -g 'daemon off;' & sleep ${TEST_EXIT_AFTER} & wait $!; exit 1"]
+        env:
+          - { name: TEST_REV,            value: "v1" }
+          - { name: TEST_STARTUP_DELAY,  value: "15" }
+        ports: [ { containerPort: 8080, name: http, protocol: TCP } ]
+        startupProbe:   { httpGet: { path: /, port: 8080 }, periodSeconds: 2, failureThreshold: 30 }
+        # Readiness carries two switches, each enough to fail it while startup
+        # and liveness keep passing, so the pod runs, leaves rotation and is
+        # never restarted: the TEST_UNREADY env (a revision whose pods never
+        # pass readiness) and the /tmp/perm-unready file (a serving pod that
+        # stops passing it). run.py names both.
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", "[ -z \"$TEST_UNREADY\" ] && [ ! -e /tmp/perm-unready ] && wget -q -O /dev/null -T 2 http://127.0.0.1:8080/"]
+          periodSeconds: 2
+          failureThreshold: 2
+        livenessProbe:  { httpGet: { path: /, port: 8080 }, periodSeconds: 5, failureThreshold: 3 }
+        resources:
+          requests: { cpu: 50m,  memory: 64Mi }
+          limits:   { cpu: 200m, memory: 128Mi }
+    worker:
+      runner: *mnRunner
+
+  decoderConfig: *mnComponent
+
+  # Router is single-pod (not gang-scheduled).
+  routerConfig:
+    nodeSelector: { kubernetes.io/arch: ${OME_EVAL_NODE_ARCH} }
+    runner: *mnRunner
+
+---
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9968 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-rt-p9968, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

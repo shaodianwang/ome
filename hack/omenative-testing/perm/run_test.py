@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import collections
 import tempfile
 import time
 import re
@@ -12465,6 +12466,8 @@ class GeneratedFaultEditFamilyTest(unittest.TestCase):
 
     def test_generated_family_crosses_every_axis(self):
         outputs, fam = self._rows()
+        self.assertEqual(230, len(fam), "128 crossings plus the further rows, one per ledger cell")
+        fam = [(n, kv, m) for n, kv, m in fam if "row" not in m]
         self.assertEqual(128, len(fam))
         breaks = [(n, kv, m) for n, kv, m in fam if "fault" in kv]
         bad = [(n, kv, m) for n, kv, m in fam if "fault" not in kv]
@@ -16144,7 +16147,7 @@ class CanaryBesideEveryFaultFamiliesTest(unittest.TestCase):
                    for folder in ("gen-canary-fault-old", "gen-canary-fault-new", "gen-canary-podkill")}
 
     def test_counts_shapes_and_the_continuation_block(self):
-        self.assertEqual({"gen-canary-fault-old": 129, "gen-canary-fault-new": 78, "gen-canary-podkill": 36},
+        self.assertEqual({"gen-canary-fault-old": 135, "gen-canary-fault-new": 78, "gen-canary-podkill": 36},
                          {folder: len(fam) for folder, fam in self.fam.items()})
         shapes = {f for f, *_ in generate_cases.GATE_SHAPES}
         for folder, fam in self.fam.items():
@@ -16158,8 +16161,9 @@ class CanaryBesideEveryFaultFamiliesTest(unittest.TestCase):
     def test_the_ledger_rows_each_family_fills(self):
         rows = {folder: {m["row"] for _n, _kv, m in fam} for folder, fam in self.fam.items()}
         self.assertEqual({"readiness never passes, persistent, running", "readiness never passes, one-shot, running",
-                          "config missing, one-shot, running", "crash at start, one-shot, running",
-                          "crash after Ready, one-shot, running", "image pull, one-shot, running"},
+                          "config missing, one-shot, running", "config missing, persistent, running",
+                          "crash at start, one-shot, running", "crash after Ready, one-shot, running",
+                          "image pull, one-shot, running"},
                          rows["gen-canary-fault-old"])
         self.assertEqual({"config missing, persistent, new", "config missing, one-shot, new",
                           "readiness never passes, persistent, new", "readiness never passes, one-shot, new",
@@ -16174,24 +16178,33 @@ class CanaryBesideEveryFaultFamiliesTest(unittest.TestCase):
         fam = self.fam["gen-canary-fault-old"]
         for name, kv, m in fam:
             pos = m["verb"].partition("@")[2]
+            kept_key = kv["fault"] == "configkey:idle" and kv.get("lift") == "never"
             self.assertEqual(generate_cases.STABLE_POSITION_POLICY[pos], kv["canary"], name)
             self.assertEqual(generate_cases.STABLE_POSITIONS[pos], kv["fault"].partition(":")[2], name)
-            self.assertEqual("Failed", kv["nophase"], f"{name}: the ladder must not park")
+            if kept_key:
+                # Both revisions read the key, so the ladder parks: the park is the exit.
+                self.assertEqual("Failed", kv["terminal"], f"{name}: the ladder parks at the step whose pod waits on the key")
+                self.assertNotIn("nophase", kv, name)
+            else:
+                self.assertEqual("Failed", kv["nophase"], f"{name}: the ladder must not park")
             self.assertTrue(run._cell_ok(kv["cell"]), name)
             self.assertIn("stableBroken", kv["cell"], name)
             if kv["canary"] == "manual":
                 self.assertEqual(generate_cases.BREAK_GATE_HOLD_S, kv["verbhold"], name)
-            if kv["topo"].endswith("-mn"):
+            if kv["topo"].endswith("-mn") and not kept_key:
                 self.assertNotEqual("idle", pos, f"{name}: gangs run the ladder positions alone")
             kind = kv["fault"].partition(":")[0]
             if kind == "configkey":
                 self.assertIn("kind: ConfigMap", self.outputs[f"gen-canary-fault-old/{name}.yaml"], name)
-                self.assertEqual("after-settle", kv["lift"], f"{name}: a kept key is read by both revisions")
+                self.assertEqual("never" if kept_key else "after-settle", kv["lift"], name)
             if kv.get("once"):
                 self.assertEqual(("crashloop", "load"), (kind, kv["form"]), name)
                 self.assertNotIn("victims", kv, name)
             line2 = self.outputs[f"gen-canary-fault-old/{name}.yaml"].splitlines()[1]
-            self.assertIn("ends on the canary revision serving" if not kv.get("once") else "ending on the canary revision", line2, name)
+            if kept_key:
+                self.assertIn("parks Failed at that step naming the missing key", line2, name)
+            else:
+                self.assertIn("ends on the canary revision serving" if not kv.get("once") else "ending on the canary revision", line2, name)
         self.assertEqual({"None", "RecreateInstance"}, {m["rp"] for _n, kv, m in fam if kv["fault"].startswith("configkey")})
         self.assertEqual({"None"}, {m["rp"] for _n, kv, m in fam if kv["fault"].startswith("readiness")})
 
@@ -16250,3 +16263,392 @@ class CanaryBesideEveryFaultFamiliesTest(unittest.TestCase):
                     path.parent.mkdir(exist_ok=True)
                     path.write_text(self.outputs[f"{folder}/{name}.yaml"])
                     self.assertEqual([], run.validate_case_file(path), name)
+
+
+class RuntimeEditBreakHeaderTest(unittest.TestCase):
+    """mode=runtimerev during=idle lands a break of the running revision on
+    the settled service before the edit; mode=runtimerev break=<kind> makes
+    the edited runtime carry the break. The header rules of both."""
+
+    BASE = ("# p999: x mode=runtimerev rt=ome-coordtest-rt-p999 expect=roll edit=env "
+            "Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine")
+    PD = ("# p999: x mode=runtimerev rt=ome-coordtest-rt-p999 expect=roll edit=env "
+          "Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=3 ceil_r=3 topo=pd")
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_a_break_before_the_edit_reads_each_kind_once_and_kept(self):
+        for tail in (" during=idle fault=crashloop:old form=start lift=after-settle",
+                     " during=idle fault=crashloop:old form=load lift=after-settle",
+                     " during=idle fault=crashloop:old form=load",
+                     " during=idle fault=imagepull:old lift=after-settle",
+                     " during=idle fault=readiness:old form=recover",
+                     " during=idle fault=readiness:old form=persist",
+                     " during=idle fault=configkey:missing lift=after-settle",
+                     " during=idle fault=configkey:missing lift=never"):
+            self.assertEqual([], self._errs(self.BASE + tail), tail)
+        for victim in ("decoder", "router"):
+            self.assertEqual([], self._errs(self.PD + f" during=idle fault=crashloop:old form=load lift=after-settle victimcomp={victim}"))
+
+    def test_a_break_before_the_edit_rejects_what_it_does_not_read(self):
+        for tail, said in ((" during=idle fault=crashloop:old form=start once=1", "once=1 does not combine with a break landed before the runtime edit"),
+                           (" during=idle fault=configkey:missing", "needs lift=never"),
+                           (" during=idle fault=crashloop:new form=start", "breaks one Instance of the running revision before the edit"),
+                           (" during=idle fault=readiness:old", "needs form=persist|recover"),
+                           (" during=idle fault=imagepull:old lift=never", "healed once the edit has fired"),
+                           (" during=idle fault=crashloop:old form=start break=crash-start", "a case carries one break"),
+                           (" during=idle fault=podkill:settling", "breaks one Instance of the running revision before the edit")):
+            errs = self._errs(self.BASE + tail)
+            self.assertTrue(any(said in e for e in errs), (tail, errs))
+        noroll = self.BASE.replace("expect=roll", "expect=noroll") + " during=idle fault=crashloop:old form=start"
+        self.assertTrue(any("expect=roll" in e for e in self._errs(noroll)))
+
+    def test_an_edited_runtime_carries_each_kind_kept_and_once(self):
+        for tail in (" break=crash-start", " break=crash-start once=1", " break=crash-load", " break=crash-load once=1",
+                     " break=imagepull", " break=imagepull once=1", " break=configkey", " break=configkey once=1",
+                     " break=stuck once=1"):
+            self.assertEqual([], self._errs(self.BASE + tail), tail)
+        self.assertEqual([], self._errs(self.PD + " break=crash-start victimcomp=decoder"))
+        self.assertEqual([], self._errs(self.PD + " break=crash-start once=1 victimcomp=router"))
+        recover = self.BASE.replace("expect=roll", "expect=recover").replace(" edit=env", "")
+        self.assertEqual([], self._errs(recover + " break=stuck"), "the recovery guard keeps its form")
+
+    def test_an_edited_runtime_break_rejects_what_it_does_not_combine_with(self):
+        for tail, said in ((" break=stuck", "is the recovery guard (expect=recover)"),
+                           (" break=crash-start fault=crashloop:old form=start", "fault= does not combine with break="),
+                           (" break=crash-start lift=after-settle", "lift= does not combine with break="),
+                           (" break=crash-start during=rollout", "during= does not combine with break="),
+                           (" break=configkey victimcomp=decoder", "names a Component the edited runtime renders"),
+                           (" break=bogus", "malformed header value break=bogus")):
+            errs = self._errs(self.BASE + tail)
+            self.assertTrue(any(said in e for e in errs), (tail, errs))
+        image = self.BASE.replace("edit=env", "edit=image img=${OME_EVAL_NGINX_ALT_IMAGE}") + " break=crash-start"
+        self.assertTrue(any("rides the runner env edit (edit=env)" in e for e in self._errs(image)))
+        self.assertTrue(any("reads the key off the engine runner" in e
+                            for e in self._errs(self.PD + " break=configkey victimcomp=decoder")))
+
+    def test_the_runtime_edit_dispatches_each_shape_to_its_handler(self):
+        calls = []
+        saved = {k: getattr(run, k) for k in ("_runtimerev_broken", "_runtimerev_carried", "_runtime_recover",
+                                                "_runtime_recover_stuck", "_runtimerev_during", "_runtimerev_repair")}
+        try:
+            for k in saved:
+                setattr(run, k, (lambda name: (lambda *a, **kw: calls.append(name) or 0))(k))
+            base = {"mode": "runtimerev", "rt": "ome-coordtest-rt-p1", "Ne": 2, "Nd": 0, "Nr": 0}
+            run._runtimerev("p1", Path("p1.yaml"), "d", dict(base, during="idle", fault="configkey:missing", lift="never"))
+            run._runtimerev("p1", Path("p1.yaml"), "d", dict(base, **{"break": "crash-start", "once": 1}))
+            run._runtimerev("p1", Path("p1.yaml"), "d", dict(base, **{"break": "stuck", "expect": "recover"}))
+            run._runtimerev("p1", Path("p1.yaml"), "d", dict(base, expect="recover"))
+            run._runtimerev("p1", Path("p1.yaml"), "d", dict(base, during="rollout"))
+            run._runtimerev("p1", Path("p1.yaml"), "d", dict(base, during="repair", fault="crashloop:old", form="start"))
+        finally:
+            for k, v in saved.items():
+                setattr(run, k, v)
+        self.assertEqual(["_runtimerev_broken", "_runtimerev_carried", "_runtime_recover_stuck", "_runtime_recover",
+                          "_runtimerev_during", "_runtimerev_repair"], calls)
+
+
+class RuntimeEditBreakOpsTest(unittest.TestCase):
+    """The one patch an edited runtime carries: the env bump that re-renders
+    every Component, the break on the victim's runners, and the restore the
+    corrective edit applies, on the single-pod and the gang shapes."""
+
+    SPEC = {"engineConfig": {"runner": {"image": "img:v1", "env": [{"name": "TEST_REV", "value": "v1"}]}},
+            "routerConfig": {"runner": {"image": "r:v1", "env": [{"name": "TEST_REV", "value": "v1"}]}}}
+    GANG = {"engineConfig": {"leader": {"runner": {"image": "img:v1", "env": [{"name": "TEST_REV", "value": "v1"}]}},
+                             "worker": {"runner": {"image": "img:v1", "env": [{"name": "TEST_REV", "value": "v1"}]}}}}
+
+    def test_the_bump_sets_the_first_env_value_of_every_runner(self):
+        self.assertEqual([{"op": "replace", "path": "/spec/engineConfig/runner/env/0/value", "value": "v2"},
+                          {"op": "replace", "path": "/spec/routerConfig/runner/env/0/value", "value": "v2"}],
+                         run._runtime_bump_ops(self.SPEC, ["engine", "router"], "v2"))
+        self.assertEqual(["/spec/engineConfig/leader/runner/env/0/value", "/spec/engineConfig/worker/runner/env/0/value"],
+                         [op["path"] for op in run._runtime_bump_ops(self.GANG, ["engine"], run.RUNTIME_FIX_VAL)])
+
+    def test_the_image_breaks_replace_the_victims_runner_images(self):
+        ops, what = run._runtime_break_ops(self.SPEC, "crash-start", "engine")
+        self.assertEqual([{"op": "replace", "path": "/spec/engineConfig/runner/image", "value": run._crashloop_image()}], ops)
+        self.assertEqual(f"image {run._crashloop_image()}", what)
+        ops, _what = run._runtime_break_ops(self.GANG, "imagepull", "engine")
+        self.assertEqual({"/spec/engineConfig/leader/runner/image", "/spec/engineConfig/worker/runner/image"},
+                         {op["path"] for op in ops})
+        self.assertEqual({run._break_image("imagepull")}, {op["value"] for op in ops})
+        self.assertEqual([], run._runtime_break_ops(self.SPEC, "crash-start", "decoder")[0], "no decoder on this runtime")
+
+    def test_the_env_breaks_append_an_entry_to_the_victims_runner_env(self):
+        ops, what = run._runtime_break_ops(self.SPEC, "crash-load", "router")
+        self.assertEqual([{"op": "add", "path": "/spec/routerConfig/runner/env/-",
+                           "value": {"name": run.CRASH_EXIT_ENV, "value": str(run.CRASH_EXIT_AFTER_S)}}], ops)
+        self.assertEqual(f"{run.CRASH_EXIT_ENV}={run.CRASH_EXIT_AFTER_S}", what)
+        entry = {"name": run.RUNTIME_CONFIGKEY_VAR, "valueFrom": {"configMapKeyRef": {"name": "p1-config", "key": "value-new"}}}
+        ops, what = run._runtime_break_ops(self.GANG, "configkey", "engine", env_entry=entry)
+        self.assertEqual({"/spec/engineConfig/leader/runner/env/-", "/spec/engineConfig/worker/runner/env/-"},
+                         {op["path"] for op in ops})
+        self.assertTrue(all(op["value"] == entry and op["value"] is not entry for op in ops))
+        self.assertEqual(f"{run.RUNTIME_CONFIGKEY_VAR} reading ConfigMap key p1-config/value-new", what)
+
+    def test_the_restore_puts_the_image_back_or_drops_the_appended_entry(self):
+        self.assertEqual([{"op": "replace", "path": "/spec/engineConfig/runner/image", "value": "img:v1"}],
+                         run._runtime_restore_ops(self.SPEC, "imagepull", "engine", image="img:v1"))
+        broken = {"engineConfig": {"leader": {"runner": {"env": [{"name": "TEST_REV", "value": "v2"},
+                                                                 {"name": run.CRASH_EXIT_ENV, "value": "20"}]}},
+                                   "worker": {"runner": {"env": [{"name": run.CRASH_EXIT_ENV, "value": "20"},
+                                                                 {"name": "TEST_REV", "value": "v2"},
+                                                                 {"name": run.CRASH_EXIT_ENV, "value": "20"}]}}}}
+        self.assertEqual([{"op": "remove", "path": "/spec/engineConfig/leader/runner/env/1"},
+                          {"op": "remove", "path": "/spec/engineConfig/worker/runner/env/2"},
+                          {"op": "remove", "path": "/spec/engineConfig/worker/runner/env/0"}],
+                         run._runtime_restore_ops(broken, "crash-load", "engine"), "last index first on each list")
+        keyed = {"engineConfig": {"runner": {"env": [{"name": "TEST_REV", "value": "v2"},
+                                                     {"name": run.RUNTIME_CONFIGKEY_VAR, "valueFrom": {}}]}}}
+        self.assertEqual([{"op": "remove", "path": "/spec/engineConfig/runner/env/1"}],
+                         run._runtime_restore_ops(keyed, "configkey", "engine"))
+        self.assertEqual([], run._runtime_restore_ops(self.SPEC, "configkey", "engine"), "nothing appended, nothing to drop")
+
+    def test_the_env_lists_are_read_off_every_runner_shape(self):
+        self.assertEqual([("/spec/engineConfig/runner/env", [{"name": "TEST_REV", "value": "v1"}])],
+                         run._runner_env_lists(self.SPEC, "engineConfig"))
+        self.assertEqual(["/spec/engineConfig/leader/runner/env", "/spec/engineConfig/worker/runner/env"],
+                         [path for path, _env in run._runner_env_lists(self.GANG, "engineConfig")])
+        self.assertEqual([], run._runner_env_lists(self.SPEC, "decoderConfig"))
+
+
+class EditWatchesWithoutAMidRollEditTest(unittest.TestCase):
+    """The held-moment watches run without a mid-roll edit when the push
+    itself is the edit (a runtime edit): nothing is read off a missing
+    edit record, and the watch ends on the context's own terms."""
+
+    def _ctx(self, kind):
+        return {"case_id": "p1", "closed": True, "pod_state": {}, "old_hashes": {"a1"}, "trigger_ts": 0.0,
+                "N": {"engine": 2, "decoder": 0, "router": 0}, "configured": {"engine"},
+                "pods_per_inst": {"engine": 1, "decoder": 1, "router": 1},
+                "fault": run._fault_new("p1", {"fault": f"{kind}:new", "form": "start"})}
+
+    def test_the_once_watch_ends_with_no_edit_record(self):
+        hb = run._edit_break_new()
+        hb.update(kind="crash-start", once=True)
+        out, state = run._edit_once_watch(self._ctx("crashloop"), {"engine"}, "engine", None, hb, 1.0)
+        self.assertEqual("NO_ROLLOUT", state)
+        self.assertIsNone(out["bitten_at"])
+        self.assertIsNone(hb["edit_at"])
+
+    def test_the_kept_watch_ends_with_no_edit_record(self):
+        hb = run._edit_break_new()
+        hb.update(kind="crash-start", once=False)
+        state = run._edit_kept_watch(self._ctx("crashloop"), {"engine"}, "engine", None, hb, 1.0,
+                                     fix=lambda: (True, "unused"))
+        self.assertEqual("HOOK_MISSED", state)
+        self.assertIsNone(hb["edit_at"])
+
+    def test_the_break_checks_name_the_operation_the_break_landed_before(self):
+        f = run._fault_new("p1", {"fault": "crashloop:old", "form": "start", "lift": "after-settle"})
+        f["notes"] = ["the break had bitten 3s after it landed"]
+        checks = []
+        verdict = run._edit_fault_checks(f, {"at": None, "why": "", "served": None}, "CONVERGED", False, True,
+                                         "PASS", [], checks, op="the runtime edit")
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any(c.startswith("  ⓘ crashloop before the runtime edit:") for c in checks), checks)
+        self.assertTrue(any("the roll completed under the edit once the cause was taken away" in c for c in checks))
+
+
+class CanaryKeptKeyTest(unittest.TestCase):
+    """The running revision's key kept away under a canary: the predicate,
+    the tracked bite's traffic and the park's message, and the verdict."""
+
+    def _fault(self, **extra):
+        f = run._fault_new("p1", dict({"fault": "configkey:idle", "lift": "never"}, **extra))
+        f.update(crash_comp="engine", crash_inst="3", cm_key="value", cause="ConfigMap key p1-config/value")
+        return f
+
+    def test_the_predicate_reads_a_kept_key_of_the_running_revision_alone(self):
+        self.assertTrue(run._canary_kept_key(self._fault()))
+        self.assertTrue(run._canary_kept_key(run._fault_new("p1", {"fault": "configkey:canary-serving@1", "lift": "never"})))
+        self.assertFalse(run._canary_kept_key(run._fault_new("p1", {"fault": "configkey:idle", "lift": "after-settle"})))
+        self.assertFalse(run._canary_kept_key(run._fault_new("p1", {"fault": "configkey:new", "lift": "never"})))
+        self.assertFalse(run._canary_kept_key(run._fault_new("p1", {"fault": "crashloop:idle", "form": "start"})))
+        self.assertFalse(run._canary_kept_key(None))
+
+    def _track(self, bite_step=0, park_step=0, reason="InstanceFailed", message="", traffic_bite=0, traffic_park=0,
+               stable=7, crash=1, phases=("Pending", "Failed"), reached=True):
+        return {"bite": {"what": "engine-3 waits", "at": 30.0, "hook": "canary-staging", "step": bite_step,
+                         "traffic": traffic_bite},
+                "park": {"at": 120.0, "step": park_step, "reason": reason, "message": message,
+                         "canary_traffic": traffic_park, "stable_serving": stable, "crash_instances": crash},
+                "ready_seen": set(), "uids": {"u1": 1.0}, "peak_crash": crash,
+                "phases_before_exit": set(phases), "crash_indices": {"3"} if reached else {"0"}}
+
+    def _run(self, track, rows=None):
+        ctx = {"case_id": "p1", "N": {"engine": 8, "decoder": 0, "router": 0}}
+        saved = run._ir_rows
+        run._ir_rows = lambda case_id: rows or {}
+        try:
+            notes, checks = [], []
+            verdict = run._canary_kept_key_checks(ctx, self._fault(), track, {"Pending", "Failed"}, "PASS", notes, checks)
+        finally:
+            run._ir_rows = saved
+        return verdict, notes, checks
+
+    def test_the_decided_exit_passes(self):
+        verdict, notes, checks = self._run(self._track(message="engine-3 waits in CreateContainerConfigError"))
+        self.assertEqual("PASS", verdict, notes)
+        text = "\n".join(checks)
+        self.assertIn("did not hold the ladder", text)
+        self.assertIn("parked at the step whose pod waited on the key (step 0)", text)
+        self.assertIn("names the missing key", text)
+        self.assertIn("no traffic reached the step whose pod never came up", text)
+        self.assertIn("kept serving 7/8 engine Instances", text)
+        self.assertIn("nothing promoted the pushed revision", text)
+        self.assertIn("was replaced by the ladder before the park", text)
+
+    def test_the_key_may_be_named_by_a_failed_row_instead(self):
+        rows = {"engine": [{"index": 3, "phase": "Failed", "lastFailure": {"reason": "ConfigError", "message": "key value missing"}}]}
+        verdict, notes, checks = self._run(self._track(reason="InstanceFailed"), rows=rows)
+        self.assertEqual("PASS", verdict, notes)
+        self.assertTrue(any("names the missing key: Instance 3 ConfigError key value missing" in c for c in checks), checks)
+
+    def test_a_ladder_held_by_the_stable_break_fails(self):
+        track = self._track()
+        track["bite"] = None
+        verdict, notes, _checks = self._run(track)
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("held by the stable-side break or never placed a pod", notes[0])
+
+    def test_no_park_a_moved_step_traffic_or_a_lost_floor_fail(self):
+        track = self._track()
+        track["park"] = None
+        self.assertEqual("FAIL", self._run(track)[0])
+        verdict, notes, _c = self._run(self._track(message="CreateContainerConfigError", park_step=1))
+        self.assertTrue(any("moved from step 0 to step 1" in n for n in notes), notes)
+        verdict, notes, _c = self._run(self._track(message="CreateContainerConfigError", traffic_park=25))
+        self.assertTrue(any("traffic moved to a step whose pod never came up" in n for n in notes), notes)
+        verdict, notes, _c = self._run(self._track(message="CreateContainerConfigError", stable=5))
+        self.assertTrue(any("floor 6" in n for n in notes), notes)
+        verdict, notes, _c = self._run(self._track(reason="Unknown"))
+        self.assertTrue(any("names no missing key" in n for n in notes), notes)
+        verdict, notes, _c = self._run(self._track(message="CreateContainerConfigError", phases=("Promoting",)))
+        self.assertTrue(any("was promoted" in n for n in notes), notes)
+        _v, _n, checks = self._run(self._track(message="CreateContainerConfigError", reached=False))
+        self.assertTrue(any("was not reached by the ladder before the park" in c for c in checks), checks)
+
+    def test_the_track_records_the_traffic_at_the_bite_and_the_parks_message(self):
+        f = self._fault()
+        ctx = {"case_id": "p1", "old_hashes": {"a1"}, "canary_hook": "canary-staging",
+               "N": {"engine": 8, "decoder": 0, "router": 0}, "pods_per_inst": {"engine": 1},
+               "pod_state": {"p1-engine-7-x": {"alive": True, "comp": "engine", "inst": "7", "hash": "b2", "uid": "u7",
+                                                "ready": False, "serving": False}}}
+        track = {"bite": None, "park": None, "ready_seen": set(), "uids": {}, "peak_crash": 0, "phases_before_exit": set()}
+        comp_status = {"rolloutPhase": "Pending", "traffic": [{"latestRevision": True, "percent": 0}]}
+        saved = run._get_pod, run._pod_waiting_reason
+        run._get_pod, run._pod_waiting_reason = (lambda name, ns=None: {}), (lambda obj: run.CONFIGKEY_WAITING)
+        try:
+            run._new_break_track(ctx, f, track, {}, comp_status, 0, 30.0, False)
+            self.assertEqual(0, track["bite"]["traffic"])
+            ctx["canary_hook"] = "canary-failed"
+            run._new_break_track(ctx, f, track, {"failed": {"reason": "InstanceFailed", "message": "engine-7 CreateContainerConfigError"}},
+                                 comp_status, 0, 120.0, False)
+        finally:
+            run._get_pod, run._pod_waiting_reason = saved
+        self.assertEqual("engine-7 CreateContainerConfigError", track["park"]["message"])
+        self.assertEqual(0, track["park"]["canary_traffic"])
+
+
+class GeneratedFaultEditFurtherRowsTest(unittest.TestCase):
+    """The further rows of gen-fault-edit: one case per ledger cell on the
+    six shape families for a break landed before the runtime edit and for a
+    break the edited runtime carries; and the canary's kept key."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.rows = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-fault-edit" and "row" in m]
+        cls.canary = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-canary-fault-old"
+                      and m.get("verb") == "configkey kept@idle"]
+
+    def test_one_case_per_cell_on_the_six_shape_families(self):
+        self.assertEqual(102, len(self.rows))
+        before = [(n, kv, m) for n, kv, m in self.rows if m["verb"].endswith("@before-edit")]
+        carried = [(n, kv, m) for n, kv, m in self.rows if m["verb"].endswith("@edited-runtime")]
+        self.assertEqual((46, 56), (len(before), len(carried)))
+        families = {(kv["topo"], kv["Nr"]) for _n, kv, _m in self.rows}
+        self.assertEqual({("engine", 0), ("engine-mn", 0), ("engine", 2), ("engine-mn", 2), ("pd", 2), ("pd-mn", 2)}, families)
+        cells = collections.Counter((m["row"], m["verb"].partition("@")[2]) for _n, kv, m in self.rows)
+        for row in ("crash at start, one-shot, running", "crash after Ready, one-shot, running", "image pull, one-shot, running",
+                    "readiness never passes, one-shot, running", "readiness never passes, persistent, running",
+                    "config missing, one-shot, running", "config missing, persistent, running"):
+            self.assertEqual(6, cells[(row, "before-edit")], row)
+        self.assertEqual(4, cells[("sibling broken, one-shot, running", "before-edit")])
+        for row in ("crash at start, one-shot, new", "crash at start, persistent, new", "crash after Ready, one-shot, new",
+                    "crash after Ready, persistent, new", "image pull, one-shot, new", "config missing, one-shot, new",
+                    "config missing, persistent, new", "readiness never passes, one-shot, new"):
+            self.assertEqual(6, cells[(row, "edited-runtime")], row)
+        self.assertEqual((4, 4), (cells[("sibling broken, one-shot, new", "edited-runtime")],
+                                  cells[("sibling broken, persistent, new", "edited-runtime")]))
+        self.assertEqual(102, sum(cells.values()))
+        ids = sorted(int(n[1:]) for n, _kv, _m in self.rows)
+        self.assertEqual((9928, 12029), (ids[0], ids[-1]), "the continuation blocks, after the family's earlier rows")
+
+    def test_every_row_is_a_runtime_edit_on_its_own_runtime_with_the_decided_reason(self):
+        for name, kv, m in self.rows:
+            text = self.outputs[f"gen-fault-edit/{name}.yaml"]
+            head, reason = text.splitlines()[0], text.splitlines()[1]
+            self.assertEqual(("runtimerev", f"ome-coordtest-rt-{name}", "roll", "env", "none"),
+                             (kv["mode"], kv["rt"], kv["expect"], kv["edit"], kv["co"]), name)
+            self.assertIn(f"name: ome-coordtest-rt-{name}", text.split("---")[0], name)
+            self.assertEqual(kv["Ne"] + 1, kv["ceil_e"], "the surge strategy, surge one")
+            self.assertTrue(reason.startswith("# reason: the operator"), name)
+            if kv["topo"].endswith("-mn"):
+                self.assertIn("leader:", text.split("---")[0], "a gang shape ships the gang runtime")
+            if m["verb"].endswith("@before-edit"):
+                self.assertEqual("idle", kv["during"], name)
+                self.assertNotIn("break", kv, name)
+                if kv["fault"] == "configkey:missing" and kv["lift"] == "never":
+                    self.assertIn("the roll parks with its reason", reason)
+                else:
+                    self.assertIn("the roll owns the broken Instance", reason)
+            else:
+                self.assertIn("break", kv, name)
+                self.assertNotIn("during", kv, name)
+                self.assertIn("the roll completes with no hold behind it" if kv.get("once") else "a corrective runtime edit", reason)
+            if kv.get("fault") == "configkey:missing" or kv.get("break") == "configkey":
+                self.assertIn("kind: ConfigMap", text, name)
+                self.assertIn("configMapKeyRef", text, name)
+                self.assertIn("lifecycle: { restartPolicy", text, name)
+            if m["victim"] != "engine":
+                self.assertEqual(m["victim"], kv["victimcomp"], name)
+                self.assertTrue(m["row"].startswith("sibling broken"), name)
+                self.assertIn("the engine's own roll", reason)
+
+    def test_the_canary_kept_key_runs_on_every_shape_family_to_the_park(self):
+        self.assertEqual(6, len(self.canary))
+        self.assertEqual({"engine single", "engine gang", "engine+router single", "engine+router gang",
+                          "engine+decoder+router single", "engine+decoder+router gang"}, {m["shape"] for _n, _kv, m in self.canary})
+        for name, kv, m in self.canary:
+            text = self.outputs[f"gen-canary-fault-old/{name}.yaml"]
+            self.assertEqual(("canary", "auto", "configkey:idle", "never", "Failed"),
+                             (kv["mode"], kv["canary"], kv["fault"], kv["lift"], kv["terminal"]), name)
+            self.assertNotIn("nophase", kv, name)
+            self.assertEqual("config missing, persistent, running", m["row"])
+            self.assertEqual("canary/Idle/stableBroken[configMissing]", kv["cell"])
+            self.assertIn("kind: ConfigMap", text, name)
+            self.assertIn("parks Failed at that step naming the missing key", text.splitlines()[1], name)
+            self.assertIn("readyTimeout", text, "the park's bound on the capacity step")
+        ids = sorted(int(n[1:]) for n, _kv, _m in self.canary)
+        self.assertEqual([11617, 11618, 11619, 11620, 11621, 11622], ids, "minted after every other stable row")
+
+    def test_the_manifest_states_the_further_rows_and_the_canary_exit(self):
+        manifest = self.outputs[generate_cases.MANIFEST_REL]
+        self.assertIn("a break the edited runtime itself carries", manifest)
+        self.assertNotIn("no decided exit", manifest)
+        self.assertIn("the ladder parks at that step naming the missing key, the stable side still serving", manifest)
+
+    def test_the_manifest_states_the_kept_cause_rule(self):
+        manifest = self.outputs[generate_cases.MANIFEST_REL]
+        self.assertIn("owes no re-arm: the row stays Failed with its reason until the config or image is fixed", manifest)
+        self.assertIn("re-arms it for a cause a fresh pod can clear (a crash loop, a run-container error, a deadline with no reason)",
+                      manifest)
+        self.assertNotIn("while the set stays wedged", manifest)
+        self.assertIn("since a fresh pod cannot clear a missing key, is owed no re-arm", manifest)

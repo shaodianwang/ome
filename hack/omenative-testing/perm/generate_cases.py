@@ -683,7 +683,7 @@ GEN_CONTINUATIONS = {
     "gen-preempt": (9600, 9700),
     "gen-pending": [(9700, 9800), (10700, 10800)],
     "gen-fault-move": [(9800, 9900), (11700, 12000)],
-    "gen-fault-edit": (9900, 10000),
+    "gen-fault-edit": [(9900, 10000), (12000, 12100)],
     "gen-ops-held": (10000, 10100),
     "gen-webhook": (10300, 10450),
     "gen-conflict": (10450, 10700),
@@ -2802,7 +2802,9 @@ def emit_canary_fault_old(add):
 # Ready stable pod killed exactly once. Positions: before the push (single-pod
 # fleets), the second step's timed soak, and the same step at a manual gate
 # promoted BREAK_GATE_HOLD_S after the break. A key kept away is read by both
-# revisions, so the push is never its fix and it is not emitted.
+# revisions, so the push is never its fix: the ladder parks at the step whose
+# pod waits on the key, and that park is the case's exit (before the push,
+# on every shape family).
 STABLE_POSITIONS = {"idle": IDLE_FAULT_HOOK, "soak": "canary-serving@1", "gate": "canary-serving@1"}
 STABLE_POSITION_POLICY = {"idle": "auto", "soak": "auto", "gate": "manual"}
 STABLE_POSITION_STATE = {"idle": "Idle", "soak": "Serving[soak]", "gate": "Serving[gate]"}
@@ -2909,6 +2911,35 @@ def _emit_canary_stable_breaks(add):
                     add("gen-canary-fault-old", desc, kv, None if body else gate_comps(topo, n, w, nr, rp),
                         _stable_row_reason(label, kind, form, lift, pos, rp, family, n, w), meta,
                         cell=("stable-break", label, pos, topo, nr, rp), coord=coord, body=body)
+    # Minted after every other stable row, so the rows above keep their ids.
+    for family, topo, n, w, nr in GATE_SHAPES:
+        _emit_canary_kept_key(add, family, topo, n, w, nr, _canary_shape(topo, w, nr), gate_group(topo))
+
+
+def _stable_kept_key_reason(family, n, w):
+    shape = _gate_shape_words(family, n, w)
+    return (f"the operator pushes a canary while the ConfigMap key one old-revision engine pod reads is kept away on "
+            f"{shape} (the pod waits in CreateContainerConfigError and the status reacted to it before the push); both "
+            f"revisions read the key, so the push cannot fix it: the stable-side break does not hold the ladder, the pod "
+            f"placed for the first capacity step waits on the same key, the ladder parks Failed at that step naming the "
+            f"missing key, the stable side keeps serving every Instance the break and the ladder did not take, no "
+            f"traffic reaches the step whose pod never came up, and nothing rolls back")
+
+
+def _emit_canary_kept_key(add, family, topo, n, w, nr, shape, group):
+    """The running revision's key kept away before the push: the ladder is
+    not held by the stable-side break and parks at the step whose pod waits
+    on the key (terminal=Failed), on every shape family."""
+    kv = gate_kv(topo, n, nr)
+    kv.update(canary="auto", fault=f"configkey:{STABLE_POSITIONS['idle']}", lift="never", terminal="Failed", co="none",
+              topo=topo, cell=f"canary/{STABLE_POSITION_STATE['idle']}/stableBroken[configMissing]")
+    coord = lib.canary_block(story_ladder("auto"), components=group, ready_timeout=HELD_READY_TIMEOUT)
+    desc = f"{GEN_MARK} canary fault-old configkey kept at idle {shape} N={n} rp {GATE_RP}"
+    meta = dict(strat="SurgeThenDrain", verb="configkey kept@idle", rp=GATE_RP, shape=family,
+                row=_ledger_row("configkey", None, False, "running"))
+    add("gen-canary-fault-old", desc, kv, None, _stable_kept_key_reason(family, n, w), meta,
+        cell=("stable-break", "configkey kept", "idle", topo, nr, GATE_RP), coord=coord,
+        body=functools.partial(_canary_configkey_body, topo=topo, n=n, w=w, nr=nr, rp=GATE_RP, coord=coord))
 
 
 # ── gen-canary-fault-new: the push brings a broken revision ─────────────────
@@ -7075,7 +7106,11 @@ def _emit_more_windows(add, kind):
 # (it holds with a reason, the old revision keeps serving, a corrective edit
 # lands). The six shape families of the coverage ledger at one gang width;
 # the surge and the drain-first strategies. (topo, N, W, routers on an
-# engine-only shape.)
+# engine-only shape.) Two further halves run one case per ledger cell under
+# the surge strategy and the env edit: a break of the running revision
+# landed on the settled service before the edit (during=idle; each kind
+# once and kept, a sibling once), and a break the edited runtime itself
+# carries (break=<kind>; kept with the corrective edit, and once).
 EDIT_SHAPES = [("engine", 4, 0, 0), ("pd", 4, 0, 0), ("engine-mn", 2, 1, 0),
                ("engine", 4, 0, lib.NR), ("engine-mn", 2, 1, lib.NR), ("pd-mn", 2, 1, 0)]
 EDIT_STRATS = {"SurgeThenDrain": (1, 0), "RecreatePod": (0, 1)}
@@ -7211,6 +7246,206 @@ def emit_fault_edit(add):
                         add("gen-fault-edit", desc, kv, comps(topo, n, w, life, nr=nr),
                             _edit_break_reason(kind, form, "router", edit, strat, rp, topo, nr), meta,
                             cell=("fault-edit", kind, form, "router", edit, topo, w, strat, rp, nr), dedicated=True)
+    _emit_fault_edit_idle_breaks(add)
+    _emit_fault_edit_carried_breaks(add)
+
+
+# The further rows of gen-fault-edit: one case per ledger cell, the surge
+# strategy (surge 1), the env edit, restart policy None. (label, kind, the
+# fault's side token, form, lift) of a break of the running revision landed
+# on the settled service before the edit; the sibling row takes the crash
+# after Ready, lifted, on the decoder or the router.
+EDIT_IDLE_BREAKS = [
+    ("crashStartOnce", "crashloop", "old", "start", "after-settle"),
+    ("crashLoadOnce", "crashloop", "old", "load", "after-settle"),
+    ("imagePullOnce", "imagepull", "old", None, "after-settle"),
+    ("readinessLostOnce", "readiness", "old", "recover", None),
+    ("readinessLost", "readiness", "old", "persist", None),
+    ("configMissingOnce", "configkey", "missing", None, "after-settle"),
+    ("configMissing", "configkey", "missing", None, "never"),
+]
+EDIT_IDLE_SIBLING_BREAK = ("crashLoadOnce", "crashloop", "old", "load", "after-settle")
+# (label, break kind, once) of a break the edited runtime itself carries on
+# the victim's runners; the sibling rows take the crash at start, kept and
+# once, on the decoder or the router.
+EDIT_CARRIED_BREAKS = [
+    ("crashStart", "crash-start", False), ("crashStartOnce", "crash-start", True),
+    ("crashLoad", "crash-load", False), ("crashLoadOnce", "crash-load", True),
+    ("imagePullOnce", "imagepull", True),
+    ("configMissing", "configkey", False), ("configMissingOnce", "configkey", True),
+    ("readinessLostOnce", "stuck", True),
+]
+EDIT_CARRIED_SIBLING_BREAKS = [("crashStart", "crash-start", False), ("crashStartOnce", "crash-start", True)]
+EDIT_ROW_RP = "None"
+# The ledger row a further gen-fault-edit case fills: the crash kinds by
+# form, the rest by kind.
+EDIT_ROW_KIND = {"crash-start": ("crashloop", "start"), "crash-load": ("crashloop", "load"),
+                 "imagepull": ("imagepull", None), "configkey": ("configkey", None), "stuck": ("readiness", None)}
+
+
+def _edit_row(kind, form, oneshot, side, victim):
+    """The ledger row a further gen-fault-edit case fills: the kind's row on
+    the engine, the sibling row on a decoder or a router."""
+    row = _ledger_row(kind, form, oneshot, side)
+    return row if victim == "engine" else "sibling broken, " + row.split(", ", 1)[1]
+
+
+def _edit_sibling(topo, nr):
+    """The sibling a shape has beside the engine: the decoder of a
+    prefill/decode service, the router in front of an engine fleet."""
+    return gate_shape_sibling(nr, topo)
+
+
+def _edit_idle_kv(topo, n, nr, kind, side, form, lift, victim):
+    kv = dict(_edit_kv(topo, n, "SurgeThenDrain", 1, nr), fault=f"{kind}:{side}", during=IDLE_FAULT_HOOK,
+              expect="roll", edit="env", co="none", topo=topo)
+    if form:
+        kv["form"] = form
+    if lift:
+        kv["lift"] = lift
+    if victim != "engine":
+        kv["victimcomp"] = victim
+    return kv
+
+
+def _edit_configkey_body(name, topo, n, w, nr, life):
+    """The body of a runtime-edit case whose engine runner reads one key of
+    a ConfigMap named after the case: the ISVC on its dedicated runtime and
+    the ConfigMap as a second document (the runtime itself is prepended by
+    the writer)."""
+    cm = f"{name}{HEAL_CONFIG_SUFFIX}"
+    cs = comps(topo, n, w, life, d_life=life, nr=nr)
+    cs[0]["runner"] = lib.configmap_env(cm, HEAL_CONFIG_KEY, HEAL_CONFIG_VAR, gang=is_mn(topo))
+    return lib.render(name, cs, runtime=f"ome-coordtest-rt-{name}",
+                      docs=[lib.configmap_doc(cm, {HEAL_CONFIG_KEY: HEAL_CONFIG_VALUE})])
+
+
+def _edit_rolls_words(topo, nr):
+    return ("engine, decoder and router each roll onto their own new revision" if is_pd(topo)
+            else "engine and router each roll onto their own new revision" if nr
+            else "the engine rolls onto a new revision")
+
+
+def _edit_idle_reason(kind, form, lift, victim, topo, w, nr):
+    shape = shape_tag(topo, w, nr)
+    does = {("crashloop", "start"): "crashes at every start", ("crashloop", "load"): "dies after Ready and comes back between crashes",
+            ("imagepull", None): "sits in ImagePullBackOff",
+            ("readiness", "recover"): "stops passing readiness while it keeps running",
+            ("readiness", "persist"): "stops passing readiness while it keeps running",
+            ("configkey", None): "waits in CreateContainerConfigError once its ConfigMap key is removed and its runner restarted"}[(kind, form)]
+    settle = lib_seconds("LIFT_SETTLE_S")
+    heal = {("crashloop", "start"): f"the image is put back {settle}s after the edit has fired",
+            ("crashloop", "load"): f"the killer stops {settle}s after the edit has fired",
+            ("imagepull", None): f"the image is put back {settle}s after the edit has fired",
+            ("readiness", "recover"): f"the switch is lifted {settle}s after the edit has fired",
+            ("configkey", None): f"the key is put back {settle}s after the edit has fired"}.get((kind, form))
+    who = f"one old-revision {victim} pod"
+    rolls = _edit_rolls_words(topo, nr)
+    if kind == "configkey" and lift == "never":
+        return (f"the operator edits the runtime every Component inherits (a new runner env) while the ConfigMap key "
+                f"{who} reads is kept away on {shape} (the pod {does}; the status reacted before the edit); both "
+                f"revisions read the key, so the edit cannot fix it: the roll parks with its reason (a Failed row at "
+                f"the Instance ready timeout) and nothing of the edited revision serves while the key is away, the "
+                f"healthy Instances keep serving")
+    cause = "the switch stays set, so the roll's rebuild is what clears it" if (kind, form) == ("readiness", "persist") else heal
+    out = (f"the operator edits the runtime every Component inherits (a new runner env) while {who} {does} on {shape}, "
+           f"the break landed on the settled service and the status reacted to it first; {cause}; {rolls}, and the roll "
+           f"owns the broken Instance: it ends on the edited revision serving with no repair recorded for it after the "
+           f"edit, the healthy Instances hold the floor lowered by the one broken Instance, nothing exceeds its ceiling "
+           f"and no Instance row is left mid-operation")
+    if victim != "engine":
+        out += f"; the engine's own roll converges untouched by the {victim}'s break"
+    if is_mn(topo):
+        out += "; each Instance is a gang, replaced whole"
+    return out
+
+
+def _edit_carried_reason(kind, once, victim, topo, w, nr):
+    shape = shape_tag(topo, w, nr)
+    rolls = _edit_rolls_words(topo, nr)
+    carries = {"crash-start": "the shell-less image, so its pods crash at every start",
+               "crash-load": "the fixture runtime's exit switch, so its pods serve and then exit",
+               "imagepull": "an image that cannot be pulled",
+               "configkey": "a second env entry reading a key the case's ConfigMap lacks, so its pods wait in CreateContainerConfigError",
+               "stuck": "the readiness switch"}[kind]
+    if once:
+        bite = {"crash-start": "its runner is killed once at its first start and the kubelet starts it again",
+                "crash-load": "its runner is killed once after Ready and the kubelet starts it again",
+                "imagepull": f"it is pointed at an image that cannot be pulled as it starts and back {lib_seconds('LIFT_SETTLE_S')}s after the pull failure has shown",
+                "configkey": f"it waits on a key the case's ConfigMap lacks until the key is added {lib_seconds('LIFT_SETTLE_S')}s after the wait has shown",
+                "stuck": f"the readiness switch is set in it as it starts and lifted {lib_seconds('LIFT_SETTLE_S')}s after the drop has settled"}[kind]
+        out = (f"the operator's runtime edit (a new runner env) re-renders every Component on {shape} and the first "
+               f"pushed {victim} pod breaks once: {bite}; the roll completes with no hold behind it: nothing escalates "
+               f"the one bite to Failed or holds it, the Instance ends Ready and serving on the edited revision, {rolls}, "
+               f"nothing exceeds its ceiling and every row settles")
+    else:
+        served = ("the pod serves and then exits, so the roll's promotion is what the status must take back"
+                  if kind == "crash-load" else "nothing of a revision that cannot start serves")
+        out = (f"the operator's runtime edit carries a break on the {victim} runner ({carries}) while every Component "
+               f"re-renders on {shape}; the roll parks on the first broken {victim} pod with the status saying why, "
+               f"{served}, and the old revision keeps serving; then a corrective runtime edit (the break taken off, "
+               f"plus a distinct runner env) lands on every Instance of every Component, nothing of the broken "
+               f"revision is created again or left, no hold is left in status and no repair is opened for a rolled "
+               f"Instance after the fix")
+    if victim != "engine":
+        out += f"; the engine's own roll is the negative control beside the {victim}'s break"
+    if is_mn(topo):
+        out += "; each Instance is a gang, attempted and replaced whole"
+    return out
+
+
+def _emit_fault_edit_idle_breaks(add):
+    """A break of the running revision landed on the settled service before
+    the runtime edit: each kind once and kept on the six shape families, and
+    a sibling broken once where the shape has one."""
+    life = lib.lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, restart=RP_FULL[EDIT_ROW_RP])
+    key_life = lib.lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, restart=RP_FULL[EDIT_ROW_RP],
+                             ready_timeout=SWITCH_HELD_READY_TIMEOUT)
+    for topo, n, w, nr in EDIT_SHAPES:
+        rows = [(label, kind, side, form, lift, "engine") for label, kind, side, form, lift in EDIT_IDLE_BREAKS]
+        sibling = _edit_sibling(topo, nr)
+        if sibling:
+            label, kind, side, form, lift = EDIT_IDLE_SIBLING_BREAK
+            rows.append((label, kind, side, form, lift, sibling))
+        for label, kind, side, form, lift, victim in rows:
+            kv = _edit_idle_kv(topo, n, nr, kind, side, form, lift, victim)
+            oneshot = lift == "after-settle" or form == "recover"
+            meta = dict(strat="SurgeThenDrain", verb=f"{label}@before-edit", rp=EDIT_ROW_RP, victim=victim, rtedit="env",
+                        row=_edit_row(kind, form, oneshot, "running", victim))
+            desc = f"{GEN_MARK} fault-edit {label} on {victim} before the edit {shape_tag(topo, w, nr)} N={n} SurgeThenDrain"
+            case_life = key_life if kind == "configkey" else life
+            case_comps = comps(topo, n, w, case_life, d_life=case_life, nr=nr)
+            body = functools.partial(_edit_configkey_body, topo=topo, n=n, w=w, nr=nr, life=case_life) if kind == "configkey" else None
+            add("gen-fault-edit", desc, kv, case_comps, _edit_idle_reason(kind, form, lift, victim, topo, w, nr), meta,
+                cell=("fault-edit-idle", label, victim, topo, w, nr), dedicated=True, body=body)
+
+
+def _emit_fault_edit_carried_breaks(add):
+    """A break the edited runtime itself carries: each kind kept (with the
+    corrective edit) and once on the six shape families, and the crash at
+    start on the sibling, kept and once, where the shape has one."""
+    for topo, n, w, nr in EDIT_SHAPES:
+        rows = [(label, kind, once, "engine") for label, kind, once in EDIT_CARRIED_BREAKS]
+        sibling = _edit_sibling(topo, nr)
+        if sibling:
+            rows += [(label, kind, once, sibling) for label, kind, once in EDIT_CARRIED_SIBLING_BREAKS]
+        for label, kind, once, victim in rows:
+            kv = dict(_edit_kv(topo, n, "SurgeThenDrain", 1, nr), expect="roll", edit="env", co="none", topo=topo)
+            kv["break"] = kind
+            if once:
+                kv["once"] = 1
+            if victim != "engine":
+                kv["victimcomp"] = victim
+            row_kind, row_form = EDIT_ROW_KIND[kind]
+            meta = dict(strat="SurgeThenDrain", verb=f"{label}@edited-runtime", rp=EDIT_ROW_RP, victim=victim, rtedit="env",
+                        row=_edit_row(row_kind, row_form, once, "new", victim))
+            desc = f"{GEN_MARK} fault-edit {label} carried on {victim} {shape_tag(topo, w, nr)} N={n} SurgeThenDrain"
+            life = lib.lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, restart=RP_FULL[EDIT_ROW_RP],
+                                 ready_timeout=(None if once else SWITCH_HELD_READY_TIMEOUT))
+            case_comps = comps(topo, n, w, life, d_life=life, nr=nr)
+            body = functools.partial(_edit_configkey_body, topo=topo, n=n, w=w, nr=nr, life=life) if kind == "configkey" else None
+            add("gen-fault-edit", desc, kv, case_comps, _edit_carried_reason(kind, once, victim, topo, w, nr), meta,
+                cell=("fault-edit-carried", label, victim, topo, w, nr), dedicated=True, body=body)
 
 
 # ── gen-crash-once: a crash that happens exactly once ──────────────────────
@@ -7936,10 +8171,13 @@ def manifest(rows):
         " after the wait has shown or kept to the park. The pod faults: an old-revision"
         " engine pod (a gang member on the gangs) deleted again each time it is back, and"
         " evicted once under a soak, once at a manual gate held until the Instance is"
-        " whole, and again each time it is back. Left out, with the reason: the running"
-        " revision's key kept away (both revisions read it, so the push is never its fix"
-        " and the ladder would park at whichever step reaches the Instance: no decided"
-        " exit); one kill at start on the running side at a grid state (a running pod has"
+        " whole, and again each time it is back. The running revision's key kept away"
+        " before the push, on every shape family: both revisions read it, so the push is"
+        " never its fix; the stable-side break does not hold the ladder, the pod placed"
+        " for the first capacity step waits on the same key, and the ladder parks at that"
+        " step naming the missing key, the stable side still serving and no traffic"
+        " reaching the step whose pod never came up. Left out, with the reason: one kill"
+        " at start on the running side at a grid state (a running pod has"
         " no first start to catch; its one-shot form is the lifted crash); a preemption at"
         " a grid state (its press runs in the pending driver's own watch; the eviction"
         " fills the ledger row); the idle position on the gangs (as the gate family: a"
@@ -8232,7 +8470,17 @@ def manifest(rows):
         " the surge and the drain-first strategies, and breaks a pod of the"
         " running revision on the engine or the decoder as the edit lands; its"
         " bad-edit half pushes an image that cannot be pulled or a readiness"
-        " that never passes and then the corrective edit. Left out, with the"
+        " that never passes and then the corrective edit. Its further rows run"
+        " one case per ledger cell under the surge strategy and the env edit: a"
+        " break of the running revision landed on the settled service before the"
+        " edit (a crash at start, after Ready and a pull failure healed once the"
+        " edit has fired, a readiness loss kept and lifted, the key put back and"
+        " the key kept away, which parks the roll with its reason; a sibling's"
+        " crash after Ready healed), and a break the edited runtime itself"
+        " carries (a crash at start, after Ready and a missing key kept until the"
+        " corrective edit, and each kind plus a pull failure and a readiness loss"
+        " once on the first pushed pod; a sibling's crash at start kept and"
+        " once). Left out, with the"
         " reason: the in-place strategies (the switch family's); the env edit"
         " beyond the engine shape (under these strategies both edits are one new"
         " revision; the pod-template difference matters to an in-place strategy"
@@ -8240,8 +8488,8 @@ def manifest(rows):
         " (they open no runner-restart trigger, so the roll owns the Instance"
         " either way; the after-Ready form runs under both); any restart policy"
         " but None on the bad edit (a revision that never becomes Ready restarts"
-        " no runner); pd-mn, a rollout group and a readiness loss on the running"
-        " side, as in fault-move. The readiness-that-never-passes cell asserts the"
+        " no runner); a rollout group, as in fault-move; the restart policy on"
+        " the further rows (one policy per cell). The readiness-that-never-passes cell asserts the"
         " fix and the floor and reports whether the status said why: nothing"
         " escalates a pod that runs but never passes readiness before its ready"
         " timeout.",
@@ -8347,8 +8595,10 @@ def lift_notes():
         "",
         f"- `{LIFT_ROW_CONFIG_RUNNING_KEPT}`: `configkey:missing during=idle lift=never"
         " expect=failed`; the row reaches Failed with its reason inside the"
-        f" `instanceReadyTimeout: {HEAL_FAILED_READY_TIMEOUT}` and stays Failed with nothing"
-        " serving across the hold; both restart policies (which repair opens first differs).",
+        f" `instanceReadyTimeout: {HEAL_FAILED_READY_TIMEOUT}` and, since a fresh pod cannot"
+        " clear a missing key, is owed no re-arm: it stays Failed with its reason and nothing"
+        " of the Instance serving across the hold, until the key is put back; both restart"
+        " policies (which repair opens first differs).",
         f"- `{LIFT_ROW_CONFIG_NEW_KEPT}` and `{LIFT_ROW_CONFIG_NEW_LIFTED}`:"
         " `configkey:new` with `lift=never` (the roll holds at the ready timeout with its"
         " reason; a fix push back onto the present key lands) or `lift=after-settle` (the"
@@ -8404,8 +8654,13 @@ def heal_notes():
         " `instanceReadyTimeout`, `HEAL_FAILED_READY_TIMEOUT`), so the"
         " escalation parks the repair at Failed with its Restart kept. A parked"
         " repair keeps two exits of its own: the restart pass resumes its"
-        " promote when the rebuilt set comes up, and re-arms it on"
-        " `lifecycle.updateRetry` while the set stays wedged. The key returns"
+        " promote when the rebuilt set comes up, and `lifecycle.updateRetry`"
+        " re-arms it for a cause a fresh pod can clear (a crash loop, a"
+        " run-container error, a deadline with no reason). A park whose cause a"
+        " fresh pod cannot clear (a missing ConfigMap key, an unpullable or"
+        " invalid image) owes no re-arm: the row stays Failed with its reason"
+        " until the config or image is fixed, and recovers by itself when it"
+        " is. The key returns"
         " once the row reads Failed, the kubelet's retry brings the rebuilt set"
         " up, and the resume promotes the Instance on its running revision with"
         " no reset mailbox and no new revision, whether or not a ladder is"

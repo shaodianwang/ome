@@ -722,5 +722,55 @@ class CommittedCorpusTest(unittest.TestCase):
         self.assertIn("### Size class x shape family", text)
 
 
+class RuntimeEditBreakCellsTest(unittest.TestCase):
+    """The cells the two further runtime-edit forms and the canary's kept
+    key fill: a break landed before the edit is the running side, kept or
+    one-shot by its lift or form; a break the edited runtime carries is the
+    new side, one-shot under once=1; a sibling victim is the sibling row."""
+
+    def setUp(self):
+        self.corpus = Corpus()
+        self.addCleanup(self.corpus.close)
+
+    def case(self, **kv):
+        return self.corpus.write(**dict({"mode": "runtimerev", "rt": "rt-x", "expect": "roll", "edit": "env", "topo": "engine"}, **kv))
+
+    def test_a_break_before_the_runtime_edit_is_the_running_side(self):
+        c = self.case(during="idle", fault="configkey:missing", lift="never")
+        self.assertEqual(("runtime edit", ""), (c.operation, c.second_operation))
+        self.assertEqual([("config missing", "persistent", "running", "engine")], c.faults)
+        self.assertEqual([("config missing", "one-shot", "running", "engine")],
+                         self.case(during="idle", fault="configkey:missing", lift="after-settle").faults)
+        self.assertEqual([("crash at start", "one-shot", "running", "engine")],
+                         self.case(during="idle", fault="crashloop:old", form="start", lift="after-settle").faults)
+        self.assertEqual([("image pull", "one-shot", "running", "engine")],
+                         self.case(during="idle", fault="imagepull:old", lift="after-settle").faults)
+        self.assertEqual([("readiness never passes", "persistent", "running", "engine")],
+                         self.case(during="idle", fault="readiness:old", form="persist").faults)
+        self.assertEqual([("readiness never passes", "one-shot", "running", "engine")],
+                         self.case(during="idle", fault="readiness:old", form="recover").faults)
+        self.assertEqual([("sibling broken", "one-shot", "running", "router")],
+                         self.case(during="idle", fault="crashloop:old", form="load", lift="after-settle",
+                                   victimcomp="router", **counts(2, 0, 2)).faults)
+
+    def test_a_break_the_edited_runtime_carries_is_the_new_side(self):
+        c = self.case(**{"break": "crash-start"})
+        self.assertEqual(("runtime edit", ""), (c.operation, c.second_operation))
+        self.assertEqual([("crash at start", "persistent", "new", "engine")], c.faults)
+        self.assertEqual([("crash at start", "one-shot", "new", "engine")], self.case(**{"break": "crash-start", "once": 1}).faults)
+        self.assertEqual([("crash after Ready", "persistent", "new", "engine")], self.case(**{"break": "crash-load"}).faults)
+        self.assertEqual([("image pull", "one-shot", "new", "engine")], self.case(**{"break": "imagepull", "once": 1}).faults)
+        self.assertEqual([("config missing", "persistent", "new", "engine")], self.case(**{"break": "configkey"}).faults)
+        self.assertEqual([("config missing", "one-shot", "new", "engine")], self.case(**{"break": "configkey", "once": 1}).faults)
+        self.assertEqual([("readiness never passes", "one-shot", "new", "engine")], self.case(**{"break": "stuck", "once": 1}).faults)
+        self.assertEqual([("sibling broken", "persistent", "new", "decoder")],
+                         self.case(topo="pd", comps=pd(), victimcomp="decoder", **counts(2, 2, 2), **{"break": "crash-start"}).faults)
+
+    def test_the_canary_kept_key_is_the_persistent_running_form_under_a_canary(self):
+        c = self.corpus.write(mode="canary", canary="auto", fault="configkey:idle", lift="never", terminal="Failed", topo="engine")
+        self.assertEqual("canary", c.operation)
+        self.assertEqual([("config missing", "persistent", "running", "engine")], c.faults)
+
+
 if __name__ == "__main__":
     unittest.main()

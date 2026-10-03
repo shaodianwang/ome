@@ -526,10 +526,18 @@ such as the recovery half of a podkill, carries both ids.
   lifts the switch `LIFT_SETTLE_S` after it bit) and
   `fault=configkey:idle|canary-<state>[@step] lift=after-settle` (the key
   the engine runner reads removed and the runner restarted, put back
-  `LIFT_SETTLE_S` after the wait showed; a key kept away is read by both
-  revisions, so a push is never its fix and no case keeps it); both are
-  judged as the crash breaks are, the ladder landing the fix on the
-  Instance. `once=1` on `fault=crashloop:canary-<state> form=load` kills
+  `LIFT_SETTLE_S` after the wait showed); both are judged as the crash
+  breaks are, the ladder landing the fix on the Instance. The key kept
+  away (`fault=configkey:idle lift=never terminal=Failed`) is read by both
+  revisions, so the push is never its fix: the verdict asks that the
+  stable-side break did not hold the ladder (a pod of the pushed revision
+  was placed and waited on the same key), that the ladder parked at that
+  step naming the missing key (the run's failed reason or message, or a
+  Failed row's recorded failure), that no traffic reached the step whose
+  pod never came up, that the stable side kept serving every Instance the
+  break and the ladder did not take, and that nothing promoted or rolled
+  back; whether the ladder reached the broken Instance before the park is
+  reported. `once=1` on `fault=crashloop:canary-<state> form=load` kills
   the runner of one Ready stable pod exactly once at that state, and on
   `fault=crashloop:new form=start|load` the pushed revision's first runner
   (at its first start, or once Ready); the verdict is the crash-once one
@@ -1471,6 +1479,39 @@ crosses the breaks with the engine and decoder victims, the image and env
 edits, the surge and drain-first strategies and the restart policies, and
 runs both bad edits under both strategies, on the engine, PD and gang
 shapes.
+
+Two further forms land a break beside a runtime edit, one case per ledger
+cell on the six shape families (the surge strategy, the env edit):
+
+- **A break before the edit** (`mode=runtimerev during=idle` with
+  `fault=crashloop:old form=start|load [lift=after-settle]`,
+  `fault=imagepull:old [lift=after-settle]`, `fault=readiness:old
+  form=persist|recover` or `fault=configkey:missing lift=after-settle|never`,
+  `victimcomp=` for a sibling): the break lands on the settled service and
+  the status reacts to it, then the runtime is edited, so every Component
+  rolls with one Instance already broken; a one-shot cause is taken away
+  once the edit has fired. The roll owns the broken Instance: it ends on
+  the edited revision serving with no repair recorded for it after the
+  edit, the healthy Instances hold the floor lowered by it, nothing exceeds
+  its ceiling and no row is left mid-operation (a kept readiness switch
+  goes with the pod the roll rebuilds). With the key kept away no revision
+  starts without it: the roll parks with its reason and nothing of the
+  edited revision serves.
+- **A break the edited runtime carries** (`mode=runtimerev
+  break=crash-start|crash-load|imagepull|configkey [once=1]
+  [victimcomp=]`, `break=stuck once=1`): the edit puts the break on the
+  victim Component's runners in the same patch that re-renders every
+  Component (the shell-less or the unpullable image, the exit switch, a
+  second env entry reading a key the ConfigMap lacks). Kept, the roll
+  parks on its first broken pod with the status saying why and nothing of
+  that revision serving; a corrective runtime edit (the break taken off,
+  plus a distinct runner env) then lands on every Instance, nothing of the
+  broken revision is created again or left, no hold is left and no repair
+  is opened for a rolled Instance after the fix. `once=1` is each kind's
+  one-shot form on the first pushed pod (the kill, the unpullable image
+  pointed back, the key added, the readiness switch lifted): the roll
+  completes with no hold behind it and nothing escalates the one bite.
+  `break=stuck` kept stays the recovery guard (`expect=recover`).
 
 ### Fault cases: quota isolation, cordon impact, leak remediation
 
