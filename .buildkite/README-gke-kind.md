@@ -191,6 +191,43 @@ the eval image is packaged again, and each republishes its hash tag, so the
 rebuilt images are the ones later builds reuse. That is also how base-image,
 package and tool refreshes reach an image whose inputs have not changed.
 
+## What the eval runs
+
+The OMENative eval group (`omenative-e2e-kind-gke`) and the
+`package-kind-eval-image` step it waits on are in the build whenever the eval
+mode is not `off`, on any branch. `OME_EVAL_MODE` names the mode outright;
+unset, the newest `Eval: <value>` line of the commit message
+(`BUILDKITE_MESSAGE`, case-insensitive) decides; with neither, `main` runs
+`targeted` and every other branch nothing. `GKE_EVAL_ENABLED=0` forces `off`.
+
+| value | runs |
+|---|---|
+| `off` | nothing: neither the image step nor the group |
+| `smoke` | the first shard of every feature/topology lane, default scheduler only |
+| `targeted` | smoke, plus every case the trailer's `families=` or `cases=` name, default scheduler; the group label says `(targeted: smoke until a full round is recorded)` while the mode has no recorded round to choose from |
+| `full` | every case on every scheduler |
+| `families=<a,b>` | every case of those folders under `hack/omenative-testing/perm/isvcs/`, every scheduler |
+| `cases=<p1,p2>` | exactly those cases in their lanes, default scheduler; a case needing the force-delete policy runs in its lane's policy-on twin |
+
+`families=` and `cases=` are trailer forms; `OME_EVAL_MODE` takes the four
+words, and a trailer selection stays beside a mode the variable set, which is
+how `targeted` gets its extra cases. A value naming nothing known, an unknown
+folder or case id, or an empty list fails generation with a message naming it.
+The group label names the mode unless it is `full`, and the upload plan in the
+entrypoint's log ends with it. `_eval_selection()` in `generate_pipeline.py`
+is the one place a mode chooses cases; the emission packs and shards whatever
+it returns, so `targeted` can read a recorded round without touching the lanes.
+
+Every lane carries `concurrency_group: "ome/gke-evals"` with
+`concurrency: <GKE_EVAL_MAX_CONCURRENCY>` (default 120), so across every build
+of the organization at most that many lanes hold a GKE agent pod at once and
+the rest wait in order. The variable must be a positive integer; unset or
+empty means the default, and generation refuses anything else.
+
+`package_kind_eval_image.sh` publishes from `main` only, as do the mirror
+steps it waits on, so a branch build with the eval on stops at the image step
+until they publish from branches too.
+
 ## Version pins
 
 `.kind-node-image` at the repo root is the single source of truth for the node

@@ -15,7 +15,7 @@ sys.path.insert(0, HERE)
 
 
 def load(env: dict[str, str]):
-    with mock.patch.dict(os.environ, {"BUILDKITE_BRANCH": "main", "BUILDKITE_COMMIT": "HEAD", **env}, clear=False):
+    with mock.patch.dict(os.environ, {"BUILDKITE_BRANCH": "main", "BUILDKITE_COMMIT": "HEAD", "OME_EVAL_MODE": "full", **env}, clear=False):
         import generate_pipeline as module
         return importlib.reload(module)
 

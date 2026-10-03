@@ -43,6 +43,14 @@ Environment variables read at runtime:
     ECR_REGISTRY              – full dev ECR registry override (takes precedence)
     OME_IMAGE_REBUILD         – "1" forces every image step to rebuild instead
                                 of reusing a published image with the same inputs
+    GKE_EVAL_ENABLED          – "0" drops the OMENative eval from the build
+    OME_EVAL_MODE             – what the OMENative eval runs: off, smoke, targeted
+                                or full. Unset, the newest "Eval: <value>" line of
+                                BUILDKITE_MESSAGE decides, the value a mode,
+                                families=<a,b> or cases=<p1,p2>; with neither,
+                                main runs targeted and every other branch nothing
+    GKE_EVAL_MAX_CONCURRENCY  – eval lanes running at once across the organization,
+                                the cap of their one concurrency group (default: 120)
 """
 
 from __future__ import annotations
@@ -60,6 +68,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from typing import NamedTuple
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -427,6 +436,13 @@ GKE_EVAL_SCHEDULER_HARD_FAIL = _truthy(os.environ.get("GKE_EVAL_SCHEDULER_HARD_F
 # sized to the shard, capped here; cases above the cap are left out of the twin
 # and named in OME_EVAL_SCHEDULER_SKIPPED.
 GKE_EVAL_SCHEDULER_MAX_WORKERS = int(os.environ.get("GKE_EVAL_SCHEDULER_MAX_WORKERS", "12"))
+# Every eval lane is in one Buildkite concurrency group, so across every
+# build of the organization at most GKE_EVAL_MAX_CONCURRENCY of them hold a
+# GKE agent pod at once and the rest wait in order. The cap is read at
+# generation by _eval_max_concurrency; unset or empty means the default.
+EVAL_CONCURRENCY_GROUP = "ome/gke-evals"
+EVAL_MAX_CONCURRENCY_VAR = "GKE_EVAL_MAX_CONCURRENCY"
+EVAL_MAX_CONCURRENCY_DEFAULT = 120
 EVAL_GANG_SCHEDULER = "ome-scheduler"
 # Scheduler dimension of the KIND suite lanes: every semantic group again with
 # the fixture runtime selecting ome-scheduler, installed into the suite's
@@ -508,6 +524,50 @@ GKE_ALFRED_ENABLED = _truthy(os.environ.get("GKE_ALFRED_ENABLED", "1"))
 
 BRANCH = os.environ.get("BUILDKITE_BRANCH", "")
 COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
+# What the OMENative eval runs on this build. OME_EVAL_MODE names the mode;
+# unset, the newest "Eval: <value>" line of the commit message decides; with
+# neither, main runs targeted and every other branch nothing. GKE_EVAL_ENABLED=0
+# forces off. The trailer may name a selection instead of a mode.
+#   off             no eval image step and no eval group
+#   smoke           the first shard of every feature/topology lane, default scheduler
+#   targeted        smoke, plus every case the trailer's families or cases name
+#   full            every case on every scheduler
+#   families=<a,b>  every case of those corpus folders, every scheduler
+#   cases=<p1,p2>   exactly those cases in their lanes, default scheduler
+EVAL_MODES = ("off", "smoke", "targeted", "full")
+EVAL_SELECTION_KINDS = ("families", "cases")
+EVAL_TRAILER = re.compile(r"^[ \t]*eval:[ \t]*(\S.*?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _resolve_eval_mode(
+    env_mode: str | None, message: str, branch: str, enabled: bool
+) -> tuple[str, tuple[str, list[str]] | None]:
+    """(mode, selection) for a build: the mode from OME_EVAL_MODE, else from
+    the newest Eval: trailer of the message, else the branch default; the
+    selection from the trailer whenever it names families or cases. A value
+    naming nothing known is kept as written for generation to refuse."""
+    trailer = None
+    for match in EVAL_TRAILER.finditer(message):
+        trailer = match.group(1).lower()
+    selection = None
+    if trailer is not None:
+        kind, _, names = trailer.partition("=")
+        kind = kind.strip()
+        if kind in EVAL_SELECTION_KINDS:
+            selection = (kind, [name.strip() for name in names.split(",") if name.strip()])
+            trailer = kind
+    if env_mode is not None and env_mode.strip():
+        mode = env_mode.strip().lower()
+    elif trailer is not None:
+        mode = trailer
+    else:
+        mode = "targeted" if branch == "main" else "off"
+    return (mode if enabled else "off"), selection
+
+
+EVAL_MODE, EVAL_SELECTION = _resolve_eval_mode(
+    os.environ.get("OME_EVAL_MODE"), os.environ.get("BUILDKITE_MESSAGE", ""), BRANCH, GKE_EVAL_ENABLED
+)
 # (label-suffix, ECR repo name under msl_infra/, Dockerfile)
 # Drop redundant "ome-" prefix in ECR names so we don't get "ome-ome-*".
 # model-agent is not built locally; we consume upstream-published images.
@@ -1561,78 +1621,227 @@ def _split_eval_cases(
     return shards
 
 
-def _eval_children() -> list[tuple[str, str, dict]]:
-    """Every job of the main-only deployed OMENative eval as (scheduler,
-    feature, step), in upload order: scheduler-major, then the named
-    feature/topology lanes with their shards."""
-    plugins = _gke_kind_plugins(_kind_ci_image(f"eval-{COMMIT[:8]}"), shared_model=True)
-    configured_pod_budget = (
-        os.environ.get("GKE_EVAL_POD_BUDGET")
-        or os.environ.get("GKE_EVAL_EXCLUSIVE_PODS")
+def _eval_mode() -> str:
+    """EVAL_MODE, refused when it names neither a mode nor the kind of the
+    trailer's selection; off while the kill switch is on."""
+    known = EVAL_MODE in EVAL_MODES or (
+        EVAL_SELECTION is not None and EVAL_MODE == EVAL_SELECTION[0]
     )
-    concurrency = int(os.environ.get("GKE_EVAL_CASE_CONCURRENCY", "4"))
-    default_target_waves = int(os.environ.get("GKE_EVAL_TARGET_WAVES", "4"))
-    canary_target_waves = int(os.environ.get("GKE_EVAL_CANARY_TARGET_WAVES", "2"))
-    # The expected minutes of exclusive cases one shard runs back to back
-    # after its pool: with the bring-up and the pool waves this keeps every
-    # lane expected well under the hour, and two cases of ten minutes or
-    # more never share a shard.
-    exclusive_budget = float(os.environ.get("GKE_EVAL_EXCLUSIVE_MINUTES", "20"))
+    if not known:
+        raise RuntimeError(
+            "OME_EVAL_MODE or the Eval: trailer must name one of "
+            + ", ".join(EVAL_MODES)
+            + " (the trailer also families=<folders> or cases=<ids>), not "
+            + repr(EVAL_MODE)
+        )
+    return EVAL_MODE if GKE_EVAL_ENABLED else "off"
+
+
+def _eval_on() -> bool:
+    """Whether the build carries the eval image step and the eval group."""
+    return _eval_mode() != "off"
+
+
+class EvalPacking(NamedTuple):
+    """The lane packing knobs, read from the environment at generation."""
+
+    pod_budget: str | None
+    canary_pod_budget: str | None
+    concurrency: int
+    target_waves: int
+    canary_target_waves: int
+    exclusive_budget: float
+
+
+def _eval_packing() -> EvalPacking:
+    return EvalPacking(
+        pod_budget=(
+            os.environ.get("GKE_EVAL_POD_BUDGET")
+            or os.environ.get("GKE_EVAL_EXCLUSIVE_PODS")
+        ),
+        canary_pod_budget=os.environ.get("GKE_EVAL_CANARY_POD_BUDGET"),
+        concurrency=int(os.environ.get("GKE_EVAL_CASE_CONCURRENCY", "4")),
+        target_waves=int(os.environ.get("GKE_EVAL_TARGET_WAVES", "4")),
+        canary_target_waves=int(os.environ.get("GKE_EVAL_CANARY_TARGET_WAVES", "2")),
+        # The expected minutes of exclusive cases one shard runs back to back
+        # after its pool: with the bring-up and the pool waves this keeps every
+        # lane expected well under the hour, and two cases of ten minutes or
+        # more never share a shard.
+        exclusive_budget=float(os.environ.get("GKE_EVAL_EXCLUSIVE_MINUTES", "20")),
+    )
+
+
+def _eval_max_concurrency() -> int:
+    """The eval lanes allowed to run at once, from GKE_EVAL_MAX_CONCURRENCY;
+    anything but a positive integer is refused."""
+    raw = os.environ.get(EVAL_MAX_CONCURRENCY_VAR, "").strip() or str(EVAL_MAX_CONCURRENCY_DEFAULT)
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise RuntimeError(EVAL_MAX_CONCURRENCY_VAR + " must be a positive integer, not " + repr(raw))
+    return value
+
+
+def _eval_lane_shards(
+    feature: str, topology: str, cases: list[str], scheduler: str, packing: EvalPacking
+) -> tuple[list[list[str]], str, int | None, list[str]]:
+    """Today's packing of one lane under one scheduler: (shards, pod budget,
+    workers, skipped cases). The gang twin of a multi-node lane keeps the
+    cases within its node cap, names the rest and is sized to the kept ones;
+    no shard at all means nothing fit."""
+    canary = _eval_feature_is_canary(feature)
+    pod_budget = packing.pod_budget or ("35" if canary else "64")
+    if canary and packing.canary_pod_budget is not None:
+        pod_budget = packing.canary_pod_budget
+    target_waves = packing.canary_target_waves if canary else packing.target_waves
+    peaks = {case_id: _eval_case_peak_pods(case_id) for case_id in cases}
+    workers = None
+    skipped: list[str] = []
+    if scheduler and topology.endswith("-mn"):
+        # Whole-node gang placement: every pod of a running case needs its
+        # own worker, so the node count is the pod budget for this twin.
+        kept = [c for c in cases if peaks.get(c) is not None and peaks[c] <= GKE_EVAL_SCHEDULER_MAX_WORKERS]
+        skipped = [c for c in cases if c not in kept]
+        cases = kept
+        if not cases:
+            return [], pod_budget, None, skipped
+        workers = max(2, max(peaks[c] for c in cases))
+        pod_budget = str(workers)
+    shards = _split_eval_cases(
+        cases,
+        peaks,
+        packing.concurrency,
+        int(pod_budget),
+        target_waves,
+        _eval_exclusive_case_minutes(feature, cases),
+        packing.exclusive_budget,
+    )
+    return shards, pod_budget, workers, skipped
+
+
+def _eval_named_families(groups: list[tuple[str, str, list[str]]]) -> set[str]:
+    """The corpus folders the trailer's families= names; an unknown or
+    empty list is refused."""
+    _, names = EVAL_SELECTION
+    known = {feature for feature, _, _ in groups}
+    unknown = [name for name in names if name not in known]
+    if not names:
+        raise RuntimeError("the Eval: trailer names no family")
+    if unknown:
+        raise RuntimeError("the Eval: trailer names no corpus family: " + ", ".join(unknown))
+    return set(names)
+
+
+def _eval_named_cases(groups: list[tuple[str, str, list[str]]]) -> dict[tuple[str, str], set[str]]:
+    """The trailer's selection as {(feature, topology): cases}: cases= as
+    named, families= as every case of the folders; an unknown or empty list
+    is refused."""
+    kind, names = EVAL_SELECTION
+    if kind == "families":
+        wanted = _eval_named_families(groups)
+        return {(f, t): set(cases) for f, t, cases in groups if f in wanted}
+    homes = {case_id: (f, t) for f, t, cases in groups for case_id in cases}
+    unknown = [name for name in names if name not in homes]
+    if not names:
+        raise RuntimeError("the Eval: trailer names no case")
+    if unknown:
+        raise RuntimeError("the Eval: trailer names no corpus case: " + ", ".join(unknown))
+    chosen: dict[tuple[str, str], set[str]] = {}
+    for name in names:
+        chosen.setdefault(homes[name], set()).add(name)
+    return chosen
+
+
+def _eval_selection() -> list[tuple[str, str, list[str], str]]:
+    """What the eval group runs under the build's mode, as (feature,
+    topology, cases, scheduler) in emission order: scheduler-major, then the
+    corpus order of the lanes. The one place a mode chooses cases;
+    _eval_children packs and emits whatever comes back.
+
+    full      every lane on every scheduler
+    smoke     each lane's first shard of today's packing, default scheduler
+    targeted  smoke plus every case of the trailer's selection, default
+              scheduler, until a recorded full round can choose for it
+    families  every lane of the named folders on every scheduler
+    cases     exactly the named cases in their lanes, default scheduler
+    """
+    mode = _eval_mode()
+    if mode == "off":
+        return []
+    groups = _eval_case_groups()
+    if mode in ("full", "families"):
+        features = {feature for feature, _, _ in groups}
+        if mode == "families":
+            features = _eval_named_families(groups)
+        return [
+            (feature, topology, list(cases), scheduler)
+            for scheduler in EVAL_SCHEDULERS
+            for feature, topology, cases in groups
+            if feature in features
+        ]
+    chosen: dict[tuple[str, str], set[str]] = {}
+    if mode in ("smoke", "targeted"):
+        packing = _eval_packing()
+        for feature, topology, cases in groups:
+            # The group's first lane is its plain one whenever it has plain
+            # cases; that lane's first shard is the shape's smoke.
+            lane = _eval_lane_variants(cases)[0][2]
+            shards = _eval_lane_shards(feature, topology, lane, "", packing)[0]
+            chosen[(feature, topology)] = set(shards[0])
+    if mode == "cases" or (mode == "targeted" and EVAL_SELECTION is not None):
+        for lane_key, cases in _eval_named_cases(groups).items():
+            chosen.setdefault(lane_key, set()).update(cases)
+    return [
+        (feature, topology, [c for c in cases if c in chosen[(feature, topology)]], "")
+        for feature, topology, cases in groups
+        if chosen.get((feature, topology))
+    ]
+
+
+def _eval_children() -> list[tuple[str, str, dict]]:
+    """Every job of the deployed OMENative eval as (scheduler, feature,
+    step), in upload order: scheduler-major, then the named feature/topology
+    lanes with their shards. The mode's selection says which lanes and
+    cases; a selected case needing the force-delete policy still runs in
+    its lane's policy-on twin."""
+    plugins = _gke_kind_plugins(_kind_ci_image(f"eval-{COMMIT[:8]}"), shared_model=True)
+    packing = _eval_packing()
+    cap = _eval_max_concurrency()
     soft = _eval_scheduler_soft_topologies()
     soft_features = _eval_soft_features()
     children = []
-    for scheduler in EVAL_SCHEDULERS:
-      for feature, topology, variant, variant_env, cases in _eval_lanes():
+    for feature, topology, selected, scheduler in _eval_selection():
+      for variant, variant_env, cases in _eval_lane_variants(selected):
         slug = f"{feature}-{topology}".replace("_", "-")
         if scheduler:
             slug += "-" + scheduler.replace("_", "-")
         if variant:
             slug += "-" + variant
         variant_part = f" [{variant}]" if variant else ""
-        canary = _eval_feature_is_canary(feature)
-        prometheus = "true" if canary or feature == "reject" else "false"
-        pod_budget = configured_pod_budget or ("35" if canary else "64")
-        if canary:
-            pod_budget = os.environ.get("GKE_EVAL_CANARY_POD_BUDGET", pod_budget)
-        target_waves = canary_target_waves if canary else default_target_waves
-        peaks = {case_id: _eval_case_peak_pods(case_id) for case_id in cases}
-        workers = None
-        skipped: list[str] = []
-        if scheduler and topology.endswith("-mn"):
-            # Whole-node gang placement: every pod of a running case needs its
-            # own worker, so the node count is the pod budget for this twin.
-            kept = [c for c in cases if peaks.get(c) is not None and peaks[c] <= GKE_EVAL_SCHEDULER_MAX_WORKERS]
-            skipped = [c for c in cases if c not in kept]
-            cases = kept
-            if not cases:
-                # Nothing fits the cap: say so in the build instead of dropping
-                # the twin silently.
-                children.append((scheduler, feature, {
-                    "label": f":information_source: {feature} / {topology} [{scheduler}]{variant_part} needs more than {GKE_EVAL_SCHEDULER_MAX_WORKERS} nodes ({len(skipped)} cases skipped)",
-                    "key": f"omenative-e2e-{slug}-skipped",
-                    "command": "echo 'whole-node gang placement: cases above the node cap are not run in this twin: "
-                    + " ".join(skipped) + "'",
-                    "agents": {"queue": BUILD_QUEUE},
-                }))
-                continue
-            workers = max(2, max(peaks[c] for c in cases))
-            pod_budget = str(workers)
-        subshards = _split_eval_cases(
-            cases,
-            peaks,
-            concurrency,
-            int(pod_budget),
-            target_waves,
-            _eval_exclusive_case_minutes(feature, cases),
-            exclusive_budget,
+        prometheus = "true" if _eval_feature_is_canary(feature) or feature == "reject" else "false"
+        subshards, pod_budget, workers, skipped = _eval_lane_shards(
+            feature, topology, cases, scheduler, packing
         )
+        if not subshards:
+            # Nothing fits the cap: say so in the build instead of dropping
+            # the twin silently.
+            children.append((scheduler, feature, {
+                "label": f":information_source: {feature} / {topology} [{scheduler}]{variant_part} needs more than {GKE_EVAL_SCHEDULER_MAX_WORKERS} nodes ({len(skipped)} cases skipped)",
+                "key": f"omenative-e2e-{slug}-skipped",
+                "command": "echo 'whole-node gang placement: cases above the node cap are not run in this twin: "
+                + " ".join(skipped) + "'",
+                "agents": {"queue": BUILD_QUEUE},
+            }))
+            continue
         for index, shard_cases in enumerate(subshards, start=1):
             part = f" [{index}/{len(subshards)}]" if len(subshards) > 1 else ""
             key_part = f"-{index}-of-{len(subshards)}" if len(subshards) > 1 else ""
             sched_part = f" [{scheduler}]" if scheduler else ""
             env = {
                 "OME_KIND_PROMETHEUS_ENABLED": prometheus,
-                "OME_EVAL_CASE_CONCURRENCY": str(concurrency),
+                "OME_EVAL_CASE_CONCURRENCY": str(packing.concurrency),
                 "OME_EVAL_POD_BUDGET": pod_budget,
                 "PROD_ECR_REGISTRY": PROD_ECR_REGISTRY,
                 **variant_env,
@@ -1648,6 +1857,10 @@ def _eval_children() -> list[tuple[str, str, dict]]:
                 "key": f"omenative-e2e-{slug}{key_part}",
                 "depends_on": "package-kind-eval-image",
                 "timeout_in_minutes": 180,
+                # The lanes of every build share one group, so together they
+                # hold at most the cap in GKE agent pods; the rest wait in order.
+                "concurrency_group": EVAL_CONCURRENCY_GROUP,
+                "concurrency": cap,
                 "env": env,
                 "agents": {"queue": GKE_QUEUE},
                 "command": "sh .buildkite/run_omenative_eval_gke.sh "
@@ -1704,7 +1917,7 @@ def _gke_eval_groups() -> list[dict]:
     """The eval jobs as group steps, one per pipeline upload. A single group
     keeps the plain key; several are numbered, and each label names its
     scheduler and, when the scheduler's jobs span more than one group, the
-    families it carries."""
+    families it carries. Every label names the mode unless it is full."""
     children = _eval_children()
     batches = _eval_batches(children, UPLOAD_JOB_LIMIT)
     per_scheduler = {
@@ -1714,7 +1927,7 @@ def _gke_eval_groups() -> list[dict]:
     groups = []
     for index, batch in enumerate(batches, start=1):
         key = "omenative-e2e-kind-gke"
-        label = ":test_tube: OMENative YAML E2E (KIND on GKE)"
+        label = ":test_tube: OMENative YAML E2E (KIND on GKE)" + _eval_mode_label()
         if len(batches) > 1:
             scheduler = batch[0][0]
             part = scheduler or "default scheduler"
@@ -1730,6 +1943,21 @@ def _gke_eval_groups() -> list[dict]:
             "steps": [child for _, _, child in batch],
         })
     return groups
+
+
+def _eval_mode_label() -> str:
+    """The group label's suffix naming what the mode runs; full needs none."""
+    mode = _eval_mode()
+    if mode == "full":
+        return ""
+    if mode == "targeted":
+        label = " (targeted: smoke until a full round is recorded)"
+        if EVAL_SELECTION is not None:
+            label += " (plus " + EVAL_SELECTION[0] + ": " + ", ".join(EVAL_SELECTION[1]) + ")"
+        return label
+    if mode in EVAL_SELECTION_KINDS:
+        return " (" + mode + ": " + ", ".join(EVAL_SELECTION[1]) + ")"
+    return " (" + mode + ")"
 
 
 def _gke_eval_group() -> str:
@@ -2463,7 +2691,7 @@ def cd_steps() -> str:
             continue
         image_keys.append(f"build-{label}")
         image_keys.append(f"mirror-{label}")
-    if BRANCH == "main" and GKE_EVAL_ENABLED:
+    if _eval_on():
         parts.append(_package_kind_eval_image_step())
     for chart in CHARTS:
         if chart in IMAGE_STAMPING_CHARTS:
@@ -2495,7 +2723,7 @@ def generate_pipeline_batches() -> list[str]:
     # which only exists in the pipeline when that switch is on.
     if BRANCH == "main" and GKE_UPGRADE_ENABLED and GKE_KIND_ENABLED:
         first += "\n" + _gke_upgrade_identity_step()
-    groups = _gke_eval_groups() if BRANCH == "main" and GKE_EVAL_ENABLED else []
+    groups = _gke_eval_groups() if _eval_on() else []
     later = ["steps:\n" + _yaml_block([group], 2) for group in groups]
     if later:
         # The upload step's label counts what follows it: the groups and the
@@ -2533,7 +2761,7 @@ def _upload_plan(batches: list[str]) -> str:
     total = sum(_job_count(document) for document in batches)
     lines = [
         f"pipeline upload plan: {_plural(len(batches), 'upload')}, {_plural(total, 'job')}, "
-        f"at most {UPLOAD_JOB_LIMIT} per upload"
+        f"at most {UPLOAD_JOB_LIMIT} per upload, eval {_eval_mode()}"
     ]
     for index, document in enumerate(batches, start=1):
         if index == 1:

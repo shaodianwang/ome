@@ -473,11 +473,11 @@ class TestChartImageOrdering(unittest.TestCase):
 
 class TestReleaseMarkerEmission(unittest.TestCase):
     def test_marker_is_the_last_step_and_names_every_other_top_level_key(self):
-        # Off main there is no eval lane, so the single document carries the
-        # marker itself, after every step it gates on. The branch is pinned:
-        # the unit lane itself runs on main, where the marker travels in the
-        # last upload instead.
-        with mock.patch.object(gp, "BRANCH", "feature"):
+        # With the eval off there is no eval lane, so the single document
+        # carries the marker itself, after every step it gates on. The mode is
+        # pinned: the unit lane itself runs where the eval is on and the
+        # marker travels in the last upload instead.
+        with mock.patch.object(gp, "BRANCH", "feature"), mock.patch.object(gp, "EVAL_MODE", "off"):
             yaml_text = gp.generate_pipeline()
         self.assertEqual(yaml_text.count('key: "chart-ome-release"'), 1)
         keys = gp._top_level_keys(yaml_text)
@@ -489,9 +489,10 @@ class TestReleaseMarkerEmission(unittest.TestCase):
         self.assertNotIn(gp.UPLOAD_STEP_KEY, keys)
 
     def test_on_main_the_marker_closes_the_last_upload_and_names_every_key(self):
-        # On main the eval lanes follow in their own uploads and the marker is
-        # the one job of the last upload, gating every key of every upload.
-        with mock.patch.object(gp, "BRANCH", "main"):
+        # With the eval on, its lanes follow in their own uploads and the
+        # marker is the one job of the last upload, gating every key of every
+        # upload. Smoke is the smallest mode that carries lanes.
+        with mock.patch.object(gp, "BRANCH", "main"), mock.patch.object(gp, "EVAL_MODE", "smoke"):
             batches = gp.generate_pipeline_batches()
         self.assertGreater(len(batches), 1)
         self.assertNotIn('key: "chart-ome-release"', batches[0])
@@ -810,6 +811,8 @@ class TestImageReuseEmission(GitRepoTestCase):
 
     def test_main_pipeline_probes_every_image_and_the_eval_image(self):
         self.patch_attr("BRANCH", "main")
+        self.patch_attr("EVAL_MODE", "smoke")
+        self.patch_attr("_eval_children", list)
         pipeline = gp.generate_pipeline()
         for _, ecr_name, _ in gp.IMAGES:
             self.assertIn(f"sh .buildkite/build_image.sh msl_infra/{ecr_name}", pipeline)
@@ -1259,7 +1262,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
                 "GKE_EVAL_TARGET_WAVES": "4",
                 "GKE_EVAL_CANARY_TARGET_WAVES": "2",
             },
-        ):
+        ), mock.patch.object(gp, "EVAL_MODE", "full"):
             yaml_text = gp._gke_eval_group()
         needing = {
             case_id
@@ -1301,7 +1304,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
                 "GKE_EVAL_TARGET_WAVES": "4",
                 "GKE_EVAL_CANARY_TARGET_WAVES": "2",
             },
-        ):
+        ), mock.patch.object(gp, "EVAL_MODE", "full"):
             yaml_text = gp._gke_eval_group()
         keys = re.findall(r'key: "(omenative-e2e-[^"]+)"', yaml_text)
         self.assertEqual(len(keys), len(set(keys)))
@@ -1475,12 +1478,13 @@ class TestPipelineDependenciesResolve(PipelineTestCase):
         return keys, targets
 
     def test_every_dependency_names_a_key_of_the_same_or_an_earlier_upload(self):
-        cases = itertools.product(("main", "feature/anything"), (True, False), (True, False))
-        for branch, kind, alfred in cases:
-            with self.subTest(branch=branch, kind=kind, alfred=alfred):
+        cases = itertools.product(("main", "feature/anything"), (True, False), (True, False), ("smoke",))
+        for branch, kind, alfred, mode in [*cases, ("main", True, True, "off")]:
+            with self.subTest(branch=branch, kind=kind, alfred=alfred, mode=mode):
                 self.patch_attr("BRANCH", branch)
                 self.patch_attr("GKE_KIND_ENABLED", kind)
                 self.patch_attr("GKE_ALFRED_ENABLED", alfred)
+                self.patch_attr("EVAL_MODE", mode)
                 uploaded: set[str] = set()
                 for index, document in enumerate(gp.generate_pipeline_batches(), start=1):
                     keys, targets = self._keys_and_dependencies(document)
@@ -1594,7 +1598,7 @@ class TestEvalClusterName(unittest.TestCase):
                 "GKE_EVAL_TARGET_WAVES": "4",
                 "GKE_EVAL_CANARY_TARGET_WAVES": "2",
             },
-        ):
+        ), mock.patch.object(gp, "EVAL_MODE", "full"):
             yaml_text = gp._gke_eval_group()
         default_workers = self.default_workers()
         lanes: dict[str, int] = {}
@@ -1702,7 +1706,7 @@ class TestEvalSoftFeatures(unittest.TestCase):
                 "GKE_EVAL_TARGET_WAVES": "4",
                 "GKE_EVAL_CANARY_TARGET_WAVES": "2",
             },
-        ):
+        ), mock.patch.object(gp, "EVAL_MODE", "full"):
             yaml_text = gp._gke_eval_group()
         seen_soft = seen_hard = 0
         for match in re.finditer(r'- label: "([^"]*)"(.*?)(?=\n\s*- label: "|\Z)', yaml_text, re.S):
@@ -1724,6 +1728,319 @@ class TestEvalSoftFeatures(unittest.TestCase):
 
 
 
+class TestEvalMode(PipelineTestCase):
+    """OME_EVAL_MODE, else the newest Eval: trailer, else the branch default
+    says what the eval group runs; _eval_selection is the one place a mode
+    chooses cases, and the emission packs whatever it returns."""
+
+    EVAL_ENV = {
+        "GKE_EVAL_CASE_CONCURRENCY": "4",
+        "GKE_EVAL_TARGET_WAVES": "4",
+        "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+    }
+    RUNNER = "run_omenative_eval_gke.sh"
+
+    @classmethod
+    def setUpClass(cls):
+        with mock.patch.dict(os.environ, cls.EVAL_ENV), mock.patch.object(
+            gp, "BRANCH", "main"
+        ), mock.patch.object(gp, "EVAL_SELECTION", None):
+            cls.groups = gp._eval_case_groups()
+            with mock.patch.object(gp, "EVAL_MODE", "full"):
+                cls.full = gp._eval_children()
+            with mock.patch.object(gp, "EVAL_MODE", "smoke"):
+                cls.smoke = gp._eval_children()
+                cls.smoke_batches = gp.generate_pipeline_batches()
+
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, self.EVAL_ENV)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.patch_attr("BRANCH", "main")
+        self.patch_attr("EVAL_SELECTION", None)
+
+    @classmethod
+    def lane_of(cls, child):
+        """(feature, topology) of a lane job, from the runner's arguments."""
+        parts = child["command"].split()
+        return parts[2], parts[3]
+
+    @classmethod
+    def cases_of(cls, child):
+        return child["command"].split()[4:]
+
+    def runner_jobs(self, children, scheduler=None):
+        return [
+            child
+            for owner, _, child in children
+            if self.RUNNER in child["command"] and (scheduler is None or owner == scheduler)
+        ]
+
+    def group_labels(self, children):
+        with mock.patch.object(gp, "_eval_children", lambda: children):
+            return [group["group"] for group in gp._gke_eval_groups()]
+
+    def test_the_environment_wins_over_the_trailer_and_the_trailer_over_the_branch(self):
+        resolve = gp._resolve_eval_mode
+        self.assertEqual(resolve("full", "Eval: smoke", "main", True), ("full", None))
+        self.assertEqual(resolve(" Smoke ", "", "feature/x", True), ("smoke", None))
+        self.assertEqual(resolve(None, "Eval: smoke", "main", True), ("smoke", None))
+        self.assertEqual(resolve(None, "", "main", True), ("targeted", None))
+        self.assertEqual(resolve(None, "", "feature/x", True), ("off", None))
+        # An empty variable is unset; the kill switch forces off from any source.
+        self.assertEqual(resolve("", "", "main", True), ("targeted", None))
+        self.assertEqual(resolve("full", "Eval: full", "main", False), ("off", None))
+        self.assertEqual(resolve(None, "Eval: cases=p3000", "main", False), ("off", ("cases", ["p3000"])))
+        # The trailer's selection is kept beside a mode the environment set.
+        self.assertEqual(
+            resolve("targeted", "Eval: families=gen-heal", "main", True),
+            ("targeted", ("families", ["gen-heal"])),
+        )
+
+    def test_every_trailer_form_is_read_and_the_newest_line_wins(self):
+        resolve = gp._resolve_eval_mode
+        self.assertEqual(resolve(None, "subject\n\nbody text\n\nEval: Full\n", "feature/x", True), ("full", None))
+        self.assertEqual(resolve(None, "eval:OFF", "main", True), ("off", None))
+        self.assertEqual(resolve(None, "  EVAL:  targeted  ", "main", True), ("targeted", None))
+        self.assertEqual(
+            resolve(None, "Eval: families=gen-heal, Reject,", "main", True),
+            ("families", ("families", ["gen-heal", "reject"])),
+        )
+        self.assertEqual(
+            resolve(None, "Eval: cases=p3000,p4267", "main", True),
+            ("cases", ("cases", ["p3000", "p4267"])),
+        )
+        self.assertEqual(
+            resolve(None, "Eval: smoke\nEval: cases=p3000\n", "main", True),
+            ("cases", ("cases", ["p3000"])),
+        )
+        self.assertEqual(resolve(None, "Eval: cases=p3000\nEval: smoke\n", "main", True), ("smoke", None))
+        # Not a trailer: another word, no value, or the keyword inside a line.
+        for message in ("Evaluation: full", "Eval:", "Eval:   ", "see Eval: full later"):
+            self.assertEqual(resolve(None, message, "feature/x", True), ("off", None), message)
+
+    def test_a_value_naming_nothing_known_is_refused_at_generation(self):
+        self.patch_attr("EVAL_MODE", "bogus")
+        with self.assertRaisesRegex(RuntimeError, "off, smoke, targeted, full.*'bogus'"):
+            gp.generate_pipeline_batches()
+        # The selection kinds are trailer forms, not OME_EVAL_MODE values.
+        self.patch_attr("EVAL_MODE", "families")
+        with self.assertRaisesRegex(RuntimeError, "'families'"):
+            gp._eval_mode()
+        self.patch_attr("EVAL_SELECTION", ("families", ["gen-heal", "no-such-family"]))
+        with self.assertRaisesRegex(RuntimeError, "no corpus family: no-such-family"):
+            gp._eval_selection()
+        self.patch_attr("EVAL_SELECTION", ("families", []))
+        with self.assertRaisesRegex(RuntimeError, "names no family"):
+            gp._eval_selection()
+        self.patch_attr("EVAL_MODE", "cases")
+        self.patch_attr("EVAL_SELECTION", ("cases", ["p3000", "p999999"]))
+        with self.assertRaisesRegex(RuntimeError, "no corpus case: p999999"):
+            gp._eval_selection()
+        self.patch_attr("EVAL_SELECTION", ("cases", []))
+        with self.assertRaisesRegex(RuntimeError, "names no case"):
+            gp._eval_selection()
+
+    def test_off_emits_neither_the_group_nor_the_image_step_on_main(self):
+        self.patch_attr("EVAL_MODE", "off")
+        self.assertEqual(gp._eval_selection(), [])
+        batches = gp.generate_pipeline_batches()
+        self.assertEqual(len(batches), 1)
+        self.assertNotIn("package-kind-eval-image", batches[0])
+        self.assertNotIn("omenative-e2e-", batches[0])
+        self.assertNotIn(gp.UPLOAD_STEP_KEY, batches[0])
+
+    def test_a_mode_other_than_off_brings_the_eval_to_any_branch(self):
+        self.patch_attr("BRANCH", "feature/x")
+        self.patch_attr("EVAL_MODE", "smoke")
+        self.patch_attr("_eval_children", lambda: self.smoke)
+        batches = gp.generate_pipeline_batches()
+        self.assertIn('key: "package-kind-eval-image"', batches[0])
+        self.assertEqual(len(batches), 3)
+        self.assertIn('key: "omenative-e2e-kind-gke"', batches[1])
+        self.assertIn("(KIND on GKE) (smoke)", batches[1])
+
+    def test_smoke_runs_the_first_shard_of_every_lane_on_the_default_scheduler(self):
+        jobs = self.runner_jobs(self.smoke)
+        self.assertEqual(len(jobs), len(self.smoke))
+        self.assertEqual(len(jobs), len(self.groups))
+        self.assertEqual(
+            sorted(self.lane_of(child) for child in jobs),
+            sorted((feature, topology) for feature, topology, _ in self.groups),
+        )
+        for child in jobs:
+            self.assertNotIn("OME_EVAL_SCHEDULER", child["env"])
+            self.assertNotIn(gp.EVAL_FORCE_DELETE_ENV, child["env"])
+            self.assertNotIn("-of-", child["key"])
+        # Each job is the full run's first default-scheduler shard of its
+        # plain lane, cases and all.
+        first_shards = {}
+        for child in self.runner_jobs(self.full, scheduler=""):
+            if gp.EVAL_FORCE_DELETE_ENV not in child["env"]:
+                first_shards.setdefault(self.lane_of(child), self.cases_of(child))
+        self.assertEqual({self.lane_of(child): self.cases_of(child) for child in jobs}, first_shards)
+        # The seam: (feature, topology, cases, scheduler) in emission order.
+        self.patch_attr("EVAL_MODE", "smoke")
+        selection = gp._eval_selection()
+        self.assertEqual(
+            [(feature, topology, scheduler) for feature, topology, _, scheduler in selection],
+            [(feature, topology, "") for feature, topology, _ in self.groups],
+        )
+        self.assertEqual({(f, t): cases for f, t, cases, _ in selection}, first_shards)
+
+    def test_targeted_is_smoke_plus_the_trailer_selection_and_the_label_says_so(self):
+        self.patch_attr("EVAL_MODE", "targeted")
+        plain = gp._eval_children()
+        self.assertEqual([c["key"] for _, _, c in plain], [c["key"] for _, _, c in self.smoke])
+        self.assertEqual([c["command"] for _, _, c in plain], [c["command"] for _, _, c in self.smoke])
+        self.assertEqual(
+            self.group_labels(plain),
+            [":test_tube: OMENative YAML E2E (KIND on GKE) (targeted: smoke until a full round is recorded)"],
+        )
+        self.patch_attr("EVAL_SELECTION", ("families", ["gen-switch"]))
+        with_family = gp._eval_children()
+        smoke_cases = {case for child in self.runner_jobs(self.smoke) for case in self.cases_of(child)}
+        family_cases = {case for feature, _, cases in self.groups if feature == "gen-switch" for case in cases}
+        self.assertFalse(family_cases <= smoke_cases)
+        emitted = [case for child in self.runner_jobs(with_family) for case in self.cases_of(child)]
+        self.assertEqual(set(emitted), smoke_cases | family_cases)
+        self.assertEqual(len(emitted), len(set(emitted)))
+        self.assertEqual({scheduler for scheduler, _, _ in with_family}, {""})
+        self.assertIn(
+            "(targeted: smoke until a full round is recorded) (plus families: gen-switch)",
+            self.group_labels(with_family)[0],
+        )
+
+    def test_families_run_every_case_of_the_named_folders_on_both_schedulers(self):
+        self.patch_attr("EVAL_MODE", "families")
+        self.patch_attr("EVAL_SELECTION", ("families", ["gen-heal", "reject"]))
+        children = gp._eval_children()
+        wanted = {case for feature, _, cases in self.groups if feature in ("gen-heal", "reject") for case in cases}
+        self.assertTrue(wanted)
+        self.assertEqual({feature for _, feature, _ in children}, {"gen-heal", "reject"})
+        for scheduler in gp.EVAL_SCHEDULERS:
+            jobs = self.runner_jobs(children, scheduler=scheduler)
+            emitted = [case for child in jobs for case in self.cases_of(child)]
+            skipped = {case for child in jobs for case in child["env"].get("OME_EVAL_SCHEDULER_SKIPPED", "").split()}
+            for owner, _, child in children:
+                if owner == scheduler and child["key"].endswith("-skipped"):
+                    skipped.update(child["command"].split("twin: ")[1].rstrip("'").split())
+            self.assertEqual(set(emitted) | skipped, wanted, scheduler or "default")
+            self.assertEqual(len(emitted), len(set(emitted)), scheduler or "default")
+            self.assertTrue(jobs, scheduler or "default")
+        for label in self.group_labels(children):
+            self.assertIn("(KIND on GKE) (families: gen-heal, reject)", label)
+
+    def test_cases_run_exactly_the_named_ids_in_their_lanes_on_the_default_scheduler(self):
+        plain = next(cases[0] for feature, topology, cases in self.groups if (feature, topology) == ("gen-heal", "engine"))
+        policy = next(
+            case
+            for feature, _, cases in self.groups
+            if feature == "gen-node"
+            for case in cases
+            if gp._eval_case_header_fields(case).get("needs") == gp.EVAL_FORCE_DELETE_NEED
+        )
+        self.patch_attr("EVAL_MODE", "cases")
+        self.patch_attr("EVAL_SELECTION", ("cases", [plain, policy]))
+        children = gp._eval_children()
+        self.assertEqual(
+            sorted(case for child in self.runner_jobs(children) for case in self.cases_of(child)),
+            sorted([plain, policy]),
+        )
+        self.assertEqual({scheduler for scheduler, _, _ in children}, {""})
+        by_case = {self.cases_of(child)[0]: child for child in self.runner_jobs(children)}
+        self.assertIn("-" + gp.EVAL_FORCE_DELETE_SLUG, by_case[policy]["key"])
+        self.assertEqual(by_case[policy]["env"].get(gp.EVAL_FORCE_DELETE_ENV), "1")
+        self.assertNotIn(gp.EVAL_FORCE_DELETE_ENV, by_case[plain]["env"])
+        self.assertIn("(KIND on GKE) (cases: " + plain + ", " + policy + ")", self.group_labels(children)[0])
+
+    def test_every_lane_of_every_mode_is_in_the_one_concurrency_group(self):
+        cap = gp._eval_max_concurrency()
+        for children in (self.full, self.smoke):
+            lanes = self.runner_jobs(children)
+            self.assertTrue(lanes)
+            for child in lanes:
+                self.assertEqual(
+                    (child["concurrency_group"], child["concurrency"]),
+                    (gp.EVAL_CONCURRENCY_GROUP, cap),
+                    child["key"],
+                )
+
+    def test_full_keeps_the_whole_corpus_and_the_smoke_totals_are_pinned(self):
+        committed = sorted(case for _, _, cases in self.groups for case in cases)
+        default = sorted(case for child in self.runner_jobs(self.full, scheduler="") for case in self.cases_of(child))
+        self.assertEqual(default, committed)
+        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 681)
+        self.assertEqual(len(self.runner_jobs(self.full)), 1513)
+        self.assertEqual(len(self.full), 1524)
+        self.assertEqual(len(self.smoke), 185)
+        self.assertEqual(len(self.smoke_batches), 3)
+        self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 294)
+
+
+class TestEvalConcurrencyCap(PipelineTestCase):
+    """Every eval lane is in one concurrency group capped by
+    GKE_EVAL_MAX_CONCURRENCY, so the lanes of every build together hold at
+    most that many GKE agent pods; a skip note holds none and is in no group."""
+
+    EVAL_ENV = {
+        "GKE_EVAL_CASE_CONCURRENCY": "4",
+        "GKE_EVAL_TARGET_WAVES": "4",
+        "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+    }
+
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, self.EVAL_ENV)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop(gp.EVAL_MAX_CONCURRENCY_VAR, None)
+        self.patch_attr("BRANCH", "main")
+        self.patch_attr("EVAL_MODE", "full")
+        self.patch_attr("EVAL_SELECTION", None)
+        self.groups = {(f, t): cases for f, t, cases in gp._eval_case_groups()}
+
+    def select(self, *lanes):
+        """Pin the selection seam to a few lanes so a render is cheap."""
+        self.patch_attr(
+            "_eval_selection",
+            lambda: [(f, t, list(self.groups[(f, t)]), s) for f, t, s in lanes],
+        )
+
+    def test_every_lane_carries_the_group_and_the_cap_and_a_skip_note_neither(self):
+        self.select(
+            ("gen-heal", "engine", ""),
+            ("reject", "pd", gp.EVAL_GANG_SCHEDULER),
+            ("gen-heal", "engine-mn", gp.EVAL_GANG_SCHEDULER),
+        )
+        self.patch_attr("GKE_EVAL_SCHEDULER_MAX_WORKERS", 1)
+        children = gp._eval_children()
+        lanes = [c for _, _, c in children if "run_omenative_eval_gke.sh" in c["command"]]
+        notes = [c for _, _, c in children if c["key"].endswith("-skipped")]
+        self.assertTrue(lanes)
+        self.assertTrue(notes)
+        for child in lanes:
+            self.assertEqual(child["concurrency_group"], "ome/gke-evals")
+            self.assertEqual(child["concurrency"], 120)
+        for child in notes:
+            self.assertNotIn("concurrency_group", child)
+            self.assertNotIn("concurrency", child)
+        rendered = gp._gke_eval_group()
+        self.assertEqual(rendered.count('concurrency_group: "ome/gke-evals"'), len(lanes))
+        self.assertEqual(rendered.count("concurrency: 120"), len(lanes))
+
+    def test_the_cap_reads_the_environment_and_refuses_anything_but_a_positive_integer(self):
+        self.select(("gen-heal", "engine", ""))
+        with mock.patch.dict(os.environ, {gp.EVAL_MAX_CONCURRENCY_VAR: " 7 "}):
+            children = gp._eval_children()
+        self.assertEqual({c["concurrency"] for _, _, c in children}, {7})
+        with mock.patch.dict(os.environ, {gp.EVAL_MAX_CONCURRENCY_VAR: ""}):
+            self.assertEqual(gp._eval_max_concurrency(), 120)
+        for raw in ("0", "-3", "x", "1.5"):
+            with self.subTest(raw=raw), mock.patch.dict(os.environ, {gp.EVAL_MAX_CONCURRENCY_VAR: raw}):
+                with self.assertRaisesRegex(RuntimeError, "GKE_EVAL_MAX_CONCURRENCY must be a positive integer"):
+                    gp._eval_children()
+
+
 class TestPipelineUploads(PipelineTestCase):
     """The build is uploaded as documents of at most UPLOAD_JOB_LIMIT jobs: the
     entrypoint's (every step that is not an eval lane, ending with the upload
@@ -1731,15 +2048,20 @@ class TestPipelineUploads(PipelineTestCase):
     other top-level key of the build."""
 
     LANE_KEY = re.compile(r'^\s*key: "(omenative-e2e-(?!kind-gke)[^"]+)"$', re.M)
+    # The pins mean the whole corpus; the upload script's own generator run
+    # reads the mode from the environment.
     EVAL_ENV = {
         "GKE_EVAL_CASE_CONCURRENCY": "4",
         "GKE_EVAL_TARGET_WAVES": "4",
         "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+        "OME_EVAL_MODE": "full",
     }
 
     @classmethod
     def setUpClass(cls):
-        with mock.patch.dict(os.environ, cls.EVAL_ENV), mock.patch.object(gp, "BRANCH", "main"):
+        with mock.patch.dict(os.environ, cls.EVAL_ENV), mock.patch.object(
+            gp, "BRANCH", "main"
+        ), mock.patch.object(gp, "EVAL_MODE", "full"):
             cls.children = gp._eval_children()
             cls.batches = gp.generate_pipeline_batches()
 
@@ -1748,6 +2070,7 @@ class TestPipelineUploads(PipelineTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.patch_attr("BRANCH", "main")
+        self.patch_attr("EVAL_MODE", "full")
 
     def marker_dependencies(self, document):
         marker = document[document.index('key: "chart-ome-release"'):]
