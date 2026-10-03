@@ -110,6 +110,20 @@ data:
       }
     }
 
+  {{- with .Values.ome.controller.eventRecorder }}
+  {{- $eventRecorder := dict }}
+  {{- if hasKey . "burstSize" }}
+  {{- $_ := set $eventRecorder "burstSize" .burstSize }}
+  {{- end }}
+  {{- if hasKey . "refillInterval" }}
+  {{- $_ := set $eventRecorder "refillInterval" .refillInterval }}
+  {{- end }}
+  {{- if $eventRecorder }}
+  eventRecorder: |-
+    {{ $eventRecorder | toJson }}
+  {{- end }}
+  {{- end }}
+
   {{- with .Values.ome.controller.lifecycle }}
   {{- $fields := list }}
   {{- if hasKey . "scaleUpPodBatchSize" }}

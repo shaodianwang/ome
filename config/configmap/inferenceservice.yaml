@@ -106,6 +106,20 @@ data:
       "instanceReadyTimeout": "30m"
     }
 
+  # How many Kubernetes Events the manager may record about one object before
+  # client-go's spam filter drops them silently: one bucket per object and
+  # event type holding burstSize events, refilled one event every
+  # refillInterval. Every emission counts, including repeats. Omitting a field
+  # keeps client-go's own default for it (25 events refilled one every five
+  # minutes), which a Component of eight gangs spends on creation and
+  # readiness alone. Read once at manager startup; non-positive values prevent
+  # startup, and a direct ConfigMap edit requires a manager restart.
+  eventRecorder: |-
+    {
+      "burstSize": 400,
+      "refillInterval": "5s"
+    }
+
   # How the manager stores InferenceReplica per-Instance status. Read once at
   # manager startup and required: a missing or unknown instanceStatusEncoding
   # prevents startup. ColumnarV2 writes grouped columns when they are strictly

@@ -551,6 +551,23 @@ ome:
       controllerIdentity:
         usernames: []
         groups: []
+    # eventRecorder bounds the Kubernetes Events the manager may record about
+    # one object before client-go's spam filter drops them silently. Every
+    # object (InferenceService, InferenceReplica, ...) gets one bucket per
+    # event type holding burstSize events, refilled one event every
+    # refillInterval; every emission counts, including a repeat of an earlier
+    # event. The OME binary has NO built-in values: removing a field keeps
+    # client-go's own default for it (25 events refilled one every five
+    # minutes), which a Component of eight gangs spends on creation and
+    # readiness alone. A plain rollout stamps five events per gang on its
+    # Component (created, ready, update started, update completed, ready
+    # again), so 400 holds ten back-to-back rollouts of eight gangs, and a
+    # refill every 5s sustains any rollout whose gangs each take longer than
+    # that. Read once at manager startup; non-positive values prevent startup.
+    # Helm rolls the manager when the rendered ConfigMap changes.
+    eventRecorder:
+      burstSize: 400
+      refillInterval: 5s
     # lifecycle tunes the OMENative per-Instance lifecycle state machine.
     lifecycle:
       # Missing-Pod budget for one OMENative scale-up pass. Instance and
