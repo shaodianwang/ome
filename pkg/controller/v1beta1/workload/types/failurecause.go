@@ -86,13 +86,15 @@ func IsWorkloadCausedReason(reason string) bool {
 
 // environmentCausedReasons are the failure reasons under which the
 // cluster refused to run the attempt at all: the scheduler found no
-// placement, or the gang's deterministic PodGroup name belongs to
-// another controller. Neither says anything about the pod template, and
-// no corrected revision changes either, so such a wave never reaches a
-// revision's retry ladder.
+// placement, the gang's deterministic PodGroup name belongs to another
+// controller, or the apiserver could not reach its admission webhook.
+// None says anything about the pod template, and no corrected revision
+// changes any of them, so such a wave never reaches a revision's retry
+// ladder.
 var environmentCausedReasons = map[string]struct{}{
-	WaitingReasonUnschedulable:      {},
-	PodGroupOwnershipConflictReason: {},
+	WaitingReasonUnschedulable:          {},
+	PodGroupOwnershipConflictReason:     {},
+	RejectionReasonAdmissionUnavailable: {},
 }
 
 // IsEnvironmentCausedReason reports whether reason is one the

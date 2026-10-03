@@ -2,6 +2,8 @@ package ops
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -1157,5 +1159,99 @@ func TestUpdateWithPods_InPlaceReadinessAndRetargetAfterThePodLoss(t *testing.T)
 	}
 	if s.Incarnation <= bumped {
 		t.Errorf("Incarnation: got %d want a further bump past %d (the recreate restarts Phase A)", s.Incarnation, bumped)
+	}
+}
+
+// TestUpdateInPlace_AdmissionUnavailable_SaysWhyThePatchWaits: a pod
+// patch the apiserver refuses because it cannot reach an admission
+// webhook is the same wait a refused create is. The attempt keeps its
+// operation and phase, the row carries the wait token with the
+// apiserver's words on LastFailure, one event names the webhook, no
+// revision is blamed, and the pass ends quietly for the ordinary retry.
+func TestUpdateInPlace_AdmissionUnavailable_SaysWhyThePatchWaits(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	spec := legacyTargetSpecImage("example.com/app:v2")
+	pod := legacyRunningPodAtRevision(isvc, 0, 1, "example.com/app:v1")
+
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{
+		corev1.AddToScheme, v1beta1.AddToScheme, discoveryv1.AddToScheme, appsv1.AddToScheme,
+	} {
+		if err := add(scheme); err != nil {
+			t.Fatalf("build scheme: %v", err)
+		}
+	}
+	const refusal = `failed calling webhook "pod-mutator.example.com": failed to call webhook: Post "https://ome-webhook.example.svc:443/mutate-pods?timeout=10s": context deadline exceeded`
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
+		WithObjects(isvc, ir, pod).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, ok := obj.(*corev1.Pod); ok {
+					return apierrors.NewInternalError(errors.New(refusal))
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	legacySeedRunningRevisionWithMeta(t, c, isvc, workload.ComponentEngine, 0, legacyTargetSpecImage("example.com/app:v1"), nil)
+	target := legacyEnsureTargetCR(t, c, isvc, spec)
+
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	input.ObservedState.UpdateRevision = target.Name
+	blamed := 0
+	input.MutateRetryBlock = func(_ context.Context, rev string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+		b := workload.RetryBlock{TargetRevision: rev}
+		if d := mutate(&b); d != workload.RetryBlockUnchanged {
+			blamed++
+		}
+		return nil
+	}
+	markNotReady := false
+	plan := legacyComponentPlan(workload.UpdateStrategyInPlaceIfPossible,
+		&workload.InPlaceUpdateStrategy{MarkNotReadyDuringLifecycle: &markNotReady})
+	recorder := record.NewFakeRecorder(16)
+
+	done, err := Update(context.Background(), workload.Deps{Client: c, Recorder: recorder}, input, plan, plan.Instances[0], target, spec)
+	if err != nil {
+		t.Fatalf("Update: %v (an admission outage is a wait, not an error)", err)
+	}
+	if done {
+		t.Fatal("Update reported done on a patch admission never saw")
+	}
+
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if s.Phase != v1beta1.OMENativeInstanceUpdating || s.Operation == nil {
+		t.Fatalf("instance 0: got phase=%q op=%+v want Updating with its operation intact", s.Phase, s.Operation)
+	}
+	if s.Operation.Waiting != workload.RejectionReasonAdmissionUnavailable {
+		t.Errorf("Operation.Waiting: got %q want %q", s.Operation.Waiting, workload.RejectionReasonAdmissionUnavailable)
+	}
+	if s.LastFailure == nil || s.LastFailure.Reason != workload.RejectionReasonAdmissionUnavailable || !strings.Contains(s.LastFailure.Message, "failed calling webhook") {
+		t.Errorf("LastFailure: got %+v want the wait with the apiserver's own words", s.LastFailure)
+	}
+	if blamed != 0 {
+		t.Errorf("RetryBlock writes: got %d want none (no revision is blamed)", blamed)
+	}
+	var events []string
+	for drained := false; !drained; {
+		select {
+		case ev := <-recorder.Events:
+			events = append(events, ev)
+		default:
+			drained = true
+		}
+	}
+	named := 0
+	for _, ev := range events {
+		if strings.Contains(ev, string(workload.EventReasonInstanceAdmissionUnavailable)) && strings.Contains(ev, "failed calling webhook") {
+			named++
+		}
+	}
+	if named != 1 {
+		t.Errorf("admission events carrying the apiserver's words: got %d want 1 (%v)", named, events)
 	}
 }

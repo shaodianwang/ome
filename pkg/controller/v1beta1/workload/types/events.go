@@ -75,6 +75,14 @@ const (
 	// parked until quota frees up.
 	EventReasonInstanceQuotaBlocked EventReason = "InstanceQuotaBlocked"
 
+	// EventReasonInstanceAdmissionUnavailable fires once per episode
+	// when the apiserver refuses an Instance's pod create or patch
+	// because it cannot reach an admission webhook. The attempt is NOT
+	// failed: it waits with its InstanceReadyTimeout clock parked until
+	// admission answers again. Carries the apiserver's own words so the
+	// operator can see which webhook is unreachable.
+	EventReasonInstanceAdmissionUnavailable EventReason = "InstanceAdmissionUnavailable"
+
 	// EventReasonCreateAttemptSuperseded fires when the target revision
 	// moves while a Create attempt is still building: the attempt is
 	// replaced by a fresh one pinned to the new target. Normal, not a

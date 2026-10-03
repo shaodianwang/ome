@@ -4361,3 +4361,224 @@ func TestCreate_RecreateInstance_DefersDemotedGangToRestart(t *testing.T) {
 		t.Fatalf("the demoted row must stay Pending with no operation (Create must not stamp Creating): got %+v", s)
 	}
 }
+
+// webhookUnreachablePodError is the apiserver failing closed on an
+// admission webhook it could not call: an InternalError whose message is
+// the dispatcher's phrase, the webhook's name and the transport error.
+// The pod name is not part of the apiserver's wording; detail lets a
+// test vary the transport error between passes.
+func webhookUnreachablePodError(detail string) error {
+	return apierrors.NewInternalError(fmt.Errorf(
+		`failed calling webhook "pod-mutator.example.com": failed to call webhook: Post "https://ome-webhook.example.svc:443/mutate-pods?timeout=10s": %s`, detail))
+}
+
+// TestCreate_AdmissionUnavailable_SaysWhyTheRollWaits: a pod create the
+// apiserver refuses because it cannot reach an admission webhook is a
+// wait, not a failure, and the wait is not silent. The attempt keeps its
+// operation, the row carries the wait token with the apiserver's own
+// words on LastFailure, one event names the webhook, and the pass retries
+// on the ordinary create interval. The outage says something different
+// on every pass — connection refused, then a deadline — yet the episode
+// writes status once and announces once; when the webhook is back the
+// create lands and the token is released.
+func TestCreate_AdmissionUnavailable_SaysWhyTheRollWaits(t *testing.T) {
+	detail := "dial tcp 10.0.0.1:443: connect: connection refused"
+	blocked := true
+	c, isvc, input, plan, target, recorder, writes := rejectionFixture(t, 1, func(podName string) error {
+		if blocked {
+			return webhookUnreachablePodError(detail)
+		}
+		return nil
+	})
+
+	result, err := ops.Create(context.Background(), workload.Deps{Client: c, Recorder: recorder}, input, plan, target)
+	if err != nil {
+		t.Fatalf("Create: %v (an admission outage is a wait, not an error)", err)
+	}
+	if result.RequeueAfter != testRequeueIntervals.Operation {
+		t.Errorf("RequeueAfter: got %v want %v", result.RequeueAfter, testRequeueIntervals.Operation)
+	}
+
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+	if s == nil || s.Phase != v1beta1.OMENativeInstanceCreating || s.Operation == nil {
+		t.Fatalf("instance 0: got %+v want Creating with its operation intact", s)
+	}
+	if s.Operation.Waiting != workload.RejectionReasonAdmissionUnavailable {
+		t.Errorf("Operation.Waiting: got %q want %q", s.Operation.Waiting, workload.RejectionReasonAdmissionUnavailable)
+	}
+	if s.Operation.Reason != "" {
+		t.Errorf("Operation.Reason: got %q want untouched — Reason names why the operation exists", s.Operation.Reason)
+	}
+	if s.LastFailure == nil || s.LastFailure.Reason != workload.RejectionReasonAdmissionUnavailable {
+		t.Fatalf("LastFailure: got %+v want the wait recorded under %s", s.LastFailure, workload.RejectionReasonAdmissionUnavailable)
+	}
+	if !strings.Contains(s.LastFailure.Message, "failed calling webhook") || !strings.Contains(s.LastFailure.Message, "pod-mutator.example.com") {
+		t.Errorf("LastFailure.Message: got %q want the apiserver's own words naming the webhook", s.LastFailure.Message)
+	}
+	if s.LastFailure.PodName != "llama-70b-engine-0-default-0" {
+		t.Errorf("LastFailure.PodName: got %q want the refused pod", s.LastFailure.PodName)
+	}
+	if len(*writes) != 0 {
+		t.Errorf("RetryBlock writes: got %+v want none (no revision is blamed)", *writes)
+	}
+	if names := rejectionPodNames(t, c); len(names) != 0 {
+		t.Errorf("pods: got %v want none while admission is unreachable", names)
+	}
+	events := rejectionEvents(recorder)
+	if got := countRejectionEvents(events, workload.EventReasonInstanceAdmissionUnavailable); got != 1 {
+		t.Fatalf("admission events after the first pass: got %d want 1 (%v)", got, events)
+	}
+	if !anyEventContains(events, "failed calling webhook") || !anyEventContains(events, "pod-mutator.example.com") {
+		t.Errorf("the event must carry the apiserver's words naming the webhook; got %v", events)
+	}
+	if countRejectionEvents(events, workload.EventReasonInstanceRejected) != 0 || countRejectionEvents(events, workload.EventReasonInstanceQuotaBlocked) != 0 {
+		t.Errorf("an admission outage is neither a rejection nor a quota wait; got %v", events)
+	}
+	rvAfterRefusal := irResourceVersion(t, c, isvc)
+
+	// Two more passes under the outage, each refused with a different
+	// transport error: no second event and no further status write.
+	detail = "context deadline exceeded"
+	for i := 0; i < 2; i++ {
+		resetExpectations(t)
+		next := buildTestInput(isvc, c, workload.ComponentEngine)
+		next.ObservedState.UpdateRevision = target.Name
+		next.Pacing = &workload.APIPacing{}
+		next.MutateRetryBlock = input.MutateRetryBlock
+		if _, err := ops.Create(context.Background(), workload.Deps{Client: c, Recorder: recorder}, next, plan, target); err != nil {
+			t.Fatalf("Create (refused pass %d): %v", i+2, err)
+		}
+	}
+	if got := countRejectionEvents(rejectionEvents(recorder), workload.EventReasonInstanceAdmissionUnavailable); got != 0 {
+		t.Errorf("admission events on repeat refused passes: got %d want 0 (one per episode)", got)
+	}
+	if rv := irResourceVersion(t, c, isvc); rv != rvAfterRefusal {
+		t.Errorf("status resourceVersion moved on repeat refused passes: %s -> %s (the episode must write once)", rvAfterRefusal, rv)
+	}
+
+	// The webhook is back: the create lands and the wait is released.
+	blocked = false
+	resetExpectations(t)
+	next := buildTestInput(isvc, c, workload.ComponentEngine)
+	next.ObservedState.UpdateRevision = target.Name
+	next.Pacing = &workload.APIPacing{}
+	next.MutateRetryBlock = input.MutateRetryBlock
+	if _, err := ops.Create(context.Background(), workload.Deps{Client: c, Recorder: recorder}, next, plan, target); err != nil {
+		t.Fatalf("Create (admission back): %v", err)
+	}
+	s = findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+	if s == nil || s.Operation == nil {
+		t.Fatalf("instance 0: got %+v want a live operation", s)
+	}
+	if s.Operation.Waiting != "" {
+		t.Errorf("Operation.Waiting: got %q want released once the create went through admission", s.Operation.Waiting)
+	}
+	if names := rejectionPodNames(t, c); len(names) != 1 {
+		t.Errorf("pods: got %v want the create to have landed", names)
+	}
+}
+
+// TestCreateFreshIndices_AdmissionUnavailable_OnScaleUpSaysWhy: the same
+// outage met by a scale-up. The added index opens its Create, its pod
+// create is refused, and the new row — not the serving one — carries the
+// wait with the apiserver's words while one event names the webhook. The
+// Ready index is left exactly as it was.
+func TestCreateFreshIndices_AdmissionUnavailable_OnScaleUpSaysWhy(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 2)
+	ir := seedInstanceStatuses(isvc, v1beta1.OMENativeInstanceStatus{
+		Index:           0,
+		Incarnation:     3,
+		Phase:           v1beta1.OMENativeInstanceReady,
+		RunningRevision: "llama-70b-engine-currentrev",
+	})
+	pod0 := podForInstance(isvc, 0, true /* ready */, true /* serving */)
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-currentrev", Namespace: "prod"},
+	}
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{corev1.AddToScheme, appsv1.AddToScheme, v1beta1.AddToScheme} {
+		if err := add(scheme); err != nil {
+			t.Fatalf("build scheme: %v", err)
+		}
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
+		WithObjects(isvc, ir, pod0, target).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*corev1.Pod); ok {
+					return webhookUnreachablePodError("dial tcp 10.0.0.1:443: connect: connection refused")
+				}
+				return cl.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	input.ObservedState.UpdateRevision = target.Name
+	input.Pacing = &workload.APIPacing{}
+	recorder := record.NewFakeRecorder(16)
+
+	if _, err := ops.CreateFreshIndices(context.Background(), workload.Deps{Client: c, Recorder: recorder}, input, buildPlanSinglePodEngine(2), target); err != nil {
+		t.Fatalf("CreateFreshIndices: %v (an admission outage is a wait, not an error)", err)
+	}
+
+	before := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+	if before == nil || before.Phase != v1beta1.OMENativeInstanceReady || before.Incarnation != 3 || before.Operation != nil {
+		t.Fatalf("the Ready index must be left exactly as it was, got %+v", before)
+	}
+	added := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 1)
+	if added == nil || added.Operation == nil || added.Operation.Type != v1beta1.InstanceOperationCreate {
+		t.Fatalf("the added index must keep its Create open, got %+v", added)
+	}
+	if added.Phase == v1beta1.OMENativeInstanceFailed {
+		t.Errorf("the added index: got Failed want the attempt kept while admission is unreachable")
+	}
+	if added.Operation.Waiting != workload.RejectionReasonAdmissionUnavailable {
+		t.Errorf("added index Operation.Waiting: got %q want %q", added.Operation.Waiting, workload.RejectionReasonAdmissionUnavailable)
+	}
+	if added.LastFailure == nil || !strings.Contains(added.LastFailure.Message, "failed calling webhook") {
+		t.Errorf("added index LastFailure: got %+v want the apiserver's own words", added.LastFailure)
+	}
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 1 || pods.Items[0].Name != pod0.Name {
+		t.Errorf("pods: got %d want only the serving pod while admission is unreachable", len(pods.Items))
+	}
+	events := rejectionEvents(recorder)
+	if got := countRejectionEvents(events, workload.EventReasonInstanceAdmissionUnavailable); got != 1 {
+		t.Fatalf("admission events: got %d want 1 (%v)", got, events)
+	}
+	if !anyEventContains(events, "failed calling webhook") {
+		t.Errorf("the event must carry the apiserver's words; got %v", events)
+	}
+}
+
+// TestCreate_InvalidPodSpec_IsNotAnAdmissionOutage: a 422 is admission
+// answering, not admission missing. The rejected Instance is disposed
+// Failed under its own reason, no wait token is recorded and no event
+// claims the webhook was unreachable.
+func TestCreate_InvalidPodSpec_IsNotAnAdmissionOutage(t *testing.T) {
+	c, isvc, input, plan, target, recorder, _ := rejectionFixture(t, 1, invalidPodError)
+
+	if _, err := ops.Create(context.Background(), workload.Deps{Client: c, Recorder: recorder}, input, plan, target); err != nil {
+		t.Fatalf("Create: %v (a permanent rejection is disposed, not returned)", err)
+	}
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+	if s == nil || s.Phase != v1beta1.OMENativeInstanceFailed || s.Operation != nil {
+		t.Fatalf("instance 0: got %+v want Failed with the operation cleared", s)
+	}
+	if s.LastFailure == nil || s.LastFailure.Reason != workload.RejectionReasonInvalidPodSpec {
+		t.Errorf("LastFailure: got %+v want reason=%s", s.LastFailure, workload.RejectionReasonInvalidPodSpec)
+	}
+	events := rejectionEvents(recorder)
+	if got := countRejectionEvents(events, workload.EventReasonInstanceAdmissionUnavailable); got != 0 {
+		t.Errorf("admission events on an Invalid rejection: got %d want 0 (%v)", got, events)
+	}
+	if got := countRejectionEvents(events, workload.EventReasonInstanceRejected); got != 1 {
+		t.Errorf("rejection events: got %d want 1 (%v)", got, events)
+	}
+}

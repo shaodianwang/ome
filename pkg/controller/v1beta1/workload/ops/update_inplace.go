@@ -79,6 +79,21 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 		markNotReady = *plan.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle
 	}
 
+	// A pod mutation the apiserver could not take to admission is a wait,
+	// not a verdict: the row records it in the apiserver's words and the
+	// pass ends quietly for the ordinary retry, exactly as a refused
+	// create does.
+	admissionWait := func(pod *corev1.Pod, err error) (bool, error) {
+		rejection := evidence.ClassifyAPIError(err)
+		if rejection.Class != workload.APIRejectionAdmissionUnavailable {
+			return false, nil
+		}
+		if rerr := recordAdmissionWait(ctx, deps, input, plan, inst.Index, pod.Name, rejection); rerr != nil {
+			return true, fmt.Errorf("record admission wait (instance=%d, pod=%s): %w", inst.Index, pod.Name, rerr)
+		}
+		return true, nil
+	}
+
 	// A pod already relabeled to the target revision has been through the
 	// drain + patch steps and is back in (or returning to) rotation; draining
 	// it again would remove converged capacity and restart its PodReady age
@@ -93,6 +108,9 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 				continue
 			}
 			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterUpdateInPlace, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
+				if handled, herr := admissionWait(pod, err); handled {
+					return false, herr
+				}
 				return false, fmt.Errorf("mark not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
 		}
@@ -167,6 +185,9 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 	// produces a different answer. Dispose exactly as a rejected create
 	// does — the corrected revision is then admitted immediately.
 	rejected := func(pod *corev1.Pod, err error) (bool, error) {
+		if handled, herr := admissionWait(pod, err); handled {
+			return true, herr
+		}
 		rejection := evidence.ClassifyAPIError(err)
 		if !rejection.Class.Permanent() {
 			return false, nil
@@ -183,6 +204,9 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 		needsImagePatch := len(imagePatches) > 0
 		if markNotReady && needsImagePatch && podreadiness.IsServing(pod) {
 			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterUpdateInPlace, updateDrainKey(inst.Index, inst.Incarnation)); err != nil {
+				if handled, herr := admissionWait(pod, err); handled {
+					return false, herr
+				}
 				return false, fmt.Errorf("re-mark not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
 			return false, nil
@@ -234,6 +258,11 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 			return false, fmt.Errorf("patch revision labels (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
 		mutated = mutated || revisionLabelsPatched
+	}
+	// Every patch went through admission: an admission wait a refused
+	// pass left on the row is over.
+	if err := releaseAdmissionWait(ctx, input, inst.Index); err != nil {
+		return false, fmt.Errorf("release admission wait (instance=%d): %w", inst.Index, err)
 	}
 	if mutated {
 		return false, nil

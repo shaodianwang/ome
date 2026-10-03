@@ -1224,6 +1224,14 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 						"OMENative %s waiting on capacity: %s", workload.InstanceKey(input.Key.Component, idx), rejection.Message)
 				}
 				return created, &podRejectionError{podName: t.Name, rejection: rejection, err: err}
+			case workload.APIRejectionAdmissionUnavailable:
+				// Admission gave no answer: the create waits for the webhook
+				// to come back, the row says so in the apiserver's words,
+				// and the pass retries on the ordinary create interval.
+				if rerr := recordAdmissionWait(ctx, deps, input, plan, idx, t.Name, rejection); rerr != nil {
+					return created, fmt.Errorf("record admission wait (instance=%d, pod=%s): %w", idx, t.Name, rerr)
+				}
+				return created, &podRejectionError{podName: t.Name, rejection: rejection, err: err}
 			case workload.APIRejectionThrottled:
 				// The server named its own delay; deposit it on the pass so
 				// whichever operation issued this create wakes no earlier.
@@ -1236,9 +1244,13 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 	}
 	// Reaching here means every target was placed or already existed and
 	// no quota refusal was seen: retire the record so the parked deadline
-	// re-arms from this moment.
+	// re-arms from this moment. Every create went through admission too,
+	// so an admission wait a refused pass left is over.
 	if err := clearCapacityRefusal(ctx, input, idx); err != nil {
 		return created, fmt.Errorf("clear quota refusal (instance=%d): %w", idx, err)
+	}
+	if err := releaseAdmissionWait(ctx, input, idx); err != nil {
+		return created, fmt.Errorf("release admission wait (instance=%d): %w", idx, err)
 	}
 	return created, nil
 }
