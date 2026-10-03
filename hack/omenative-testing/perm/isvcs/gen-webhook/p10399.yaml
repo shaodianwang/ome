@@ -1,0 +1,27 @@
+# p10399: [gen] webhook edit pd-mn W1 N=2 SurgeThenDrain s1 lift after-window  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=2 ceil_r=2 fault=webhook:settling co=none topo=pd-mn during=rotating edit=strategy:RecreatePod lift=after-window
+# reason: the engine is bumped under SurgeThenDrain and its strategy edited to RecreatePod at the first pod of the new revision on prefill/decode as gangs of 1 leader + 1 worker, then the admission webhook is made unreachable as the edit lands: the pods the roll creates under the edited strategy are refused by admission, so the roll must wait and the status must say why in the webhook's own words (an event on the ISVC or an InferenceReplica, a row failure or wait, a hold or a condition) while the capacity floor (N minus maxUnavailable) holds, the rows follow every change of the pods in rotation within the configured requeues, and the manager's events stay bounded; the manager's reconciles stay bounded; the webhook stays unreachable across the hold window, then its webhooks are pointed back, and the roll completes under the edited strategy with every Instance on the new revision and the edit on the live spec, each pod slot created at most once, the rows settled with no hold, retry block or Failed row left; decoder and router are negative controls (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p10399 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

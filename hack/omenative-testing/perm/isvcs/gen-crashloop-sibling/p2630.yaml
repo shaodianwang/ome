@@ -1,0 +1,18 @@
+# p2630: [gen] crashloop sibling start engine+router N=4 co none rp None  Ne=4 Nd=0 Nr=2 ceil_e=5 ceil_d=0 ceil_r=2 fault=crashloop:old co=none topo=engine bump=engine form=start victimcomp=router
+# reason: the engine is bumped alone and, as the bump lands, the router's highest Instance's pod is pointed at an image with no shell, so it crashes at every start and is never Ready again; the engine roll converges within its budget with every engine Instance on the new revision, while the router, which nothing bumped, keeps N with nothing rotated and its broken Instance is rebuilt by a repair (every pod new, Ready and serving on its running revision) that a RestartTriggered event names; the router sits outside every rollout group and no roll or scale of the engine owns its break, so the repair is the only thing that may touch it
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p2630 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

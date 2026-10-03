@@ -686,7 +686,8 @@ class CommittedCorpusTest(unittest.TestCase):
         for kind in ("webhook unavailable", "apiserver conflict"):
             for form in ("one-shot", "persistent"):
                 for family in coverage.SHAPE_FAMILIES:
-                    for operation in ("steady state", "push", "scale up"):
+                    for operation in ("steady state", "push", "scale up", "scale down", "rollback",
+                                      "strategy or policy edit", "runtime edit", "migrate", "delete"):
                         self.assertIn((family, operation, (kind, form, "-")), rows, (kind, form, family, operation))
         sizes = self.by_folder["gen-size"]
         self.assertEqual({"1", "2"}, {c.size_class for c in sizes})

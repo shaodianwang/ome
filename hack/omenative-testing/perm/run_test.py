@@ -1708,8 +1708,11 @@ class WindowFaultHeaderTest(unittest.TestCase):
         self.assertTrue(run._fault_ok("webhook:idle"))
         self.assertTrue(run._fault_ok("webhook:settling"))
         self.assertTrue(run._fault_ok("conflict:settling"))
-        self.assertFalse(run._fault_ok("webhook:rotating"))
+        self.assertTrue(run._fault_ok("webhook:rotating"))
+        self.assertTrue(run._fault_ok("conflict:draining"))
+        self.assertTrue(run._fault_ok("webhook:migrating"))
         self.assertFalse(run._fault_ok("conflict:canary-serving"))
+        self.assertFalse(run._fault_ok("webhook:accept"))
         self.assertFalse(run._fault_ok("webhook"))
 
     def test_webhook_needs_its_lift_and_refuses_the_writers_knobs(self):
@@ -2319,6 +2322,325 @@ class WindowVerdictTest(unittest.TestCase):
                          "rows not read when the operation never completed")
 
 
+class WindowHooksTest(unittest.TestCase):
+    """A window fault at every hook: the operation each header names, the
+    moment a push, a rollback, a mid-roll edit, a scale, a runtime edit, a
+    move and a delete open the window at, what each may create, and the
+    verdict branches the operations add to the window verdict."""
+
+    BASE = WindowFaultHeaderTest.BASE
+    SCALE_DOWN = "# p999: x mode=scaledown Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 topo=engine to_e=1"
+    RT = ("# p999: x mode=runtimerev Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine "
+          "rt=ome-coordtest-rt-p999 edit=env expect=roll")
+    MOVE = "# p999: x mode=migrate Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine mig=Auto inst=0"
+    DELETE = "# p999: x mode=recreate Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 topo=engine"
+    CANARY = "# p999: x mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto topo=engine"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def _ctx(self, pods, **over):
+        ctx = {"case_id": "p999", "pod_state": pods, "old_hashes": {"h-old"}, "closed": False, "trigger_ts": 0.0,
+               "N": {"engine": 1, "decoder": 0, "router": 0}, "pods_per_inst": {"engine": 1, "decoder": 1, "router": 1}}
+        ctx.update(over)
+        return ctx
+
+    def test_every_hook_form_validates(self):
+        for header in (
+                self.BASE + " fault=webhook:rotating lift=after-hold",
+                self.BASE + " fault=webhook:draining lift=after-window",
+                self.BASE + " fault=conflict:draining form=persist target=ir",
+                self.BASE + " fault=webhook:settling lift=after-hold rollback=1 during=rotating",
+                self.BASE + " fault=conflict:settling form=once target=isvc rollback=1 during=draining",
+                self.BASE + " fault=webhook:settling lift=after-hold rollback=1 during=last",
+                self.BASE + " fault=conflict:settling form=once target=isvc edit=strategy:RecreatePod during=rotating",
+                self.BASE + " fault=webhook:settling lift=after-hold edit=restartPolicy:RecreateInstanceOnPodRestart during=settling",
+                self.SCALE_DOWN + " fault=webhook:settling lift=after-window",
+                self.SCALE_DOWN + " fault=conflict:settling form=persist target=ir",
+                self.RT + " fault=webhook:settling lift=after-hold",
+                self.RT + " fault=conflict:rotating form=persist target=isvc",
+                self.RT + " fault=webhook:draining lift=after-window",
+                self.MOVE + " fault=webhook:migrating at=accept lift=after-hold",
+                self.MOVE + " fault=conflict:migrating at=drain form=once target=ir",
+                self.MOVE + " fault=conflict:migrating at=surge form=persist target=isvc",
+                self.DELETE + " fault=conflict:settling form=persist target=ir",
+                self.DELETE + " fault=webhook:settling lift=after-hold"):
+            self.assertEqual([], self._errs(header), header)
+
+    def test_the_hooks_each_operation_refuses(self):
+        def has(text, header):
+            errs = self._errs(header)
+            self.assertTrue(any(text in e for e in errs), (header, errs))
+        has("as the rollback lands", self.BASE + " fault=webhook:rotating lift=after-hold rollback=1 during=rotating")
+        has("once the rollback has fired", self.BASE + " fault=webhook:settling lift=after-hold rollback=1 during=held break=stuck")
+        has("as the mid-roll edit lands", self.BASE + " fault=conflict:draining form=once target=isvc edit=strategy:RecreatePod during=rotating")
+        has("at a moment of the move", self.MOVE + " fault=webhook:migrating lift=after-hold")
+        has("at a moment of the move", self.MOVE + " fault=webhook:settling at=accept lift=after-hold")
+        has("at a moment of the move", self.MOVE + " fault=webhook:migrating at=accept then=bump lift=after-hold")
+        has("not mig=Never", self.MOVE.replace("mig=Auto", "mig=Never") + " fault=webhook:migrating at=accept lift=after-hold")
+        has("as the delete lands", self.DELETE + " fault=webhook:rotating lift=after-hold")
+        has("as the scale lands", self.SCALE_DOWN + " fault=webhook:rotating lift=after-hold")
+        has("at a hook of the roll", self.BASE + " fault=webhook:migrating lift=after-hold")
+        has("at a hook of the roll", self.RT + " fault=conflict:migrating form=once target=isvc")
+        has("malformed header value fault=", self.CANARY + " fault=webhook:canary-serving lift=after-hold")
+        has("does not combine", self.BASE + " fault=conflict:settling form=once target=isvc during=rotating")
+        has("does not combine", self.RT + " fault=webhook:settling lift=after-hold during=rollout")
+
+    def test_the_ledger_reads_every_hook(self):
+        import coverage
+        for phase in ("idle", "settling", "rotating", "draining", "migrating"):
+            self.assertTrue(coverage._fault(f"webhook:{phase}"), phase)
+            self.assertTrue(coverage._fault(f"conflict:{phase}"), phase)
+        self.assertFalse(coverage._fault("webhook:accept"))
+        self.assertEqual(run.WINDOW_PHASES, {"idle", "settling", "rotating", "draining", "migrating"})
+
+    def test_the_operation_is_read_from_the_header(self):
+        self.assertEqual("idle", run._window_operation({"during": "idle"}))
+        self.assertEqual("push", run._window_operation({}))
+        self.assertEqual("push", run._window_operation({"mode": "rollout", "edit": "env"}))
+        self.assertEqual("rollback", run._window_operation({"rollback": 1, "during": "rotating"}))
+        self.assertEqual("edit", run._window_operation({"edit": "strategy:RecreatePod", "during": "rotating"}))
+        self.assertEqual("scale", run._window_operation({"mode": "scaledown", "to_e": 1}))
+        self.assertEqual("runtime", run._window_operation({"mode": "runtimerev"}))
+        self.assertEqual("move", run._window_operation({"mode": "migrate", "at": "surge"}))
+        self.assertEqual("delete", run._window_operation({"mode": "recreate"}))
+        self.assertEqual(run.WINDOW_OPS, set(run.WINDOW_WHAT))
+
+    def test_what_each_operation_may_create(self):
+        ctx = {"N": {"engine": 4, "decoder": 0, "router": 2}, "pods_per_inst": {"engine": 3, "decoder": 1, "router": 1},
+               "configured": {"engine", "router"}, "modes": {"engine": "surge", "router": "surge"}}
+        target = {"engine": 4, "decoder": 0, "router": 2}
+        self.assertEqual({"engine": 12, "router": 0}, run._window_expected(ctx, "push", {"engine"}, target, "engine"))
+        self.assertEqual({"engine": 24, "router": 0}, run._window_expected(ctx, "rollback", {"engine"}, target, "engine"),
+                         "a rollback may rebuild each slot once in each direction")
+        self.assertEqual({"engine": 12, "router": 0}, run._window_expected(ctx, "edit", {"engine"}, target, "engine"))
+        self.assertEqual({"engine": 12, "router": 2}, run._window_expected(ctx, "runtime", {"engine", "router"}, target, "engine"),
+                         "every Component rolls on a runtime edit")
+        self.assertEqual({"engine": 3, "router": 0}, run._window_expected(ctx, "move", {"engine"}, target, "engine"),
+                         "a move creates one replacement Instance")
+        self.assertEqual({"engine": 0, "router": 0}, run._window_expected(ctx, "delete", {"engine", "router"}, target, "engine"))
+        self.assertEqual({"engine": 3, "router": 0}, run._window_expected(ctx, "scale", {"engine"}, dict(target, engine=5), "engine"))
+        self.assertEqual({"engine": 0, "router": 0}, run._window_expected(ctx, "scale", {"engine"}, dict(target, engine=3), "engine"))
+        inplace = dict(ctx, modes={"engine": "inplace", "router": "surge"})
+        self.assertEqual({"engine": 0, "router": 0}, run._window_expected(inplace, "push", {"engine"}, target, "engine"))
+        self.assertEqual({"engine": 12, "router": 0}, run._window_expected(inplace, "edit", {"engine"}, target, "engine"),
+                         "a mid-roll edit may flip the strategy, so the slots bound it")
+
+    def test_the_hooks_of_the_roll(self):
+        old = pod("engine", 0)
+        old["hash"] = "h-old"
+        ctx = {"pod_state": {"a": old}, "old_hashes": {"h-old"}}
+        self.assertTrue(run._window_roll_hook_due("settling", ctx))
+        self.assertFalse(run._window_roll_hook_due("rotating", ctx))
+        self.assertFalse(run._window_roll_hook_due("draining", ctx))
+        new = pod("engine", 1)
+        new["hash"] = "h-new"
+        ctx["pod_state"]["b"] = new
+        self.assertTrue(run._window_roll_hook_due("rotating", ctx))
+        self.assertFalse(run._window_roll_hook_due("draining", ctx))
+        old["alive"] = False
+        self.assertTrue(run._window_roll_hook_due("draining", ctx))
+        self.assertFalse(run._window_roll_hook_due("rotating", {"pod_state": {"b": new}, "old_hashes": None}))
+        self.assertFalse(run._window_roll_hook_due("draining", {"pod_state": {"a": old}, "old_hashes": None}))
+
+    def test_a_move_is_done_once_its_row_is_completed_and_consumed(self):
+        mv = {"entry": {"phase": "SurgeReady"}, "seen": (None, None, False), "src_uids": {"u-src"}, "inst": "0",
+              "comp": "engine", "orig_uids": set(), "end": None}
+        with mock.patch.object(run, "_move_end_state", lambda *a: (True, "whole, Ready and serving")):
+            self.assertFalse(run._window_move_done({}, {}, mv))
+            mv["entry"] = {"phase": "Completed", "surgeInstance": 2}
+            self.assertFalse(run._window_move_done({}, {}, mv), "the request annotation is still set")
+            mv["seen"] = (None, None, True)
+            self.assertTrue(run._window_move_done({}, {}, mv))
+            self.assertEqual((True, "whole, Ready and serving", "2"), mv["end"])
+            mv["entry"] = {"phase": "Completed", "surgeInstance": -1}
+            self.assertTrue(run._window_move_done({}, {}, mv))
+            self.assertEqual("0", mv["end"][2], "a placeholder index reads as the source index")
+        with mock.patch.object(run, "_move_end_state", lambda *a: (False, "Instance 2 has 0/1 pod(s)")):
+            self.assertFalse(run._window_move_done({}, {}, mv))
+            self.assertEqual((False, "Instance 2 has 0/1 pod(s)", "0"), mv["end"])
+
+    def test_a_delete_is_done_once_nothing_is_left(self):
+        live = pod("engine", 0)
+        ctx = {"case_id": "p999", "pod_state": {"a": live}}
+        st = {"last_poll": 0.0, "gone": False}
+        calls = []
+        with mock.patch.object(run, "_teardown_survivors", lambda c: calls.append(c) or [("isvc", "p999", "")]):
+            self.assertFalse(run._window_delete_done(ctx, st))
+            self.assertEqual([], calls, "the apiserver is not asked while a pod is alive")
+            live["alive"] = False
+            self.assertFalse(run._window_delete_done(ctx, st))
+            self.assertEqual(["p999"], calls)
+            self.assertFalse(run._window_delete_done(ctx, st))
+            self.assertEqual(["p999"], calls, "read at most once per teardown poll")
+        st["last_poll"] = 0.0
+        with mock.patch.object(run, "_teardown_survivors", lambda c: []):
+            self.assertTrue(run._window_delete_done(ctx, st))
+
+    def test_the_window_waits_for_its_hook_or_misses_it(self):
+        old = pod("engine", 0)
+        old["hash"] = "h-old"
+        ctx = self._ctx({"a": old})
+        reads = []
+
+        def read(c):
+            reads.append(1)
+            if len(reads) == 2:
+                new = pod("engine", 1)
+                new["hash"] = "h-new"
+                c["pod_state"]["b"] = new
+        with mock.patch.object(run, "_read_one", read):
+            self.assertEqual((True, ""), run._window_wait_hook(ctx, "push", "settling", None, None, None, {"engine"}, lambda: False, 5))
+            self.assertEqual([], reads, "settling is as soon as the operation has landed")
+            self.assertEqual((True, ""), run._window_wait_hook(ctx, "push", "rotating", None, None, None, {"engine"}, lambda: False, 5))
+            self.assertEqual(2, len(reads))
+        ctx["pod_state"] = {"a": old}
+        with mock.patch.object(run, "_read_one", lambda c: None):
+            reached, why = run._window_wait_hook(ctx, "runtime", "rotating", None, None, None, {"engine"}, lambda: True, 5)
+            self.assertFalse(reached)
+            self.assertIn("completed before the rotating hook", why)
+            reached, why = run._window_wait_hook(ctx, "push", "draining", None, None, None, {"engine"}, lambda: False, 0.0)
+            self.assertFalse(reached)
+            self.assertIn("not reached within", why)
+        for op in ("scale", "delete", "idle"):
+            self.assertEqual((True, ""), run._window_wait_hook(ctx, op, "settling", None, None, None, {"engine"}, lambda: False, 5))
+
+    def test_a_mid_roll_edit_lands_at_its_hook_and_opens_the_window(self):
+        old, new = pod("engine", 0), pod("engine", 1)
+        old["hash"], new["hash"] = "h-old", "h-new"
+        ctx = self._ctx({"a": old, "b": new})
+        medit = run._midroll_new({"edit": "strategy:RecreatePod", "during": "rotating"})
+        patches = []
+
+        def kubectl(*args, **kw):
+            patches.append(json.loads(args[-1]))
+            return mock.Mock(returncode=0, stderr="")
+        with mock.patch.object(run, "_read_one", lambda c: None), mock.patch.object(run, "kubectl", kubectl):
+            self.assertEqual((True, ""), run._window_wait_hook(ctx, "edit", "settling", None, medit, None, {"engine"}, lambda: False, 5))
+        self.assertTrue(medit["fired"])
+        self.assertEqual([{"spec": {"engine": {"lifecycle": {"updateStrategy": {"type": "RecreatePod"}}}}}], patches)
+        medit = run._midroll_new({"edit": "strategy:RecreatePod", "during": "rotating"})
+        with mock.patch.object(run, "_read_one", lambda c: None), \
+                mock.patch.object(run, "kubectl", lambda *a, **k: mock.Mock(returncode=1, stderr="denied")):
+            reached, why = run._window_wait_hook(ctx, "edit", "settling", None, medit, None, {"engine"}, lambda: False, 5)
+        self.assertFalse(reached)
+        self.assertIn("the edit at rotating failed", why)
+        ctx["pod_state"] = {"a": old}
+        medit = run._midroll_new({"edit": "strategy:RecreatePod", "during": "rotating"})
+        with mock.patch.object(run, "_read_one", lambda c: None), mock.patch.object(run, "kubectl", kubectl):
+            reached, why = run._window_wait_hook(ctx, "edit", "settling", None, medit, None, {"engine"}, lambda: True, 5)
+        self.assertFalse(reached)
+        self.assertIn("completed before the strategy edit at rotating", why)
+
+    def test_a_rollback_fires_at_its_hook_and_opens_the_window(self):
+        old = pod("engine", 0)
+        old["hash"], old["uid"] = "h-old", "u-a"
+        ctx = self._ctx({"a": old})
+        rb = run._rollback_new({"rollback": 1, "during": "rotating"})
+        rb["snapshot"] = {"engine": {"minReplicas": 1}}
+        patches, reads = [], []
+
+        def kubectl(*args, **kw):
+            patches.append(json.loads(args[-1]))
+            return mock.Mock(returncode=0, stderr="")
+
+        def read(c):
+            reads.append(1)
+            if len(reads) == 1:
+                new = pod("engine", 1)
+                new["hash"], new["uid"] = "h-new", "u-b"
+                c["pod_state"]["b"] = new
+        with mock.patch.object(run, "_read_one", read), mock.patch.object(run, "kubectl", kubectl):
+            self.assertEqual((True, ""), run._window_wait_hook(ctx, "rollback", "settling", rb, None, None, {"engine"}, lambda: False, 5))
+        self.assertTrue(rb["fired"])
+        self.assertEqual([[{"op": "replace", "path": "/spec/engine", "value": {"minReplicas": 1}}]], patches)
+        self.assertEqual(1, rb["new_pods_at_fire"])
+        rb = run._rollback_new({"rollback": 1, "during": "draining"})
+        rb["snapshot"] = {"engine": {"minReplicas": 1}}
+        with mock.patch.object(run, "_read_one", lambda c: None), mock.patch.object(run, "kubectl", kubectl):
+            reached, why = run._window_wait_hook(ctx, "rollback", "settling", rb, None, None, {"engine"}, lambda: True, 5)
+            self.assertFalse(reached)
+            self.assertIn("completed before the rollback at draining", why)
+            old["alive"] = False
+            self.assertEqual((True, ""), run._window_wait_hook(ctx, "rollback", "settling", rb, None, None, {"engine"}, lambda: False, 5))
+        self.assertIsNotNone(rb["first_drain_at"])
+        self.assertTrue(rb["fired"])
+
+    def test_the_verdict_names_the_operation(self):
+        for op in ("rollback", "edit", "runtime", "move", "delete", "scale", "push"):
+            f, win = _win(op=op)
+            win["expected_created"] = {"engine": 8 if op == "rollback" else 4}
+            notes, checks = [], []
+            self.assertEqual("PASS", run._window_checks(f, win, "CONVERGED", "PASS", notes, checks), (op, notes))
+            text = "\n".join(checks)
+            self.assertIn(f"the status said why {run.WINDOW_WHAT[op]} waited", text)
+            self.assertIn(f"{run.WINDOW_WHAT[op]} completed", text)
+            if op == "rollback":
+                self.assertIn("over the roll and the roll back", text)
+
+    def test_a_rollback_may_rebuild_a_slot_once_in_each_direction_only(self):
+        f, win = _win(op="rollback")
+        win["expected_created"], win["created"] = {"engine": 8}, {"engine": 9}
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._window_checks(f, win, "CONVERGED", "PASS", notes, checks))
+        self.assertIn("9 new pod(s) for 8 pod slot(s) over the roll and the roll back", "\n".join(checks))
+
+    def test_a_scale_may_take_down_only_what_it_owns(self):
+        f, win = _win(op="scale")
+        win.update(torn_in_window={"engine": 1}, expected_created={"engine": 0}, created={"engine": 0})
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._window_checks(f, win, "CONVERGED", "PASS", notes, checks))
+        self.assertIn("the operation does not own", notes[0])
+        for op in ("rollback", "edit", "runtime", "move", "delete"):
+            f, win = _win(op=op)
+            win.update(torn_in_window={"engine": 2}, expected_created={"engine": 8})
+            notes, checks = [], []
+            self.assertEqual("PASS", run._window_checks(f, win, "CONVERGED", "PASS", notes, checks), (op, notes))
+
+    def test_the_operations_own_checks(self):
+        old, new = pod("engine", 0), pod("engine", 1)
+        old["hash"], new["hash"] = "h-old", "h-new"
+        ctx = {"case_id": "p999", "pod_state": {"a": old, "b": new}, "old_hashes": {"h-old"}}
+        rb = {"hook": "rotating", "fired_at": 12.0, "busy_at_fire": [("engine", "1")], "new_pods_at_fire": 1}
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._window_op_checks(ctx, "rollback", "CONVERGED", rb, None, None, {"engine"}, "PASS", notes, checks))
+        self.assertIn("pod(s) of the new revision left", notes[0])
+        new["alive"] = False
+        notes, checks = [], []
+        self.assertEqual("PASS", run._window_op_checks(ctx, "rollback", "CONVERGED", rb, None, None, {"engine"}, "PASS", notes, checks))
+        self.assertIn("ended on the starting revision", checks[0])
+        self.assertIn("fired at rotating 12s after the bump", checks[1])
+        medit = run._midroll_new({"edit": "strategy:RecreatePod", "during": "rotating"})
+        with mock.patch.object(run, "_isvc_spec", lambda c: {"engine": {"lifecycle": {"updateStrategy": {"type": "RecreatePod"}}}}):
+            notes, checks = [], []
+            self.assertEqual("PASS", run._window_op_checks(ctx, "edit", "CONVERGED", None, medit, None, {"engine"}, "PASS", notes, checks))
+            self.assertIn("is on the live spec", checks[0])
+        with mock.patch.object(run, "_isvc_spec", lambda c: {"engine": {"lifecycle": {"updateStrategy": {"type": "SurgeThenDrain"}}}}):
+            notes, checks = [], []
+            self.assertEqual("FAIL", run._window_op_checks(ctx, "edit", "CONVERGED", None, medit, None, {"engine"}, "PASS", notes, checks))
+            self.assertIn("not on the spec (engine=SurgeThenDrain)", notes[0])
+        policy = run._midroll_new({"edit": "restartPolicy:RecreateInstanceOnPodRestart", "during": "settling"})
+        with mock.patch.object(run, "_isvc_spec", lambda c: {"engine": {"lifecycle": {"restartPolicy": "RecreateInstanceOnPodRestart"}}}):
+            notes, checks = [], []
+            self.assertEqual("PASS", run._window_op_checks(ctx, "edit", "CONVERGED", None, policy, None, {"engine"}, "PASS", notes, checks))
+        mv = {"entry": {"phase": "Completed"}, "seen": (None, None, True), "end": (True, "whole, Ready and serving", "2")}
+        notes, checks = [], []
+        self.assertEqual("PASS", run._window_op_checks(ctx, "move", "CONVERGED", None, None, mv, {"engine"}, "PASS", notes, checks))
+        self.assertIn("Instance 2 is whole, Ready and serving", checks[0])
+        mv = {"entry": {"phase": "Failed"}, "seen": (None, None, False), "end": None}
+        notes, checks = [], []
+        run._window_op_checks(ctx, "move", "ROTATE_TIMEOUT", None, None, mv, {"engine"}, "PASS", notes, checks)
+        self.assertIn("ledger phase Failed", checks[0])
+        self.assertIn("annotation still set", checks[0])
+        for op in ("push", "scale", "runtime", "delete", "idle"):
+            notes, checks = [], []
+            self.assertEqual("PASS", run._window_op_checks(ctx, op, "CONVERGED", None, None, None, {"engine"}, "PASS", notes, checks))
+            self.assertEqual([], checks)
+
+
 class WindowTimingTest(unittest.TestCase):
     """When the webhook is due back, how long a window is held, and how a
     tick tracks the rows lagging the pods in rotation."""
@@ -2371,8 +2693,13 @@ class WindowTimingTest(unittest.TestCase):
 
 class GeneratedWindowFamiliesTest(unittest.TestCase):
     """gen-webhook and gen-conflict: every shape family of the ledger at one
-    gang width, the steady state, the push and the scale-up, each kind's own
-    forms; every cell validates and says what it asserts."""
+    gang width; the steady state, the push and the scale-up of the first
+    pass, then the push at its later hooks, a rollback, a strategy edit, a
+    scale-down, a runtime edit, a move and a delete, each kind's own forms;
+    every cell validates and says what it asserts."""
+
+    FIRST = ("steady", "push", "scale")
+    MORE = {"push rotating", "push draining", "rollback", "edit", "scaledown", "runtime", "move", "delete"}
 
     @classmethod
     def setUpClass(cls):
@@ -2390,9 +2717,16 @@ class GeneratedWindowFamiliesTest(unittest.TestCase):
     def _families(self, fam):
         return {(kv["topo"], kv["Nr"] > 0 and kv["Nd"] == 0, kv["Nd"] > 0) for _n, kv, _m in fam}
 
+    def _first(self, fam):
+        return [(n, kv, m) for n, kv, m in fam if "hook" not in m]
+
+    def _more(self, fam):
+        return [(n, kv, m) for n, kv, m in fam if "hook" in m]
+
     def test_webhook_family(self):
-        fam = self.webhook
+        fam = self._first(self.webhook)
         self.assertEqual(48, len(fam))
+        self.assertEqual([n for n, _kv, _m in fam], [f"p{i}" for i in range(8900, 8948)], "the first pass keeps its ids")
         self.assertEqual(6, len(self._families(fam)), "every shape family of the ledger")
         self.assertEqual({"webhook steady", "webhook push", "webhook scale"}, {m["winop"] for _n, _kv, m in fam})
         self.assertEqual({"after-hold", "after-window"}, {kv["lift"] for _n, kv, _m in fam})
@@ -2426,8 +2760,9 @@ class GeneratedWindowFamiliesTest(unittest.TestCase):
         self._validates("gen-webhook", fam)
 
     def test_conflict_family(self):
-        fam = self.conflict
+        fam = self._first(self.conflict)
         self.assertEqual(72, len(fam))
+        self.assertEqual([n for n, _kv, _m in fam], [f"p{i}" for i in range(8960, 9032)], "the first pass keeps its ids")
         self.assertEqual(6, len(self._families(fam)))
         self.assertEqual({"once", "persist"}, {kv["form"] for _n, kv, _m in fam})
         self.assertEqual({"isvc", "ir"}, {kv["target"] for _n, kv, _m in fam})
@@ -2447,17 +2782,112 @@ class GeneratedWindowFamiliesTest(unittest.TestCase):
                 self.assertIn('type: "SurgeThenDrain"', self.outputs[f"gen-conflict/{name}.yaml"])
         self._validates("gen-conflict", fam)
 
+    def _check_more(self, folder, fam, per_cell):
+        """The second pass of a window family: every (operation, hook) of
+        WINDOW_MORE_OPS on every shape under the kind's knobs, each header
+        naming its operation and each reason the operator's act, the fault
+        and the promise."""
+        self.assertEqual(6, len(self._families(fam)))
+        self.assertEqual({f"{folder[4:]} {label}" for label in self.MORE}, {m["winop"] for _n, _kv, m in fam})
+        self.assertEqual(set(generate_cases.WINDOW_MORE_OPS), {(m["op"], m["hook"]) for _n, _kv, m in fam})
+        cells = {(kv["topo"], kv["Nr"], m["op"], m["hook"], m["strat"]) for _n, kv, m in fam}
+        # The webhook's push hooks run under both pod-rebuilding strategies.
+        per_pass = 6 * (len(generate_cases.WINDOW_MORE_OPS) + (2 if folder == "gen-webhook" else 0))
+        self.assertEqual(per_pass, len(cells))
+        self.assertEqual(per_pass * per_cell, len(fam))
+        for name, kv, m in fam:
+            text = self.outputs[f"{folder}/{name}.yaml"]
+            header, reason = text.splitlines()[:2]
+            op, hook = m["op"], m["hook"]
+            self.assertEqual(f"{folder[4:]}:{hook}", kv["fault"], name)
+            self.assertEqual("none", kv["co"])
+            if op == "push":
+                self.assertIn(hook, ("rotating", "draining"))
+                self.assertNotIn("mode", kv)
+                self.assertNotIn("during", kv)
+                self.assertIn("at the first pod of the new revision" if hook == "rotating" else "as the first pod of the old revision goes", reason)
+            elif op == "rollback":
+                self.assertEqual((1, "rotating", "settling", kv["Ne"] + 1), (kv["rollback"], kv["during"], hook, kv["ceil_e"]))
+                self.assertIn("starting revision re-applied at the first pod of the new revision", reason)
+                self.assertIn("at most once in each direction", reason)
+            elif op == "edit":
+                self.assertEqual(("strategy:RecreatePod", "rotating", "settling", kv["Ne"] + 1), (kv["edit"], kv["during"], hook, kv["ceil_e"]))
+                self.assertIn("maxUnavailable: 1", text, "the budget valid under both strategies")
+                self.assertIn("the edit on the live spec", reason)
+            elif op == "scaledown":
+                self.assertEqual(("scaledown", kv["Ne"] - 1, kv["Ne"], "settling"), (kv["mode"], kv["to_e"], kv["ceil_e"], hook))
+                self.assertIn("scaled from N to N-1", reason)
+                self.assertIn("no Instance below the target is taken down", reason)
+            elif op == "runtime":
+                self.assertEqual(("runtimerev", "env", "roll", f"ome-coordtest-rt-{name}", "settling"),
+                                 (kv["mode"], kv["edit"], kv["expect"], kv["rt"], hook))
+                self.assertIn(f"name: ome-coordtest-rt-{name}", text.split("---")[0], "the case ships its own runtime")
+                self.assertEqual((kv["Ne"] + 1, kv["Nd"] + 1 if kv["Nd"] else 0, kv["Nr"] + 1 if kv["Nr"] else 0),
+                                 (kv["ceil_e"], kv["ceil_d"], kv["ceil_r"]), "every Component rolls under a surge of one")
+                self.assertIn("every Component rolls onto its own new revision", reason)
+            elif op == "move":
+                self.assertEqual(("migrate", "Auto", 0, "accept", "migrating", kv["Ne"] + 1), (kv["mode"], kv["mig"], kv["inst"], kv["at"], hook, kv["ceil_e"]))
+                self.assertIn("one engine Instance is asked to move", reason)
+                self.assertIn("ledger row reads Completed once", reason)
+            else:
+                self.assertEqual(("recreate", "settling", kv["Ne"]), (kv["mode"], hook, kv["ceil_e"]))
+                self.assertIn("the service is deleted", reason)
+                self.assertIn("re-applied under the same name comes up whole on fresh pods", reason)
+            if kv["Nd"] and op != "runtime":
+                self.assertIn("decoder and router are negative controls", reason)
+            elif kv["Nr"] and op != "runtime":
+                self.assertIn("the router is a negative control", reason)
+            else:
+                self.assertNotIn("negative control", reason, "every Component rolls on a runtime edit")
+            self.assertRegex(reason, r"^# reason: .+, (then|and) .+")
+        self._validates(folder, fam)
+
+    def test_webhook_family_at_every_hook(self):
+        fam = self._more(self.webhook)
+        self._check_more("gen-webhook", fam, 2)
+        self.assertEqual({"after-hold", "after-window"}, {kv["lift"] for _n, kv, _m in fam})
+        for name, kv, m in fam:
+            reason = self.outputs[f"gen-webhook/{name}.yaml"].splitlines()[1]
+            self.assertNotIn("form", kv)
+            self.assertIn("the admission webhook is made unreachable", reason)
+            self.assertIn("refused by admission", reason)
+            self.assertIn("hold window" if kv["lift"] == "after-window" else "pointed back", reason)
+            if m["op"] == "push":
+                self.assertIn(m["strat"], ("SurgeThenDrain", "RecreatePod"))
+                self.assertEqual(kv["Ne"] + (1 if m["strat"] == "SurgeThenDrain" else 0), kv["ceil_e"])
+            elif m["op"] in ("rollback", "edit"):
+                self.assertEqual("SurgeThenDrain", m["strat"])
+            else:
+                self.assertEqual("(dormant: nothing rolls)", m["strat"])
+
+    def test_conflict_family_at_every_hook(self):
+        fam = self._more(self.conflict)
+        self._check_more("gen-conflict", fam, 4)
+        self.assertEqual({("once", "isvc"), ("once", "ir"), ("persist", "isvc"), ("persist", "ir")},
+                         {(kv["form"], kv["target"]) for _n, kv, _m in fam})
+        for name, kv, m in fam:
+            reason = self.outputs[f"gen-conflict/{name}.yaml"].splitlines()[1]
+            self.assertNotIn("lift", kv)
+            self.assertIn("stale resourceVersion", reason)
+            self.assertIn("once" if kv["form"] == "once" else "every few hundred milliseconds", reason)
+            self.assertIn("the ISVC" if kv["target"] == "isvc" else "every InferenceReplica", reason)
+            self.assertIn("double apply", reason)
+            if m["op"] != "edit":
+                self.assertIn('type: "SurgeThenDrain"', self.outputs[f"gen-conflict/{name}.yaml"])
+
     def test_ids_blocks_and_manifest(self):
         for folder, fam in (("gen-webhook", self.webhook), ("gen-conflict", self.conflict)):
             lo, hi = generate_cases.GEN_BLOCKS[folder]
             self.assertTrue(8900 <= lo < hi <= 9050, folder)
+            blocks = generate_cases.id_blocks(folder)
+            self.assertEqual(2, len(blocks), "the block and its continuation")
             for name, _kv, _m in fam:
-                self.assertTrue(lo <= int(name[1:]) < hi, (folder, name))
+                self.assertTrue(any(lo <= int(name[1:]) < hi for lo, hi in blocks), (folder, name))
         manifest = self.outputs[generate_cases.MANIFEST_REL]
-        for text in ("| gen-webhook | 48 |", "| gen-conflict | 72 |", "By window operation", "By competing-writer form",
-                     "By competing-writer target", "gen-webhook points the admission webhook", "gen-conflict runs a competing writer"):
+        for text in ("| gen-webhook | 168 |", "| gen-conflict | 264 |", "By window operation", "By competing-writer form",
+                     "By competing-writer target", "gen-webhook points the admission webhook", "gen-conflict runs a competing writer",
+                     "as a rollback filed at the first new pod lands"):
             self.assertIn(text, manifest)
-
 
 if __name__ == "__main__":
     unittest.main()
@@ -4353,18 +4783,30 @@ class CrashloopFaultTest(unittest.TestCase):
         cell is parked."""
         outputs, rows = generate_cases.build_outputs()
         fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-crashloop-idle"]
-        self.assertEqual(108, len(fam))
+        self.assertEqual(114, len(fam))
         self.assertEqual(set(generate_cases.BREAK_GROUPS), {kv["co"] for _n, kv, _m in fam})
         self.assertEqual({"engine", "pd", "engine-mn", "pd-mn"}, {kv["topo"] for _n, kv, _m in fam})
         self.assertEqual({("start", "None"), ("start", "RecreateInstance"), ("load", "RecreateInstance")},
                          {(kv["form"], m["rp"]) for _n, kv, m in fam},
                          "a crash after Ready under policy None promises no repair")
         self.assertEqual({"engine", "decoder"}, {kv["victimcomp"] for _n, kv, _m in fam if kv["topo"].startswith("pd")})
+        router = [(n, kv, m) for n, kv, m in fam if kv["victimcomp"] == "router"]
+        self.assertEqual(6, len(router), "the router breaks on the engine+router shapes, single-pod and gang")
+        self.assertEqual({("engine", 2), ("engine-mn", 2)}, {(kv["topo"], kv["Nr"]) for _n, kv, _m in router})
+        self.assertEqual({"none"}, {kv["co"] for _n, kv, _m in router}, "the router sits outside every group")
+        self.assertEqual({("start", "None"), ("start", "RecreateInstance"), ("load", "RecreateInstance")},
+                         {(kv["form"], m["rp"]) for _n, kv, m in router})
+        for n, kv, m in router:
+            reason = outputs[f"gen-crashloop-idle/{n}.yaml"].splitlines()[1]
+            self.assertIn("the router's highest Instance's pod", reason)
+            self.assertIn("the engine, which nothing broke, keeps its pods", reason)
         for n, kv, m in fam:
             self.assertEqual(("crashloop:old", "idle", "repaired"), (kv["fault"], kv["during"], kv["expect"]))
             self.assertEqual(kv["victimcomp"], m["victim"])
             if kv["victimcomp"] == "decoder":
                 self.assertTrue(kv["topo"].startswith("pd"))
+            if kv["victimcomp"] == "router":
+                self.assertTrue(kv["Nr"] > 0 and kv["Nd"] == 0)
             if kv["co"] == "seq":
                 self.assertTrue(kv["topo"].startswith("pd"), "one member makes Sequential a blueGreen group")
             self.assertEqual((kv["Ne"], kv["Nd"], kv["Nr"]), (kv["ceil_e"], kv["ceil_d"], kv["ceil_r"]),
@@ -4385,16 +4827,20 @@ class CrashloopFaultTest(unittest.TestCase):
         parked."""
         outputs, rows = generate_cases.build_outputs()
         fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-crashloop-sibling"]
-        self.assertEqual(30, len(fam))
+        self.assertEqual(36, len(fam))
         self.assertEqual(set(generate_cases.BREAK_GROUPS), {kv["co"] for _n, kv, _m in fam})
-        self.assertEqual({"pd", "pd-mn"}, {kv["topo"] for _n, kv, _m in fam})
+        self.assertEqual({"pd", "pd-mn", "engine", "engine-mn"}, {kv["topo"] for _n, kv, _m in fam})
         self.assertEqual({("start", "None"), ("start", "RecreateInstance"), ("load", "RecreateInstance")},
                          {(kv["form"], m["rp"]) for _n, kv, m in fam})
+        router = [(n, kv, m) for n, kv, m in fam if kv["victimcomp"] == "router"]
+        self.assertEqual(6, len(router), "the router breaks on the engine+router shapes, single-pod and gang")
+        self.assertEqual({("engine", 2, "none"), ("engine-mn", 2, "none")}, {(kv["topo"], kv["Nr"], kv["co"]) for _n, kv, _m in router})
         for n, kv, m in fam:
             rolling = kv["co"] == "rolling"
-            self.assertEqual(("crashloop:old", "decoder", "engine,decoder" if rolling else "engine"),
+            sibling = "router" if kv["Nd"] == 0 else "decoder"
+            self.assertEqual(("crashloop:old", sibling, "engine,decoder" if rolling else "engine"),
                              (kv["fault"], kv["victimcomp"], kv["bump"]))
-            self.assertEqual("decoder", m["victim"])
+            self.assertEqual(sibling, m["victim"])
             self.assertEqual((kv["Ne"] + 1, kv["Nd"] + (1 if rolling else 0), kv["Nr"]),
                              (kv["ceil_e"], kv["ceil_d"], kv["ceil_r"]))
             reason = outputs[f"gen-crashloop-sibling/{n}.yaml"].splitlines()[1]
@@ -4404,6 +4850,9 @@ class CrashloopFaultTest(unittest.TestCase):
             else:
                 self.assertIn("the engine is bumped alone", reason)
                 self.assertIn("rebuilt by a repair", reason)
+                self.assertIn(f"the {sibling}'s highest Instance's pod", reason)
+            if sibling == "router":
+                self.assertIn("the repair is the only thing that may touch it", reason)
             self.assertNotIn("during", kv)
             self.assertNotIn("expect", kv)
             self.assertNotIn("floor_soft", kv, "the break is on the decoder; the engine keeps its floor")
@@ -4422,7 +4871,7 @@ class CrashloopFaultTest(unittest.TestCase):
         rolling = [(n, kv) for n, kv in fam if kv["co"] == "rolling"]
         others = [(n, kv) for n, kv in fam if kv["co"] != "rolling"]
         self.assertEqual(6, len(rolling))
-        self.assertEqual(24, len(others))
+        self.assertEqual(30, len(others))
         self.assertEqual({"none", "bluegreen", "seq", "canary"}, {kv["co"] for _n, kv in others})
         clause = "the broken decoder's own capacity is the one Instance the floor allows"
         for n, kv in rolling:
@@ -10746,7 +11195,15 @@ class MoveMomentFaultTest(unittest.TestCase):
         self.assertEqual([], self._errs(ok(fault="fault=imagepull:old", at="drain", victim="sibling", nd=4, nr=2, topo="pd")))
         node = ok(fault="fault=node:notready lift=after-recover needs=forcedelete floor_soft=1", at="accept")
         self.assertEqual([], self._errs(node))
-        self.assertTrue(any("needs Nd>0" in e for e in self._errs(ok(victim="sibling"))))
+        self.assertTrue(any("needs Nd>0, or Nr>0 for the router" in e for e in self._errs(ok(victim="sibling"))))
+        self.assertEqual([], self._errs(ok(fault="fault=imagepull:old victimcomp=router", at="accept", victim="sibling", nr=2)))
+        self.assertEqual([], self._errs(ok(fault="fault=crashloop:old form=load victimcomp=router", at="drain", victim="sibling", nr=2, topo="engine-mn")))
+        self.assertTrue(any("needs Nd>0, or Nr>0 for the router" in e
+                            for e in self._errs(ok(fault="fault=imagepull:old victimcomp=router", victim="sibling"))))
+        self.assertTrue(any("names the sibling a break hits" in e
+                            for e in self._errs(ok(fault="fault=imagepull:old victimcomp=router", victim="peer", nr=2))))
+        self.assertTrue(any("names the sibling a break hits" in e
+                            for e in self._errs(ok(fault="fault=imagepull:old victimcomp=engine", victim="sibling", nd=4, nr=2, topo="pd"))))
         self.assertTrue(any("source node's" in e for e in self._errs(
             ok(fault="fault=node:notready lift=after-recover needs=forcedelete", victim="peer"))))
         self.assertTrue(any("force-delete policy" in e for e in self._errs(
@@ -10773,16 +11230,26 @@ class GeneratedFaultMoveFamilyTest(unittest.TestCase):
 
     def test_generated_family_crosses_every_axis(self):
         outputs, fam = self._rows()
-        self.assertEqual(150, len(fam))
+        self.assertEqual(168, len(fam))
         self.assertEqual({("engine", 0), ("pd", 2), ("engine-mn", 0), ("engine", 2), ("engine-mn", 2), ("pd-mn", 2)},
                          {(kv["topo"], kv["Nr"]) for _n, kv, _m in fam}, "the six shape families")
         self.assertEqual(set(generate_cases.MOVE_MOMENTS), {kv["at"] for _n, kv, _m in fam})
         self.assertEqual({"moved", "peer", "sibling"}, {kv["victim"] for _n, kv, _m in fam})
         self.assertEqual({"moved"}, {kv["victim"] for _n, kv, _m in fam if kv["fault"].startswith("node:")})
-        self.assertEqual({"pd", "pd-mn"}, {kv["topo"] for _n, kv, _m in fam if kv["victim"] == "sibling"},
-                         "the decoder is the sibling a break may hit; a router is a negative control")
+        self.assertEqual({"pd", "pd-mn"}, {kv["topo"] for _n, kv, _m in fam if kv["victim"] == "sibling" and "victimcomp" not in kv},
+                         "the decoder is the sibling a break hits on a prefill/decode shape")
+        router = [(n, kv, m) for n, kv, m in fam if kv.get("victimcomp") == "router"]
+        self.assertEqual(18, len(router), "the router is the sibling on the engine+router shapes: every moment, every break")
+        self.assertEqual({("engine", 2, "sibling"), ("engine-mn", 2, "sibling")}, {(kv["topo"], kv["Nr"], kv["victim"]) for _n, kv, _m in router})
+        self.assertEqual({(at, kind, form, rp) for at in generate_cases.MOVE_MOMENTS for kind, form, rp in generate_cases.MOVE_BREAKS},
+                         {(kv["at"], kv["fault"].partition(":")[0], kv.get("form"), m["rp"]) for _n, kv, m in router})
+        for n, kv, m in router:
+            reason = outputs[f"gen-fault-move/{n}.yaml"].splitlines()[1]
+            self.assertIn("the router's highest Instance's pod", reason)
+            self.assertIn("the router is otherwise untouched", reason)
+            self.assertIn("the engine's other Instances are the negative control", reason)
         cells = {(kv["topo"], kv["Nr"], kv["at"], kv["victim"], kv["fault"], kv.get("form"), m["rp"]) for _n, kv, m in fam}
-        self.assertEqual(150, len(cells))
+        self.assertEqual(168, len(cells))
         cells = {cell[:1] + cell[2:] for cell in cells}
         for topo in ("engine", "pd", "engine-mn", "pd-mn"):
             for at in generate_cases.MOVE_MOMENTS:
@@ -10914,15 +11381,23 @@ class GeneratedFaultEditFamilyTest(unittest.TestCase):
 
     def test_generated_family_crosses_every_axis(self):
         outputs, fam = self._rows()
-        self.assertEqual(104, len(fam))
+        self.assertEqual(128, len(fam))
         breaks = [(n, kv, m) for n, kv, m in fam if "fault" in kv]
         bad = [(n, kv, m) for n, kv, m in fam if "fault" not in kv]
-        self.assertEqual((80, 24), (len(breaks), len(bad)))
+        self.assertEqual((104, 24), (len(breaks), len(bad)))
+        router = [(n, kv, m) for n, kv, m in breaks if kv.get("victimcomp") == "router"]
+        self.assertEqual(24, len(router), "the router breaks on the engine+router shapes under every strategy, break and edit")
+        self.assertEqual({("engine", 2), ("engine-mn", 2)}, {(kv["topo"], kv["Nr"]) for _n, kv, _m in router})
+        for n, kv, m in router:
+            reason = outputs[f"gen-fault-edit/{n}.yaml"].splitlines()[1]
+            self.assertIn("engine and router roll, each onto its own new revision", reason)
+            self.assertIn("the router's highest Instance's pod", reason)
+            self.assertIn("the engine's own roll converges untouched by the router's break", reason)
         self.assertEqual({("engine", 0), ("pd", 2), ("engine-mn", 0), ("engine", 2), ("engine-mn", 2), ("pd-mn", 2)},
                          {(kv["topo"], kv["Nr"]) for _n, kv, _m in fam}, "the six shape families")
         cells = {(kv["topo"], kv["Nr"], m["strat"], kv["fault"], kv.get("form"), kv.get("victimcomp", "engine"), kv["edit"], m["rp"])
                  for _n, kv, m in breaks}
-        self.assertEqual(80, len(cells))
+        self.assertEqual(104, len(cells))
         cells = {cell[:1] + cell[2:] for cell in cells}
         for topo in ("engine", "pd", "engine-mn", "pd-mn"):
             for strat in ("SurgeThenDrain", "RecreatePod"):

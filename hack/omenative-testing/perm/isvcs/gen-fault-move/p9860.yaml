@@ -1,0 +1,20 @@
+# p9860: [gen] fault-move imagepull at accept on sibling router engine-mn W1+router N=2 rp None  mode=migrate Ne=2 Nd=0 Nr=2 ceil_e=3 ceil_d=0 ceil_r=2 fault=imagepull:old co=none topo=engine-mn victim=sibling victimcomp=router mig=Auto inst=0 at=accept
+# reason: as soon as the request is recorded, before the replacement exists, the router's highest Instance's pod is pointed at an image that cannot be pulled, so the kubelet parks it in ImagePullBackOff and it is never Ready again; the move finishes, or is abandoned with a reason its record carries, within budget and is recorded once (one ledger row, one controller record); the moved Instance ends whole, Ready and serving on one pod set, the engine holds N whole Instances on distinct indices, and nothing exceeds N+1 alive; the move completes (a broken sibling is not the move's to care about) and the broken Instance is rebuilt, every pod new, Ready and serving on its running revision, by a repair a RestartTriggered event names, under restart policy None (an Instance that serves nothing is rebuilt by the crash-loop repair once its pod has sat past the stuck-pod grace); the capacity floor, lowered by that one Instance, holds throughout; the router is otherwise untouched: nothing rotates and nothing surges there; the engine's other Instances are the negative control: nothing rotates and nothing surges there beyond the move; each Instance is a gang, moved and rebuilt whole
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9860 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

@@ -1,0 +1,18 @@
+# p2510: [gen] crashloop idle load engine+router N=4 co none victim router rp RecreateInstance  Ne=4 Nd=0 Nr=2 ceil_e=4 ceil_d=0 ceil_r=2 fault=crashloop:old co=none topo=engine form=load during=idle victimcomp=router expect=repaired
+# reason: the router's highest Instance's pod on the settled service has its runner killed every few seconds while it is up, so it dies after Ready and comes back between crashes; no bump follows, and an Instance that serves nothing is repaired without touching its Component's budget or a group's gate, whatever group it sits in: it is rebuilt (every pod new) Ready and serving on its running revision within the rotate budget, a RestartTriggered event names it, and nothing surges above N; the engine, which nothing broke, keeps its pods and serves N
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p2510 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

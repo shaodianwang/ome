@@ -1,0 +1,18 @@
+# p10526: [gen] conflict delete engine+router N=4 once on ir  mode=recreate Ne=4 Nd=0 Nr=2 ceil_e=4 ceil_d=0 ceil_r=2 fault=conflict:settling co=none topo=engine form=once target=ir
+# reason: the service is deleted on engine behind a router, single-pod, and a competing writer patches an annotation of every InferenceReplica of the service once as the delete lands, so the controller's next status write carries a stale resourceVersion and conflicts; the conflict must be retried without a lost decision: the rows follow the pods on their way out and the manager's events stay bounded (a lost write is a stale row, a conflict retried as a fresh decision is a double apply, a conflict storm is a hot loop); the delete completes with no pod, InferenceReplica, Service or InferenceService left, and the same manifest re-applied under the same name comes up whole on fresh pods; the router is a negative control (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p10526 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

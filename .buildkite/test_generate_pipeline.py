@@ -1443,8 +1443,10 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-crashloop-idle", "engine-mn", "")], 2)
         self.assertEqual(shard_counts[("gen-crashloop-idle", "pd", "")], 2)
         self.assertEqual(shard_counts[("gen-crashloop-idle", "pd-mn", "")], 2)
-        self.assertEqual(shard_counts[("gen-crashloop-sibling", "pd", "")], 1)
-        self.assertEqual(shard_counts[("gen-crashloop-sibling", "pd-mn", "")], 1)
+        # The sibling that breaks: the decoder on the prefill/decode shapes,
+        # the router on the engine+router shapes.
+        for topology in ("pd", "pd-mn", "engine", "engine-mn"):
+            self.assertEqual(shard_counts[("gen-crashloop-sibling", topology, "")], 1)
         for topology in ("engine", "engine-mn", "pd", "pd-mn"):
             self.assertEqual(shard_counts[("gen-heal", topology, "")], 1)
         self.assertEqual(shard_counts[("gen-imagepull", "engine", "")], 1)
@@ -1533,7 +1535,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         for topology, plain, policy in (("engine", 3, 4), ("engine-mn", 3, 4), ("pd", 2, 2), ("pd-mn", 2, 2)):
             self.assertEqual(shard_counts[("gen-fault-move", topology, "")], plain)
             self.assertEqual(shard_counts[("gen-fault-move", topology, gp.EVAL_FORCE_DELETE_SLUG)], policy)
-        self.assertEqual(shard_counts[("gen-fault-edit", "engine", "")], 3)
+        self.assertEqual(shard_counts[("gen-fault-edit", "engine", "")], 4)
         self.assertEqual(shard_counts[("gen-fault-edit", "engine-mn", "")], 2)
         self.assertEqual(shard_counts[("gen-fault-edit", "pd", "")], 2)
         self.assertEqual(shard_counts[("gen-fault-edit", "pd-mn", "")], 2)
@@ -1548,15 +1550,16 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-repeat", "pd", "")], 3)
         self.assertEqual(shard_counts[("gen-repeat", "pd-mn", "")], 3)
         # A webhook outage runs alone at about six minutes: three per shard.
-        # A competing writer stays in the pool.
-        self.assertEqual(shard_counts[("gen-webhook", "engine", "")], 6)
-        self.assertEqual(shard_counts[("gen-webhook", "engine-mn", "")], 6)
-        self.assertEqual(shard_counts[("gen-webhook", "pd", "")], 3)
-        self.assertEqual(shard_counts[("gen-webhook", "pd-mn", "")], 3)
-        self.assertEqual(shard_counts[("gen-conflict", "engine", "")], 2)
-        self.assertEqual(shard_counts[("gen-conflict", "engine-mn", "")], 2)
-        self.assertEqual(shard_counts[("gen-conflict", "pd", "")], 1)
-        self.assertEqual(shard_counts[("gen-conflict", "pd-mn", "")], 1)
+        # A competing writer stays in the pool. The engine topologies carry
+        # the engine alone and the engine behind a router.
+        self.assertEqual(shard_counts[("gen-webhook", "engine", "")], 19)
+        self.assertEqual(shard_counts[("gen-webhook", "engine-mn", "")], 19)
+        self.assertEqual(shard_counts[("gen-webhook", "pd", "")], 10)
+        self.assertEqual(shard_counts[("gen-webhook", "pd-mn", "")], 10)
+        self.assertEqual(shard_counts[("gen-conflict", "engine", "")], 6)
+        self.assertEqual(shard_counts[("gen-conflict", "engine-mn", "")], 6)
+        self.assertEqual(shard_counts[("gen-conflict", "pd", "")], 3)
+        self.assertEqual(shard_counts[("gen-conflict", "pd-mn", "")], 3)
         self.assertEqual(shard_counts[("gen-crash-once", "engine", "")], 3)
         self.assertEqual(shard_counts[("gen-crash-once", "engine-mn", "")], 3)
         self.assertEqual(shard_counts[("gen-crash-once", "pd", "")], 2)
@@ -1565,7 +1568,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-lift", "engine-mn", "")], 2)
         self.assertEqual(shard_counts[("gen-lift", "pd", "")], 1)
         self.assertEqual(shard_counts[("gen-lift", "pd-mn", "")], 1)
-        self.assertEqual(job_count, 787)
+        self.assertEqual(job_count, 842)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin
@@ -2150,7 +2153,7 @@ class TestEvalTargeted(PipelineTestCase):
         self.assertEqual(gp._top_level_keys(batches[-1]), ["chart-ome-release"])
         # The fixture round, 5% sampled under the pinned commit: the pin
         # moves with the corpus like the full and smoke totals.
-        self.assertEqual(sum(gp._job_count(document) for document in batches), 365)
+        self.assertEqual(sum(gp._job_count(document) for document in batches), 382)
 
 
 class TestEvalVerdicts(unittest.TestCase):
@@ -3039,12 +3042,12 @@ class TestEvalMode(PipelineTestCase):
         committed = sorted(case for _, _, cases in self.groups for case in cases)
         default = sorted(case for child in self.runner_jobs(self.full, scheduler="") for case in self.cases_of(child))
         self.assertEqual(default, committed)
-        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 787)
-        self.assertEqual(len(self.runner_jobs(self.full)), 1761)
-        self.assertEqual(len(self.full), 1772)
-        self.assertEqual(len(self.smoke), 195)
+        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 842)
+        self.assertEqual(len(self.runner_jobs(self.full)), 1892)
+        self.assertEqual(len(self.full), 1903)
+        self.assertEqual(len(self.smoke), 197)
         self.assertEqual(len(self.smoke_batches), 3)
-        self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 304)
+        self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 306)
         # Only a full round records its verdicts.
         self.assertNotIn(f'key: "{gp.EVAL_VERDICTS_STEP_KEY}"', "".join(self.smoke_batches))
 
@@ -3213,7 +3216,7 @@ class TestPipelineUploads(PipelineTestCase):
     def test_todays_corpus_uploads_within_the_limit_and_the_total_is_pinned(self):
         self.assert_uploads_are_well_formed(self.batches, self.children)
         self.assertGreater(len(self.batches), 2)
-        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 1882)
+        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2013)
 
     def test_the_full_round_records_its_verdicts_after_every_eval_group(self):
         last = self.batches[-1]

@@ -641,6 +641,8 @@ GEN_CONTINUATIONS = {
     "gen-fault-move": (9800, 9900),
     "gen-fault-edit": (9900, 10000),
     "gen-ops-held": (10000, 10100),
+    "gen-webhook": (10300, 10450),
+    "gen-conflict": (10450, 10700),
 }
 
 
@@ -737,6 +739,9 @@ UNPROMISED_REPAIR = {("load", "None")}
 BREAK_GROUPS = ["none", "bluegreen", "rolling", "seq", "canary"]
 BREAK_VICTIMS = {"engine": ["engine"], "engine-mn": ["engine"], "pd": ["engine", "decoder"], "pd-mn": ["engine", "decoder"]}
 SIBLING_SHAPES = [("pd", 4, 0), ("pd-mn", 2, 1)]
+# The engine behind a router, single-pod and as a gang: the router is the
+# sibling that breaks there. (topo, N, W, routers.)
+SIBLING_ROUTER_SHAPES = [("engine", 4, 0, lib.NR), ("engine-mn", 2, 1, lib.NR)]
 UNPROMISED_REPAIR = {("load", "None")}
 GROUP_NAMES = {"bluegreen": "blueGreen", "rolling": "rollingUpdate", "seq": "Sequential", "canary": "canary"}
 IDLE_PHASE = "idle"
@@ -1147,9 +1152,10 @@ MISSING_HOOKS = [
     "a pending cause armed mid-roll (a taint or a quota at the rotating hook) — "
     "taint:all and quota:<n> are armed before the bump; only preempt fires at a "
     "hook",
-    "a webhook outage or a competing writer at the rotating or draining hook, "
-    "under a canary step or over a migration — the window faults start on the "
-    "settled service (idle) or as a push or a scale lands (settling) only",
+    "a webhook outage or a competing writer at a canary step — the window faults "
+    "open on the settled service, at a hook of a push or a runtime edit, as a "
+    "rollback, a mid-roll edit, a scale or a delete lands, and at a moment of a "
+    "move, not while a canary ladder is at a step",
 ]
 
 
@@ -1720,7 +1726,7 @@ def _idle_reason(form, victim, co):
     return out
 
 
-def _sibling_reason(form, co):
+def _sibling_reason(form, co, sibling="decoder"):
     if co == "rolling":
         return (f"the rollingUpdate group lists both Components and admits no push that names one without the "
                 f"other, so engine and decoder are bumped together and, as the bump lands, "
@@ -1730,11 +1736,14 @@ def _sibling_reason(form, co):
                 f"the group's gate paces the two members as one run; the broken decoder's own capacity is the one "
                 f"Instance the floor allows while the roll takes it first (floor_slack=1): no healthy decoder "
                 f"Instance is drained below N-1 while its replacement surges within the ceiling")
-    out = (f"the engine is bumped alone and, as the bump lands, {_break_how(form, 'decoder')}; the engine "
+    out = (f"the engine is bumped alone and, as the bump lands, {_break_how(form, sibling)}; the engine "
            f"roll converges within its budget with every engine Instance on the new revision, while the "
-           f"decoder, which nothing bumped, keeps N with nothing rotated and its broken Instance is rebuilt "
+           f"{sibling}, which nothing bumped, keeps N with nothing rotated and its broken Instance is rebuilt "
            f"by a repair (every pod new, Ready and serving on its running revision) that a RestartTriggered "
            f"event names")
+    if sibling == "router":
+        out += ("; the router sits outside every rollout group and no roll or scale of the engine owns its "
+                "break, so the repair is the only thing that may touch it")
     if co != "none":
         out += (f"; the {GROUP_NAMES[co]} group lists both Components, so the engine's run is open while the "
                 f"decoder breaks, and a rebuild of an Instance that serves nothing takes no capacity offline "
@@ -1775,6 +1784,25 @@ def emit_crashloop_idle(add):
                             _idle_reason(form, victim, co) + ("; the router keeps its pods" if nr else ""), meta,
                             cell=("crashloop-idle", form, topo, w, n, co, victim, rp, nr),
                             coord=group_for(co, topo))
+    # The router as the broken sibling on the engine+router shapes: outside
+    # every group, so the plain service alone; the engine is the negative
+    # control.
+    for topo, n, w, nr in CRASHLOOP_IDLE_SHAPES:
+        if not nr:
+            continue
+        for rp in RESTARTS:
+            for form in CRASH_FORMS:
+                if (form, rp) in UNPROMISED_REPAIR:
+                    continue
+                kv = dict(**counts(topo, n, nr), ceil_e=n, ceil_d=0, ceil_r=router_count(topo, nr),
+                          fault="crashloop:old", co="none", topo=topo, form=form, during=IDLE_PHASE,
+                          victimcomp="router", expect="repaired")
+                meta = dict(strat="SurgeThenDrain", verb=f"crashloop:{form}@idle", rp=rp, victim="router")
+                desc = f"{GEN_MARK} crashloop idle {form} {shape_tag(topo, w, nr)} N={n} co none victim router rp {rp}"
+                life = lib.lifecycle(restart=RP_FULL[rp])
+                add("gen-crashloop-idle", desc, kv, comps(topo, n, w, life, r_life=lib.lifecycle(restart=RP_FULL[rp]), nr=nr),
+                    _idle_reason(form, "router", "none") + "; the engine, which nothing broke, keeps its pods and serves N",
+                    meta, cell=("crashloop-idle", form, topo, w, n, "none", "router", rp, nr))
 
 
 def emit_crashloop_sibling(add):
@@ -1807,6 +1835,23 @@ def emit_crashloop_sibling(add):
                         _sibling_reason(form, co), meta,
                         cell=("crashloop-sibling", form, topo, w, n, co, rp),
                         coord=group_for(co, topo))
+    # The router as the broken sibling on the engine+router shapes: the
+    # engine is bumped alone, the router (outside every group) breaks as the
+    # bump lands and is a repair's to rebuild.
+    for topo, n, w, nr in SIBLING_ROUTER_SHAPES:
+        for rp in RESTARTS:
+            for form in CRASH_FORMS:
+                if (form, rp) in UNPROMISED_REPAIR:
+                    continue
+                kv = dict(**counts(topo, n, nr), **ceilings(topo, n, "SurgeThenDrain", 1, nr),
+                          fault="crashloop:old", co="none", topo=topo, form=form, victimcomp="router", bump="engine")
+                meta = dict(strat="SurgeThenDrain", verb=f"crashloop:{form}@sibling", rp=rp, victim="router")
+                desc = f"{GEN_MARK} crashloop sibling {form} {shape_tag(topo, w, nr)} N={n} co none rp {rp}"
+                life = lib.lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, restart=RP_FULL[rp])
+                add("gen-crashloop-sibling", desc, kv,
+                    comps(topo, n, w, life, r_life=lib.lifecycle(restart=RP_FULL[rp]), nr=nr),
+                    _sibling_reason(form, "none", sibling="router"), meta,
+                    cell=("crashloop-sibling", form, topo, w, n, "none", rp, nr))
 
 
 # ── gen-heal: a cause that disappears ───────────────────────────────────────
@@ -5079,10 +5124,10 @@ MOVE_REPAIR_HOW = {"None": "an Instance that serves nothing is rebuilt by the cr
                    "RecreateInstance": "a runner that dies after Ready re-arms the whole-Instance rebuild"}
 
 
-def _move_fault_pod(at, victim):
+def _move_fault_pod(at, victim, sibling="decoder"):
     """(when, whose pod) the fault hits, in words."""
     if victim == "sibling":
-        return MOVE_WHEN[at], "the decoder's highest Instance's pod"
+        return MOVE_WHEN[at], f"the {sibling}'s highest Instance's pod"
     if victim == "peer":
         return MOVE_WHEN[at], "the pod of the moved Component's highest other Instance"
     return {"accept": ("as soon as the request is recorded, before its replacement exists", "the moved Instance's source pod"),
@@ -5090,8 +5135,8 @@ def _move_fault_pod(at, victim):
             "drain": ("as the source is being taken down", "the moved Instance's replacement pod, Ready and serving,")}[at]
 
 
-def _move_fault_reason(kind, form, at, victim, rp, topo, nr=0):
-    when, pod = _move_fault_pod(at, victim)
+def _move_fault_reason(kind, form, at, victim, rp, topo, nr=0, sibling="decoder"):
+    when, pod = _move_fault_pod(at, victim, sibling)
     out = (f"{when}, {pod} {MOVE_BREAK_HOW[(kind, form)]}; the move finishes, or is abandoned with a reason its "
            f"record carries, within budget and is recorded once (one ledger row, one controller record); the moved "
            f"Instance ends whole, Ready and serving on one pod set, the engine holds N whole Instances on distinct "
@@ -5107,8 +5152,10 @@ def _move_fault_reason(kind, form, at, victim, rp, topo, nr=0):
                 f"by a repair a RestartTriggered event names, under restart policy {RP_FULL[rp]} "
                 f"({MOVE_REPAIR_HOW[rp]}); the capacity floor, lowered by that one Instance, holds throughout")
     if victim == "sibling":
-        out += "; the decoder is otherwise untouched: nothing rotates and nothing surges there"
-    if is_pd(topo) or nr:
+        out += f"; the {sibling} is otherwise untouched: nothing rotates and nothing surges there"
+    if sibling == "router":
+        out += "; the engine's other Instances are the negative control: nothing rotates and nothing surges there beyond the move"
+    elif is_pd(topo) or nr:
         out += "; the router keeps its pods"
     if is_mn(topo):
         out += "; each Instance is a gang, moved and rebuilt whole"
@@ -5160,6 +5207,26 @@ def emit_fault_move(add):
                 add("gen-fault-move", desc, kv, comps(topo, n, w, life, d_life=d_life, nr=nr),
                     _move_node_reason(at, rp, topo), meta,
                     cell=("fault-move", "node", None, at, "moved", topo, w, rp, nr))
+    # The router as the broken sibling on the engine+router shapes: a break
+    # the move is not to care about, rebuilt by a repair beside it.
+    for topo, n, w, nr in MOVE_SHAPES:
+        if not nr:
+            continue
+        base = dict(mode="migrate", **counts(topo, n, nr), ceil_e=n + 1, ceil_d=0, ceil_r=router_count(topo, nr))
+        for at in MOVE_MOMENTS:
+            for kind, form, rp in MOVE_BREAKS:
+                kv = dict(base, fault=f"{kind}:old", co="none", topo=topo)
+                if form:
+                    kv["form"] = form
+                kv.update(victim="sibling", victimcomp="router", mig="Auto", inst=0, at=at)
+                meta = dict(strat="SurgeThenDrain", verb=f"{_storm_label(kind, form)}@move-{at}", rp=rp,
+                            victim="router", at=at, who="sibling")
+                desc = (f"{GEN_MARK} fault-move {_storm_label(kind, form)} at {at} on sibling router "
+                        f"{shape_tag(topo, w, nr)} N={n} rp {rp}")
+                life = lib.lifecycle(restart=RP_FULL[rp])
+                add("gen-fault-move", desc, kv, comps(topo, n, w, life, r_life=lib.lifecycle(restart=RP_FULL[rp]), nr=nr),
+                    _move_fault_reason(kind, form, at, "sibling", rp, topo, nr, sibling="router"), meta,
+                    cell=("fault-move", kind, form, at, "sibling", "router", topo, w, rp, nr))
 
 
 # ── gen-webhook / gen-conflict: the admission webhook unreachable, a competing writer ──
@@ -5184,6 +5251,20 @@ WEBHOOK_LIFTS = ["after-hold", "after-window"]
 CONFLICT_FORMS = ["once", "persist"]
 CONFLICT_TARGETS = ["isvc", "ir"]
 WINDOW_SCALE_UP = 1
+# The hooks beyond the settled service, the push as it lands and the
+# scale-up: (operation, the hook the window opens at). The push at its
+# later hooks (the first pod of the new revision, the first pod of the old
+# one on its way out); a rollback filed at the first new pod and a strategy
+# edit landed there, each opening the window as it lands; a scale-down by
+# one; a runtime edit of the dedicated runtime every Component inherits; a
+# move opened at accept, the whole move still ahead of the window; a
+# delete, then the same name re-created once the window has closed.
+WINDOW_MORE_OPS = [("push", "rotating"), ("push", "draining"), ("rollback", "settling"), ("edit", "settling"),
+                   ("scaledown", "settling"), ("runtime", "settling"), ("move", "migrating"), ("delete", "settling")]
+WINDOW_ROLLBACK_HOOK = "rotating"
+WINDOW_EDIT = ("strategy", "RecreatePod", "rotating")
+WINDOW_MOVE_AT = "accept"
+WINDOW_SCALE_DOWN = 1
 
 
 def _window_counts(topo, n, nr):
@@ -5337,6 +5418,7 @@ def emit_webhook(add):
                     add("gen-webhook", desc, kv, _window_comps(topo, n, w, nr, life),
                         _webhook_reason(op, lift, topo, w, nr, strat), meta,
                         cell=("webhook", op, topo, w, nr, strat, lift))
+    _emit_more_windows(add, "webhook")
 
 
 def emit_conflict(add):
@@ -5356,6 +5438,161 @@ def emit_conflict(add):
                     add("gen-conflict", desc, kv, _window_comps(topo, n, w, nr, life),
                         _conflict_reason(op, form, target, topo, w, nr), meta,
                         cell=("conflict", op, topo, w, nr, form, target))
+    _emit_more_windows(add, "conflict")
+
+
+def _more_window_kv(kind, op, hook, topo, n, nr, strat, surge, unavail, knobs):
+    """The header and the fleet of a window case of the second pass: the
+    operation's mode and knobs, its counts and ceilings, the fault at its
+    hook, and the kind's own knobs."""
+    counts_ = _window_counts(topo, n, nr)
+    routers = counts_["Nr"]
+    life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+    kv = dict(**counts_, **_window_ceilings(topo, n, nr, strat, surge))
+    kv.update(fault=f"{kind}:{hook}", co="none", topo=topo)
+    if op == "rollback":
+        kv.update(rollback=1, during=WINDOW_ROLLBACK_HOOK)
+    elif op == "edit":
+        kv.update(edit=f"{WINDOW_EDIT[0]}:{WINDOW_EDIT[1]}", during=WINDOW_EDIT[2])
+    elif op == "scaledown":
+        kv.update(mode="scaledown", to_e=n - WINDOW_SCALE_DOWN,
+                  **_window_ceilings(topo, n, nr, strat, 0, peak_e=n))
+    elif op == "runtime":
+        # Every Component rolls on the edit: the decoder and the router under
+        # their default surge of one.
+        kv.update(mode="runtimerev", edit="env", expect="roll",
+                  ceil_d=(n + 1 if is_pd(topo) else 0), ceil_r=(routers + 1 if routers else 0))
+    elif op == "move":
+        kv.update(mode="migrate", mig="Auto", inst=0, at=WINDOW_MOVE_AT,
+                  **_window_ceilings(topo, n, nr, strat, 0, peak_e=n + 1))
+    elif op == "delete":
+        kv.update(mode="recreate", **_window_ceilings(topo, n, nr, strat, 0, peak_e=n))
+    kv.update(knobs)
+    return kv, _window_comps(topo, n, w_of(topo), nr, life)
+
+
+def w_of(topo):
+    """The gang width the window shapes carry for a topology."""
+    return next(w for t, _n, w, _nr in WINDOW_SHAPES if t == topo)
+
+
+MORE_WINDOW_DOES = {
+    "rollback": "the engine is bumped and the starting revision re-applied at the first pod of the new revision",
+    "edit": "the engine is bumped under SurgeThenDrain and its strategy edited to RecreatePod at the first pod of the new revision",
+    "scaledown": "the engine is scaled from N to N-1",
+    "runtime": "the dedicated runtime every Component inherits gets a new runner env, so every Component rolls onto its own new revision",
+    "move": "one engine Instance is asked to move",
+    "delete": "the service is deleted",
+}
+MORE_WINDOW_HOOK = {
+    ("push", "rotating"): "at the first pod of the new revision",
+    ("push", "draining"): "as the first pod of the old revision goes",
+    ("rollback", "settling"): "as the rollback lands",
+    ("edit", "settling"): "as the edit lands",
+    ("scaledown", "settling"): "as the scale-down lands",
+    ("runtime", "settling"): "as the edit lands",
+    ("move", "migrating"): "as soon as the move's request is recorded, the whole move still ahead",
+    ("delete", "settling"): "as the delete lands",
+}
+MORE_WEBHOOK_REFUSES = {
+    ("push", "rotating"): "the next pod the roll creates is refused by admission, so the roll must wait",
+    ("push", "draining"): "the replacement the roll creates for the pod that went is refused by admission, so the roll must wait",
+    ("rollback", "settling"): "the pods the rollback creates to bring its Instances back are refused by admission, so the rollback must wait",
+    ("edit", "settling"): "the pods the roll creates under the edited strategy are refused by admission, so the roll must wait",
+    ("scaledown", "settling"): "the InferenceReplica spec write that shrinks the Component is refused by admission, so the scale must wait",
+    ("runtime", "settling"): "the pods the edit's roll creates are refused by admission, so the roll must wait",
+    ("move", "migrating"): "the replacement pod the move creates is refused by admission, so the move must wait",
+    ("delete", "settling"): "the InferenceService update that releases its finalizer is refused by admission, so the delete must wait (or finish on the writes admission does not gate)",
+}
+MORE_WINDOW_CLAIMS = {
+    "push": _window_claims("push"),
+    "rollback": _window_claims("push"),
+    "edit": _window_claims("push"),
+    "runtime": ("the capacity floor of every Component holds, the rows follow every change of the pods in rotation "
+                "within the configured requeues, and the manager's events stay bounded"),
+    "scaledown": ("no Instance below the target is taken down, the survivors keep serving, the rows follow every change "
+                  "of the pods in rotation within the configured requeues, and the manager's events stay bounded"),
+    "move": ("the N Instances keep serving (the source until its replacement serves), the rows follow every change of "
+             "the pods in rotation within the configured requeues, and the manager's events stay bounded"),
+    "delete": "the rows follow the pods on their way out and the manager's events stay bounded",
+}
+MORE_WINDOW_END = {
+    "push": _window_end("push"),
+    "rollback": ("the rollback completes with every Instance back on the starting revision and serving, no pod of the "
+                 "new revision left, each pod slot created at most once in each direction, the rows settled with no "
+                 "hold, retry block or Failed row left"),
+    "edit": ("the roll completes under the edited strategy with every Instance on the new revision and the edit on "
+             "the live spec, each pod slot created at most once, the rows settled with no hold, retry block or Failed "
+             "row left"),
+    "scaledown": ("the scale completes with the engine at N-1, the survivors on their own pods, nothing created, and "
+                  "the rows settled with no hold, retry block or Failed row left"),
+    "runtime": ("the edit lands on every Instance of every Component, each on its own new revision and serving, each "
+                "pod slot created once, the rows settled with no hold, retry block or Failed row left"),
+    "move": ("the move completes: its ledger row reads Completed once, the request annotation is consumed, the moved "
+             "Instance ends whole, Ready and serving off its source pod and created once, the engine holds N whole "
+             "Instances, and the rows settle with no hold, retry block or Failed row left"),
+    "delete": ("the delete completes with no pod, InferenceReplica, Service or InferenceService left, and the same "
+               "manifest re-applied under the same name comes up whole on fresh pods"),
+}
+
+
+def _more_webhook_reason(op, hook, lift, topo, w, nr, strat):
+    shape = _window_shape(topo, w, nr)
+    does = MORE_WINDOW_DOES.get(op, f"the bump lands under {strat}")
+    out = (f"{does} on {shape}, then the admission webhook is made unreachable {MORE_WINDOW_HOOK[(op, hook)]}: "
+           f"{MORE_WEBHOOK_REFUSES[(op, hook)]} and the status must say why in the webhook's own words (an event on "
+           f"the ISVC or an InferenceReplica, a row failure or wait, a hold or a condition) while "
+           f"{MORE_WINDOW_CLAIMS[op]}; the manager's reconciles stay bounded; {_webhook_window(op, lift)}, and "
+           f"{MORE_WINDOW_END[op]}")
+    return out + ("" if op == "runtime" else _window_controls(topo, nr))
+
+
+def _more_conflict_reason(op, hook, form, target, topo, w, nr):
+    shape = _window_shape(topo, w, nr)
+    what = "the ISVC" if target == "isvc" else "every InferenceReplica of the service"
+    does = MORE_WINDOW_DOES.get(op, "the engine is bumped under the canonical surge budget")
+    if form == "once":
+        writes = f"a competing writer patches an annotation of {what} once {MORE_WINDOW_HOOK[(op, hook)]}"
+    else:
+        writes = (f"a competing writer patches an annotation of {what} every few hundred milliseconds from "
+                  f"{MORE_WINDOW_HOOK[(op, hook)]} until the operation completes")
+    out = (f"{does} on {shape}, and {writes}, so the controller's next status write carries a stale "
+           f"resourceVersion and conflicts; the conflict must be retried without a lost decision: "
+           f"{MORE_WINDOW_CLAIMS[op]} (a lost write is a stale row, a conflict retried as a fresh decision is a "
+           f"double apply, a conflict storm is a hot loop); {MORE_WINDOW_END[op]}")
+    return out + ("" if op == "runtime" else _window_controls(topo, nr))
+
+
+def _emit_more_windows(add, kind):
+    """The second pass of a window family: every (operation, hook) of
+    WINDOW_MORE_OPS on every shape, under the kind's own knobs; appended
+    after the first pass so the committed ids keep their places."""
+    for topo, n, w, nr in WINDOW_SHAPES:
+        for op, hook in WINDOW_MORE_OPS:
+            if op == "push" and kind == "webhook":
+                strats = WEBHOOK_PUSH_STRATS
+            elif op == "edit":
+                strats = [("SurgeThenDrain",) + switch_budget("SurgeThenDrain", WINDOW_EDIT[1])]
+            else:
+                strats = [WINDOW_STRAT]
+            for strat, surge, unavail in strats:
+                knob_sets = ([dict(lift=lift) for lift in WEBHOOK_LIFTS] if kind == "webhook"
+                             else [dict(form=form, target=target) for target in CONFLICT_TARGETS for form in CONFLICT_FORMS])
+                for knobs in knob_sets:
+                    kv, case_comps = _more_window_kv(kind, op, hook, topo, n, nr, strat, surge, unavail, knobs)
+                    label = f"{op} {hook}" if op == "push" else op
+                    meta = dict(strat=strat if op in ("push", "rollback", "edit") else "(dormant: nothing rolls)",
+                                verb=f"{kind}:{hook}", winop=f"{kind} {label}", op=op, hook=hook, **knobs)
+                    if kind == "conflict":
+                        meta["cform"] = meta.pop("form")
+                    desc = (f"{GEN_MARK} {kind} {label} {_window_tag(topo, w, nr)} N={n}"
+                            + (f" {strat} {budget_tag(strat, surge, unavail)}" if op in ("push", "edit") else "")
+                            + (f" lift {knobs['lift']}" if kind == "webhook" else f" {knobs['form']} on {knobs['target']}"))
+                    reason = (_more_webhook_reason(op, hook, knobs["lift"], topo, w, nr, strat) if kind == "webhook"
+                              else _more_conflict_reason(op, hook, knobs["form"], knobs["target"], topo, w, nr))
+                    add(f"gen-{kind}", desc, kv, case_comps, reason, meta,
+                        cell=(kind, op, hook, topo, w, nr, strat) + tuple(knobs[k] for k in sorted(knobs)),
+                        dedicated=(op == "runtime"))
 
 
 # ── gen-fault-edit: a fault during a runtime edit ────────────────────────────
@@ -5406,8 +5643,8 @@ def _edit_break_reason(kind, form, victim, edit, strat, rp, topo, nr=0):
     elif form == "load":
         out += ("; under RecreateInstanceOnPodRestart the runner-restart trigger competes with the roll, and the roll "
                 "must win")
-    if victim == "decoder":
-        out += "; the engine's own roll converges untouched by the decoder's break"
+    if victim != "engine":
+        out += f"; the engine's own roll converges untouched by the {victim}'s break"
     if is_mn(topo):
         out += "; each Instance is a gang, replaced whole"
     return out
@@ -5478,6 +5715,29 @@ def emit_fault_edit(add):
                 add("gen-fault-edit", desc, kv, comps(topo, n, w, life, d_life=life, nr=nr),
                     _bad_edit_reason(kind, strat, topo), meta,
                     cell=("bad-edit", kind, topo, w, strat, nr), dedicated=True)
+    # The router as the broken sibling on the engine+router shapes: it rolls
+    # on the edit like every Component, so the roll owns its broken Instance;
+    # the engine's own roll is the negative control.
+    for topo, n, w, nr in EDIT_SHAPES:
+        if not nr:
+            continue
+        for strat, (surge, unavail) in EDIT_STRATS.items():
+            for kind, form, policies in EDIT_BREAKS:
+                for edit in EDIT_VERBS[topo]:
+                    for rp in policies:
+                        kv = dict(_edit_kv(topo, n, strat, surge, nr), fault=f"{kind}:old", co="none", topo=topo)
+                        if form:
+                            kv["form"] = form
+                        kv.update(victimcomp="router", expect="roll", edit=edit)
+                        if edit == "image":
+                            kv["img"] = ALT_IMAGE
+                        meta = dict(strat=strat, verb=f"{_storm_label(kind, form)}@edit", rp=rp, victim="router", rtedit=edit)
+                        desc = (f"{GEN_MARK} fault-edit {_storm_label(kind, form)} on router edit {edit} "
+                                f"{shape_tag(topo, w, nr)} N={n} {strat} rp {rp}")
+                        life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                        add("gen-fault-edit", desc, kv, comps(topo, n, w, life, nr=nr),
+                            _edit_break_reason(kind, form, "router", edit, strat, rp, topo, nr), meta,
+                            cell=("fault-edit", kind, form, "router", edit, topo, w, strat, rp, nr), dedicated=True)
 
 
 # ── gen-crash-once: a crash that happens exactly once ──────────────────────
@@ -6486,14 +6746,22 @@ def manifest(rows):
         " annotation-only diff is patched onto the live pod and creates"
         " nothing for admission to refuse. A webhook case runs alone (the"
         " outage is cluster-wide: every ISVC write in the cluster is refused"
-        " while it holds).",
+        " while it holds). The outage also opens at the push's later hooks"
+        " (the first pod of the new revision, the first pod of the old one on"
+        " its way out, under both strategies), as a rollback filed at the first"
+        " new pod lands, as a strategy edit landed there lands, as a scale-down"
+        " by one lands, as an env edit of the case's dedicated runtime lands"
+        " (every Component rolls), as soon as a move's request is recorded,"
+        " and as a delete lands (the same name is re-created once the window"
+        " has closed); each reads the same window verdict, and the operation"
+        " must complete once the webhook is back.",
         "- gen-conflict runs a competing writer (an annotation patch of the"
         " ISVC or of every InferenceReplica of the service; target=isvc|ir)"
         " once or until the operation completes (form=once|persist) over the"
-        " same operations and shapes, under the canonical surge budget alone:"
-        " a status write conflicts the same way under every strategy. The"
-        " writer is per service, so its cases run in the concurrent pool. The"
-        " reconcile counters are read on the webhook cases only (they run"
+        " same operations, hooks and shapes, under the canonical surge budget"
+        " alone: a status write conflicts the same way under every strategy."
+        " The writer is per service, so its cases run in the concurrent pool."
+        " The reconcile counters are read on the webhook cases only (they run"
         " alone); a conflict case bounds the controller's events on its own"
         " objects.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",

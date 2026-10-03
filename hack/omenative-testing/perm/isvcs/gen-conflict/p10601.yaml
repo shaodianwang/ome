@@ -1,0 +1,27 @@
+# p10601: [gen] conflict rollback pd-mn W1 N=2 persist on isvc  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=2 ceil_r=2 fault=conflict:settling co=none topo=pd-mn form=persist during=rotating rollback=1 target=isvc
+# reason: the engine is bumped and the starting revision re-applied at the first pod of the new revision on prefill/decode as gangs of 1 leader + 1 worker, and a competing writer patches an annotation of the ISVC every few hundred milliseconds from as the rollback lands until the operation completes, so the controller's next status write carries a stale resourceVersion and conflicts; the conflict must be retried without a lost decision: the capacity floor (N minus maxUnavailable) holds, the rows follow every change of the pods in rotation within the configured requeues, and the manager's events stay bounded (a lost write is a stale row, a conflict retried as a fresh decision is a double apply, a conflict storm is a hot loop); the rollback completes with every Instance back on the starting revision and serving, no pod of the new revision left, each pod slot created at most once in each direction, the rows settled with no hold, retry block or Failed row left; decoder and router are negative controls (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p10601 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

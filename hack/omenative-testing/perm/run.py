@@ -2383,16 +2383,32 @@ PENDING_TOKENS = {"preempt": {"Unschedulable"}, "taint": {"Unschedulable"},
                   "quota": {"QuotaExceeded", "Unschedulable"}}
 ROW_POLL_S = 2.0
 # A window fault holds a cluster condition over an operation for a bounded
-# time: the admission webhook unreachable (webhook:<phase>) or a competing
+# time: the admission webhook unreachable (webhook:<hook>) or a competing
 # writer bumping the resourceVersion of the ISVC or of the case's
-# InferenceReplicas (conflict:<phase>). The phase is when it starts: on the
-# settled service (idle, with during=idle: no operation follows) or right
-# after a push or a scale lands (settling).
+# InferenceReplicas (conflict:<hook>). The hook is when it starts: on the
+# settled service (idle, with during=idle: no operation follows); as the
+# operation lands (settling: a push, a scale up or down, a rollback or a
+# mid-roll edit once it has fired at its own during= hook, a runtime edit,
+# a delete); at the first pod of the new revision (rotating) or the first
+# pod of the old one on its way out (draining) under a push or a runtime
+# edit; or at a moment of a move (migrating, with at=accept|surge|drain).
 WEBHOOK_FAULT = "webhook"
 CONFLICT_FAULT = "conflict"
 WINDOW_FAULTS = {WEBHOOK_FAULT, CONFLICT_FAULT}
-WINDOW_PHASES = {IDLE_FAULT_PHASE, "settling"}
-WINDOW_MODES = {"rollout", "scaledown"}
+WINDOW_ROLL_HOOKS = {"settling", "rotating", "draining"}
+WINDOW_MOVE_PHASE = "migrating"
+WINDOW_PHASES = {IDLE_FAULT_PHASE, WINDOW_MOVE_PHASE} | WINDOW_ROLL_HOOKS
+WINDOW_MODES = {"rollout", "scaledown", "runtimerev", "migrate", "recreate"}
+# The operation a window case holds its fault over, read from the header:
+# the settled service, a push, a rollback or a mid-roll edit of a rollout
+# case, a scale, a runtime edit, a move or a delete.
+WINDOW_OPS = {"idle", "push", "rollback", "edit", "scale", "runtime", "move", "delete"}
+# The hooks a rollback may fire at before its window opens (held needs a
+# broken revision, which a window case does not carry).
+WINDOW_ROLLBACK_HOOKS = {"settling", "rotating", "draining", "last"}
+WINDOW_WHAT = {"idle": "the steady service", "push": "the push", "rollback": "the rollback",
+               "edit": "the roll under its edit", "scale": "the scale", "runtime": "the runtime edit",
+               "move": "the move", "delete": "the delete"}
 # webhook: after-hold points the Service back once the status has said why
 # a write waits (or the reason wait has run out; at idle, after the settle
 # window); after-window keeps the webhook unreachable across the hold window
@@ -11256,7 +11272,8 @@ def _window_new(f, hdr, op):
             "last_rows_poll": 0.0, "last_reason_poll": 0.0,
             "events": None, "event_reasons": {}, "window_s": None, "window_end_ts": None,
             "metrics_before": None, "reconciles": None,
-            "lifted_at": None, "converged_at": None, "rows_settled": None, "rows_why": "", "leftover_hold": None}
+            "lifted_at": None, "converged_at": None, "rows_settled": None, "rows_why": "", "leftover_hold": None,
+            "owned_uids": set()}
 
 
 def _window_tick(ctx, f, win, now):
@@ -11344,7 +11361,7 @@ def _window_close(ctx, f, win):
     old = ctx["old_uids"]
     win["created_in_window"] = {c: len(win["uids_seen"].get(c, set()) - old.get(c, set())) for c in ctx["configured"]}
     alive = {p["uid"] for p in ctx["pod_state"].values() if p and p["alive"] and p.get("uid")}
-    win["torn_in_window"] = {c: len(old.get(c, set()) - alive) for c in ctx["configured"]}
+    win["torn_in_window"] = {c: len(old.get(c, set()) - alive - win["owned_uids"]) for c in ctx["configured"]}
     win["events"], win["event_reasons"] = _controller_event_tally(ctx["case_id"], win["ir_names"], t0, win["window_end_ts"])
     if win["metrics_before"] is not None:
         after = _reconcile_counts(_manager_metrics())
@@ -11432,14 +11449,258 @@ def _window_complete(ctx, f, win, done, budget):
     return "ROTATE_TIMEOUT"
 
 
+def _window_operation(hdr):
+    """The operation a window case holds its fault over (WINDOW_OPS), from
+    the mode and the knobs a rollout case carries."""
+    mode = str(hdr.get("mode", "rollout") or "rollout")
+    if mode == "scaledown":
+        return "scale"
+    if mode == "runtimerev":
+        return "runtime"
+    if mode == "migrate":
+        return "move"
+    if mode == "recreate":
+        return "delete"
+    if str(hdr.get("during", "")) == IDLE_FAULT_PHASE:
+        return "idle"
+    if hdr.get("rollback") == 1:
+        return "rollback"
+    if _midroll_edit(hdr.get("edit")) is not None:
+        return "edit"
+    return "push"
+
+
+def _window_roll_hook_due(hook, ctx):
+    """Whether a hook of the roll has arrived: settling as soon as the
+    operation has landed, rotating at the first pod of the new revision,
+    draining at the first pod of the old one on its way out."""
+    old = ctx.get("old_hashes")
+    if hook == "settling":
+        return True
+    if hook == "rotating":
+        return _midroll_due("rotating", ctx["pod_state"], old)
+    return old is not None and any(p and not p["alive"] and p.get("hash") in old for p in ctx["pod_state"].values())
+
+
+def _window_expected(ctx, op, acting, target, mcomp):
+    """Pods the operation may create, per Component: a push's or a runtime
+    edit's rebuild of every pod slot of the Components it rolls (a mid-roll
+    edit may rebuild fewer, never more), a rollback's at most once in each
+    direction, a scale-up's new Instances, a move's one replacement, nothing
+    for a scale-down or a delete."""
+    N, ppi = ctx["N"], ctx["pods_per_inst"]
+    out = {c: 0 for c in ctx["configured"]}
+    for c in acting:
+        if op == "scale":
+            out[c] = max(0, target[c] - N[c]) * ppi.get(c, 1)
+        elif op == "move":
+            out[c] = ppi.get(c, 1)
+        elif op == "rollback":
+            out[c] = 2 * N[c] * ppi.get(c, 1)
+        elif op in ("push", "edit", "runtime"):
+            out[c] = 0 if (op == "push" and ctx["modes"].get(c) == "inplace") else N[c] * ppi.get(c, 1)
+    return out
+
+
+def _window_move_request(ctx, hdr):
+    """File one migration request for the Instance the header names (the
+    moved Component is the engine where one is configured). Returns the
+    move's bookkeeping, or None when the patch failed (ctx carries why)."""
+    mcomp = "engine" if "engine" in ctx["configured"] else sorted(ctx["configured"])[0]
+    inst = str(hdr.get("inst", 0)).split(",")[0].strip() or "0"
+    pods = [p for p in ctx["pod_state"].values() if p and p["alive"] and p["comp"] == mcomp]
+    from_node = next((p.get("node", "") for p in pods if str(p.get("inst")) == inst and p.get("node")),
+                     ctx["old_nodes"].get((mcomp, inst), ""))
+    ru = str(uuid.uuid4())
+    key = f"ome.io/migration-request-v1-{ru}"
+    body = {"schemaVersion": "v1", "component": mcomp, "instance": int(inst), "from_node": from_node, "reason": "perm-test"}
+    rr = kubectl("-n", NS, "patch", "isvc", ctx["case_id"], "--type=merge",
+                 "-p", json.dumps({"metadata": {"annotations": {key: json.dumps(body)}}}))
+    ctx["trigger_ts"] = time.time()
+    if rr.returncode != 0:
+        ctx["trigger_error"] = (rr.stderr.strip().splitlines() or ["patch failed"])[-1][:200]
+        return None
+    return {"uuid": ru, "key": key, "from": from_node, "comp": mcomp, "inst": inst, "at": str(hdr.get("at") or ""),
+            "src_uids": {p["uid"] for p in pods if str(p.get("inst")) == inst and p.get("uid")},
+            "orig_uids": {p["uid"] for p in pods if p.get("uid")},
+            "seen": (None, None, False), "last_poll": 0.0, "entry": None, "end": None}
+
+
+def _window_move_poll(mv, case_id, now, every=OVERLAP_POLL_S):
+    """Refresh the move's record, ledger row and consumed annotation, at
+    most every `every` seconds."""
+    if now - mv["last_poll"] < every:
+        return
+    mv["last_poll"] = now
+    entry = _migration_ledger_entry(case_id, mv["uuid"])
+    mv["entry"] = entry
+    mv["seen"] = (_migration_record(case_id, mv["comp"], mv["uuid"]), entry, mv["key"] not in _isvc_annotations(case_id))
+
+
+def _window_move_done(ctx, f, mv):
+    """The move is over: its ledger row reads Completed, the request
+    annotation is consumed, no source pod is alive and the moved Component
+    holds N whole serving Instances on distinct indices."""
+    entry = mv.get("entry") or {}
+    if entry.get("phase") != "Completed" or not mv["seen"][2]:
+        return False
+    idx = _surge_index_allocated(entry)
+    idx = str(idx) if idx is not None else mv["inst"]
+    ok, why = _move_end_state(ctx, f, mv["comp"], idx, mv["src_uids"], True)
+    mv["end"] = (ok, why, idx)
+    return ok
+
+
+def _window_delete_done(ctx, st):
+    """The delete is over: no pod of the case is alive and nothing of it is
+    left in the apiserver (read at most every teardown poll once the pods
+    are gone)."""
+    if any(p and p["alive"] for p in ctx["pod_state"].values()):
+        return False
+    now = time.time()
+    if now - st["last_poll"] < TEARDOWN_POLL_S:
+        return st["gone"]
+    st["last_poll"] = now
+    st["gone"] = not _teardown_survivors(ctx["case_id"])
+    return st["gone"]
+
+
+def _window_wait_hook(ctx, op, hook, rb, medit, mv, acting, done, budget):
+    """Wait for the moment the window opens at and land what fires there: a
+    hook of the roll (rotating, draining), a rollback or a mid-roll edit at
+    its own during= hook, a moment of the move. Returns (reached, why not):
+    the moment is missed when the operation completes first or the budget
+    runs out."""
+    case_id, N, ppi = ctx["case_id"], ctx["N"], ctx["pods_per_inst"]
+    if op in ("push", "runtime"):
+        if hook == "settling":
+            return True, ""
+        label = f"the {hook} hook of the roll"
+
+        def due(now):
+            return _window_roll_hook_due(hook, ctx)
+    elif op == "rollback":
+        label = f"the rollback at {rb['hook']}"
+
+        def due(now):
+            if rb["hook"] == "draining" and rb["first_drain_at"] is None and _window_roll_hook_due("draining", ctx):
+                rb["first_drain_at"] = now
+            _rollback_tick(rb, case_id, acting, ctx["pod_state"], ctx["old_hashes"], ppi, N, now, now - ctx["trigger_ts"])
+            return rb["fired"]
+    elif op == "edit":
+        label = f"the {medit['kind']} edit at {medit['hook']}"
+
+        def due(now):
+            if not _midroll_due(medit["hook"], ctx["pod_state"], ctx["old_hashes"]):
+                return False
+            rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge", "-p", json.dumps(_midroll_patch(medit, acting)))
+            if rr.returncode != 0:
+                medit["error"] = f"the edit at {medit['hook']} failed: {rr.stderr.strip()[:160]}"
+            medit["fired"], medit["fired_at"] = True, now
+            return True
+    elif op == "move":
+        label = f"{mv['at']} of the move"
+
+        def due(now):
+            _window_move_poll(mv, case_id, now)
+            return _move_moment_due(mv["at"], ctx["pod_state"], *mv["seen"], mv["comp"], mv["src_uids"], mv["orig_uids"])
+    else:
+        return True, ""
+    t0 = time.time()
+    while time.time() - t0 < budget and not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        if due(now):
+            error = (rb or {}).get("error") or (medit or {}).get("error")
+            if error:
+                return False, error
+            print(f"    ⚡ {label} ({now - ctx['trigger_ts']:.0f}s after the trigger) — the window opens")
+            return True, ""
+        if op != "move" and done():
+            return False, f"the operation completed before {label}"
+    return False, f"{label} was not reached within {budget}s"
+
+
+def _window_op_checks(ctx, op, state, rb, medit, mv, acting, verdict, notes, checks):
+    """What each operation owes beyond the window verdict: a rollback ends
+    every Instance on the starting revision, a mid-roll edit is on the
+    spec, a move's record is closed and its Instance whole."""
+    case_id = ctx["case_id"]
+    if op == "rollback":
+        on_new = sorted(n for n, p in ctx["pod_state"].items()
+                        if p and p["alive"] and p["comp"] in acting and _pod_on_new(p, ctx["old_hashes"]))
+        if on_new:
+            verdict = "FAIL"
+            notes.append(f"{len(on_new)} pod(s) of the new revision left after the rollback")
+            checks.append(f"  ✗ rollback: {len(on_new)} pod(s) of the new revision still alive ({', '.join(on_new[:4])})")
+        else:
+            checks.append(f"  ✓ rollback: every Instance of {sorted(acting)} ended on the starting revision")
+        if rb.get("fired_at") is not None:
+            checks.append(f"  ⓘ rollback: fired at {rb['hook']} {rb['fired_at']:.0f}s after the bump "
+                          f"({len(rb['busy_at_fire'])} Instance(s) mid-operation, {rb['new_pods_at_fire']} new-revision pod(s) alive)")
+    elif op == "edit":
+        spec = _isvc_spec(case_id)
+        off = []
+        for c in sorted(acting):
+            life = (spec.get(c) or {}).get("lifecycle") or {}
+            live = (life.get("updateStrategy") or {}).get("type") if medit["kind"] == "strategy" else life.get("restartPolicy")
+            if live != medit["value"]:
+                off.append(f"{c}={live}")
+        if off:
+            verdict = "FAIL"
+            notes.append(f"the {medit['kind']} edit is not on the spec ({', '.join(off)})")
+            checks.append(f"  ✗ edit: {medit['kind']}={medit['value']} is not on the live spec ({', '.join(off)})")
+        else:
+            checks.append(f"  ✓ edit: {medit['kind']}={medit['value']} is on the live spec of {sorted(acting)}")
+    elif op == "move":
+        phase = (mv.get("entry") or {}).get("phase")
+        if mv.get("end") and mv["end"][0] and state == "CONVERGED":
+            checks.append(f"  ✓ move: the ledger row reads Completed, the request annotation is consumed, "
+                          f"Instance {mv['end'][2]} is {mv['end'][1]}")
+        else:
+            why = mv["end"][1] if mv.get("end") else f"ledger phase {phase or 'not written'}"
+            checks.append(f"  ✗ move: not closed whole ({why}; annotation {'consumed' if mv['seen'][2] else 'still set'})")
+    return verdict
+
+
+def _window_recreate(case_id, yaml_file, desc, hdr, ctx, state, verdict, notes, checks):
+    """Pass 2 of a window over a delete: once the delete has converged, the
+    same manifest is applied again under the same name and must reach
+    Ready on fresh pods."""
+    pass1 = {p["uid"] for p in ctx["pod_state"].values() if p and p.get("uid")}
+    _stop_watcher(ctx)
+    hdr2 = dict(hdr)
+    for k in ("fault", "lift", "form", "target"):
+        hdr2.pop(k, None)
+    print("  Phase 6: same-name recreate")
+    t_re = time.time()
+    ctx2, err2 = _setup_and_ready(case_id, yaml_file, hdr2)
+    if err2:
+        notes.append(f"same-name recreate failed: {err2[0]} {err2[1]}")
+        return _write_fail(case_id, desc, hdr, "RECREATE_FAIL", "; ".join(notes))
+    ctx2["fault"] = ctx.get("fault")
+    ctx2["converged_at"] = time.time() - t_re
+    reused = pass1 & {p["uid"] for p in ctx2["pod_state"].values() if p and p.get("uid")}
+    if reused:
+        verdict = "FAIL"
+        notes.append(f"{len(reused)} pod UID(s) reused across the recreate")
+        checks.append(f"  ✗ recreate: {len(reused)} pod UID(s) of the deleted service came back — leftovers were adopted")
+    else:
+        checks.append(f"  ✓ recreate: the service came back under the same name on fresh pods, "
+                      f"Ready {ctx2['converged_at']:.0f}s after the apply")
+    return _finish(case_id, desc, hdr, ctx2, state, verdict, notes, checks)
+
+
 def _window_op(case_id, yaml_file, desc, hdr):
-    """A push or a scale with a window fault fired as it lands
-    (fault=webhook:settling | conflict:settling). Under the webhook outage
-    the operation must wait with the reason in the webhook's own words while
-    the floor holds and the rows keep following the pods in rotation; once
-    the webhook is back (after-hold | after-window) it must complete with
-    every pod slot created once and nothing left held. Under the competing
-    writer it must complete the same way while its status writes conflict."""
+    """An operation with a window fault held over it (fault=webhook:<hook> |
+    conflict:<hook>): a push, a rollback or a mid-roll edit once it has
+    fired, a scale up or down, a runtime edit, a move or a delete. Under the
+    webhook outage the operation must wait with the reason in the webhook's
+    own words while the floor holds and the rows keep following the pods in
+    rotation; once the webhook is back (after-hold | after-window) it must
+    complete with each pod slot created once and nothing left held. Under
+    the competing writer it must complete the same way while its status
+    writes conflict."""
     kind = str(hdr.get("fault", "")).partition(":")[0]
     reason = _fault_capability(kind)
     if reason:
@@ -11449,44 +11710,105 @@ def _window_op(case_id, yaml_file, desc, hdr):
     if err:
         return _write_fail(case_id, desc, hdr, *err)
     f, N, configured, ppi = ctx["fault"], ctx["N"], ctx["configured"], ctx["pods_per_inst"]
-    scale = hdr.get("mode") == "scaledown"
+    op, hook = _window_operation(hdr), f["param"]
+    N0 = dict(N)
     target = {c: int(hdr.get(TO_KEYS[c], N[c])) for c in COMPS}
-    acting = {c for c in configured if target[c] != N[c]} if scale else _bumped(ctx)
+    rb = _rollback_new(hdr) if op == "rollback" else None
+    medit = _midroll_new(hdr) if op == "edit" else None
+    mv, dstate = None, {"last_poll": 0.0, "gone": False}
+    mcomp = "engine" if "engine" in configured else sorted(configured)[0]
+    if op == "scale":
+        acting = {c for c in configured if target[c] != N[c]}
+    elif op in ("runtime", "delete"):
+        acting = set(configured)
+    elif op == "move":
+        acting = {mcomp}
+    else:
+        acting = _bumped(ctx)
     controls = configured - acting
     ctx["track_comps"] = sorted(configured)
-    win = _window_new(f, hdr, "scale" if scale else "push")
-    win["expected_created"] = _expected_creations(ctx, acting, target if scale else None)
+    win = _window_new(f, hdr, op)
+    win["expected_created"] = _window_expected(ctx, op, acting, target, mcomp)
+    scale_down = op == "scale" and any(target[c] < N[c] for c in acting)
+    if scale_down:
+        # The Instances the scale takes: their pods may go during the window.
+        win["owned_uids"] = {p["uid"] for p in ctx["pod_state"].values()
+                             if p and p["alive"] and p.get("uid") and p["comp"] in acting
+                             and int(p.get("inst", 0) or 0) >= target[p["comp"]]}
     knob = f"lift={win['lift']}" if kind == WEBHOOK_FAULT else f"form={win['form']} target={f['target']}"
-    goal = (" ".join(f"{c} {N[c]}->{target[c]}" for c in sorted(acting)) if scale else f"bump {sorted(acting)}")
-    print(f"  Phase 2: {goal}, then {kind}:{f['param']} as it lands ({knob})")
-    if scale:
+    goal = {"scale": " ".join(f"{c} {N[c]}->{target[c]}" for c in sorted(acting)),
+            "runtime": f"{hdr.get('edit') or 'env'} edit of the runtime {sorted(configured)} inherit",
+            "move": f"move {mcomp} Instance {hdr.get('inst', 0)}", "delete": "delete the service",
+            "rollback": f"bump {sorted(acting)}, roll back at {hdr.get('during')}",
+            "edit": f"bump {sorted(acting)}, {hdr.get('edit')} at {hdr.get('during')}"}.get(op, f"bump {sorted(acting)}")
+    when = f"at {hdr.get('at')} of the move" if op == "move" else f"at {hook}" if hook != "settling" else "as it lands"
+    print(f"  Phase 2: {goal}, then {kind}:{hook} {when} ({knob})")
+    if op == "scale":
         ok, msg = _scale_patch(case_id, {c: target[c] for c in acting})
         ctx["trigger_ts"] = time.time()
+    elif op == "runtime":
+        edit = str(hdr.get("edit") or "env")
+        ok = _bump_runtime(ctx, str(hdr.get("rt")), sorted(configured), True,
+                           kind=("image" if edit == "image" else "env"), image=hdr.get("img"))
+        msg = "csr patch failed"
+    elif op == "move":
+        mv = _window_move_request(ctx, hdr)
+        ok, msg = mv is not None, ctx.get("trigger_error", "migration request failed")
+    elif op == "delete":
+        rr = kubectl("-n", NS, "delete", "isvc", case_id, "--wait=false")
+        ctx["trigger_ts"] = time.time()
+        ok, msg = rr.returncode == 0, rr.stderr.strip()[:200]
     else:
+        if rb and not _rollback_snapshot(rb, _isvc_spec(case_id), acting):
+            return _finish(case_id, desc, hdr, ctx, "TRIGGER_FAIL", "FAIL", [rb["error"]], [f"  ✗ {rb['error']}"])
         ok, msg = _bump_rev(ctx, acting), ctx.get("trigger_error", "bump failed")
     if not ok:
         return _finish(case_id, desc, hdr, ctx, "TRIGGER_FAIL", "FAIL",
                        [f"trigger failed: {msg}"], [f"  ✗ trigger failed: {msg}"])
+    if scale_down:
+        for c in acting:
+            N[c] = target[c]   # the floor's basis is the count the scale leaves
     win["ir_names"] = _case_ir_names(case_id)
+
+    def done():
+        agg = ctx.get("agg") or {}
+        if op == "move":
+            _window_move_poll(mv, case_id, time.time(), every=ROW_POLL_S * 2)
+            return _window_move_done(ctx, f, mv)
+        if op == "delete":
+            return _window_delete_done(ctx, dstate)
+        for c in configured:
+            alive, ready, updated = agg.get(c, (0, 0, 0))
+            want = target[c] if op == "scale" else N0[c]
+            if alive != want or ready != want:
+                return False
+            if c in acting and op in ("push", "edit", "runtime") and updated != want:
+                return False
+            if c in acting and op == "rollback" and updated != 0:
+                return False
+        if op == "rollback":
+            return not any(p and p["alive"] and p["comp"] in acting and _pod_on_new(p, ctx["old_hashes"])
+                           for p in ctx["pod_state"].values())
+        return True
+
+    if op == "delete":
+        budget = min(MAX_BUDGET_S, TEARDOWN_BASE_S + TEARDOWN_PER_POD_S * sum(N0[c] * ppi[c] for c in configured))
+    elif op == "move":
+        budget = min(MAX_BUDGET_S, 2 * (ROTATE_BASE_S + ROTATE_PER_POD_S * N0[mcomp] * ppi[mcomp]))
+    else:
+        pods = sum(max(N0[c], target[c]) * ppi[c] for c in acting)
+        budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * pods * (2 if op == "rollback" else 1))
+    reached, why = _window_wait_hook(ctx, op, hook, rb, medit, mv, acting, done, budget)
+    if not reached:
+        f["infra_fail"] = f"{kind}:{hook}: the window never opened — {why}"
+        return _finish(case_id, desc, hdr, ctx, "HOOK_MISSED", "INFRA-FAIL", [why], [f"  ✗ {f['infra_fail']}"])
     if kind == WEBHOOK_FAULT:
         win["metrics_before"] = _reconcile_counts(_manager_metrics()) or None
     _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
     win["fault_ts"] = time.time()
     if f["infra_fail"]:
         return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
-
-    def done():
-        agg = ctx.get("agg") or {}
-        for c in configured:
-            alive, ready, updated = agg.get(c, (0, 0, 0))
-            want = target[c] if scale else N[c]
-            if alive != want or ready != want:
-                return False
-            if not scale and c in acting and updated != want:
-                return False
-        return True
-
-    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(max(N[c], target[c]) * ppi[c] for c in acting))
+    what = WINDOW_WHAT[op]
     if kind == WEBHOOK_FAULT:
         print(f"  Phase 3: watching under the outage until the lift is due (≤{_window_span(win)}s)")
         _window_hold(ctx, f, win, done)
@@ -11494,29 +11816,32 @@ def _window_op(case_id, yaml_file, desc, hdr):
         if f["infra_fail"]:
             state = "LIFT_FAILED"
         else:
-            print(f"  Phase 5: watching {'the scale' if scale else 'the roll'} complete (≤{budget}s)")
+            print(f"  Phase 5: watching {what} complete (≤{budget}s)")
             state = _window_complete(ctx, f, win, done, budget)
     else:
-        print(f"  Phase 3: watching {'the scale' if scale else 'the roll'} complete under the writer (≤{budget}s)")
+        print(f"  Phase 3: watching {what} complete under the writer (≤{budget}s)")
         state = _window_complete(ctx, f, win, done, budget)
         _window_close(ctx, f, win)
-    if state == "CONVERGED":
-        want = {c: (target[c] if scale else N[c]) for c in COMPS}
+    if state == "CONVERGED" and op != "delete":
+        want = {c: (target[c] if op == "scale" else N0[c]) for c in COMPS}
         win["rows_settled"], win["rows_why"] = _wait_rows_settled(case_id, want, configured, ROWS_SETTLE_S)
         win["leftover_hold"] = _leftover_hold(case_id)
     _window_end_tally(ctx, win)
     verdict, notes, checks = "PASS", [], []
     verdict = _window_checks(f, win, state, verdict, notes, checks)
     verdict = _ceiling_checks(ctx, verdict, notes, checks)
-    verdict = min_ready_checks(ctx, sorted(configured if scale else acting), verdict, notes, checks)
-    verdict = gang_atomicity_checks(ctx, sorted(acting), verdict, notes, checks)
-    if state == "CONVERGED":
-        verdict = index_collision_checks(ctx, sorted(acting), verdict, notes, checks)
-    if not scale:
-        verdict = surge_before_drain_checks(ctx, sorted(acting), verdict, notes, checks)
+    if op != "delete":
+        verdict = min_ready_checks(ctx, sorted(configured if op in ("scale", "move") else acting), verdict, notes, checks)
+        verdict = gang_atomicity_checks(ctx, sorted(acting), verdict, notes, checks)
+        if state == "CONVERGED" and op != "move":
+            verdict = index_collision_checks(ctx, sorted(acting), verdict, notes, checks)
+        if op in ("push", "rollback", "edit", "runtime"):
+            verdict = surge_before_drain_checks(ctx, sorted(acting), verdict, notes, checks)
     verdict = _window_control_checks(ctx, win, controls, verdict, notes, checks)
+    verdict = _window_op_checks(ctx, op, state, rb, medit, mv, acting, verdict, notes, checks)
+    if op == "delete" and state == "CONVERGED":
+        return _window_recreate(case_id, yaml_file, desc, hdr, ctx, state, verdict, notes, checks)
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
-
 
 def _idle_window(ctx, f, hdr):
     """A window fault on the settled service: nothing may move while it
@@ -11609,7 +11934,7 @@ def _window_checks(f, win, state, verdict, notes, checks):
     once; the rows settled with nothing left held."""
     kind, op = win["kind"], win["op"]
     label = f"{kind}:{f['param']}"
-    what = {"push": "the push", "scale": "the scale", "idle": "the steady service"}[op]
+    what = WINDOW_WHAT[op]
     if kind == WEBHOOK_FAULT:
         if win["refused_at"] is None:
             f["infra_fail"] = (f"{label}: admission kept answering with the webhooks pointed at a Service that does "
@@ -11651,13 +11976,14 @@ def _window_checks(f, win, state, verdict, notes, checks):
         torn = {c: n for c, n in win["torn_in_window"].items() if n}
         if torn:
             verdict = "FAIL"
-            notes.append(f"{label}: running pod(s) left during the window: "
+            whose = "running pod(s)" if op == "idle" else "running pod(s) the operation does not own"
+            notes.append(f"{label}: {whose} left during the window: "
                          + ", ".join(f"{c}-{n}" for c, n in sorted(torn.items())))
-            checks.append(f"  ✗ {label}: {sum(torn.values())} running pod(s) left during the window "
+            checks.append(f"  ✗ {label}: {sum(torn.values())} {whose} left during the window "
                           f"({', '.join(f'{c}-{n}' for c, n in sorted(torn.items()))}) — nothing may be taken down under "
-                          f"{f.get('cause', 'the fault')}")
+                          f"{f.get('cause', 'the fault')}" + ("" if op == "idle" else " beyond what the scale takes"))
         else:
-            checks.append(f"  ✓ {label}: no running pod left during the window")
+            checks.append(f"  ✓ {label}: no running pod{'' if op == 'idle' else ' the operation does not own'} left during the window")
     if op == "idle":
         made = {c: n for c, n in win["created"].items() if n}
         if made:
@@ -11709,16 +12035,17 @@ def _window_checks(f, win, state, verdict, notes, checks):
             notes.append(f"{label}: {what} did not complete after {back} ({state})")
             checks.append(f"  ✗ {label}: {what} did not complete within budget after {back} ({state})")
         if state == "CONVERGED":
+            slots = "pod slot(s) over the roll and the roll back" if op == "rollback" else "pod slot(s)"
             for c in sorted(win["expected_created"]):
                 want, got = win["expected_created"][c], win["created"].get(c, 0)
                 if got > want:
                     verdict = "FAIL"
                     notes.append(f"{c}: {got} pod(s) created for {want} slot(s)")
-                    checks.append(f"  ✗ {label}: {c} got {got} new pod(s) for {want} pod slot(s) — something was applied twice")
+                    checks.append(f"  ✗ {label}: {c} got {got} new pod(s) for {want} {slots} — something was applied twice")
                 elif got < want:
-                    checks.append(f"  ⚠ {label}: {c} got {got} new pod(s) for {want} pod slot(s) (fewer than a rebuild of each)")
+                    checks.append(f"  ⚠ {label}: {c} got {got} new pod(s) for {want} {slots} (fewer than a rebuild of each)")
                 elif want:
-                    checks.append(f"  ✓ {label}: {c}: each of its {want} pod slot(s) was created once")
+                    checks.append(f"  ✓ {label}: {c}: each of its {want} {slots} was created once")
     if win["rows_settled"] is not None:
         if win["rows_settled"]:
             checks.append(f"  ✓ {label}: every InferenceReplica row ended Ready with no operation open")
@@ -12434,19 +12761,37 @@ def validate_case_file(path):
             errs.append(f"{path}:1: repeat= is the persistent form of a kill (mode=kill) or of "
                         f"fault={'|'.join(sorted(REPEAT_FAULTS))}:<hook> under a push or a scale (mode=rollout|scaledown)")
     # A window fault: the admission webhook unreachable, or a competing
-    # writer, on the settled service (idle, with during=idle) or as a push
-    # or a scale lands (settling).
+    # writer, on the settled service (idle, with during=idle), as an
+    # operation lands (settling), at a hook of the roll a push or a runtime
+    # edit starts (rotating, draining), or at a moment of a move (migrating
+    # with at=).
     if fault_kind in WINDOW_FAULTS:
+        wop = _window_operation(fields)
         if mode not in WINDOW_MODES:
-            errs.append(f"{path}:1: fault={fields.get('fault')} holds a window over a push (mode=rollout), the settled "
-                        f"service (mode=rollout during={IDLE_FAULT_PHASE}) or a scale (mode=scaledown)")
+            errs.append(f"{path}:1: fault={fields.get('fault')} holds a window over a push, a rollback or a mid-roll edit "
+                        f"(mode=rollout), the settled service (mode=rollout during={IDLE_FAULT_PHASE}), a scale "
+                        f"(mode=scaledown), a runtime edit (mode=runtimerev), a move (mode=migrate) or a delete (mode=recreate)")
         if (fault_param == IDLE_FAULT_PHASE) != (during == IDLE_FAULT_PHASE):
             errs.append(f"{path}:1: fault={fault_kind}:{IDLE_FAULT_PHASE} is the window on the settled service and goes with "
                         f"during={IDLE_FAULT_PHASE}; fault={fault_kind}:settling starts as the operation lands, with no during=")
-        elif during and during != IDLE_FAULT_PHASE:
-            errs.append(f"{path}:1: during={during} does not combine with fault={fields.get('fault')} (the window starts at its own phase)")
-        if mode == "scaledown" and fault_param != "settling":
-            errs.append(f"{path}:1: a window over a scale starts as the scale lands (fault={fault_kind}:settling)")
+        elif during and during != IDLE_FAULT_PHASE and wop not in ("rollback", "edit"):
+            errs.append(f"{path}:1: during={during} does not combine with fault={fields.get('fault')} (the window starts at "
+                        f"its own hook; during= is the hook of a rollback=1 or a mid-roll edit= the window then opens on)")
+        if wop in ("scale", "delete", "rollback", "edit") and fault_param != "settling":
+            what = {"scale": "the scale", "delete": "the delete", "rollback": "the rollback", "edit": "the mid-roll edit"}[wop]
+            errs.append(f"{path}:1: a window over {what} starts as {what} lands (fault={fault_kind}:settling)")
+        if wop == "rollback" and during not in WINDOW_ROLLBACK_HOOKS:
+            errs.append(f"{path}:1: a window over a rollback opens once the rollback has fired at "
+                        f"during={'|'.join(sorted(WINDOW_ROLLBACK_HOOKS))}")
+        if wop in ("push", "runtime") and fault_param not in WINDOW_ROLL_HOOKS and fault_param != IDLE_FAULT_PHASE:
+            errs.append(f"{path}:1: a window under a push or a runtime edit starts at a hook of the roll "
+                        f"(fault={fault_kind}:{'|'.join(sorted(WINDOW_ROLL_HOOKS))})")
+        if wop == "move":
+            if fault_param != WINDOW_MOVE_PHASE or str(fields.get("at", "")) not in MOVE_HOOKS or "then" in fields:
+                errs.append(f"{path}:1: a window over a move starts at a moment of the move "
+                            f"(fault={fault_kind}:{WINDOW_MOVE_PHASE} at={'|'.join(sorted(MOVE_HOOKS))}, no then=)")
+            if str(fields.get("mig", "Auto")) == "Never":
+                errs.append(f"{path}:1: a window over a move needs a move the policy admits (not mig=Never)")
         if fault_kind == WEBHOOK_FAULT:
             if lift not in WEBHOOK_LIFTS:
                 errs.append(f"{path}:1: fault={fields.get('fault')} needs lift={'|'.join(sorted(WEBHOOK_LIFTS))} "
@@ -12707,14 +13052,21 @@ def validate_case_file(path):
     if at_move:
         if mode != "migrate":
             errs.append(f"{path}:1: at={fields['at']} is the moment of a move a fault fires at (mode=migrate)")
-        if not (fault_kind in BREAK_FAULTS and break_param == CRASHLOOP_VICTIM) and not (fault_kind == "node" and str(fields.get("fault", "")).partition(":")[2] == NODE_PARAM):
-            errs.append(f"{path}:1: at={fields['at']} fires a break of the running fleet or a node loss "
-                        f"(fault=crashloop|imagepull:{CRASHLOOP_VICTIM} or fault=node:{NODE_PARAM})")
+        window_move = fault_kind in WINDOW_FAULTS and fault_param == WINDOW_MOVE_PHASE
+        if not (fault_kind in BREAK_FAULTS and break_param == CRASHLOOP_VICTIM) and not window_move \
+                and not (fault_kind == "node" and str(fields.get("fault", "")).partition(":")[2] == NODE_PARAM):
+            errs.append(f"{path}:1: at={fields['at']} fires a break of the running fleet, a node loss or a window fault "
+                        f"(fault=crashloop|imagepull:{CRASHLOOP_VICTIM}, fault=node:{NODE_PARAM} or "
+                        f"fault={'|'.join(sorted(WINDOW_FAULTS))}:{WINDOW_MOVE_PHASE})")
         if move_victim not in MOVE_VICTIMS:
             errs.append(f"{path}:1: victim={fields.get('victim')} under at= names whose pod breaks "
                         f"(victim={'|'.join(sorted(MOVE_VICTIMS))})")
-        if move_victim == "sibling" and fields.get("Nd", 0) == 0:
-            errs.append(f"{path}:1: victim=sibling breaks the decoder's highest Instance (needs Nd>0)")
+        if move_victim == "sibling":
+            sibling = str(fields.get("victimcomp") or "decoder")
+            count_key = {"decoder": "Nd", "router": "Nr"}.get(sibling)
+            if not count_key or fields.get(count_key, 0) == 0:
+                errs.append(f"{path}:1: victim=sibling breaks the decoder's highest Instance, or the router's with "
+                            f"victimcomp=router (needs Nd>0, or Nr>0 for the router)")
         if fault_kind == "node" and move_victim != MOVE_DEFAULT_VICTIM:
             errs.append(f"{path}:1: a node loss during a move is the source node's (victim={MOVE_DEFAULT_VICTIM})")
         if fault_kind == "node" and str(fields.get("lift", "")) != "after-recover":
@@ -12727,10 +13079,13 @@ def validate_case_file(path):
             errs.append(f"{path}:1: a move-moment fault needs a move the policy admits (mig=Never rejects the request)")
         if len(str(fields.get("inst", 0)).split(",")) != 1:
             errs.append(f"{path}:1: a move-moment fault rides one Instance's move (inst= names one)")
-        for k in ("dup", "hint", "blocked", "during", "victimcomp", "expect", "victims"):
+        for k in ("dup", "hint", "blocked", "during", "expect", "victims"):
             if k in fields:
                 errs.append(f"{path}:1: {k}= does not combine with a move-moment fault (victim= names the pod, "
                             f"the verdict is the move's end state)")
+        if "victimcomp" in fields and (move_victim != "sibling" or str(fields["victimcomp"]) not in ("decoder", "router")):
+            errs.append(f"{path}:1: victimcomp= under a move-moment fault names the sibling a break hits "
+                        f"(victim=sibling with victimcomp=decoder|router)")
     elif move_victim in MOVE_VICTIMS and "victim" in fields:
         errs.append(f"{path}:1: victim={fields['victim']} names the pod a move-moment fault hits (needs mode=migrate at=<moment>)")
     if fields.get("blocked") and "fault" not in fields:
@@ -19548,6 +19903,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                      None, None, "MODE_TODO", f"mode={mode} not implemented", zero)
         return 0
 
+    if mode in ("migrate", "recreate", "runtimerev") and str(hdr.get("fault", "")).partition(":")[0] in WINDOW_FAULTS:
+        return _window_op(case_id, yaml_file, desc, hdr)
     if mode == "partition":
         return _partition(case_id, yaml_file, desc, hdr)
     if mode == "rebump":

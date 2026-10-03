@@ -2078,6 +2078,25 @@ shapes.
   nothing left held. The generated `isvcs/gen-conflict/` family crosses the
   form and the target with the same operations and shapes; the writer is
   per service, so these cases run in the concurrent pool.
+- **A window at every hook.** Both window faults also open at
+  `rotating` and `draining` under a push or a runtime edit
+  (`mode=runtimerev`, `fault=<kind>:settling|rotating|draining`), as a
+  rollback lands (`rollback=1 during=settling|rotating|draining|last`,
+  `fault=<kind>:settling`), as a mid-roll edit lands
+  (`edit=strategy:*|restartPolicy:* during=settling|rotating`), as a
+  scale-down lands (`mode=scaledown` with a target below the count), at a
+  moment of a move (`mode=migrate fault=<kind>:migrating at=accept|surge|drain`)
+  and as a delete lands (`mode=recreate`). One handler reads them all with
+  the window verdict above: the operation waits with a reason while the
+  window holds and completes once it closes, each pod slot created once (a
+  rollback: at most once in each direction; a scale-down creates nothing
+  and may take down only the Instances it owns), the rows settled with
+  nothing left held; a rollback ends on the starting revision, an edit is on
+  the live spec, a move's ledger row reads Completed once with its
+  annotation consumed and its Instance whole, and a delete comes back under
+  the same name on fresh pods once the window has closed. A hook the
+  operation passes before the window can open (the roll completes first)
+  is `INFRA-FAIL`, never a pass. Not under a canary step (`MISSING_HOOKS`).
 - **`fault=quota`, `fault=taint`, `fault=preempt`, `fault=webhook`, `via=preempt` and
   `pool=packed` cases run serially.** A quota case creates a *namespace-wide*
   ResourceQuota sized from a live usage snapshot, so run concurrently it both
@@ -2292,11 +2311,15 @@ Four generators write into `isvcs/`; re-run one after editing it:
   place with stable pod identities, an env, resources or probe change is
   refused on a single-pod Instance and rebuilt whole on a gang, and a crash
   loop under each is repaired or fixed the way the strategy allows), and the
-  window faults (`p8900`–`p9049`) → `isvcs/gen-webhook/` (the admission
+  window faults (`p8900`–`p9049`, continued at `p10300`–`p10449` and
+  `p10450`–`p10699`) → `isvcs/gen-webhook/` (the admission
   webhook unreachable on the settled service, as a push lands and as a
-  scale-up lands, for a bounded time or across the hold window) and
+  scale-up lands, for a bounded time or across the hold window, and at the
+  push's later hooks, as a rollback, a strategy edit, a scale-down, a
+  runtime edit or a delete lands and as a move's request is recorded) and
   `isvcs/gen-conflict/` (a competing writer on the ISVC or the
-  InferenceReplicas, once or until the operation completes), the
+  InferenceReplicas, once or until the operation completes, over the same
+  operations and hooks), the
   faults crossed with a move and with a runtime edit (`p7800`–`p7999`) →
   `isvcs/gen-fault-move/` (a break, or the loss of the source node, at accept,
   at surge or at drain of a move, on the moved Instance, a peer or the decoder)
