@@ -2797,3 +2797,47 @@ func TestProjectedReplicaDerivesNamesFromItsParent(t *testing.T) {
 		t.Fatalf("revision key name = %q, want svc-engine", rk.Name)
 	}
 }
+
+// TestComposedFieldsAnnotationIsHashNeutral locks that the composed-fields
+// annotation, which the referencing InferenceService writes on the replica
+// object, never mints a revision in either replica form: a runners-based
+// replica takes its pod-template metadata from its runners, and a
+// refs-based replica, whose render inherits its object annotations, excludes
+// every one of them from the hash.
+func TestComposedFieldsAnnotationIsHashNeutral(t *testing.T) {
+	const held = "svc:paused"
+
+	t.Run("runners-based", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		ir := baselineIR("pool-a", "team-a", 3)
+		ir.OwnerReferences, ir.Spec.ParentRef, ir.Annotations = nil, nil, nil
+		plain := desiredFromIR(ir, ir.Spec.Runners)
+
+		annotated := ir.DeepCopy()
+		annotated.Annotations = map[string]string{constants.InferenceReplicaComposedFieldsAnnotationKey: held}
+		withHolding := desiredFromIR(annotated, annotated.Spec.Runners)
+		g.Expect(withHolding.PodTemplateObjectMeta).To(gomega.Equal(plain.PodTemplateObjectMeta),
+			"the annotation on the replica object must not reach the pod template")
+
+		plainHash, _, err := (&Reconciler{}).revisionHash(ir, workloadtypes.ReconcileInput{DesiredSpec: plain}, nil, "scope-uid")
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		heldHash, _, err := (&Reconciler{}).revisionHash(annotated, workloadtypes.ReconcileInput{DesiredSpec: withHolding}, nil, "scope-uid")
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(heldHash).To(gomega.Equal(plainHash), "the annotation must not move the revision hash")
+	})
+
+	t.Run("refs-based", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		ir := refsReplica()
+		ir.Annotations = map[string]string{constants.InferenceReplicaComposedFieldsAnnotationKey: held}
+		excluded := hashExcludedAnnotationKeys(ir)
+		g.Expect(excluded).To(gomega.HaveKey(constants.InferenceReplicaComposedFieldsAnnotationKey))
+
+		inherited := &metav1.ObjectMeta{Annotations: map[string]string{
+			constants.InferenceReplicaComposedFieldsAnnotationKey: held,
+			"ome.io/declared": "1",
+		}}
+		g.Expect(stripExcludedAnnotations(inherited, excluded).Annotations).To(gomega.Equal(map[string]string{"ome.io/declared": "1"}),
+			"the inherited annotation is stripped before hashing while declared template annotations stay")
+	})
+}

@@ -9,6 +9,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
@@ -160,5 +161,38 @@ var _ = ginkgo.Describe("InferenceReplica ownership admission", func() {
 
 	ginkgo.It("admits a standalone replica whose runtime is not found", func() {
 		Expect(userClient.Create(suiteCtx, refsIR(ns.Name, "pool-a", v1beta1.DecoderComponent, ns.Name+"-missing"))).To(Succeed())
+	})
+
+	// The admin client is the controller identity, so a standalone replica
+	// is created through userClient and steered through k8sClient with the
+	// merge patch a composing InferenceService sends.
+	ginkgo.It("lets the controller identity write only rollout-control fields on a replica it does not project", func() {
+		ir := bareIR(ns.Name, "pool-a", v1beta1.EngineComponent)
+		Expect(userClient.Create(suiteCtx, ir)).To(Succeed())
+
+		fresh := &v1beta1.InferenceReplica{}
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(ir), fresh)).To(Succeed())
+		steered := fresh.DeepCopy()
+		steered.Spec.Pacing = &v1beta1.InferenceReplicaPacing{Partition: ptr.To(int32(1))}
+		Expect(k8sClient.Patch(suiteCtx, steered, client.MergeFrom(fresh))).To(Succeed())
+
+		Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(ir), fresh)).To(Succeed())
+		scaled := fresh.DeepCopy()
+		scaled.Spec.Replicas = ptr.To(int32(3))
+		err := k8sClient.Patch(suiteCtx, scaled, client.MergeFrom(fresh))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("rollout-control fields (pacing.partition, paused, pauseMode, pacing.rollbackToRevision, pairingProtocol)"))
+	})
+
+	ginkgo.It("rejects a user write to the composed-fields annotation", func() {
+		ir := bareIR(ns.Name, "pool-a", v1beta1.EngineComponent)
+		Expect(userClient.Create(suiteCtx, ir)).To(Succeed())
+
+		fresh := &v1beta1.InferenceReplica{}
+		Expect(userClient.Get(suiteCtx, client.ObjectKeyFromObject(ir), fresh)).To(Succeed())
+		fresh.Annotations = map[string]string{constants.InferenceReplicaComposedFieldsAnnotationKey: "svc:paused"}
+		err := userClient.Update(suiteCtx, fresh)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("written by the InferenceService controller"))
 	})
 })

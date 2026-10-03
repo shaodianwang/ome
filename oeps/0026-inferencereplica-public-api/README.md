@@ -192,12 +192,13 @@ standalone replica carries neither.
 |---|---|---|---|
 | Projected (inline role) | ISVC controller | the whole spec (the projector) | admission by controller identity; anyone RBAC admits may still write metadata |
 | Standalone | the user: any principal RBAC lets write it except the ISVC controller; admission does not track which user created it | nothing: the projector refuses an IR it does not project, and no ISVC names a standalone IR before Phase 3 | RBAC, plus the controller-only fields and the standalone rejections (Design Details) |
-| Referenced (Phase 3) | the user | at most the rollout-control fields, only while a rollout group names the IR | admission by controller identity; which writes it admits depends on Open Question 1 |
+| Referenced (Phase 3) | the user | exactly `pacing.partition`, `paused`, `pauseMode`, `pacing.rollbackToRevision` and `pairingProtocol`, recorded in the `ome.io/composed-fields` annotation; never a create | admission by controller identity: a controller write that touches any other spec field is denied whole, and only the controller adds, changes or removes the annotation; with no identity configured the controller is not recognizable on a referenced IR, so composition is unavailable there |
 
-Whether the composer may write even the rollout-control fields on a referenced
-IR is **Open Question 1**. The alternative is that cross-set rollouts are driven
-only by policy objects the user binds (`RolloutPolicy`, OEP-0017.1), and the ISVC
-never writes a referenced IR at all.
+Open Question 1 is answered *yes*, for those five fields only: admission lets
+the composer steer a rollout and never scale, re-render or re-budget an IR it
+does not own (`pacing.maxUnavailable` stays the user's). Admission does not check that
+an ISVC names the IR at that moment, because the write that releases the held
+fields arrives after the reference is gone and must be admitted.
 
 ### 4. Spec split
 
@@ -329,10 +330,19 @@ Rules:
 3. On a projected IR, a spec write by anyone but the ISVC controller is
    rejected. On any IR, a write to a controller-only field by anyone but the
    ISVC controller is rejected, and `parentRef` is immutable for every writer.
-   On a referenced IR, a write to a user field by anyone but the owner is
-   rejected (Phase 3). On any IR, a write to a rollout-control field by anyone
-   but the owner or the composer is rejected (Phase 3). Phase 1 enforces the
-   projected-IR and controller-only checks. Mechanism in Design Details.
+   On an IR it does not project, the ISVC controller is a composer, not the
+   owner: it may not create the IR, and it may change only `pacing.partition`,
+   `paused`, `pauseMode`, `pacing.rollbackToRevision` and `pairingProtocol`,
+   the controller-only fields, and the `ome.io/composed-fields` annotation
+   that records the service holding them; a write that also touches any
+   other spec field (`replicas`, `runners`, `pacing.maxUnavailable`, …) is
+   rejected whole, never partly applied. Only the ISVC controller adds,
+   changes or removes that annotation, on either form; anyone may keep it.
+   With no controller identity configured, the webhook recognizes the
+   controller only by the controller-write annotation the projector stamps
+   on the IRs it projects, so a composer's write on a referenced IR is a
+   user's write there and composition is unavailable. Mechanism in Design
+   Details.
 4. A standalone IR's name is the prefix of its pod and Service names, so it
    must match the ISVC name pattern and must not collide with an ISVC. The IR
    webhook rejects a standalone IR named `<isvc>` or `<isvc>-<component>` for
@@ -380,9 +390,11 @@ Two mechanisms can implement rule 3 above. Both are stated; one is recommended.
 - **(a) Admission by identity.** The IR webhook already exists and already sees
   `req.UserInfo`. Replace the annotation gate with: if the IR has a controller
   owner reference to an ISVC, user-field writes must come from the OME manager
-  ServiceAccount; otherwise from anyone RBAC allows. Rollout-control writes are
-  allowed from the manager when `status.coordinationGroupRef` or an ISVC
-  `replicaRefs` entry names the IR. *Tradeoff:* the webhook must know the
+  ServiceAccount; otherwise from anyone RBAC allows. Rollout-control writes on
+  a standalone IR are allowed from the manager without checking that an ISVC
+  names the IR at that moment: the write that releases the held fields arrives
+  after the reference is gone and must be admitted, and the
+  `ome.io/composed-fields` annotation records the holder. *Tradeoff:* the webhook must know the
   manager's identity, which is config (a ServiceAccount name from the Helm
   chart, not a literal in Go).
 - **(b) Server-side-apply field managers.** The projector and the composer apply
@@ -433,9 +445,9 @@ requester:
 
 | Request | Projected IR | Standalone IR |
 |---|---|---|
-| Create | only the controller, and only with the ISVC controller owner reference: `parentRef` without it is refused for every writer | anyone RBAC admits; the placement fields need the controller; the standalone rejections below apply |
-| Spec update | only the controller | anyone RBAC admits; the controller-only fields need the controller; the standalone rejections below apply, except the name checks, which run at create |
-| Metadata-only update: labels, annotations, finalizers, keeping or removing the controller owner reference | anyone RBAC admits | anyone RBAC admits, except adding a migration request |
+| Create | only the controller, and only with the ISVC controller owner reference: `parentRef` without it is refused for every writer | anyone RBAC admits except the controller, which creates only the IRs it projects; the placement fields are refused; the standalone rejections below apply |
+| Spec update | only the controller | anyone RBAC admits; the controller-only fields need the controller, and the controller may change only them and the rollout-control fields (rule 3); the standalone rejections below apply, except the name checks, which run at create |
+| Metadata-only update: labels, annotations, finalizers, keeping or removing the controller owner reference | anyone RBAC admits, except changing `ome.io/composed-fields` | anyone RBAC admits, except adding a migration request or changing `ome.io/composed-fields` |
 | Install or change a controller owner reference | only the controller | only the controller for an ISVC controller owner reference; anyone RBAC admits for another kind's |
 | Change `parentRef` or `component` | refused for every writer | refused for every writer |
 | Delete | not gated | not gated |
@@ -480,9 +492,14 @@ Recreating an ISVC with the same name re-adopts the IRs. The new ISVC's UID
 scopes a new revision history, so each IR moves its Instances onto a new
 revision through its update strategy, even when the pod template is unchanged.
 
-Composer writes on a referenced IR arrive with Phase 3, and their rule depends
-on Open Question 1. Phase 1 has no composer writes: no ISVC names a standalone
-IR, and the ISVC controller writes only the IRs it projects.
+Composer writes on an IR the controller does not project follow rule 3. The
+webhook zeroes the rollout-control and controller-only fields on both sides
+of the update and denies it if anything else differs, so a patch carrying
+`spec.replicas` beside `spec.paused` is refused whole rather than partly
+applied. A change to `ome.io/composed-fields` leaves the metadata-only fast
+path and needs the identity, so a user can neither forge nor strip the record
+of what the controller holds, while every other annotation edit still passes
+without the identity.
 
 ### Rendering library extraction
 
@@ -522,12 +539,10 @@ a referenced IR means.
 Nothing new is invented. Per-revision Services stay ISVC-created because their
 selector is `{isvc, component, revision-hash, managed-by}`
 (`perRevisionServiceSelector`) and their consumer is the HTTPRoute the ISVC owns.
-For a referenced IR the `isvc` label value is the composing ISVC's name, stamped
-by the composer onto the IR's pod template labels — which is a rollout-control
-write. If Open Question 1 resolves to "the composer writes nothing", the
-per-revision Service selector must instead key on the IR name, and the peer env
-must be rendered from the IR's own label. That is the one place the two answers
-to Open Question 1 produce different code.
+For a referenced IR the `isvc` label value is the IR's own name: the composer
+stamps nothing onto the IR's pod template (a pod-template write is a user-field
+write, which admission denies), so the per-revision Service selector keys on the
+IR name and the peer env is rendered from the IR's own label.
 
 Peer env today requires the parent ISVC object (`ISVCRenderHook(isvc)`). For a
 referenced IR the IR controller resolves the composing ISVC through the
