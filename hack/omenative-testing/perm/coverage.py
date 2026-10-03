@@ -166,8 +166,9 @@ RESTART_POLICY_NAMES = {"None", "RecreateInstanceOnPodRestart"}
 # The rollout-mode runner edits a push carries beside its annotation bump.
 ROLLOUT_EDITS = {"image", "env", "resources", "probe"}
 IDLE_EXPECTS = {"repaired", "held", "heals", "parked", "relocated", "failed"}
-# What a scale-up leaves a broken Instance at: repaired, or left as the fault left it.
-BROKEN_UP_EXPECTS = {"repaired", "left"}
+# What a scale that does not take a broken Instance leaves it at: repaired,
+# left as the fault left it, or healed once a one-shot cause is gone.
+BROKEN_UP_EXPECTS = {"repaired", "left", "heals"}
 
 HEADER_VALUES = {
     "mode": {"rollout", "scaledown", "partition", "rebump", "migrate", "kill", "canary", "runtimerev",

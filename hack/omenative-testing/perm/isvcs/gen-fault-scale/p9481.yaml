@@ -1,0 +1,13 @@
+# p9481: [gen] broken readiness once up1 engine N=4 rp None  mode=scaledown Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=readiness:old co=none topo=engine form=recover during=idle to_e=5 inst=0 expect=heals
+# reason: the pod of the engine's Instance 0 stops passing its readiness probe while it keeps running, so it leaves rotation; once the status first reports Instance 0 broken the engine is scaled from 4 to 5 and, once the scale has landed, the readiness switch is lifted and the same pod passes readiness again: a new Instance 4 comes up on the running revision and serves, the healthy Instances keep their pods and never leave rotation (never below 3 Ready), nothing surges above 5, and the broken Instance is Ready and serving again on its running revision once the cause is gone, the same pod started again or rebuilt by a repair that is recorded at most once, with no new revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9481 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }

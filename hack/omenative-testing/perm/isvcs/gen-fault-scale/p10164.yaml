@@ -1,0 +1,25 @@
+# p10164: [gen] broken configkey once up1 engine-mn W1+router N=2 rp None  mode=scaledown Ne=2 Nd=0 Nr=2 ceil_e=3 ceil_d=0 ceil_r=2 fault=configkey:missing co=none topo=engine-mn during=idle to_e=3 inst=0 lift=after-settle expect=heals
+# reason: the ConfigMap key the runner of the leader pod of the engine's gang 0 reads is removed and the runner restarted, so its next start waits in CreateContainerConfigError and it serves nothing; once the status first reports Instance 0 broken the engine is scaled from 2 to 3 and, once the scale has landed, the key is put back and the kubelet's own retry starts the container: a new Instance 2 comes up on the running revision and serves, the healthy Instances keep their pods and never leave rotation (never below 1 Ready), nothing surges above 3, and the broken Instance is Ready and serving again on its running revision once the cause is gone, the same pod started again or rebuilt by a repair that is recorded at most once, with no new revision; the router is neither broken nor scaled and keeps its pods; each Instance is a gang of a leader and a worker, counted whole
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p10164 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: { runner: { name: "ome-container", env: [{ name: "TEST_CONFIG_VALUE", valueFrom: { configMapKeyRef: { name: "p10164-config", key: "value" } } }] } }
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: p10164-config }
+data: { value: "1" }

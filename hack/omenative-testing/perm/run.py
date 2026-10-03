@@ -2163,10 +2163,12 @@ ROWS_SETTLE_S = int(60 * TIMEOUT_MULT)
 HOLD_REASON_WAIT_S = int(90 * TIMEOUT_MULT)
 # imagepull has one form: an image that cannot be pulled never runs.
 IMAGEPULL_FORMS = {"start"}
-BREAK_VICTIM_COMPS = {"engine", "decoder"}
-# Under a canary the router in front of an engine ladder is a sibling a break
-# may hit too: the ladder never rolls it, so the repair owns the break.
-CANARY_BREAK_VICTIM_COMPS = BREAK_VICTIM_COMPS | {"router"}
+# The Components a break may hit: the engine and the decoder, which a roll
+# targets, and the router in front of an engine fleet, which no roll and no
+# scale of the engine touches, so its break is the repair's alone and the
+# operation on the engine is read as a negative control beside it.
+BREAK_VICTIM_COMPS = {"engine", "decoder", "router"}
+CANARY_BREAK_VICTIM_COMPS = BREAK_VICTIM_COMPS
 BREAK_DEFAULT_COMP = "engine"
 # readiness:<old|new> makes a pod run without ever passing readiness, through
 # the two switches the fixture runtimes' readiness probe reads (runtime/
@@ -2200,13 +2202,29 @@ READINESS_NEW_BITE_S = int(30 * TIMEOUT_MULT)
 # highest index otherwise), so the operation's natural victim and the
 # broken Instance can differ. The breaks such a case may use: a crash at
 # start or after Ready, an image that cannot be pulled, readiness that
-# stops passing.
+# stops passing, the ConfigMap key the runner reads removed. victimcomp=
+# aims the break at a sibling Component the operation does not scale.
 BROKEN_OP_MODES = {"scaledown", "recreate"}
-BROKEN_OP_FAULTS = BREAK_FAULTS | {READINESS_FAULT}
+BROKEN_OP_FAULTS = BREAK_FAULTS | {READINESS_FAULT, "configkey"}
+# The one-shot forms: lift=after-settle on a crash or a pull failure (the
+# harness heals its own break) or on the missing key (put back), and
+# readiness:old form=recover (the switch lifted). The cause is taken away
+# right after the operation lands, so the operation meets the broken
+# Instance and the Instance may serve again on its own afterwards.
+BROKEN_OP_LIFT = HEAL_LIFT
+# A cause armed on the settled service before the operation, with no
+# Instance broken: every node tainted, or a quota short of the pod the
+# operation creates; lift= says when it is removed (the pending vocabulary).
+BROKEN_OP_PENDING = {"taint", "quota"}
 # What a scale-up expects of the broken Instance: repaired (rebuilt, every
-# pod new, Ready and serving, a RestartTriggered event names it) or left as
-# the fault left it (no new pod for its index, no repair recorded).
-BROKEN_UP_EXPECTS = {"repaired", "left"}
+# pod new, Ready and serving, a RestartTriggered event names it), left as
+# the fault left it (no new pod for its index, no repair recorded), or heals
+# (the one-shot forms: Ready and serving again on its running revision once
+# the cause is gone, rebuilt or not, a repair reported at most once). A
+# sibling's broken Instance is not the scale's to take, so a scale-down
+# states its fate too.
+BROKEN_UP_EXPECTS = {"repaired", "left", "heals"}
+BROKEN_HEAL_EXPECT = "heals"
 # How long the status is given to report the broken Instance not Ready (its
 # row leaves Ready once a repair opens, which waits for the pod to be older
 # than the stuck-pod grace) before the operator acts on the serving count
@@ -2216,8 +2234,10 @@ BROKEN_STATUS_WAIT_S = int(120 * TIMEOUT_MULT)
 # pods have converged after the scale.
 BROKEN_ROWS_SETTLE_S = int(60 * TIMEOUT_MULT)
 # A readiness break before a scale or a delete keeps its switch set until the
-# case ends: only the persistent form is a broken-Instance operation.
-BROKEN_READINESS_FORMS = {"persist"}
+# case ends (form=persist), or lifts it right after the operation lands
+# (form=recover, the one-shot form).
+BROKEN_READINESS_FORMS = READINESS_FORMS
+BROKEN_READINESS_ONCE = "recover"
 # A break, or a node loss, fired at a moment of a move (mode=migrate
 # at=<moment>): accept once the request is recorded, surge once the
 # replacement pod has appeared, drain once the source is being taken down.
@@ -5152,7 +5172,7 @@ def _fault_configkey_fire(f, pod_state, old_hashes):
     pod, so a runtime-level or an ISVC-level env works alike. The restore is
     registered before the key is removed."""
     comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
-    victim = _crashloop_pick_pod(pod_state, old_hashes, comp)
+    victim = _crashloop_pick_pod(pod_state, old_hashes, comp, inst=f.get("inst") or None)
     if not victim:
         f["infra_fail"] = f"configkey: no live {comp} pod to break"
         return
@@ -12179,9 +12199,22 @@ def validate_case_file(path):
                 errs.append(f"{path}:1: during={IDLE_FAULT_PHASE} needs a persistent fault to fire "
                             f"(fault={'|'.join(sorted(IDLE_FAULTS))}:…, or fault=ctrlrestart:{IDLE_FAULT_PHASE} repeat=<n>)")
         elif broken_op:
-            if fault_kind not in BROKEN_OP_FAULTS or fault_param != CRASHLOOP_VICTIM:
+            break_param = CONFIGKEY_PARAM if fault_kind == "configkey" else CRASHLOOP_VICTIM
+            if fault_kind in BROKEN_OP_PENDING:
+                if str(fields.get("lift", "")) not in PENDING_LIFTS:
+                    errs.append(f"{path}:1: fault={fields.get('fault')} before a scale or a delete is a cause the operation "
+                                f"meets and needs lift={'|'.join(sorted(PENDING_LIFTS))} (when the cause is removed)")
+                if "inst" in fields or "victimcomp" in fields or "expect" in fields:
+                    errs.append(f"{path}:1: fault={fields.get('fault')} breaks no Instance: inst=, victimcomp= and expect= "
+                                f"do not apply (the operation's own pod waits on the cause)")
+            elif fault_kind not in BROKEN_OP_FAULTS or fault_param != break_param:
                 errs.append(f"{path}:1: during={IDLE_FAULT_PHASE} in mode={mode} breaks one Instance of the running "
-                            f"revision before the operation (needs fault={'|'.join(sorted(BROKEN_OP_FAULTS))}:{CRASHLOOP_VICTIM})")
+                            f"revision before the operation (needs fault={'|'.join(sorted(BREAK_FAULTS | {READINESS_FAULT}))}:"
+                            f"{CRASHLOOP_VICTIM} or fault=configkey:{CONFIGKEY_PARAM}), or arms a cause the operation meets "
+                            f"(fault={'|'.join(sorted(BROKEN_OP_PENDING))}:… lift={'|'.join(sorted(PENDING_LIFTS))})")
+            elif str(fields.get("lift", "")) not in ("", BROKEN_OP_LIFT):
+                errs.append(f"{path}:1: lift={fields.get('lift')} before a scale or a delete: the cause is kept (no lift=) "
+                            f"or taken away right after the operation lands (lift={BROKEN_OP_LIFT})")
         else:
             errs.append(f"{path}:1: during={IDLE_FAULT_PHASE} fires a persistent fault on the idle service (mode=rollout) "
                         f"or breaks one Instance before a scale or a delete (mode={'|'.join(sorted(BROKEN_OP_MODES))})")
@@ -12233,9 +12266,17 @@ def validate_case_file(path):
     # A scale-up on a service with a broken Instance states what becomes of
     # that Instance; a scale-down removes it first and a delete takes it,
     # so neither states an expectation.
+    broken_scaled = {c for c, count_key in (("engine", "Ne"), ("decoder", "Nd"), ("router", "Nr"))
+                     if TO_KEYS[c] in fields and fields.get(TO_KEYS[c], 0) != fields.get(count_key, 0)}
     broken_up = broken_op and mode == "scaledown" and any(
         fields.get(TO_KEYS[c], 0) > fields.get(count_key, 0)
         for c, count_key in (("engine", "Ne"), ("decoder", "Nd"), ("router", "Nr")) if TO_KEYS[c] in fields)
+    broken_victim = str(fields.get("victimcomp") or BREAK_DEFAULT_COMP)
+    broken_fate = (broken_op and mode == "scaledown" and fault_kind in BROKEN_OP_FAULTS
+                   and (broken_up or broken_victim not in broken_scaled))
+    broken_once = broken_op and fault_kind in BROKEN_OP_FAULTS and (
+        str(fields.get("lift", "")) == BROKEN_OP_LIFT
+        or (fault_kind == READINESS_FAULT and str(fields.get("form", "")) == BROKEN_READINESS_ONCE))
     if expect == HELD_PUSH and during != IDLE_FAULT_PHASE:
         # A push the strategy cannot apply: held with a reason, then the
         # corrective push lands.
@@ -12243,10 +12284,16 @@ def validate_case_file(path):
             errs.append(f"{path}:1: expect=held on a push needs mode=rollout and "
                         f"edit={'|'.join(sorted(TEMPLATE_EDITS))} (a change a strict in-place strategy "
                         f"cannot apply); a held repair at idle needs during={IDLE_FAULT_PHASE}")
-    elif broken_up:
+    elif broken_fate:
         if expect not in BROKEN_UP_EXPECTS:
-            errs.append(f"{path}:1: a scale-up on a service with a broken Instance states what becomes of it "
-                        f"(expect={'|'.join(sorted(BROKEN_UP_EXPECTS))})")
+            errs.append(f"{path}:1: a scale that does not take the broken Instance (a scale-up, or a scale of another "
+                        f"Component) states what becomes of it (expect={'|'.join(sorted(BROKEN_UP_EXPECTS))})")
+        elif broken_once and expect != BROKEN_HEAL_EXPECT:
+            errs.append(f"{path}:1: expect={expect}: a cause taken away as the operation lands leaves the Instance to "
+                        f"serve again on its own (expect={BROKEN_HEAL_EXPECT})")
+        elif not broken_once and expect == BROKEN_HEAL_EXPECT:
+            errs.append(f"{path}:1: expect={BROKEN_HEAL_EXPECT} reads a cause taken away as the operation lands "
+                        f"(lift={BROKEN_OP_LIFT}, or fault={READINESS_FAULT}:old form={BROKEN_READINESS_ONCE})")
     elif broken_op and expect:
         errs.append(f"{path}:1: expect={expect}: a scale-down removes the broken Instance first and a delete "
                     f"takes it, so no outcome is stated")
@@ -12260,7 +12307,7 @@ def validate_case_file(path):
     if "inst" in fields and mode == "scaledown" and not broken_op:
         errs.append(f"{path}:1: inst= in mode=scaledown names the Instance a break at idle hits (needs during={IDLE_FAULT_PHASE})")
     if "inst" in fields and broken_op:
-        count_key = {"engine": "Ne", "decoder": "Nd"}.get(str(fields.get("victimcomp") or BREAK_DEFAULT_COMP), "Ne")
+        count_key = {"engine": "Ne", "decoder": "Nd", "router": "Nr"}.get(str(fields.get("victimcomp") or BREAK_DEFAULT_COMP), "Ne")
         if "," in str(fields["inst"]) or not isinstance(fields["inst"], int) or fields["inst"] >= fields.get(count_key, 0):
             errs.append(f"{path}:1: inst={fields['inst']} names the one Instance the break hits "
                         f"(an index below {count_key}={fields.get(count_key, 0)})")
@@ -12296,10 +12343,10 @@ def validate_case_file(path):
                     f"a move-moment fault (needs mode=migrate at=<moment>), or names the side a metric breach or a break "
                     f"at a canary hook hits (victim=stable|canary)")
     if "victimcomp" in fields and fault_kind not in ("podkill", "evict", METRIC_FAULT) and fault_kind not in BREAK_FAULTS \
-            and "podkill" not in hook_verbs and fault_kind != READINESS_FAULT:
+            and "podkill" not in hook_verbs and fault_kind != READINESS_FAULT and not (fault_kind == "configkey" and broken_op):
         errs.append(f"{path}:1: victimcomp= aims a podkill, an eviction, a break or a metric breach at one Component "
-                    f"(needs fault=podkill:<phase>, fault=evict:<phase>, verb=podkill, fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM} "
-                    f"or fault={METRIC_FAULT}:<hook>)")
+                    f"(needs fault=podkill:<phase>, fault=evict:<phase>, verb=podkill, fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM}, "
+                    f"fault=configkey:{CONFIGKEY_PARAM} before a scale or a delete, or fault={METRIC_FAULT}:<hook>)")
     if fault_kind in GATE_FAULTS:
         if mode != "canary" or "analysis" not in fields:
             errs.append(f"{path}:1: fault={fields.get('fault')} breaks what an analysis gate reads "
@@ -12330,11 +12377,12 @@ def validate_case_file(path):
     heals_itself = fault_kind in BREAK_FAULTS and str(fields.get("lift", "")) == HEAL_LIFT
     pushed_pull_once = (fault_kind == "imagepull" and fault_param == CRASHLOOP_NEW and mode == "rollout"
                         and str(fields.get("lift", "")) == HEAL_LIFT)
-    if heals_itself and not idle_heal and not pushed_pull_once \
+    if heals_itself and not idle_heal and not pushed_pull_once and not broken_op \
             and not (mode == "canary" and (fault_param == IDLE_FAULT_PHASE or _canary_hook_ok(fault_param))):
         errs.append(f"{path}:1: lift={HEAL_LIFT} on fault={fields.get('fault')} heals the harness's own break under a canary "
-                    f"(mode=canary, fault={fault_kind}:canary-<state> or fault={fault_kind}:{IDLE_FAULT_PHASE}) or on the "
-                    f"settled service (mode=rollout, fault={fault_kind}:{CRASHLOOP_VICTIM} during={IDLE_FAULT_PHASE} expect=heals)")
+                    f"(mode=canary, fault={fault_kind}:canary-<state> or fault={fault_kind}:{IDLE_FAULT_PHASE}), on the "
+                    f"settled service (mode=rollout, fault={fault_kind}:{CRASHLOOP_VICTIM} during={IDLE_FAULT_PHASE} expect=heals) "
+                    f"or right after a scale or a delete lands on it (mode={'|'.join(sorted(BROKEN_OP_MODES))} during={IDLE_FAULT_PHASE})")
     via = str(fields.get("via", ""))
     if via and mode != "kill":
         errs.append(f"{path}:1: via={via} says how mode=kill removes the pod (mode=kill)")
@@ -12343,7 +12391,8 @@ def validate_case_file(path):
                     f"a kill case evicts through via=evict")
     lift = fields.get("lift")
     pending = (fault_kind in PENDING_FAULTS and mode in ("rollout", "kill") and during != IDLE_FAULT_PHASE
-               and (fault_kind != "quota" or mode == "kill" or lift in PENDING_LIFTS) and not _tight_cell(fields))
+               and (fault_kind != "quota" or mode == "kill" or lift in PENDING_LIFTS) and not _tight_cell(fields)) \
+        or (broken_op and fault_kind in BROKEN_OP_PENDING)
     if via == "preempt":
         if "kill" in fields:
             errs.append(f"{path}:1: via=preempt leaves the victim to the scheduler — kill= does not apply")
@@ -12419,11 +12468,11 @@ def validate_case_file(path):
             errs.append(f"{path}:1: target= names the object a competing writer patches (needs fault={CONFLICT_FAULT}:<phase>)")
         if lift == "after-window":
             errs.append(f"{path}:1: lift=after-window keeps the webhook unreachable across the hold window (needs fault={WEBHOOK_FAULT}:<phase>)")
-    victim_comps = CANARY_BREAK_VICTIM_COMPS if mode == "canary" else BREAK_VICTIM_COMPS
-    if fault_kind in BREAK_FAULTS | {READINESS_FAULT} and "victimcomp" in fields and str(fields["victimcomp"]) not in victim_comps:
+    if fault_kind in BREAK_FAULTS | {READINESS_FAULT, "configkey"} and "victimcomp" in fields \
+            and str(fields["victimcomp"]) not in BREAK_VICTIM_COMPS:
         errs.append(f"{path}:1: victimcomp={fields['victimcomp']}: a break victim is a pod of "
-                    f"{' or '.join(sorted(victim_comps))} (the Components a roll targets"
-                    f"{'' if mode == 'canary' else '; under a canary the router too, as a sibling'})")
+                    f"{', '.join(sorted(BREAK_VICTIM_COMPS))} (the Components a roll targets, and the router in front "
+                    f"of an engine fleet, whose break no roll and no scale of the engine owns)")
     break_param = str(fields.get("fault", "")).partition(":")[2] if fault_kind in BREAK_FAULTS else ""
     crash_new = str(fields.get("fault", "")) == f"crashloop:{CRASHLOOP_NEW}"
     packed = str(fields.get("pool", "")) == POOL_PACKED
@@ -12538,9 +12587,6 @@ def validate_case_file(path):
             if str(fields.get("form", "")) not in READINESS_FORMS:
                 errs.append(f"{path}:1: fault={READINESS_FAULT}:old needs form={'|'.join(sorted(READINESS_FORMS))} "
                             f"(whether the switch stays or is lifted)")
-            elif broken_op and str(fields.get("form", "")) not in BROKEN_READINESS_FORMS:
-                errs.append(f"{path}:1: fault={READINESS_FAULT}:old before a scale or a delete needs "
-                            f"form={'|'.join(sorted(BROKEN_READINESS_FORMS))} (the switch stays set until the case ends)")
         else:
             if during:
                 errs.append(f"{path}:1: fault={READINESS_FAULT}:new is the bump itself (no during=)")
@@ -12732,7 +12778,7 @@ def validate_case_file(path):
         for k in ("expect", "victimcomp", "victims", "pauseat", "fixfirst", "rollback", "edit", "once", "form"):
             if k in fields:
                 errs.append(f"{path}:1: {k}= does not combine with fault=configkey:{CRASHLOOP_NEW} (the lift says what follows)")
-    elif fault_kind in LIFT_FAULTS:
+    elif fault_kind in LIFT_FAULTS and not broken_op:
         phases = LIFT_PHASES_BY_FAULT[fault_kind]
         if during != IDLE_FAULT_PHASE and not at_move:
             errs.append(f"{path}:1: fault={fields.get('fault')} fires on the idle service (needs during={IDLE_FAULT_PHASE}) "
@@ -13181,8 +13227,12 @@ def _fetch_initial_ir_items(case_id):
     return items if isinstance(items, list) else None
 
 
-def _setup_and_ready(case_id, yaml_file, hdr):
+def _setup_and_ready(case_id, yaml_file, hdr, tick=None):
     """Apply runtime + ISVC, wait for initial settlement, and snapshot state.
+    tick(ctx), when given, runs on every read of the settling fleet; a
+    truthy return stops the wait and hands the context back as it stands
+    (ctx["init_stopped"] names why), for a case that reads the fleet held
+    short of Ready.
 
     Returns (ctx, None) or (None, (state, msg)).
     """
@@ -13213,6 +13263,13 @@ def _setup_and_ready(case_id, yaml_file, hdr):
     while time.time() - t0 < budget and not ctx["closed"]:
         agg = _read_one(ctx)
         _once_start_tick(ctx["fault"], ctx["pod_state"])   # a one-shot crash at start lands on the first start
+        stopped = tick(ctx) if tick is not None else None
+        if stopped:
+            alive = [p for p in ctx["pod_state"].values() if p and p["alive"]]
+            ctx["old_hashes"] = {p["hash"] for p in alive if p.get("hash")}
+            ctx["init_stopped"] = stopped
+            print(f"  ⓘ initial settlement left as it stands: {stopped}")
+            return ctx, None
         if all(agg.get(c, (0, 0, 0))[1] == N[c] for c in configured):
             ir_items = _fetch_initial_ir_items(case_id)
             settled, wait = _initial_rollout_settled(
@@ -14702,15 +14759,16 @@ def _move_moment_due(at, pod_state, record, ledger_entry, anno_consumed, mcomp, 
     return phase == RECORD_DRAIN_PHASE or bool(set(src_uids) - live)
 
 
-def _move_victim(victim, at, kind, pod_state, old_hashes, mcomp, inst, orig_uids):
+def _move_victim(victim, at, kind, pod_state, old_hashes, mcomp, inst, orig_uids, sibling_comp="decoder"):
     """The pod a move-moment fault hits (None while no such pod is live).
     moved: the Instance's source pod (its leader on a gang) at accept, its
     replacement (a fresh pod of the moved Component) at surge and at drain;
     a node loss is the source node's at every moment. peer: the highest
     other Instance of the moved Component still on its original pods.
-    sibling: the decoder's highest Instance."""
+    sibling: the highest Instance of the sibling Component (the decoder, or
+    the router victimcomp= names in front of an engine fleet)."""
     if victim == "sibling":
-        return _crashloop_pick_pod(pod_state, old_hashes, "decoder")
+        return _crashloop_pick_pod(pod_state, old_hashes, sibling_comp)
 
     def pool(keep):
         return {n: p for n, p in pod_state.items() if p and p["alive"] and p.get("comp") == mcomp and keep(p)}
@@ -14757,7 +14815,7 @@ def _move_tick(ctx, f, mv, now, mcomp, inst, reqs, src_uids, orig_uids):
         return
     mv["due_at"] = mv["due_at"] or now
     mv["pod"] = _move_victim(mv["victim"], mv["at"], f["kind"], ctx["pod_state"], ctx["old_hashes"], mcomp, inst,
-                             orig_uids)
+                             orig_uids, sibling_comp=f.get("victimcomp") or "decoder")
     if mv["pod"] is None:
         if now - mv["due_at"] >= MOVE_VICTIM_GRACE_S:
             mv["missed"] = f"no {mv['victim']} pod was live within {MOVE_VICTIM_GRACE_S}s of the moment"
@@ -16064,12 +16122,55 @@ def _broken_new_instances(ctx, comp, pre_indices):
     return out
 
 
+def _broken_one_shot(f):
+    """True when the case takes its cause away right after the operation
+    lands: lift=after-settle on a break or on the missing key, or the
+    readiness switch lifted (form=recover)."""
+    if not f:
+        return False
+    if f.get("kind") == READINESS_FAULT:
+        return f.get("form") == BROKEN_READINESS_ONCE
+    return f.get("kind") in BREAK_FAULTS | {"configkey"} and f.get("lift") == BROKEN_OP_LIFT
+
+
+def _broken_lift(f):
+    """Take a one-shot cause away once the operation has landed; True when
+    it is gone. The end-of-case cleanup finds nothing left to lift."""
+    if f["kind"] == READINESS_FAULT:
+        return _readiness_restore(f)
+    return _lift_cause(f)
+
+
+def _broken_bitten(f, pod_state):
+    """True once the break shows on its victim: the kubelet's waiting reason
+    for a missing key, the break rule for the rest."""
+    if f["kind"] == "configkey":
+        return _pod_waiting_reason(_get_pod(f["crash_pod"])) == f.get("bite")
+    return _break_bitten(f, pod_state)
+
+
+def _broken_fate_settled(ctx, comp, n, expect, rebuilt):
+    """True once a broken Instance the scale does not take has come to what
+    expect= says: left (its pod still there, not Ready, nothing rebuilt),
+    repaired (rebuilt and every Instance of the Component Ready) or heals
+    (every Instance Ready again, rebuilt or not)."""
+    alive = ctx.get("measures", {}).get(comp, (0, 0, 0))[0]
+    ready = ctx["agg"].get(comp, (0, 0, 0))[1]
+    if expect == "left":
+        return alive == n and ready == n - 1 and not rebuilt
+    if expect == "repaired":
+        return alive == n and ready == n and rebuilt
+    return alive == n and ready == n
+
+
 def _broken_fire_and_report(ctx, hdr):
     """Fire the case's break on the settled service (at the Instance inst=
     names) and wait for the status to report the broken Instance: its row
     leaves Ready, or it has reported fewer serving pods than it has for
     BROKEN_STATUS_WAIT_S while staying Ready, which is where readiness loss
-    leaves it. Returns the record the verdict reads; an apparatus failure is
+    leaves it; a cause the case takes away as the operation lands is acted
+    on at the status's first word, so the operation meets the Instance
+    broken. Returns the record the verdict reads; an apparatus failure is
     left on the fault record."""
     f = ctx["fault"]
     f["inst"] = str(hdr["inst"]) if "inst" in hdr else ""
@@ -16079,6 +16180,7 @@ def _broken_fire_and_report(ctx, hdr):
     if f["infra_fail"]:
         return out
     case_id, comp, inst = ctx["case_id"], f["crash_comp"], f["crash_inst"]
+    one_shot = _broken_one_shot(f)
     print(f"  Phase 3: waiting for the break to bite and for the status to report {comp} Instance {inst} "
           f"(≤{BREAK_BITE_S + BROKEN_STATUS_WAIT_S}s)")
     last_poll = 0.0
@@ -16086,7 +16188,7 @@ def _broken_fire_and_report(ctx, hdr):
         _read_one(ctx)
         now = time.time()
         if out["bitten_at"] is None:
-            if _break_bitten(f, ctx["pod_state"]):
+            if _broken_bitten(f, ctx["pod_state"]):
                 out["bitten_at"] = now - t0
                 print(f"    bite: {comp} Instance {inst} shows the break ({out['bitten_at']:.0f}s)")
             elif now - t0 >= BREAK_BITE_S:
@@ -16107,6 +16209,10 @@ def _broken_fire_and_report(ctx, hdr):
                       f"{row.get('servingPodCount', 0)}/{row.get('podCount', 0)} ({out['reported_at']:.0f}s)")
             if phase != "Ready":
                 out["acted_on"] = f"its row reads {phase}"
+                return out
+            if one_shot and out["reported_at"] is not None:
+                out["acted_on"] = (f"its row reports serving {row.get('servingPodCount', 0)}/{row.get('podCount', 0)} "
+                                   f"(the cause goes as soon as the operation has landed)")
                 return out
         if now - t0 - out["bitten_at"] >= BROKEN_STATUS_WAIT_S:
             if row is not None and _row_not_healthy(row):
@@ -16229,25 +16335,38 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
     verdict = _broken_report_checks(f, report, verdict, notes, checks)
     comp, inst = f["crash_comp"], f["crash_inst"]
     broken_uids = set(pods_before_break.get(comp, {}).get(inst, set()))
-    controls = configured - scaled
+    controls = configured - scaled - {comp}
+    # The Component the scale changes; a break on a sibling leaves the scale
+    # nothing to take, so the broken Instance's fate is judged on every
+    # direction, as on a scale-up.
+    scomp = comp if comp in scaled else sorted(scaled)[0]
+    takes_broken = comp in scaled and not up
+    judge_fate = not takes_broken
 
     # The fleet at the moment the scale lands.
     rows_at_op = {c: _broken_rows(case_id, c) for c in scaled | {comp}}
     pre_pods = {c: _pods_by_instance(ctx, c) for c in configured}
-    pre_indices = _broken_pre_indices(pre_pods[comp], rows_at_op[comp], inst)
+    pre_indices = _broken_pre_indices(pre_pods[scomp], rows_at_op[scomp], inst if scomp == comp else None) - {"None"}
     pre_ready = {c: ctx["agg"].get(c, (0, 0, 0))[1] for c in configured}
     plans = {c: {"at the scale": _broken_removals([(i, h) for i, h, _ph in rows_at_op[c]], N[c] - target[c])}
              for c in scaled if not up}
     # The healthy Instances keep serving throughout: on a scale-down the
-    # kept ones (the broken Instance being among the removed), on a scale-up
-    # every Instance but the broken one; a Component not scaled keeps N.
-    floor = {c: ((N[c] - 1 if up else target[c]) if c == comp else min(N[c], target[c])) for c in configured}
+    # kept ones (the broken Instance being among the removed), otherwise
+    # every Instance of the broken Component but the broken one; a
+    # Component neither scaled nor broken keeps N.
+    floor = {c: (target[c] if c == comp and takes_broken else N[c] - 1 if c == comp else min(N[c], target[c]))
+             for c in configured}
     print(f"  Phase 4: scale {' '.join(f'{c} {N[c]}→{target[c]}' for c in sorted(scaled))} while {comp} Instance {inst} is broken"
-          + (f" (expected to go, in order: {plans[comp]['at the scale']})" if plans else ""))
+          + (f" (expected to go, in order: {plans[scomp]['at the scale']})" if plans else ""))
     ok, msg = _scale_patch(case_id, {c: target[c] for c in scaled})
     if not ok:
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", f"scale patch failed: {msg[:160]}")
     op_ts = time.time()
+    if _broken_one_shot(f):
+        print(f"  Phase 4a: lift — {f.get('cause') or 'the cause'} taken away now that the scale has landed")
+        if not _broken_lift(f):
+            f["infra_fail"] = f"{f['kind']}: {f.get('cause') or 'the cause'} could not be lifted after the scale"
+            return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", notes, checks)
     budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in configured))
     rows_after_op = {c: None for c in scaled}
     min_ready, floor_since, floor_sust = dict(pre_ready), {}, {}
@@ -16265,11 +16384,11 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
                 floor_sust[c] = max(floor_sust.get(c, 0.0), now - floor_since[c])
             else:
                 floor_since.pop(c, None)
+        if judge_fate and rebuilt_at is None and _pods_by_instance(ctx, comp).get(inst, set()) - broken_uids:
+            rebuilt_at = now - op_ts
+            print(f"    {comp} Instance {inst} has a pod the fault did not hit ({rebuilt_at:.0f}s after the scale)")
         if up:
-            if rebuilt_at is None and _pods_by_instance(ctx, comp).get(inst, set()) - broken_uids:
-                rebuilt_at = now - op_ts
-                print(f"    {comp} Instance {inst} has a pod the fault did not hit ({rebuilt_at:.0f}s after the scale)")
-            new_instances = _broken_new_instances(ctx, comp, pre_indices)
+            new_instances = _broken_new_instances(ctx, scomp, pre_indices)
         if now - last_poll >= 3.0:
             last_poll = now
             for c in scaled:
@@ -16286,12 +16405,14 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
         else:
             converged = all(ctx.get("measures", {}).get(c, (0, 0, 0))[0] == target[c]
                             and ctx["agg"].get(c, (0, 0, 0))[1] == target[c] for c in scaled)
+            if judge_fate:
+                converged = converged and _broken_fate_settled(ctx, comp, N[comp], expect, rebuilt_at is not None)
         if converged:
             stable = stable or now
             if now - stable >= STABILITY_S:
                 state = "CONVERGED"
                 ctx["converged_at"] = stable - op_ts
-                if up and expect == "left":
+                if judge_fate and expect == "left":
                     hold_end = now + IDLE_HOLD_S
                     print(f"  Phase 6: holding {IDLE_HOLD_S}s — {comp} Instance {inst} must stay as the fault left it")
                     continue
@@ -16344,11 +16465,12 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
                               f"index) and {kept} to stay; rows now {sorted(rows_now, key=_index_key)}, pods on removed "
                               f"indices {sorted((i for i in expected if i in now_pods[c]), key=_index_key)}")
             else:
-                broken_went = inst in expected
+                broken_went = c == comp and inst in expected
                 checks.append(f"  ✓ {c}: Instances {expected} went (as the rows read {followed}) and {kept} stayed"
                               + (f"; the broken Instance {inst} was the first to go" if broken_went else
-                                 f"; the broken Instance {inst} read healthy by then and stayed"))
-                if not broken_went:
+                                 f"; the broken Instance {inst} read healthy by then and stayed" if c == comp else
+                                 f"; the broken {comp} Instance {inst} was not the scale's to take"))
+                if not broken_went and c == comp:
                     checks.append(f"  ⓘ {c}: the broken Instance {inst} was healthy again when the scale landed, so the "
                                   f"removal followed the index order alone")
             if extra_rows:
@@ -16363,26 +16485,40 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
                 checks.append(f"  ✓ {c}: every surviving Instance kept its pods")
     else:
         fresh = sorted(new_instances, key=_index_key)
-        wanted = target[comp] - N[comp]
+        wanted = target[scomp] - N[scomp]
         whole = [i for i in fresh if new_instances[i][0]]
         running = [i for i in fresh if new_instances[i][1]]
         if len(whole) == wanted and len(running) == wanted:
-            checks.append(f"  ✓ {comp}: new Instance(s) {fresh} came up whole, serving, on the running revision")
+            checks.append(f"  ✓ {scomp}: new Instance(s) {fresh} came up whole, serving, on the running revision")
         else:
             verdict = "FAIL"
-            notes.append(f"{comp}: new Instances {fresh} (whole+serving {whole}, running revision {running}), want {wanted}")
-            checks.append(f"  ✗ {comp}: wanted {wanted} new Instance(s) whole, serving and on the running revision; "
+            notes.append(f"{scomp}: new Instances {fresh} (whole+serving {whole}, running revision {running}), want {wanted}")
+            checks.append(f"  ✗ {scomp}: wanted {wanted} new Instance(s) whole, serving and on the running revision; "
                           f"got {fresh} (whole+serving {whole}, on the running revision {running})")
-        survivors = {i: v for i, v in pre_pods[comp].items() if i != inst}
-        changed = _survivor_pods_changed(survivors, now_pods[comp])
+        survivors = {i: v for i, v in pre_pods[scomp].items() if not (scomp == comp and i == inst)}
+        changed = _survivor_pods_changed(survivors, now_pods[scomp])
         if changed:
             verdict = "FAIL"
-            notes.append(f"{comp}: healthy Instance(s) {changed} were rebuilt by the scale-up")
-            checks.append(f"  ✗ {comp}: healthy Instance(s) {changed} lost or gained pods during the scale-up")
+            notes.append(f"{scomp}: healthy Instance(s) {changed} were rebuilt by the scale-up")
+            checks.append(f"  ✗ {scomp}: healthy Instance(s) {changed} lost or gained pods during the scale-up")
         else:
-            checks.append(f"  ✓ {comp}: every healthy Instance kept its pods")
+            checks.append(f"  ✓ {scomp}: every healthy Instance kept its pods")
+    if judge_fate:
+        if scomp != comp:
+            # The broken sibling: the scale is not its operation, so its
+            # healthy Instances keep their pods whatever the direction.
+            changed = _survivor_pods_changed({i: v for i, v in pre_pods[comp].items() if i != inst}, now_pods[comp])
+            if changed:
+                verdict = "FAIL"
+                notes.append(f"{comp}: healthy Instance(s) {changed} were rebuilt beside the scale")
+                checks.append(f"  ✗ {comp} (not scaled): healthy Instance(s) {changed} lost or gained pods during the scale")
+            else:
+                checks.append(f"  ✓ {comp} (not scaled): every healthy Instance kept its pods")
+        serving_now = (lambda ps: bool(ps) and all(q.get("ready") and q.get("serving") for _n, q in ps))(
+            _instance_pods(ctx["pod_state"], comp, inst))
         verdict = _broken_fate_checks(f, expect, now_pods[comp].get(inst, set()), broken_uids, rebuilt_at,
-                                      _isvc_events_since(case_id, ctx["trigger_ts"]), verdict, notes, checks)
+                                      _isvc_events_since(case_id, ctx["trigger_ts"]), verdict, notes, checks,
+                                      serving=serving_now)
     for c in sorted(configured):
         mr, sust = min_ready.get(c, 0), floor_sust.get(c, 0.0)
         if mr >= floor[c]:
@@ -16412,13 +16548,34 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
-def _broken_fate_checks(f, expect, pods_now, broken_uids, rebuilt_at, events, verdict, notes, checks):
-    """What became of the broken Instance across a scale-up. repaired: it was
-    rebuilt (every pod new) and a RestartTriggered event names it. left: no
-    new pod appeared for its index and no repair was recorded for it."""
+def _broken_fate_checks(f, expect, pods_now, broken_uids, rebuilt_at, events, verdict, notes, checks, serving=None):
+    """What became of the broken Instance across a scale that did not take
+    it. repaired: it was rebuilt (every pod new) and a RestartTriggered
+    event names it. left: no new pod appeared for its index and no repair
+    was recorded for it. heals: the cause was taken away as the scale
+    landed and the Instance is Ready and serving again on its running
+    revision, rebuilt or not, with a repair recorded at most once."""
     comp, inst, kind = f["crash_comp"], f["crash_inst"], f["kind"]
     repairs = [m for reason, m in events if reason == "RestartTriggered" and _event_names_instance(m, comp, inst)]
     rebuilt = bool(pods_now) and not (pods_now & broken_uids)
+    if expect == BROKEN_HEAL_EXPECT:
+        if serving:
+            checks.append(f"  ✓ {kind}: {comp} Instance {inst} is Ready and serving again on its running revision"
+                          + (" (rebuilt, every pod new)" if rebuilt else " (the same pod, started again)"))
+        else:
+            verdict = "FAIL"
+            notes.append(f"{kind}: {comp} Instance {inst} did not serve again once the cause was gone")
+            checks.append(f"  ✗ {kind}: {comp} Instance {inst} is not Ready and serving after the cause was taken away")
+        if len(repairs) > 1:
+            verdict = "FAIL"
+            notes.append(f"{kind}: {comp} Instance {inst} was repaired {len(repairs)} times")
+            checks.append(f"  ✗ {kind}: {len(repairs)} RestartTriggered events name {comp} Instance {inst} — a cause gone "
+                          f"after one restart warrants at most one repair")
+        elif repairs:
+            checks.append(f"  ⓘ {kind}: a RestartTriggered event names {comp} Instance {inst} once: {repairs[0][:160]}")
+        else:
+            checks.append(f"  ✓ {kind}: no repair was recorded for {comp} Instance {inst} (it came back on its own)")
+        return verdict
     if expect == "repaired":
         if rebuilt:
             checks.append(f"  ✓ {kind}: {comp} Instance {inst} was rebuilt (every pod new)"
@@ -16453,6 +16610,215 @@ def _broken_fate_checks(f, expect, pods_now, broken_uids, rebuilt_at, events, ve
     return verdict
 
 
+def _pending_recreate_tick(case_id, f, lift, comps, t0):
+    """The tick the recreate's initial settlement runs under a pending cause:
+    the wait the product reports on a row of the recreated service, the lift
+    once the wait has held LIFT_SETTLE_S (lift=after-settle, then the
+    settlement goes on to Ready), or the hold across IDLE_HOLD_S with the
+    cause kept (lift=never, which stops the settlement). (tick, record)."""
+    tokens = PENDING_TOKENS[f["kind"]]
+    out = {"bitten_at": None, "token": "", "row": None, "message": "", "failed": [], "lifted_at": None,
+           "held_s": None, "waiting_at_end": False}
+    st = {"last_poll": 0.0, "bitten_since": None}
+
+    def tick(ctx):
+        now = time.time()
+        if now - st["last_poll"] < ROW_POLL_S:
+            return None
+        st["last_poll"] = now
+        rows = _ir_rows_by_index(case_id, comps)
+        hit = _pending_row(rows, tokens)
+        for key, row in sorted(rows.items()):
+            if row.get("phase") == "Failed" and key not in out["failed"]:
+                out["failed"].append(key)
+        if hit:
+            st["bitten_since"] = st["bitten_since"] or now
+            if out["bitten_at"] is None:
+                out.update(bitten_at=now - t0, token=hit[2], row=(hit[0], hit[1]), message=hit[3])
+                print(f"    wait: {hit[0]} Instance {hit[1]} of the recreate reports {hit[2]} ({out['bitten_at']:.0f}s)"
+                      + (f": {hit[3][:120]}" if hit[3] else ""))
+        else:
+            st["bitten_since"] = None
+        out["waiting_at_end"] = bool(hit)
+        if lift == "after-settle" and out["lifted_at"] is None and st["bitten_since"] is not None \
+                and now - st["bitten_since"] >= LIFT_SETTLE_S:
+            print(f"  Phase 4: lift — {f.get('cause', 'the cause')} removed; the recreate goes on to Ready")
+            if not _pending_lift(f):
+                f["infra_fail"] = f"{f['kind']}: {f.get('cause', 'the cause')} could not be lifted"
+                return "LIFT_FAILED"
+            out["lifted_at"] = now - t0
+        elif lift == "never" and out["bitten_at"] is not None and now - (t0 + out["bitten_at"]) >= IDLE_HOLD_S:
+            out["held_s"] = now - (t0 + out["bitten_at"])
+            return "HELD"
+        return None
+    return tick, out
+
+
+def _pending_recreate_summary(f, out):
+    if out.get("bitten_at") is None:
+        return f"{f['kind']}: no row of the recreate reported a wait while {f.get('cause') or 'the cause'} held"
+    return (f"{f['kind']}: {out['row'][0]} Instance {out['row'][1]} of the recreate waited with {out['token']}"
+            + (f", lifted {out['lifted_at']:.0f}s in" if out.get("lifted_at") is not None else ", never lifted"))
+
+
+def _pending_recreate_checks(f, lift, out, stopped, verdict, notes, checks):
+    """The verdict of a delete under a pending cause: the recreate's pods
+    cannot be placed or admitted and a row says so; no row reads Failed
+    while the cause holds; then the recreate reaches Ready once the cause is
+    lifted (lift=after-settle), or the wait is still reported at the end of
+    the hold (lift=never)."""
+    kind, cause, tokens = f["kind"], f.get("cause") or "the cause", sorted(PENDING_TOKENS[f["kind"]])
+    if f.get("infra_fail"):
+        return verdict
+    if out["bitten_at"] is None:
+        f["infra_fail"] = (f"{kind}: the recreate reached Ready with {cause} in place and no wait reported "
+                           f"— the cause never bound")
+        return verdict
+    comp, idx = out["row"]
+    checks.append(f"  ✓ {kind}: {comp} Instance {idx} of the recreate waits with reason {out['token']} "
+                  f"{out['bitten_at']:.0f}s after the re-apply")
+    if out["message"]:
+        checks.append(f"  ⓘ {kind}: the recorded cause: {out['message'][:160]}")
+    if out["failed"]:
+        rows = ", ".join(f"{c}/{i}" for c, i in out["failed"])
+        verdict = "FAIL"
+        notes.append(f"{kind}: Instance(s) {rows} read Failed while {cause} held")
+        checks.append(f"  ✗ {kind}: Instance(s) {rows} read Failed while {cause} held — a wait on the cluster is not "
+                      f"a failure inside the configured grace")
+    else:
+        checks.append(f"  ✓ {kind}: no Instance read Failed while {cause} held")
+    if lift == "after-settle":
+        if out["lifted_at"] is None:
+            f["infra_fail"] = f"{kind}: {cause} was never lifted"
+            return verdict
+        checks.append(f"  ✓ {kind}: {cause} lifted {out['lifted_at']:.0f}s after the re-apply; the recreate went on to Ready")
+        return verdict
+    if stopped == "HELD" and out["waiting_at_end"]:
+        checks.append(f"  ✓ {kind}: still waiting with reason {out['token']} after the {IDLE_HOLD_S}s hold with {cause} "
+                      f"in place; the recreate comes back once the cause is gone")
+    else:
+        verdict = "FAIL"
+        notes.append(f"{kind}: the wait was not held with its reason to the end of the hold ({stopped or 'settled'})")
+        checks.append(f"  ✗ {kind}: the wait was not still reported with {tokens} at the end of the {IDLE_HOLD_S}s hold "
+                      f"while {cause} held ({stopped or 'the recreate settled'})")
+    return verdict
+
+
+def _pending_scale(case_id, yaml_file, desc, hdr):
+    """mode=scaledown with during=idle and a pending cause (every node
+    tainted, or a quota short of the pod the operation creates), armed on
+    the settled service before the scale. Up: the new Instance's pod waits
+    with the product's own reason, nothing settled is taken down to make
+    room, and the scale completes once the cause is lifted (lift=after-settle)
+    or holds with the reason to the end (lift=never). Down: nothing is
+    placed, so the scale converges beside the cause, no row waits, the
+    survivors keep their pods and every row settles."""
+    kind = str(hdr.get("fault", "")).partition(":")[0]
+    reason = _fault_capability(kind)
+    if reason:
+        print(f"  ⓘ {kind} unavailable here: {reason}")
+        return _write_fail(case_id, desc, hdr, "SKIP", f"{kind} unavailable here: {reason}")
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    f, N, configured, ppi = ctx["fault"], ctx["N"], ctx["configured"], ctx["pods_per_inst"]
+    lift = str(hdr.get("lift") or "")
+    ceil = {"engine": hdr.get("ceil_e", N["engine"]), "decoder": hdr.get("ceil_d", N["decoder"]),
+            "router": hdr.get("ceil_r", N["router"])}
+    target = {c: int(hdr.get(TO_KEYS[c], N[c])) for c in configured}
+    scaled = {c for c in configured if target[c] != N[c]}
+    up = any(target[c] > N[c] for c in scaled)
+    ctx["track_comps"] = sorted(configured)
+    pre_pods = {c: _pods_by_instance(ctx, c) for c in configured}
+    verdict, notes, checks = "PASS", [], []
+    print(f"  Phase 2: scale {' '.join(f'{c} {N[c]}→{target[c]}' for c in sorted(scaled))} under "
+          f"{f.get('cause') or f['kind']} (lift={lift})")
+    ok, msg = _scale_patch(case_id, {c: target[c] for c in scaled})
+    if not ok:
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", f"scale patch failed: {msg[:160]}")
+    ctx["trigger_ts"] = t0 = time.time()
+    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in configured))
+
+    def done():
+        return all(ctx.get("measures", {}).get(c, (0, 0, 0))[0] == target[c]
+                   and ctx["agg"].get(c, (0, 0, 0))[1] == target[c] for c in configured)
+
+    if up:
+        print(f"  Phase 3: watching the scale-up wait on the cause (≤{budget}s)")
+        state, out = _pending_watch(ctx, f, sorted(configured), lift, done, budget)
+        verdict = _pending_checks(f, lift, state, out, ctx, sorted(configured), {c: 0 for c in configured},
+                                  verdict, notes, checks)
+    else:
+        print(f"  Phase 3: watching the scale-down converge beside the cause (≤{budget}s)")
+        state, waited, stable, last_poll = "WATCHING", None, None, 0.0
+        while time.time() - t0 < budget and not ctx["closed"]:
+            _read_one(ctx)
+            now = time.time()
+            if now - last_poll >= ROW_POLL_S:
+                last_poll = now
+                hit = _pending_row(_ir_rows_by_index(case_id, sorted(configured)), PENDING_TOKENS[f["kind"]])
+                if hit and waited is None:
+                    waited = hit
+            if done():
+                stable = stable or now
+                if now - stable >= STABILITY_S:
+                    state = "CONVERGED"
+                    ctx["converged_at"] = stable - t0
+                    break
+            else:
+                stable = None
+        if state == "CONVERGED":
+            checks.append(f"  ✓ the scale-down converged on the target at {ctx['converged_at']:.1f}s with "
+                          f"{f.get('cause') or 'the cause'} in place (nothing to place, nothing to admit)")
+        else:
+            verdict = "FAIL"
+            notes.append(f"the scale-down did not converge beside {f.get('cause') or 'the cause'} ({state})")
+            checks.append(f"  ✗ the scale-down did not converge within {budget}s beside {f.get('cause') or 'the cause'} "
+                          f"— a scale-down places no pod and waits on nothing")
+        if waited:
+            verdict = "FAIL"
+            notes.append(f"{waited[0]} Instance {waited[1]} waited with {waited[2]} during a scale-down")
+            checks.append(f"  ✗ {f['kind']}: {waited[0]} Instance {waited[1]} reported {waited[2]} during the scale-down "
+                          f"— something tried to place or admit a pod the scale-down did not ask for")
+        else:
+            checks.append(f"  ✓ {f['kind']}: no row waited on {f.get('cause') or 'the cause'} during the scale-down")
+        if lift == "after-settle":
+            if _pending_lift(f):
+                checks.append(f"  ✓ {f['kind']}: {f.get('cause') or 'the cause'} lifted once the scale-down had converged; "
+                              f"nothing moves for it")
+            else:
+                f["infra_fail"] = f"{f['kind']}: {f.get('cause') or 'the cause'} could not be lifted"
+        else:
+            checks.append(f"  ⓘ {f['kind']}: {f.get('cause') or 'the cause'} stays to the end of the case")
+    for c in sorted(configured):
+        if ctx["peaks"][c] > ceil[c]:
+            verdict = "FAIL"
+            notes.append(f"{c} peak {ctx['peaks'][c]} > ceiling {ceil[c]}")
+            checks.append(f"  ✗ {c} peak {ctx['peaks'][c]} > ceiling {ceil[c]} — something surged during the scale")
+        else:
+            checks.append(f"  ✓ {c} peak {ctx['peaks'][c]} ≤ ceiling {ceil[c]}")
+    now_pods = {c: _pods_by_instance(ctx, c) for c in configured}
+    for c in sorted(configured):
+        keep = {i: v for i, v in pre_pods[c].items() if _index_key(i) < min(N[c], target[c])}
+        changed = _survivor_pods_changed(keep, now_pods[c])
+        if changed:
+            verdict = "FAIL"
+            notes.append(f"{c}: Instance(s) {changed} were rebuilt by the scale")
+            checks.append(f"  ✗ {c}: Instance(s) {changed} lost or gained pods during the scale — a scale touches only the "
+                          f"tail it was asked about")
+        else:
+            checks.append(f"  ✓ {c}: every surviving Instance kept its pods")
+    if state in ("CONVERGED", "DONE"):
+        settled, why = _wait_broken_rows_settled(case_id, target, configured, BROKEN_ROWS_SETTLE_S)
+        if settled:
+            checks.append("  ✓ every Instance row settled: Ready, no operation open")
+        else:
+            verdict = "FAIL"
+            notes.append(f"a row was left mid-operation after the scale ({why})")
+            checks.append(f"  ✗ a row did not settle within {BROKEN_ROWS_SETTLE_S}s after the scale ({why}) — left mid-operation")
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
 def _recreate(case_id, yaml_file, desc, hdr):
     """Delete the case ISVC (optionally mid-rollout / mid-migration), require the
     universal teardown to converge, then IMMEDIATELY re-apply the same manifest:
@@ -16468,6 +16834,9 @@ def _recreate(case_id, yaml_file, desc, hdr):
         return _write_fail(case_id, desc, hdr, *err)
     verdict, notes, checks = "PASS", [], []
     during = hdr.get("during")
+    pend = ctx["fault"] if (during == IDLE_FAULT_PHASE and ctx["fault"]
+                            and ctx["fault"]["kind"] in BROKEN_OP_PENDING) else None
+    lift = str(hdr.get("lift") or "")
     if hdr.get("stuck"):
         # The delete lands on a Component stuck on a revision that cannot be
         # pulled: everything must still go, stuck pods included, and the
@@ -16478,7 +16847,10 @@ def _recreate(case_id, yaml_file, desc, hdr):
         verdict = _stuck_reached_checks(hdr["stuck"], reached, time.time() - ctx["trigger_ts"], verdict, notes, checks)
         if not reached:
             return _finish(case_id, desc, hdr, ctx, "NOT_STUCK", verdict, notes, checks)
-    if during == IDLE_FAULT_PHASE:
+    if pend:
+        print(f"  Phase 2: {pend.get('cause') or pend['kind']} armed on the settled service; the delete lands under it "
+              f"and the recreate's pods must wait on it")
+    elif during == IDLE_FAULT_PHASE:
         print("  Phase 2: break one Instance of the settled service; the delete lands once the status reports it")
         report = _broken_fire_and_report(ctx, hdr)
         if ctx["fault"]["infra_fail"]:
@@ -16518,17 +16890,31 @@ def _recreate(case_id, yaml_file, desc, hdr):
     _stop_watcher(ctx)
     print("  Phase 3: delete, teardown convergence, then same-name recreate")
     kubectl("delete", "-n", NS, "isvc", case_id, "--wait=false")
+    if during == IDLE_FAULT_PHASE and _broken_one_shot(ctx.get("fault")):
+        f1 = ctx["fault"]
+        print(f"  Phase 3a: lift — {f1.get('cause') or 'the cause'} taken away now that the delete has landed")
+        if not _broken_lift(f1):
+            checks.append(f"  ⓘ {f1['kind']}: {f1.get('cause') or 'the cause'} was already gone with the pods")
     verdict = teardown_check(case_id, total_pods, verdict, notes, checks)
     hdr2 = dict(hdr)
     hdr2.pop("fault", None)   # pass-1 apparatus (quota/cordon) stays armed; never re-arm
     hdr2.pop("stuck", None)   # the recreate applies the manifest's good revision; nothing is pushed again
     t_re = time.time()
-    ctx2, err2 = _setup_and_ready(case_id, yaml_file, hdr2)
+    tick, pend_out = (None, None)
+    if pend:
+        tick, pend_out = _pending_recreate_tick(case_id, pend, lift, sorted(ctx["configured"]), t_re)
+    ctx2, err2 = _setup_and_ready(case_id, yaml_file, hdr2, tick=tick)
     if err2:
+        if pend_out:
+            notes.append(_pending_recreate_summary(pend, pend_out))
         notes.append(f"same-name recreate failed: {err2[0]} {err2[1]}")
         return _write_fail(case_id, desc, hdr, "RECREATE_FAIL", "; ".join(notes))
     ctx2["fault"] = ctx.get("fault")   # surface pass-1 fault notes/errors in the verdict
     ctx2["converged_at"] = time.time() - t_re
+    if pend:
+        verdict = _pending_recreate_checks(pend, lift, pend_out, ctx2.get("init_stopped"), verdict, notes, checks)
+        if ctx2.get("init_stopped"):
+            return _finish(case_id, desc, hdr, ctx2, str(ctx2["init_stopped"]), verdict, notes, checks)
     reused = pass1_uids & {p["uid"] for p in ctx2["pod_state"].values() if p and p.get("uid")}
     if reused:
         verdict = "FAIL"
@@ -19185,6 +19571,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     if hdr.get("stuck"):
         return _stuck_scale(case_id, yaml_file, desc, hdr)
     if hdr.get("during") == IDLE_FAULT_PHASE:
+        if str(hdr.get("fault", "")).partition(":")[0] in BROKEN_OP_PENDING:
+            return _pending_scale(case_id, yaml_file, desc, hdr)
         return _broken_scale(case_id, yaml_file, desc, hdr)
 
     target = {c: int(hdr.get(TO_KEYS[c], N[c])) for c in COMPS}

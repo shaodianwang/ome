@@ -1,0 +1,20 @@
+# p10157: [gen] broken pending quota-kept down1 engine-mn W1+router N=2 rp None lift never  mode=scaledown Ne=2 Nd=0 Nr=2 ceil_e=2 ceil_d=0 ceil_r=2 fault=quota:0 co=none topo=engine-mn during=idle lift=never to_e=1
+# reason: a quota with room for no further pod is armed on the settled service, then the engine is scaled from 2 to 1: nothing is placed or admitted, so the scale-down converges beside the cause, the highest engine Instance 1 goes, no row waits on QuotaExceeded, the survivors keep their pods and every row settles Ready with no operation open; the cause stays to the end of the case and nothing waits on it; the router is neither scaled nor waiting and keeps its pods; each Instance is a gang of a leader and a worker, counted whole
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p10157 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

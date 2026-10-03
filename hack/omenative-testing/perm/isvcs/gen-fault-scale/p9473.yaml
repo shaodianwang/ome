@@ -1,0 +1,19 @@
+# p9473: [gen] broken configkey once down1 engine N=4 rp None  mode=scaledown Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 fault=configkey:missing co=none topo=engine during=idle to_e=3 inst=0 lift=after-settle
+# reason: the ConfigMap key the runner of the pod of the engine's Instance 0 reads is removed and the runner restarted, so its next start waits in CreateContainerConfigError and it serves nothing; once the status first reports Instance 0 broken the engine is scaled from 4 to 3 and, once the scale has landed, the key is put back and the kubelet's own retry starts the container: the broken Instance 0 goes and Instances 1, 2 and 3 stay; the survivors keep their pods and keep serving throughout (never below 3 Ready), no Component surges, and every row settles Ready with no operation open
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9473 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    runner: { env: [{ name: "TEST_CONFIG_VALUE", valueFrom: { configMapKeyRef: { name: "p9473-config", key: "value" } } }] }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: p9473-config }
+data: { value: "1" }

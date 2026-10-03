@@ -1,0 +1,23 @@
+# p10107: [gen] broken sibling decoder crashloop:start once up1 pd N=4 rp None  mode=scaledown Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 fault=crashloop:old co=none topo=pd form=start during=idle victimcomp=decoder to_e=5 inst=0 lift=after-settle expect=heals
+# reason: the pod of the decoder's Instance 0 is pointed at an image with no shell on the settled service, so it crashes at every start and is never Ready again; once the status reports the decoder's Instance 0 broken the engine is scaled from 4 to 5: a new engine Instance 4 comes up on the running revision and serves, nothing surges above 5; the engine's healthy Instances keep their pods and keep serving throughout, the decoder's other Instances keep theirs (never below 3 Ready there) and nothing rotates or surges on the decoder; once the scale has landed, the pod is pointed back at the image it ran, where a repair has not rebuilt it first and the decoder's Instance 0 is Ready and serving again on its running revision, the same pod started again or rebuilt by a repair recorded at most once; every row settles Ready with no operation open; the engine is the negative control of the decoder's break: the scale is its only change
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p10107 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

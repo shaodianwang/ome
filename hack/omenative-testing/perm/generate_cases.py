@@ -495,7 +495,14 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     both. A gang fleet of two runs down by one and up by one only: "to one"
     is "down by one" there, and "down by two" asks for zero, which the API
     refuses (minReplicas 0 needs KEDA autoscaling). A rolling group is
-    crossed in where a decoder exists, as in the crashloop family.
+    crossed in where a decoder exists, as in the crashloop family. The
+    further rows run one case per ledger cell: the missing key, the
+    one-shot forms (the cause taken away as the operation lands), a
+    pending cause armed before the operation, and a break on the sibling
+    the scale does not touch, each on one scale-down, the scale-up and the
+    delete, under restart policy None and no group. The missing key kept
+    away across a scale-up has no cell: the new Instance waits on the same
+    key, so the scale cannot complete while the case runs.
   - fault-move runs one gang width (the move copies the whole gang) and no
     pd-mn shape (the gang axis is engine-mn's, the sibling axis pd's); the
     update strategy is dormant (no roll is in flight: a move surges whatever
@@ -626,7 +633,8 @@ GEN_BLOCKS = {
 # A folder mints from its block until the block is full, then from its
 # continuation block; a folder owns an id that lies in either.
 GEN_CONTINUATIONS = {
-    "gen-fault-scale": (9400, 9500),
+    "gen-fault-scale": [(9400, 9500), (10100, 10200)],
+    "gen-fault-delete": (10200, 10300),
     "gen-evict": (9500, 9600),
     "gen-preempt": (9600, 9700),
     "gen-pending": (9700, 9800),
@@ -639,8 +647,9 @@ GEN_CONTINUATIONS = {
 def id_blocks(folder):
     """The id blocks a folder mints from, in minting order."""
     blocks = [GEN_BLOCKS[folder]]
-    if folder in GEN_CONTINUATIONS:
-        blocks.append(GEN_CONTINUATIONS[folder])
+    cont = GEN_CONTINUATIONS.get(folder)
+    if cont:
+        blocks.extend(cont if isinstance(cont, list) else [cont])
     return blocks
 
 
@@ -4746,6 +4755,262 @@ def _broken_comps(topo, n, w, rp, nr=0):
     return comps(topo, n, w, life, d_life=d_life, nr=nr)
 
 
+# The further rows, one case per ledger cell: the operations each row runs
+# (one scale-down, the scale-up, the delete), the restart policy, and the
+# sibling a break may hit per shape (the decoder beside a prefill/decode
+# engine, the router in front of an engine fleet).
+BROKEN_MORE_OPS = {4: [("down1", 3), ("up1", 5)], 2: [("down1", 1), ("up1", 3)]}
+BROKEN_MORE_RP = "None"
+BROKEN_SIBLING = {"pd": "decoder", "pd-mn": "decoder", "engine": "router", "engine-mn": "router"}
+BROKEN_CONFIG_SUFFIX = "-config"
+# The one-shot breaks: (kind, form), lifted with lift=after-settle except
+# readiness, whose switch form=recover lifts.
+BROKEN_ONCE = [("crashloop", "start"), ("crashloop", "load"), ("imagepull", None), ("readiness", "recover"),
+               ("configkey", None)]
+# The pending causes before an operation: (label, the fault per operation,
+# the lifts). A scale-up meets a quota with no room for one more pod; a
+# delete's recreate meets one a pod short of the fleet; a scale-down
+# places nothing and meets either as a negative control.
+BROKEN_PENDING = [("taint", {"down1": "taint:all", "up1": "taint:all", "delete": "taint:all"}, ["after-settle", "never"]),
+                  ("quota", {"down1": "quota:0", "up1": "quota:0", "delete": "quota:-1"}, ["after-settle"]),
+                  ("quota-kept", {"down1": "quota:0"}, ["never"])]
+BROKEN_PENDING_TOKEN = {"taint": "Unschedulable", "quota": "QuotaExceeded"}
+
+
+def _broken_more_label(kind, form):
+    return _broken_label(kind, form) if kind != "configkey" else "configkey"
+
+
+def _broken_victim_words(topo, victim):
+    """The pod a break hits, in words, per Component."""
+    if victim == "engine":
+        return "the leader pod of the engine's gang 0" if is_mn(topo) else "the pod of the engine's Instance 0"
+    if victim == "decoder":
+        return "the leader pod of the decoder's gang 0" if is_mn(topo) else "the pod of the decoder's Instance 0"
+    return "the pod of the router's Instance 0"
+
+
+def _broken_more_how(kind, form, topo, victim="engine"):
+    pod = _broken_victim_words(topo, victim)
+    if kind == "configkey":
+        return (f"the ConfigMap key the runner of {pod} reads is removed and the runner restarted, so its next start "
+                f"waits in CreateContainerConfigError and it serves nothing")
+    if kind == "readiness":
+        return f"{pod} stops passing its readiness probe while it keeps running, so it leaves rotation"
+    if kind == "imagepull":
+        return (f"{pod} is pointed at an image that cannot be pulled on the settled service, so the kubelet parks it in "
+                f"ImagePullBackOff and it is never Ready again")
+    if form == "start":
+        return f"{pod} is pointed at an image with no shell on the settled service, so it crashes at every start and is never Ready again"
+    return f"{pod} has its runner killed every few seconds while it is up, so it dies after Ready and comes back between crashes"
+
+
+def _broken_once_lift_words(kind, form):
+    if kind == "configkey":
+        return "the key is put back and the kubelet's own retry starts the container"
+    if kind == "readiness":
+        return "the readiness switch is lifted and the same pod passes readiness again"
+    if kind == "imagepull" or form == "start":
+        return "the pod is pointed back at the image it ran, where a repair has not rebuilt it first"
+    return "the killer stops and the kubelet's restart of the runner is the last"
+
+
+def _broken_heal_words(kind, form):
+    return (f"the broken Instance is Ready and serving again on its running revision once the cause is gone, the same "
+            f"pod started again or rebuilt by a repair that is recorded at most once, with no new revision")
+
+
+def _broken_more_op_words(n, target, scomp="engine"):
+    if target < n:
+        return f"the {scomp} is scaled from {n} to {target}"
+    return f"the {scomp} is scaled from {n} to {target}"
+
+
+def _broken_once_reason(kind, form, topo, n, target, op, nr):
+    how = _broken_more_how(kind, form, topo)
+    lift = _broken_once_lift_words(kind, form)
+    if op == "delete":
+        return (f"{how}; once the status reports Instance {BROKEN_INST} broken the service is deleted and {lift}: every pod "
+                f"goes within the teardown budget, the broken one included, no pod stays Terminating and no finalizer "
+                f"wedges, and the same name comes back Ready on fresh pods with nothing of the break left"
+                + _broken_tail(topo, "none", op="a delete", nr=nr))
+    if target < n:
+        return (f"{how}; once the status first reports Instance {BROKEN_INST} broken {_broken_more_op_words(n, target)} and, "
+                f"once the scale has landed, {lift}: {_broken_removal_words(n, target)}; the survivors keep their pods and keep "
+                f"serving throughout (never below {target} Ready), no Component surges, and every row settles Ready with "
+                f"no operation open" + _broken_tail(topo, "none", nr=nr))
+    return (f"{how}; once the status first reports Instance {BROKEN_INST} broken {_broken_more_op_words(n, target)} and, "
+            f"once the scale has landed, {lift}: a new Instance {n} comes up on the running revision and serves, the healthy "
+            f"Instances keep their pods and never leave rotation (never below {n - 1} Ready), nothing surges above "
+            f"{target}, and {_broken_heal_words(kind, form)}" + _broken_tail(topo, "none", nr=nr))
+
+
+def _broken_configkey_reason(topo, n, target, op, nr):
+    how = _broken_more_how("configkey", None, topo)
+    repair = ("the crash-loop repair opens as soon as the wait is seen and rebuilds the pod, which waits on the same key, "
+              "so the Instance serves nothing while the key is away")
+    if op == "delete":
+        return (f"{how}; {repair}; once the status reports Instance {BROKEN_INST} broken the service is deleted: every pod "
+                f"goes within the teardown budget, the waiting one included, no pod stays Terminating and no finalizer "
+                f"wedges, and the same name comes back Ready on fresh pods with the key the re-apply carries"
+                + _broken_tail(topo, "none", op="a delete", nr=nr))
+    return (f"{how}; {repair}; once the status reports Instance {BROKEN_INST} broken {_broken_more_op_words(n, target)}: "
+            f"{_broken_removal_words(n, target)}; the survivors keep their pods and keep serving throughout (never below "
+            f"{target} Ready), no Component surges, and every row settles Ready with no operation open; the key returns "
+            f"only with the case's teardown" + _broken_tail(topo, "none", nr=nr))
+
+
+def _broken_sibling_reason(kind, form, topo, n, target, op, victim, once, nr):
+    how = _broken_more_how(kind, form, topo, victim)
+    whose = f"the {victim}'s Instance {BROKEN_INST}"
+    if once:
+        fate = (f"once the scale has landed, {_broken_once_lift_words(kind, form)} and {whose} is Ready and serving again on its "
+                f"running revision, the same pod started again or rebuilt by a repair recorded at most once")
+    else:
+        fate = (f"{whose} is rebuilt, every pod new, Ready and serving on its running revision, by the crash-loop repair a "
+                f"RestartTriggered event names (a pod parked in CrashLoopBackOff past the stuck-pod grace is a wedge it "
+                f"rebuilds under every restart policy)")
+    if op == "delete":
+        return (f"{how}; once the status reports {whose} broken the service is deleted: every pod goes within the "
+                f"teardown budget, the broken one included, no pod stays Terminating and no finalizer wedges, and the "
+                f"same name comes back Ready on fresh pods with nothing of the break left"
+                + ("; each engine Instance is a gang of a leader and a worker, counted whole" if is_mn(topo) else ""))
+    if target < n:
+        act = (f"the engine is scaled from {n} to {target}: the highest engine Instance {n - 1} goes and the rest stay, since "
+               f"the broken Instance is the {victim}'s and not the scale's to take")
+    else:
+        act = (f"the engine is scaled from {n} to {target}: a new engine Instance {n} comes up on the running revision and "
+               f"serves, nothing surges above {target}")
+    return (f"{how}; once the status reports {whose} broken {act}; the engine's healthy Instances keep their pods and keep "
+            f"serving throughout, the {victim}'s other Instances keep theirs (never below {n - 1 if victim != 'router' else nr - 1} "
+            f"Ready there) and nothing rotates or surges on the {victim}; {fate}; every row settles Ready with no operation "
+            f"open; the engine is the negative control of the {victim}'s break: the scale is its only change"
+            + ("; each engine Instance is a gang of a leader and a worker, counted whole" if is_mn(topo) else ""))
+
+
+def _broken_pending_reason(label, fault, lift, topo, n, target, op, nr):
+    cause = ("a NoSchedule taint on every schedulable node" if label == "taint"
+             else "a quota with room for no further pod" if fault == "quota:0"
+             else "a quota one pod short of the running fleet")
+    token = BROKEN_PENDING_TOKEN[label.split("-")[0]]
+    how = "placed" if label == "taint" else "admitted"
+    gone = ("once the cause is lifted" if lift == "after-settle" else "the cause stays to the end, so")
+    if op == "delete":
+        short = "its last pod" if label.startswith("quota") else "its pods"
+        out = (f"{cause} is armed on the settled service, then the service is deleted: every pod goes within the teardown "
+               f"budget and the same name is re-applied, but {short} cannot be {how}, so a row of the recreate waits with "
+               f"reason {token} and no row reads Failed")
+        out += (f"; {gone} the recreate comes back Ready on fresh pods" if lift == "after-settle"
+                else f"; {gone} the wait holds with its reason across the hold window and the service comes back only once the cause is gone")
+    elif target < n:
+        out = (f"{cause} is armed on the settled service, then the engine is scaled from {n} to {target}: nothing is placed or "
+               f"admitted, so the scale-down converges beside the cause, the highest engine Instance {n - 1} goes, no row "
+               f"waits on {token}, the survivors keep their pods and every row settles Ready with no operation open")
+        out += ("; the cause is lifted once the scale has converged and nothing moves for it" if lift == "after-settle"
+                else "; the cause stays to the end of the case and nothing waits on it")
+    else:
+        out = (f"{cause} is armed on the settled service, then the engine is scaled from {n} to {target}: the new Instance's "
+               f"pod cannot be {how}, so its row waits with reason {token}, nothing settled is taken down to make room, "
+               f"the healthy Instances keep their pods and keep serving at {n}, and no row reads Failed")
+        out += (f"; {gone} the new Instance is {how} and serves, the fleet is at {target} and every row settles"
+                if lift == "after-settle" else f"; {gone} the wait holds with its reason across the hold window")
+    if is_pd(topo):
+        out += "; decoder and router are neither scaled nor waiting and stay as they were"
+    elif nr:
+        out += "; the router is neither scaled nor waiting and keeps its pods"
+    if is_mn(topo):
+        out += "; each Instance is a gang of a leader and a worker, counted whole"
+    return out
+
+
+def _broken_configkey_body(name, topo, n, w, nr):
+    """The case body of a missing-key cell: the engine runner reads one key of
+    a ConfigMap named after the case, carried as a second document."""
+    cm = f"{name}{BROKEN_CONFIG_SUFFIX}"
+    cs = _broken_comps(topo, n, w, BROKEN_MORE_RP, nr)
+    cs[0]["runner"] = lib.configmap_env(cm, HEAL_CONFIG_KEY, HEAL_CONFIG_VAR, gang=is_mn(topo))
+    return lib.render(name, cs, docs=[lib.configmap_doc(cm, {HEAL_CONFIG_KEY: HEAL_CONFIG_VALUE})])
+
+
+def _broken_more_kv(mode, topo, n, kind, form, ceil_e, nr, op, target):
+    kv = _broken_kv(mode, topo, n, kind if kind != "configkey" else "crashloop", form, "none", ceil_e, nr)
+    if kind == "configkey":
+        kv["fault"] = "configkey:missing"
+        kv.pop("form", None)
+    if op != "delete":
+        kv.update(to_e=target, inst=BROKEN_INST)
+    else:
+        kv["inst"] = BROKEN_INST
+    return kv
+
+
+def emit_fault_more(add):
+    """The further rows of gen-fault-scale and gen-fault-delete, one case per
+    ledger cell (see BROKEN_MORE_OPS and the manifest)."""
+    rp = BROKEN_MORE_RP
+    for topo, n, w, nr in BROKEN_SHAPES:
+        ops = BROKEN_MORE_OPS[n] + [("delete", None)]
+        for op, target in ops:
+            mode = "recreate" if op == "delete" else "scaledown"
+            folder = "gen-fault-delete" if op == "delete" else "gen-fault-scale"
+            up = target is not None and target > n
+            ceil_e = max(n, target or n)
+            tag = f"{shape_tag(topo, w, nr)} N={n} rp {rp}"
+            # The missing key, kept away: a scale-down and a delete.
+            if not up:
+                kv = _broken_more_kv(mode, topo, n, "configkey", None, ceil_e, nr, op, target)
+                add(folder, f"{GEN_MARK} broken configkey {op} {tag}", kv, None,
+                    _broken_configkey_reason(topo, n, target, op, nr),
+                    dict(strat="(dormant: nothing rolls)", verb=f"configkey@{op}", rp=rp, op=op, victim="engine"),
+                    cell=("broken-more", "configkey", None, topo, w, op, nr),
+                    body=functools.partial(_broken_configkey_body, topo=topo, n=n, w=w, nr=nr))
+            # The one-shot forms: the cause taken away as the operation lands.
+            for kind, form in BROKEN_ONCE:
+                kv = _broken_more_kv(mode, topo, n, kind, form if kind != "readiness" else "recover", ceil_e, nr, op, target)
+                if kind != "readiness":
+                    kv["lift"] = "after-settle"
+                if up:
+                    kv["expect"] = "heals"
+                label = _broken_more_label(kind, form)
+                body = functools.partial(_broken_configkey_body, topo=topo, n=n, w=w, nr=nr) if kind == "configkey" else None
+                add(folder, f"{GEN_MARK} broken {label} once {op} {tag}", kv, None if body else _broken_comps(topo, n, w, rp, nr),
+                    _broken_once_reason(kind, form, topo, n, target, op, nr),
+                    dict(strat="(dormant: nothing rolls)", verb=f"{label}:once@{op}", rp=rp, op=op, victim="engine"),
+                    cell=("broken-more", kind, form, "once", topo, w, op, nr), body=body)
+            # A pending cause armed before the operation.
+            for label, faults, lifts in BROKEN_PENDING:
+                if op not in faults:
+                    continue
+                for lift in lifts:
+                    kv = dict(mode=mode, **counts(topo, n, nr), ceil_e=ceil_e, ceil_d=(n if is_pd(topo) else 0),
+                              ceil_r=router_count(topo, nr), fault=faults[op], during=IDLE_PHASE, co="none", topo=topo,
+                              lift=lift)
+                    if op != "delete":
+                        kv["to_e"] = target
+                    add(folder, f"{GEN_MARK} broken pending {label} {op} {tag} lift {lift}", kv, _broken_comps(topo, n, w, rp, nr),
+                        _broken_pending_reason(label, faults[op], lift, topo, n, target, op, nr),
+                        dict(strat="(dormant: nothing rolls)", verb=f"pending:{label}@{op}", rp=rp, op=op, lift=lift),
+                        cell=("broken-more", "pending", label, lift, topo, w, op, nr))
+            # The sibling's break: the decoder beside a prefill/decode
+            # engine, the router in front of an engine fleet.
+            victim = BROKEN_SIBLING[topo] if (is_pd(topo) or nr) else None
+            if victim is None:
+                continue
+            for once in (False, True):
+                kv = _broken_more_kv(mode, topo, n, "crashloop", "start", ceil_e, nr, op, target)
+                kv["victimcomp"] = victim
+                if once:
+                    kv["lift"] = "after-settle"
+                if op != "delete":
+                    kv["expect"] = "heals" if once else "repaired"
+                add(folder, f"{GEN_MARK} broken sibling {victim} crashloop:start{' once' if once else ''} {op} {tag}", kv,
+                    _broken_comps(topo, n, w, rp, nr),
+                    _broken_sibling_reason("crashloop", "start", topo, n, target, op, victim, once, nr),
+                    dict(strat="(dormant: nothing rolls)", verb=f"crashloop:start{':once' if once else ''}@{op}", rp=rp, op=op,
+                         victim=victim),
+                    cell=("broken-more", "sibling", victim, once, topo, w, op, nr))
+
+
 def emit_fault_scale(add):
     for topo, n, w, nr in BROKEN_SHAPES:
         for co in BROKEN_GROUPS[topo]:
@@ -4797,9 +5062,8 @@ MOVE_MOMENTS = ["accept", "surge", "drain"]
 # after-Ready form is the one the policy decides, so it runs under the policy
 # that promises its repair.
 MOVE_BREAKS = [("crashloop", "start", "None"), ("imagepull", None, "None"), ("crashloop", "load", "RecreateInstance")]
-# The sibling a break may hit is the decoder: outside a canary the runner
-# admits engine and decoder pods as break victims, so a router in front of an
-# engine fleet is a negative control here, not a victim.
+# The sibling a break may hit is the decoder; the router in front of an
+# engine fleet is this family's negative control.
 MOVE_VICTIMS = {"engine": ["moved", "peer"], "pd": ["moved", "peer", "sibling"], "engine-mn": ["moved", "peer"],
                 "pd-mn": ["moved", "peer", "sibling"]}
 # The source node dies at accept or at surge (at drain the source is already
@@ -5625,6 +5889,7 @@ def build_outputs():
     emit_inplaceonly(add)
     emit_fault_scale(add)
     emit_fault_delete(add)
+    emit_fault_more(add)
     emit_fault_move(add)
     emit_fault_edit(add)
     emit_packed_pool(add)

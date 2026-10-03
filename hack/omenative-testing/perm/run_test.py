@@ -4515,7 +4515,12 @@ class IdleBreakFaultTest(unittest.TestCase):
         self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=start during=idle"))
         self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=load during=idle victimcomp=decoder expect=held"))
         self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=start during=idle expect=repaired"))
-        self.assertTrue(any("victimcomp=router" in e for e in self._errs(self.BASE + " fault=crashloop:old form=start victimcomp=router")))
+        self.assertTrue(any("needs Nr>0" in e for e in self._errs(self.BASE + " fault=crashloop:old form=start victimcomp=router")))
+        with_router = self.BASE.replace("Nr=0", "Nr=2").replace("ceil_r=0", "ceil_r=2")
+        self.assertEqual([], self._errs(with_router + " fault=crashloop:old form=start victimcomp=router during=idle expect=repaired"))
+        self.assertEqual([], self._errs(with_router + " fault=imagepull:old victimcomp=router"))
+        self.assertTrue(any("a break victim is a pod of decoder, engine, router" in e
+                            for e in self._errs(with_router + " fault=crashloop:old form=start victimcomp=sidecar")))
         no_decoder = self.BASE.replace("Nd=2", "Nd=0")
         self.assertTrue(any("Nd>0" in e for e in self._errs(no_decoder + " fault=crashloop:old form=start victimcomp=decoder")))
         self.assertEqual([], self._errs(no_decoder + " fault=crashloop:old form=start"))
@@ -10252,15 +10257,69 @@ class BrokenOperationTest(unittest.TestCase):
         self.assertEqual([], self._errs(self.UP + " fault=readiness:old form=persist during=idle inst=0 expect=left"))
         self.assertTrue(run._fault_ok("readiness:old"))
 
+    PD_DOWN = "# p999: x mode=scaledown Ne=4 Nd=4 Nr=2 ceil_e=4 ceil_d=4 ceil_r=2 to_e=3 topo=pd"
+    ER_DOWN = "# p999: x mode=scaledown Ne=4 Nd=0 Nr=2 ceil_e=4 ceil_d=0 ceil_r=2 to_e=3 topo=engine"
+    ER_UP = "# p999: x mode=scaledown Ne=4 Nd=0 Nr=2 ceil_e=5 ceil_d=0 ceil_r=2 to_e=5 topo=engine"
+
+    def test_the_missing_key_is_a_break_before_a_scale_or_a_delete(self):
+        self.assertEqual([], self._errs(self.DOWN + " fault=configkey:missing during=idle inst=0"))
+        self.assertEqual([], self._errs(self.DOWN + " fault=configkey:missing during=idle inst=0 lift=after-settle"))
+        self.assertEqual([], self._errs(self.DELETE + " fault=configkey:missing during=idle inst=0"))
+        self.assertEqual([], self._errs(self.DELETE + " fault=configkey:missing during=idle inst=0 lift=after-settle"))
+        self.assertEqual([], self._errs(self.UP + " fault=configkey:missing during=idle inst=0 lift=after-settle expect=heals"))
+        self.assertEqual([], self._errs(self.PD_DOWN + " fault=configkey:missing during=idle inst=0 victimcomp=decoder expect=repaired"))
+        self.assertTrue(any("needs fault=crashloop|imagepull|readiness:old or fault=configkey:missing" in e
+                            for e in self._errs(self.DOWN + " fault=configkey:new during=idle")))
+        self.assertTrue(any("lift=after-failed before a scale or a delete" in e
+                            for e in self._errs(self.DOWN + " fault=configkey:missing during=idle inst=0 lift=after-failed")))
+        self.assertTrue(any("lift=never before a scale or a delete" in e
+                            for e in self._errs(self.DELETE + " fault=configkey:missing during=idle inst=0 lift=never")))
+
+    def test_the_one_shot_forms_heal_on_a_scale_that_does_not_take_the_instance(self):
+        for once in (" fault=crashloop:old form=start lift=after-settle", " fault=crashloop:old form=load lift=after-settle",
+                     " fault=imagepull:old lift=after-settle", " fault=readiness:old form=recover",
+                     " fault=configkey:missing lift=after-settle"):
+            self.assertEqual([], self._errs(self.DOWN + once + " during=idle inst=0"), once)
+            self.assertEqual([], self._errs(self.DELETE + once + " during=idle inst=0"), once)
+            self.assertEqual([], self._errs(self.UP + once + " during=idle inst=0 expect=heals"), once)
+            self.assertTrue(any("(expect=heals)" in e for e in self._errs(self.UP + once + " during=idle inst=0 expect=repaired")), once)
+            self.assertTrue(any("no outcome is stated" in e for e in self._errs(self.DOWN + once + " during=idle inst=0 expect=heals")), once)
+        self.assertTrue(any("expect=heals reads a cause taken away" in e
+                            for e in self._errs(self.UP + " fault=crashloop:old form=start during=idle inst=0 expect=heals")))
+        self.assertTrue(any("expect=heals reads a cause taken away" in e
+                            for e in self._errs(self.UP + " fault=readiness:old form=persist during=idle inst=0 expect=heals")))
+        self.assertTrue(any("once=1 is a crash that happens exactly once (needs mode=rollout" in e
+                            for e in self._errs(self.DOWN + " fault=crashloop:old form=load during=idle inst=0 once=1")))
+
+    def test_a_pending_cause_before_a_scale_or_a_delete_reads_the_pending_vocabulary(self):
+        for cause in (" fault=taint:all", " fault=quota:0", " fault=quota:-1"):
+            for lift in (" lift=after-settle", " lift=never"):
+                self.assertEqual([], self._errs(self.DOWN + cause + lift + " during=idle"), cause + lift)
+                self.assertEqual([], self._errs(self.UP + cause + lift + " during=idle"), cause + lift)
+                self.assertEqual([], self._errs(self.DELETE + cause + lift + " during=idle"), cause + lift)
+        self.assertTrue(any("needs lift=after-settle|never" in e for e in self._errs(self.DOWN + " fault=taint:all during=idle")))
+        self.assertTrue(any("breaks no Instance" in e for e in self._errs(self.DOWN + " fault=taint:all lift=never during=idle inst=0")))
+        self.assertTrue(any("breaks no Instance" in e for e in self._errs(self.UP + " fault=quota:0 lift=never during=idle expect=repaired")))
+        self.assertTrue(any("lift=after-settle is when a pending cause is removed" in e
+                            for e in self._errs(self.DOWN + " fault=taint:all lift=after-settle")))
+
+    def test_a_siblings_break_states_its_fate_on_every_scale(self):
+        self.assertTrue(any("states what becomes of it" in e
+                            for e in self._errs(self.PD_DOWN + " fault=crashloop:old form=start during=idle inst=0 victimcomp=decoder")))
+        self.assertEqual([], self._errs(self.PD_DOWN + " fault=crashloop:old form=start during=idle inst=0 victimcomp=decoder expect=repaired"))
+        self.assertEqual([], self._errs(self.ER_DOWN + " fault=imagepull:old during=idle inst=1 victimcomp=router expect=repaired"))
+        self.assertEqual([], self._errs(self.ER_DOWN + " fault=readiness:old form=persist during=idle inst=0 victimcomp=router expect=left"))
+        self.assertEqual([], self._errs(self.ER_UP + " fault=crashloop:old form=load during=idle inst=0 victimcomp=router lift=after-settle expect=heals"))
+        self.assertEqual([], self._errs(self.PD_DOWN.replace("mode=scaledown", "mode=recreate").replace(" to_e=3", "")
+                                        + " fault=crashloop:old form=start during=idle inst=0 victimcomp=decoder"))
+        self.assertTrue(any("names the one Instance the break hits (an index below Nr=2)" in e
+                            for e in self._errs(self.ER_DOWN + " fault=imagepull:old during=idle inst=2 victimcomp=router expect=repaired")))
+
     def test_the_break_must_be_one_of_the_three_and_name_the_running_revision(self):
-        self.assertTrue(any("needs fault=crashloop|imagepull|readiness:old" in e
-                            for e in self._errs(self.DOWN + " fault=configkey:missing during=idle")))
         self.assertTrue(any("needs fault=crashloop|imagepull|readiness:old" in e
                             for e in self._errs(self.DOWN + " fault=podkill:settling during=idle")))
         self.assertTrue(any("needs form=start|load" in e for e in self._errs(self.DOWN + " fault=crashloop:old during=idle")))
         self.assertTrue(any("needs form=persist" in e for e in self._errs(self.DOWN + " fault=readiness:old during=idle")))
-        self.assertTrue(any("needs form=persist (the switch stays set" in e
-                            for e in self._errs(self.DOWN + " fault=readiness:old form=recover during=idle")))
         # readiness:new is a push whose revision never passes readiness, not a break of the running revision
         self.assertTrue(any("needs fault=crashloop|imagepull|readiness:old" in e
                             for e in self._errs(self.DOWN + " fault=readiness:new form=persist during=idle")))
@@ -10422,6 +10481,70 @@ class BrokenOperationTest(unittest.TestCase):
         notes, checks = [], []
         self.assertEqual("FAIL", run._broken_fate_checks(f, "left", {"u0"}, {"u0"}, None, named, "PASS", notes, checks))
         self.assertTrue(any("though no repair was due" in c for c in checks))
+
+    def test_a_one_shot_cause_is_read_off_the_fault_record(self):
+        self.assertTrue(run._broken_one_shot({"kind": "crashloop", "form": "start", "lift": "after-settle"}))
+        self.assertTrue(run._broken_one_shot({"kind": "imagepull", "lift": "after-settle"}))
+        self.assertTrue(run._broken_one_shot({"kind": "configkey", "lift": "after-settle"}))
+        self.assertTrue(run._broken_one_shot({"kind": "readiness", "form": "recover"}))
+        self.assertFalse(run._broken_one_shot({"kind": "readiness", "form": "persist"}))
+        self.assertFalse(run._broken_one_shot({"kind": "crashloop", "form": "start", "lift": ""}))
+        self.assertFalse(run._broken_one_shot({"kind": "configkey", "lift": "never"}))
+        self.assertFalse(run._broken_one_shot(None))
+
+    def test_a_scale_down_waits_for_the_siblings_fate(self):
+        ctx = {"measures": {"decoder": (4, 0, 0)}, "agg": {"decoder": (4, 3, 0)}}
+        self.assertTrue(run._broken_fate_settled(ctx, "decoder", 4, "left", False))
+        self.assertFalse(run._broken_fate_settled(ctx, "decoder", 4, "left", True))
+        self.assertFalse(run._broken_fate_settled(ctx, "decoder", 4, "repaired", True))
+        self.assertFalse(run._broken_fate_settled(ctx, "decoder", 4, "heals", False))
+        ctx["agg"]["decoder"] = (4, 4, 0)
+        self.assertTrue(run._broken_fate_settled(ctx, "decoder", 4, "repaired", True))
+        self.assertFalse(run._broken_fate_settled(ctx, "decoder", 4, "repaired", False))
+        self.assertTrue(run._broken_fate_settled(ctx, "decoder", 4, "heals", False))
+        self.assertTrue(run._broken_fate_settled(ctx, "decoder", 4, "heals", True))
+        self.assertFalse(run._broken_fate_settled(ctx, "decoder", 4, "left", False))
+
+    def test_a_healed_instance_serves_again_with_at_most_one_repair(self):
+        f = {"crash_comp": "engine", "crash_inst": "0", "kind": "crashloop"}
+        named = ("RestartTriggered", "OMENative component=engine instance=0 crash-loop repair: pod e0 wedged")
+        notes, checks = [], []
+        self.assertEqual("PASS", run._broken_fate_checks(f, "heals", {"u0"}, {"u0"}, None, [], "PASS", notes, checks, serving=True))
+        self.assertTrue(any("the same pod, started again" in c for c in checks))
+        self.assertTrue(any("came back on its own" in c for c in checks))
+        notes, checks = [], []
+        self.assertEqual("PASS", run._broken_fate_checks(f, "heals", {"u0b"}, {"u0"}, 20.0, [named], "PASS", notes, checks, serving=True))
+        self.assertTrue(any("rebuilt, every pod new" in c for c in checks))
+        self.assertTrue(any("names engine Instance 0 once" in c for c in checks))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._broken_fate_checks(f, "heals", {"u0"}, {"u0"}, None, [], "PASS", notes, checks, serving=False))
+        self.assertTrue(any("is not Ready and serving after the cause was taken away" in c for c in checks))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._broken_fate_checks(f, "heals", {"u0b"}, {"u0"}, 20.0, [named, named], "PASS", notes, checks, serving=True))
+        self.assertTrue(any("at most one repair" in c for c in checks))
+
+    def test_a_delete_under_a_pending_cause_reads_the_recreates_wait(self):
+        f = {"kind": "taint", "cause": "the taint", "infra_fail": None}
+        waited = {"bitten_at": 12.0, "token": "Unschedulable", "row": ("engine", "0"), "message": "0/3 nodes are available",
+                  "failed": [], "lifted_at": None, "held_s": None, "waiting_at_end": True}
+        notes, checks = [], []
+        self.assertEqual("PASS", run._pending_recreate_checks(f, "never", waited, "HELD", "PASS", notes, checks))
+        self.assertTrue(any("still waiting with reason Unschedulable" in c for c in checks))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._pending_recreate_checks(f, "never", dict(waited, waiting_at_end=False), "HELD", "PASS", notes, checks))
+        notes, checks = [], []
+        self.assertEqual("PASS", run._pending_recreate_checks(f, "after-settle", dict(waited, lifted_at=40.0), None, "PASS", notes, checks))
+        self.assertTrue(any("the recreate went on to Ready" in c for c in checks))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._pending_recreate_checks(f, "after-settle", dict(waited, lifted_at=40.0, failed=[("engine", "0")]),
+                                                              None, "PASS", notes, checks))
+        self.assertTrue(any("read Failed while the taint held" in c for c in checks))
+        g = dict(f)
+        notes, checks = [], []
+        run._pending_recreate_checks(g, "after-settle", dict(waited, bitten_at=None), None, "PASS", notes, checks)
+        self.assertIn("the cause never bound", g["infra_fail"])
+        self.assertIn("never lifted", run._pending_recreate_summary(f, waited))
+        self.assertIn("no row of the recreate reported a wait", run._pending_recreate_summary(f, dict(waited, bitten_at=None)))
 
     def test_the_status_must_have_reported_the_broken_instance(self):
         f = {"crash_comp": "engine", "crash_inst": "0", "kind": "imagepull"}

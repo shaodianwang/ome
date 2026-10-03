@@ -1,0 +1,13 @@
+# p9476: [gen] broken pending quota down1 engine N=4 rp None lift after-settle  mode=scaledown Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 fault=quota:0 co=none topo=engine during=idle lift=after-settle to_e=3
+# reason: a quota with room for no further pod is armed on the settled service, then the engine is scaled from 4 to 3: nothing is placed or admitted, so the scale-down converges beside the cause, the highest engine Instance 3 goes, no row waits on QuotaExceeded, the survivors keep their pods and every row settles Ready with no operation open; the cause is lifted once the scale has converged and nothing moves for it
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9476 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }

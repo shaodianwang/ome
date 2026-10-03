@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **4559**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -43,8 +43,8 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 | gen-pending | 138 | p7500..p9737 |
 | gen-budget | 114 | p8200..p8313 |
 | gen-inplaceonly | 45 | p8330..p8374 |
-| gen-fault-scale | 168 | p7600..p9467 |
-| gen-fault-delete | 56 | p7700..p7755 |
+| gen-fault-scale | 292 | p7600..p10191 |
+| gen-fault-delete | 118 | p7700..p10217 |
 | gen-fault-move | 150 | p7800..p9849 |
 | gen-fault-edit | 104 | p7900..p9903 |
 | gen-packed-pool | 96 | p8600..p8695 |
@@ -58,16 +58,16 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| engine | 1217 |
-| engine-mn | 1076 |
-| pd | 1175 |
-| pd-mn | 905 |
+| engine | 1277 |
+| engine-mn | 1136 |
+| pd | 1208 |
+| pd-mn | 938 |
 
 ### By update strategy
 
 | value | cases |
 |---|---|
-| (dormant: nothing rolls) | 384 |
+| (dormant: nothing rolls) | 570 |
 | InPlaceIfPossible | 458 |
 | InPlaceOnly | 281 |
 | RecreatePod | 961 |
@@ -90,6 +90,11 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 | configkey:never | 12 |
 | configkey:new:after-settle | 12 |
 | configkey:new:never | 12 |
+| configkey:once@delete | 6 |
+| configkey:once@down1 | 6 |
+| configkey:once@up1 | 6 |
+| configkey@delete | 6 |
+| configkey@down1 | 6 |
 | conflict:idle | 24 |
 | conflict:settling | 48 |
 | cordon:after-hold | 8 |
@@ -103,6 +108,9 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:load:decoder@idle | 1 |
 | crashloop:load:decoder@last | 1 |
 | crashloop:load:decoder@mid | 2 |
+| crashloop:load:once@delete | 6 |
+| crashloop:load:once@down1 | 6 |
+| crashloop:load:once@up1 | 6 |
 | crashloop:load:router:new:once@last | 2 |
 | crashloop:load:router:new:once@mid | 3 |
 | crashloop:load:router:once@idle | 2 |
@@ -144,13 +152,16 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:start:decoder@idle | 1 |
 | crashloop:start:decoder@last | 1 |
 | crashloop:start:decoder@mid | 2 |
+| crashloop:start:once@delete | 10 |
+| crashloop:start:once@down1 | 10 |
+| crashloop:start:once@up1 | 10 |
 | crashloop:start:router@idle | 1 |
 | crashloop:start:router@last | 1 |
 | crashloop:start:router@mid | 2 |
 | crashloop:start@canary | 16 |
 | crashloop:start@capacity | 16 |
-| crashloop:start@delete | 16 |
-| crashloop:start@down1 | 16 |
+| crashloop:start@delete | 20 |
+| crashloop:start@down1 | 20 |
 | crashloop:start@down2 | 8 |
 | crashloop:start@edit | 20 |
 | crashloop:start@gate | 4 |
@@ -163,7 +174,7 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:start@sibling | 20 |
 | crashloop:start@toone | 8 |
 | crashloop:start@traffic | 16 |
-| crashloop:start@up1 | 16 |
+| crashloop:start@up1 | 20 |
 | crashonce:new:load | 24 |
 | crashonce:new:start | 24 |
 | crashonce:old:load | 36 |
@@ -192,6 +203,9 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 | imagepull:new:decoder:imagePull | 4 |
 | imagepull:new:imagePull | 12 |
 | imagepull:new:router:parked | 3 |
+| imagepull:once@delete | 6 |
+| imagepull:once@down1 | 6 |
+| imagepull:once@up1 | 6 |
 | imagepull:router:once@idle | 1 |
 | imagepull:router:once@last | 1 |
 | imagepull:router:once@mid | 2 |
@@ -241,10 +255,17 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 | packed:idle:start | 16 |
 | packed:new:load | 32 |
 | packed:new:start | 32 |
+| pending:quota-kept@down1 | 6 |
 | pending:quota:roll | 42 |
 | pending:quota:steady | 24 |
+| pending:quota@delete | 6 |
+| pending:quota@down1 | 6 |
+| pending:quota@up1 | 6 |
 | pending:taint:roll | 48 |
 | pending:taint:steady | 24 |
+| pending:taint@delete | 12 |
+| pending:taint@down1 | 12 |
+| pending:taint@up1 | 12 |
 | podkill:draining:leader | 12 |
 | podkill:draining:worker | 12 |
 | podkill:rotating | 160 |
@@ -270,6 +291,9 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 | readiness:new:recover | 12 |
 | readiness:old:persist | 12 |
 | readiness:old:recover | 12 |
+| readiness:once@delete | 6 |
+| readiness:once@down1 | 6 |
+| readiness:once@up1 | 6 |
 | readiness@delete | 8 |
 | readiness@down1 | 8 |
 | readiness@down2 | 4 |
@@ -314,7 +338,7 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (unset — baseline) | 984 |
-| None | 1821 |
+| None | 2007 |
 | RecreateInstance | 1568 |
 
 ### By pause
@@ -322,14 +346,14 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 4079 |
+| off | 4265 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 4193 |
+| (no pause around a repair) | 4379 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -338,7 +362,7 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 4193 |
+| (no pause around a repair) | 4379 |
 | fix | 90 |
 | none | 90 |
 
@@ -348,7 +372,7 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 54 |
 | canary | 30 |
-| none | 3611 |
+| none | 3797 |
 | ratio | 16 |
 | rolling | 628 |
 | seq | 34 |
@@ -392,9 +416,10 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 3138 |
-| decoder | 94 |
-| engine | 1141 |
+| (no break) | 3198 |
+| decoder | 106 |
+| engine | 1243 |
+| router | 12 |
 
 ### By migration mode (node family)
 
@@ -431,8 +456,8 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| delete | 88 |
-| down1 | 56 |
+| delete | 150 |
+| down1 | 124 |
 | down2 | 28 |
 | push | 48 |
 | scale | 36 |
@@ -441,7 +466,7 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 | scale-up | 32 |
 | steady | 36 |
 | toone | 28 |
-| up1 | 56 |
+| up1 | 112 |
 
 ### By overlap order (runtime-edit-repair)
 
@@ -462,9 +487,9 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | after-hold | 24 |
-| after-settle | 114 |
+| after-settle | 150 |
 | after-window | 24 |
-| never | 102 |
+| never | 126 |
 
 ### By window operation (webhook and conflict families)
 
@@ -506,8 +531,8 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| delete | 88 |
-| down1 | 56 |
+| delete | 150 |
+| down1 | 124 |
 | down2 | 28 |
 | push | 48 |
 | scale | 36 |
@@ -516,7 +541,7 @@ Total generated cases: **4373**. The whole-corpus per-PR cap (hand + generated) 
 | scale-up | 32 |
 | steady | 36 |
 | toone | 28 |
-| up1 | 56 |
+| up1 | 112 |
 
 ### By one-shot crash (gen-crash-once)
 

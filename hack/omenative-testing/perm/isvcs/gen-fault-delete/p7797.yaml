@@ -1,0 +1,20 @@
+# p7797: [gen] broken crashloop:start once delete engine-mn W1+router N=2 rp None  mode=recreate Ne=2 Nd=0 Nr=2 ceil_e=2 ceil_d=0 ceil_r=2 fault=crashloop:old co=none topo=engine-mn form=start during=idle inst=0 lift=after-settle
+# reason: the leader pod of the engine's gang 0 is pointed at an image with no shell on the settled service, so it crashes at every start and is never Ready again; once the status reports Instance 0 broken the service is deleted and the pod is pointed back at the image it ran, where a repair has not rebuilt it first: every pod goes within the teardown budget, the broken one included, no pod stays Terminating and no finalizer wedges, and the same name comes back Ready on fresh pods with nothing of the break left; the router is neither broken nor scaled and keeps its pods; each Instance is a gang of a leader and a worker, counted whole
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7797 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

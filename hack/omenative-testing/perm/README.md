@@ -1144,13 +1144,39 @@ shapes.
 `during=idle` in `mode=scaledown` and `mode=recreate` breaks one Instance of
 the settled service first and lands the mode's operation once the status has
 reported it. The break is one of `fault=crashloop:old form=start|load`,
-`fault=imagepull:old` or `fault=readiness:old form=persist` (the fixture's
-readiness switch set in the live pod with `kubectl exec`, so the pod keeps
-running, leaves rotation and is never restarted; the switch stays set until
-the case ends and the end-of-case cleanup lifts it). `inst=<index>` aims the
-break at one Instance; the generated families use Instance 0, the lowest
-index, so a scale-down's natural victim (the highest index) and the broken
-Instance differ and the order of removal can be told apart.
+`fault=imagepull:old`, `fault=readiness:old form=persist|recover` (the
+fixture's readiness switch set in the live pod with `kubectl exec`, so the
+pod keeps running, leaves rotation and is never restarted; `persist` keeps
+the switch set until the case ends and the end-of-case cleanup lifts it) or
+`fault=configkey:missing` (the ConfigMap key the runner reads removed and
+the runner restarted, so it waits in `CreateContainerConfigError`).
+`inst=<index>` aims the break at one Instance; the generated families use
+Instance 0, the lowest index, so a scale-down's natural victim (the highest
+index) and the broken Instance differ and the order of removal can be told
+apart. `victimcomp=decoder|router` aims it at a sibling the operation does
+not scale: the engine's scale then takes nothing of the broken Instance and
+states its fate as a scale-up does, and the engine is the negative control
+of the sibling's break.
+
+The one-shot forms take the cause away right after the operation has
+landed: `lift=after-settle` on a crash, a pull failure or the missing key
+(the pod pointed back at its image, the killer stopped, the key put back)
+and `form=recover` on the readiness switch. The status's first word about
+the broken Instance is what the operator acts on there, so the operation
+meets the Instance broken; a scale that does not take it then expects
+`expect=heals`: Ready and serving again on its running revision once the
+cause is gone, the same pod started again or rebuilt by a repair recorded
+at most once.
+
+A pending cause is armed on the settled service before the operation
+instead of a break: `fault=taint:all` or `fault=quota:<n>` with
+`lift=after-settle|never`, the pending vocabulary. A scale-up's new
+Instance, or every pod of a delete's recreate, waits with the product's own
+reason (`Unschedulable`, `QuotaExceeded`) on its row, no row reads Failed
+and nothing settled is taken down to make room; the operation completes
+once the cause is lifted, or holds with the reason across the hold window.
+A scale-down places nothing, so it converges beside the cause and no row
+may wait.
 
 The operator acts as the status lets them: once the broken Instance's row
 leaves Ready (a repair opening on it, which waits for the pod to be older
@@ -1196,8 +1222,13 @@ policies (readiness loss under `None` only, since no policy rebuilds it), the
 engine, PD and gang shapes, a rolling group on PD, and the operations down by
 one, down by two, to one, up by one and delete; the engine runs under
 `maxUnavailable: 1`, the budget that admits the repair a scale-up expects (a
-budget of zero holds it). `isvcs/MANIFEST.md` lists the cells left out and
-why.
+budget of zero holds it). The further rows run one case per ledger cell on
+the six shape families, under restart policy `None` and no group, on one
+scale-down, the scale-up and the delete: the missing key kept away (no
+scale-up: the new Instance would wait on the same key), the one-shot forms,
+a taint or a quota armed before the operation, and a crash at start on the
+sibling (the decoder beside a prefill/decode engine, the router in front of
+an engine fleet). `isvcs/MANIFEST.md` lists the cells left out and why.
 
 ### A fault at a moment of a move (`mode=migrate at=accept|surge|drain`)
 
@@ -2283,10 +2314,11 @@ Four generators write into `isvcs/`; re-run one after editing it:
   constraint ledger with every omitted cell and its reason, missing-hook
   catalog). The story families are canary lanes in CI: the pipeline gives
   every `gen-canary-*` folder the canary pod budget and Prometheus. The
-  broken-Instance operations (`p7600`–`p7799`) → `isvcs/gen-fault-scale/` (one
-  Instance broken, then the engine scaled down by one, by two, to one, or up
-  by one) and `isvcs/gen-fault-delete/` (the same breaks, then the service
-  deleted and re-created under the same name). The repeating faults
+  broken-Instance operations (`p7600`–`p7799`, continued at `p9400`–`p9499`
+  and `p10100`–`p10299`) → `isvcs/gen-fault-scale/` (one Instance broken,
+  then the engine scaled down by one, by two, to one, or up by one) and
+  `isvcs/gen-fault-delete/` (the same breaks, then the service deleted and
+  re-created under the same name). The repeating faults
   (`p8700`–`p8899`) → `isvcs/gen-repeat/` (a pod deleted by hand, a gang
   member lost, an eviction or a preemption applied again each time what it
   took has come back, and the manager deleted again each time it is Ready,

@@ -1,0 +1,18 @@
+# p7792: [gen] broken pending taint delete engine+router N=4 rp None lift never  mode=recreate Ne=4 Nd=0 Nr=2 ceil_e=4 ceil_d=0 ceil_r=2 fault=taint:all co=none topo=engine during=idle lift=never
+# reason: a NoSchedule taint on every schedulable node is armed on the settled service, then the service is deleted: every pod goes within the teardown budget and the same name is re-applied, but its pods cannot be placed, so a row of the recreate waits with reason Unschedulable and no row reads Failed; the cause stays to the end, so the wait holds with its reason across the hold window and the service comes back only once the cause is gone; the router is neither scaled nor waiting and keeps its pods
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7792 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

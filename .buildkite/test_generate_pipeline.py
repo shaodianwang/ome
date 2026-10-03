@@ -1521,12 +1521,15 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-budget", "pd-mn", "")], 1)
         for topology in ("engine", "pd", "engine-mn"):
             self.assertEqual(shard_counts[("gen-inplaceonly", topology, "")], 1)
-        self.assertEqual(shard_counts[("gen-fault-scale", "engine", "")], 4)
-        self.assertEqual(shard_counts[("gen-fault-scale", "engine-mn", "")], 2)
-        self.assertEqual(shard_counts[("gen-fault-scale", "pd", "")], 4)
-        self.assertEqual(shard_counts[("gen-fault-scale", "pd-mn", "")], 2)
-        for topology in ("engine", "pd", "engine-mn", "pd-mn"):
-            self.assertEqual(shard_counts[("gen-fault-delete", topology, "")], 1)
+        # The engine topologies carry the engine alone and the engine behind
+        # a router; a broken-Instance operation waits for the status's word
+        # and a settled fleet, so the rows pack a few per shard.
+        self.assertEqual(shard_counts[("gen-fault-scale", "engine", "")], 12)
+        self.assertEqual(shard_counts[("gen-fault-scale", "engine-mn", "")], 10)
+        self.assertEqual(shard_counts[("gen-fault-scale", "pd", "")], 8)
+        self.assertEqual(shard_counts[("gen-fault-scale", "pd-mn", "")], 6)
+        for topology, shards in (("engine", 4), ("engine-mn", 4), ("pd", 3), ("pd-mn", 3)):
+            self.assertEqual(shard_counts[("gen-fault-delete", topology, "")], shards)
         for topology, plain, policy in (("engine", 3, 4), ("engine-mn", 3, 4), ("pd", 2, 2), ("pd-mn", 2, 2)):
             self.assertEqual(shard_counts[("gen-fault-move", topology, "")], plain)
             self.assertEqual(shard_counts[("gen-fault-move", topology, gp.EVAL_FORCE_DELETE_SLUG)], policy)
@@ -1562,7 +1565,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-lift", "engine-mn", "")], 2)
         self.assertEqual(shard_counts[("gen-lift", "pd", "")], 1)
         self.assertEqual(shard_counts[("gen-lift", "pd-mn", "")], 1)
-        self.assertEqual(job_count, 753)
+        self.assertEqual(job_count, 787)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin
@@ -2147,7 +2150,7 @@ class TestEvalTargeted(PipelineTestCase):
         self.assertEqual(gp._top_level_keys(batches[-1]), ["chart-ome-release"])
         # The fixture round, 5% sampled under the pinned commit: the pin
         # moves with the corpus like the full and smoke totals.
-        self.assertEqual(sum(gp._job_count(document) for document in batches), 363)
+        self.assertEqual(sum(gp._job_count(document) for document in batches), 365)
 
 
 class TestEvalVerdicts(unittest.TestCase):
@@ -3036,9 +3039,9 @@ class TestEvalMode(PipelineTestCase):
         committed = sorted(case for _, _, cases in self.groups for case in cases)
         default = sorted(case for child in self.runner_jobs(self.full, scheduler="") for case in self.cases_of(child))
         self.assertEqual(default, committed)
-        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 753)
-        self.assertEqual(len(self.runner_jobs(self.full)), 1689)
-        self.assertEqual(len(self.full), 1700)
+        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 787)
+        self.assertEqual(len(self.runner_jobs(self.full)), 1761)
+        self.assertEqual(len(self.full), 1772)
         self.assertEqual(len(self.smoke), 195)
         self.assertEqual(len(self.smoke_batches), 3)
         self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 304)
@@ -3210,7 +3213,7 @@ class TestPipelineUploads(PipelineTestCase):
     def test_todays_corpus_uploads_within_the_limit_and_the_total_is_pinned(self):
         self.assert_uploads_are_well_formed(self.batches, self.children)
         self.assertGreater(len(self.batches), 2)
-        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 1810)
+        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 1882)
 
     def test_the_full_round_records_its_verdicts_after_every_eval_group(self):
         last = self.batches[-1]
