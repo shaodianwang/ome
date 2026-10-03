@@ -13,6 +13,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -1018,5 +1019,199 @@ func TestReconcile_InPlaceOnly_ImagePushRollsEveryInstance(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// livePodProbesNeverReady reports whether any live pod still carries the
+// never-ready probe.
+func (h *recoveryHarness) livePodProbesNeverReady() bool {
+	for _, pod := range h.livePods() {
+		if probesNeverReadyPath(pod) {
+			return true
+		}
+	}
+	return false
+}
+
+// inPlaceIfPossibleHarness is replicas single-pod Instances settled on v1
+// under InPlaceIfPossible with maxSurge 0 and the given maxUnavailable.
+// gated lists the Component in a rollout group with a run open.
+func inPlaceIfPossibleHarness(t *testing.T, replicas, maxUnavailable int32, gated bool) *recoveryHarness {
+	t.Helper()
+	h := newRecoveryHarnessFor(t, false, constants.MainContainerName)
+	h.recorder = record.NewFakeRecorder(256)
+	h.replicas = replicas
+	maxSurge := intstr.FromInt32(0)
+	unavail := intstr.FromInt32(maxUnavailable)
+	h.lifecycle = types.Lifecycle{
+		UpdateStrategy: &types.UpdateStrategy{
+			Type:          types.UpdateStrategyInPlaceIfPossible,
+			RollingUpdate: &types.RollingUpdate{MaxSurge: &maxSurge, MaxUnavailable: &unavail},
+		},
+	}
+	if gated {
+		consults := 0
+		h.gate = rollingGroupGate(h, replicas, 0, maxUnavailable, &consults)
+	}
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(40, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+	}
+	return h
+}
+
+// requireRollWithinUnavailableBudget fails the test when more than budget
+// Instances are offline for the roll, fewer than replicas-budget serve, or
+// a repair has opened on an Instance the roll owns.
+func requireRollWithinUnavailableBudget(t *testing.T, h *recoveryHarness, replicas, budget int32) {
+	t.Helper()
+	if n := escalation.CurrentUnavailableInFlight(h.irStatuses()); n > budget {
+		h.dumpState("budget")
+		t.Fatalf("%d Instances offline for the roll, budget %d", n, budget)
+	}
+	if n := h.servingInstances(); n < replicas-budget {
+		h.dumpState("floor")
+		t.Fatalf("%d Instances in rotation, floor %d", n, replicas-budget)
+	}
+	if h.repairInFlight() {
+		h.dumpState("repair")
+		t.Fatalf("a repair opened on an Instance the roll owns")
+	}
+}
+
+// TestRollback_HeldInPlacePushOnNeverReadyRevisionLandsTheStartingRevision:
+// four single-pod Instances serve v1 under InPlaceIfPossible with
+// maxUnavailable 1. A push whose diff reaches past the container images
+// (a readiness probe) rolls as a recreate, and the pod it rebuilds runs
+// without ever turning Ready, so the roll parks at its budget: one
+// Instance dark on the new revision, three serving v1. Re-applying v1
+// then lands v1 on every Instance within that budget. The parked
+// Instance's pod was rendered from the new revision, so no in-place patch
+// brings it back: its attempt is rebuilt at v1, no pod of the new
+// revision is left, the three serving Instances keep their pods and stay
+// in rotation, and no repair opens. Standalone and listed in a rollout
+// group with a run open.
+//
+// Cells: instance/Update/Drain/spec.revision/before, instance/Ready/spec.revision/before
+func TestRollback_HeldInPlacePushOnNeverReadyRevisionLandsTheStartingRevision(t *testing.T) {
+	const replicas = 4
+	for _, shape := range rollShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			h := inPlaceIfPossibleHarness(t, replicas, 1, shape.gated)
+			uids := h.podUIDByInstance(replicas)
+
+			// The new revision: v1's image behind a readiness probe its pod
+			// never passes, a diff no image patch can apply or undo.
+			stuckSpec := h.podSpec(goodImage)
+			stuckSpec.Containers[0].ReadinessProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{Path: neverReadyPath, Port: intstr.FromInt32(8080)},
+			}}
+			revStuck := h.ensureRevision(stuckSpec)
+			stuckHash := query.RevisionOf(revStuck).Hash()
+			h.setTarget(revStuck, goodImage)
+			h.desired.PodSpec = stuckSpec
+
+			withinBudget := func() { requireRollWithinUnavailableBudget(t, h, replicas, 1) }
+			// Parked: the rebuilt Instance runs the new revision's pod with
+			// no readiness, the other three are untouched on v1.
+			parked := func() bool {
+				s := h.instance(0)
+				if s == nil || s.Phase != types.InstancePhaseUpdating || s.Operation == nil || s.Operation.TargetRevision != revStuck.Name {
+					return false
+				}
+				pods := h.podsOf(0)
+				if len(pods) != 1 || pods[0].Labels[query.LabelRevisionHash] != stuckHash || !probesNeverReadyPath(pods[0]) || podreadiness.IsContainersReady(pods[0]) {
+					return false
+				}
+				for idx := int32(1); idx < replicas; idx++ {
+					if !h.untouchedOn(idx, h.revV1) || !h.instanceServes(idx) {
+						return false
+					}
+				}
+				return true
+			}
+			if !h.runWithInvariant(20, parked, withinBudget) {
+				h.dumpState("push")
+				t.Fatalf("the push never parked at its budget with one Instance dark on %s", revStuck.Name)
+			}
+			for i := 0; i < 3; i++ {
+				h.step()
+				withinBudget()
+			}
+			if !parked() {
+				h.dumpState("held")
+				t.Fatalf("the parked roll moved while its only rebuilt pod never turned Ready")
+			}
+
+			// The rollback: v1 re-applied over the parked roll.
+			h.setTarget(h.revV1, goodImage)
+			floorHeld := func() {
+				withinBudget()
+				for idx := int32(1); idx < replicas; idx++ {
+					if !h.untouchedOn(idx, h.revV1) {
+						h.dumpState("rollback")
+						t.Fatalf("instance %d left v1 during a rollback onto v1", idx)
+					}
+					if pods := h.podsOf(idx); len(pods) != 1 || pods[0].UID != uids[idx] {
+						h.dumpState("rollback")
+						t.Fatalf("instance %d no longer runs the pod it served v1 with: the rollback rebuilt an Instance that never left v1", idx)
+					}
+				}
+			}
+			if !h.runWithInvariant(40, func() bool { return h.settledOn(h.revV1, replicas) }, floorHeld) {
+				h.dumpState("after the rollback")
+				t.Fatalf("the rollback did not settle on %s: %d of %d Instances Ready on it, a pod of the rolled-back revision alive: %v",
+					h.revV1.Name, len(h.landedOn(h.revV1)), replicas, h.livePodProbesNeverReady())
+			}
+			if h.livePodProbesNeverReady() {
+				h.dumpState("leftover")
+				t.Fatalf("a pod of the rolled-back revision is still alive after the rollback settled")
+			}
+			h.requirePodsRender(0, h.revV1, goodImage)
+		})
+	}
+}
+
+// TestRollback_AtTheLastInstanceOfAnInPlaceRollComesBackInPlace: four
+// single-pod Instances listed in a rollout group roll an image push in
+// place under InPlaceIfPossible with maxUnavailable 1. With three
+// Instances Ready on the new revision and the last at most mid-patch, v1
+// is re-applied. Every Instance comes back to v1 in place: the same pod
+// UIDs throughout, at most one Instance out of rotation at a time, no
+// repair, and no pod of the new revision left.
+//
+// Cells: instance/Update/InPlace/spec.revision/before, instance/Ready/spec.revision/boundary@T-ready-inplace
+func TestRollback_AtTheLastInstanceOfAnInPlaceRollComesBackInPlace(t *testing.T) {
+	const replicas = 4
+	h := inPlaceIfPossibleHarness(t, replicas, 1, true)
+	uids := h.podUIDByInstance(replicas)
+	inPlaceWithinBudget := func() {
+		requireRollWithinUnavailableBudget(t, h, replicas, 1)
+		for idx := int32(0); idx < replicas; idx++ {
+			if pods := h.podsOf(idx); len(pods) != 1 || pods[0].UID != uids[idx] {
+				h.dumpState("pod identity")
+				t.Fatalf("instance %d no longer runs the pod it had before the push: an in-place roll patches, it does not recreate", idx)
+			}
+		}
+	}
+
+	h.setTarget(h.revFixed, fixedImage)
+	atTheLast := func() bool { return len(h.landedOn(h.revFixed)) == replicas-1 }
+	if !h.runWithInvariant(80, atTheLast, inPlaceWithinBudget) {
+		h.dumpState("push")
+		t.Fatalf("the roll never reached its last Instance: %d of %d Ready on %s", len(h.landedOn(h.revFixed)), replicas, h.revFixed.Name)
+	}
+
+	h.setTarget(h.revV1, goodImage)
+	if !h.runWithInvariant(80, func() bool { return h.settledOn(h.revV1, replicas) }, inPlaceWithinBudget) {
+		h.dumpState("after the rollback")
+		t.Fatalf("the rollback did not settle on %s: %d of %d Instances Ready on it", h.revV1.Name, len(h.landedOn(h.revV1)), replicas)
+	}
+	if h.livePodOnImage(fixedImage) {
+		t.Fatalf("a pod of the rolled-back revision is still alive after the rollback settled")
+	}
+	for idx := int32(0); idx < replicas; idx++ {
+		h.requirePodsRender(idx, h.revV1, goodImage)
 	}
 }

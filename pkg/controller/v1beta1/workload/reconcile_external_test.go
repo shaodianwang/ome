@@ -1586,10 +1586,11 @@ func (h *recoveryHarness) kubelet() {
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionTrue, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, h.servingGate(pod), h.clk.Now())
-		case h.readinessFails[pod.Name]:
-			// The readiness probe fails: the container keeps running, and
-			// the kubelet clears ContainersReady and Ready while the serving
-			// gate keeps the value the controller wrote.
+		case h.readinessFails[pod.Name] || probesNeverReadyPath(pod):
+			// The readiness probe fails, by fault or because the runner
+			// probes a path this node never serves: the container keeps
+			// running, and the kubelet clears ContainersReady and Ready
+			// while the serving gate keeps the value the controller wrote.
 			pod.Status.Phase = corev1.PodRunning
 			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 				Name:  pod.Spec.Containers[0].Name,

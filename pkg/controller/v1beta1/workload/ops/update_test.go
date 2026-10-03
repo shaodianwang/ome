@@ -19,6 +19,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	clocktesting "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -3060,5 +3061,105 @@ func TestEffectiveUpdateStrategy_GangSurgePairStaysOnThePinnedStrategy(t *testin
 	idle := &workload.InstanceStatus{Index: 0, Phase: workload.InstancePhaseReady}
 	if got := effectiveUpdateStrategy(idle, workload.UpdateStrategyRecreatePod); got != workload.UpdateStrategyRecreatePod {
 		t.Errorf("idle row effective strategy: got %q want the edited RecreatePod", got)
+	}
+}
+
+// TestUpdateWithPods_RecreateFallbackRetargetedToTheRunningRevisionStaysARecreate:
+// an InPlaceIfPossible roll whose diff reached past the container images
+// rebuilt its pod at the new revision, and that pod has not turned Ready
+// when the target returns to the revision the row records as running.
+// The running revision's PodSpec equals the target's, but the live pod
+// was rendered from the superseded revision, so the roll is not an
+// in-place patch: the attempt stays on the recreate, its Incarnation is
+// bumped again and the superseded pod is taken down for a rebuild at the
+// target, never relabeled onto a revision it does not run.
+//
+// Cells: instance/Update/Drain/spec.revision/before
+func TestUpdateWithPods_RecreateFallbackRetargetedToTheRunningRevisionStaysARecreate(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 2)
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{Type: v1beta1.UpdateStrategyInPlaceIfPossible},
+	}
+	v1Spec := legacyTargetSpecImage("llama:v1")
+	probedSpec := legacyTargetSpecImage("llama:v1")
+	probedSpec.Containers[0].ReadinessProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+		HTTPGet: &corev1.HTTPGetAction{Path: "/never-ready", Port: intstr.FromInt32(8080)},
+	}}
+	c := legacyNewFakeClient(t, isvc, ir)
+	legacySeedRunningRevision(t, c, isvc, workload.ComponentEngine, 0, v1Spec)
+	v1CR := legacyEnsureTargetCR(t, c, isvc, v1Spec)
+	probedCR := legacyEnsureTargetCR(t, c, isvc, probedSpec)
+
+	// The row mid-recreate toward the probed revision: Incarnation bumped
+	// to 2, the attempt on its Drain step, and its rebuilt pod running at
+	// that Incarnation without readiness.
+	stamped := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)
+	if len(stamped) != 1 || stamped[0].RunningRevision != v1CR.Name {
+		t.Fatalf("fixture: want one row running %s, got %+v", v1CR.Name, stamped)
+	}
+	live := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: isvc.Namespace, Name: legacyIRName(isvc, workload.ComponentEngine)}, live); err != nil {
+		t.Fatalf("get IR: %v", err)
+	}
+	now := metav1.NewTime(time.Now().Add(-time.Minute))
+	live.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceUpdating
+	live.Status.InstanceStatuses[0].TargetRevision = probedCR.Name
+	live.Status.InstanceStatuses[0].Operation = &v1beta1.InstanceOperation{
+		ID:             "update-0-1",
+		Type:           v1beta1.InstanceOperationUpdate,
+		Step:           workload.UpdateStepDrain,
+		TargetRevision: probedCR.Name,
+		Strategy:       string(v1beta1.UpdateStrategyInPlaceIfPossible),
+		Reason:         "revision " + v1CR.Name + " -> " + probedCR.Name,
+		StartedAt:      now,
+		LastProgressAt: now,
+	}
+	if err := c.Status().Update(context.Background(), live); err != nil {
+		t.Fatalf("stamp the recreate in flight: %v", err)
+	}
+	rebuilt := legacyPodAtIncarnation(isvc, 0, 2, false, false)
+	rebuilt.Spec = *probedSpec.DeepCopy()
+	rebuilt.Labels[query.LabelRevisionHash] = query.RevisionOf(probedCR).Hash()
+	rebuilt.Status.Phase = corev1.PodRunning
+	rebuilt.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "main", Image: "llama:v1", Ready: false,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}}
+	if err := c.Create(context.Background(), rebuilt); err != nil {
+		t.Fatalf("create the rebuilt pod: %v", err)
+	}
+
+	// The target returns to the running revision.
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	input.DesiredSpec.PodSpec = v1Spec
+	input.ObservedState.UpdateRevision = v1CR.Name
+	plan := legacyComponentPlan(workload.UpdateStrategyInPlaceIfPossible, nil)
+	plan.Instances[0].Incarnation = 2
+	done, err := UpdateWithPods(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], v1CR, v1Spec, []*corev1.Pod{rebuilt})
+	if err != nil {
+		t.Fatalf("UpdateWithPods: %v", err)
+	}
+	if done {
+		t.Fatal("a retarget of a recreate in flight must not complete the roll")
+	}
+
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if s.Operation == nil || s.Operation.Step != workload.UpdateStepDrain {
+		t.Fatalf("Operation: got %+v want the recreate still owning the row (Step=%s)", s.Operation, workload.UpdateStepDrain)
+	}
+	if s.Operation.TargetRevision != v1CR.Name || s.TargetRevision != v1CR.Name {
+		t.Errorf("target: operation %q row %q, want both %q", s.Operation.TargetRevision, s.TargetRevision, v1CR.Name)
+	}
+	if s.Incarnation <= 2 {
+		t.Errorf("Incarnation: got %d want a bump past 2 (the superseded pod is torn down for a rebuild)", s.Incarnation)
+	}
+	after := &corev1.Pod{}
+	switch err := c.Get(context.Background(), client.ObjectKeyFromObject(rebuilt), after); {
+	case apierrors.IsNotFound(err):
+	case err != nil:
+		t.Fatalf("get the rebuilt pod: %v", err)
+	case after.Labels[query.LabelRevisionHash] != query.RevisionOf(probedCR).Hash():
+		t.Errorf("the superseded pod was relabeled to %q; a pod rendered from %s never carries another revision", after.Labels[query.LabelRevisionHash], probedCR.Name)
 	}
 }

@@ -251,3 +251,18 @@ func unschedulablePod(name string, since time.Time) *corev1.Pod {
 		},
 	}
 }
+
+// neverReadyPath is a readiness path the kubelet model never serves: a
+// pod whose runner probes it runs without ever turning Ready.
+const neverReadyPath = "/never-ready"
+
+// probesNeverReadyPath reports whether a container of pod aims its
+// readiness probe at neverReadyPath.
+func probesNeverReadyPath(pod *corev1.Pod) bool {
+	for _, c := range pod.Spec.Containers {
+		if p := c.ReadinessProbe; p != nil && p.HTTPGet != nil && p.HTTPGet.Path == neverReadyPath {
+			return true
+		}
+	}
+	return false
+}

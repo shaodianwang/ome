@@ -108,6 +108,10 @@ func podHasServingCondition(pod *corev1.Pod) bool {
 //     only; otherwise fall through to recreate.
 //   - InPlaceOnly: image-patch when eligible; error otherwise.
 //
+// Under either in-place strategy, a recreate already in flight on the
+// Instance completes as a recreate whatever the diff against the target
+// now says (recreateInFlight).
+//
 // done=true once Phase=Ready with RunningRevision=target.Name.
 //
 // Self-lists the Component's pods (cached) then filters to this Instance.
@@ -181,13 +185,27 @@ func UpdateWithPods(ctx context.Context, deps workload.Deps, input workload.Reco
 	// the chooser compares against the workload constants directly. It is
 	// the attempt's pinned strategy once one is in flight.
 	strategy := plan.UpdateStrategy.Type
-	mode, err := chooseUpdateModeForInstance(strategy, runningSpec, targetSpec, multiPod)
-	if err != nil {
-		// InPlaceOnly + ineligible diff is the only error path here.
-		workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonInPlaceUpdateNotPossible,
-			"OMENative %s rejected update: %v",
-			workload.InstanceKey(input.Key.Component, inst.Index), err)
-		return false, fmt.Errorf("choose update mode (instance=%d): %w", inst.Index, err)
+	var mode updateMode
+	if inPlaceStrategy(strategy) && recreateInFlight(observed) {
+		// An in-place strategy resolves its mechanism from the diff between
+		// the running revision and the target, and a recreate it fell back
+		// to leaves that diff stale: the pod set was rendered from the
+		// revision the attempt opened for, so the running revision's PodSpec
+		// describes none of the live pods and offers nothing to patch from.
+		// The attempt completes as the recreate it is. A target that
+		// moves meanwhile, back onto the running revision included, is
+		// reached by tearing that set down and rebuilding it at the target,
+		// which the recreate stamp does on a retarget.
+		mode = updateModeRecreate
+	} else {
+		mode, err = chooseUpdateModeForInstance(strategy, runningSpec, targetSpec, multiPod)
+		if err != nil {
+			// InPlaceOnly + ineligible diff is the only error path here.
+			workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonInPlaceUpdateNotPossible,
+				"OMENative %s rejected update: %v",
+				workload.InstanceKey(input.Key.Component, inst.Index), err)
+			return false, fmt.Errorf("choose update mode (instance=%d): %w", inst.Index, err)
+		}
 	}
 
 	// A surge keeps the serving source in rotation while its replacement
@@ -242,6 +260,19 @@ const (
 // RunningPodSpecFunc loads the PodSpec recorded by an Instance's running
 // revision on demand. nil with no error is no recorded baseline.
 type RunningPodSpecFunc func() (*corev1.PodSpec, error)
+
+// recreateInFlight reports whether the row carries a recreate attempt: an
+// Update on its Drain step, which tears the pod set down and rebuilds it
+// at a bumped Incarnation.
+func recreateInFlight(s *workload.InstanceStatus) bool {
+	return workload.StateOf(s) == workload.StateUpdateDrain
+}
+
+// inPlaceStrategy reports whether strategy is one of the two that patch
+// pods where they run and resolve a recreate from the diff instead.
+func inPlaceStrategy(strategy workload.UpdateStrategyType) bool {
+	return strategy == workload.UpdateStrategyInPlaceIfPossible || strategy == workload.UpdateStrategyInPlaceOnly
+}
 
 // SurgeHasNoSource reports whether a fresh start on the row has nothing a
 // surge could keep in rotation: the Instance was never promoted, so no pod
