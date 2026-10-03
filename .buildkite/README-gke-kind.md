@@ -261,9 +261,31 @@ of the organization at most that many lanes hold a GKE agent pod at once and
 the rest wait in order. The variable must be a positive integer; unset or
 empty means the default, and generation refuses anything else.
 
-`package_kind_eval_image.sh` publishes from `main` only, as do the mirror
-steps it waits on, so a branch build with the eval on stops at the image step
-until they publish from branches too.
+### Running the eval from a branch
+
+A branch build whose eval mode is not `off` (an `Eval:` trailer or
+`OME_EVAL_MODE`) publishes what the eval needs for its commit, and nothing
+more. `_images_published()` in `generate_pipeline.py` is the one gate: true on
+`main` and on a branch whose eval runs. Every image step and the eval image
+step carry its decision as `OME_PUBLISH_IMAGES` (`1` publishes, `0` builds for
+validation only); `build_image.sh` and `package_kind_eval_image.sh` honour the
+variable and, when it is unset, take `main` as publishing and every other
+branch as not.
+
+On such a branch the image steps push their commit tag (`<sha8>`, plus the
+`inputs-<hex>` reuse tag) to the dev registry: never `latest`, never a branch
+name, and an image whose inputs are already published is retagged rather than
+rebuilt. `package-kind-eval-image` waits on those builds instead of the mirror
+steps, pulls the commit tags from the dev registry (`OME_EVAL_SOURCE_REGISTRY`)
+and publishes `kind-ci:eval-<sha8>` to the prod registry, the one the GKE queue
+pulls the runner image from; its label says the branch publishes its images
+for the eval. The mirror steps keep `--only-main`, `push_chart.sh` keeps its
+`main` gate and the release marker its branch condition, so the prod registry
+receives nothing from the branch but that runner image (as it already receives
+`kind-ci:test-<sha8>-<build>` from every branch), no chart publishes and no
+marker is written. With the eval off, a branch build is as it always was: images are
+built for validation and nothing is pushed. `GKE_EVAL_ENABLED=0` turns the
+eval, and with it the branch publish, off.
 
 ## Version pins
 
@@ -277,8 +299,9 @@ node image for that tag (its release notes list them).
 
 `package_kind_test_image.sh` reads both files and appends the binary and the
 node tarball to the runner image, shadowing the copies `kind-ci` bakes. That
-indirection is load-bearing, not tidiness: `kind-ci` only builds and mirrors
-from `main`, and a PR branch's runner is assembled on top of `kind-ci:latest`.
+indirection is load-bearing, not tidiness: `kind-ci` only mirrors to the prod
+registry from `main`, and a PR branch's runner is assembled on top of
+`kind-ci:latest`.
 A pin baked only into the Dockerfile therefore cannot reach the branch that
 raises it — the runner asks for a node image it has no egress to fetch and dies
 in `kind create cluster`. The `ARG`s in `dockerfiles/kind-ci.Dockerfile` are

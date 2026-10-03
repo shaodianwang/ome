@@ -1,5 +1,15 @@
 #!/bin/sh
-# Package exact main-build runtime images into the offline GKE KIND runner.
+# Package this commit's runtime images into the offline GKE KIND runner.
+#
+# generate_pipeline.py decides what this build publishes and passes it in:
+#   OME_PUBLISH_IMAGES        1 when the build publishes its images; unset,
+#                             main publishes and every other branch does not
+#   OME_EVAL_SOURCE_REGISTRY  where this commit's images are: the prod
+#                             registry for main (the mirrors), the dev
+#                             registry for a branch (its commit-tag pushes);
+#                             unset means the prod registry
+# The eval image always publishes to the prod registry, the one the GKE
+# queue pulls from, under kind-ci:eval-<sha8>.
 #
 # Reuses before it packages: generate_pipeline.py passes the tag naming the
 # source images' inputs (OME_EVAL_IMAGE_INPUTS_TAG), and an eval image already
@@ -9,8 +19,13 @@
 # OME_IMAGE_REBUILD=1 skips the probe and still retags what it packages.
 set -eu
 
-[ "${BUILDKITE_BRANCH:-}" = "main" ] || {
-  echo "package_kind_eval_image.sh only publishes from main" >&2
+publish="${OME_PUBLISH_IMAGES:-}"
+if [ -z "$publish" ]; then
+  if [ "${BUILDKITE_BRANCH:-}" = "main" ]; then publish=1; else publish=0; fi
+fi
+[ "$publish" = 1 ] || {
+  echo "package_kind_eval_image.sh: this build publishes no images" \
+    "(OME_PUBLISH_IMAGES=${OME_PUBLISH_IMAGES:-unset}, branch ${BUILDKITE_BRANCH:-?})" >&2
   exit 1
 }
 
@@ -24,6 +39,8 @@ PROD_AWS_ACCOUNT_ID="${PROD_AWS_ACCOUNT_ID:-168653207203}"
 PROD_ECR_REGISTRY="${PROD_ECR_REGISTRY:-${PROD_AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com}"
 repo="${PROD_ECR_REGISTRY}/msl_infra"
 target="${repo}/kind-ci:eval-${short_sha}"
+source_registry="${OME_EVAL_SOURCE_REGISTRY:-$PROD_ECR_REGISTRY}"
+source_repo="${source_registry}/msl_infra"
 
 if ! command -v crane >/dev/null 2>&1; then
   case "$(uname -m)" in
@@ -38,6 +55,10 @@ fi
 
 . "$(dirname "$0")/_ecr_login.sh"
 ecr_login_for prod crane auth login --username AWS --password-stdin "$PROD_ECR_REGISTRY"
+if [ "$source_registry" != "$PROD_ECR_REGISTRY" ]; then
+  ecr_login_for dev crane auth login --username AWS --password-stdin "$source_registry"
+fi
+echo "--- eval image sources: ${source_repo}/<image>:${short_sha} (branch ${BUILDKITE_BRANCH:-?})"
 
 stage=$(mktemp -d)
 trap 'rm -rf -- "$stage"' EXIT
@@ -63,7 +84,7 @@ if [ -n "$inputs_tag" ]; then
 fi
 
 for image in ome-manager ome-agent ome-scheduler canary-metrics; do
-  ref="${repo}/${image}:${short_sha}"
+  ref="${source_repo}/${image}:${short_sha}"
   echo "--- pull ${ref}"
   crane pull --platform linux/amd64 "$ref" "$stage/images/${image}.tar"
   test -s "$stage/images/${image}.tar"
@@ -74,7 +95,7 @@ done
 tar -C "$stage" -cf "$stage/runtime-images.layer.tar" images
 echo "--- publish ${target}"
 crane append --platform linux/amd64 \
-  --base "${repo}/kind-ci:${short_sha}" \
+  --base "${source_repo}/kind-ci:${short_sha}" \
   --new_layer "$stage/runtime-images.layer.tar" \
   --new_tag "$target"
 

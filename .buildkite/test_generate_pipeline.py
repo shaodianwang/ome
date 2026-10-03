@@ -786,8 +786,12 @@ class TestImageReuseEmission(GitRepoTestCase):
     def test_publish_tags_follow_the_push_policy(self):
         sha = gp.COMMIT[:8]
         self.patch_attr("BRANCH", "feature/anything")
+        self.patch_attr("EVAL_MODE", "off")
         self.assertIn('OME_IMAGE_PUBLISH_TAGS: ""', gp._build_image_step(*self.MANAGER))
         self.assertIn(f'OME_IMAGE_PUBLISH_TAGS: "{sha}"', gp._build_image_step(*self.ALFRED))
+        # A branch whose eval runs publishes every image's commit tag.
+        self.patch_attr("EVAL_MODE", "smoke")
+        self.assertIn(f'OME_IMAGE_PUBLISH_TAGS: "{sha}"', gp._build_image_step(*self.MANAGER))
         self.patch_attr("BRANCH", "main")
         self.assertIn(f'OME_IMAGE_PUBLISH_TAGS: "latest {sha}"', gp._build_image_step(*self.MANAGER))
         self.assertIn(f'OME_IMAGE_PUBLISH_TAGS: "latest {sha}"', gp._build_image_step(*self.ALFRED))
@@ -852,6 +856,272 @@ class TestImageReuseEmission(GitRepoTestCase):
             self.assertIn(needle, eval_script)
         runner = (gp.REPO_ROOT / ".buildkite/run_omenative_eval_gke.sh").read_text()
         self.assertIn("runtime-image-refs.txt", runner)
+
+
+class TestBranchImagePublishing(GitRepoTestCase):
+    """A branch build publishes its images only when its eval runs. The
+    generator decides once (_images_published) and every image step and the
+    eval image step carry the decision as OME_PUBLISH_IMAGES; a branch
+    publishes commit tags to the dev registry and the eval image is packaged
+    from them, while the mirror, chart and marker steps stay main-only."""
+
+    MANAGER = ("ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile")
+    SHA = "0123456789abcdef0123456789abcdef01234567"
+
+    def setUp(self):
+        super().setUp()
+        self.patch_attr("EVAL_SELECTION", None)
+        self.patch_attr("GKE_EVAL_ENABLED", True)
+        self.patch_attr("GKE_KIND_ENABLED", True)
+        self.patch_attr("GKE_ALFRED_ENABLED", True)
+        self.patch_attr("IMAGE_REBUILD", False)
+
+    def on(self, branch, mode):
+        self.patch_attr("BRANCH", branch)
+        self.patch_attr("EVAL_MODE", mode)
+
+    def test_the_gate_is_main_or_an_eval_that_runs(self):
+        for branch, mode, enabled, expected in (
+            ("main", "off", True, True),
+            ("main", "targeted", True, True),
+            ("feature/x", "off", True, False),
+            ("feature/x", "smoke", True, True),
+            ("feature/x", "full", True, True),
+            ("feature/x", "smoke", False, False),
+        ):
+            with self.subTest(branch=branch, mode=mode, enabled=enabled):
+                self.on(branch, mode)
+                self.patch_attr("GKE_EVAL_ENABLED", enabled)
+                self.assertIs(gp._images_published(), expected)
+
+    def test_a_branch_with_the_eval_off_builds_without_publishing(self):
+        self.on("feature/x", "off")
+        batches = gp.generate_pipeline_batches()
+        self.assertEqual(len(batches), 1)
+        pipeline = batches[0]
+        self.assertNotIn("package-kind-eval-image", pipeline)
+        self.assertNotIn("omenative-e2e-", pipeline)
+        self.assertNotIn("OME_EVAL_SOURCE_REGISTRY", pipeline)
+        every_branch = gp._push_every_branch_images()
+        self.assertEqual(pipeline.count('OME_PUBLISH_IMAGES: "1"'), len(every_branch))
+        self.assertEqual(pipeline.count('OME_PUBLISH_IMAGES: "0"'), len(gp.IMAGES) - len(every_branch))
+        probe = gp._build_image_step(*self.MANAGER)
+        self.assertIn('OME_PUBLISH_IMAGES: "0"', probe)
+        self.assertIn('OME_IMAGE_PUBLISH_TAGS: ""', probe)
+        uploaded = uploaded_build_step(*self.MANAGER)
+        self.assertIn('OME_PUBLISH_IMAGES: "0"', uploaded)
+        self.assertIn('push-branches: "main"', uploaded)
+        self.assertNotIn("push: true", uploaded)
+        self.assertEqual(pipeline.count("mirror_image.sh --only-main"), len(gp.IMAGES))
+        self.assertIn('if: build.branch == "main"', pipeline)
+
+    def test_a_branch_whose_eval_runs_publishes_commit_tags_for_it(self):
+        self.on("feature/x", "smoke")
+        sha = gp.COMMIT[:8]
+        batches = gp.generate_pipeline_batches()
+        first = batches[0]
+        # Every image step and the eval image step say they publish.
+        self.assertEqual(first.count('OME_PUBLISH_IMAGES: "1"'), len(gp.IMAGES) + 1)
+        self.assertNotIn('OME_PUBLISH_IMAGES: "0"', first)
+        probe = gp._build_image_step(*self.MANAGER)
+        self.assertIn(f'OME_IMAGE_PUBLISH_TAGS: "{sha}"', probe)
+        uploaded = uploaded_build_step(*self.MANAGER)
+        inputs = gp._image_inputs_tag("ome-manager", "dockerfiles/manager.Dockerfile")
+        self.assertIn(f'tags: ["{sha}", "{inputs}"]', uploaded)
+        self.assertNotIn('"latest"', uploaded)
+        self.assertIn("push: true", uploaded)
+        self.assertNotIn("push-branches", uploaded)
+        # The eval image is packaged from the dev-registry commit tags.
+        step = gp._package_kind_eval_image_step()
+        self.assertIn("(this branch publishes its images for the eval)", step)
+        self.assertIn('OME_PUBLISH_IMAGES: "1"', step)
+        self.assertIn(f'OME_EVAL_SOURCE_REGISTRY: "{gp.ECR_REGISTRY}"', step)
+        for source in gp.EVAL_IMAGE_SOURCES:
+            self.assertIn(f'- "build-{source}"', step)
+        self.assertNotIn("mirror-", step)
+        self.assertIn('- "ECR_AUTH_TOKEN"', step)
+        self.assertIn('- "PROD_ECR_AUTH_TOKEN"', step)
+        self.assertIn('key: "package-kind-eval-image"', first)
+        self.assertIn('key: "omenative-e2e-kind-gke"', batches[1])
+        # Nothing else publishes from the branch: the mirror steps keep their
+        # main-only switch, the chart script its main gate, the marker its
+        # branch condition.
+        self.assertEqual(first.count("mirror_image.sh --only-main"), len(gp.IMAGES))
+        self.assertNotIn("mirror_image.sh msl_infra", first)
+        self.assertIn('key: "chart-ome-release"', batches[-1])
+        self.assertIn('if: build.branch == "main"', batches[-1])
+        mirror = (gp.REPO_ROOT / ".buildkite/mirror_image.sh").read_text()
+        self.assertIn('if [ "${BUILDKITE_BRANCH:-}" != "main" ]', mirror)
+        chart = (gp.REPO_ROOT / ".buildkite/push_chart.sh").read_text()
+        self.assertIn('if [ "${BUILDKITE_BRANCH:-}" = "main" ]', chart)
+
+    def test_main_publishes_as_before(self):
+        self.on("main", "smoke")
+        sha = gp.COMMIT[:8]
+        probe = gp._build_image_step(*self.MANAGER)
+        self.assertIn('OME_PUBLISH_IMAGES: "1"', probe)
+        self.assertIn(f'OME_IMAGE_PUBLISH_TAGS: "latest {sha}"', probe)
+        uploaded = uploaded_build_step(*self.MANAGER)
+        self.assertIn('push-branches: "main"', uploaded)
+        self.assertIn(f'tags: ["latest", "{sha}", ', uploaded)
+        step = gp._package_kind_eval_image_step()
+        self.assertNotIn("this branch publishes", step)
+        self.assertIn(f'OME_EVAL_SOURCE_REGISTRY: "{gp.PROD_ECR_REGISTRY}"', step)
+        for source in gp.EVAL_IMAGE_SOURCES:
+            self.assertIn(f'- "mirror-{source}"', step)
+        self.assertNotIn('"build-', step)
+        self.assertNotIn('- "ECR_AUTH_TOKEN"', step)
+        self.assertIn('- "PROD_ECR_AUTH_TOKEN"', step)
+
+    def test_the_eval_kill_switch_turns_the_branch_publish_off(self):
+        self.on("feature/x", "smoke")
+        self.patch_attr("GKE_EVAL_ENABLED", False)
+        self.assertFalse(gp._images_published())
+        self.assertIn('OME_IMAGE_PUBLISH_TAGS: ""', gp._build_image_step(*self.MANAGER))
+        self.assertIn('push-branches: "main"', uploaded_build_step(*self.MANAGER))
+        self.assertNotIn("package-kind-eval-image", gp.generate_pipeline_batches()[0])
+
+    def test_the_rebuild_switch_keeps_the_branch_publish(self):
+        self.on("feature/x", "smoke")
+        self.patch_attr("IMAGE_REBUILD", True)
+        step = gp._build_image_step(*self.MANAGER)
+        self.assertIn('key: "build-ome-manager"', step)
+        self.assertIn("push: true", step)
+        self.assertIn('OME_PUBLISH_IMAGES: "1"', step)
+        self.assertNotIn('"latest"', step)
+
+    # -- the scripts, run with crane stubbed -------------------------------
+
+    CRANE_STUB = (
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$STUB_LOG\"\n"
+        "case \"$1\" in\n"
+        "  digest)\n"
+        "    case \"$2\" in *:eval-inputs-*) echo MANIFEST_UNKNOWN >&2; exit 1 ;; esac\n"
+        "    echo sha256:stub ;;\n"
+        "  pull) printf layer > \"$5\" ;;\n"
+        "esac\n"
+        "exit 0\n"
+    )
+
+    def shell_fixture(self):
+        """A PATH with crane and buildkite-agent stubbed, and the crane log."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        stubs = root / "bin"
+        stubs.mkdir()
+        (stubs / "crane").write_text(self.CRANE_STUB)
+        (stubs / "crane").chmod(0o755)
+        (stubs / "buildkite-agent").write_text("#!/bin/sh\nexit 0\n")
+        (stubs / "buildkite-agent").chmod(0o755)
+        log = root / "crane.log"
+        env = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith(("OME_", "BUILDKITE_", "AWS_", "PROD_", "ECR_"))
+        }
+        env.update({
+            "PATH": f"{stubs}:{os.environ.get('PATH', '')}",
+            "STUB_LOG": str(log),
+            "BUILDKITE_COMMIT": self.SHA,
+            "AWS_REGION": "us-east-2",
+            "CLOUD_OSS_PATH": str(root / "no-cloud-oss"),
+            "ECR_AUTH_TOKEN": "stub-dev",
+            "PROD_ECR_AUTH_TOKEN": "stub-prod",
+        })
+        return root, env, log
+
+    def crane_calls(self, log):
+        return log.read_text().splitlines() if log.exists() else []
+
+    def run_eval_packager(self, branch, **extra):
+        root, env, log = self.shell_fixture()
+        env.update({
+            "BUILDKITE_BRANCH": branch,
+            "PROD_ECR_REGISTRY": "prod.example.com",
+            "OME_EVAL_IMAGE_INPUTS_TAG": "eval-inputs-" + "0" * 32,
+            "OME_EVAL_IMAGE_INPUTS": "stub",
+            **extra,
+        })
+        result = subprocess.run(
+            ["sh", str(gp.REPO_ROOT / gp.EVAL_IMAGE_SCRIPT)],
+            env=env, cwd=str(root), capture_output=True, text=True,
+        )
+        return result, self.crane_calls(log)
+
+    def test_eval_packager_refuses_a_build_that_publishes_nothing(self):
+        for extra in ({}, {"OME_PUBLISH_IMAGES": "0"}):
+            with self.subTest(env=extra):
+                result, calls = self.run_eval_packager("feature/x", **extra)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("publishes no images", result.stderr)
+                self.assertEqual(calls, [])
+
+    def test_eval_packager_on_a_branch_packages_the_dev_registry_commit_tags(self):
+        result, calls = self.run_eval_packager(
+            "feature/x", OME_PUBLISH_IMAGES="1", OME_EVAL_SOURCE_REGISTRY="dev.example.com"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        sha = self.SHA[:8]
+        self.assertIn("auth login --username AWS --password-stdin prod.example.com", calls)
+        self.assertIn("auth login --username AWS --password-stdin dev.example.com", calls)
+        pulls = [call for call in calls if call.startswith("pull ")]
+        self.assertEqual(
+            [call.split()[3] for call in pulls],
+            [f"dev.example.com/msl_infra/{image}:{sha}"
+             for image in ("ome-manager", "ome-agent", "ome-scheduler", "canary-metrics")],
+        )
+        append = [call for call in calls if call.startswith("append ")]
+        self.assertEqual(len(append), 1)
+        self.assertIn(f"--base dev.example.com/msl_infra/kind-ci:{sha}", append[0])
+        self.assertIn(f"--new_tag prod.example.com/msl_infra/kind-ci:eval-{sha}", append[0])
+        self.assertIn(
+            f"tag prod.example.com/msl_infra/kind-ci:eval-{sha} eval-inputs-" + "0" * 32, calls
+        )
+        self.assertFalse([call for call in calls if "prod.example.com/msl_infra/ome-" in call])
+
+    def test_eval_packager_on_main_packages_the_prod_mirrors_by_default(self):
+        result, calls = self.run_eval_packager("main")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        sha = self.SHA[:8]
+        logins = [call for call in calls if call.startswith("auth login")]
+        self.assertEqual(logins, ["auth login --username AWS --password-stdin prod.example.com"])
+        pulls = [call.split()[3] for call in calls if call.startswith("pull ")]
+        self.assertEqual(pulls[0], f"prod.example.com/msl_infra/ome-manager:{sha}")
+        append = [call for call in calls if call.startswith("append ")][0]
+        self.assertIn(f"--base prod.example.com/msl_infra/kind-ci:{sha}", append)
+
+    def run_build_probe(self, branch, **extra):
+        root, env, log = self.shell_fixture()
+        env.update({
+            "BUILDKITE_BRANCH": branch,
+            "ECR_REGISTRY": "dev.example.com",
+            "OME_IMAGE_INPUTS_TAG": "inputs-" + "0" * 32,
+            "OME_IMAGE_INPUTS": "stub",
+            "OME_IMAGE_PUBLISH_TAGS": self.SHA[:8],
+            "OME_IMAGE_BUILD_STEP_B64": base64.b64encode(b"steps: []\n").decode(),
+            **extra,
+        })
+        result = subprocess.run(
+            ["sh", str(gp.REPO_ROOT / ".buildkite/build_image.sh"), "msl_infra/ome-manager"],
+            env=env, cwd=str(root), capture_output=True, text=True,
+        )
+        return result, self.crane_calls(log)
+
+    def test_build_probe_retags_only_when_the_build_publishes(self):
+        retag = f"tag dev.example.com/msl_infra/ome-manager:inputs-{'0' * 32} {self.SHA[:8]}"
+        for branch, extra, expected in (
+            ("feature/x", {}, False),
+            ("feature/x", {"OME_PUBLISH_IMAGES": "0"}, False),
+            ("feature/x", {"OME_PUBLISH_IMAGES": "1"}, True),
+            ("main", {}, True),
+        ):
+            with self.subTest(branch=branch, env=extra):
+                result, calls = self.run_build_probe(branch, **extra)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"digest dev.example.com/msl_infra/ome-manager:inputs-{'0' * 32}", calls)
+                self.assertEqual(retag in calls, expected, calls)
+                self.assertIn("publishes:     " + ("1" if expected else "0"), result.stdout)
 
 
 class TestDriftCheckEmission(unittest.TestCase):
@@ -1410,6 +1680,9 @@ class TestAlfredKindGroup(PipelineTestCase):
             self.assertEqual(len(owners), 1, f"{name} matched by {owners or 'no shard'}")
 
     def test_alfred_image_pushes_on_every_branch(self):
+        # Pinned to a branch whose build publishes nothing else.
+        self.patch_attr("BRANCH", "feature/anything")
+        self.patch_attr("EVAL_MODE", "off")
         alfred = uploaded_build_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
         self.assertIn("push: true", alfred)
         self.assertNotIn("push-branches", alfred)
@@ -1419,6 +1692,7 @@ class TestAlfredKindGroup(PipelineTestCase):
 
     def test_every_branch_image_tags_latest_only_on_main(self):
         sha = gp.COMMIT[:8]
+        self.patch_attr("EVAL_MODE", "off")
         alfred_inputs = gp._image_inputs_tag("alfred", "dockerfiles/alfred.Dockerfile")
         manager_inputs = gp._image_inputs_tag("ome-manager", "dockerfiles/manager.Dockerfile")
         self.patch_attr("BRANCH", "feature/anything")
@@ -1441,6 +1715,8 @@ class TestAlfredKindGroup(PipelineTestCase):
         self.assertIn("kind-gke-alfred-", gp.ci_steps())
 
     def test_kill_switch_drops_the_lane_and_the_dependency(self):
+        self.patch_attr("BRANCH", "feature/anything")
+        self.patch_attr("EVAL_MODE", "off")
         self.patch_attr("GKE_ALFRED_ENABLED", False)
         self.assertNotIn("kind-gke-alfred-", gp.ci_steps())
         step = gp._package_kind_test_image_step()
@@ -1453,6 +1729,8 @@ class TestAlfredKindGroup(PipelineTestCase):
         self.assertNotIn("push: true", alfred)
 
     def test_lane_is_nested_under_the_kind_switch(self):
+        self.patch_attr("BRANCH", "feature/anything")
+        self.patch_attr("EVAL_MODE", "off")
         self.patch_attr("GKE_KIND_ENABLED", False)
         self.assertNotIn("kind-gke-alfred-", gp.ci_steps())
         alfred = uploaded_build_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")

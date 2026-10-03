@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Generate the Buildkite pipeline for OME.
 
-Image builds and chart packaging always run; the per-step scripts only
-push to ECR when BUILDKITE_BRANCH=main, so PR builds validate without
-publishing. The exception is _push_every_branch_images(): those images
-push their commit tag from every branch because a KIND lane pulls them
-back out of the dev registry.
+Image builds and chart packaging always run. Images publish when
+_images_published() says so: on main, and on a branch whose build runs the
+OMENative eval, because the eval lanes deploy this commit's images. The
+generator hands that decision to the image steps and the eval image step
+as OME_PUBLISH_IMAGES; a branch publishes commit tags to the dev registry
+only, while latest, the prod mirror, the charts and the release marker stay
+main-only. _push_every_branch_images() names the images that push their
+commit tag from every branch because a KIND lane pulls them back out of
+the dev registry.
 
 Image steps reuse before they build. The generator hashes the tracked
 content each image build reads (IMAGE_INPUTS) and every published image
@@ -755,6 +759,21 @@ def _push_every_branch_images() -> frozenset[str]:
     if GKE_KIND_ENABLED and GKE_ALFRED_ENABLED:
         return frozenset({"alfred"})
     return frozenset()
+
+
+# Set on every image step and on the eval image step: "1" when the step
+# publishes from this build, "0" when it builds for validation only. The
+# scripts take an unset variable as main publishing and other branches not.
+PUBLISH_IMAGES_VAR = "OME_PUBLISH_IMAGES"
+
+
+def _images_published() -> bool:
+    """Whether this build publishes its images: on main always, and on a
+    branch whose build runs the eval, because the eval lanes deploy this
+    commit's images and nothing else supplies them. A branch publishes
+    commit tags to the dev registry only; latest, the prod mirror, the
+    charts and the release marker stay main-only."""
+    return BRANCH == "main" or _eval_on()
 
 
 CHARTS = ["ome-crd", "ome-resources", "ome-isvc", "muse", "ome-scheduler", "ome-quota-manager", "ome-bot"]
@@ -2580,7 +2599,8 @@ def ci_steps() -> str:
 
 
 # ---------------------------------------------------------------------------
-# CD pipeline (build always; push only when run_*.sh sees BUILDKITE_BRANCH=main)
+# CD pipeline (build always; images publish when _images_published(), the
+# mirror, chart and release marker steps on main only)
 # ---------------------------------------------------------------------------
 
 
@@ -2695,14 +2715,21 @@ def _image_tags(label: str) -> list[str]:
     """The commit-facing tags a build publishes.
 
     `latest` is main-only: the mirror step copies it to the prod registry, so
-    a branch build of an every-branch image publishes its commit tag only.
+    a branch build that publishes carries its commit tag only.
     """
-    every_branch = label in _push_every_branch_images()
-    return [COMMIT[:8]] if every_branch and BRANCH != "main" else ["latest", COMMIT[:8]]
+    if BRANCH != "main" and _image_pushes_from_this_branch(label):
+        return [COMMIT[:8]]
+    return ["latest", COMMIT[:8]]
 
 
 def _image_pushes_from_this_branch(label: str) -> bool:
-    return BRANCH == "main" or label in _push_every_branch_images()
+    """Whether the step for this image publishes from this build: the build
+    publishes its images, or the image pushes from every branch."""
+    return _images_published() or label in _push_every_branch_images()
+
+
+def _publish_flag(label: str) -> str:
+    return "1" if _image_pushes_from_this_branch(label) else "0"
 
 
 def _image_build_plugin_step(
@@ -2718,13 +2745,14 @@ def _image_build_plugin_step(
 
     The plugin's command hook generates the real build job and uploads it
     behind this step, so this step is thin and the build runs as the job it
-    uploads. Builds on every branch (validates the Dockerfile); pushes only on
-    main via push-branches, except the images whose build pushes on every
-    branch (_push_every_branch_images). Mirror to prod ECR is handled by
-    _mirror_image_step, which copies the manifest at the registry layer.
+    uploads. Builds on every branch (validates the Dockerfile); pushes on
+    main via push-branches, from every branch for the images a KIND lane
+    pulls back (_push_every_branch_images), and from a branch whose build
+    publishes its images (_images_published). Mirror to prod ECR is handled
+    by _mirror_image_step, which copies the manifest at the registry layer.
     """
-    every_branch = label in _push_every_branch_images()
-    push_line = "push: true" if every_branch else 'push-branches: "main"'
+    pushes = label in _push_every_branch_images() or (BRANCH != "main" and _images_published())
+    push_line = "push: true" if pushes else 'push-branches: "main"'
     lines = [
         f'- label: ":docker: Build {label}"',
         f'  key: "{key}"',
@@ -2738,6 +2766,7 @@ def _image_build_plugin_step(
         f'    queue: "{BUILD_QUEUE}"',
         "  env:",
         '    BUILDX_NO_DEFAULT_ATTESTATIONS: "1"',
+        f'    {PUBLISH_IMAGES_VAR}: "{_publish_flag(label)}"',
         "  plugins:",
         f'    - "{CF_DOCKER_IMAGE_PLUGIN}":',
         f'        ecr-name: "msl_infra/{ecr_name}"',
@@ -2800,6 +2829,7 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
               ECR_REGISTRY: "{ECR_REGISTRY}"
               OME_IMAGE_INPUTS_TAG: "{inputs_tag}"
               OME_IMAGE_INPUTS: "{' '.join(_image_inputs(label))}"
+              {PUBLISH_IMAGES_VAR}: "{_publish_flag(label)}"
               OME_IMAGE_PUBLISH_TAGS: "{publish}"
               OME_IMAGE_BUILD_STEP_B64: "{fragment}"
             agents:
@@ -2866,15 +2896,30 @@ def _mirror_image_step(label: str, ecr_name: str) -> str:
 
 
 def _package_kind_eval_image_step() -> str:
-    """Add exact main runtime-image archives to the offline KIND runner.
+    """Add this commit's runtime-image archives to the offline KIND runner.
 
-    The step reuses like the image steps: the generator hands it the tag
-    naming its source images' inputs, and the script retags the eval image
-    already published under it instead of packaging again. Under
-    OME_IMAGE_REBUILD the script packages and retags, so the refreshed
-    runtime images reach the eval image too.
+    On main the sources are the prod-registry mirrors, so the step waits on
+    the mirror steps; on a branch they are the commit tags the build steps
+    pushed to the dev registry, so it waits on those builds instead and logs
+    in to both registries. The eval image itself always publishes to the prod
+    registry, the one the GKE queue pulls from. The step reuses like the
+    image steps: the generator hands it the tag naming its source images'
+    inputs, and the script retags the eval image already published under it
+    instead of packaging again. Under OME_IMAGE_REBUILD the script packages
+    and retags, so the refreshed runtime images reach the eval image too.
     """
-    env: dict[str, str] = {}
+    on_main = BRANCH == "main"
+    label = ":package: Package exact OMENative eval images"
+    if not on_main:
+        label += " (this branch publishes its images for the eval)"
+    depends_on = [
+        f"{'mirror' if on_main else 'build'}-{source}" for source in EVAL_IMAGE_SOURCES
+    ]
+    secrets = ["PROD_ECR_AUTH_TOKEN"] if on_main else ["ECR_AUTH_TOKEN", "PROD_ECR_AUTH_TOKEN"]
+    env: dict[str, str] = {
+        PUBLISH_IMAGES_VAR: "1",
+        "OME_EVAL_SOURCE_REGISTRY": PROD_ECR_REGISTRY if on_main else ECR_REGISTRY,
+    }
     if (eval_inputs := _eval_image_inputs()) is not None:
         tag, sources = eval_inputs
         env["OME_EVAL_IMAGE_INPUTS_TAG"] = tag
@@ -2883,22 +2928,20 @@ def _package_kind_eval_image_step() -> str:
         )
         if IMAGE_REBUILD:
             env["OME_IMAGE_REBUILD"] = "1"
-    env_block = _yaml_block({"env": env}, indent=12) if env else ""
+    env_block = _yaml_block({"env": env}, indent=12)
+    depends_block = "\n".join(f'              - "{key}"' for key in depends_on)
+    secrets_block = "\n".join(f'              - "{name}"' for name in secrets)
     return textwrap.dedent(
         f"""\
-          - label: ":package: Package exact OMENative eval images"
+          - label: "{label}"
             key: "package-kind-eval-image"
 {_gh_status("package-kind-eval-image")}
             depends_on:
-              - "mirror-kind-ci"
-              - "mirror-ome-manager"
-              - "mirror-ome-agent"
-              - "mirror-ome-scheduler"
-              - "mirror-canary-metrics"
+{depends_block}
 {_auto_retry()}
 {env_block}
             secrets:
-              - "PROD_ECR_AUTH_TOKEN"
+{secrets_block}
             agents:
               queue: "{BUILD_QUEUE}"
             command: |

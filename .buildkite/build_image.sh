@@ -15,8 +15,11 @@
 # Environment (set by generate_pipeline.py):
 #   OME_IMAGE_INPUTS_TAG      tag naming the inputs hash, e.g. inputs-<hex>
 #   OME_IMAGE_INPUTS          the hashed paths, space separated (for the log)
+#   OME_PUBLISH_IMAGES        1 when this step publishes from this build, 0
+#                             when it builds for validation only; unset, main
+#                             publishes and every other branch does not
 #   OME_IMAGE_PUBLISH_TAGS    tags to publish on reuse, space separated; empty
-#                             when this branch's build would push nothing
+#                             when this build publishes nothing for the image
 #   OME_IMAGE_BUILD_STEP_B64  base64 of the pipeline fragment that builds the
 #                             image, uploaded when no reusable image exists
 #   ECR_REGISTRY, AWS_REGION  the dev registry and its region (_ecr_login.sh)
@@ -25,7 +28,12 @@ set -eu
 ecr_name="${1:?ecr-name required}"
 inputs_tag="${OME_IMAGE_INPUTS_TAG:?OME_IMAGE_INPUTS_TAG is required}"
 build_step_b64="${OME_IMAGE_BUILD_STEP_B64:?OME_IMAGE_BUILD_STEP_B64 is required}"
+publish="${OME_PUBLISH_IMAGES:-}"
+if [ -z "$publish" ]; then
+  if [ "${BUILDKITE_BRANCH:-}" = "main" ]; then publish=1; else publish=0; fi
+fi
 publish_tags="${OME_IMAGE_PUBLISH_TAGS:-}"
+[ "$publish" = 1 ] || publish_tags=""
 registry="${ECR_REGISTRY:?ECR_REGISTRY is required}"
 : "${AWS_REGION:?AWS_REGION is required}"
 image="${registry}/${ecr_name}"
@@ -35,10 +43,11 @@ echo "--- image reuse check: ${image}"
 echo "commit:        ${BUILDKITE_COMMIT:-?} (branch ${BUILDKITE_BRANCH:-?})"
 echo "inputs tag:    ${inputs_tag}"
 echo "inputs hashed: ${OME_IMAGE_INPUTS:-?}"
+echo "publishes:     ${publish} (OME_PUBLISH_IMAGES=${OME_PUBLISH_IMAGES:-unset})"
 if [ -n "$publish_tags" ]; then
   echo "publish tags:  ${publish_tags}"
 else
-  echo "publish tags:  none (the build pushes nothing from this branch)"
+  echo "publish tags:  none (this build publishes nothing for the image)"
 fi
 
 # One shared build annotation, a line per image, so a wrong reuse is visible
@@ -85,8 +94,8 @@ fi
 echo "found ${candidate}@${digest}"
 
 if [ -z "$publish_tags" ]; then
-  echo "reused: the build pushes nothing from this branch, so there is nothing to retag and no build to run"
-  annotate info "reused ${inputs_tag} (${digest}); nothing to publish from this branch"
+  echo "reused: this build publishes nothing for the image, so there is nothing to retag and no build to run"
+  annotate info "reused ${inputs_tag} (${digest}); nothing to publish from this build"
   exit 0
 fi
 
