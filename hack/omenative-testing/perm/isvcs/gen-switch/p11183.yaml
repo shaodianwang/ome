@@ -1,0 +1,18 @@
+# p11183: [gen] switch held by crash-load engine+router N=4 strategy SurgeThenDrain to RecreatePod co none  Ne=4 Nd=0 Nr=2 ceil_e=5 ceil_d=0 ceil_r=2 co=none topo=engine during=held break=crash-load edit=strategy:RecreatePod
+# reason: the operator edits a roll whose push cannot start: the push gives the engine runner a runner that exits after Ready, so the roll parks on its first pod: the kubelet shows the break and the status says why (a rolloutHold gate from the retry ladder or the budget, a Failed row, a RetryHeld or InstanceFailed event); every bumped member's updateStrategy is patched from SurgeThenDrain to RecreatePod once the roll is parked on the broken pod; then the fix push, the override dropped, lands under the edit on every Instance of the bumped members, nothing of the broken revision is created again or left, no hold is left and the live spec carries the edit; the budget (maxSurge 1, maxUnavailable 1) is valid under both strategies
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11183 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { instanceReadyTimeout: "90s", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

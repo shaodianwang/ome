@@ -1,0 +1,18 @@
+# p11120: [gen] switch settling over crashloop start on the router engine+router N=4 strategy SurgeThenDrain to RecreatePod co none  Ne=4 Nd=0 Nr=2 ceil_e=5 ceil_d=0 ceil_r=2 fault=crashloop:idle co=none topo=engine form=start during=settling victimcomp=router edit=strategy:RecreatePod
+# reason: the operator edits a roll over a fleet whose router is already broken: the pod of the router's highest Instance is pointed at an image whose runner dies at every start on the settled service, and the push follows once the status has reacted to it; the cause stays for the whole case; every bumped member's updateStrategy is patched from SurgeThenDrain to RecreatePod right after the bump lands; a step already in flight finishes under SurgeThenDrain and every step afterwards runs under RecreatePod, so the roll completes with every Instance of the bumped members on the new revision serving, every row settled, nothing held and the live spec carrying RecreatePod; the router is not bumped, so it ends Ready and serving on its running revision, rebuilt by a repair that names it; the budget (maxSurge 1, maxUnavailable 1) is valid under both strategies and the ceiling is N+1, since a surge step can be in flight on either side of the edit; the capacity floor is lowered by the broken Instance
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11120 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

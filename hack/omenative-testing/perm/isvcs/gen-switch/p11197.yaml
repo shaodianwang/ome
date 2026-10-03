@@ -1,0 +1,24 @@
+# p11197: [gen] switch rotating by configkey once engine+router N=4 strategy RecreatePod to SurgeThenDrain co none  Ne=4 Nd=0 Nr=2 ceil_e=5 ceil_d=0 ceil_r=2 co=none topo=engine during=rotating break=configkey edit=strategy:SurgeThenDrain once=1
+# reason: the operator edits a roll whose push breaks once: the push's first engine pod reads a key the ConfigMap lacks, which is added once the wait has settled; every bumped member's updateStrategy is patched from RecreatePod to SurgeThenDrain at the first pushed pod; the roll completes on its own under the edit with no hold behind it, the Instance Ready and serving on the new revision, every row settled, nothing escalated, and the live spec carries the edit; a rebuild is reported where the restart policy promises one, never required, never twice; the budget (maxSurge 1, maxUnavailable 1) is valid under both strategies
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11197 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    runner: { env: [{ name: "TEST_CONFIG_VALUE", valueFrom: { configMapKeyRef: { name: "p11197-config", key: "value" } } }] }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: p11197-config }
+data: { value: "1" }

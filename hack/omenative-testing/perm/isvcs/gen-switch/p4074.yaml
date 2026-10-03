@@ -1,0 +1,22 @@
+# p4074: [gen] switch rotating over crashloop load after-settle engine+router N=4 strategy InPlaceIfPossible to SurgeThenDrain co rolling  Ne=4 Nd=0 Nr=2 ceil_e=5 ceil_d=0 ceil_r=2 fault=crashloop:idle co=rolling topo=engine form=load during=rotating edit=strategy:SurgeThenDrain lift=after-settle
+# reason: the operator edits a roll over a fleet whose engine is already broken: the pod of the engine's highest Instance has its runner killed every few seconds once it is up on the settled service, and the push follows once the status has reacted to it; the cause is taken away once the edit has fired; every bumped member's updateStrategy is patched from InPlaceIfPossible to SurgeThenDrain at the first updated pod; a step already in flight finishes under InPlaceIfPossible and every step afterwards runs under SurgeThenDrain, so the roll completes with every Instance of the bumped members on the new revision serving, every row settled, nothing held and the live spec carrying SurgeThenDrain; the broken Instance is off the target from the moment of the push, so the roll owns it: it ends on the new revision serving with no repair opened for it after the push; the budget (maxSurge 1, maxUnavailable 1) is valid under both strategies and the ceiling is N+1, since a surge step can be in flight on either side of the edit; the capacity floor is lowered by the broken Instance; the single-member group puts the roll under the run model
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p4074 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          rollingUpdate: {}

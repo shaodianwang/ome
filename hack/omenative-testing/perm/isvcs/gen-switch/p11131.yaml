@@ -1,0 +1,13 @@
+# p11131: [gen] switch held by crash-start once engine N=4 strategy SurgeThenDrain to RecreatePod co none  Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 co=none topo=engine during=held break=crash-start edit=strategy:RecreatePod once=1
+# reason: the operator edits a roll whose push breaks once: the push's first engine pod has its runner killed once during its first start, before it was ever Ready, and the kubelet restarts it; every bumped member's updateStrategy is patched from SurgeThenDrain to RecreatePod as the break shows; the roll completes on its own under the edit with no hold behind it, the Instance Ready and serving on the new revision, every row settled, nothing escalated, and the live spec carries the edit; a rebuild is reported where the restart policy promises one, never required, never twice; the budget (maxSurge 1, maxUnavailable 1) is valid under both strategies
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11131 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }

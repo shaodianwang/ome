@@ -1435,10 +1435,13 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-crashloop", "engine-mn", "")], 3)
         self.assertEqual(shard_counts[("gen-crashloop", "pd", "")], 5)
         self.assertEqual(shard_counts[("gen-crashloop", "pd-mn", "")], 5)
-        self.assertEqual(shard_counts[("gen-switch", "engine", "")], 2)
-        self.assertEqual(shard_counts[("gen-switch", "engine-mn", "")], 2)
-        self.assertEqual(shard_counts[("gen-switch", "pd", "")], 4)
-        self.assertEqual(shard_counts[("gen-switch", "pd-mn", "")], 4)
+        # The switch family carries its breaks beside the edit: each running-
+        # revision break before the push at four moments and each pushed-
+        # revision break at three, kept and once, on every shape.
+        self.assertEqual(shard_counts[("gen-switch", "engine", "")], 11)
+        self.assertEqual(shard_counts[("gen-switch", "engine-mn", "")], 11)
+        self.assertEqual(shard_counts[("gen-switch", "pd", "")], 9)
+        self.assertEqual(shard_counts[("gen-switch", "pd-mn", "")], 9)
         self.assertEqual(shard_counts[("gen-crashloop-idle", "engine", "")], 2)
         self.assertEqual(shard_counts[("gen-crashloop-idle", "engine-mn", "")], 2)
         self.assertEqual(shard_counts[("gen-crashloop-idle", "pd", "")], 2)
@@ -1574,7 +1577,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-lift", "engine-mn", "")], 2)
         self.assertEqual(shard_counts[("gen-lift", "pd", "")], 1)
         self.assertEqual(shard_counts[("gen-lift", "pd-mn", "")], 1)
-        self.assertEqual(job_count, 904)
+        self.assertEqual(job_count, 932)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin
@@ -3048,9 +3051,9 @@ class TestEvalMode(PipelineTestCase):
         committed = sorted(case for _, _, cases in self.groups for case in cases)
         default = sorted(case for child in self.runner_jobs(self.full, scheduler="") for case in self.cases_of(child))
         self.assertEqual(default, committed)
-        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 904)
-        self.assertEqual(len(self.runner_jobs(self.full)), 2038)
-        self.assertEqual(len(self.full), 2049)
+        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 932)
+        self.assertEqual(len(self.runner_jobs(self.full)), 2123)
+        self.assertEqual(len(self.full), 2134)
         self.assertEqual(len(self.smoke), 197)
         self.assertEqual(len(self.smoke_batches), 3)
         self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 306)
@@ -3222,7 +3225,7 @@ class TestPipelineUploads(PipelineTestCase):
     def test_todays_corpus_uploads_within_the_limit_and_the_total_is_pinned(self):
         self.assert_uploads_are_well_formed(self.batches, self.children)
         self.assertGreater(len(self.batches), 2)
-        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2159)
+        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2244)
 
     def test_the_full_round_records_its_verdicts_after_every_eval_group(self):
         last = self.batches[-1]

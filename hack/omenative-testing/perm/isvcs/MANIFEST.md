@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **5423**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **5825**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -13,7 +13,7 @@ Total generated cases: **5423**. The whole-corpus per-PR cap (hand + generated) 
 | gen-fault | 320 | p1200..p1519 |
 | gen-restart | 187 | p1600..p1786 |
 | gen-crashloop | 216 | p2000..p2215 |
-| gen-switch | 180 | p3800..p3979 |
+| gen-switch | 582 | p3800..p11281 |
 | gen-crashloop-idle | 114 | p2400..p2513 |
 | gen-crashloop-sibling | 36 | p2600..p2635 |
 | gen-heal | 32 | p3000..p3031 |
@@ -58,20 +58,20 @@ Total generated cases: **5423**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| engine | 1576 |
-| engine-mn | 1427 |
-| pd | 1345 |
-| pd-mn | 1075 |
+| engine | 1708 |
+| engine-mn | 1559 |
+| pd | 1414 |
+| pd-mn | 1144 |
 
 ### By update strategy
 
 | value | cases |
 |---|---|
 | (dormant: nothing rolls) | 750 |
-| InPlaceIfPossible | 542 |
+| InPlaceIfPossible | 602 |
 | InPlaceOnly | 281 |
-| RecreatePod | 1105 |
-| SurgeThenDrain | 2745 |
+| RecreatePod | 1225 |
+| SurgeThenDrain | 2967 |
 
 ### By failure verb / phase
 
@@ -187,8 +187,36 @@ Total generated cases: **5423**. The whole-corpus per-PR cap (hand + generated) 
 | ctrlrestart:migration | 12 |
 | ctrlrestart:scaledown | 12 |
 | ctrlrestart:surge | 16 |
+| edit:held+break:configkey | 12 |
+| edit:held+break:configkey:once | 6 |
+| edit:held+break:crash-load | 12 |
+| edit:held+break:crash-load:once | 6 |
+| edit:held+break:crash-start | 14 |
+| edit:held+break:crash-start:once | 8 |
+| edit:held+break:imagepull | 12 |
+| edit:held+break:imagepull:once | 6 |
+| edit:held+break:stuck | 12 |
+| edit:held+break:stuck:once | 6 |
 | edit:rotating | 84 |
+| edit:rotating+break:configkey | 6 |
+| edit:rotating+break:configkey:once | 6 |
+| edit:rotating+break:crash-load | 6 |
+| edit:rotating+break:crash-load:once | 6 |
+| edit:rotating+break:crash-start | 6 |
+| edit:rotating+break:crash-start:once | 6 |
+| edit:rotating+break:imagepull | 6 |
+| edit:rotating+break:imagepull:once | 6 |
+| edit:rotating+break:stuck | 6 |
+| edit:rotating+break:stuck:once | 6 |
+| edit:rotating+configkey:missing | 24 |
+| edit:rotating+crashloop:idle | 48 |
+| edit:rotating+imagepull:idle | 24 |
+| edit:rotating+readiness:old | 24 |
 | edit:settling | 84 |
+| edit:settling+configkey:missing | 24 |
+| edit:settling+crashloop:idle | 56 |
+| edit:settling+imagepull:idle | 24 |
+| edit:settling+readiness:old | 24 |
 | env@held | 4 |
 | env@recreate | 2 |
 | evict:delete | 6 |
@@ -384,8 +412,8 @@ Total generated cases: **5423**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (unset — baseline) | 1794 |
-| None | 2041 |
+| (unset — baseline) | 2106 |
+| None | 2131 |
 | RecreateInstance | 1588 |
 
 ### By pause
@@ -393,14 +421,14 @@ Total generated cases: **5423**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 5129 |
+| off | 5531 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 5243 |
+| (no pause around a repair) | 5645 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -409,7 +437,7 @@ Total generated cases: **5423**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 5243 |
+| (no pause around a repair) | 5645 |
 | fix | 90 |
 | none | 90 |
 
@@ -419,17 +447,32 @@ Total generated cases: **5423**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 54 |
 | canary | 30 |
-| none | 4537 |
+| none | 4815 |
 | ratio | 16 |
-| rolling | 752 |
+| rolling | 876 |
 | seq | 34 |
 
 ### By mid-roll edit (gen-switch)
 
 | value | cases |
 |---|---|
+| restartPolicy None to RecreateInstance at held by configkey | 6 |
+| restartPolicy None to RecreateInstance at held by crash-load | 6 |
+| restartPolicy None to RecreateInstance at held by crash-start | 6 |
+| restartPolicy None to RecreateInstance at held by imagepull | 6 |
+| restartPolicy None to RecreateInstance at held by stuck | 6 |
 | restartPolicy None to RecreateInstance at rotating | 6 |
 | restartPolicy None to RecreateInstance at settling | 6 |
+| restartPolicy None to RecreateInstance at settling over configkey after-settle | 6 |
+| restartPolicy None to RecreateInstance at settling over configkey never | 6 |
+| restartPolicy None to RecreateInstance at settling over crashloop load | 6 |
+| restartPolicy None to RecreateInstance at settling over crashloop load after-settle | 6 |
+| restartPolicy None to RecreateInstance at settling over crashloop start | 6 |
+| restartPolicy None to RecreateInstance at settling over crashloop start after-settle | 6 |
+| restartPolicy None to RecreateInstance at settling over imagepull | 6 |
+| restartPolicy None to RecreateInstance at settling over imagepull after-settle | 6 |
+| restartPolicy None to RecreateInstance at settling over readiness persist | 6 |
+| restartPolicy None to RecreateInstance at settling over readiness recover | 6 |
 | restartPolicy RecreateInstance to None at rotating | 6 |
 | restartPolicy RecreateInstance to None at settling | 6 |
 | strategy InPlaceIfPossible to InPlaceOnly at rotating | 6 |
@@ -437,6 +480,16 @@ Total generated cases: **5423**. The whole-corpus per-PR cap (hand + generated) 
 | strategy InPlaceIfPossible to RecreatePod at rotating | 6 |
 | strategy InPlaceIfPossible to RecreatePod at settling | 6 |
 | strategy InPlaceIfPossible to SurgeThenDrain at rotating | 6 |
+| strategy InPlaceIfPossible to SurgeThenDrain at rotating over configkey after-settle | 6 |
+| strategy InPlaceIfPossible to SurgeThenDrain at rotating over configkey never | 6 |
+| strategy InPlaceIfPossible to SurgeThenDrain at rotating over crashloop load | 6 |
+| strategy InPlaceIfPossible to SurgeThenDrain at rotating over crashloop load after-settle | 6 |
+| strategy InPlaceIfPossible to SurgeThenDrain at rotating over crashloop start | 6 |
+| strategy InPlaceIfPossible to SurgeThenDrain at rotating over crashloop start after-settle | 6 |
+| strategy InPlaceIfPossible to SurgeThenDrain at rotating over imagepull | 6 |
+| strategy InPlaceIfPossible to SurgeThenDrain at rotating over imagepull after-settle | 6 |
+| strategy InPlaceIfPossible to SurgeThenDrain at rotating over readiness persist | 6 |
+| strategy InPlaceIfPossible to SurgeThenDrain at rotating over readiness recover | 6 |
 | strategy InPlaceIfPossible to SurgeThenDrain at settling | 6 |
 | strategy InPlaceOnly to InPlaceIfPossible at rotating | 6 |
 | strategy InPlaceOnly to InPlaceIfPossible at settling | 6 |
@@ -449,21 +502,98 @@ Total generated cases: **5423**. The whole-corpus per-PR cap (hand + generated) 
 | strategy RecreatePod to InPlaceOnly at rotating | 6 |
 | strategy RecreatePod to InPlaceOnly at settling | 6 |
 | strategy RecreatePod to SurgeThenDrain at rotating | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating by configkey | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating by configkey once | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating by crash-load | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating by crash-load once | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating by crash-start | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating by crash-start once | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating by imagepull | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating by imagepull once | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating by stuck | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating by stuck once | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating over configkey after-settle | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating over configkey never | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating over crashloop load | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating over crashloop load after-settle | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating over crashloop start | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating over crashloop start after-settle | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating over imagepull | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating over imagepull after-settle | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating over readiness persist | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating over readiness recover | 6 |
 | strategy RecreatePod to SurgeThenDrain at rotating while an Instance crashes | 6 |
 | strategy RecreatePod to SurgeThenDrain at settling | 6 |
 | strategy SurgeThenDrain to InPlaceIfPossible at rotating | 6 |
 | strategy SurgeThenDrain to InPlaceIfPossible at settling | 6 |
 | strategy SurgeThenDrain to InPlaceOnly at rotating | 6 |
 | strategy SurgeThenDrain to InPlaceOnly at settling | 6 |
+| strategy SurgeThenDrain to RecreatePod at held by configkey | 6 |
+| strategy SurgeThenDrain to RecreatePod at held by configkey once | 6 |
+| strategy SurgeThenDrain to RecreatePod at held by crash-load | 6 |
+| strategy SurgeThenDrain to RecreatePod at held by crash-load once | 6 |
+| strategy SurgeThenDrain to RecreatePod at held by crash-start | 6 |
+| strategy SurgeThenDrain to RecreatePod at held by crash-start on the decoder | 2 |
+| strategy SurgeThenDrain to RecreatePod at held by crash-start once | 6 |
+| strategy SurgeThenDrain to RecreatePod at held by crash-start once on the decoder | 2 |
+| strategy SurgeThenDrain to RecreatePod at held by imagepull | 6 |
+| strategy SurgeThenDrain to RecreatePod at held by imagepull once | 6 |
+| strategy SurgeThenDrain to RecreatePod at held by stuck | 6 |
+| strategy SurgeThenDrain to RecreatePod at held by stuck once | 6 |
 | strategy SurgeThenDrain to RecreatePod at rotating | 6 |
 | strategy SurgeThenDrain to RecreatePod at rotating while an Instance crashes | 6 |
 | strategy SurgeThenDrain to RecreatePod at settling | 6 |
+| strategy SurgeThenDrain to RecreatePod at settling over configkey after-settle | 6 |
+| strategy SurgeThenDrain to RecreatePod at settling over configkey never | 6 |
+| strategy SurgeThenDrain to RecreatePod at settling over crashloop load | 6 |
+| strategy SurgeThenDrain to RecreatePod at settling over crashloop load after-settle | 6 |
+| strategy SurgeThenDrain to RecreatePod at settling over crashloop start | 6 |
+| strategy SurgeThenDrain to RecreatePod at settling over crashloop start after-settle | 6 |
+| strategy SurgeThenDrain to RecreatePod at settling over crashloop start after-settle on the decoder | 2 |
+| strategy SurgeThenDrain to RecreatePod at settling over crashloop start after-settle on the router | 2 |
+| strategy SurgeThenDrain to RecreatePod at settling over crashloop start on the decoder | 2 |
+| strategy SurgeThenDrain to RecreatePod at settling over crashloop start on the router | 2 |
+| strategy SurgeThenDrain to RecreatePod at settling over imagepull | 6 |
+| strategy SurgeThenDrain to RecreatePod at settling over imagepull after-settle | 6 |
+| strategy SurgeThenDrain to RecreatePod at settling over readiness persist | 6 |
+| strategy SurgeThenDrain to RecreatePod at settling over readiness recover | 6 |
+
+### By break beside the mid-roll edit (gen-switch)
+
+| value | cases |
+|---|---|
+| configkey after-settle before the push | 24 |
+| configkey never before the push | 24 |
+| configkey on the pushed revision | 18 |
+| configkey once on the pushed revision | 12 |
+| crash-load on the pushed revision | 18 |
+| crash-load once on the pushed revision | 12 |
+| crash-start on the decoder on the pushed revision | 2 |
+| crash-start on the pushed revision | 18 |
+| crash-start once on the decoder on the pushed revision | 2 |
+| crash-start once on the pushed revision | 12 |
+| crashloop load after-settle before the push | 24 |
+| crashloop load before the push | 24 |
+| crashloop start after-settle before the push | 24 |
+| crashloop start after-settle before the push on the decoder | 2 |
+| crashloop start after-settle before the push on the router | 2 |
+| crashloop start before the push | 24 |
+| crashloop start before the push on the decoder | 2 |
+| crashloop start before the push on the router | 2 |
+| imagepull after-settle before the push | 24 |
+| imagepull before the push | 24 |
+| imagepull on the pushed revision | 18 |
+| imagepull once on the pushed revision | 12 |
+| readiness persist before the push | 24 |
+| readiness recover before the push | 24 |
+| stuck on the pushed revision | 18 |
+| stuck once on the pushed revision | 12 |
 
 ### By break victim
 
 | value | cases |
 |---|---|
-| (no break) | 4008 |
+| (no break) | 4410 |
 | decoder | 106 |
 | engine | 1243 |
 | router | 66 |
@@ -539,11 +669,11 @@ Total generated cases: **5423**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-|  | 124 |
+|  | 248 |
 | after-hold | 84 |
-| after-settle | 316 |
+| after-settle | 416 |
 | after-window | 84 |
-| never | 186 |
+| never | 210 |
 
 ### By window operation (webhook and conflict families)
 
@@ -741,7 +871,7 @@ Total generated cases: **5423**. The whole-corpus per-PR cap (hand + generated) 
 - Kill targets (`kill=leader|worker`) exist only on gang topologies.
 - Update budgets are dormant under a steady-state kill: the kill family permutes strategies at their canonical budget only.
 - crashloop breaks an engine pod, so its coordination axis (co=none | co=rolling) exists only on the PD topologies; maxUnavailable=0 is emitted for SurgeThenDrain only, percent budgets run at the mid size where the ceil() rounding differs from the integer case, and both restart policies run under both crash forms.
-- A mid-roll edit (gen-switch) is a merge patch of the lifecycle's type or policy, so the declared rollingUpdate budget must be valid under both strategies of a pair: (maxSurge 1, maxUnavailable 1) whenever SurgeThenDrain is on either side, (0, 1) otherwise. The header is stated for the worse of the two shapes: the ceiling is N+1 whenever a surge step can be in flight on either side of the edit, the floor N-1 is the one the drain-first side needs and stays hard. A strategy flip carries no restart policy; the restart-policy flips run under the canonical surge budget (floor N). The switch family runs one integer budget per pair and one gang width per topology, and its crashing variants pair the surge and recreate strategies only, at the rotating hook, with form=start.
+- A mid-roll edit (gen-switch) is a merge patch of the lifecycle's type or policy, so the declared rollingUpdate budget must be valid under both strategies of a pair: (maxSurge 1, maxUnavailable 1) whenever SurgeThenDrain is on either side, (0, 1) otherwise. The header is stated for the worse of the two shapes: the ceiling is N+1 whenever a surge step can be in flight on either side of the edit, the floor N-1 is the one the drain-first side needs and stays hard. A strategy flip carries no restart policy; the restart-policy flips run under the canonical surge budget (floor N). The switch family runs one integer budget per pair and one gang width per topology, and its crashing variants pair the surge and recreate strategies only, at the rotating hook, with form=start. Its continuation puts a break beside the edit on the six shape families: a running-revision break landed before the push (fault=crashloop:idle, imagepull:idle, configkey:missing, readiness:old; the :old crash form beside an edit stays the break armed as the bump lands) meets the edit at a moment of its own, and a pushed-revision break (break=<kind>, once=1 for its one-shot form) meets it once the roll is parked or at the first pushed pod; the capacity floor is lowered by the broken Instance, not waived.
 - No strategy pair is skipped in gen-switch: the bump is an annotation diff, which both in-place variants apply, and a gang runs either variant as a whole-gang recreate, so a flip into InPlaceOnly has no diff it cannot apply.
 - The steady-state family (`during=idle`) and the sibling family (`bump=engine victimcomp=decoder`) leave out `form=load` under `restartPolicy: None`: a runner that dies after Ready and comes back is a container restart the kubelet owns under that policy, not a wedge, so no repair is promised and neither family can read one.
 - On the engine-only topologies a Sequential group as the generators express it (one single-Component blueGreen group per member) is one blueGreen group over the engine, so the steady-state family emits it as `co=bluegreen` only.

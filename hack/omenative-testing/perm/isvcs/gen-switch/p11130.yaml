@@ -1,0 +1,13 @@
+# p11130: [gen] switch held by crash-start engine N=4 restartPolicy None to RecreateInstance co none  Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 co=none topo=engine during=held break=crash-start edit=restartPolicy:RecreateInstanceOnPodRestart
+# reason: the operator edits a roll whose push cannot start: the push gives the engine runner a runner that dies at every start, so the roll parks on its first pod: the kubelet shows the break and the status says why (a rolloutHold gate from the retry ladder or the budget, a Failed row, a RetryHeld or InstanceFailed event); every bumped member's restartPolicy is patched from None to RecreateInstanceOnPodRestart once the roll is parked on the broken pod; then the fix push, the override dropped, lands under the edit on every Instance of the bumped members, nothing of the broken revision is created again or left, no hold is left and the live spec carries the edit; nothing of the broken revision ever served; the roll runs under SurgeThenDrain (maxSurge 1, maxUnavailable 0) and the policy decides what a pod restart rebuilds
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11130 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", instanceReadyTimeout: "90s", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

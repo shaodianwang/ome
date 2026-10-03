@@ -1,0 +1,31 @@
+# p4195: [gen] switch settling over crashloop load after-settle pd-mn W1 N=2 restartPolicy None to RecreateInstance co rolling  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=3 ceil_r=2 fault=crashloop:idle co=rolling topo=pd-mn form=load during=settling edit=restartPolicy:RecreateInstanceOnPodRestart lift=after-settle
+# reason: the operator edits a roll over a fleet whose engine is already broken: the leader pod of the engine's highest Instance has its runner killed every few seconds once it is up on the settled service, and the push follows once the status has reacted to it; the cause is taken away once the edit has fired; every bumped member's restartPolicy is patched from None to RecreateInstanceOnPodRestart right after the bump lands; the policy decides what a pod restart rebuilds and the roll's pacing is unchanged, so the roll completes with every Instance of the bumped members on the new revision serving, every row settled, nothing held and the live spec carrying RecreateInstanceOnPodRestart; the broken Instance is off the target from the moment of the push, so the roll owns it: it ends on the new revision serving with no repair opened for it after the push; the roll runs under SurgeThenDrain (maxSurge 1, maxUnavailable 0), so the ceiling is N+1; the capacity floor is lowered by the broken Instance; the group paces engine and decoder together and both carry the edit
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p4195 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          rollingUpdate: {}

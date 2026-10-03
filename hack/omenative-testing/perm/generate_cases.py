@@ -23,7 +23,12 @@ runners (run.py + the KIND CI lane) already implement:
                           both policy flips x hook, a rolling group on PD,
                           and the two most informative strategy pairs with
                           an old-revision Instance crashing while the
-                          strategy flips
+                          strategy flips; its continuation (p11100+) puts a
+                          break beside the edit on the six shape families:
+                          each running-revision break before the push, kept
+                          and one-shot, at a moment of its own, and each
+                          pushed-revision break, kept and once, with the
+                          edit at the held moment or the first pushed pod
     gen-crashloop-idle/    p2400+  a crash loop on the settled service, no bump
                           (during=idle), crossed with topology x rollout-group
                           kind x break victim (engine, or decoder) x crash form
@@ -666,6 +671,7 @@ GEN_CONTINUATIONS = {
     "gen-webhook": (10300, 10450),
     "gen-conflict": (10450, 10700),
     "gen-rollback": (10800, 11100),
+    "gen-switch": (11100, 11500),
 }
 
 
@@ -1624,6 +1630,296 @@ def emit_switch(add):
                 add("gen-switch", desc, kv, comps(topo, n, w, life, d_life=d_life),
                     _switch_crash_reason(from_, to, co), meta,
                     cell=("switch-crash", SWITCH_CRASH_HOOK, topo, w, n, from_, to, co), coord=coord)
+    _emit_switch_faults(add)
+    _emit_switch_held_breaks(add)
+
+
+# The switch family under a break, on the six shape families (the engine
+# alone, behind a router, and with a decoder and router; single and gang).
+# A break of the running revision lands before the push, kept and one-shot
+# for each kind; the edit fires at a moment of its own (hook, edited field,
+# group) and the roll completes under it, except that a key kept away parks
+# the push with its reason. The pushed revision's break, kept and once for
+# each kind, meets the edit once the roll is parked on it or at the first
+# pushed pod, and the fix push lands under the edit. The sibling forms break
+# the decoder or the router nobody bumped before the push, and the grouped
+# decoder the push breaks.
+SWITCH_FAULT_SHAPES = [("engine", 4, 0, False), ("engine-mn", 2, 1, False), ("engine", 4, 0, True),
+                       ("engine-mn", 2, 1, True), ("pd", 4, 0, True), ("pd-mn", 2, 1, True)]
+SWITCH_FAULT_ROWS = [
+    ("crashloop:idle", "start", ""), ("crashloop:idle", "start", "after-settle"),
+    ("crashloop:idle", "load", ""), ("crashloop:idle", "load", "after-settle"),
+    ("imagepull:idle", "", ""), ("imagepull:idle", "", "after-settle"),
+    ("configkey:missing", "", "never"), ("configkey:missing", "", "after-settle"),
+    ("readiness:old", "persist", ""), ("readiness:old", "recover", ""),
+]
+# (hook, edited field, from, to, group) for each running-revision row,
+# cycling the family's own axes. The in-place start is edited at the first
+# patched pod, so the broken Instance, which the roll reaches last, is
+# surged rather than patched while it fails.
+SWITCH_FAULT_MOMENTS = [("settling", "strategy", "SurgeThenDrain", "RecreatePod", "none"),
+                        ("rotating", "strategy", "RecreatePod", "SurgeThenDrain", "none"),
+                        ("rotating", "strategy", "InPlaceIfPossible", "SurgeThenDrain", "rolling"),
+                        ("settling", "restartPolicy", "None", "RecreateInstance", "rolling")]
+SWITCH_SIBLING_ROWS = [("crashloop:idle", "start", ""), ("crashloop:idle", "start", "after-settle")]
+SWITCH_SIBLING_MOMENT = SWITCH_FAULT_MOMENTS[0]
+SWITCH_HELD_BREAKS = ["crash-start", "crash-load", "imagepull", "configkey", "stuck"]
+# (hook, edited field, from, to) for each pushed-revision row; the one-shot
+# rows meet the strategy flips, where a restart is handled under one policy.
+SWITCH_HELD_MOMENTS = [("held", "strategy", "SurgeThenDrain", "RecreatePod"),
+                       ("rotating", "strategy", "RecreatePod", "SurgeThenDrain"),
+                       ("held", "restartPolicy", "None", "RecreateInstance")]
+SWITCH_HELD_ONCE_MOMENTS = SWITCH_HELD_MOMENTS[:2]
+SWITCH_HELD_SIBLING_SHAPES = [("pd", 4, 0, True), ("pd-mn", 2, 1, True)]
+# The bumped members' Instance ready timeout under a kept break of the
+# pushed revision, and under a key kept away before the push: a revision
+# that never comes up parks its row Failed within the wait the runner gives
+# the status to say why.
+SWITCH_HELD_READY_TIMEOUT = READINESS_NEW_TIMEOUT
+SWITCH_HELD_WORDS = {"crash-start": "a runner that dies at every start", "crash-load": "a runner that exits after Ready",
+                     "imagepull": "an image that cannot be pulled", "configkey": "a ConfigMap key the ConfigMap lacks",
+                     "stuck": "a readiness probe it never passes"}
+SWITCH_EDIT_WHEN = dict(SWITCH_WHEN, held="once the roll is parked on the broken pod")
+
+
+def _switch_fault_kept(fault, lift):
+    """True when the running revision's cause outlives the roll: the key
+    kept away, which no revision starts without."""
+    return fault == "configkey:missing" and lift == "never"
+
+
+def _switch_fault_oneshot(fault, form, lift):
+    return lift == "after-settle" or (fault == "readiness:old" and form == "recover")
+
+
+def _switch_moment_life(field, from_, to, ready_timeout=None):
+    """(lifecycle, maxSurge, maxUnavailable) a roll starts under at a moment:
+    the pair's shared budget for a strategy flip, the canonical surge budget
+    with the starting policy for a policy flip."""
+    if field == "strategy":
+        surge, unavail = switch_budget(from_, to)
+        return lib.lifecycle(strat=from_, surge=surge, unavail=unavail, ready_timeout=ready_timeout), surge, unavail
+    surge, unavail = SWITCH_POLICY_BUDGET
+    return (lib.lifecycle(strat=SWITCH_POLICY_STRAT, surge=surge, unavail=unavail, restart=RP_FULL[from_],
+                          ready_timeout=ready_timeout), surge, unavail)
+
+
+def _switch_edit_value(field, to):
+    return f"strategy:{to}" if field == "strategy" else f"restartPolicy:{RP_FULL[to]}"
+
+
+def _switch_edit_words(field, from_, to):
+    if field == "strategy":
+        return f"every bumped member's updateStrategy is patched from {from_} to {to}"
+    return f"every bumped member's restartPolicy is patched from {RP_FULL[from_]} to {RP_FULL[to]}"
+
+
+def _switch_budget_words(field, from_, to, surge, unavail):
+    if field == "strategy":
+        out = (f"the budget (maxSurge {surge}, maxUnavailable {unavail}) is valid under both strategies and the "
+               f"ceiling is {'N+1, since a surge step can be in flight on either side of the edit' if surge else 'N'}")
+    else:
+        out = f"the roll runs under {SWITCH_POLICY_STRAT} (maxSurge {surge}, maxUnavailable {unavail}), so the ceiling is N+1"
+    return out + "; the capacity floor is lowered by the broken Instance"
+
+
+def _switch_fault_kv(topo, n, router, surge, co, extra):
+    kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, "SurgeThenDrain", surge),
+              co=co, topo=topo)
+    if co != "none" and is_pd(topo):
+        kv["ceil_d"] = kv["ceil_e"]
+    kv.update(extra)
+    return kv
+
+
+def _switch_fault_comps(topo, n, w, router, life, co, cm):
+    """The fleet on a six-family shape: the engine (its runner reading a key
+    of the ConfigMap cm names, where the case has one), the decoder of a
+    prefill/decode service (sharing the engine's lifecycle under a group),
+    and the router where the shape carries one."""
+    cw = w if is_mn(topo) else 0
+    runner = lib.configmap_env(cm, HEAL_CONFIG_KEY, HEAL_CONFIG_VAR, gang=is_mn(topo)) if cm else None
+    cs = [lib.comp("engine", n, cw, life, runner=runner)]
+    if is_pd(topo):
+        cs.append(lib.comp("decoder", n, cw, life if co != "none" else lib.lifecycle()))
+    if router_count(topo, lib.NR if router else 0):
+        cs.append(lib.comp("router", lib.NR, 0, lib.lifecycle()))
+    return cs
+
+
+def _switch_fault_body(name, topo, n, w, router, life, co, configkey, coord):
+    """The case body as a function of the minted name: where the break needs
+    a ConfigMap key, the engine runner reads one of a ConfigMap named after
+    the case, carried as a second document."""
+    cm = f"{name}{HEAL_CONFIG_SUFFIX}" if configkey else None
+    cs = _switch_fault_comps(topo, n, w, router, life, co, cm)
+    docs = [lib.configmap_doc(cm, {HEAL_CONFIG_KEY: HEAL_CONFIG_VALUE})] if cm else []
+    return lib.render(name, cs, coord=coord, docs=docs)
+
+
+def _switch_fault_words(fault, form, lift, victim, topo):
+    pod = "leader pod" if is_mn(topo) else "pod"
+    where = f"the {pod} of the {victim}'s highest Instance"
+    what = {("crashloop:idle", "start"): f"{where} is pointed at an image whose runner dies at every start",
+            ("crashloop:idle", "load"): f"{where} has its runner killed every few seconds once it is up",
+            ("imagepull:idle", ""): f"{where} is pointed at an image that cannot be pulled",
+            ("configkey:missing", ""): f"the ConfigMap key the {victim} runner reads is removed and {where} restarted, "
+                                       f"so it waits in CreateContainerConfigError",
+            ("readiness:old", form): f"{where} gets the readiness switch and stops passing readiness"}
+    key = (fault, form if fault in ("crashloop:idle", "readiness:old") else "")
+    out = what[key] + " on the settled service, and the push follows once the status has reacted to it"
+    if _switch_fault_oneshot(fault, form, lift):
+        out += "; the cause is taken away once the edit has fired"
+    else:
+        out += "; the cause stays for the whole case"
+    return out
+
+
+def _switch_fault_reason(fault, form, lift, hook, field, from_, to, co, topo, router, victim, surge, unavail):
+    kept = _switch_fault_kept(fault, lift)
+    out = (f"the operator edits a roll over a fleet whose {victim} is already broken: "
+           f"{_switch_fault_words(fault, form, lift, victim, topo)}; {_switch_edit_words(field, from_, to)} "
+           f"{SWITCH_EDIT_WHEN[hook]}")
+    if kept:
+        out += (f"; no revision starts without the key, so the push parks on its first pod with the reason "
+                f"(a Failed row at the Instance ready timeout, an InstanceFailed event), nothing of the new revision "
+                f"serves and the hold is kept; the edit is on the live spec meanwhile")
+    else:
+        pacing = (f"a step already in flight finishes under {from_} and every step afterwards runs under {to}"
+                  if field == "strategy" else "the policy decides what a pod restart rebuilds and the roll's pacing is unchanged")
+        out += (f"; {pacing}, so the roll completes with every Instance of the bumped members on the new revision serving, "
+                f"every row settled, nothing held and the live spec carrying {to if field == 'strategy' else RP_FULL[to]}")
+        if victim == "engine":
+            out += (f"; the broken Instance is off the target from the moment of the push, so the roll owns it: it ends "
+                    f"on the new revision serving with no repair opened for it after the push")
+        else:
+            out += (f"; the {victim} is not bumped, so it ends Ready and serving on its running revision, "
+                    + ("healed in place or rebuilt by a repair" if _switch_fault_oneshot(fault, form, lift)
+                       else "rebuilt by a repair that names it"))
+    out += "; " + _switch_budget_words(field, from_, to, surge, unavail)
+    if is_mn(topo) and field == "strategy" and IN_PLACE & {from_, to}:
+        out += "; a gang runs the in-place variant as a whole-gang recreate"
+    if co != "none":
+        out += ("; the group paces engine and decoder together and both carry the edit" if is_pd(topo)
+                else "; the single-member group puts the roll under the run model")
+    return out
+
+
+def _switch_held_reason(kind, once, hook, field, from_, to, co, topo, router, victim, surge, unavail):
+    pod = "leader pod" if is_mn(topo) else "pod"
+    edit = _switch_edit_words(field, from_, to)
+    when = "as the break shows" if hook == "held" else "at the first pushed pod"
+    if once:
+        how = {"crash-start": "has its runner killed once during its first start, before it was ever Ready, and the kubelet restarts it",
+               "crash-load": "has its runner killed once after it is Ready and serving, and the kubelet restarts it",
+               "imagepull": "is pointed at an image that cannot be pulled while its runner is starting and pointed back once the pull failure has settled",
+               "configkey": "reads a key the ConfigMap lacks, which is added once the wait has settled",
+               "stuck": "gets the readiness switch while its runner is starting and loses it once the drop has settled"}[kind]
+        out = (f"the operator edits a roll whose push breaks once: the push's first {victim} {pod} {how}; {edit} {when}; "
+               f"the roll completes on its own under the edit with no hold behind it, the Instance Ready and serving on "
+               f"the new revision, every row settled, nothing escalated, and the live spec carries the edit; a rebuild is "
+               f"reported where the restart policy promises one, never required, never twice")
+    else:
+        out = (f"the operator edits a roll whose push cannot start: the push gives the {victim} runner {SWITCH_HELD_WORDS[kind]}, "
+               f"so the roll parks on its first {pod}: the kubelet shows the break and the status says why (a rolloutHold "
+               f"gate from the retry ladder or the budget, a Failed row, a RetryHeld or InstanceFailed event); {edit} "
+               f"{SWITCH_EDIT_WHEN[hook]}; then the fix push, the override dropped, lands under the edit on every Instance "
+               f"of the bumped members, nothing of the broken revision is created again or left, no hold is left and the "
+               f"live spec carries the edit")
+        if kind != "crash-load":
+            out += "; nothing of the broken revision ever served"
+    if field == "strategy":
+        out += f"; the budget (maxSurge {surge}, maxUnavailable {unavail}) is valid under both strategies"
+    else:
+        out += f"; the roll runs under {SWITCH_POLICY_STRAT} (maxSurge {surge}, maxUnavailable {unavail}) and the policy decides what a pod restart rebuilds"
+    if victim != "engine":
+        out += f"; the engine's own roll converges or holds meanwhile and the fix lands on it too"
+    if co != "none":
+        out += "; the group paces engine and decoder together and both carry the edit"
+    return out
+
+
+def _emit_switch_faults(add):
+    def one(topo, n, w, router, fault, form, lift, hook, field, from_, to, co, victim):
+        shape = _lift_shape(topo, w, router)
+        configkey = fault == "configkey:missing"
+        life, surge, unavail = _switch_moment_life(field, from_, to,
+                                                   ready_timeout=(SWITCH_HELD_READY_TIMEOUT if configkey else None))
+        extra = dict(fault=fault, edit=_switch_edit_value(field, to), during=hook)
+        if form:
+            extra["form"] = form
+        if lift:
+            extra["lift"] = lift
+        if victim != "engine":
+            extra["victimcomp"] = victim
+        kv = _switch_fault_kv(topo, n, router, surge, co, extra)
+        words = fault.partition(":")[0] + (f" {form}" if form else "") + (f" {lift}" if lift else "")
+        strat = from_ if field == "strategy" else SWITCH_POLICY_STRAT
+        meta = dict(strat=strat, verb=f"edit:{hook}+{fault}", hook=hook, fault=fault, form=form, lift=lift,
+                    edit=f"{field} {from_} to {to} at {hook} over {words}" + (f" on the {victim}" if victim != "engine" else ""),
+                    switchbreak=f"{words} before the push" + (f" on the {victim}" if victim != "engine" else ""))
+        if field == "restartPolicy":
+            meta["rp"] = from_
+        desc = (f"{GEN_MARK} switch {hook} over {words}" + (f" on the {victim}" if victim != "engine" else "")
+                + f" {shape} N={n} {field} {from_} to {to} co {co}")
+        coord = lib.coord_for(co, comps=("engine", "decoder") if is_pd(topo) else ("engine",)) if co != "none" else None
+        add("gen-switch", desc, kv, None,
+            _switch_fault_reason(fault, form, lift, hook, field, from_, to, co, topo, router, victim, surge, unavail),
+            meta, cell=("switch-fault", fault, form, lift, hook, field, from_, to, co, topo, w, router, victim),
+            body=functools.partial(_switch_fault_body, topo=topo, n=n, w=w, router=router, life=life, co=co,
+                                   configkey=configkey, coord=coord))
+
+    for topo, n, w, router in SWITCH_FAULT_SHAPES:
+        for fault, form, lift in SWITCH_FAULT_ROWS:
+            for hook, field, from_, to, co in SWITCH_FAULT_MOMENTS:
+                one(topo, n, w, router, fault, form, lift, hook, field, from_, to, co, "engine")
+    hook, field, from_, to, co = SWITCH_SIBLING_MOMENT
+    for topo, n, w, router in SWITCH_FAULT_SHAPES:
+        victim = "decoder" if is_pd(topo) else ("router" if router else "")
+        if not victim:
+            continue
+        for fault, form, lift in SWITCH_SIBLING_ROWS:
+            one(topo, n, w, router, fault, form, lift, hook, field, from_, to, co, victim)
+
+
+def _emit_switch_held_breaks(add):
+    def one(topo, n, w, router, kind, once, hook, field, from_, to, co, victim):
+        shape = _lift_shape(topo, w, router)
+        life, surge, unavail = _switch_moment_life(field, from_, to,
+                                                   ready_timeout=(None if once else SWITCH_HELD_READY_TIMEOUT))
+        extra = {"break": kind, "edit": _switch_edit_value(field, to), "during": hook}
+        if once:
+            extra["once"] = 1
+        if victim != "engine":
+            extra["victimcomp"] = victim
+        kv = _switch_fault_kv(topo, n, router, surge, co, extra)
+        words = kind + (" once" if once else "") + (f" on the {victim}" if victim != "engine" else "")
+        strat = from_ if field == "strategy" else SWITCH_POLICY_STRAT
+        meta = dict(strat=strat, verb=f"edit:{hook}+break:{kind}" + (":once" if once else ""), hook=hook,
+                    held_break=kind, once=once, edit=f"{field} {from_} to {to} at {hook} by {words}",
+                    switchbreak=f"{words} on the pushed revision")
+        if field == "restartPolicy":
+            meta["rp"] = from_
+        desc = f"{GEN_MARK} switch {hook} by {words} {shape} N={n} {field} {from_} to {to} co {co}"
+        coord = lib.coord_for(co, comps=("engine", "decoder") if is_pd(topo) else ("engine",)) if co != "none" else None
+        add("gen-switch", desc, kv, None,
+            _switch_held_reason(kind, once, hook, field, from_, to, co, topo, router, victim, surge, unavail), meta,
+            cell=("switch-held", kind, once, hook, field, from_, to, co, topo, w, router, victim),
+            body=functools.partial(_switch_fault_body, topo=topo, n=n, w=w, router=router, life=life, co=co,
+                                   configkey=(kind == "configkey"), coord=coord))
+
+    for topo, n, w, router in SWITCH_FAULT_SHAPES:
+        for kind in SWITCH_HELD_BREAKS:
+            for hook, field, from_, to in SWITCH_HELD_MOMENTS:
+                one(topo, n, w, router, kind, False, hook, field, from_, to, "none", "engine")
+            for hook, field, from_, to in SWITCH_HELD_ONCE_MOMENTS:
+                one(topo, n, w, router, kind, True, hook, field, from_, to, "none", "engine")
+    hook, field, from_, to = SWITCH_HELD_MOMENTS[0]
+    for topo, n, w, router in SWITCH_HELD_SIBLING_SHAPES:
+        one(topo, n, w, router, "crash-start", False, hook, field, from_, to, "rolling", "decoder")
+        one(topo, n, w, router, "crash-start", True, hook, field, from_, to, "rolling", "decoder")
+
+
 # ── gen-pause-repair: a pause or a freeze around the repair of a crash loop ─
 def pause_group_for(co, topo):
     """The spec.rollout.groups block a pause-and-repair case carries: a
@@ -6736,6 +7032,7 @@ def manifest(rows):
             edits[m["edit"]] = edits.get(m["edit"], 0) + 1
     if edits:
         lines += table("By mid-roll edit (gen-switch)", edits)
+    lines += table_if("By break beside the mid-roll edit (gen-switch)", "switchbreak")
     lines += table("By break victim", tally(lambda kv, m: m.get("victim", "(no break)")))
     lines += table("By migration mode (node family)",
                    tally(lambda kv, m: m["mig"], where=lambda kv, m: "mig" in m))
@@ -6812,7 +7109,15 @@ def manifest(rows):
         " the canonical surge budget (floor N). The switch family runs one"
         " integer budget per pair and one gang width per topology, and its"
         " crashing variants pair the surge and recreate strategies only, at"
-        " the rotating hook, with form=start.",
+        " the rotating hook, with form=start. Its continuation puts a break"
+        " beside the edit on the six shape families: a running-revision"
+        " break landed before the push (fault=crashloop:idle, imagepull:idle,"
+        " configkey:missing, readiness:old; the :old crash form beside an edit"
+        " stays the break armed as the bump lands) meets the edit at a moment"
+        " of its own, and a pushed-revision break (break=<kind>, once=1 for"
+        " its one-shot form) meets it once the roll is parked or at the first"
+        " pushed pod; the capacity floor is lowered by the broken Instance,"
+        " not waived.",
         "- No strategy pair is skipped in gen-switch: the bump is an annotation"
         " diff, which both in-place variants apply, and a gang runs either"
         " variant as a whole-gang recreate, so a flip into InPlaceOnly has no"

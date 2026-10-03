@@ -440,7 +440,7 @@ class GeneratedCorpusTest(unittest.TestCase):
         # sub-shards, so the corpus total bounds nothing physical; the ceiling
         # exists to force a conscious decision when the corpus grows past it.
         n = sum(1 for _ in (HERE / "isvcs").glob("**/*.yaml"))
-        self.assertLessEqual(n, 6000)
+        self.assertLessEqual(n, 7000)
 
     def test_parked_cell_emits_xfail_header_and_reason(self):
         """A PARKED entry must turn its cell into notimpl=1 issue=N with the
@@ -5833,7 +5833,8 @@ class StrategySwitchFamilyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.outputs, rows = generate_cases.build_outputs()
-        cls.fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-switch"]
+        cls.fam = [(n, kv, m) for folder, n, kv, m in rows
+                   if folder == "gen-switch" and "fault" not in m and "held_break" not in m]
 
     @staticmethod
     def _lifecycle(text, comp):
@@ -5929,6 +5930,134 @@ class StrategySwitchFamilyTest(unittest.TestCase):
         self.assertIn("| strategy SurgeThenDrain to RecreatePod at settling | 6 |", manifest)
         self.assertIn("| restartPolicy None to RecreateInstance at rotating | 6 |", manifest)
         self.assertIn("No strategy pair is skipped in gen-switch", manifest)
+
+
+class StrategySwitchUnderBreakFamilyTest(unittest.TestCase):
+    """The switch family's continuation: a break beside the edit on the six
+    shape families, each running-revision break kept and one-shot before the
+    push at a moment of its own, the sibling rows, and each pushed-revision
+    break kept and once with the edit at the held moment or the first pushed
+    pod, the grouped decoder's too."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-switch"]
+        cls.running = [(n, kv, m) for n, kv, m in fam if "fault" in m]
+        cls.held = [(n, kv, m) for n, kv, m in fam if "held_break" in m]
+        cls.plain = [(n, kv, m) for n, kv, m in fam if "fault" not in m and "held_break" not in m]
+
+    def test_ids_continue_into_the_family_s_second_block(self):
+        self.assertEqual(180, len(self.plain))
+        self.assertEqual(402, len(self.running) + len(self.held))
+        ids = sorted(int(n[1:]) for n, _kv, _m in self.running + self.held)
+        lo, hi = generate_cases.GEN_BLOCKS["gen-switch"]
+        clo, chi = generate_cases.GEN_CONTINUATIONS["gen-switch"]
+        self.assertTrue(all(lo <= i < hi or clo <= i < chi for i in ids))
+        self.assertEqual(hi - 1, max(i for i in ids if i < hi), "the first block is filled before the continuation")
+        self.assertEqual(clo, min(i for i in ids if i >= clo))
+
+    def test_running_revision_breaks_cross_the_six_shapes(self):
+        running = self.running
+        self.assertEqual(248, len(running), "ten rows x six shapes x four moments, plus the sibling rows")
+        shapes = {(kv["topo"], kv["Nr"]) for _n, kv, _m in running}
+        self.assertEqual(6, len(shapes))
+        engine_rows = [(n, kv, m) for n, kv, m in running if "victimcomp" not in kv]
+        self.assertEqual({(f, form, li) for f, form, li in generate_cases.SWITCH_FAULT_ROWS},
+                         {(m["fault"], m["form"], m["lift"]) for _n, _kv, m in engine_rows})
+        self.assertEqual(set(run.EDIT_HOOKS), {kv["during"] for _n, kv, _m in engine_rows})
+        self.assertEqual({"strategy:RecreatePod", "strategy:SurgeThenDrain", "restartPolicy:RecreateInstanceOnPodRestart"},
+                         {kv["edit"] for _n, kv, _m in engine_rows})
+        self.assertEqual({"SurgeThenDrain", "RecreatePod", "InPlaceIfPossible"}, {m["strat"] for _n, _kv, m in engine_rows})
+        self.assertEqual({"none", "rolling"}, {kv["co"] for _n, kv, _m in engine_rows})
+        for n, kv, m in running:
+            self.assertTrue(run._edit_fault_case(kv), n)
+            self.assertFalse(run._edit_held_break_case(kv), n)
+            for k in ("break", "once", "expect", "rollback", "floor_soft"):
+                self.assertNotIn(k, kv, n)
+            text = self.outputs[f"gen-switch/{n}.yaml"]
+            reason = text.splitlines()[1]
+            self.assertTrue(reason.startswith("# reason: the operator edits a roll over a fleet whose "), n)
+            kept = generate_cases._switch_fault_kept(m["fault"], m["lift"])
+            self.assertEqual(kept, "the hold is kept" in reason, n)
+            self.assertEqual(not kept, "the roll completes" in reason, n)
+            self.assertEqual(generate_cases._switch_fault_oneshot(m["fault"], m["form"], m["lift"]),
+                             "taken away once the edit has fired" in reason, n)
+            self.assertEqual(m["fault"] == "configkey:missing", "kind: ConfigMap" in text, n)
+            self.assertEqual(m["fault"] == "configkey:missing", "instanceReadyTimeout" in text, n)
+            self.assertIn("the capacity floor is lowered by the broken Instance", reason)
+            kind, value = run._midroll_edit(kv["edit"])
+            if kind == "strategy":
+                self.assertIn("valid under both strategies", reason)
+            else:
+                self.assertEqual("SurgeThenDrain", m["strat"])
+                self.assertEqual("None", m["rp"])
+                self.assertEqual(kv["Ne"] + 1, kv["ceil_e"], n)
+            surge = kv["ceil_e"] - kv["Ne"]
+            self.assertIn(surge, (0, 1))
+            if kv["topo"].startswith("pd"):
+                self.assertEqual(kv["ceil_e"] if kv["co"] == "rolling" else kv["Nd"], kv["ceil_d"], n)
+            if kv["co"] == "rolling" and not kv["topo"].startswith("pd"):
+                self.assertIn("components: [engine]", text)
+            if "victimcomp" in kv:
+                self.assertIn(kv["victimcomp"], ("router", "decoder"))
+                self.assertEqual("none", kv["co"], "the sibling is one nobody bumped")
+                self.assertEqual(generate_cases.SWITCH_SIBLING_MOMENT[0], kv["during"])
+                self.assertIn(f"the {kv['victimcomp']} is not bumped", reason)
+        self.assertEqual(8, sum(1 for _n, kv, _m in running if "victimcomp" in kv))
+        with tempfile.TemporaryDirectory() as d:
+            for n, _kv, _m in running[::7]:
+                p = Path(d) / f"{n}.yaml"
+                p.write_text(self.outputs[f"gen-switch/{n}.yaml"])
+                self.assertEqual([], run.validate_case_file(p), n)
+
+    def test_pushed_revision_breaks_cross_the_six_shapes(self):
+        held = self.held
+        self.assertEqual(154, len(held), "five kinds x six shapes x three moments kept and two once, plus the decoder's")
+        self.assertEqual(6, len({(kv["topo"], kv["Nr"]) for _n, kv, _m in held}))
+        self.assertEqual(set(generate_cases.SWITCH_HELD_BREAKS), {kv["break"] for _n, kv, _m in held})
+        self.assertEqual(set(run.EDIT_BREAKS), set(generate_cases.SWITCH_HELD_BREAKS))
+        once = [(n, kv, m) for n, kv, m in held if kv.get("once")]
+        self.assertEqual(62, len(once))
+        self.assertEqual(set(generate_cases.SWITCH_HELD_BREAKS), {kv["break"] for _n, kv, _m in once})
+        self.assertEqual({"strategy:RecreatePod", "strategy:SurgeThenDrain"}, {kv["edit"] for _n, kv, _m in once},
+                         "a one-shot restart is read under one policy")
+        self.assertEqual(set(run.EDIT_BREAK_HOOKS), {kv["during"] for _n, kv, _m in held})
+        for n, kv, m in held:
+            self.assertTrue(run._edit_held_break_case(kv), n)
+            self.assertFalse(run._edit_fault_case(kv), n)
+            for k in ("fault", "lift", "expect", "rollback", "floor_soft"):
+                self.assertNotIn(k, kv, n)
+            text = self.outputs[f"gen-switch/{n}.yaml"]
+            reason = text.splitlines()[1]
+            self.assertEqual(bool(kv.get("once")), reason.startswith("# reason: the operator edits a roll whose push breaks once: "), n)
+            self.assertEqual(not kv.get("once"), reason.startswith("# reason: the operator edits a roll whose push cannot start: "), n)
+            self.assertEqual(kv["break"] == "configkey", "kind: ConfigMap" in text, n)
+            self.assertEqual(not kv.get("once"), "instanceReadyTimeout" in text, n)
+            self.assertEqual(kv["break"] != "crash-load" and not kv.get("once"), "nothing of the broken revision ever served" in reason, n)
+            self.assertEqual(not kv.get("once"), "the fix push, the override dropped" in reason, n)
+            self.assertEqual(bool(kv.get("once")), "completes on its own" in reason, n)
+            if "victimcomp" in kv:
+                self.assertEqual(("decoder", "rolling"), (kv["victimcomp"], kv["co"]))
+                self.assertTrue(kv["topo"].startswith("pd"))
+                self.assertEqual(kv["ceil_e"], kv["ceil_d"], "the grouped decoder rolls under the engine's budget")
+            else:
+                self.assertEqual("none", kv["co"])
+        self.assertEqual(4, sum(1 for _n, kv, _m in held if "victimcomp" in kv))
+        with tempfile.TemporaryDirectory() as d:
+            for n, _kv, _m in held[::5]:
+                p = Path(d) / f"{n}.yaml"
+                p.write_text(self.outputs[f"gen-switch/{n}.yaml"])
+                self.assertEqual([], run.validate_case_file(p), n)
+
+    def test_manifest_counts_the_breaks_beside_the_edit(self):
+        manifest = self.outputs[generate_cases.MANIFEST_REL]
+        self.assertIn("### By break beside the mid-roll edit (gen-switch)", manifest)
+        self.assertIn("| crashloop start before the push | 24 |", manifest)
+        self.assertIn("| stuck on the pushed revision | 18 |", manifest)
+        self.assertIn("| crash-start once on the decoder on the pushed revision | 2 |", manifest)
+        self.assertIn("| strategy SurgeThenDrain to RecreatePod at settling | 6 |", manifest,
+                      "the family's own rows keep their counts")
 
 
 class GeneratedHealAndImagepullFamiliesTest(unittest.TestCase):
@@ -7877,6 +8006,296 @@ class RollbackUnderBreakTest(unittest.TestCase):
         self.assertEqual([("config missing", "persistent", "running", "engine")],
                          row({"rollback": 1, "during": "last", "fault": "configkey:missing", "lift": "never"}))
         self.assertEqual("rollback", coverage.classify_operation({"rollback": 1, "during": "held", "break": "imagepull"}, "rollout", "many")[0])
+
+
+class EditUnderBreakTest(unittest.TestCase):
+    """A break beside a mid-roll edit: the running revision broken before
+    the push (fault=<kind>:idle|missing|old edit= during=settling|rotating),
+    or the pushed revision broken (break=<kind> [once=1] edit=
+    during=held|rotating). The header forms, the case readers, the kept and
+    one-shot readings, the verdicts of both halves, the stuck symptom, the
+    fix env, the edit landed at a moment of the handler's own and the
+    ledger's reading of the new headers."""
+
+    E1 = "# p999: x mode=rollout Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 co=none topo=engine"
+    ER = "# p999: x mode=rollout Ne=4 Nd=0 Nr=2 ceil_e=5 ceil_d=0 ceil_r=2 co=none topo=engine"
+    PD = "# p999: x mode=rollout Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 co=rolling topo=pd"
+    EDIT = " edit=strategy:RecreatePod"
+    POLICY = " edit=restartPolicy:RecreateInstanceOnPodRestart"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def _has(self, frag, header):
+        errs = self._errs(header)
+        self.assertTrue(any(frag in e for e in errs), (frag, header, errs))
+
+    @staticmethod
+    def _pod(comp, inst, hash_, uid, ready=True, serving=True):
+        return {"alive": True, "comp": comp, "inst": str(inst), "hash": hash_, "uid": uid,
+                "ready": ready, "serving": serving, "runner": "default"}
+
+    def test_running_revision_break_forms_beside_an_edit(self):
+        rows = (" fault=crashloop:idle form=start", " fault=crashloop:idle form=start lift=after-settle",
+                " fault=crashloop:idle form=load", " fault=crashloop:idle form=load lift=after-settle",
+                " fault=imagepull:idle", " fault=imagepull:idle lift=after-settle",
+                " fault=configkey:missing lift=never", " fault=configkey:missing lift=after-settle",
+                " fault=readiness:old form=persist", " fault=readiness:old form=recover")
+        for extra in rows:
+            for hook in sorted(run.EDIT_HOOKS):
+                self.assertEqual([], self._errs(self.E1 + extra + self.EDIT + f" during={hook}"), extra + hook)
+                self.assertEqual([], self._errs(self.PD + extra + self.POLICY + f" during={hook}"), extra + hook)
+        self.assertEqual([], self._errs(self.ER + " fault=crashloop:idle form=start victimcomp=router" + self.EDIT + " during=settling"))
+        self.assertEqual([], self._errs(self.PD.replace("co=rolling", "co=none")
+                                        + " fault=crashloop:idle form=start lift=after-settle victimcomp=decoder" + self.EDIT + " during=rotating"))
+        # The :old crash beside an edit stays the switch family's break armed as the bump lands.
+        self.assertEqual([], self._errs(self.E1 + " fault=crashloop:old form=start floor_soft=1" + self.EDIT + " during=rotating"))
+        self._has("needs during=rotating|settling", self.E1 + " fault=crashloop:idle form=start" + self.EDIT + " during=held")
+        self._has("once=1 does not combine with a break landed before the push",
+                  self.E1 + " fault=crashloop:idle form=start once=1" + self.EDIT + " during=rotating")
+        self._has("needs lift=never", self.E1 + " fault=configkey:missing" + self.EDIT + " during=rotating")
+        self._has("needs form=", self.E1 + " fault=readiness:old" + self.EDIT + " during=rotating")
+        self._has("lift=after-hold beside edit=", self.E1 + " fault=imagepull:idle lift=after-hold" + self.EDIT + " during=rotating")
+        self._has("expect= is the idle break's vocabulary",
+                  self.E1 + " fault=crashloop:idle form=start expect=repaired" + self.EDIT + " during=rotating")
+        self.assertNotEqual([], self._errs(self.E1 + " fault=crashloop:idle form=start during=rotating"),
+                            "a break before the push needs the edit it is beside")
+        self.assertNotEqual([], self._errs(self.E1 + " fault=crashloop:idle form=start rollback=1" + self.EDIT + " during=rotating"))
+
+    def test_pushed_revision_break_forms_beside_an_edit(self):
+        for kind in sorted(run.EDIT_BREAKS):
+            for hook in sorted(run.EDIT_BREAK_HOOKS):
+                self.assertEqual([], self._errs(self.E1 + f" break={kind}" + self.EDIT + f" during={hook}"), (kind, hook))
+                self.assertEqual([], self._errs(self.E1 + f" break={kind} once=1" + self.POLICY + f" during={hook}"), (kind, hook))
+        self.assertEqual([], self._errs(self.PD + " break=crash-start victimcomp=decoder" + self.EDIT + " during=held"))
+        self.assertEqual([], self._errs(self.PD + " break=crash-start once=1 victimcomp=decoder" + self.EDIT + " during=held"))
+        self._has("needs during=held|rotating", self.E1 + " break=crash-start" + self.EDIT + " during=settling")
+        self._has("lift= does not combine with break=", self.E1 + " break=stuck lift=after-settle" + self.EDIT + " during=held")
+        self._has("carries one break", self.E1 + " break=crash-start fault=crashloop:idle form=start" + self.EDIT + " during=held")
+        self._has("names a member the push bumps beside the engine", self.E1 + " break=crash-start victimcomp=decoder" + self.EDIT + " during=held")
+        self._has("names a member the push bumps beside the engine",
+                  self.PD.replace("co=rolling", "co=none") + " break=crash-start victimcomp=decoder" + self.EDIT + " during=held")
+        self._has("expect= is the idle break's vocabulary", self.E1 + " break=imagepull expect=repaired" + self.EDIT + " during=held")
+        self._has("a mid-roll edit rolls", self.E1 + " break=crash-start during=held")
+        self._has("break=", self.E1 + " break=bogus" + self.EDIT + " during=held")
+        self._has("would both fire", self.E1 + " break=crash-start rollback=1" + self.EDIT + " during=held")
+
+    def test_the_case_readers_and_the_forms(self):
+        fault_case = lambda **kw: run._edit_fault_case(dict({"edit": "strategy:RecreatePod", "during": "rotating"}, **kw))
+        self.assertTrue(fault_case(fault="crashloop:idle", form="start"))
+        self.assertTrue(fault_case(fault="imagepull:idle", lift="after-settle", during="settling"))
+        self.assertTrue(fault_case(fault="configkey:missing", lift="never"))
+        self.assertTrue(fault_case(fault="readiness:old", form="recover"))
+        self.assertFalse(fault_case(fault="crashloop:old", form="start"), "the :old crash is the break armed as the bump lands")
+        self.assertFalse(fault_case(fault="crashloop:new", form="start"))
+        self.assertFalse(fault_case(fault="crashloop:idle", form="start", during="held"))
+        self.assertFalse(fault_case(fault="crashloop:idle", form="start", **{"break": "stuck"}))
+        self.assertFalse(run._edit_fault_case({"fault": "crashloop:idle", "form": "start", "during": "rotating"}))
+        held_case = lambda **kw: run._edit_held_break_case(dict({"edit": "strategy:RecreatePod", "during": "held"}, **kw))
+        self.assertTrue(held_case(**{"break": "crash-start"}))
+        self.assertTrue(held_case(**{"break": "stuck", "once": 1, "during": "rotating"}))
+        self.assertFalse(held_case(**{"break": "crash-start", "during": "settling"}))
+        self.assertFalse(held_case())
+        self.assertFalse(run._edit_held_break_case({"break": "crash-start", "during": "held", "rollback": 1}))
+        kept = lambda **kw: run._edit_break_kept(dict({"kind": "configkey", "lift": "never"}, **kw))
+        self.assertTrue(kept())
+        self.assertFalse(kept(lift="after-settle"))
+        self.assertFalse(kept(kind="readiness", form="persist", lift=""), "the roll replaces a pod that only fails readiness")
+        self.assertFalse(kept(kind="crashloop", lift=""))
+        self.assertFalse(run._edit_break_kept(None))
+        fired = {"kind": "restartPolicy", "value": "RecreateInstanceOnPodRestart", "fired": True}
+        self.assertEqual("RecreateInstance", run._edit_once_policy({}, fired))
+        self.assertEqual("None", run._edit_once_policy({}, dict(fired, value="None")))
+        self.assertEqual("RecreateInstance", run._edit_once_policy({}, dict(fired, fired=False)))
+        self.assertEqual("None", run._edit_once_policy({"restart": "None"}, {"kind": "strategy", "value": "RecreatePod", "fired": True}))
+
+    def test_before_push_verdict(self):
+        f = {"kind": "configkey", "notes": ["the break had bitten 12s after it landed", "the push follows once the status said why"]}
+        hold = {"at": 95.0, "why": "engine Instance 0 Failed: CreateContainerConfigError", "served": None}
+        notes, checks = [], []
+        self.assertEqual("PASS", run._edit_fault_checks(f, hold, "HELD", True, False, "PASS", notes, checks))
+        self.assertTrue(any("parked with a reason" in c for c in checks))
+        self.assertTrue(any("nothing of the new revision served" in c for c in checks))
+        self.assertEqual(2, sum(1 for c in checks if c.startswith("  ⓘ configkey before the push")))
+        notes = []
+        self.assertEqual("FAIL", run._edit_fault_checks(f, dict(hold, at=None), "NO_HOLD", True, False, "PASS", notes, []))
+        self.assertTrue(any("never held with a reason" in n or "never said it holds" in n for n in notes))
+        notes = []
+        self.assertEqual("FAIL", run._edit_fault_checks(f, dict(hold, served=40.0), "HELD", True, False, "PASS", notes, []))
+        self.assertTrue(any("cannot start served" in n for n in notes))
+        g = {"kind": "crashloop", "notes": []}
+        checks = []
+        self.assertEqual("PASS", run._edit_fault_checks(g, hold, "CONVERGED", False, True, "PASS", [], checks))
+        self.assertTrue(any("once the cause was taken away" in c for c in checks))
+        notes = []
+        self.assertEqual("FAIL", run._edit_fault_checks(g, hold, "ROTATE_TIMEOUT", False, False, "PASS", notes, []))
+        self.assertTrue(any("did not complete" in n for n in notes))
+
+    def _victim_ctx(self, pods):
+        return {"case_id": "p999", "pod_state": pods, "old_hashes": {"a"}, "inv": {"surges": None}}
+
+    def test_before_push_victim_by_side(self):
+        f = {"case_id": "p999", "kind": "readiness", "form": "persist", "lift": "", "fired": True, "fired_ts": 1.0,
+             "infra_fail": None, "crash_comp": "engine", "crash_inst": "3", "crash_uid": "u3"}
+        orig_ev, orig_chain = run._isvc_events_since, run._victim_index_chain
+        try:
+            run._isvc_events_since = lambda cid, since, **kw: []
+            run._victim_index_chain = lambda comp, inst, surges, events: [inst]
+            notes, checks = [], []
+            pods = {"e3": self._pod("engine", 3, "b", "u3-new")}
+            self.assertEqual("PASS", run._edit_fault_victim_checks(f, self._victim_ctx(pods), {"engine"}, "PASS", notes, checks))
+            self.assertTrue(any("ends Ready and serving on the new revision, rebuilt" in c for c in checks))
+            notes = []
+            old = {"e3": self._pod("engine", 3, "a", "u3")}
+            self.assertEqual("FAIL", run._edit_fault_victim_checks(f, self._victim_ctx(old), {"engine"}, "PASS", notes, []))
+            self.assertTrue(any("not serving on the new revision" in n for n in notes))
+            down = {"e3": self._pod("engine", 3, "b", "u3-new", ready=False, serving=False)}
+            self.assertEqual("FAIL", run._edit_fault_victim_checks(f, self._victim_ctx(down), {"engine"}, "PASS", [], []))
+            s = dict(f, crash_comp="router", crash_inst="1", crash_uid="r1")
+            checks = []
+            healed = {"r1": self._pod("router", 1, "a", "r1")}
+            self.assertEqual("PASS", run._edit_fault_victim_checks(s, self._victim_ctx(healed), {"engine"}, "PASS", [], checks))
+            self.assertTrue(any("a sibling nobody bumped), healed in place" in c for c in checks))
+            moved = {"r1": self._pod("router", 1, "b", "r1-new")}
+            self.assertEqual("FAIL", run._edit_fault_victim_checks(s, self._victim_ctx(moved), {"engine"}, "PASS", [], []))
+            crash = dict(f, kind="crashloop")
+            self.assertEqual("PASS", run._edit_fault_victim_checks(crash, self._victim_ctx(old), {"engine"}, "PASS", [], []),
+                             "a crash is judged by the crashloop checks")
+            self.assertEqual("PASS", run._edit_fault_victim_checks(dict(f, fired=False), self._victim_ctx({}), {"engine"}, "PASS", [], []))
+        finally:
+            run._isvc_events_since, run._victim_index_chain = orig_ev, orig_chain
+
+    def _hb(self, **kw):
+        hb = run._edit_break_new()
+        hb.update(kind="crash-start", armed="image x", bite_at=12.0, bite="e5 waits in CrashLoopBackOff",
+                  why_at=30.0, why="rolloutHold gate=RetryBlock", edit_at=31.0, edit_when="once the roll was parked on the broken pod",
+                  fix_at=40.0, fix="the runner override dropped", state="CONVERGED", converged_at=120.0)
+        hb.update(kw)
+        return hb
+
+    def test_pushed_revision_verdict(self):
+        notes, checks = [], []
+        self.assertEqual("PASS", run._edit_break_checks(self._hb(), "engine", "PASS", notes, checks))
+        self.assertEqual([], notes)
+        for frag in ("showed the break", "status said why", "nothing of the broken revision ever served", "the edit landed 31s",
+                     "landed on every Instance", "no pod of the broken revision was created", "nothing of the broken revision is left",
+                     "nothing is left held", "no repair was opened"):
+            self.assertTrue(any(frag in c for c in checks), frag)
+        notes = []
+        self.assertEqual("FAIL", run._edit_break_checks(self._hb(why_at=None), "engine", "PASS", notes, []))
+        self.assertTrue(any("never said why" in n for n in notes))
+        checks = []
+        self.assertEqual("PASS", run._edit_break_checks(self._hb(once=True, why_at=None, fix_at=None), "engine", "PASS", [], checks),
+                         "a one-shot cause need not open a hold, and no fix push follows it")
+        self.assertTrue(any("need not open one" in c for c in checks))
+        notes = []
+        self.assertEqual("FAIL", run._edit_break_checks(self._hb(served=40.0), "engine", "PASS", notes, []))
+        self.assertTrue(any("cannot start served" in n for n in notes))
+        self.assertEqual("PASS", run._edit_break_checks(self._hb(kind="crash-load", served=40.0), "engine", "PASS", [], []),
+                         "a runner that exits after Ready has served by definition")
+        for kw, frag in (({"late_pods": ["e7"]}, "created after the fix push"), ({"leftover": ["e5"]}, "left alive"),
+                         ({"hold_left": "engine rolloutHold gate=RetryBlock"}, "hold is left"),
+                         ({"late_repairs": ["component=engine instance=0"]}, "repair was opened"),
+                         ({"state": "ROTATE_TIMEOUT"}, "did not land")):
+            notes = []
+            self.assertEqual("FAIL", run._edit_break_checks(self._hb(**kw), "engine", "PASS", notes, []), kw)
+            self.assertTrue(any(frag in n for n in notes), (kw, notes))
+        checks = []
+        self.assertEqual("PASS", run._edit_break_checks(self._hb(late_repairs=["component=engine instance=0"],
+                                                                 rebuilds_policy="RecreateInstanceOnPodRestart"), "engine", "PASS", [], checks),
+                         "the edited policy rebuilds a restarting pod: reported, not judged")
+        self.assertTrue(any("reported, not judged" in c for c in checks))
+        self.assertEqual("PASS", run._edit_break_checks(self._hb(bite_at=None), "engine", "PASS", [], []),
+                         "a break that never showed is the apparatus's failure, recorded elsewhere")
+
+    def test_stuck_symptom_and_the_surge_order_across_a_switch(self):
+        pods = {"e0": self._pod("engine", 0, "a", "u0"), "e4": self._pod("engine", 4, "b", "u4", ready=False, serving=False)}
+        now = 1000.0
+        self.assertEqual((None, ""), run._edit_break_symptom("stuck", pods, "engine", {"a"}, set(), None, now))
+        self.assertEqual((None, ""), run._edit_break_symptom("stuck", pods, "engine", {"a"}, set(), now - 1, now))
+        pod, what = run._edit_break_symptom("stuck", pods, "engine", {"a"}, set(), now - run.HELD_SETTLE_S, now)
+        self.assertEqual("e4", pod)
+        self.assertIn("without passing readiness", what)
+        ready = dict(pods, e4=self._pod("engine", 4, "b", "u4"))
+        self.assertEqual((None, ""), run._edit_break_symptom("stuck", ready, "engine", {"a"}, set(), now - run.HELD_SETTLE_S, now))
+        orig = run._held_break_symptom
+        try:
+            run._held_break_symptom = lambda kind, ps, victim, old, seen: ("e4", f"{kind} delegated")
+            self.assertEqual(("e4", "imagepull delegated"), run._edit_break_symptom("imagepull", pods, "engine", {"a"}, set(), None, now))
+        finally:
+            run._held_break_symptom = orig
+        ctx = {"order_viol": {"engine": 2}, "info": {"strat": {"engine": "SurgeThenDrain"}}, "hdr": {}}
+        switched = {"kind": "strategy", "value": "RecreatePod", "fired": True}
+        checks = []
+        self.assertEqual("PASS", run._edit_surge_order_checks(ctx, switched, ["engine"], "PASS", [], checks))
+        self.assertTrue(any("informational" in c for c in checks))
+        notes = []
+        self.assertEqual("FAIL", run._edit_surge_order_checks(ctx, dict(switched, fired=False), ["engine"], "PASS", notes, []),
+                         "until the edit fires the starting strategy's claim is hard")
+        policy = {"kind": "restartPolicy", "value": "None", "fired": True}
+        self.assertEqual("FAIL", run._edit_surge_order_checks(ctx, policy, ["engine"], "PASS", [], []),
+                         "a policy flip changes no strategy, so the claim stays hard")
+
+    def test_fix_env_and_the_edit_landed_at_a_moment(self):
+        ctx = {"pod_state": {"e0": self._pod("engine", 0, "a", "u0")}, "old_hashes": {"a"}}
+        orig_get, orig_ref = run._get_pod, run._configkey_env_ref
+        try:
+            run._get_pod = lambda name: {"metadata": {"name": name}}
+            run._configkey_env_ref = lambda obj: ("TEST_CONFIG_VALUE", "p999-config", "value")
+            env = run._edit_break_fix_env(ctx, "engine")
+            self.assertEqual("TEST_CONFIG_VALUE", env[0]["name"])
+            self.assertEqual({"name": "p999-config", "key": "value"}, env[0]["valueFrom"]["configMapKeyRef"])
+            self.assertEqual({"name": "TEST_REV", "value": "v3"}, env[1])
+            run._configkey_env_ref = lambda obj: None
+            self.assertIsNone(run._edit_break_fix_env(ctx, "engine"))
+            self.assertIsNone(run._edit_break_fix_env({"pod_state": {}, "old_hashes": {"a"}}, "engine"))
+        finally:
+            run._get_pod, run._configkey_env_ref = orig_get, orig_ref
+        e = run._midroll_new({"edit": "strategy:RecreatePod", "during": "held"})
+        calls = []
+        orig = run.kubectl
+        run.kubectl = lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0, "", "")
+        try:
+            run._midroll_fire(e, "p999", {"engine"}, 44.0)
+            self.assertEqual((True, 44.0, None), (e["fired"], e["fired_at"], e["error"]))
+            self.assertEqual(1, len(calls))
+            self.assertIn("RecreatePod", calls[0][-1])
+            run.kubectl = lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "denied")
+            bad = run._midroll_new({"edit": "restartPolicy:None", "during": "held"})
+            run._midroll_fire(bad, "p999", {"engine"}, 50.0)
+            self.assertTrue(bad["fired"])
+            self.assertIn("denied", bad["error"])
+        finally:
+            run.kubectl = orig
+        self.assertEqual({"crash-load": "env", "configkey": "env", "stuck": "probe"}, run.EDIT_BREAK_TEMPLATE_EDIT)
+        self.assertEqual({"crashloop", "imagepull", "readiness", "configkey"}, run.EDIT_BREAK_FAULTS)
+        self.assertEqual(set(run.EDIT_ONCE_FAULTS), run.EDIT_BREAKS)
+
+    def test_ledger_reads_the_breaks_beside_the_edit(self):
+        import coverage
+        row = lambda h: coverage.classify_faults(h, "rollout", 1, "SurgeThenDrain", set())
+        base = {"edit": "strategy:RecreatePod", "during": "settling"}
+        self.assertEqual([("crash at start", "persistent", "running", "engine")], row(dict(base, fault="crashloop:idle", form="start")))
+        self.assertEqual([("crash after Ready", "one-shot", "running", "engine")],
+                         row(dict(base, fault="crashloop:idle", form="load", lift="after-settle")))
+        self.assertEqual([("image pull", "one-shot", "running", "engine")], row(dict(base, fault="imagepull:idle", lift="after-settle")))
+        self.assertEqual([("config missing", "persistent", "running", "engine")], row(dict(base, fault="configkey:missing", lift="never")))
+        self.assertEqual([("readiness never passes", "one-shot", "running", "engine")], row(dict(base, fault="readiness:old", form="recover")))
+        self.assertEqual([("sibling broken", "persistent", "running", "router")],
+                         row(dict(base, fault="crashloop:idle", form="start", victimcomp="router")))
+        held = {"edit": "strategy:RecreatePod", "during": "held"}
+        self.assertEqual([("readiness never passes", "one-shot", "new", "engine")], row(dict(held, once=1, **{"break": "stuck"})))
+        self.assertEqual([("image pull", "persistent", "new", "engine")], row(dict(held, **{"break": "imagepull"})))
+        self.assertEqual([("config missing", "one-shot", "new", "engine")], row(dict(held, once=1, **{"break": "configkey"})))
+        self.assertEqual([("sibling broken", "persistent", "new", "decoder")],
+                         row(dict(held, victimcomp="decoder", **{"break": "crash-start"})))
+        self.assertEqual("strategy or policy edit",
+                         coverage.classify_operation(dict(held, **{"break": "imagepull"}), "rollout", "many")[0])
+        self.assertEqual("strategy or policy edit",
+                         coverage.classify_operation(dict(base, fault="crashloop:idle", form="start"), "rollout", "many")[0])
 
 
 class CrashloopNewFaultTest(unittest.TestCase):

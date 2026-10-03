@@ -1,0 +1,27 @@
+# p11266: [gen] switch held by imagepull once pd-mn W1 N=2 strategy SurgeThenDrain to RecreatePod co none  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=2 ceil_r=2 co=none topo=pd-mn during=held break=imagepull edit=strategy:RecreatePod once=1
+# reason: the operator edits a roll whose push breaks once: the push's first engine leader pod is pointed at an image that cannot be pulled while its runner is starting and pointed back once the pull failure has settled; every bumped member's updateStrategy is patched from SurgeThenDrain to RecreatePod as the break shows; the roll completes on its own under the edit with no hold behind it, the Instance Ready and serving on the new revision, every row settled, nothing escalated, and the live spec carries the edit; a rebuild is reported where the restart policy promises one, never required, never twice; the budget (maxSurge 1, maxUnavailable 1) is valid under both strategies
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11266 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

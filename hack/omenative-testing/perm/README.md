@@ -865,6 +865,60 @@ strategy edit at `rotating`, so the crashing Instance, reached last, is
 fixed under the strategy the roll switched to (`floor_soft=1`, as on every
 crashloop case).
 
+Its continuation (`p11100`+, once `p3800`-`p4199` is full) puts a break
+beside the edit on the six shape families, each break kind kept and
+one-shot on either side of the push. On the running revision
+`fault=crashloop:idle form=start|load`, `fault=imagepull:idle`,
+`fault=configkey:missing lift=never|after-settle` or `fault=readiness:old
+form=persist|recover` (`victimcomp=decoder|router` for a sibling nobody
+bumped) lands on the settled service before the push, the status reacts
+to it, the push follows and the edit fires at `during=settling|rotating`;
+the one-shot forms (`lift=after-settle`, readiness `form=recover`) take
+the cause away once the edit has fired. The `:idle` parameter is what
+tells this break from the `:old` crash the family already pairs with an
+edit, which is armed as the bump lands. The roll must complete under the
+edit with every bumped Instance on the new revision serving, the rows
+settled and nothing held; the broken Instance ends on the new revision
+serving with no repair opened for it after the push (the roll owns an
+Instance that is off the target), a sibling ends Ready and serving on its
+running revision, rebuilt by a repair or, once healed, in place; the
+capacity floor is lowered by the broken Instance, not waived. A key kept
+away (`configkey:missing lift=never`) is the one cause no revision starts
+without: the push parks on its first pod with the reason (a Failed row at
+the Instance ready timeout, an InstanceFailed event), nothing of the new
+revision may serve, the hold is kept to the end and the edit is read on
+the live spec meanwhile. Each row meets the edit at a moment of its own
+(`SWITCH_FAULT_MOMENTS`): the surge and recreate flips at both hooks, an
+in-place start flipped to the surge at its first patched pod so the broken
+Instance, reached last, is surged rather than patched while it fails, and
+the policy flip, two of them under a `rollingUpdate` group (a single-member
+one on the engine-only shapes).
+
+On the pushed revision `break=crash-start|crash-load|imagepull|configkey|stuck`
+(the readiness probe the pushed revision never passes) rides the push with
+the edit at `during=held` (once the roll is parked on the broken pod with
+the status saying why, waited for up to `HOLD_REASON_WAIT_S` after the
+break shows) or `during=rotating` (the first pushed pod); `victimcomp=decoder`
+puts the break on the grouped decoder of a prefill/decode service. After
+the edit the fix push, the runner override dropped (the victim runner put
+back onto its present key for `configkey`), must land under the edited
+spec on every bumped Instance, nothing of the broken revision may be
+created again or left, no hold may be left, no repair may name a bumped
+Instance after the fix (reported, not judged, where the edited policy is
+`RecreateInstanceOnPodRestart`, which rebuilds a restarting pod), and
+nothing of a revision that cannot start may ever have served. `once=1` is
+each kind's one-shot form: the first runner killed once (the crash kinds),
+the unpullable image or the missing key taken away once the wait has
+settled, the readiness switch lifted once the drop has settled; the edit
+at `held` fires as the break shows, no fix push follows, and the roll must
+complete on its own with no hold behind it, the Instance Ready and serving
+on the new revision and a rebuild reported where the restart policy
+promises one, never required, never twice. The kept rows meet the surge
+and recreate flips at both hooks and the policy flip at `held`
+(`SWITCH_HELD_MOMENTS`); the one-shot rows meet the two strategy flips,
+where a restart is handled under one policy. `lift=` does not combine
+with `break=`; `rollback=1` and an edit never share a case.
+
 ### Rollback of a plain rollout (`rollback=1`, `during=`, `break=stuck`)
 
 `rollback=1` (rollout mode) re-applies the revision the run started from:

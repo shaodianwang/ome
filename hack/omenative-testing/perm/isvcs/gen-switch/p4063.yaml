@@ -1,0 +1,22 @@
+# p4063: [gen] switch settling over crashloop start engine+router N=4 restartPolicy None to RecreateInstance co rolling  Ne=4 Nd=0 Nr=2 ceil_e=5 ceil_d=0 ceil_r=2 fault=crashloop:idle co=rolling topo=engine form=start during=settling edit=restartPolicy:RecreateInstanceOnPodRestart
+# reason: the operator edits a roll over a fleet whose engine is already broken: the pod of the engine's highest Instance is pointed at an image whose runner dies at every start on the settled service, and the push follows once the status has reacted to it; the cause stays for the whole case; every bumped member's restartPolicy is patched from None to RecreateInstanceOnPodRestart right after the bump lands; the policy decides what a pod restart rebuilds and the roll's pacing is unchanged, so the roll completes with every Instance of the bumped members on the new revision serving, every row settled, nothing held and the live spec carrying RecreateInstanceOnPodRestart; the broken Instance is off the target from the moment of the push, so the roll owns it: it ends on the new revision serving with no repair opened for it after the push; the roll runs under SurgeThenDrain (maxSurge 1, maxUnavailable 0), so the ceiling is N+1; the capacity floor is lowered by the broken Instance; the single-member group puts the roll under the run model
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p4063 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          rollingUpdate: {}

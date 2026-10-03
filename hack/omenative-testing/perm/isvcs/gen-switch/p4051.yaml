@@ -1,0 +1,24 @@
+# p4051: [gen] switch settling over configkey after-settle engine-mn W1 N=2 restartPolicy None to RecreateInstance co rolling  Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 fault=configkey:missing co=rolling topo=engine-mn during=settling edit=restartPolicy:RecreateInstanceOnPodRestart lift=after-settle
+# reason: the operator edits a roll over a fleet whose engine is already broken: the ConfigMap key the engine runner reads is removed and the leader pod of the engine's highest Instance restarted, so it waits in CreateContainerConfigError on the settled service, and the push follows once the status has reacted to it; the cause is taken away once the edit has fired; every bumped member's restartPolicy is patched from None to RecreateInstanceOnPodRestart right after the bump lands; the policy decides what a pod restart rebuilds and the roll's pacing is unchanged, so the roll completes with every Instance of the bumped members on the new revision serving, every row settled, nothing held and the live spec carrying RecreateInstanceOnPodRestart; the broken Instance is off the target from the moment of the push, so the roll owns it: it ends on the new revision serving with no repair opened for it after the push; the roll runs under SurgeThenDrain (maxSurge 1, maxUnavailable 0), so the ceiling is N+1; the capacity floor is lowered by the broken Instance; the single-member group puts the roll under the run model
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p4051 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: { runner: { name: "ome-container", env: [{ name: "TEST_CONFIG_VALUE", valueFrom: { configMapKeyRef: { name: "p4051-config", key: "value" } } }] } }
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", instanceReadyTimeout: "90s", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          rollingUpdate: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: p4051-config }
+data: { value: "1" }
