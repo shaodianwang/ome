@@ -1,0 +1,18 @@
+# p6865: [gen] stuck held scale-one engine+router N=3 SurgeThenDrain group none  mode=scaledown Ne=3 Nd=0 Nr=2 ceil_e=4 ceil_d=0 ceil_r=2 co=none topo=engine img=example.com/canary-test/missing:none to_e=1 stuck=held
+# reason: the push lands a revision whose image cannot be pulled; every attempt of the retry ladder has failed and the push is held (only a new revision or a release lifts it); the running Instances kept serving beside the failed replacements; then the engine is asked for one, the least count the API admits (a Component without KEDA autoscaling may not ask for zero): the fleet converges on one Instance, the count the controller accepted, with the stuck Instances gone first and no pod left behind on a removed index; the healthy survivors keep serving throughout and the status keeps reporting the push that has not landed; the router is neither pushed nor scaled and stays as it is
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6865 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 3
+    maxReplicas: 3
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

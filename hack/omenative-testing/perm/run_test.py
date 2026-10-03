@@ -4353,7 +4353,7 @@ class CrashloopFaultTest(unittest.TestCase):
         cell is parked."""
         outputs, rows = generate_cases.build_outputs()
         fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-crashloop-idle"]
-        self.assertEqual(84, len(fam))
+        self.assertEqual(108, len(fam))
         self.assertEqual(set(generate_cases.BREAK_GROUPS), {kv["co"] for _n, kv, _m in fam})
         self.assertEqual({"engine", "pd", "engine-mn", "pd-mn"}, {kv["topo"] for _n, kv, _m in fam})
         self.assertEqual({("start", "None"), ("start", "RecreateInstance"), ("load", "RecreateInstance")},
@@ -4441,7 +4441,7 @@ class CrashloopFaultTest(unittest.TestCase):
         """A PARKED entry keyed as the table documents parks exactly that
         crashloop-idle cell, replacing the family's reason with its own, and
         touches no other cell of either family."""
-        cell = ("crashloop-idle", "start", "engine", 0, 4, "none", "engine", "None")
+        cell = ("crashloop-idle", "start", "engine", 0, 4, "none", "engine", "None", 0)
         with mock.patch.dict(generate_cases.PARKED, {cell: (999999, "parked on a tracked bug (fixture)", "A")}):
             outputs, rows = generate_cases.build_outputs()
         hit = [(f, n, kv) for f, n, kv, m in rows if m.get("parked") == 999999]
@@ -5607,13 +5607,18 @@ class GeneratedHealAndImagepullFamiliesTest(unittest.TestCase):
             self.assertNotIn("rollout:", self.outputs[f"gen-imagepull/{n}.yaml"])
 
     def test_generated_blocks_are_disjoint_and_own_their_ids(self):
-        blocks = sorted(generate_cases.GEN_BLOCKS.items(), key=lambda item: item[1])
-        for (fa, (_lo_a, hi_a)), (fb, (lo_b, _hi_b)) in zip(blocks, blocks[1:]):
+        blocks = sorted(generate_cases.all_id_blocks(), key=lambda item: item[1:])
+        for (fa, _lo_a, hi_a), (fb, lo_b, _hi_b) in zip(blocks, blocks[1:]):
             self.assertLessEqual(hi_a, lo_b, f"{fa} and {fb} overlap")
-        for folder, (lo, hi) in generate_cases.GEN_BLOCKS.items():
+        for folder in generate_cases.GEN_BLOCKS:
             ids = [int(n[1:]) for f, n, _kv, _m in self.rows if f == folder]
             self.assertTrue(ids, folder)
-            self.assertTrue(lo <= min(ids) and max(ids) < hi, folder)
+            owned = generate_cases.id_blocks(folder)
+            self.assertTrue(all(any(lo <= i < hi for lo, hi in owned) for i in ids), folder)
+            # A continuation block is minted from only once the block is full.
+            (lo, hi), *rest = owned
+            if rest and any(i >= hi for i in ids):
+                self.assertEqual(hi - lo, sum(1 for i in ids if lo <= i < hi), folder)
         owned = {Path(rel).stem for rel in self.outputs if rel.endswith(".yaml")}
         for f in (HERE / "isvcs").glob("**/*.yaml"):
             if f.parent.name not in generate_cases.GEN_BLOCKS:
@@ -5704,13 +5709,15 @@ class GeneratedCtrlRestartFamilyTest(unittest.TestCase):
 
     def test_generated_family_crosses_every_axis(self):
         outputs, fam = self._rows()
-        self.assertEqual(34, len(fam))
+        self.assertEqual(68, len(fam))
         self.assertEqual(set(generate_cases.CTRL_CONDITIONS), {m["cond"] for _n, _kv, m in fam})
         self.assertEqual({"SurgeThenDrain", "RecreatePod"}, {m["strat"] for _n, _kv, m in fam})
-        self.assertEqual({"engine", "pd", "engine-mn"}, {kv["topo"] for _n, kv, _m in fam})
-        tuples = {(kv["topo"], m["strat"], m["cond"], kv["co"]) for _n, kv, m in fam}
-        self.assertEqual(34, len(tuples))
-        for topo in ("engine", "pd", "engine-mn"):
+        self.assertEqual({("engine", 0), ("pd", 2), ("engine-mn", 0), ("engine", 2), ("engine-mn", 2), ("pd-mn", 2)},
+                         {(kv["topo"], kv["Nr"]) for _n, kv, _m in fam}, "the six shape families")
+        tuples = {(kv["topo"], kv["Nr"], m["strat"], m["cond"], kv["co"]) for _n, kv, m in fam}
+        self.assertEqual(68, len(tuples))
+        tuples = {t[:1] + t[2:] for t in tuples}
+        for topo in ("engine", "pd", "engine-mn", "pd-mn"):
             for strat in ("SurgeThenDrain", "RecreatePod"):
                 for cond in generate_cases.CTRL_CONDITIONS:
                     self.assertIn((topo, strat, cond, "none"), tuples)
@@ -5739,10 +5746,13 @@ class GeneratedCtrlRestartFamilyTest(unittest.TestCase):
                 self.assertEqual(("canary", "auto"), (kv["mode"], kv["canary"]))
                 self.assertEqual(generate_cases.CTRL_CANARY_CELL, kv["cell"])
                 self.assertEqual(kv["Ne"] + surge, kv["ceil_e"], "capacity steps run under the member's strategy")
-                members = "[engine, decoder, router]" if kv["topo"].startswith("pd") else "[engine]"
+                members = ("[engine, decoder, router]" if kv["topo"].startswith("pd")
+                           else "[engine, router]" if kv["Nr"] else "[engine]")
                 self.assertIn(f"- components: {members}\n          canary:", text)
                 if kv["topo"].startswith("pd"):
                     self.assertEqual((kv["Nd"] + 1, kv["Nr"] + 1), (kv["ceil_d"], kv["ceil_r"]))
+                elif kv["Nr"]:
+                    self.assertEqual(kv["Nr"] + 1, kv["ceil_r"], "the router walks the ladder on its default surge")
             elif cond == "scaledown":
                 self.assertEqual("scaledown", kv["mode"])
                 self.assertEqual(kv["Ne"] // 2, kv["to_e"])
@@ -9218,7 +9228,7 @@ class GeneratedFaultFamiliesTest(unittest.TestCase):
         # autoscaling, so the family's deepest scale is to one; on the gang
         # fleet of two that is the scale-down row already.
         rows = self.by_folder["gen-ops-held"]
-        self.assertEqual(60, len(rows))
+        self.assertEqual(112, len(rows))
         self.assertEqual({"scale-down", "scale-one", "delete", "scale-up"}, {m["op"] for _n, _kv, m in rows})
         for name, kv, meta in rows:
             for key in ("to_e", "to_d", "to_r"):
@@ -9227,16 +9237,16 @@ class GeneratedFaultFamiliesTest(unittest.TestCase):
                 text = self.outputs[f"gen-ops-held/{name}.yaml"]
                 self.assertEqual(1, kv["to_e"], name)
                 self.assertEqual(1 if kv["co"] != "none" else None, kv.get("to_d"), name)
-                self.assertNotEqual("engine-mn", kv["topo"], name)
+                self.assertFalse(kv["topo"].endswith("-mn"), name)
                 self.assertIn("asked for one, the least count the API admits", text)
                 self.assertNotIn("asked for zero", text)
-        gang = [(kv, m) for _n, kv, m in rows if kv["topo"] == "engine-mn"]
-        self.assertEqual(12, len(gang))
+        gang = [(kv, m) for _n, kv, m in rows if kv["topo"].endswith("-mn")]
+        self.assertEqual(48, len(gang))
         self.assertEqual({"scale-down", "delete", "scale-up"}, {m["op"] for _kv, m in gang})
         self.assertEqual({1}, {kv["to_e"] for kv, m in gang if m["op"] == "scale-down"})
 
     def test_family_sizes_and_id_blocks(self):
-        self.assertEqual(30, len(self.by_folder["gen-readiness"]))
+        self.assertEqual(60, len(self.by_folder["gen-readiness"]))
         self.assertEqual(72, len(self.by_folder["gen-gang-member"]))
         self.assertEqual(28, len(self.by_folder["gen-tight"]))
         for folder in ("gen-readiness", "gen-gang-member", "gen-tight"):
@@ -9250,7 +9260,7 @@ class GeneratedFaultFamiliesTest(unittest.TestCase):
     def test_readiness_cells(self):
         old = [(n, kv) for n, kv, _m in self.by_folder["gen-readiness"] if kv["fault"] == "readiness:old"]
         new = [(n, kv) for n, kv, _m in self.by_folder["gen-readiness"] if kv["fault"] == "readiness:new"]
-        self.assertEqual((12, 18), (len(old), len(new)))
+        self.assertEqual((24, 36), (len(old), len(new)))
         for name, kv in old:
             self.assertEqual("idle", kv["during"])
             self.assertIn(kv["form"], ("persist", "recover"))
@@ -10005,7 +10015,8 @@ class GeneratedDisruptionFamiliesTest(unittest.TestCase):
     evicted, preempted, or a new pod that cannot be placed or admitted, at
     steady state and while a roll is in flight."""
 
-    SHAPES = {("engine", 0), ("pd", 0), ("engine-mn", 1)}
+    # The six shape families: (topo, gang, routers).
+    SHAPES = {("engine", 0, 0), ("pd", 0, 2), ("engine-mn", 1, 0), ("engine", 0, 2), ("engine-mn", 1, 2), ("pd-mn", 1, 2)}
 
     def _rows(self, folder):
         outputs, rows = generate_cases.build_outputs()
@@ -10020,18 +10031,18 @@ class GeneratedDisruptionFamiliesTest(unittest.TestCase):
 
     def test_evict_family_crosses_shape_policy_and_strategy(self):
         outputs, fam = self._rows("gen-evict")
-        self.assertEqual(20, len(fam))
-        self.assertEqual(self.SHAPES, {(kv["topo"], 1 if kv["topo"].endswith("-mn") else 0) for _n, kv, _m in fam})
+        self.assertEqual(42, len(fam))
+        self.assertEqual(self.SHAPES, {(kv["topo"], 1 if kv["topo"].endswith("-mn") else 0, kv["Nr"]) for _n, kv, _m in fam})
         steady = [(n, kv, m) for n, kv, m in fam if kv.get("mode") == "kill"]
         rolling = [(n, kv, m) for n, kv, m in fam if kv.get("mode") != "kill"]
-        self.assertEqual((8, 12), (len(steady), len(rolling)))
+        self.assertEqual((18, 24), (len(steady), len(rolling)))
         for name, kv, m in steady:
             self.assertEqual("evict", kv["via"])
             self.assertNotIn("fault", kv)
             self.assertNotIn("lift", kv, "an eviction is one-shot: nothing to lift")
             self.assertEqual(kv["Ne"], kv["ceil_e"], "nobody bumps the service")
             self.assertIn("Eviction API", outputs[f"gen-evict/{name}.yaml"].splitlines()[1])
-        self.assertEqual({("engine-mn", "leader"), ("engine-mn", "worker")},
+        self.assertEqual({("engine-mn", "leader"), ("engine-mn", "worker"), ("pd-mn", "leader"), ("pd-mn", "worker")},
                          {(kv["topo"], kv["kill"]) for _n, kv, _m in steady if "kill" in kv})
         for name, kv, m in rolling:
             self.assertEqual("evict:rotating", kv["fault"])
@@ -10046,11 +10057,11 @@ class GeneratedDisruptionFamiliesTest(unittest.TestCase):
 
     def test_preempt_family_crosses_lift_at_both_moments(self):
         outputs, fam = self._rows("gen-preempt")
-        self.assertEqual(36, len(fam))
+        self.assertEqual(72, len(fam))
         self.assertEqual({"after-settle", "never"}, {m["lift"] for _n, _kv, m in fam})
         steady = [(n, kv, m) for n, kv, m in fam if kv.get("mode") == "kill"]
         rolling = [(n, kv, m) for n, kv, m in fam if kv.get("mode") != "kill"]
-        self.assertEqual((12, 24), (len(steady), len(rolling)))
+        self.assertEqual((24, 48), (len(steady), len(rolling)))
         for name, kv, m in steady:
             self.assertEqual(("preempt", m["lift"]), (kv["via"], kv["lift"]))
             self.assertNotIn("kill", kv, "the scheduler picks the victim")
@@ -10058,8 +10069,9 @@ class GeneratedDisruptionFamiliesTest(unittest.TestCase):
         for name, kv, m in rolling:
             self.assertEqual(("preempt:rotating", m["lift"], 1, 1), (kv["fault"], kv["lift"], kv["floor_soft"], kv["order_soft"]))
             self.assertEqual(kv["Ne"] + (1 if m["strat"] == "SurgeThenDrain" else 0), kv["ceil_e"])
-        tuples = {(kv["topo"], m["rp"], m["lift"], m["strat"] if kv.get("mode") != "kill" else "steady") for _n, kv, m in fam}
-        self.assertEqual(36, len(tuples), "every (shape, restart policy, lift, moment) once")
+        tuples = {(kv["topo"], kv["Nr"], m["rp"], m["lift"], m["strat"] if kv.get("mode") != "kill" else "steady")
+                  for _n, kv, m in fam}
+        self.assertEqual(72, len(tuples), "every (shape, restart policy, lift, moment) once")
         for name, _kv, m in fam:
             reason = outputs[f"gen-preempt/{name}.yaml"].splitlines()[1]
             self.assertIn("reason Unschedulable", reason)
@@ -10069,12 +10081,12 @@ class GeneratedDisruptionFamiliesTest(unittest.TestCase):
 
     def test_pending_family_arms_the_quota_the_operation_needs(self):
         outputs, fam = self._rows("gen-pending")
-        self.assertEqual(70, len(fam), "the tight-cluster family owns the gang surge roll held to the end by a quota")
+        self.assertEqual(138, len(fam), "the tight-cluster family owns the gang surge roll held to the end by a quota")
         self.assertEqual({"pending:taint:steady", "pending:taint:roll", "pending:quota:steady", "pending:quota:roll"},
                          {m["verb"] for _n, _kv, m in fam})
         steady = [(n, kv, m) for n, kv, m in fam if kv.get("mode") == "kill"]
         rolling = [(n, kv, m) for n, kv, m in fam if kv.get("mode") != "kill"]
-        self.assertEqual((24, 46), (len(steady), len(rolling)))
+        self.assertEqual((48, 90), (len(steady), len(rolling)))
         self.assertFalse([n for n, kv, m in rolling if kv["topo"].endswith("-mn") and kv["fault"].startswith("quota:")
                           and m["strat"] == "SurgeThenDrain" and kv["lift"] == "never"],
                          "a gang surge roll held to the end by a quota is the tight-cluster family's cell")
@@ -10098,7 +10110,7 @@ class GeneratedDisruptionFamiliesTest(unittest.TestCase):
             self.assertIn("inside its unschedulable grace", reason)
             self.assertIn("repair completes" if m["lift"] == "after-settle" else "holds with its reason", reason)
         gang_quota = [(n, kv, m) for n, kv, m in fam if kv["topo"].endswith("-mn") and kv["fault"].startswith("quota:")]
-        self.assertEqual(10, len(gang_quota))
+        self.assertEqual(30, len(gang_quota))
         for name, kv, m in gang_quota:
             reason = outputs[f"gen-pending/{name}.yaml"].splitlines()[1]
             if kv.get("mode") == "kill" and m["rp"] == "None":
@@ -10542,15 +10554,18 @@ class GeneratedFaultMoveFamilyTest(unittest.TestCase):
 
     def test_generated_family_crosses_every_axis(self):
         outputs, fam = self._rows()
-        self.assertEqual(75, len(fam))
-        self.assertEqual({"engine", "pd", "engine-mn"}, {kv["topo"] for _n, kv, _m in fam})
+        self.assertEqual(150, len(fam))
+        self.assertEqual({("engine", 0), ("pd", 2), ("engine-mn", 0), ("engine", 2), ("engine-mn", 2), ("pd-mn", 2)},
+                         {(kv["topo"], kv["Nr"]) for _n, kv, _m in fam}, "the six shape families")
         self.assertEqual(set(generate_cases.MOVE_MOMENTS), {kv["at"] for _n, kv, _m in fam})
         self.assertEqual({"moved", "peer", "sibling"}, {kv["victim"] for _n, kv, _m in fam})
         self.assertEqual({"moved"}, {kv["victim"] for _n, kv, _m in fam if kv["fault"].startswith("node:")})
-        self.assertEqual({"pd"}, {kv["topo"] for _n, kv, _m in fam if kv["victim"] == "sibling"})
-        cells = {(kv["topo"], kv["at"], kv["victim"], kv["fault"], kv.get("form"), m["rp"]) for _n, kv, m in fam}
-        self.assertEqual(75, len(cells))
-        for topo in ("engine", "pd", "engine-mn"):
+        self.assertEqual({"pd", "pd-mn"}, {kv["topo"] for _n, kv, _m in fam if kv["victim"] == "sibling"},
+                         "the decoder is the sibling a break may hit; a router is a negative control")
+        cells = {(kv["topo"], kv["Nr"], kv["at"], kv["victim"], kv["fault"], kv.get("form"), m["rp"]) for _n, kv, m in fam}
+        self.assertEqual(150, len(cells))
+        cells = {cell[:1] + cell[2:] for cell in cells}
+        for topo in ("engine", "pd", "engine-mn", "pd-mn"):
             for at in generate_cases.MOVE_MOMENTS:
                 for victim in generate_cases.MOVE_VICTIMS[topo]:
                     self.assertIn((topo, at, victim, "crashloop:old", "start", "None"), cells)
@@ -10594,9 +10609,9 @@ class GeneratedFaultMoveFamilyTest(unittest.TestCase):
             sys.path.pop(0)
         lanes = {(feature, topology, variant): cases for feature, topology, variant, _env, cases in gp._eval_lanes()
                  if feature == "gen-fault-move"}
-        for topology in ("engine", "pd", "engine-mn"):
+        for topology, node_cases in (("engine", 8), ("pd", 4), ("engine-mn", 8), ("pd-mn", 4)):
             policy = lanes[("gen-fault-move", topology, gp.EVAL_FORCE_DELETE_SLUG)]
-            self.assertEqual(4, len(policy), topology)
+            self.assertEqual(node_cases, len(policy), topology)
             self.assertTrue(all(gp._eval_case_header_fields(c).get("fault") == "node:notready" for c in policy))
             plain = lanes[("gen-fault-move", topology, "")]
             self.assertFalse(any(gp._eval_case_header_fields(c).get("needs") for c in plain))
@@ -10680,14 +10695,17 @@ class GeneratedFaultEditFamilyTest(unittest.TestCase):
 
     def test_generated_family_crosses_every_axis(self):
         outputs, fam = self._rows()
-        self.assertEqual(52, len(fam))
+        self.assertEqual(104, len(fam))
         breaks = [(n, kv, m) for n, kv, m in fam if "fault" in kv]
         bad = [(n, kv, m) for n, kv, m in fam if "fault" not in kv]
-        self.assertEqual((40, 12), (len(breaks), len(bad)))
-        cells = {(kv["topo"], m["strat"], kv["fault"], kv.get("form"), kv.get("victimcomp", "engine"), kv["edit"], m["rp"])
+        self.assertEqual((80, 24), (len(breaks), len(bad)))
+        self.assertEqual({("engine", 0), ("pd", 2), ("engine-mn", 0), ("engine", 2), ("engine-mn", 2), ("pd-mn", 2)},
+                         {(kv["topo"], kv["Nr"]) for _n, kv, _m in fam}, "the six shape families")
+        cells = {(kv["topo"], kv["Nr"], m["strat"], kv["fault"], kv.get("form"), kv.get("victimcomp", "engine"), kv["edit"], m["rp"])
                  for _n, kv, m in breaks}
-        self.assertEqual(40, len(cells))
-        for topo in ("engine", "pd", "engine-mn"):
+        self.assertEqual(80, len(cells))
+        cells = {cell[:1] + cell[2:] for cell in cells}
+        for topo in ("engine", "pd", "engine-mn", "pd-mn"):
             for strat in ("SurgeThenDrain", "RecreatePod"):
                 for victim in generate_cases.EDIT_VICTIMS[topo]:
                     for edit in generate_cases.EDIT_VERBS[topo]:
@@ -10695,9 +10713,10 @@ class GeneratedFaultEditFamilyTest(unittest.TestCase):
                         self.assertIn((topo, strat, "imagepull:old", None, victim, edit, "None"), cells)
                         self.assertIn((topo, strat, "crashloop:old", "load", victim, edit, "None"), cells)
                         self.assertIn((topo, strat, "crashloop:old", "load", victim, edit, "RecreateInstance"), cells)
-        bad_cells = {(kv["topo"], m["strat"], kv.get("break")) for _n, kv, m in bad}
-        self.assertEqual(12, len(bad_cells))
-        for topo in ("engine", "pd", "engine-mn"):
+        bad_cells = {(kv["topo"], kv["Nr"], m["strat"], kv.get("break")) for _n, kv, m in bad}
+        self.assertEqual(24, len(bad_cells))
+        bad_cells = {cell[:1] + cell[2:] for cell in bad_cells}
+        for topo in ("engine", "pd", "engine-mn", "pd-mn"):
             for strat in ("SurgeThenDrain", "RecreatePod"):
                 self.assertIn((topo, strat, None), bad_cells)
                 self.assertIn((topo, strat, "stuck"), bad_cells)
@@ -10713,6 +10732,8 @@ class GeneratedFaultEditFamilyTest(unittest.TestCase):
             if kv["topo"].startswith("pd"):
                 self.assertEqual((kv["Nd"] + surge, kv["Nr"] + 1), (kv["ceil_d"], kv["ceil_r"]),
                                  "the decoder rolls under the case's strategy, the router under its default surge")
+            elif kv["Nr"]:
+                self.assertEqual(kv["Nr"] + 1, kv["ceil_r"], "the router in front of the engine rolls on the edit too")
             self.assertIn(f'restartPolicy: "{generate_cases.RP_FULL[m["rp"]]}"', text)
             if "fault" in kv:
                 self.assertEqual("roll", kv["expect"])

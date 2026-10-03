@@ -1,0 +1,18 @@
+# p9425: [gen] broken readiness up1 engine+router N=4 rp None co none  mode=scaledown Ne=4 Nd=0 Nr=2 ceil_e=5 ceil_d=0 ceil_r=2 fault=readiness:old co=none topo=engine form=persist during=idle to_e=5 inst=0 expect=left
+# reason: the pod of the engine's Instance 0 stops passing its readiness probe while it keeps running, so it leaves rotation; once the status reports Instance 0 broken the engine is scaled from 4 to 5: a new Instance 4 comes up on the running revision and serves, the healthy Instances keep their pods and never leave rotation (never below 3 Ready), nothing surges above 5, and the broken Instance is left as the fault left it: no new pod for its index and no repair recorded, since readiness is the runtime's own out-of-rotation signal and no restart policy rebuilds a pod that runs; the router is neither broken nor scaled and keeps its pods
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9425 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

@@ -1,0 +1,20 @@
+# p9429: [gen] broken crashloop:start up1 engine-mn W1+router N=2 rp RecreateInstance co none  mode=scaledown Ne=2 Nd=0 Nr=2 ceil_e=3 ceil_d=0 ceil_r=2 fault=crashloop:old co=none topo=engine-mn form=start during=idle to_e=3 inst=0 expect=repaired
+# reason: the leader pod of the engine's gang 0 is pointed at an image with no shell on the settled service, so it crashes at every start and is never Ready again; once the status reports Instance 0 broken the engine is scaled from 2 to 3: a new Instance 2 comes up on the running revision and serves, the healthy Instances keep their pods and never leave rotation (never below 1 Ready), nothing surges above 3, and the broken Instance is rebuilt, every pod new, Ready and serving on its running revision, and a RestartTriggered event names it: a pod that dies at every start is parked in CrashLoopBackOff, a wedge the crash-loop repair rebuilds under every restart policy once the pod is past the stuck-pod grace; under RecreateInstanceOnPodRestart the runner's restart after Ready triggers it at once; the router is neither broken nor scaled and keeps its pods; each Instance is a gang of a leader and a worker, counted whole
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9429 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

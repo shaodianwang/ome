@@ -2287,7 +2287,10 @@ Four generators write into `isvcs/`; re-run one after editing it:
   took has come back, and the manager deleted again each time it is Ready,
   at steady state, under a push and under a scale-up).
 
-A generator owns exactly the case ids it mints. Hand-written cases share the
+A generator owns exactly the case ids it mints. A gen-* folder whose id
+block is full mints from a continuation block (`GEN_CONTINUATIONS` in
+`generate_cases.py`, `p9400` and up); the folder owns the ids of both
+blocks. Hand-written cases share the
 feature folders with generated ones (`restart/`, `canary/`, `scale/` and
 `runtime-rev/` all hold some) and need no registration: the shared write path
 (`casefiles.py`) never deletes a file, writes only the ids it mints, and

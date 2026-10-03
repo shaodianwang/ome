@@ -1,0 +1,34 @@
+# p4666: [gen] ctrlrestart canary pd-mn W1 N=2 RecreatePod u1 co none  mode=canary Ne=2 Nd=2 Nr=2 ceil_e=2 ceil_d=3 ceil_r=3 fault=ctrlrestart:canary-serving co=none topo=pd-mn canary=auto cell=canary/Serving/ctrlRestart[gen]
+# reason: the manager pod is deleted while the first step serves its canary; the restarted manager carries nothing in memory and resumes the operation from status; nothing is created twice (peaks within the ceiling, no index collision) and nothing is deleted twice (every Component ends at its count); the step clock and the run are status, so the ladder resumes at the same step, the timed hold elapses and the run promotes to Stable with every member on the canary revision; capacity steps run under the member's strategy: each stepped Instance rebuilt in place, no surge above N
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p4666 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder, router]
+          canary:
+            steps:
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

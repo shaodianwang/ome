@@ -1,0 +1,84 @@
+# p7971: [gen] bad-edit readiness engine+router N=4 RecreatePod  mode=runtimerev Ne=4 Nd=0 Nr=2 ceil_e=4 ceil_d=0 ceil_r=3 co=none topo=engine rt=ome-coordtest-rt-p7971 expect=recover break=stuck
+# reason: the runtime every Component inherits gets a readiness probe that never passes and a new runner env, so every Component's new revision runs but is never Ready; the old revision keeps serving on every Instance the attempt did not take (the floor N-1 under the drain-first strategy, which takes one Instance into the attempt), nothing promotes the broken revision, and whether the status says why within budget is reported (a pod that runs but never passes readiness escalates nothing before its ready timeout); then a corrective edit (the probe restored, plus a distinct runner env) lands on every Instance of every Component, serving, with no row left mid-operation; the restart policy is None: a revision that never becomes Ready restarts no runner, so it decides nothing here
+# Test ClusterServingRuntime — CPU-only, nginx, artificial 15s startup delay.
+# The sleep is the critical part: without it nginx is Ready in ~150ms and the
+# pod sampler misses every transition.
+apiVersion: ome.io/v1beta1
+kind: ClusterServingRuntime
+metadata:
+  name: ome-coordtest-rt-p7971
+  labels:
+    ome-coordtest/managed: "true"
+spec:
+  schedulerName: ${OME_EVAL_SCHEDULER}
+  disabled: false
+  protocolVersions: [openAI]
+  supportedModelFormats:
+    - autoSelect: false
+      modelArchitecture: TestArchitecture
+      modelFormat:    { name: noop, operator: Equal, version: "1.0.0", weight: 1 }
+      modelFramework: { name: noop, operator: Equal,                  weight: 1 }
+      priority: 1
+
+  engineConfig: &cpuRunner
+    # The eval judges a case well inside the cluster's default pod grace; a
+    # pod that ignores its stop signal must not outlive the verdict.
+    terminationGracePeriodSeconds: 60
+    nodeSelector: { kubernetes.io/arch: ${OME_EVAL_NODE_ARCH} }
+    runner:
+      name:  ome-container
+      image: ${OME_EVAL_NGINX_IMAGE}
+      # The critical line: sleep before starting nginx so pod startup
+      # takes ~15s. Without this, peak/drain transitions complete in
+      # ~2s and the sampler misses them.
+      # The trap keeps sh (PID 1 until the exec) responsive to pod deletion.
+      # The kubelet delivers the image's declared stop signal — nginx images
+      # declare SIGQUIT, not SIGTERM — and an untrapped PID-1 shell ignores it,
+      # leaving a deleted pod Terminating for its full termination grace.
+      # Cap nginx workers (NOT 'auto', which = one worker per NODE core and
+      # ignores the CPU cgroup quota → OOM on a big node). The image conf already
+      # sets worker_processes, so sed a copy into /tmp (conf is read-only) and
+      # nginx -c it — preserving the image's writable pid path + 8080 server.
+      command: ["sh", "-c", "trap 'exit 0' QUIT TERM INT; sleep ${TEST_STARTUP_DELAY:-15} & wait $! && sed 's/^worker_processes.*/worker_processes 2;/' /etc/nginx/nginx.conf > /tmp/nginx.conf || exit 1; [ -n \"${TEST_EXIT_AFTER}\" ] || exec nginx -c /tmp/nginx.conf -g 'daemon off;'; nginx -c /tmp/nginx.conf -g 'daemon off;' & sleep ${TEST_EXIT_AFTER} & wait $!; exit 1"]
+      env:
+        - { name: TEST_REV,            value: "v1" }
+        - { name: TEST_STARTUP_DELAY,  value: "15" }
+      ports: [ { containerPort: 8080, name: http, protocol: TCP } ]
+      # Startup probe absorbs the artificial 15s sleep — kubelet won't run liveness
+      # until startupProbe succeeds. failureThreshold * periodSeconds = 60s grace.
+      startupProbe:   { httpGet: { path: /, port: 8080 }, periodSeconds: 2, failureThreshold: 30 }
+      # Readiness carries two switches, each enough to fail it while startup
+      # and liveness keep passing, so the pod runs, leaves rotation and is
+      # never restarted: the TEST_UNREADY env (a revision whose pods never
+      # pass readiness) and the /tmp/perm-unready file (a serving pod that
+      # stops passing it). run.py names both.
+      readinessProbe:
+        exec:
+          command: ["sh", "-c", "[ -z \"$TEST_UNREADY\" ] && [ ! -e /tmp/perm-unready ] && wget -q -O /dev/null -T 2 http://127.0.0.1:8080/"]
+        periodSeconds: 2
+        failureThreshold: 2
+      livenessProbe:  { httpGet: { path: /, port: 8080 }, periodSeconds: 5, failureThreshold: 3 }
+      resources:
+        requests: { cpu: 50m,  memory: 64Mi }
+        limits:   { cpu: 200m, memory: 128Mi }
+
+  decoderConfig: *cpuRunner
+  routerConfig:  *cpuRunner
+
+---
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7971 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-rt-p7971, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

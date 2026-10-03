@@ -1,0 +1,20 @@
+# p6880: [gen] stuck held delete engine-mn W1+router N=2 SurgeThenDrain group none  mode=recreate Ne=2 Nd=0 Nr=2 ceil_e=3 ceil_d=0 ceil_r=2 co=none topo=engine-mn img=example.com/canary-test/missing:none stuck=held
+# reason: the push lands a revision whose image cannot be pulled; every attempt of the retry ladder has failed and the push is held (only a new revision or a release lifts it); the running Instances kept serving beside the failed replacements; then the service is deleted: every pod goes, stuck ones included, no pod stays Terminating and no finalizer wedges, and the same name comes back clean on fresh pods with nothing of the push left; the router is neither pushed nor scaled and stays as it is; each Instance is a gang, counted whole
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6880 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

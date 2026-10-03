@@ -1,0 +1,20 @@
+# p7430: [gen] evict steady engine-mn W1+router N=2 rp RecreateInstance target leader  mode=kill Ne=2 Nd=0 Nr=2 ceil_e=2 ceil_d=0 ceil_r=2 restart=RecreateInstance kill=leader co=none topo=engine-mn via=evict
+# reason: the leader pod of one gang is evicted through the Eviction API, as a node drain would; the disruption budget admits it with every Instance serving, the whole Instance (leader and workers) is rebuilt under restart policy RecreateInstanceOnPodRestart, no other Instance is touched and the fleet is back at N serving; nothing surges on a service nobody bumped; the router keeps its pods
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7430 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

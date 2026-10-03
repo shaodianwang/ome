@@ -623,8 +623,34 @@ GEN_BLOCKS = {
     "gen-crash-once": (8400, 8600),
     "gen-lift": (9250, 9400),
 }
-GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
-GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
+# A folder mints from its block until the block is full, then from its
+# continuation block; a folder owns an id that lies in either.
+GEN_CONTINUATIONS = {
+    "gen-fault-scale": (9400, 9500),
+    "gen-evict": (9500, 9600),
+    "gen-preempt": (9600, 9700),
+    "gen-pending": (9700, 9800),
+    "gen-fault-move": (9800, 9900),
+    "gen-fault-edit": (9900, 10000),
+    "gen-ops-held": (10000, 10100),
+}
+
+
+def id_blocks(folder):
+    """The id blocks a folder mints from, in minting order."""
+    blocks = [GEN_BLOCKS[folder]]
+    if folder in GEN_CONTINUATIONS:
+        blocks.append(GEN_CONTINUATIONS[folder])
+    return blocks
+
+
+def all_id_blocks():
+    """Every (folder, lo, hi) a generated id may come from."""
+    return [(f, lo, hi) for f in GEN_BLOCKS for lo, hi in id_blocks(f)]
+
+
+GEN_ID_LO = min(lo for _f, lo, _hi in all_id_blocks())
+GEN_ID_HI = max(hi for _f, _lo, hi in all_id_blocks())
 MANIFEST_REL = "MANIFEST.md"
 # Every generated description starts with this mark; it is what tells a
 # generated file in a gen-* folder from a hand-written one.
@@ -774,8 +800,11 @@ NODE_NO_RELOCATION = {
 # nothing created twice (ceilings, index partition) and nothing deleted twice
 # (every Instance ends at its count). Each condition is one runner mode and
 # one hook; the strategy axis is live for the two rollout conditions and
-# dormant under a migration and a scale-down.
-CTRL_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1)]
+# dormant under a migration and a scale-down. The six shape families of the
+# coverage ledger at one gang width; on a canary every Component is a group
+# member, the router included. (topo, N, W, routers on an engine-only shape.)
+CTRL_SHAPES = [("engine", 4, 0, 0), ("pd", 4, 0, 0), ("engine-mn", 2, 1, 0),
+               ("engine", 4, 0, lib.NR), ("engine-mn", 2, 1, lib.NR), ("pd-mn", 2, 1, 0)]
 CTRL_STRATS = [("SurgeThenDrain", 1, 0), ("RecreatePod", 0, 1)]
 CTRL_CONDITIONS = ["surge", "drain", "migration", "canary", "scaledown"]
 CTRL_FAULTS = {"surge": "ctrlrestart:settling", "drain": "ctrlrestart:rotating",
@@ -850,11 +879,14 @@ RATIO_TOL_BY_N = {2: 50, 3: 50, 4: 25}
 # pace with, as in the crashloop family). The deepest scale asks for one,
 # the least count the API admits (minReplicas 0 needs KEDA autoscaling);
 # on the gang fleet of two that is down by one, the scale-down row.
-OPS_HELD_SHAPES = [("engine", 3, 0), ("pd", 3, 0), ("engine-mn", 2, 1)]
+# The six shape families of the coverage ledger: singles at N=3, gangs at
+# N=2 with one worker. (topo, N, W, routers on an engine-only shape.)
+OPS_HELD_SHAPES = [("engine", 3, 0, 0), ("pd", 3, 0, 0), ("engine-mn", 2, 1, 0),
+                   ("engine", 3, 0, lib.NR), ("engine-mn", 2, 1, lib.NR), ("pd-mn", 2, 1, 0)]
 OPS_HELD_STUCK = ["failed", "held"]
 OPS_HELD_OPS = ["scale-down", "scale-one", "delete", "scale-up"]
 OPS_HELD_STRATS = {"SurgeThenDrain": (1, 0), "RecreatePod": (0, 1)}
-OPS_HELD_GROUPS = {"engine": ["none"], "pd": ["none", "rolling"], "engine-mn": ["none"]}
+OPS_HELD_GROUPS = {"engine": ["none"], "pd": ["none", "rolling"], "engine-mn": ["none"], "pd-mn": ["none", "rolling"]}
 
 # The runtime-edit-repair family: a repair of a crash-looping Instance and
 # an edit of the runtime every Component inherits overlap. One fleet size
@@ -908,7 +940,11 @@ MIGRATE_BUMP_MOMENT = {
 # readiness, then a fix push) with a short Instance ready timeout so the hold
 # arrives inside the case budget; shapes with one gang width (the switch is
 # on the leader, so the width adds nothing).
-READINESS_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1)]
+# The six shape families of the coverage ledger, in the batches the ids are
+# minted in: a batch's running-side cells come before its new-side cells.
+# (topo, N, W, routers on an engine-only shape.)
+READINESS_BATCHES = [[("engine", 4, 0, 0), ("pd", 4, 0, 0), ("engine-mn", 2, 1, 0)],
+                     [("engine", 4, 0, lib.NR), ("engine-mn", 2, 1, lib.NR), ("pd-mn", 2, 1, 0)]]
 READINESS_STRATS = ["SurgeThenDrain", "RecreatePod", "InPlaceIfPossible"]
 READINESS_FORMS = ["persist", "recover"]
 READINESS_NEW_TIMEOUT = "90s"
@@ -929,12 +965,17 @@ TIGHT_STRATS = ["SurgeThenDrain", "RecreatePod"]
 TIGHT_SQUEEZES = ["quota", "cordon"]
 TIGHT_LIFTS = ["after-hold", "never"]
 
-# The eviction, preemption and pending families: the shapes the fault list
-# names at one gang width, the two strategies a roll waits under, the
-# rotating hook for the in-flight moment, and for the causes that can be
-# lifted whether they are. A pending cell's quota admits one pod fewer than
-# the operation needs (see _pending_quota).
-DISRUPT_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1)]
+# The eviction, preemption and pending families: the six shape families of
+# the coverage ledger at one gang width, the two strategies a roll waits
+# under, the rotating hook for the in-flight moment, and for the causes that
+# can be lifted whether they are. A pending cell's quota admits one pod
+# fewer than the operation needs (see _pending_quota). (topo, N, W, routers
+# on an engine-only shape.)
+DISRUPT_SHAPES = [("engine", 4, 0, 0), ("pd", 4, 0, 0), ("engine-mn", 2, 1, 0),
+                  ("engine", 4, 0, lib.NR), ("engine-mn", 2, 1, lib.NR), ("pd-mn", 2, 1, 0)]
+# The repeating preemption at steady state runs on the single-pod shapes
+# and the engine gang, at the disruption families' sizes.
+REPEAT_PREEMPT_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1)]
 DISRUPT_STRATS = [("SurgeThenDrain", 1, 0), ("RecreatePod", 0, 1)]
 DISRUPT_PHASE = "rotating"
 PENDING_CAUSES = ["taint", "quota"]
@@ -1057,15 +1098,16 @@ HAND_PINNED_KILL = {
 #   ("switch", "strategy", hook, topo, w, n, from, to, co)
 #   ("switch", "restartPolicy", hook, topo, w, n, from, to, co)
 #   ("switch-crash", hook, topo, w, n, from, to, co)
-#   ("crashloop-idle", form, topo, w, size, co, victim, rp)
+#   ("crashloop-idle", form, topo, w, size, co, victim, rp, routers)
 #   ("crashloop-sibling", form, topo, w, size, co, rp)
 #   ("heal", topo, w, rp, lift, co)
 #   ("imagepull", "settling", topo, w, strat, rp, co) / ("imagepull", "idle", topo, w, rp)
 #   ("rollback", hook, topo, w, strat, surge, unavail, co)
 #   ("pause-repair", topo, w, form, rp, co, pause, moment, push)
 #   ("migrate-bump", first, hook, topo, w, strat, surge, unavail, co)
-#   ("fault-move", kind, form, at, victim, topo, w, rp)
-#   ("fault-edit", kind, form, victim, edit, topo, w, strat, rp) / ("bad-edit", kind, topo, w, strat)
+#   ("fault-move", kind, form, at, victim, topo, w, rp, routers)
+#   ("fault-edit", kind, form, victim, edit, topo, w, strat, rp, routers) / ("bad-edit", kind, topo, w, strat, routers)
+# (routers is the router count of an engine-only shape, 0 when it has none.)
 # A park is added here as (key): (issue, reason, invariant scope) and
 # rendered into the header.
 PARKED = {}
@@ -1129,8 +1171,24 @@ def budget_tag(strat, surge, unavail):
     return f"{p}{v}".replace("%", "pct")
 
 
-def shape_tag(topo, w):
-    return f"{topo} W{w}" if is_mn(topo) else topo
+def shape_tag(topo, w, nr=None):
+    tag = f"{topo} W{w}" if is_mn(topo) else topo
+    return tag + ("+router" if nr and not is_pd(topo) else "")
+
+
+def router_count(topo, nr=None):
+    """The router replicas a shape carries: a prefill/decode service always
+    has lib.NR; an engine-only topo has what its shape list names, 0 when it
+    names none."""
+    if is_pd(topo):
+        return lib.NR
+    return nr or 0
+
+
+def shape_words(topo, w, nr=None):
+    """The shape family in words, for a reason line."""
+    base = "prefill/decode" if is_pd(topo) else ("engine behind a router" if nr else "engine alone")
+    return base + (f" as gangs of 1 leader + {w} worker{'s' if w > 1 else ''}" if is_mn(topo) else ", single-pod")
 
 
 # The keys the hot-core families emit come first, in their order; the canary
@@ -1150,25 +1208,29 @@ def header(name, desc, kv):
     return f"# {name}: {desc}  " + " ".join(parts)
 
 
-def counts(topo, n):
+def counts(topo, n, nr=None):
     if is_pd(topo):
         return dict(Ne=n, Nd=n, Nr=lib.NR)
-    return dict(Ne=n, Nd=0, Nr=0)
+    return dict(Ne=n, Nd=0, Nr=router_count(topo, nr))
 
 
-def ceilings(topo, n, strat, surge):
+def ceilings(topo, n, strat, surge, nr=None):
     ce = n + surge_count(n, surge) if strat == "SurgeThenDrain" else n
     if is_pd(topo):
         return dict(ceil_e=ce, ceil_d=n, ceil_r=lib.NR)
-    return dict(ceil_e=ce, ceil_d=0, ceil_r=0)
+    return dict(ceil_e=ce, ceil_d=0, ceil_r=router_count(topo, nr))
 
 
-def comps(topo, n, w, e_life, d_life=None, r_life=None):
+def comps(topo, n, w, e_life, d_life=None, r_life=None, nr=None):
+    """The fleet of one shape: the engine, the decoder of a prefill/decode
+    service, and the router where the shape carries one (always on a
+    prefill/decode service, on an engine-only shape when nr names it)."""
     cw = w if is_mn(topo) else 0
     cs = [lib.comp("engine", n, cw, e_life)]
     if is_pd(topo):
         cs.append(lib.comp("decoder", n, cw, d_life if d_life is not None else lib.lifecycle()))
-        cs.append(lib.comp("router", lib.NR, 0, r_life if r_life is not None else lib.lifecycle()))
+    if router_count(topo, nr):
+        cs.append(lib.comp("router", router_count(topo, nr), 0, r_life if r_life is not None else lib.lifecycle()))
     return cs
 
 
@@ -1672,8 +1734,15 @@ def _sibling_reason(form, co):
     return out
 
 
+# The idle crash-loop family's shapes: the crash-loop shapes and the engine
+# behind a router, single-pod and as a gang. The router is outside every
+# group and never the victim (outside a canary the runner admits engine and
+# decoder pods as break victims). (topo, N, W, routers on an engine-only shape.)
+CRASHLOOP_IDLE_SHAPES = [(topo, n, w, 0) for topo, n, w in CRASH_SHAPES] + [("engine", 4, 0, lib.NR), ("engine-mn", 2, 1, lib.NR)]
+
+
 def emit_crashloop_idle(add):
-    for topo, n, w in CRASH_SHAPES:
+    for topo, n, w, nr in CRASHLOOP_IDLE_SHAPES:
         for co in BREAK_GROUPS:
             if co == "seq" and not is_pd(topo):
                 continue   # constraint ledger: one member makes Sequential a blueGreen group
@@ -1682,20 +1751,20 @@ def emit_crashloop_idle(add):
                     for form in CRASH_FORMS:
                         if (form, rp) in UNPROMISED_REPAIR:
                             continue   # constraint ledger: no repair is promised there
-                        kv = dict(**counts(topo, n), ceil_e=n, ceil_d=(n if is_pd(topo) else 0),
-                                  ceil_r=(lib.NR if is_pd(topo) else 0),
+                        kv = dict(**counts(topo, n, nr), ceil_e=n, ceil_d=(n if is_pd(topo) else 0),
+                                  ceil_r=router_count(topo, nr),
                                   fault="crashloop:old", co=co, topo=topo, form=form, during=IDLE_PHASE,
                                   victimcomp=victim, expect="repaired")
                         if co == "canary":
                             kv["canary"] = "auto"
                         meta = dict(strat="SurgeThenDrain", verb=f"crashloop:{form}@idle", rp=rp, victim=victim)
-                        desc = (f"{GEN_MARK} crashloop idle {form} {shape_tag(topo, w)} N={n} co {co} "
+                        desc = (f"{GEN_MARK} crashloop idle {form} {shape_tag(topo, w, nr)} N={n} co {co} "
                                 f"victim {victim} rp {rp}")
                         life = lib.lifecycle(restart=RP_FULL[rp])
                         add("gen-crashloop-idle", desc, kv,
-                            comps(topo, n, w, life, d_life=(life if is_pd(topo) else None)),
-                            _idle_reason(form, victim, co), meta,
-                            cell=("crashloop-idle", form, topo, w, n, co, victim, rp),
+                            comps(topo, n, w, life, d_life=(life if is_pd(topo) else None), nr=nr),
+                            _idle_reason(form, victim, co) + ("; the router keeps its pods" if nr else ""), meta,
+                            cell=("crashloop-idle", form, topo, w, n, co, victim, rp, nr),
                             coord=group_for(co, topo))
 
 
@@ -1937,7 +2006,7 @@ def emit_node_relocation(add):
 
 
 # ── gen-ctrlrestart: the manager restarts under an operation in flight ──────
-def _ctrl_reason(cond, strat, topo, co):
+def _ctrl_reason(cond, strat, topo, co, nr=0):
     resumes = ("the restarted manager carries nothing in memory and resumes the operation from status; "
                "nothing is created twice (peaks within the ceiling, no index collision) and nothing is "
                "deleted twice (every Component ends at its count)")
@@ -1962,6 +2031,7 @@ def _ctrl_reason(cond, strat, topo, co):
         if is_pd(topo):
             out += ("; the rolling group paces engine and decoder together and its run resumes with the roll"
                     if co != "none" else "; decoder and router are negative controls (co=none)")
+        out += _router_control(topo, nr)
     elif cond == "migration":
         out += ("; the replacement comes up on another node at a distinct index, the source drains once, the "
                 "request is consumed exactly once and the ledger reaches Completed; the update strategy is "
@@ -1972,23 +2042,29 @@ def _ctrl_reason(cond, strat, topo, co):
                 "capacity steps run under the member's strategy: ")
         out += ("a surge of one beside the stable Instances" if strat == "SurgeThenDrain"
                 else "each stepped Instance rebuilt in place, no surge above N")
+        if nr and not is_pd(topo):
+            out += "; the router is a group member on its default surge lifecycle and walks the ladder too"
     else:
         out += ("; exactly the tail is torn down, the survivors are untouched and never below the target; "
                 "the update strategy is dormant under a scale-down")
+        if nr and not is_pd(topo):
+            out += "; the router keeps its pods"
+    if cond == "migration" and nr and not is_pd(topo):
+        out += "; the router keeps its pods"
     return out
 
 
 def emit_ctrlrestart(add):
-    for topo, n, w in CTRL_SHAPES:
+    for topo, n, w, nr in CTRL_SHAPES:
         for strat, surge, unavail in CTRL_STRATS:
             life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
             for cond in CTRL_CONDITIONS:
                 coords = ["none", "rolling"] if cond in CTRL_ROLL_CONDITIONS and is_pd(topo) else ["none"]
                 for co in coords:
-                    kv, coord, d_life = dict(**counts(topo, n)), None, None
+                    kv, coord, d_life = dict(**counts(topo, n, nr)), None, None
                     case_comps = None
                     if cond in CTRL_ROLL_CONDITIONS:
-                        kv.update(ceilings(topo, n, strat, surge))
+                        kv.update(ceilings(topo, n, strat, surge, nr))
                         if co != "none":
                             # The group rolls the decoder too, under the same strategy.
                             d_life = life
@@ -1996,26 +2072,28 @@ def emit_ctrlrestart(add):
                             coord = lib.coord_for(co)
                     elif cond == "migration":
                         # The replacement surges at a new index whatever the strategy.
-                        kv.update(mode="migrate", **ceilings(topo, n, "SurgeThenDrain", 1), mig="Auto", inst=0)
+                        kv.update(mode="migrate", **ceilings(topo, n, "SurgeThenDrain", 1, nr), mig="Auto", inst=0)
                     elif cond == "canary":
-                        kv.update(mode="canary", **ceilings(topo, n, strat, surge), canary="auto",
+                        kv.update(mode="canary", **ceilings(topo, n, strat, surge, nr), canary="auto",
                                   cell=CTRL_CANARY_CELL)
                         if is_pd(topo):
                             # Decoder and router are group members on their default surge lifecycle.
                             kv.update(ceil_d=n + 1, ceil_r=lib.NR + 1)
-                        case_comps = comps(topo, n, w, life)
+                        elif nr:
+                            kv.update(ceil_r=nr + 1)
+                        case_comps = comps(topo, n, w, life, nr=nr)
                         coord = lib.canary_block(lib.canary_steps("auto", *CTRL_CANARY_STEPS),
                                                  components=[c["comp"] for c in case_comps])
                     else:
-                        kv.update(mode="scaledown", **ceilings(topo, n, "SurgeThenDrain", 0), to_e=n // 2)
+                        kv.update(mode="scaledown", **ceilings(topo, n, "SurgeThenDrain", 0, nr), to_e=n // 2)
                     kv.update(fault=CTRL_FAULTS[cond], co=co, topo=topo)
                     meta = dict(strat=strat, verb=f"ctrlrestart:{cond}", cond=cond)
-                    desc = (f"{GEN_MARK} ctrlrestart {cond} {shape_tag(topo, w)} N={n} {strat} "
+                    desc = (f"{GEN_MARK} ctrlrestart {cond} {shape_tag(topo, w, nr)} N={n} {strat} "
                             f"{budget_tag(strat, surge, unavail)} co {co}")
                     add("gen-ctrlrestart", desc, kv,
-                        case_comps if case_comps is not None else comps(topo, n, w, life, d_life=d_life),
-                        _ctrl_reason(cond, strat, topo, co), meta,
-                        cell=("ctrlrestart", cond, topo, w, strat, co), coord=coord)
+                        case_comps if case_comps is not None else comps(topo, n, w, life, d_life=d_life, nr=nr),
+                        _ctrl_reason(cond, strat, topo, co, nr), meta,
+                        cell=("ctrlrestart", cond, topo, w, strat, co, nr), coord=coord)
 # ── gen-canary-*: operator stories driven through a canary ──────────────────
 # Every story family walks the same ladder: four steps of capacity ahead of
 # traffic with a timed soak in place of an analysis gate, on a
@@ -3367,7 +3445,7 @@ def _ops_held_target(op, n):
     return {"scale-down": n - 1, "scale-one": 1, "scale-up": n + 1}.get(op)
 
 
-def _ops_held_reason(stuck, op, strat, topo, co):
+def _ops_held_reason(stuck, op, strat, topo, co, nr=0):
     how = ("the push lands a revision whose image cannot be pulled; " +
            ("its first attempt has failed (an Instance row reads Failed, the retry ladder is still running)"
             if stuck == "failed" else
@@ -3400,7 +3478,7 @@ def _ops_held_reason(stuck, op, strat, topo, co):
         out += "; the healthy survivors keep serving throughout and the status keeps reporting the push that has not landed"
     if is_pd(topo) and co == "none":
         out += "; decoder and router are neither pushed nor scaled and stay as they were"
-    elif is_pd(topo):
+    elif is_pd(topo) or nr:
         out += "; the router is neither pushed nor scaled and stays as it is"
     if is_mn(topo):
         out += "; each Instance is a gang, counted whole"
@@ -3408,7 +3486,7 @@ def _ops_held_reason(stuck, op, strat, topo, co):
 
 
 def emit_ops_held(add):
-    for topo, n, w in OPS_HELD_SHAPES:
+    for topo, n, w, nr in OPS_HELD_SHAPES:
         for strat, (surge, unavail) in OPS_HELD_STRATS.items():
             for co in OPS_HELD_GROUPS[topo]:
                 for stuck in OPS_HELD_STUCK:
@@ -3418,9 +3496,9 @@ def emit_ops_held(add):
                             continue   # constraint ledger: to one is down by one on a fleet of two
                         bump = surge if strat == "SurgeThenDrain" else 0
                         reach = max(n, target or 0)
-                        kv = dict(**counts(topo, n), ceil_e=reach + bump,
+                        kv = dict(**counts(topo, n, nr), ceil_e=reach + bump,
                                   ceil_d=((reach + bump if co != "none" else n) if is_pd(topo) else 0),
-                                  ceil_r=(lib.NR if is_pd(topo) else 0))
+                                  ceil_r=router_count(topo, nr))
                         if op == "delete":
                             kv["mode"] = "recreate"
                         else:
@@ -3430,12 +3508,12 @@ def emit_ops_held(add):
                                 kv["to_d"] = target
                         kv.update(stuck=stuck, img=runtime_fixtures.UNPULLABLE_IMAGE, co=co, topo=topo)
                         meta = dict(strat=strat, verb=f"push:{stuck}", stuck=stuck, op=op)
-                        desc = f"{GEN_MARK} stuck {stuck} {op} {shape_tag(topo, w)} N={n} {strat} group {co}"
+                        desc = f"{GEN_MARK} stuck {stuck} {op} {shape_tag(topo, w, nr)} N={n} {strat} group {co}"
                         life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
                         d_life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail) if co != "none" else None
-                        add("gen-ops-held", desc, kv, comps(topo, n, w, life, d_life=d_life),
-                            _ops_held_reason(stuck, op, strat, topo, co), meta,
-                            cell=("ops-held", stuck, op, topo, w, strat, co),
+                        add("gen-ops-held", desc, kv, comps(topo, n, w, life, d_life=d_life, nr=nr),
+                            _ops_held_reason(stuck, op, strat, topo, co, nr), meta,
+                            cell=("ops-held", stuck, op, topo, w, strat, co, nr),
                             coord=lib.coord_for(co) if co != "none" else None)
 
 
@@ -3591,7 +3669,7 @@ def _canonical_budget(strat):
     return dict(STRATS)[strat][0]
 
 
-def _readiness_old_reason(form, topo):
+def _readiness_old_reason(form, topo, nr=0):
     victim = ("the leader pod of the engine's highest gang" if is_mn(topo)
               else "the pod of the engine's highest Instance")
     out = (f"{victim} stops passing its readiness probe while it keeps running; readiness is "
@@ -3605,10 +3683,12 @@ def _readiness_old_reason(form, topo):
                 "rebuild and no new revision")
     if is_pd(topo):
         out += "; decoder and router are untouched"
+    elif nr:
+        out += "; the router is untouched"
     return out
 
 
-def _readiness_new_reason(strat, topo):
+def _readiness_new_reason(strat, topo, nr=0):
     how = {"SurgeThenDrain": "the surge Instance is the one that fails and nothing drains (floor N)",
            "RecreatePod": "the first drained Instance's replacement is the one that fails (floor N-1)",
            "InPlaceIfPossible": ("the switch is a template change beyond images, so the strategy recreates and "
@@ -3619,39 +3699,42 @@ def _readiness_new_reason(strat, topo):
            f"switch then lands on every Instance; {how}")
     if is_pd(topo):
         out += "; decoder and router are untouched"
+    elif nr:
+        out += "; the router is untouched"
     return out
 
 
 def emit_readiness(add):
-    for topo, n, w in READINESS_SHAPES:
-        pd = is_pd(topo)
-        for form in READINESS_FORMS:
-            for rp in RESTARTS:
-                kv = dict(**counts(topo, n), ceil_e=n, ceil_d=(n if pd else 0), ceil_r=(lib.NR if pd else 0),
-                          restart=rp, fault="readiness:old", co="none", topo=topo, form=form, during="idle")
-                desc = f"{GEN_MARK} readiness lost {form} {shape_tag(topo, w)} N={n} rp {rp}"
-                life = lib.lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, restart=RP_FULL[rp])
-                d_life = lib.lifecycle(restart=RP_FULL[rp]) if pd else None
-                add("gen-readiness", desc, kv, comps(topo, n, w, life, d_life=d_life),
-                    _readiness_old_reason(form, topo),
-                    dict(strat="SurgeThenDrain", verb=f"readiness:old:{form}", rp=rp),
-                    cell=("readiness", "old", form, topo, w, rp))
-    for topo, n, w in READINESS_SHAPES:
-        pd = is_pd(topo)
-        for strat in READINESS_STRATS:
-            surge, unavail = _canonical_budget(strat)
-            for rp in RESTARTS:
-                kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge),
-                          restart=rp, fault="readiness:new", co="none", topo=topo)
-                desc = (f"{GEN_MARK} readiness never {shape_tag(topo, w)} N={n} {strat} "
-                        f"{budget_tag(strat, surge, unavail)} rp {rp}")
-                life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp],
-                                     ready_timeout=READINESS_NEW_TIMEOUT)
-                d_life = lib.lifecycle(restart=RP_FULL[rp]) if pd else None
-                add("gen-readiness", desc, kv, comps(topo, n, w, life, d_life=d_life),
-                    _readiness_new_reason(strat, topo),
-                    dict(strat=strat, verb="readiness:new", rp=rp),
-                    cell=("readiness", "new", topo, w, strat, rp))
+    for shapes in READINESS_BATCHES:
+        for topo, n, w, nr in shapes:
+            pd = is_pd(topo)
+            for form in READINESS_FORMS:
+                for rp in RESTARTS:
+                    kv = dict(**counts(topo, n, nr), ceil_e=n, ceil_d=(n if pd else 0), ceil_r=router_count(topo, nr),
+                              restart=rp, fault="readiness:old", co="none", topo=topo, form=form, during="idle")
+                    desc = f"{GEN_MARK} readiness lost {form} {shape_tag(topo, w, nr)} N={n} rp {rp}"
+                    life = lib.lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, restart=RP_FULL[rp])
+                    d_life = lib.lifecycle(restart=RP_FULL[rp]) if pd else None
+                    add("gen-readiness", desc, kv, comps(topo, n, w, life, d_life=d_life, nr=nr),
+                        _readiness_old_reason(form, topo, nr),
+                        dict(strat="SurgeThenDrain", verb=f"readiness:old:{form}", rp=rp),
+                        cell=("readiness", "old", form, topo, w, rp, nr))
+        for topo, n, w, nr in shapes:
+            pd = is_pd(topo)
+            for strat in READINESS_STRATS:
+                surge, unavail = _canonical_budget(strat)
+                for rp in RESTARTS:
+                    kv = dict(**counts(topo, n, nr), **ceilings(topo, n, strat, surge, nr),
+                              restart=rp, fault="readiness:new", co="none", topo=topo)
+                    desc = (f"{GEN_MARK} readiness never {shape_tag(topo, w, nr)} N={n} {strat} "
+                            f"{budget_tag(strat, surge, unavail)} rp {rp}")
+                    life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp],
+                                         ready_timeout=READINESS_NEW_TIMEOUT)
+                    d_life = lib.lifecycle(restart=RP_FULL[rp]) if pd else None
+                    add("gen-readiness", desc, kv, comps(topo, n, w, life, d_life=d_life, nr=nr),
+                        _readiness_new_reason(strat, topo, nr),
+                        dict(strat=strat, verb="readiness:new", rp=rp),
+                        cell=("readiness", "new", topo, w, strat, rp, nr))
 
 
 # ── gen-gang-member: a gang's leader or worker dies mid-roll ────────────────
@@ -3744,20 +3827,28 @@ def _recreate_scope(topo, rp):
     return "the Instance (one pod) is recreated"
 
 
-def _evict_steady_reason(topo, rp, target):
+def _router_control(topo, nr):
+    """The router's part on an engine-only shape behind one: a negative
+    control the operation never touches; nothing on the other shapes."""
+    return "; the router is a negative control (co=none)" if nr and not is_pd(topo) else ""
+
+
+def _evict_steady_reason(topo, rp, target, nr=0):
     who = f"the {target} pod of one gang" if target else "one engine pod"
     return (f"{who} is evicted through the Eviction API, as a node drain would; the disruption budget admits it with "
             f"every Instance serving, {_recreate_scope(topo, rp)} under restart policy {RP_FULL[rp]}, no other Instance "
-            f"is touched and the fleet is back at N serving; nothing surges on a service nobody bumped")
+            f"is touched and the fleet is back at N serving; nothing surges on a service nobody bumped"
+            + ("; the router keeps its pods" if nr and not is_pd(topo) else ""))
 
 
-def _evict_roll_reason(topo, strat, waivers):
+def _evict_roll_reason(topo, strat, waivers, nr=0):
     victim = _podkill_victim(topo, strat, DISRUPT_PHASE)
     out = (f"once the roll is in flight {victim} is evicted through the Eviction API, as a node drain would, asked again "
            f"while the disruption budget refuses it under {strat}; the controller replaces it, the roll converges with "
            f"every Instance on the new revision and no pod comes back under the old label")
     if is_pd(topo):
         out += "; decoder and router are negative controls (co=none)"
+    out += _router_control(topo, nr)
     if waivers.get("floor_soft"):
         out += "; floor waived — the eviction itself costs settled capacity the update budget cannot absorb"
     if waivers.get("order_soft"):
@@ -3765,41 +3856,41 @@ def _evict_roll_reason(topo, strat, waivers):
     return out
 
 
-def _kill_counts(topo, n):
-    return dict(**counts(topo, n), ceil_e=n, ceil_d=(n if is_pd(topo) else 0), ceil_r=(lib.NR if is_pd(topo) else 0))
+def _kill_counts(topo, n, nr=0):
+    return dict(**counts(topo, n, nr), ceil_e=n, ceil_d=(n if is_pd(topo) else 0), ceil_r=router_count(topo, nr))
 
 
 def emit_evict(add):
-    for topo, n, w in DISRUPT_SHAPES:
+    for topo, n, w, nr in DISRUPT_SHAPES:
         for rp in RESTARTS:
             life = lib.lifecycle(restart=RP_FULL[rp])
             d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
             for target in (["leader", "worker"] if is_mn(topo) else [None]):
-                kv = dict(mode="kill", **_kill_counts(topo, n), restart=rp)
+                kv = dict(mode="kill", **_kill_counts(topo, n, nr), restart=rp)
                 if target:
                     kv["kill"] = target
                 kv.update(co="none", topo=topo, via="evict")
                 meta = dict(strat="SurgeThenDrain", verb="evict:steady", rp=rp)
-                desc = (f"{GEN_MARK} evict steady {shape_tag(topo, w)} N={n} rp {rp}"
+                desc = (f"{GEN_MARK} evict steady {shape_tag(topo, w, nr)} N={n} rp {rp}"
                         + (f" target {target}" if target else ""))
-                add("gen-evict", desc, kv, comps(topo, n, w, life, d_life=d_life),
-                    _evict_steady_reason(topo, rp, target), meta,
-                    cell=("evict", "steady", topo, w, rp, target))
+                add("gen-evict", desc, kv, comps(topo, n, w, life, d_life=d_life, nr=nr),
+                    _evict_steady_reason(topo, rp, target, nr), meta,
+                    cell=("evict", "steady", topo, w, rp, target, nr))
             for strat, surge, unavail in DISRUPT_STRATS:
                 waivers = _podkill_waivers(topo, strat, DISRUPT_PHASE)
-                kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge),
+                kv = dict(**counts(topo, n, nr), **ceilings(topo, n, strat, surge, nr),
                           fault=f"evict:{DISRUPT_PHASE}", **waivers, co="none", topo=topo)
                 meta = dict(strat=strat, verb=f"evict:{DISRUPT_PHASE}", rp=rp)
-                desc = (f"{GEN_MARK} evict {DISRUPT_PHASE} {shape_tag(topo, w)} N={n} {strat} "
+                desc = (f"{GEN_MARK} evict {DISRUPT_PHASE} {shape_tag(topo, w, nr)} N={n} {strat} "
                         f"{budget_tag(strat, surge, unavail)} rp {rp}")
                 roll_life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
-                add("gen-evict", desc, kv, comps(topo, n, w, roll_life, d_life=d_life),
-                    _evict_roll_reason(topo, strat, waivers), meta,
-                    cell=("evict", DISRUPT_PHASE, topo, w, strat, rp))
+                add("gen-evict", desc, kv, comps(topo, n, w, roll_life, d_life=d_life, nr=nr),
+                    _evict_roll_reason(topo, strat, waivers, nr), meta,
+                    cell=("evict", DISRUPT_PHASE, topo, w, strat, rp, nr))
 
 
 # ── gen-preempt: a pod of a Ready Instance is preempted ─────────────────────
-def _preempt_reason(moment, topo, rp, lift, strat=None):
+def _preempt_reason(moment, topo, rp, lift, strat=None, nr=0):
     base = ("fillers take the spare CPU of every node, the pending taint closes every node to the case, and a "
             "higher-priority filler presses on the node of the aimed pod, so the scheduler preempts one pod of the "
             "case there")
@@ -3820,31 +3911,34 @@ def _preempt_reason(moment, topo, rp, lift, strat=None):
     if is_pd(topo) and moment != "steady":
         out += "; decoder and router are negative controls (co=none)"
     if moment != "steady":
+        out += _router_control(topo, nr)
         out += "; floor and order waived — the preemption itself takes a pod the update budget cannot absorb"
+    elif nr and not is_pd(topo):
+        out += "; the router keeps its pods"
     return out
 
 
 def emit_preempt(add):
-    for topo, n, w in DISRUPT_SHAPES:
+    for topo, n, w, nr in DISRUPT_SHAPES:
         for rp in RESTARTS:
             d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
             for lift in PENDING_LIFTS:
-                kv = dict(mode="kill", **_kill_counts(topo, n), restart=rp, co="none", topo=topo, via="preempt", lift=lift)
+                kv = dict(mode="kill", **_kill_counts(topo, n, nr), restart=rp, co="none", topo=topo, via="preempt", lift=lift)
                 meta = dict(strat="SurgeThenDrain", verb="preempt:steady", rp=rp, lift=lift)
-                desc = f"{GEN_MARK} preempt steady {shape_tag(topo, w)} N={n} rp {rp} lift {lift}"
-                add("gen-preempt", desc, kv, comps(topo, n, w, lib.lifecycle(restart=RP_FULL[rp]), d_life=d_life),
-                    _preempt_reason("steady", topo, rp, lift), meta,
-                    cell=("preempt", "steady", topo, w, rp, lift))
+                desc = f"{GEN_MARK} preempt steady {shape_tag(topo, w, nr)} N={n} rp {rp} lift {lift}"
+                add("gen-preempt", desc, kv, comps(topo, n, w, lib.lifecycle(restart=RP_FULL[rp]), d_life=d_life, nr=nr),
+                    _preempt_reason("steady", topo, rp, lift, nr=nr), meta,
+                    cell=("preempt", "steady", topo, w, rp, lift, nr))
                 for strat, surge, unavail in DISRUPT_STRATS:
-                    kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge),
+                    kv = dict(**counts(topo, n, nr), **ceilings(topo, n, strat, surge, nr),
                               fault=f"preempt:{DISRUPT_PHASE}", floor_soft=1, order_soft=1, co="none", topo=topo, lift=lift)
                     meta = dict(strat=strat, verb=f"preempt:{DISRUPT_PHASE}", rp=rp, lift=lift)
-                    desc = (f"{GEN_MARK} preempt {DISRUPT_PHASE} {shape_tag(topo, w)} N={n} {strat} "
+                    desc = (f"{GEN_MARK} preempt {DISRUPT_PHASE} {shape_tag(topo, w, nr)} N={n} {strat} "
                             f"{budget_tag(strat, surge, unavail)} rp {rp} lift {lift}")
                     roll_life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
-                    add("gen-preempt", desc, kv, comps(topo, n, w, roll_life, d_life=d_life),
-                        _preempt_reason(DISRUPT_PHASE, topo, rp, lift, strat), meta,
-                        cell=("preempt", DISRUPT_PHASE, topo, w, strat, rp, lift))
+                    add("gen-preempt", desc, kv, comps(topo, n, w, roll_life, d_life=d_life, nr=nr),
+                        _preempt_reason(DISRUPT_PHASE, topo, rp, lift, strat, nr), meta,
+                        cell=("preempt", DISRUPT_PHASE, topo, w, strat, rp, lift, nr))
 
 
 # ── gen-packed-pool: the only room is what a broken pod vacates ─────────────
@@ -4145,7 +4239,7 @@ def emit_repeat(add):
             cell=("repeat", "ctrlrestart", "scale-up", label, None, None, None))
     # The scheduler taking the pod again each time it lands: the preempt
     # shapes, at steady state, the fillers dropped once the wait has held.
-    for topo, size, w in DISRUPT_SHAPES:
+    for topo, size, w in REPEAT_PREEMPT_SHAPES:
         shape = (shape_tag(topo, w), topo, size, w, False)
         for rp in RESTARTS:
             d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
@@ -4186,7 +4280,7 @@ def _pending_cause(cause, topo, moment, strat, rp):
     return "a quota one pod short (the leader's replacement alone is refused)"
 
 
-def _pending_reason(cause, moment, topo, rp, lift, strat, w):
+def _pending_reason(cause, moment, topo, rp, lift, strat, w, nr=0):
     token = PENDING_TOKEN[cause]
     what = _pending_cause(cause, topo, moment, strat, rp)
     how = "placed" if cause == "taint" else "admitted"
@@ -4200,7 +4294,7 @@ def _pending_reason(cause, moment, topo, rp, lift, strat, w):
             out += f"; once the cause is lifted the repair completes: {_recreate_scope(topo, rp)} and the fleet is back at N serving"
         else:
             out += "; the cause stays to the end, so the wait holds with its reason across the hold window"
-        return out
+        return out + ("; the router keeps its pods" if nr and not is_pd(topo) else "")
     pod = "the surge" if strat == "SurgeThenDrain" else "the drained Instance's replacement"
     out = (f"{what} is in place when the bump lands under {strat}; {pod} cannot be {how}, so the roll waits with reason "
            f"{token} inside its unschedulable grace, the capacity floor (N minus maxUnavailable) holds and nothing settled "
@@ -4211,38 +4305,38 @@ def _pending_reason(cause, moment, topo, rp, lift, strat, w):
         out += "; the cause stays to the end, so the roll holds with its reason across the hold window and no Instance reads Failed"
     if is_pd(topo):
         out += "; decoder and router are negative controls (co=none)"
-    return out
+    return out + _router_control(topo, nr)
 
 
 def emit_pending(add):
-    for topo, n, w in DISRUPT_SHAPES:
+    for topo, n, w, nr in DISRUPT_SHAPES:
         for rp in RESTARTS:
             d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
             for cause in PENDING_CAUSES:
                 for lift in PENDING_LIFTS:
                     fault = "taint:all" if cause == "taint" else f"quota:{_pending_quota('steady', None, w)}"
-                    kv = dict(mode="kill", **_kill_counts(topo, n), restart=rp)
+                    kv = dict(mode="kill", **_kill_counts(topo, n, nr), restart=rp)
                     if is_mn(topo):
                         kv["kill"] = "leader"
                     kv.update(fault=fault, co="none", topo=topo, lift=lift)
                     meta = dict(strat="SurgeThenDrain", verb=f"pending:{cause}:steady", rp=rp, lift=lift)
-                    desc = f"{GEN_MARK} pending {cause} steady {shape_tag(topo, w)} N={n} rp {rp} lift {lift}"
-                    add("gen-pending", desc, kv, comps(topo, n, w, lib.lifecycle(restart=RP_FULL[rp]), d_life=d_life),
-                        _pending_reason(cause, "steady", topo, rp, lift, None, w), meta,
-                        cell=("pending", cause, "steady", topo, w, rp, lift))
+                    desc = f"{GEN_MARK} pending {cause} steady {shape_tag(topo, w, nr)} N={n} rp {rp} lift {lift}"
+                    add("gen-pending", desc, kv, comps(topo, n, w, lib.lifecycle(restart=RP_FULL[rp]), d_life=d_life, nr=nr),
+                        _pending_reason(cause, "steady", topo, rp, lift, None, w, nr), meta,
+                        cell=("pending", cause, "steady", topo, w, rp, lift, nr))
                     for strat, surge, unavail in DISRUPT_STRATS:
                         if cause == "quota" and lift == "never" and is_mn(topo) and strat == "SurgeThenDrain":
                             continue   # constraint ledger: the tight-cluster family's cell
                         fault = "taint:all" if cause == "taint" else f"quota:{_pending_quota('roll', strat, w)}"
-                        kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge), fault=fault,
+                        kv = dict(**counts(topo, n, nr), **ceilings(topo, n, strat, surge, nr), fault=fault,
                                   co="none", topo=topo, lift=lift)
                         meta = dict(strat=strat, verb=f"pending:{cause}:roll", rp=rp, lift=lift)
-                        desc = (f"{GEN_MARK} pending {cause} roll {shape_tag(topo, w)} N={n} {strat} "
+                        desc = (f"{GEN_MARK} pending {cause} roll {shape_tag(topo, w, nr)} N={n} {strat} "
                                 f"{budget_tag(strat, surge, unavail)} rp {rp} lift {lift}")
                         roll_life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
-                        add("gen-pending", desc, kv, comps(topo, n, w, roll_life, d_life=d_life),
-                            _pending_reason(cause, "roll", topo, rp, lift, strat, w), meta,
-                            cell=("pending", cause, "roll", topo, w, strat, rp, lift))
+                        add("gen-pending", desc, kv, comps(topo, n, w, roll_life, d_life=d_life, nr=nr),
+                            _pending_reason(cause, "roll", topo, rp, lift, strat, w, nr), meta,
+                            cell=("pending", cause, "roll", topo, w, strat, rp, lift, nr))
 
 
 # ── gen-budget: percent budgets as the engine resolves them ─────────────────
@@ -4513,12 +4607,15 @@ def emit_inplaceonly(add):
 # engine, or deletes the service. The break hits Instance 0, the lowest
 # index, so a scale-down's natural victim (the highest index) and the broken
 # Instance differ and the family can tell the order of removal apart.
-# Singles at N=4, the gang at N=2 with one worker; a rolling group where a
-# decoder exists. The engine runs under maxUnavailable 1 everywhere: nothing
-# rolls, so the strategy is dormant, and a budget of one admits the repair
-# that takes the broken Instance offline (a budget of zero holds it).
-BROKEN_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1)]
-BROKEN_GROUPS = {"engine": ["none"], "pd": ["none", "rolling"], "engine-mn": ["none"]}
+# The six shape families of the coverage ledger: singles at N=4, gangs at
+# N=2 with one worker; a rolling group where a decoder exists. The engine
+# runs under maxUnavailable 1 everywhere: nothing rolls, so the strategy is
+# dormant, and a budget of one admits the repair that takes the broken
+# Instance offline (a budget of zero holds it). (topo, N, W, routers on an
+# engine-only shape.)
+BROKEN_SHAPES = [("engine", 4, 0, 0), ("pd", 4, 0, 0), ("engine-mn", 2, 1, 0),
+                 ("engine", 4, 0, lib.NR), ("engine-mn", 2, 1, lib.NR), ("pd-mn", 2, 1, 0)]
+BROKEN_GROUPS = {"engine": ["none"], "pd": ["none", "rolling"], "engine-mn": ["none"], "pd-mn": ["none", "rolling"]}
 BROKEN_FAULTS = [("crashloop", "start"), ("crashloop", "load"), ("imagepull", None), ("readiness", "persist")]
 BROKEN_INST = 0
 BROKEN_BUDGET = (1, 1)
@@ -4597,10 +4694,12 @@ def _broken_removal_words(n, target):
     return f"the broken Instance {BROKEN_INST} goes first, then {then}; {kept_words}"
 
 
-def _broken_tail(topo, co, op="a scale", repaired_up=False):
+def _broken_tail(topo, co, op="a scale", repaired_up=False, nr=0):
     out = ""
     if is_pd(topo):
         out += "; decoder and router are neither broken nor scaled and stay as they were"
+    elif nr:
+        out += "; the router is neither broken nor scaled and keeps its pods"
     if co != "none":
         out += f"; the rollingUpdate group lists engine and decoder, and {op} is not a run it paces"
         if repaired_up:
@@ -4610,91 +4709,99 @@ def _broken_tail(topo, co, op="a scale", repaired_up=False):
     return out
 
 
-def _broken_scale_reason(kind, form, rp, topo, co, n, target):
+def _broken_scale_reason(kind, form, rp, topo, co, n, target, nr=0):
     how = _broken_how(kind, form, topo)
     if target < n:
         return (f"{how}; once the status reports Instance {BROKEN_INST} broken the engine is scaled from {n} to {target}: "
                 f"{_broken_removal_words(n, target)}; the survivors keep their pods and keep serving throughout (never "
                 f"below {target} Ready), nothing is rebuilt during the scale, no Component surges, and every row "
-                f"settles Ready with no operation open" + _broken_tail(topo, co))
+                f"settles Ready with no operation open" + _broken_tail(topo, co, nr=nr))
     fate = _broken_fate(kind)
     return (f"{how}; once the status reports Instance {BROKEN_INST} broken the engine is scaled from {n} to {target}: a "
             f"new Instance {n} comes up on the running revision and serves, the healthy Instances keep their pods and "
             f"never leave rotation (never below {n - 1} Ready), nothing surges above {target}, and the broken Instance "
-            f"is {_broken_fate_words(kind, form, rp)}" + _broken_tail(topo, co, repaired_up=(fate == "repaired")))
+            f"is {_broken_fate_words(kind, form, rp)}" + _broken_tail(topo, co, repaired_up=(fate == "repaired"), nr=nr))
 
 
-def _broken_delete_reason(kind, form, topo, co):
+def _broken_delete_reason(kind, form, topo, co, nr=0):
     return (f"{_broken_how(kind, form, topo)}; once the status reports Instance {BROKEN_INST} broken the service is "
             f"deleted: every pod goes within the teardown budget, the broken one included, no pod stays Terminating "
             f"and no finalizer wedges, and the same name comes back Ready on fresh pods with nothing of the break left"
-            + _broken_tail(topo, co, op="a delete"))
+            + _broken_tail(topo, co, op="a delete", nr=nr))
 
 
-def _broken_kv(mode, topo, n, kind, form, co, ceil_e):
-    kv = dict(mode=mode, **counts(topo, n), ceil_e=ceil_e, ceil_d=(n if is_pd(topo) else 0),
-              ceil_r=(lib.NR if is_pd(topo) else 0), fault=f"{kind}:old")
+def _broken_kv(mode, topo, n, kind, form, co, ceil_e, nr=0):
+    kv = dict(mode=mode, **counts(topo, n, nr), ceil_e=ceil_e, ceil_d=(n if is_pd(topo) else 0),
+              ceil_r=router_count(topo, nr), fault=f"{kind}:old")
     if form is not None:
         kv["form"] = form
     kv.update(during=IDLE_PHASE, co=co, topo=topo)
     return kv
 
 
-def _broken_comps(topo, n, w, rp):
+def _broken_comps(topo, n, w, rp, nr=0):
     surge, unavail = BROKEN_BUDGET
     life = lib.lifecycle(strat="SurgeThenDrain", surge=surge, unavail=unavail, restart=RP_FULL[rp])
     d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
-    return comps(topo, n, w, life, d_life=d_life)
+    return comps(topo, n, w, life, d_life=d_life, nr=nr)
 
 
 def emit_fault_scale(add):
-    for topo, n, w in BROKEN_SHAPES:
+    for topo, n, w, nr in BROKEN_SHAPES:
         for co in BROKEN_GROUPS[topo]:
             for kind, form in BROKEN_FAULTS:
                 for rp in BROKEN_RESTARTS.get(kind, RESTARTS):
                     for op, target in BROKEN_OPS[n]:
-                        kv = _broken_kv("scaledown", topo, n, kind, form, co, max(n, target))
+                        kv = _broken_kv("scaledown", topo, n, kind, form, co, max(n, target), nr)
                         kv.update(to_e=target, inst=BROKEN_INST)
                         if target > n:
                             kv["expect"] = _broken_fate(kind)
                         meta = dict(strat="(dormant: nothing rolls)", verb=f"{_broken_label(kind, form)}@{op}",
                                     rp=rp, op=op, victim="engine")
-                        desc = (f"{GEN_MARK} broken {_broken_label(kind, form)} {op} {shape_tag(topo, w)} "
+                        desc = (f"{GEN_MARK} broken {_broken_label(kind, form)} {op} {shape_tag(topo, w, nr)} "
                                 f"N={n} rp {rp} co {co}")
-                        add("gen-fault-scale", desc, kv, _broken_comps(topo, n, w, rp),
-                            _broken_scale_reason(kind, form, rp, topo, co, n, target), meta,
-                            cell=("broken-scale", kind, form, topo, w, co, rp, op),
+                        add("gen-fault-scale", desc, kv, _broken_comps(topo, n, w, rp, nr),
+                            _broken_scale_reason(kind, form, rp, topo, co, n, target, nr), meta,
+                            cell=("broken-scale", kind, form, topo, w, co, rp, op, nr),
                             coord=lib.coord_for(co) if co != "none" else None)
 
 
 def emit_fault_delete(add):
-    for topo, n, w in BROKEN_SHAPES:
+    for topo, n, w, nr in BROKEN_SHAPES:
         for co in BROKEN_GROUPS[topo]:
             for kind, form in BROKEN_FAULTS:
                 for rp in BROKEN_RESTARTS.get(kind, RESTARTS):
-                    kv = _broken_kv("recreate", topo, n, kind, form, co, n)
+                    kv = _broken_kv("recreate", topo, n, kind, form, co, n, nr)
                     kv["inst"] = BROKEN_INST
                     meta = dict(strat="(dormant: nothing rolls)", verb=f"{_broken_label(kind, form)}@delete",
                                 rp=rp, op="delete", victim="engine")
-                    desc = f"{GEN_MARK} broken {_broken_label(kind, form)} delete {shape_tag(topo, w)} N={n} rp {rp} co {co}"
-                    add("gen-fault-delete", desc, kv, _broken_comps(topo, n, w, rp),
-                        _broken_delete_reason(kind, form, topo, co), meta,
-                        cell=("broken-delete", kind, form, topo, w, co, rp),
+                    desc = (f"{GEN_MARK} broken {_broken_label(kind, form)} delete {shape_tag(topo, w, nr)} "
+                            f"N={n} rp {rp} co {co}")
+                    add("gen-fault-delete", desc, kv, _broken_comps(topo, n, w, rp, nr),
+                        _broken_delete_reason(kind, form, topo, co, nr), meta,
+                        cell=("broken-delete", kind, form, topo, w, co, rp, nr),
                         coord=lib.coord_for(co) if co != "none" else None)
 # ── gen-fault-move: a fault at a moment of a move ────────────────────────────
 # An Instance is moved by request and, at a moment of the move, a pod breaks
-# or the source node dies. One gang width (the move copies the whole gang),
-# the canonical surge budget (no roll is in flight; the strategy is dormant),
-# no group (a repair of an Instance that serves nothing is admitted without a
-# group's gate; the group axis is the steady-state crash-loop family's).
-MOVE_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1)]
+# or the source node dies. The six shape families of the coverage ledger at
+# one gang width (the move copies the whole gang), the canonical surge budget
+# (no roll is in flight; the strategy is dormant), no group (a repair of an
+# Instance that serves nothing is admitted without a group's gate; the group
+# axis is the steady-state crash-loop family's). (topo, N, W, routers on an
+# engine-only shape.)
+MOVE_SHAPES = [("engine", 4, 0, 0), ("pd", 4, 0, 0), ("engine-mn", 2, 1, 0),
+               ("engine", 4, 0, lib.NR), ("engine-mn", 2, 1, lib.NR), ("pd-mn", 2, 1, 0)]
 MOVE_MOMENTS = ["accept", "surge", "drain"]
 # (kind, form, the restart policy the cell runs under): a crash at start and
 # a pull failure reach the crash-loop repair under either policy; the
 # after-Ready form is the one the policy decides, so it runs under the policy
 # that promises its repair.
 MOVE_BREAKS = [("crashloop", "start", "None"), ("imagepull", None, "None"), ("crashloop", "load", "RecreateInstance")]
-MOVE_VICTIMS = {"engine": ["moved", "peer"], "pd": ["moved", "peer", "sibling"], "engine-mn": ["moved", "peer"]}
+# The sibling a break may hit is the decoder: outside a canary the runner
+# admits engine and decoder pods as break victims, so a router in front of an
+# engine fleet is a negative control here, not a victim.
+MOVE_VICTIMS = {"engine": ["moved", "peer"], "pd": ["moved", "peer", "sibling"], "engine-mn": ["moved", "peer"],
+                "pd-mn": ["moved", "peer", "sibling"]}
 # The source node dies at accept or at surge (at drain the source is already
 # going); read on the force-delete lane, under both restart policies.
 MOVE_NODE_MOMENTS = ["accept", "surge"]
@@ -4719,7 +4826,7 @@ def _move_fault_pod(at, victim):
             "drain": ("as the source is being taken down", "the moved Instance's replacement pod, Ready and serving,")}[at]
 
 
-def _move_fault_reason(kind, form, at, victim, rp, topo):
+def _move_fault_reason(kind, form, at, victim, rp, topo, nr=0):
     when, pod = _move_fault_pod(at, victim)
     out = (f"{when}, {pod} {MOVE_BREAK_HOW[(kind, form)]}; the move finishes, or is abandoned with a reason its "
            f"record carries, within budget and is recorded once (one ledger row, one controller record); the moved "
@@ -4737,7 +4844,7 @@ def _move_fault_reason(kind, form, at, victim, rp, topo):
                 f"({MOVE_REPAIR_HOW[rp]}); the capacity floor, lowered by that one Instance, holds throughout")
     if victim == "sibling":
         out += "; the decoder is otherwise untouched: nothing rotates and nothing surges there"
-    if is_pd(topo):
+    if is_pd(topo) or nr:
         out += "; the router keeps its pods"
     if is_mn(topo):
         out += "; each Instance is a gang, moved and rebuilt whole"
@@ -4759,9 +4866,9 @@ def _move_node_reason(at, rp, topo):
 
 
 def emit_fault_move(add):
-    for topo, n, w in MOVE_SHAPES:
-        base = dict(mode="migrate", **counts(topo, n), ceil_e=n + 1, ceil_d=(n if is_pd(topo) else 0),
-                    ceil_r=(lib.NR if is_pd(topo) else 0))
+    for topo, n, w, nr in MOVE_SHAPES:
+        base = dict(mode="migrate", **counts(topo, n, nr), ceil_e=n + 1, ceil_d=(n if is_pd(topo) else 0),
+                    ceil_r=router_count(topo, nr))
         for at in MOVE_MOMENTS:
             for victim in MOVE_VICTIMS[topo]:
                 for kind, form, rp in MOVE_BREAKS:
@@ -4772,23 +4879,23 @@ def emit_fault_move(add):
                     meta = dict(strat="SurgeThenDrain", verb=f"{_storm_label(kind, form)}@move-{at}", rp=rp,
                                 victim=("decoder" if victim == "sibling" else "engine"), at=at, who=victim)
                     desc = (f"{GEN_MARK} fault-move {_storm_label(kind, form)} at {at} on {victim} "
-                            f"{shape_tag(topo, w)} N={n} rp {rp}")
+                            f"{shape_tag(topo, w, nr)} N={n} rp {rp}")
                     life = lib.lifecycle(restart=RP_FULL[rp])
                     d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
-                    add("gen-fault-move", desc, kv, comps(topo, n, w, life, d_life=d_life),
-                        _move_fault_reason(kind, form, at, victim, rp, topo), meta,
-                        cell=("fault-move", kind, form, at, victim, topo, w, rp))
+                    add("gen-fault-move", desc, kv, comps(topo, n, w, life, d_life=d_life, nr=nr),
+                        _move_fault_reason(kind, form, at, victim, rp, topo, nr), meta,
+                        cell=("fault-move", kind, form, at, victim, topo, w, rp, nr))
         for at in MOVE_NODE_MOMENTS:
             for rp in RESTARTS:
                 kv = dict(base, fault=f"node:{NODE_PARAM}", floor_soft=1, co="none", topo=topo)
                 kv.update(victim="moved", mig="Auto", inst=0, at=at, lift="after-recover", needs=NODE_NEEDS["relocated"])
                 meta = dict(strat="SurgeThenDrain", verb=f"node@move-{at}", rp=rp, victim="engine", at=at, who="moved")
-                desc = f"{GEN_MARK} fault-move node at {at} on moved {shape_tag(topo, w)} N={n} rp {rp}"
+                desc = f"{GEN_MARK} fault-move node at {at} on moved {shape_tag(topo, w, nr)} N={n} rp {rp}"
                 life = lib.lifecycle(restart=RP_FULL[rp])
                 d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
-                add("gen-fault-move", desc, kv, comps(topo, n, w, life, d_life=d_life),
+                add("gen-fault-move", desc, kv, comps(topo, n, w, life, d_life=d_life, nr=nr),
                     _move_node_reason(at, rp, topo), meta,
-                    cell=("fault-move", "node", None, at, "moved", topo, w, rp))
+                    cell=("fault-move", "node", None, at, "moved", topo, w, rp, nr))
 
 
 # ── gen-webhook / gen-conflict: the admission webhook unreachable, a competing writer ──
@@ -4992,18 +5099,24 @@ def emit_conflict(add):
 # router each roll onto their own new revision. As the edit lands a pod of
 # the running revision breaks (the roll owns it), or the edit itself is bad
 # (it holds with a reason, the old revision keeps serving, a corrective edit
-# lands). One gang width; the surge and the drain-first strategies.
-EDIT_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1)]
+# lands). The six shape families of the coverage ledger at one gang width;
+# the surge and the drain-first strategies. (topo, N, W, routers on an
+# engine-only shape.)
+EDIT_SHAPES = [("engine", 4, 0, 0), ("pd", 4, 0, 0), ("engine-mn", 2, 1, 0),
+               ("engine", 4, 0, lib.NR), ("engine-mn", 2, 1, lib.NR), ("pd-mn", 2, 1, 0)]
 EDIT_STRATS = {"SurgeThenDrain": (1, 0), "RecreatePod": (0, 1)}
 # (kind, form, the restart policies the cell runs under): a crash at start
 # and a pull failure open no runner-restart trigger; the after-Ready form
 # does, so it runs under both.
 EDIT_BREAKS = [("crashloop", "start", ["None"]), ("imagepull", None, ["None"]),
                ("crashloop", "load", ["None", "RecreateInstance"])]
-EDIT_VICTIMS = {"engine": ["engine"], "pd": ["engine", "decoder"], "engine-mn": ["engine"]}
-# The image edit on every shape; the env edit on the engine shape as the
-# control (the same new revision under these strategies).
-EDIT_VERBS = {"engine": ["image", "env"], "pd": ["image"], "engine-mn": ["image"]}
+# The break victims per topo: the decoder is the sibling a break may hit
+# (outside a canary the runner admits engine and decoder pods), so a router
+# rolls on the edit as a negative control and is never the victim.
+EDIT_VICTIMS = {"engine": ["engine"], "pd": ["engine", "decoder"], "engine-mn": ["engine"], "pd-mn": ["engine", "decoder"]}
+# The image edit on every shape; the env edit on the single-pod engine
+# shapes as the control (the same new revision under these strategies).
+EDIT_VERBS = {"engine": ["image", "env"], "pd": ["image"], "engine-mn": ["image"], "pd-mn": ["image"]}
 # The bad edit: an image that cannot be pulled (expect=recover) and a
 # readiness that never passes (expect=recover break=stuck).
 BAD_EDITS = [("imagepull", None), ("readiness", "stuck")]
@@ -5012,9 +5125,10 @@ EDIT_LANDS = {"SurgeThenDrain": "the surge brings the fixed replacement up besid
               "RecreatePod": "the recreate drains it and rebuilds the Instance at the edited revision"}
 
 
-def _edit_break_reason(kind, form, victim, edit, strat, rp, topo):
+def _edit_break_reason(kind, form, victim, edit, strat, rp, topo, nr=0):
     what = "a new image" if edit == "image" else "a new runner env"
     rolls = ("engine, decoder and router roll, each onto its own new revision" if is_pd(topo)
+             else "engine and router roll, each onto its own new revision" if nr
              else "the engine rolls onto a new revision")
     out = (f"the runtime every Component inherits gets {what}, so {rolls}; as the edit lands "
            f"{_break_how(form or 'start', victim)}; its "
@@ -5058,22 +5172,23 @@ def _bad_edit_reason(kind, strat, topo):
     return out
 
 
-def _edit_kv(topo, n, strat, surge):
+def _edit_kv(topo, n, strat, surge, nr=0):
     """Counts and ceilings of an edit case: engine and decoder roll under the
     case's strategy, the router under its default surge of one."""
     ce = n + surge if strat == "SurgeThenDrain" else n
-    return dict(mode="runtimerev", Ne=n, Nd=(n if is_pd(topo) else 0), Nr=(lib.NR if is_pd(topo) else 0),
-                ceil_e=ce, ceil_d=(ce if is_pd(topo) else 0), ceil_r=(lib.NR + 1 if is_pd(topo) else 0))
+    routers = router_count(topo, nr)
+    return dict(mode="runtimerev", Ne=n, Nd=(n if is_pd(topo) else 0), Nr=routers,
+                ceil_e=ce, ceil_d=(ce if is_pd(topo) else 0), ceil_r=(routers + 1 if routers else 0))
 
 
 def emit_fault_edit(add):
-    for topo, n, w in EDIT_SHAPES:
+    for topo, n, w, nr in EDIT_SHAPES:
         for strat, (surge, unavail) in EDIT_STRATS.items():
             for kind, form, policies in EDIT_BREAKS:
                 for victim in EDIT_VICTIMS[topo]:
                     for edit in EDIT_VERBS[topo]:
                         for rp in policies:
-                            kv = dict(_edit_kv(topo, n, strat, surge), fault=f"{kind}:old", co="none", topo=topo)
+                            kv = dict(_edit_kv(topo, n, strat, surge, nr), fault=f"{kind}:old", co="none", topo=topo)
                             if form:
                                 kv["form"] = form
                             if victim != "engine":
@@ -5084,21 +5199,21 @@ def emit_fault_edit(add):
                             meta = dict(strat=strat, verb=f"{_storm_label(kind, form)}@edit", rp=rp, victim=victim,
                                         rtedit=edit)
                             desc = (f"{GEN_MARK} fault-edit {_storm_label(kind, form)} on {victim} edit {edit} "
-                                    f"{shape_tag(topo, w)} N={n} {strat} rp {rp}")
+                                    f"{shape_tag(topo, w, nr)} N={n} {strat} rp {rp}")
                             life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
-                            add("gen-fault-edit", desc, kv, comps(topo, n, w, life, d_life=life),
-                                _edit_break_reason(kind, form, victim, edit, strat, rp, topo), meta,
-                                cell=("fault-edit", kind, form, victim, edit, topo, w, strat, rp), dedicated=True)
+                            add("gen-fault-edit", desc, kv, comps(topo, n, w, life, d_life=life, nr=nr),
+                                _edit_break_reason(kind, form, victim, edit, strat, rp, topo, nr), meta,
+                                cell=("fault-edit", kind, form, victim, edit, topo, w, strat, rp, nr), dedicated=True)
             for kind, brk in BAD_EDITS:
-                kv = dict(_edit_kv(topo, n, strat, surge), co="none", topo=topo, expect="recover")
+                kv = dict(_edit_kv(topo, n, strat, surge, nr), co="none", topo=topo, expect="recover")
                 if brk:
                     kv["break"] = brk
                 meta = dict(strat=strat, verb=f"bad-edit:{kind}", rp=EDIT_RP_FOR_BAD, rtedit="image")
-                desc = f"{GEN_MARK} bad-edit {kind} {shape_tag(topo, w)} N={n} {strat}"
+                desc = f"{GEN_MARK} bad-edit {kind} {shape_tag(topo, w, nr)} N={n} {strat}"
                 life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[EDIT_RP_FOR_BAD])
-                add("gen-fault-edit", desc, kv, comps(topo, n, w, life, d_life=life),
+                add("gen-fault-edit", desc, kv, comps(topo, n, w, life, d_life=life, nr=nr),
                     _bad_edit_reason(kind, strat, topo), meta,
-                    cell=("bad-edit", kind, topo, w, strat), dedicated=True)
+                    cell=("bad-edit", kind, topo, w, strat, nr), dedicated=True)
 
 
 # ── gen-crash-once: a crash that happens exactly once ──────────────────────
@@ -5428,6 +5543,18 @@ def build_outputs():
     rows = []   # (folder, case id, kv, meta) for the manifest
     parked_used = set()
 
+    def mint(folder):
+        """The next id of a folder: from its block, then from its
+        continuation block once the block is full."""
+        cid = counters[folder]
+        for lo, hi in id_blocks(folder):
+            if cid < lo:
+                cid = lo
+            if cid < hi:
+                counters[folder] = cid + 1
+                return cid
+        sys.exit(f"{folder}: id blocks exhausted at p{cid} (the last block ends before p{hi})")
+
     def add(folder, desc, kv, case_comps, reason, meta, cell, coord=None, body=None,
             runtime=None, dedicated=False, edit_runtime=False):
         """body: the case body as a function of the minted name, for a family
@@ -5436,11 +5563,7 @@ def build_outputs():
         runtime edit touches this case alone; edit_runtime ships the
         runtime-rev generator's ClusterServingRuntime for the case's topology
         under that name, the one the runtime-edit verbs patch."""
-        lo, hi = GEN_BLOCKS[folder]
-        cid = counters[folder]
-        if cid >= hi:
-            sys.exit(f"{folder}: id block exhausted at p{cid} (block ends before p{hi})")
-        counters[folder] += 1
+        cid = mint(folder)
         name = f"p{cid}"
         issue = inv_scope = None
         if cell in PARKED:
@@ -5637,6 +5760,11 @@ def manifest(rows):
         " pod itself and its recreate trips the UID-stability check by harness"
         " design (a missing component-scoped victim hook, see below).",
         "- `fault=podkill:migrating` needs `mode=migrate` — out of scope here.",
+        "- A router in front of an engine fleet is a break victim under a canary"
+        " alone: elsewhere the runner admits engine and decoder pods, so the"
+        " sibling rows of the engine-behind-a-router shapes outside a canary"
+        " (a move, a runtime edit, a push, the idle service) have no cell and"
+        " the router is a negative control there.",
         "- Kill targets (`kill=leader|worker`) exist only on gang topologies.",
         "- Update budgets are dormant under a steady-state kill: the kill family"
         " permutes strategies at their canonical budget only.",

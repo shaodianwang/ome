@@ -1,0 +1,20 @@
+# p7491: [gen] preempt steady engine-mn W1+router N=2 rp None lift never  mode=kill Ne=2 Nd=0 Nr=2 ceil_e=2 ceil_d=0 ceil_r=2 restart=None co=none topo=engine-mn via=preempt lift=never
+# reason: fillers take the spare CPU of every node, the pending taint closes every node to the case, and a higher-priority filler presses on the node of the aimed pod, so the scheduler preempts one pod of the case there; exactly the removed pod is recreated under restart policy None and its new pod waits with reason Unschedulable while every other Instance keeps serving and nothing is taken down to make room; the taint and the fillers stay to the end, so the wait holds with its reason across the hold window and no Instance reads Failed; the router keeps its pods
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7491 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
