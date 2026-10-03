@@ -1,0 +1,33 @@
+# p6709: [gen] canary fault-new readiness lifted pd N=8 rp None  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=2 fault=readiness:new co=none topo=pd canary=auto form=recover victimcomp=engine nophase=Failed cell=canary/Staging/canaryBroken[readinessLostOnce]
+# reason: the pushed engine revision has the readiness switch set in its first pod as it starts, so the pod runs without passing readiness until the switch is lifted 20s after the drop has settled on engine+decoder+router single (8 Instances), under restart policy None; the capacity step waits inside its bound and never parks, the same pod passes once the cause is gone, nothing escalates or holds it, and the ladder walks every step to Stable with every Instance on the canary revision serving
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6709 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          canary:
+            readyTimeout: "240s"
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

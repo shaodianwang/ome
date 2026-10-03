@@ -105,7 +105,7 @@ perm/
 │   ├── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
 │   ├── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/ gen-crashloop-idle/ gen-crashloop-sibling/
 │   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/ gen-rollback/ gen-crashloop-new/ gen-crashloop-group/ gen-pause-repair/ gen-ops-held/ gen-runtime-edit-repair/ gen-migrate-bump/  — generated hot core (see isvcs/MANIFEST.md)
-│   ├── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary
+│   ├── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary (the podkill and fault families also carry a canary beside the remaining faults on the six shape families)
 │   ├── gen-canary-fault-gate/  — generated: what a step's gates read breaks (a metric breach on either side, an unusable analysis source, a broken sibling)
 │   ├── gen-size/ gen-router-gang/  — generated small fleets (one and two Instances per Component) and the engine gang behind a router
 │   ├── gen-readiness/ gen-gang-member/ gen-tight/ gen-evict/ gen-preempt/ gen-pending/  — generated fault families (see isvcs/MANIFEST.md)
@@ -520,6 +520,37 @@ such as the recovery half of a podkill, carries both ids.
   read with the Instances the broken revision reached allowed for. Under an
   analysis gate only the pull failure is armed: the metrics image is a static
   binary with no shell and no exit switch.
+- **The remaining faults beside a canary.** The stable side also breaks as
+  `fault=readiness:idle|canary-<state>[@step] form=persist|recover` (a
+  serving pod of the running revision stops passing readiness; `recover`
+  lifts the switch `LIFT_SETTLE_S` after it bit) and
+  `fault=configkey:idle|canary-<state>[@step] lift=after-settle` (the key
+  the engine runner reads removed and the runner restarted, put back
+  `LIFT_SETTLE_S` after the wait showed; a key kept away is read by both
+  revisions, so a push is never its fix and no case keeps it); both are
+  judged as the crash breaks are, the ladder landing the fix on the
+  Instance. `once=1` on `fault=crashloop:canary-<state> form=load` kills
+  the runner of one Ready stable pod exactly once at that state, and on
+  `fault=crashloop:new form=start|load` the pushed revision's first runner
+  (at its first start, or once Ready); the verdict is the crash-once one
+  over the ladder's end state. The pushed revision also breaks as
+  `fault=configkey:new lift=never` and `fault=readiness:new` (the runner
+  reads a key the ConfigMap lacks; the fixture's readiness switch env is
+  set), parked and exited like the fault-new breaks, and as the one-shot
+  forms `configkey:new lift=after-settle`, `readiness:new form=recover` and
+  `imagepull:new lift=after-settle` (the key added, the switch lifted in the
+  first pod, the first pod pointed back at its image, each `LIFT_SETTLE_S`
+  after the bite; the step waits inside its bound and the same pod passes).
+  `fault=podkill:canary-<state>[@step]` and `fault=evict:canary-<state>[@step]`
+  take `repeat=<n>` (the deletion or the eviction again each time what it
+  took is back; the window stays open until the repetitions are spent and
+  the repeating-fault verdict reads it); an eviction at a manual gate holds
+  the promote the way a deletion does. `fault=taint:all lift=after-settle|never`
+  is armed before the push: the first step's canary pod waits with reason
+  `Unschedulable` on its row, no row reads Failed and nothing settled is
+  taken down; the lift lets the ladder complete, `never` parks it at the
+  capacity step's ready timeout (`terminal=Failed`) with the wait still
+  reported.
 - **`terminal=Stable|RolledBack|Failed`** — the expected terminal phase when the
   derivation from `analysis=`/`rollback=` does not apply; `Failed` asserts the
   park (no canary traffic, not fully rolled, nothing rolled back).
@@ -2400,10 +2431,18 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `isvcs/gen-canary-fault-old/` (the stable side breaks before the push, at
   the capacity step, during a soak, at a manual gate, at an analysis gate and
   at the last gate before the cutover; the ladder still lands the fix on every
-  broken Instance) and `isvcs/gen-canary-fault-new/` (the push brings a
+  broken Instance; continued at `p11500`–`p11699` with the remaining
+  stable-side breaks on the six shape families: a readiness loss kept or
+  lifted, the key put back, a crash and a pull failure taken away again, and
+  one runner killed once) and `isvcs/gen-canary-fault-new/` (the push brings a
   revision that crashes at start, crashes after Ready inside or past the first
   soak, or cannot be pulled; the ladder parks where it bites and a rollback or
-  a fix push lands), what a step's gates read (`p9050`–`p9249`) →
+  a fix push lands; then on the six shape families the missing key and the
+  never-Ready revision under both exits, their one-shot forms and the pull
+  failure that lifts, one runner killed once at start or after Ready, and a
+  taint armed before the push), the deletion and the eviction under a canary
+  once and again (`gen-canary-podkill`, the six shape families), what a step's
+  gates read (`p9050`–`p9249`) →
   `isvcs/gen-canary-fault-gate/` (the health metric breaches on the stable or
   the canary side, once or for good; the analysis source becomes unreachable
   or answers garbage and comes back or never does; a sibling Component breaks

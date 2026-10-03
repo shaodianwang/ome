@@ -2180,6 +2180,12 @@ BREAK_DEFAULT_COMP = "engine"
 READINESS_FAULT = "readiness"
 READINESS_SIDES = {"old", "new"}
 READINESS_FORMS = {"persist", "recover"}
+# The breaks of the stable side a canary case may name: a crash and a pull
+# failure, the running revision's ConfigMap key removed, a serving pod that
+# stops passing readiness; before the push (:idle) or at a grid state.
+CANARY_STABLE_FAULTS = BREAK_FAULTS | {"configkey", READINESS_FAULT}
+# The pod faults a canary case may repeat at a grid state (repeat=<n>).
+CANARY_REPEAT_FAULTS = {"podkill", "evict"}
 READINESS_SWITCH_ENV = "TEST_UNREADY"
 READINESS_SWITCH_FILE = "/tmp/perm-unready"
 # How long a pod that stopped passing readiness may take to leave the Ready
@@ -5208,7 +5214,8 @@ def _fault_ok(v):
     if kind == "ctrlrestart" and param == IDLE_FAULT_PHASE:
         return True
     if kind in ("podkill", "ctrlrestart", "evict", "preempt"):
-        return param in FAULT_PHASES
+        # A phase of a roll, or a canary grid state (with a step index).
+        return param in FAULT_PHASES or _canary_hook_ok(param)
     if kind == "cordon":
         return param in FAULT_TARGETS
     if kind in BREAK_FAULTS:
@@ -5218,7 +5225,9 @@ def _fault_ok(v):
         # the stable side in.
         return param in (CRASHLOOP_VICTIM, CRASHLOOP_NEW, IDLE_FAULT_PHASE) or _canary_hook_ok(param)
     if kind == READINESS_FAULT:
-        return param in READINESS_SIDES
+        # A serving pod of the running revision (old; under a canary before
+        # the push, idle, or at a grid state) or a pushed revision's pod (new).
+        return param in READINESS_SIDES or param == IDLE_FAULT_PHASE or _canary_hook_ok(param)
     if kind == METRIC_FAULT:
         # The pushed revision's own metrics, the stable side before the push,
         # or a side named by victim= at a canary hook.
@@ -5226,7 +5235,10 @@ def _fault_ok(v):
     if kind == SOURCE_FAULT:
         return param == IDLE_FAULT_PHASE or _canary_hook_ok(param)
     if kind == "configkey":
-        return param in (CONFIGKEY_PARAM, CRASHLOOP_NEW)
+        # The running revision's key removed (missing; under a canary before
+        # the push, idle, or at a grid state) or a pushed revision reading a
+        # key the ConfigMap lacks (new).
+        return param in (CONFIGKEY_PARAM, CRASHLOOP_NEW, IDLE_FAULT_PHASE) or _canary_hook_ok(param)
     if kind == "node":
         return param == NODE_PARAM
     return False
@@ -5282,7 +5294,35 @@ def _fault_before_push(f):
     (fault=<kind>:idle under a canary): the stable side is already broken,
     its metrics already breach or the gate's source is already unusable when
     the push lands, and no phase hook fires it."""
-    return bool(f) and f.get("kind") in BREAK_FAULTS | GATE_FAULTS and f.get("param") == IDLE_FAULT_PHASE
+    return bool(f) and f.get("kind") in CANARY_STABLE_FAULTS | GATE_FAULTS and f.get("param") == IDLE_FAULT_PHASE
+
+
+def _canary_stable_hook_fault(f):
+    """A missing key or a readiness loss aimed at a canary grid state: the
+    phase hook fires it like a crash there."""
+    return bool(f) and f.get("kind") in CANARY_STABLE_FAULTS - BREAK_FAULTS \
+        and str(f.get("param") or "").partition("@")[0] in CANARY_HOOKS
+
+
+def _canary_oneshot_new(f):
+    """A one-shot break of the pushed revision under a canary: the readiness
+    switch that lifts (readiness:new form=recover), the pull failure or the
+    missing key taken away once they have bitten (imagepull:new and
+    configkey:new with lift=after-settle)."""
+    if not f or f.get("param") != CRASHLOOP_NEW:
+        return False
+    if f.get("kind") == READINESS_FAULT:
+        return f.get("form") == "recover"
+    return f.get("kind") in ("imagepull", "configkey") and f.get("lift") == HEAL_LIFT
+
+
+def _canary_new_break(f):
+    """A break the push itself carries under a canary and keeps until the
+    exit verb: a crash, a pull failure, a missing ConfigMap key or a revision
+    that never passes readiness (fault=<kind>:new); not the one-shot forms,
+    not a crash that happens exactly once."""
+    return bool(f) and f.get("param") == CRASHLOOP_NEW and f.get("kind") in CANARY_STABLE_FAULTS \
+        and not _fault_once(f) and not _canary_oneshot_new(f)
 
 
 def _break_before_push(ctx, fault):
@@ -5298,7 +5338,7 @@ def _break_before_push(ctx, fault):
     _fault_fire(fault, ctx["pod_state"], ctx["pods_per_inst"], ctx["old_hashes"], inv=ctx.get("inv"))
     if fault["infra_fail"]:
         return False, fault["infra_fail"]
-    if fault["kind"] in BREAK_FAULTS:
+    if fault["kind"] in CANARY_STABLE_FAULTS:
         bitten = _wait_break_bitten(ctx, fault, BREAK_BITE_S)
         if bitten is None:
             return False, f"{fault['kind']}: the break on the idle service did not bite within {BREAK_BITE_S}s"
@@ -6986,7 +7026,8 @@ def _instance_rebuilt_whole(pods, pre_uids, expected):
     return len(pods) >= max(1, expected) and _instance_rebuilt(pods, pre_uids)
 
 
-def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, checks, bumped=None, surges=None):
+def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, checks, bumped=None, surges=None,
+                      kinds=BREAK_FAULTS):
     """The break verdict after a roll. A victim on a bumped Component ended
     on the new revision with its pods serving, and no repair was opened for
     it after the bump: a repair on the old revision is the failure this fault
@@ -7002,7 +7043,7 @@ def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, chec
     the chain counts. The surges come from every record that names a pair
     (_victim_surge_pairs), re-read within ROWS_SETTLE_S while the chain
     ends at an index with no pod (_victim_chain)."""
-    if not f or f.get("kind") not in BREAK_FAULTS or not f.get("fired") or f.get("infra_fail"):
+    if not f or f.get("kind") not in kinds or not f.get("fired") or f.get("infra_fail"):
         return verdict
     if _fault_once(f):
         return verdict   # a crash that happens once is judged by _once_checks
@@ -7215,18 +7256,33 @@ def _break_heal(f):
     print(f"    ⚡ {f['notes'][-1]}")
 
 
+def _canary_break_heals(f):
+    """A stable-side break under a canary the harness takes away again: a
+    crash, a pull failure or a missing key under lift=after-settle, a
+    readiness switch under form=recover."""
+    if not f or f.get("param") == CRASHLOOP_NEW:
+        return False
+    if f.get("kind") == READINESS_FAULT:
+        return f.get("form") == "recover"
+    return f.get("kind") in CANARY_STABLE_FAULTS and f.get("lift") == HEAL_LIFT and not _fault_once(f)
+
+
 def _break_heal_tick(ctx, now):
-    """Heal a self-healing break once it has bitten and held LIFT_SETTLE_S."""
+    """Heal a self-healing break once it has bitten and held LIFT_SETTLE_S: a
+    killer stops or a pod is pointed back at its image, the key is put back,
+    the readiness switch is lifted."""
     f = ctx.get("fault")
-    if not f or f.get("kind") not in BREAK_FAULTS or f.get("lift") != HEAL_LIFT or not f.get("fired") \
-            or f.get("infra_fail") or f.get("healed_at"):
+    if not _canary_break_heals(f) or not f.get("fired") or f.get("infra_fail") or f.get("healed_at"):
         return
     if f.get("bite_ts") is None:
         if _break_bitten(f, ctx["pod_state"]):
             f["bite_ts"] = now
         return
     if now - f["bite_ts"] >= LIFT_SETTLE_S:
-        _break_heal(f)
+        if f["kind"] in BREAK_FAULTS:
+            _break_heal(f)
+        else:
+            _rollback_break_lift(f, after=f"the break had bitten for {LIFT_SETTLE_S}s")
 
 
 # ── The health metric breaches on one side (fault=metric, canary) ───────────
@@ -7653,7 +7709,8 @@ def _hook_fault_fired_checks(f, phases, verdict, notes, checks):
     if not f or f.get("fired") or f.get("infra_fail"):
         return verdict
     mine = f.get("kind") in GATE_FAULTS or (f.get("kind") in BREAK_FAULTS
-                                           and (f.get("lift") == HEAL_LIFT or f.get("victim") == "canary"))
+                                           and (f.get("lift") == HEAL_LIFT or f.get("victim") == "canary")) \
+        or (f.get("kind") in CANARY_STABLE_FAULTS - BREAK_FAULTS)
     where = str(f.get("param") or "")
     if not mine or where.partition("@")[0] not in CANARY_HOOKS:
         return verdict
@@ -7756,8 +7813,8 @@ def _canary_break_allowance(ctx, fault, new_break):
     either side, on the primary or on a sibling: the floor the healthy
     Instances must hold is lowered by that many, once, when the break has
     fired. A break the push itself carries is costed by its crash watch."""
-    if fault and fault.get("kind") in BREAK_FAULTS and fault.get("fired") and not new_break \
-            and fault.get("crash_comp") and "floor_allowance" not in ctx:
+    if fault and fault.get("kind") in CANARY_STABLE_FAULTS and fault.get("fired") and not new_break \
+            and fault.get("param") != CRASHLOOP_NEW and fault.get("crash_comp") and "floor_allowance" not in ctx:
         ctx["floor_allowance"] = {fault["crash_comp"]: len(_break_victims(fault))}
 
 
@@ -7818,13 +7875,30 @@ def _sibling_park_checks(ctx, parked, track, verdict, notes, checks):
 
 
 # ── A break on the revision the push brings (fault=<kind>:new, canary) ──────
-def _new_break_arm(f, comp):
+def _new_break_arm(f, comp, ctx=None):
     """What the push carries for a break on the new revision: (image, the
     members it is narrowed to, env). A crash at start and a pull failure are
-    an image; a crash after Ready is the fixture runtime's exit switch."""
+    an image; a crash after Ready is the fixture runtime's exit switch; a
+    missing key is an env reading a key the ConfigMap lacks, next to the key
+    the running revision reads (its reference is read off a live pod); a
+    revision that never passes readiness is the fixture's readiness switch
+    env. None when the case gives the runner no ConfigMap key to miss."""
     if f["kind"] == "crashloop" and f.get("form") == "load":
         after = int(f.get("exitafter") or 0) or CRASH_EXIT_AFTER_S
         return "", {comp}, [{"name": CRASH_EXIT_ENV, "value": str(after)}]
+    if f["kind"] == "configkey":
+        pod = _crashloop_pick_pod(ctx["pod_state"], ctx["old_hashes"], comp) if ctx else None
+        ref = _configkey_env_ref(_get_pod(pod)) if pod else None
+        if ref is None:
+            return None
+        var, cm_name, cm_key = ref
+        missing = f"{cm_key}{CONFIGKEY_NEW_SUFFIX}"
+        f.update(cm_name=cm_name, cm_key=missing, cm_value=CONFIGKEY_NEW_VALUE, bite=CONFIGKEY_WAITING,
+                 cause=f"ConfigMap key {cm_name}/{missing}")
+        return "", {comp}, [{"name": var, "valueFrom": {"configMapKeyRef": {"name": cm_name, "key": missing}}}]
+    if f["kind"] == READINESS_FAULT:
+        f.update(bite=f"no readiness for {READINESS_NEW_BITE_S}s while running", cause="the readiness switch")
+        return "", {comp}, [{"name": READINESS_SWITCH_ENV, "value": "1"}]
     return _break_image(f["kind"]), {comp}, None
 
 
@@ -7849,7 +7923,16 @@ def _new_break_bite(f, pod_state, canary_pods, ready_seen, hook, step, now_rel):
             return {"what": f"{gone[0]} on the pushed revision was Ready and then was not",
                     "at": now_rel, "hook": hook, "step": step}
         return None
-    reasons = IMAGEPULL_REASONS if f["kind"] == "imagepull" else CRASH_START_REASONS
+    if f["kind"] == READINESS_FAULT:
+        # The revision runs and never passes: a pod of it alive and not Ready
+        # for READINESS_NEW_BITE_S, never Ready before.
+        for name, pod in canary_pods:
+            seen = f.setdefault("new_seen", {}).setdefault(name, now_rel)
+            if not pod.get("ready") and name not in ready_seen and now_rel - seen >= READINESS_NEW_BITE_S:
+                return {"what": f"{name} on the pushed revision ran {now_rel - seen:.0f}s without passing readiness",
+                        "at": now_rel, "hook": hook, "step": step}
+        return None
+    reasons = {"imagepull": IMAGEPULL_REASONS, "configkey": {CONFIGKEY_WAITING}}.get(f["kind"], CRASH_START_REASONS)
     for name, pod in canary_pods:
         if pod.get("ready"):
             continue
@@ -7920,8 +8003,9 @@ def _new_break_checks(ctx, f, track, phases, verdict, notes, checks):
     checks (drained back, or the fix on every Instance with nothing left on
     the broken revision) follow."""
     kind, form, comp = f["kind"], f.get("form") or "start", f["crash_comp"]
-    label = {"imagepull": "could not be pulled", "start": "crashed at start",
-             "load": "crashed after Ready"}["imagepull" if kind == "imagepull" else form]
+    label = {"imagepull": "could not be pulled", "configkey": "waited on a missing ConfigMap key",
+             READINESS_FAULT: "never passed readiness", "start": "crashed at start",
+             "load": "crashed after Ready"}[kind if kind != "crashloop" else form]
     name = f"{kind}:{CRASHLOOP_NEW}"
 
     def ok(cond, msg_ok, msg_bad):
@@ -8243,7 +8327,7 @@ def _fault_tick(ctx):
       draining  → first old-revision pod observed on its way out;
       migrating → migration accept observed (_migrate sets ctx['fault_migrating'])."""
     f = ctx.get("fault")
-    if not f or f["kind"] not in HOOK_FAULTS:
+    if not f or (f["kind"] not in HOOK_FAULTS and not _canary_stable_hook_fault(f)):
         return
     if ctx.get("trigger_ts") is None or _fault_fired_by_handler(f) or _fault_before_push(f) or _metric_on_new(f):
         return
@@ -14271,8 +14355,14 @@ def validate_case_file(path):
     heals_itself = fault_kind in BREAK_FAULTS and str(fields.get("lift", "")) == HEAL_LIFT
     pushed_pull_once = (fault_kind == "imagepull" and fault_param == CRASHLOOP_NEW and mode == "rollout"
                         and str(fields.get("lift", "")) == HEAL_LIFT)
+    # Under a canary a fault names the grid state it lands in, or the idle
+    # service before the push; the pushed revision's one-shot pull failure
+    # is lifted on its first pod there too.
+    canary_stable_hook = mode == "canary" and (fault_param == IDLE_FAULT_PHASE or _canary_hook_ok(fault_param))
+    canary_pull_once = mode == "canary" and fault_kind == "imagepull" and fault_param == CRASHLOOP_NEW \
+        and str(fields.get("lift", "")) == HEAL_LIFT
     if heals_itself and not idle_heal and not pushed_pull_once and not broken_op and not rollback_break and not edit_break \
-            and not (mode == "canary" and (fault_param == IDLE_FAULT_PHASE or _canary_hook_ok(fault_param))):
+            and not canary_stable_hook and not canary_pull_once:
         errs.append(f"{path}:1: lift={HEAL_LIFT} on fault={fields.get('fault')} heals the harness's own break under a canary "
                     f"(mode=canary, fault={fault_kind}:canary-<state> or fault={fault_kind}:{IDLE_FAULT_PHASE}), on the "
                     f"settled service (mode=rollout, fault={fault_kind}:{CRASHLOOP_VICTIM} during={IDLE_FAULT_PHASE} expect=heals) "
@@ -14283,12 +14373,16 @@ def validate_case_file(path):
     via = str(fields.get("via", ""))
     if via and mode != "kill":
         errs.append(f"{path}:1: via={via} says how mode=kill removes the pod (mode=kill)")
-    if fault_kind == "evict" and mode not in HOOK_FAULT_MODES:
+    if fault_kind == "evict" and mode not in HOOK_FAULT_MODES and not (mode == "canary" and _canary_hook_ok(fault_param)):
         errs.append(f"{path}:1: fault=evict:<phase> evicts the podkill victim of a rollout, scale, runtime-edit or delete case "
-                    f"(mode={'|'.join(sorted(HOOK_FAULT_MODES))}); a kill case evicts through via=evict")
+                    f"(mode={'|'.join(sorted(HOOK_FAULT_MODES))}) or of a canary at a grid state (mode=canary, "
+                    f"fault=evict:canary-<state>); a kill case evicts through via=evict")
     lift = fields.get("lift")
+    # A taint under a canary is armed before the push and holds the first
+    # step's capacity; a quota under a canary is the canary's own park.
     pending = (fault_kind in PENDING_FAULTS and during != IDLE_FAULT_PHASE
-               and (mode in ("rollout", "kill", "runtimerev") or (mode in ("scaledown", "recreate") and fault_kind == "preempt"))
+               and (mode in ("rollout", "kill", "runtimerev") or (mode in ("scaledown", "recreate") and fault_kind == "preempt")
+                    or (mode == "canary" and fault_kind == "taint"))
                and (fault_kind != "quota" or mode == "kill" or lift in PENDING_LIFTS) and not _tight_cell(fields)) \
         or (broken_op and fault_kind in BROKEN_OP_PENDING)
     if via == "preempt":
@@ -14332,10 +14426,16 @@ def validate_case_file(path):
                     not at_hook_op and (fields.get("rollback") == 1 or _midroll_edit(fields.get("edit")) is not None)):
                 errs.append(f"{path}:1: repeat= rides a plain push, a scale, a runtime edit, or an eviction at a hook of a rollback "
                             f"or a mid-roll edit; stuck=, blocked= and pauseat= do not combine with it")
+        elif mode == "canary" and fault_kind in CANARY_REPEAT_FAULTS:
+            # A pod deleted by hand or evicted again each time it is back, at a grid state of the ladder.
+            if not _canary_hook_ok(fault_param):
+                errs.append(f"{path}:1: repeat= under a canary applies fault={fault_kind} again at a grid state "
+                            f"(fault={fault_kind}:canary-<state>[@step])")
         else:
             errs.append(f"{path}:1: repeat= is the persistent form of a kill (mode=kill) or of "
                         f"fault={'|'.join(sorted(REPEAT_FAULTS))}:<hook> under a push, a scale or a runtime edit "
-                        f"(mode=rollout|scaledown|runtimerev)")
+                        f"(mode=rollout|scaledown|runtimerev), or of fault={'|'.join(sorted(CANARY_REPEAT_FAULTS))}:canary-<state> "
+                        f"under a canary")
     # A window fault: the admission webhook unreachable, or a competing
     # writer, on the settled service (idle, with during=idle), as an
     # operation lands (settling), at a hook of the roll a push or a runtime
@@ -14435,19 +14535,27 @@ def validate_case_file(path):
         if str(fields.get("victimcomp") or BREAK_DEFAULT_COMP) != BREAK_DEFAULT_COMP and str(fields.get("co", "none")) == "none":
             errs.append(f"{path}:1: victimcomp={fields.get('victimcomp')} under fault=crashloop:{CRASHLOOP_NEW} names a member "
                         f"the push bumps (needs a group: co=rolling|ratio|percomp|seq|bluegreen)")
+    # Under a canary the runner of one pod is killed once: a Ready stable pod at
+    # a grid state (form=load), or the pushed revision's first pod (form=start|load).
+    canary_once = mode == "canary" and fault_kind == "crashloop" and (
+        fault_param == CRASHLOOP_NEW or (_canary_hook_ok(fault_param) and str(fields.get("form", "")) == "load"))
+    if "once" in fields and mode == "canary" and not canary_once:
+        errs.append(f"{path}:1: once=1 under a canary kills a Ready stable pod's runner once at a grid state "
+                    f"(fault=crashloop:canary-<state> form=load) or the pushed revision's first runner "
+                    f"(fault=crashloop:{CRASHLOOP_NEW} form=start|load)")
     if "once" in fields:
         # A one-shot crash: the running revision's pod at idle or under a
         # push, or the pushed revision's first pod; nothing else rides it,
         # except the rollback or the mid-roll edit the held moment carries.
-        if (fault_kind != "crashloop" or mode != "rollout") and not held_once and not edit_once:
+        if (fault_kind != "crashloop" or mode != "rollout") and not held_once and not edit_once and not canary_once:
             errs.append(f"{path}:1: once=1 is a crash that happens exactly once (needs mode=rollout and "
                         f"fault=crashloop:{CRASHLOOP_VICTIM}|{CRASHLOOP_NEW} with form=start|load, or rollback=1 "
                         f"during=held break={'|'.join(sorted(ROLLBACK_ONCE_BREAKS))}), or the one-shot form of a "
                         f"pushed revision's break beside a mid-roll edit (break={'|'.join(sorted(EDIT_BREAKS))} once=1 "
                         f"edit= during={'|'.join(sorted(EDIT_BREAK_HOOKS))})")
-        if during and during != IDLE_FAULT_PHASE and not held_once and not edit_once:
+        if during and during != IDLE_FAULT_PHASE and not held_once and not edit_once and not canary_once:
             errs.append(f"{path}:1: once=1 fires on the idle service (during={IDLE_FAULT_PHASE}) or under a push (no during=)")
-        if crash_new and during:
+        if crash_new and during and not canary_once:
             errs.append(f"{path}:1: once=1 on fault=crashloop:{CRASHLOOP_NEW} is the pushed revision's first pod (no during=)")
         for k in ("expect", "victims", "fixfirst", "pauseat", "pause", "push", "rollback", "edit", "lift", "blocked"):
             if k in fields and not (held_once and k == "rollback") and not (edit_once and k == "edit"):
@@ -14519,9 +14627,16 @@ def validate_case_file(path):
             errs.append(f"{path}:1: fault={fields.get('fault')} breaks a {victim_comp} pod (needs {count_key}>0)")
     if fault_kind == READINESS_FAULT:
         side = str(fields.get("fault", "")).partition(":")[2]
-        if mode != "rollout" and not broken_op:
-            errs.append(f"{path}:1: fault={fields.get('fault')} is a rollout-mode fault (mode=rollout), or breaks one "
-                        f"Instance before a scale or a delete (mode={'|'.join(sorted(BROKEN_OP_MODES))} during={IDLE_FAULT_PHASE})")
+        canary_readiness = mode == "canary" and (side == CRASHLOOP_NEW or canary_stable_hook)
+        if mode != "rollout" and not broken_op and not canary_readiness:
+            errs.append(f"{path}:1: fault={fields.get('fault')} is a rollout-mode fault (mode=rollout), breaks one "
+                        f"Instance before a scale or a delete (mode={'|'.join(sorted(BROKEN_OP_MODES))} during={IDLE_FAULT_PHASE}), "
+                        f"or under a canary a serving stable pod before the push or at a grid state "
+                        f"(fault={READINESS_FAULT}:{IDLE_FAULT_PHASE}|canary-<state> form=persist|recover) and the pushed "
+                        f"revision (fault={READINESS_FAULT}:{CRASHLOOP_NEW})")
+        if canary_readiness and side != CRASHLOOP_NEW and str(fields.get("form", "")) not in READINESS_FORMS:
+            errs.append(f"{path}:1: fault={fields.get('fault')} under a canary needs form={'|'.join(sorted(READINESS_FORMS))} "
+                        f"(whether the switch stays or is lifted once it has bitten)")
         if side == "old":
             if during != IDLE_FAULT_PHASE and not rollback_break and not edit_break:
                 errs.append(f"{path}:1: fault={READINESS_FAULT}:old breaks a serving pod of the running revision on the "
@@ -14530,8 +14645,8 @@ def validate_case_file(path):
             if str(fields.get("form", "")) not in READINESS_FORMS:
                 errs.append(f"{path}:1: fault={READINESS_FAULT}:old needs form={'|'.join(sorted(READINESS_FORMS))} "
                             f"(whether the switch stays or is lifted)")
-        else:
-            if during:
+        elif side == CRASHLOOP_NEW:
+            if during and mode != "canary":
                 errs.append(f"{path}:1: fault={READINESS_FAULT}:new is the bump itself (no during=)")
             if "form" in fields and str(fields["form"]) != "recover":
                 errs.append(f"{path}:1: fault={READINESS_FAULT}:new without form= never passes readiness (a fix push follows); "
@@ -14612,6 +14727,12 @@ def validate_case_file(path):
                 errs.append(f"{path}:2: xcheck={fields['xcheck']} requires an adjacent '# reason: <why>' comment on line 2")
     if mode == "canary" and "img" in fields and "bump" not in fields:
         errs.append(f"{path}:1: img= in canary mode needs bump=<members> (the revision it breaks)")
+    kept_new = mode == "canary" and fault_param == CRASHLOOP_NEW and (
+        (fault_kind == "configkey" and lift == KEPT_LIFT) or (fault_kind == READINESS_FAULT and "form" not in fields))
+    if kept_new and (str(fields.get("during", "")).partition("@")[0] != "canary-failed"
+                     or str(fields.get("verb", "")) not in ("rollback", "rebump-fix")):
+        errs.append(f"{path}:1: fault={fields.get('fault')} under a canary parks the ladder and ends with its exit "
+                    f"(during=canary-failed verb=rollback|rebump-fix)")
     if mode == "canary" and str(fields.get("fault", "")).partition(":")[2].partition("@")[0] in ("rotating", "migrating", "settling"):
         errs.append(f"{path}:1: fault= in canary mode fires at a canary hook (fault=<kind>:canary-<state>)")
     if ("dup" in fields or "hint" in fields) and mode != "migrate":
@@ -14721,18 +14842,27 @@ def validate_case_file(path):
         errs.append(f"{path}:1: lift={lift} lifts a persistent fault's cause "
                     f"(needs fault=configkey:{CONFIGKEY_PARAM} or fault=node:{NODE_PARAM})")
     pushed_key = fault_kind == "configkey" and fault_param == CRASHLOOP_NEW
+    canary_key = mode == "canary" and fault_kind == "configkey" and canary_stable_hook
+    if canary_key:
+        # The running revision's key removed under a canary, before the push or at a grid state.
+        if lift not in (HEAL_LIFT, KEPT_LIFT):
+            errs.append(f"{path}:1: fault={fields.get('fault')} under a canary needs lift={KEPT_LIFT} (the key stays away) "
+                        f"or lift={HEAL_LIFT} (put back once the wait has bitten)")
+        if "expect" in fields:
+            errs.append(f"{path}:1: expect= is the idle break's vocabulary; under a canary the ladder lands the fix on the victim")
     if pushed_key:
         # The push itself: the pushed engine revision reads a key the
         # ConfigMap lacks; the lift says what follows.
-        if mode != "rollout" or during:
-            errs.append(f"{path}:1: fault=configkey:{CRASHLOOP_NEW} is the push itself (mode=rollout, no during=)")
+        if mode not in ("rollout", "canary") or (during and mode != "canary"):
+            errs.append(f"{path}:1: fault=configkey:{CRASHLOOP_NEW} is the push itself (mode=rollout or mode=canary, no during= "
+                        f"other than a canary's exit hook)")
         if lift not in (HEAL_LIFT, KEPT_LIFT):
             errs.append(f"{path}:1: fault=configkey:{CRASHLOOP_NEW} needs lift={HEAL_LIFT} (the key is added once the wait "
                         f"has settled and the roll completes) or lift={KEPT_LIFT} (the roll holds; a fix push follows)")
         for k in ("expect", "victimcomp", "victims", "pauseat", "fixfirst", "rollback", "edit", "once", "form"):
             if k in fields:
                 errs.append(f"{path}:1: {k}= does not combine with fault=configkey:{CRASHLOOP_NEW} (the lift says what follows)")
-    elif fault_kind in LIFT_FAULTS and not broken_op and not rollback_break and not edit_break:
+    elif fault_kind in LIFT_FAULTS and not broken_op and not rollback_break and not edit_break and not canary_key:
         phases = LIFT_PHASES_BY_FAULT[fault_kind]
         if during != IDLE_FAULT_PHASE and not at_move:
             errs.append(f"{path}:1: fault={fields.get('fault')} fires on the idle service (needs during={IDLE_FAULT_PHASE}) "
@@ -20145,7 +20275,7 @@ def _promote_held_after_podkill(verb, verb_fired, verb_ts, hold_s, now):
 def _podkill_fault_at_hold(fault, hook, step):
     """A podkill fault aimed at the hold the ladder is at: its hook names the
     current grid state and, where it names one, the current step."""
-    return bool(fault) and fault.get("kind") == "podkill" and not fault.get("infra_fail") \
+    return bool(fault) and fault.get("kind") in CANARY_REPEAT_FAULTS and not fault.get("infra_fail") \
         and _hook_due(str(fault.get("param") or ""), hook, step)
 
 
@@ -20214,9 +20344,136 @@ def _podkill_hold_summary(fault):
 
 def _break_at_hook(fault):
     """A break that fired at a canary hook (not before the push, not on the
-    pushed revision)."""
-    return bool(fault) and fault.get("kind") in BREAK_FAULTS and bool(fault.get("fired")) \
+    pushed revision): a crash, a pull failure, a missing key, a readiness
+    loss, or the runner of a stable pod killed once."""
+    return bool(fault) and fault.get("kind") in CANARY_STABLE_FAULTS and bool(fault.get("fired")) \
         and str(fault.get("param") or "").partition("@")[0] in CANARY_HOOKS
+
+
+def _canary_oneshot_new_tick(ctx, f, out, now):
+    """Per poll under a one-shot break of the pushed revision: fire it on the
+    first starting canary pod where the push did not arm it (the readiness
+    switch, the pull failure), read the bite, and take the cause away
+    LIFT_SETTLE_S after it bit (the switch lifted, the pod pointed back at
+    its image, the key added)."""
+    if f.get("infra_fail"):
+        return
+    t0 = ctx["trigger_ts"]
+    if not f.get("fired"):
+        _oneshot_new_fire(f, ctx)
+        return
+    if out["bitten_at"] is None:
+        if now - out["last_bite"] < ONCE_POLL_S:
+            return
+        out["last_bite"] = now
+        if _oneshot_new_bitten(f, ctx):
+            out["bitten_at"], f["bite_ts"] = now - t0, now
+            print(f"    bite: {f.get('crash_comp')} Instance {f.get('crash_inst')} ({f.get('crash_pod')}) shows "
+                  f"{f.get('bite')} ({out['bitten_at']:.0f}s)")
+        return
+    if out["lifted_at"] is None and now - f["bite_ts"] >= LIFT_SETTLE_S:
+        if _oneshot_new_lift(f):
+            out["lifted_at"] = now - t0
+            f["notes"].append(f"{f.get('cause', 'the cause')} lifted {out['lifted_at']:.0f}s after the push")
+            print(f"    ⚡ {f['notes'][-1]}")
+        else:
+            f["infra_fail"] = f"{f['kind']}:{CRASHLOOP_NEW}: {f.get('cause', 'the cause')} could not be lifted"
+
+
+def _canary_once_checks(ctx, f, hdr, verdict, notes, checks):
+    """A crash that happens exactly once under a canary, on either side: the
+    one-shot verdict over the ladder's end state (the victim ends on the
+    canary revision, at the index its gang surge left it at; a repair only
+    where the policy promises one)."""
+    if not _fault_once(f) or f.get("infra_fail"):
+        return verdict
+    if not f.get("fired"):
+        f["infra_fail"] = _once_never_landed(f, "the ladder ended")
+        return verdict
+    out = _once_observe(ctx["case_id"], f, ctx["pod_state"], ctx["old_hashes"], True, ctx["N"], ctx["configured"],
+                        ROWS_SETTLE_S, surges=(ctx.get("inv") or {}).get("surges"))
+    comp = f.get("crash_comp") or f.get("victimcomp") or BREAK_DEFAULT_COMP
+    out.update(side=("new" if f.get("param") == CRASHLOOP_NEW else "old"), op="push",
+               rp=_restart_policy(hdr, ctx["info"], comp))
+    return _once_checks(f, out, verdict, notes, checks)
+
+
+def _canary_pending_tick(ctx, f, out, comps, lift, now):
+    """Per poll under a pending cause armed before the canary push: the wait
+    the product reports on an Instance row of the unit, any row that reads
+    Failed while the cause holds, and the lift once the wait has held
+    LIFT_SETTLE_S (lift=after-settle); under lift=never the rows are read
+    until the ladder parks."""
+    if f.get("infra_fail") or out["lifted_at"] is not None or out["park_at"] is not None:
+        return
+    t0 = ctx["trigger_ts"]
+    if ctx.get("canary_hook") == "canary-failed":
+        out["park_at"] = now - t0
+        return
+    if now - out["last_poll"] < ROW_POLL_S:
+        return
+    out["last_poll"] = now
+    rows = _ir_rows_by_index(ctx["case_id"], comps)
+    hit = _pending_row(rows, PENDING_TOKENS[f["kind"]])
+    for key, row in sorted(rows.items()):
+        if row.get("phase") == "Failed" and key not in out["failed"]:
+            out["failed"].append(key)
+    if hit:
+        out["since"] = out["since"] or now
+        if out["bitten_at"] is None:
+            out.update(bitten_at=now - t0, token=hit[2], row=(hit[0], hit[1]), message=hit[3])
+            print(f"    wait: {hit[0]} Instance {hit[1]} reports {hit[2]} ({out['bitten_at']:.0f}s)"
+                  + (f": {hit[3][:120]}" if hit[3] else ""))
+    else:
+        out["since"] = None
+    if lift == HEAL_LIFT and out["since"] is not None and now - out["since"] >= LIFT_SETTLE_S:
+        if _pending_lift(f):
+            out["lifted_at"] = now - t0
+            f["notes"].append(f"{f.get('cause', 'the cause')} lifted {out['lifted_at']:.0f}s after the push")
+            print(f"    ⚡ {f['notes'][-1]}")
+        else:
+            f["infra_fail"] = f"{f['kind']}: {f.get('cause', 'the cause')} could not be lifted"
+
+
+def _canary_pending_checks(f, out, lift, verdict, notes, checks):
+    """The pending verdict under a canary. The product named the wait on an
+    Instance row of the unit while the cause held and no row read Failed
+    meanwhile; then the cause lifted and the ladder's own terminal checks
+    carry the roll (lift=after-settle), or the ladder parked with the
+    capacity step still waiting (lift=never)."""
+    kind, cause = f["kind"], f.get("cause") or "the cause"
+    if f.get("infra_fail"):
+        return verdict
+
+    def ok(cond, msg_ok, msg_bad):
+        nonlocal verdict
+        if cond:
+            checks.append(f"  ✓ {msg_ok}")
+        else:
+            verdict = "FAIL"; notes.append(msg_bad); checks.append(f"  ✗ {msg_bad}")
+
+    tokens = sorted(PENDING_TOKENS[kind])
+    if out["bitten_at"] is None:
+        ok(False, "", f"{kind}: no Instance of the unit reported operation.waiting in {tokens} while {cause} held "
+                      f"— every wait has a reason")
+        return verdict
+    comp, idx = out["row"]
+    checks.append(f"  ✓ {kind}: {comp} Instance {idx} waits with reason {out['token']} {out['bitten_at']:.0f}s after the push")
+    if out["message"]:
+        checks.append(f"  ⓘ {kind}: the recorded cause: {out['message'][:160]}")
+    rows = ", ".join(f"{c}/{i}" for c, i in out["failed"])
+    ok(not out["failed"], f"{kind}: no Instance read Failed while {cause} held",
+       f"{kind}: Instance(s) {rows} read Failed while {cause} held — a wait on the cluster is not a failure inside the configured grace")
+    if lift == HEAL_LIFT:
+        if out["lifted_at"] is None:
+            f["infra_fail"] = f"{kind}: {cause} was never lifted"
+            return verdict
+        checks.append(f"  ✓ {kind}: {cause} lifted {out['lifted_at']:.0f}s after the push; the ladder's terminal carries the roll")
+        return verdict
+    ok(out["park_at"] is not None,
+       f"{kind}: the ladder parked {out['park_at'] or 0:.0f}s after the push with the capacity step still waiting ({out['token']})",
+       f"{kind}: the ladder never parked while {cause} held the capacity step")
+    return verdict
 
 
 def _promote_held_after_break(fault, hold_s, now):
@@ -20590,7 +20847,18 @@ def _canary(case_id, yaml_file, desc, hdr):
             time.sleep(PREARM_SETTLE_S)
         ctx["prearm_annos"] = _isvc_annotations(case_id)   # what still lingers when the bump lands
     fault = ctx.get("fault")
-    new_break = _fault_on_new(fault)
+    # The push carries a break it keeps (new_break), a break the harness takes
+    # away again (oneshot_new), the runner of one pod is killed exactly once
+    # (once), a pod fault repeats at a grid state, or a pending cause armed
+    # before the push holds the capacity step.
+    once = _fault_once(fault)
+    oneshot_new = _canary_oneshot_new(fault)
+    new_break = _canary_new_break(fault)
+    oneshot = {"bitten_at": None, "lifted_at": None, "held_at": None, "hold": "", "last_bite": 0.0}
+    pending = fault if fault and fault.get("kind") == "taint" else None
+    pend = {"bitten_at": None, "token": "", "row": None, "message": "", "failed": [], "lifted_at": None,
+            "since": None, "last_poll": 0.0, "park_at": None}
+    lift = str(hdr.get("lift") or "")
     newbreak = {"bite": None, "park": None, "ready_seen": set(), "uids": {}, "peak_crash": 0,
                 "phases_before_exit": set()}
     gate = _gate_track_new()
@@ -20657,14 +20925,21 @@ def _canary(case_id, yaml_file, desc, hdr):
             return _write_fail(case_id, desc, hdr, "INFRA-FAIL", f"ctrlrestart: the admission webhook did not answer within {CTRL_READY_S}s")
         idle_fault["notes"].append("manager Ready and admitting again before the bump")
     armed_env, victim_comp = None, ""
-    if new_break:
-        # The push itself carries the break, on the runner of one bumped member.
+    if new_break or (oneshot_new and fault["kind"] == "configkey"):
+        # The push itself carries the break, on the runner of one bumped
+        # member (a missing key is armed by the push under both forms).
         victim_comp = fault.get("victimcomp") or BREAK_DEFAULT_COMP
         if victim_comp not in group:
             _stop_watcher(ctx)
             return _write_fail(case_id, desc, hdr, "CASE_ERROR",
                                f"victimcomp={victim_comp} is not a member the push bumps ({sorted(group)})")
-        bad_image, image_comps, armed_env = _new_break_arm(fault, victim_comp)
+        armed = _new_break_arm(fault, victim_comp, ctx)
+        if armed is None:
+            _stop_watcher(ctx)
+            return _write_fail(case_id, desc, hdr, "INFRA-FAIL",
+                               f"configkey:{CRASHLOOP_NEW}: the {victim_comp} runner reads no ConfigMap key "
+                               f"(the case must give it an env valueFrom.configMapKeyRef)")
+        bad_image, image_comps, armed_env = armed
     if proto_target is not None:
         ok, msg = _pairing_patch(case_id, proto_target, extra=analysis_extra, comps=group)
         if not ok:
@@ -20677,7 +20952,7 @@ def _canary(case_id, yaml_file, desc, hdr):
                                      "drain_first": _pairing_drain_first(ctx["info"])}
     elif not _bump_rev(ctx, group, extra=analysis_extra, image=bad_image or None, image_comps=image_comps, env=armed_env):
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "rev bump patch failed: " + str(ctx.get("trigger_error") or ""))
-    if new_break:
+    if new_break or (oneshot_new and fault["kind"] == "configkey"):
         _new_break_armed(fault, victim_comp, bad_image, armed_env, ctx["trigger_ts"])
     if _metric_on_new(fault):
         fault["fired"], fault["fired_ts"] = True, ctx["trigger_ts"]
@@ -20707,6 +20982,8 @@ def _canary(case_id, yaml_file, desc, hdr):
         # step's initialDelay + failureLimit×interval (+ stall timeout for the
         # Hold path). Give it generous extra headroom over the bare rollout.
         budget = min(MAX_BUDGET_S, budget + 300)
+    if _fault_repeats(fault):
+        budget = min(MAX_BUDGET_S, budget + REPEAT_CYCLE_S * int(fault["repeat"]))
     print(f"  Phase 3: driving + observing the canary (≤{budget}s)")
 
     phases, traffic_by_step = set(), {}
@@ -20797,6 +21074,10 @@ def _canary(case_id, yaml_file, desc, hdr):
             failed_at = now
         if new_break:
             _new_break_track(ctx, fault, newbreak, can, comp, step, now - ctx["trigger_ts"], verb_fired)
+        if oneshot_new:
+            _canary_oneshot_new_tick(ctx, fault, oneshot, now)
+        if pending:
+            _canary_pending_tick(ctx, pending, pend, sorted(group), lift, now)
         # A quota lift lets the parked step's capacity land; a second verb
         # after the lift waits for it, so the park is judged with capacity there.
         if quota_verb and (verb2_fired if verb2 == "quotalift" else verb_fired) and not capacity_landed:
@@ -20980,6 +21261,11 @@ def _canary(case_id, yaml_file, desc, hdr):
             pods_settled = False   # the park is judged once the lifted capacity is there
         if release and not released:
             pods_settled = False   # the hold is judged at the release
+        if oneshot_new and oneshot["bitten_at"] is not None and oneshot["lifted_at"] is None and not fault.get("infra_fail"):
+            pods_settled = False   # the cause is taken away before the terminal is judged
+        if _fault_repeats(fault) and fault.get("fired_count") and int(fault["fired_count"]) < int(fault["repeat"]) \
+                and not fault.get("infra_fail"):
+            pods_settled = False   # the window stays open until the repetitions are spent
         if _runlost_repin_pending(ctx.get("runlost"), now):
             pods_settled = False   # the run layer's re-pin is owed before the terminal is judged
         # A bump with no group is a plain rollout: its phase is not the run's.
@@ -21050,7 +21336,7 @@ def _canary(case_id, yaml_file, desc, hdr):
         # stable side must hold the floor that remains.
         ctx["floor_allowance"] = {fault["crash_comp"]: newbreak["peak_crash"]}
     fault = ctx.get("fault") or {}
-    killed = fault.get("victim_comp") if fault.get("kind") == "podkill" and fault.get("fired") else None
+    killed = fault.get("victim_comp") if fault.get("kind") in CANARY_REPEAT_FAULTS and fault.get("fired") else None
     killed = killed or (ctx.get("podkill") or {}).get("comp")
     verdict = min_ready_checks(ctx, sorted(ctx["configured"] - ({killed} if killed else set())), verdict, notes, checks)
     if killed:
@@ -21091,6 +21377,14 @@ def _canary(case_id, yaml_file, desc, hdr):
              f"second verb {verb2} never fired: the canary never reached {during2} after {verb} (phases={sorted(phases)})")
     if new_break:
         verdict = _new_break_checks(ctx, ctx["fault"], newbreak, phases, verdict, notes, checks)
+    if oneshot_new:
+        verdict = _oneshot_new_checks(ctx, oneshot, state, verdict, notes, checks)
+    if pending:
+        verdict = _canary_pending_checks(pending, pend, lift, verdict, notes, checks)
+    if _fault_repeats(ctx.get("fault")):
+        op_pods = sum(N[c] * ctx["pods_per_inst"].get(c, 1) for c in group) * (2 if expect_rollback else 1)
+        verdict = _repeat_checks(ctx["fault"], ctx["pods_per_inst"], group, op_pods, ctx["trigger_ts"], verdict, notes, checks)
+        verdict = _repeat_end_checks(case_id, N, ctx["configured"], verdict, notes, checks)
     verdict = _hook_fault_fired_checks(ctx.get("fault"), phases, verdict, notes, checks)
     if gate_fault:
         verdict = _gate_fault_checks(ctx, gate_fault, gate, on_inconclusive, failed_checks_peak, rejected, phases,
@@ -21434,7 +21728,9 @@ def _canary(case_id, yaml_file, desc, hdr):
     # serving, and nothing rebuilt the broken revision for it after the bump.
     verdict = _crashloop_checks(ctx.get("fault"), ctx["pod_state"], ctx["old_hashes"], ctx["trigger_ts"],
                                 verdict, notes, checks, bumped=group,
-                                surges=(ctx.get("inv") or {}).get("surges"))
+                                surges=(ctx.get("inv") or {}).get("surges"), kinds=CANARY_STABLE_FAULTS)
+    if once:
+        verdict = _canary_once_checks(ctx, ctx["fault"], hdr, verdict, notes, checks)
     if pre_final is not None:
         left = stranded()
         good(not left, "re-target: no Instance stranded on a pre-re-target revision",

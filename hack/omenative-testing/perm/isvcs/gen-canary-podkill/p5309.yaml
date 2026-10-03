@@ -1,0 +1,22 @@
+# p5309: [gen] canary podkill evict once at manual engine N=8 rp None  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 fault=evict:canary-serving@0 co=none topo=engine canary=manual verbhold=30 victim=stable victimcomp=engine nophase=Failed cell=canary/Serving[M]/capacityDropped[evicted]
+# reason: one old-revision engine pod is evicted through the Eviction API (as a node drain would) while the ladder waits at its first manual gate, which the harness promotes once the Instance is whole again on engine single (8 Instances), under restart policy None; the step keeps its state across the capacity dip, the replacement comes back on the revision it ran, and the ladder walks every step to Stable with every Instance on the canary revision serving
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p5309 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "10%", traffic: 10, pause: {  } }
+              - { capacity: "30%", traffic: 30, pause: {  } }
+              - { capacity: "60%", traffic: 60, pause: {  } }
+              - { capacity: "100%", traffic: 100 }

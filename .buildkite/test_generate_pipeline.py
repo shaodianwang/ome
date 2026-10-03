@@ -1469,12 +1469,20 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-canary-crash", "pd", "")], 12)
         self.assertEqual(shard_counts[("gen-canary-second-rev", "engine", "")], 3)
         self.assertEqual(shard_counts[("gen-canary-second-rev", "pd", "")], 8)
-        self.assertEqual(shard_counts[("gen-canary-podkill", "engine", "")], 2)
-        self.assertEqual(shard_counts[("gen-canary-podkill", "pd", "")], 4)
-        self.assertEqual(shard_counts[("gen-canary-fault-old", "engine", "")], 16)
-        self.assertEqual(shard_counts[("gen-canary-fault-old", "pd", "")], 47)
-        self.assertEqual(shard_counts[("gen-canary-fault-new", "engine", "")], 5)
-        self.assertEqual(shard_counts[("gen-canary-fault-new", "pd", "")], 13)
+        # The podkill and fault families also carry a canary beside the
+        # remaining faults on the six shape families, the gangs included.
+        self.assertEqual(shard_counts[("gen-canary-podkill", "engine", "")], 3)
+        self.assertEqual(shard_counts[("gen-canary-podkill", "engine-mn", "")], 2)
+        self.assertEqual(shard_counts[("gen-canary-podkill", "pd", "")], 7)
+        self.assertEqual(shard_counts[("gen-canary-podkill", "pd-mn", "")], 2)
+        self.assertEqual(shard_counts[("gen-canary-fault-old", "engine", "")], 25)
+        self.assertEqual(shard_counts[("gen-canary-fault-old", "engine-mn", "")], 5)
+        self.assertEqual(shard_counts[("gen-canary-fault-old", "pd", "")], 60)
+        self.assertEqual(shard_counts[("gen-canary-fault-old", "pd-mn", "")], 5)
+        self.assertEqual(shard_counts[("gen-canary-fault-new", "engine", "")], 9)
+        self.assertEqual(shard_counts[("gen-canary-fault-new", "engine-mn", "")], 4)
+        self.assertEqual(shard_counts[("gen-canary-fault-new", "pd", "")], 19)
+        self.assertEqual(shard_counts[("gen-canary-fault-new", "pd-mn", "")], 3)
         self.assertEqual(shard_counts[("gen-canary-fault-gate", "engine", "")], 13)
         self.assertEqual(shard_counts[("gen-canary-fault-gate", "engine-mn", "")], 3)
         self.assertEqual(shard_counts[("gen-canary-fault-gate", "pd", "")], 29)
@@ -1577,7 +1585,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-lift", "engine-mn", "")], 2)
         self.assertEqual(shard_counts[("gen-lift", "pd", "")], 1)
         self.assertEqual(shard_counts[("gen-lift", "pd-mn", "")], 1)
-        self.assertEqual(job_count, 932)
+        self.assertEqual(job_count, 989)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin
@@ -2162,7 +2170,7 @@ class TestEvalTargeted(PipelineTestCase):
         self.assertEqual(gp._top_level_keys(batches[-1]), ["chart-ome-release"])
         # The fixture round, 5% sampled under the pinned commit: the pin
         # moves with the corpus like the full and smoke totals.
-        self.assertEqual(sum(gp._job_count(document) for document in batches), 382)
+        self.assertEqual(sum(gp._job_count(document) for document in batches), 407)
 
 
 class TestEvalVerdicts(unittest.TestCase):
@@ -3051,12 +3059,12 @@ class TestEvalMode(PipelineTestCase):
         committed = sorted(case for _, _, cases in self.groups for case in cases)
         default = sorted(case for child in self.runner_jobs(self.full, scheduler="") for case in self.cases_of(child))
         self.assertEqual(default, committed)
-        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 932)
-        self.assertEqual(len(self.runner_jobs(self.full)), 2123)
-        self.assertEqual(len(self.full), 2134)
-        self.assertEqual(len(self.smoke), 197)
+        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 989)
+        self.assertEqual(len(self.runner_jobs(self.full)), 2251)
+        self.assertEqual(len(self.full), 2265)
+        self.assertEqual(len(self.smoke), 203)
         self.assertEqual(len(self.smoke_batches), 3)
-        self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 306)
+        self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 312)
         # Only a full round records its verdicts.
         self.assertNotIn(f'key: "{gp.EVAL_VERDICTS_STEP_KEY}"', "".join(self.smoke_batches))
 
@@ -3225,7 +3233,7 @@ class TestPipelineUploads(PipelineTestCase):
     def test_todays_corpus_uploads_within_the_limit_and_the_total_is_pinned(self):
         self.assert_uploads_are_well_formed(self.batches, self.children)
         self.assertGreater(len(self.batches), 2)
-        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2244)
+        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2375)
 
     def test_the_full_round_records_its_verdicts_after_every_eval_group(self):
         last = self.batches[-1]

@@ -1,0 +1,29 @@
+# p6597: [gen] canary fault-old configkey lifted at soak engine N=8 rp RecreateInstance  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 fault=configkey:canary-serving@1 co=none topo=engine canary=auto nophase=Failed cell=canary/Serving[soak]/stableBroken[configMissingOnce] lift=after-settle
+# reason: one old-revision engine pod waits in CreateContainerConfigError once its ConfigMap key is removed and its runner restarted while the second step soaks its split on engine single (8 Instances), under restart policy RecreateInstanceOnPodRestart; the key is put back 20s after the wait showed; the ladder walks every step to Stable inside its budgets, the broken Instance ends on the canary revision serving, no repair is opened for it after the push, and the healthy Instances keep serving above N-1
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6597 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    runner: { env: [{ name: "TEST_CONFIG_VALUE", valueFrom: { configMapKeyRef: { name: "p6597-config", key: "value" } } }] }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            readyTimeout: "240s"
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: p6597-config }
+data: { value: "1" }

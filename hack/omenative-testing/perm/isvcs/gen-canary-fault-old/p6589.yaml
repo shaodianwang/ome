@@ -1,0 +1,22 @@
+# p6589: [gen] canary fault-old readiness kept at soak engine N=8 rp None  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 fault=readiness:canary-serving@1 co=none topo=engine canary=auto form=persist nophase=Failed cell=canary/Serving[soak]/stableBroken[readinessLost]
+# reason: one old-revision engine pod stops passing readiness while it keeps running while the second step soaks its split on engine single (8 Instances), under restart policy None; the switch stays set until the case ends; the ladder walks every step to Stable inside its budgets, the broken Instance ends on the canary revision serving, no repair is opened for it after the push, and the healthy Instances keep serving above N-1
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6589 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

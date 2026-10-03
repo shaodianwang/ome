@@ -7136,7 +7136,7 @@ class GeneratedStoryFamiliesTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.outputs, rows = generate_cases.build_outputs()
-        cls.rows = {folder: [(n, kv, m) for f, n, kv, m in rows if f == folder]
+        cls.rows = {folder: [(n, kv, m) for f, n, kv, m in rows if f == folder and "row" not in m]
                     for folder in ("gen-canary-crash", "gen-canary-second-rev", "gen-canary-podkill")}
 
     def _line2(self, folder, name):
@@ -7249,7 +7249,7 @@ class GeneratedCanaryFaultFamiliesTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.outputs, rows = generate_cases.build_outputs()
-        cls.rows = {folder: [(n, kv, m) for f, n, kv, m in rows if f == folder]
+        cls.rows = {folder: [(n, kv, m) for f, n, kv, m in rows if f == folder and "row" not in m]
                     for folder in ("gen-canary-fault-old", "gen-canary-fault-new")}
 
     def _line2(self, folder, name):
@@ -15625,3 +15625,394 @@ class HookOperationTest(unittest.TestCase):
         self.assertEqual("scale", run._window_operation({"mode": "scaledown", "fault": "preempt:settling"}))
         self.assertEqual("delete", run._window_operation({"mode": "recreate", "fault": "evict:settling"}))
         self.assertEqual("push", run._window_operation({"fault": "preempt:rotating", "lift": "never"}))
+
+
+class CanaryUnderEveryFaultTest(unittest.TestCase):
+    """The faults a canary case may carry beside a crash and a pull failure:
+    a missing key and a readiness loss on the stable side (before the push
+    or at a grid state) and on the pushed revision, the one-shot forms, a
+    runner killed exactly once, a pod fault that repeats at a grid state,
+    and a taint armed before the push; what the header rules accept, what
+    the handler arms and ticks, and what each verdict branch reads."""
+
+    BASE = "mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 co=none topo=engine canary=auto"
+    GANG = "mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 co=none topo=engine-mn canary=auto"
+    ACCEPTED = [
+        "fault=configkey:idle lift=never nophase=Failed cell=canary/Idle/stableBroken[configMissing]",
+        "fault=configkey:idle lift=after-settle nophase=Failed cell=canary/Idle/stableBroken[configMissingOnce]",
+        "fault=configkey:canary-serving@1 lift=never nophase=Failed cell=canary/Serving[soak]/stableBroken[configMissing]",
+        "fault=readiness:idle form=persist nophase=Failed cell=canary/Idle/stableBroken[readinessLost]",
+        "fault=readiness:canary-serving@1 form=recover nophase=Failed cell=canary/Serving[soak]/stableBroken[readinessLostOnce]",
+        "fault=crashloop:idle form=start lift=after-settle nophase=Failed cell=canary/Idle/stableBroken[crashStartOnce]",
+        "fault=imagepull:canary-serving@1 lift=after-settle nophase=Failed cell=canary/Serving[soak]/stableBroken[imagePullOnce]",
+        "fault=crashloop:canary-serving@1 form=load once=1 nophase=Failed cell=canary/Serving[soak]/stableBroken[restartOnce]",
+        "fault=crashloop:new form=start once=1 victimcomp=engine nophase=Failed cell=canary/Staging/canaryBroken[restartOnce]",
+        "fault=crashloop:new form=load once=1 victimcomp=engine nophase=Failed cell=canary/Serving/canaryBroken[restartOnce]",
+        "fault=configkey:new lift=never during=canary-failed verb=rollback terminal=RolledBack "
+        "cell=canary/Staging/canaryBroken[configMissing],canary/Failed/rollback",
+        "fault=configkey:new lift=after-settle nophase=Failed cell=canary/Staging/canaryBroken[configMissingOnce]",
+        "fault=readiness:new during=canary-failed verb=rebump-fix terminal=Stable "
+        "cell=canary/Staging/canaryBroken[readinessLost],canary/Failed/newTarget",
+        "fault=readiness:new form=recover nophase=Failed cell=canary/Staging/canaryBroken[readinessLostOnce]",
+        "fault=imagepull:new lift=after-settle nophase=Failed cell=canary/Staging/canaryBroken[imagePullOnce]",
+        "fault=taint:all lift=after-settle nophase=Failed cell=canary/Staging/capacityReached[unschedulableLifted]",
+        "fault=taint:all lift=never terminal=Failed cell=canary/Staging/readyTimeout[unschedulable]",
+        "fault=evict:canary-serving@0 victim=stable victimcomp=engine nophase=Failed cell=canary/Serving/capacityDropped[evicted]",
+        "fault=evict:canary-serving@0 victim=stable victimcomp=engine repeat=2 nophase=Failed "
+        "cell=canary/Serving/capacityDropped[evictedRepeat]",
+        "fault=podkill:canary-serving@0 victim=stable victimcomp=engine repeat=2 nophase=Failed "
+        "cell=canary/Serving/capacityDropped[stableRepeat]",
+    ]
+    REFUSED = [
+        ("fault=crashloop:new form=load lift=after-settle nophase=Failed cell=canary/Staging/canaryBroken[x]",
+         "heals the harness's own break under a canary"),
+        ("fault=configkey:new lift=never nophase=Failed cell=canary/Staging/canaryBroken[configMissing]",
+         "ends with its exit"),
+        ("fault=crashloop:canary-serving@1 form=start once=1 nophase=Failed cell=canary/Serving/stableBroken[restartOnce]",
+         "kills a Ready stable pod's runner once"),
+        ("fault=preempt:canary-serving@0 lift=after-settle nophase=Failed cell=canary/Serving/capacityDropped[x]",
+         "preempts the podkill victim"),
+        ("fault=readiness:canary-serving@1 nophase=Failed cell=canary/Serving/stableBroken[readinessLost]",
+         "needs form=persist|recover"),
+        ("fault=configkey:idle nophase=Failed cell=canary/Idle/stableBroken[configMissing]",
+         "needs lift=never"),
+        ("fault=podkill:canary-serving@0 victim=stable repeat=2 nophase=Failed cell=canary/Serving/capacityDropped[x] "
+         "mode=rollout", "needs a phase hook"),
+    ]
+
+    def _errs(self, tmp, i, base, extra):
+        path = Path(tmp) / f"p{i}.yaml"
+        path.write_text(f"# p{i}: probe {base} {extra}\n# reason: probe\napiVersion: ome.io/v1beta1\n"
+                        f"kind: InferenceService\nmetadata: {{ name: p{i} }}\n")
+        return run.validate_case_file(path)
+
+    def test_header_rules_accept_every_new_canary_form(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for i, extra in enumerate(self.ACCEPTED):
+                self.assertEqual([], self._errs(tmp, i, self.BASE, extra), extra)
+            gang = ("fault=podkill:canary-serving@0 victim=stable victimcomp=engine repeat=2 kill=worker nophase=Failed "
+                    "cell=canary/Serving/capacityDropped[gangRepeat]")
+            self.assertEqual([], self._errs(tmp, 99, self.GANG, gang))
+
+    def test_header_rules_refuse_the_forms_no_verb_drives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for i, (extra, phrase) in enumerate(self.REFUSED):
+                errs = self._errs(tmp, i, self.BASE, extra)
+                self.assertTrue(any(phrase in e for e in errs), (extra, errs))
+
+    def test_fault_vocabulary_names_the_stable_breaks_and_pod_faults_at_a_grid_state(self):
+        for v in ("configkey:idle", "configkey:canary-serving@1", "readiness:idle", "readiness:canary-staging",
+                  "evict:canary-serving@0", "podkill:canary-serving", "preempt:canary-serving@1"):
+            self.assertTrue(run._fault_ok(v), v)
+        for v in ("configkey:settling", "readiness:rotating", "evict:canary-nowhere", "podkill:canary-serving@x"):
+            self.assertFalse(run._fault_ok(v), v)
+
+    def _fault(self, **kw):
+        hdr = {"Ne": 8, "Nd": 0, "Nr": 0, "mode": "canary", "topo": "engine"}
+        hdr.update(kw)
+        return run._fault_new("p999", hdr)
+
+    def test_the_handler_sorts_its_faults_by_what_arms_and_heals_them(self):
+        kept = self._fault(fault="configkey:new", lift="never")
+        once = self._fault(fault="crashloop:new", form="start", once=1)
+        lifted = self._fault(fault="imagepull:new", lift="after-settle")
+        recover = self._fault(fault="readiness:new", form="recover")
+        never_ready = self._fault(fault="readiness:new")
+        self.assertTrue(run._canary_new_break(kept) and run._canary_new_break(never_ready))
+        self.assertFalse(run._canary_new_break(once) or run._canary_new_break(lifted) or run._canary_new_break(recover))
+        self.assertTrue(run._canary_oneshot_new(lifted) and run._canary_oneshot_new(recover))
+        self.assertFalse(run._canary_oneshot_new(kept) or run._canary_oneshot_new(once))
+        self.assertTrue(run._fault_before_push(self._fault(fault="configkey:idle", lift="never")))
+        self.assertTrue(run._fault_before_push(self._fault(fault="readiness:idle", form="persist")))
+        self.assertTrue(run._canary_stable_hook_fault(self._fault(fault="readiness:canary-serving@1", form="persist")))
+        self.assertFalse(run._canary_stable_hook_fault(self._fault(fault="readiness:idle", form="persist")))
+        self.assertFalse(run._canary_stable_hook_fault(self._fault(fault="crashloop:canary-serving@1", form="load")))
+        self.assertTrue(run._canary_break_heals(self._fault(fault="configkey:canary-serving@1", lift="after-settle")))
+        self.assertTrue(run._canary_break_heals(self._fault(fault="readiness:idle", form="recover")))
+        self.assertTrue(run._canary_break_heals(self._fault(fault="crashloop:idle", form="load", lift="after-settle")))
+        self.assertFalse(run._canary_break_heals(self._fault(fault="readiness:idle", form="persist")))
+        self.assertFalse(run._canary_break_heals(self._fault(fault="configkey:new", lift="after-settle")))
+        self.assertFalse(run._canary_break_heals(once))
+
+    def test_the_push_arms_a_missing_key_or_the_readiness_switch(self):
+        ctx = {"pod_state": {"e0": _rec("engine", 0, "old")}, "old_hashes": {"old"}}
+        f = self._fault(fault="configkey:new", lift="never")
+        with mock.patch.object(run, "_get_pod", lambda name: {"name": name}), \
+                mock.patch.object(run, "_configkey_env_ref", lambda obj: ("TEST_CONFIG_VALUE", "p999-config", "value")):
+            image, comps, env = run._new_break_arm(f, "engine", ctx)
+        self.assertEqual(("", {"engine"}), (image, comps))
+        self.assertEqual([{"name": "TEST_CONFIG_VALUE", "valueFrom": {"configMapKeyRef": {"name": "p999-config", "key": "value-new"}}}], env)
+        self.assertEqual(("p999-config", "value-new", run.CONFIGKEY_NEW_VALUE), (f["cm_name"], f["cm_key"], f["cm_value"]))
+        self.assertEqual(run.CONFIGKEY_WAITING, f["bite"])
+        with mock.patch.object(run, "_get_pod", lambda name: {}), mock.patch.object(run, "_configkey_env_ref", lambda obj: None):
+            self.assertIsNone(run._new_break_arm(f, "engine", ctx), "a runner that reads no key has nothing to miss")
+        image, comps, env = run._new_break_arm(self._fault(fault="readiness:new"), "engine", ctx)
+        self.assertEqual(("", {"engine"}, [{"name": run.READINESS_SWITCH_ENV, "value": "1"}]), (image, comps, env))
+
+    def test_the_bite_of_a_never_ready_or_keyless_revision(self):
+        f = self._fault(fault="readiness:new")
+        pods = [("e9", {"ready": False})]
+        self.assertIsNone(run._new_break_bite(f, {}, pods, set(), "canary-staging", 0, 1.0))
+        bite = run._new_break_bite(f, {}, pods, set(), "canary-staging", 0, 1.0 + run.READINESS_NEW_BITE_S)
+        self.assertEqual(("canary-staging", 0), (bite["hook"], bite["step"]))
+        self.assertIn("without passing readiness", bite["what"])
+        self.assertIsNone(run._new_break_bite(f, {}, pods, {"e9"}, "canary-staging", 0, 500.0),
+                          "a pod that was Ready once is not a revision that never passes")
+        g = self._fault(fault="configkey:new", lift="never")
+        with mock.patch.object(run, "_get_pod", lambda name: {}), \
+                mock.patch.object(run, "_pod_waiting_reason", lambda obj: run.CONFIGKEY_WAITING):
+            bite = run._new_break_bite(g, {}, pods, set(), "canary-staging", 0, 3.0)
+        self.assertIn(run.CONFIGKEY_WAITING, bite["what"])
+
+    def test_the_pending_tick_reads_the_wait_lifts_after_the_settle_and_stops_at_the_park(self):
+        f = self._fault(fault="taint:all", lift="after-settle")
+        f["cause"] = "the taint"
+        out = {"bitten_at": None, "token": "", "row": None, "message": "", "failed": [], "lifted_at": None,
+               "since": None, "last_poll": 0.0, "park_at": None}
+        ctx = {"case_id": "p999", "trigger_ts": 100.0, "canary_hook": "canary-staging"}
+        waiting = {("engine", "8"): {"phase": "Pending", "operation": {"waiting": "Unschedulable"},
+                                     "lastFailure": {"message": "0/3 nodes are available"}}}
+        lifted = []
+        with mock.patch.object(run, "_ir_rows_by_index", lambda case_id, comps: waiting), \
+                mock.patch.object(run, "_pending_lift", lambda fault: lifted.append(fault) or True):
+            run._canary_pending_tick(ctx, f, out, ["engine"], "after-settle", 110.0)
+            self.assertEqual((10.0, "Unschedulable", ("engine", "8")), (out["bitten_at"], out["token"], out["row"]))
+            self.assertEqual([], lifted, "the lift waits for the settle")
+            run._canary_pending_tick(ctx, f, out, ["engine"], "after-settle", 110.0 + run.LIFT_SETTLE_S)
+        self.assertEqual([f], lifted)
+        self.assertEqual(10.0 + run.LIFT_SETTLE_S, out["lifted_at"])
+        notes, checks = [], []
+        self.assertEqual("PASS", run._canary_pending_checks(f, out, "after-settle", "PASS", notes, checks))
+        self.assertTrue(any("waits with reason Unschedulable" in c for c in checks))
+        # lift=never: the rows are read until the ladder parks, then the park is the claim
+        g = self._fault(fault="taint:all", lift="never")
+        out2 = dict(out, bitten_at=None, lifted_at=None, since=None, last_poll=0.0, park_at=None, failed=[])
+        with mock.patch.object(run, "_ir_rows_by_index", lambda case_id, comps: waiting):
+            run._canary_pending_tick(ctx, g, out2, ["engine"], "never", 110.0)
+            ctx["canary_hook"] = "canary-failed"
+            run._canary_pending_tick(ctx, g, out2, ["engine"], "never", 200.0)
+        self.assertEqual((10.0, 100.0, None), (out2["bitten_at"], out2["park_at"], out2["lifted_at"]))
+        notes, checks = [], []
+        self.assertEqual("PASS", run._canary_pending_checks(g, out2, "never", "PASS", notes, checks))
+        self.assertTrue(any("parked 100s after the push" in c for c in checks))
+        failed = dict(out2, failed=[("engine", "8")])
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._canary_pending_checks(g, failed, "never", "PASS", notes, checks))
+        self.assertTrue(any("read Failed while" in n for n in notes))
+        silent = dict(out2, bitten_at=None)
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._canary_pending_checks(g, silent, "never", "PASS", notes, checks))
+        self.assertTrue(any("every wait has a reason" in n for n in notes))
+
+    def test_the_oneshot_tick_fires_reads_the_bite_and_lifts_after_the_settle(self):
+        f = self._fault(fault="readiness:new", form="recover")
+        f["cause"] = "the readiness switch"
+        out = {"bitten_at": None, "lifted_at": None, "held_at": None, "hold": "", "last_bite": 0.0}
+        ctx = {"trigger_ts": 100.0}
+        lifted = []
+        with mock.patch.object(run, "_oneshot_new_fire", lambda fault, c: fault.__setitem__("fired", True)), \
+                mock.patch.object(run, "_oneshot_new_bitten", lambda fault, c: True), \
+                mock.patch.object(run, "_oneshot_new_lift", lambda fault: lifted.append(fault) or True):
+            run._canary_oneshot_new_tick(ctx, f, out, 105.0)
+            self.assertTrue(f["fired"])
+            self.assertIsNone(out["bitten_at"], "the fire and the bite are read on separate polls")
+            run._canary_oneshot_new_tick(ctx, f, out, 105.0 + run.ONCE_POLL_S)
+            self.assertEqual(5.0 + run.ONCE_POLL_S, out["bitten_at"])
+            run._canary_oneshot_new_tick(ctx, f, out, 110.0)
+            self.assertEqual([], lifted, "the lift waits for the settle")
+            run._canary_oneshot_new_tick(ctx, f, out, 105.0 + run.ONCE_POLL_S + run.LIFT_SETTLE_S)
+        self.assertEqual([f], lifted)
+        self.assertIsNotNone(out["lifted_at"])
+        self.assertTrue(f["notes"][-1].startswith("the readiness switch lifted"))
+
+    def test_a_runner_killed_once_under_a_canary_is_judged_on_the_ladders_end_state(self):
+        f = self._fault(fault="crashloop:new", form="start", once=1)
+        f.update(fired=True, crash_comp="engine", crash_inst="3", crash_pod="e3", kills=1, crash_restarts=0, restart_seen=True)
+        ctx = {"case_id": "p999", "pod_state": {}, "old_hashes": {"old"}, "N": {"engine": 8}, "configured": {"engine"},
+               "info": {"restart": {"engine": "None"}}, "inv": {}}
+        out = {"fired": True, "kills": 1, "bitten": True, "restarts": 1, "rebuilt": False, "final": "3", "serving": True,
+               "on_revision": True, "expect_new": True, "repairs": [], "escalations": [], "rows_settled": True, "rows_why": ""}
+        seen = []
+        with mock.patch.object(run, "_once_observe", lambda *a, **k: seen.append((a[4], k)) or dict(out)):
+            notes, checks = [], []
+            self.assertEqual("PASS", run._canary_once_checks(ctx, f, {}, "PASS", notes, checks))
+            self.assertTrue(seen[0][0], "the victim is read on the canary revision")
+            self.assertTrue(any("no repair under restart policy None" in c for c in checks))
+            repaired = dict(out, repairs=["OMENative component=engine instance=3 restart triggered"])
+        with mock.patch.object(run, "_once_observe", lambda *a, **k: dict(repaired)):
+            notes, checks = [], []
+            self.assertEqual("FAIL", run._canary_once_checks(ctx, f, {}, "PASS", notes, checks))
+            self.assertTrue(any("restart policy None promises no repair" in c for c in checks))
+        g = self._fault(fault="crashloop:canary-serving@1", form="load", once=1)
+        notes, checks = [], []
+        self.assertEqual("PASS", run._canary_once_checks(ctx, g, {}, "PASS", notes, checks))
+        self.assertIn("the kill never landed", g["infra_fail"])
+
+    def test_the_heal_tick_puts_a_key_back_or_lifts_the_switch(self):
+        f = self._fault(fault="readiness:idle", form="recover")
+        f.update(fired=True, crash_pod="e1", crash_comp="engine", crash_inst="1")
+        ctx = {"fault": f, "pod_state": {"e1": _rec("engine", 1, "old", ready=False)}}
+        lifted = []
+        with mock.patch.object(run, "_rollback_break_lift", lambda fault, after="": lifted.append(after) or fault.__setitem__("healed_at", 1.0)):
+            run._break_heal_tick(ctx, 100.0)
+            self.assertEqual(100.0, f["bite_ts"])
+            run._break_heal_tick(ctx, 100.0 + run.LIFT_SETTLE_S - 1)
+            self.assertEqual([], lifted)
+            run._break_heal_tick(ctx, 100.0 + run.LIFT_SETTLE_S)
+        self.assertEqual(1, len(lifted))
+        kept = self._fault(fault="readiness:idle", form="persist")
+        kept.update(fired=True, crash_pod="e1")
+        with mock.patch.object(run, "_rollback_break_lift", lambda *a, **k: self.fail("a kept switch is never lifted")):
+            run._break_heal_tick({"fault": kept, "pod_state": ctx["pod_state"]}, 500.0)
+
+    def test_the_manual_gate_holds_for_an_eviction_and_a_hook_fault_that_never_fired_fails(self):
+        f = self._fault(fault="evict:canary-serving@0", victim="stable")
+        self.assertTrue(run._podkill_fault_at_hold(f, "canary-serving", 0))
+        self.assertFalse(run._podkill_fault_at_hold(f, "canary-serving", 1))
+        g = self._fault(fault="readiness:canary-serving@1", form="persist")
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._hook_fault_fired_checks(g, {"Pending", "Stable"}, "PASS", notes, checks))
+        self.assertIn("never fired", notes[0])
+        h = self._fault(fault="configkey:canary-serving@1", lift="never")
+        h.update(fired=True, crash_pod="e1", crash_comp="engine", crash_inst="1", crash_hash="old")
+        self.assertTrue(run._break_at_hook(h), "a key removed at a grid state holds the manual gate like a crash")
+
+    def test_the_stable_break_verdict_reads_a_missing_key_and_a_readiness_loss(self):
+        f = self._fault(fault="configkey:idle", lift="never")
+        f.update(fired=True, crash_inst="1", crash_comp="engine", crash_hash="old", crash_pod="e1")
+        healed = {"e1": {"alive": True, "hash": "new", "inst": "1", "comp": "engine", "ready": True, "serving": True}}
+        stale = {"e1": {"alive": True, "hash": "old", "inst": "1", "comp": "engine", "ready": False, "serving": False}}
+        with mock.patch.object(run, "_isvc_events_since", lambda case_id, since, **kw: []):
+            notes, checks = [], []
+            self.assertEqual("PASS", run._crashloop_checks(f, healed, {"old"}, 1.0, "PASS", notes, checks, bumped={"engine"}),
+                             "a crash verdict asked for the crash kinds alone leaves the key alone")
+            self.assertEqual([], checks)
+            notes, checks = [], []
+            self.assertEqual("PASS", run._crashloop_checks(f, healed, {"old"}, 1.0, "PASS", notes, checks, bumped={"engine"},
+                                                           kinds=run.CANARY_STABLE_FAULTS))
+            self.assertTrue(any("ended on the new revision" in c for c in checks))
+            notes, checks = [], []
+            self.assertEqual("FAIL", run._crashloop_checks(f, stale, {"old"}, 1.0, "PASS", notes, checks, bumped={"engine"},
+                                                           kinds=run.CANARY_STABLE_FAULTS))
+            self.assertTrue(any("did not end on the new revision" in n for n in notes))
+
+
+class CanaryBesideEveryFaultFamiliesTest(unittest.TestCase):
+    """The rows the three canary families carry on the ledger's six shape
+    families beside the faults the earlier rows left out: every row names
+    its ledger cell, its grid cell and the operator's end state, and its
+    header validates."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.fam = {folder: [(n, kv, m) for f, n, kv, m in rows if f == folder and "row" in m]
+                   for folder in ("gen-canary-fault-old", "gen-canary-fault-new", "gen-canary-podkill")}
+
+    def test_counts_shapes_and_the_continuation_block(self):
+        self.assertEqual({"gen-canary-fault-old": 129, "gen-canary-fault-new": 78, "gen-canary-podkill": 36},
+                         {folder: len(fam) for folder, fam in self.fam.items()})
+        shapes = {f for f, *_ in generate_cases.GATE_SHAPES}
+        for folder, fam in self.fam.items():
+            self.assertEqual(shapes, {m["shape"] for _n, _kv, m in fam}, folder)
+        ids = sorted(int(n[1:]) for n, _kv, _m in self.fam["gen-canary-fault-old"])
+        lo, hi = generate_cases.GEN_BLOCKS["gen-canary-fault-old"]
+        clo, _chi = generate_cases.GEN_CONTINUATIONS["gen-canary-fault-old"]
+        self.assertEqual(hi - 1, max(i for i in ids if i < hi), "the first block is filled before the continuation")
+        self.assertEqual(clo, min(i for i in ids if i >= clo))
+
+    def test_the_ledger_rows_each_family_fills(self):
+        rows = {folder: {m["row"] for _n, _kv, m in fam} for folder, fam in self.fam.items()}
+        self.assertEqual({"readiness never passes, persistent, running", "readiness never passes, one-shot, running",
+                          "config missing, one-shot, running", "crash at start, one-shot, running",
+                          "crash after Ready, one-shot, running", "image pull, one-shot, running"},
+                         rows["gen-canary-fault-old"])
+        self.assertEqual({"config missing, persistent, new", "config missing, one-shot, new",
+                          "readiness never passes, persistent, new", "readiness never passes, one-shot, new",
+                          "image pull, one-shot, new", "crash at start, one-shot, new", "crash after Ready, one-shot, new",
+                          "pod Pending, one-shot", "pod Pending, persistent"},
+                         rows["gen-canary-fault-new"])
+        self.assertEqual({"pod deleted by hand, persistent", "gang member lost, persistent",
+                          "evicted or preempted, one-shot", "evicted or preempted, persistent"},
+                         rows["gen-canary-podkill"])
+
+    def test_stable_rows_cross_position_policy_and_restart_policy(self):
+        fam = self.fam["gen-canary-fault-old"]
+        for name, kv, m in fam:
+            pos = m["verb"].partition("@")[2]
+            self.assertEqual(generate_cases.STABLE_POSITION_POLICY[pos], kv["canary"], name)
+            self.assertEqual(generate_cases.STABLE_POSITIONS[pos], kv["fault"].partition(":")[2], name)
+            self.assertEqual("Failed", kv["nophase"], f"{name}: the ladder must not park")
+            self.assertTrue(run._cell_ok(kv["cell"]), name)
+            self.assertIn("stableBroken", kv["cell"], name)
+            if kv["canary"] == "manual":
+                self.assertEqual(generate_cases.BREAK_GATE_HOLD_S, kv["verbhold"], name)
+            if kv["topo"].endswith("-mn"):
+                self.assertNotEqual("idle", pos, f"{name}: gangs run the ladder positions alone")
+            kind = kv["fault"].partition(":")[0]
+            if kind == "configkey":
+                self.assertIn("kind: ConfigMap", self.outputs[f"gen-canary-fault-old/{name}.yaml"], name)
+                self.assertEqual("after-settle", kv["lift"], f"{name}: a kept key is read by both revisions")
+            if kv.get("once"):
+                self.assertEqual(("crashloop", "load"), (kind, kv["form"]), name)
+                self.assertNotIn("victims", kv, name)
+            line2 = self.outputs[f"gen-canary-fault-old/{name}.yaml"].splitlines()[1]
+            self.assertIn("ends on the canary revision serving" if not kv.get("once") else "ending on the canary revision", line2, name)
+        self.assertEqual({"None", "RecreateInstance"}, {m["rp"] for _n, kv, m in fam if kv["fault"].startswith("configkey")})
+        self.assertEqual({"None"}, {m["rp"] for _n, kv, m in fam if kv["fault"].startswith("readiness")})
+
+    def test_pushed_rows_name_their_exit_or_their_lift(self):
+        fam = self.fam["gen-canary-fault-new"]
+        for name, kv, m in fam:
+            text = self.outputs[f"gen-canary-fault-new/{name}.yaml"]
+            self.assertEqual("auto", kv["canary"], name)
+            self.assertTrue(run._cell_ok(kv["cell"]), name)
+            kind, _, param = kv["fault"].partition(":")
+            if kind == "taint":
+                self.assertEqual(("all", kv["lift"] == "never"), (param, kv.get("terminal") == "Failed"), name)
+                continue
+            self.assertEqual("new", param, name)
+            if kv.get("verb"):
+                self.assertEqual("canary-failed", kv["during"], name)
+                self.assertEqual({"rollback": "RolledBack", "rebump-fix": "Stable"}[kv["verb"]], kv["terminal"], name)
+                self.assertIn(f'readyTimeout: "{generate_cases.HELD_READY_TIMEOUT}"', text, name)
+                self.assertIn("canary/Failed/", kv["cell"], name)
+            else:
+                self.assertEqual("Failed", kv["nophase"], name)
+                self.assertIn(f'readyTimeout: "{generate_cases.LIFTED_READY_TIMEOUT}"', text, name)
+            if kind == "configkey":
+                self.assertIn("kind: ConfigMap", text, name)
+                self.assertNotIn("victimcomp", kv, name)
+            else:
+                self.assertEqual("engine", kv["victimcomp"], name)
+            if kv.get("once"):
+                self.assertIn(m["rp"], ("None", "RecreateInstance"), name)
+            else:
+                self.assertEqual("None", m["rp"], name)
+
+    def test_pod_fault_rows_delete_or_evict_once_and_again(self):
+        fam = self.fam["gen-canary-podkill"]
+        for name, kv, m in fam:
+            kind = kv["fault"].partition(":")[0]
+            self.assertEqual(generate_cases.POD_FAULT_HOOK, kv["fault"].partition(":")[2], name)
+            self.assertEqual(("stable", "engine"), (kv["victim"], kv["victimcomp"]), name)
+            self.assertTrue(run._cell_ok(kv["cell"]), name)
+            if kind == "podkill":
+                self.assertEqual(generate_cases.HOOK_REPEAT_N, kv["repeat"], name)
+                self.assertEqual(kv["topo"].endswith("-mn"), "kill" in kv, name)
+            else:
+                self.assertEqual("None", m["rp"], name)
+            if kv["canary"] == "manual":
+                self.assertEqual(("evict", generate_cases.BREAK_GATE_HOLD_S), (kind, kv["verbhold"]), name)
+                self.assertIn("Serving[M]", kv["cell"], name)
+        self.assertEqual({"leader", "worker"}, {kv.get("kill") for _n, kv, _m in fam if kv["topo"].endswith("-mn") and "kill" in kv})
+
+    def test_generated_headers_validate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for folder, fam in self.fam.items():
+                for name, _kv, _m in fam:
+                    path = root / folder / f"{name}.yaml"
+                    path.parent.mkdir(exist_ok=True)
+                    path.write_text(self.outputs[f"{folder}/{name}.yaml"])
+                    self.assertEqual([], run.validate_case_file(path), name)

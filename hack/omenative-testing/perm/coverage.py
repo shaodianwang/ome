@@ -254,7 +254,8 @@ def _fault(v):
         # push brings (new), the idle service before the push, or a canary hook
         return param in ("old", "new", "idle") or _hook(param)
     if kind == "readiness":
-        return param in ("old", "new")   # a serving pod stops passing readiness, or a pushed revision never does
+        # a serving pod stops passing readiness (old; under a canary before the push, idle, or at a hook), or a pushed revision never does
+        return param in ("old", "new", "idle") or _hook(param)
     if kind == "metric":
         # the pushed revision's own metrics, the stable side before the push, or the side victim= names at a hook
         return param in ("new", "idle") or _hook(param)
@@ -263,7 +264,8 @@ def _fault(v):
     if kind == "cordon":
         return param in ("source", "all")   # the source node, or every node (a roll with no room)
     if kind == "configkey":
-        return param in ("missing", "new")   # the running revision's key removed, or a pushed revision reading a missing key
+        # the running revision's key removed (under a canary before the push, idle, or at a hook), or a pushed revision reading a missing key
+        return param in ("missing", "new", "idle") or _hook(param)
     return {"node": "notready"}.get(kind) == param
 
 

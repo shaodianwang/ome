@@ -85,12 +85,19 @@ runners (run.py + the KIND CI lane) already implement:
                           each step kind of the ladder (before the push,
                           the capacity step, a soak, a manual gate, an
                           analysis gate, the last gate before the promote);
-                          the ladder still lands the fix on every Instance
+                          the ladder still lands the fix on every Instance;
+                          continued at p11500+ with the remaining stable-side
+                          breaks on the six shape families (a readiness loss
+                          kept or lifted, the key, a crash and a pull failure
+                          lifted, one runner killed once)
     gen-canary-fault-new/ p6600+  the push itself brings a broken revision
                           (crash at start, crash after Ready inside or past
                           the soak, an image that cannot be pulled); the
                           ladder stops where it bites, says why, and a
-                          rollback or a fix push lands
+                          rollback or a fix push lands; then the missing key
+                          and the never-Ready revision under the same exits,
+                          the one-shot pushed breaks, one runner killed once,
+                          and a taint armed before the push
     gen-canary-fault-gate/ p9050+ what a step's gates read breaks while the
                           ladder walks: the health metric breaches on the
                           stable side (the gate must not blame the canary)
@@ -672,6 +679,7 @@ GEN_CONTINUATIONS = {
     "gen-conflict": (10450, 10700),
     "gen-rollback": (10800, 11100),
     "gen-switch": (11100, 11500),
+    "gen-canary-fault-old": (11500, 11700),
 }
 
 
@@ -2675,6 +2683,7 @@ def emit_canary_podkill(add):
                     cell=("podkill", shape, topo, rp),
                     coord=story_group(case_comps, story_ladder("manual" if shape == "gate" else "auto"),
                                          ready_timeout=ready_timeout))
+    _emit_canary_pod_faults(add)
 
 
 # ── gen-canary-fault-old: the stable side breaks at each step kind ───────────
@@ -2772,6 +2781,124 @@ def emit_canary_fault_old(add):
                                 cell=("fault-old", step, kind, form, topo, surge, rp, victims, gate),
                                 coord=story_group(case_comps, story_ladder(policy, gate)),
                                 runtime=(lib.CSR_METRICS if gate else None))
+    _emit_canary_stable_breaks(add)
+
+
+# ── the remaining stable-side breaks under a canary ─────────────────────────
+# On the ledger's six shape families as the engine unit's ladder (the gate
+# family's shapes): a serving stable pod that stops passing readiness, kept
+# or lifted; the running revision's ConfigMap key put back once its wait has
+# bitten; a crash and a pull failure taken away again; and the runner of one
+# Ready stable pod killed exactly once. Positions: before the push (single-pod
+# fleets), the second step's timed soak, and the same step at a manual gate
+# promoted BREAK_GATE_HOLD_S after the break. A key kept away is read by both
+# revisions, so the push is never its fix and it is not emitted.
+STABLE_POSITIONS = {"idle": IDLE_FAULT_HOOK, "soak": "canary-serving@1", "gate": "canary-serving@1"}
+STABLE_POSITION_POLICY = {"idle": "auto", "soak": "auto", "gate": "manual"}
+STABLE_POSITION_STATE = {"idle": "Idle", "soak": "Serving[soak]", "gate": "Serving[gate]"}
+STABLE_POSITIONS_GANG = ["soak", "gate"]
+# (label, kind, form, lift, cell variant, restart policies, positions)
+STABLE_ROWS = [
+    ("readiness kept", "readiness", "persist", None, "readinessLost", ["None"], ["idle", "soak", "gate"]),
+    ("readiness lifted", "readiness", "recover", None, "readinessLostOnce", ["None"], ["idle", "soak", "gate"]),
+    ("configkey lifted", "configkey", None, "after-settle", "configMissingOnce", RESTARTS, ["idle", "soak", "gate"]),
+    ("crashloop:start lifted", "crashloop", "start", "after-settle", "crashStartOnce", RESTARTS, ["idle", "soak"]),
+    ("crashloop:load lifted", "crashloop", "load", "after-settle", "crashLoadOnce", RESTARTS, ["idle", "soak"]),
+    ("imagepull lifted", "imagepull", None, "after-settle", "imagePullOnce", ["None"], ["idle", "soak"]),
+    ("crashloop:load once", "crashloop", "load", "once", "restartOnce", RESTARTS, ["soak", "gate"]),
+]
+# The ladder's bound on a capacity step while a lifted cause is still away.
+LIFTED_READY_TIMEOUT = "240s"
+LEDGER_KIND = {"configkey": "config missing", "readiness": "readiness never passes", "imagepull": "image pull",
+               ("crashloop", "start"): "crash at start", ("crashloop", "load"): "crash after Ready"}
+
+
+def _ledger_row(kind, form, oneshot, side):
+    name = LEDGER_KIND[(kind, form)] if kind == "crashloop" else LEDGER_KIND[kind]
+    return f"{name}, {'one-shot' if oneshot else 'persistent'}, {side}"
+
+
+def _canary_shape(topo, w, nr):
+    return shape_tag(topo, w) + (" router" if nr and not is_pd(topo) else "")
+
+
+def _canary_configkey_body(name, topo, n, w, nr, rp, coord, ready_timeout=None):
+    """The body of a canary case whose engine runner reads one key of a
+    ConfigMap named after the case, carried as a second document."""
+    cm = f"{name}{HEAL_CONFIG_SUFFIX}"
+    cs = gate_comps(topo, n, w, nr, rp)
+    cs[0]["runner"] = lib.configmap_env(cm, HEAL_CONFIG_KEY, HEAL_CONFIG_VAR, gang=is_mn(topo))
+    return lib.render(name, cs, coord=coord, docs=[lib.configmap_doc(cm, {HEAL_CONFIG_KEY: HEAL_CONFIG_VALUE})])
+
+
+def _stable_position_words(pos):
+    return {"idle": "before the push lands (the break bites on the idle service and the status reacts to it first)",
+            "soak": "while the second step soaks its split",
+            "gate": f"while the second step waits at its manual gate, promoted {BREAK_GATE_HOLD_S}s after the break"}[pos]
+
+
+def _stable_row_reason(label, kind, form, lift, pos, rp, family, n, w):
+    shape = _gate_shape_words(family, n, w)
+    how = {"readiness": "stops passing readiness while it keeps running",
+           "configkey": "waits in CreateContainerConfigError once its ConfigMap key is removed and its runner restarted",
+           "imagepull": "sits in ImagePullBackOff",
+           ("crashloop", "start"): "crashes at every start",
+           ("crashloop", "load"): "dies after Ready and comes back between crashes"}
+    does = how[(kind, form)] if kind == "crashloop" and lift != "once" else how.get(kind, "")
+    if lift == "once":
+        return (f"the runner of one Ready old-revision engine pod is killed exactly once {_stable_position_words(pos)} on "
+                f"{shape}, under restart policy {RP_FULL[rp]}; the kubelet starts it again and the ladder walks every "
+                f"step to Stable with the Instance ending on the canary revision serving, nothing escalates or holds the "
+                f"one restart, no repair is opened for it after the push (its revision is not the roll target), and the "
+                f"healthy Instances keep serving above N-1")
+    heal = {"readiness": f"the switch is lifted {lib_seconds('LIFT_SETTLE_S')}s after the pod left rotation",
+            "configkey": f"the key is put back {lib_seconds('LIFT_SETTLE_S')}s after the wait showed",
+            "imagepull": f"the image is put back {lib_seconds('LIFT_SETTLE_S')}s after the break bit",
+            "crashloop": (f"the killer stops {lib_seconds('LIFT_SETTLE_S')}s after the first kill" if form == "load"
+                          else f"the image is put back {lib_seconds('LIFT_SETTLE_S')}s after the break bit")}[kind]
+    kept = lift is None and form == "persist"
+    cause = "the switch stays set until the case ends" if kept else heal
+    return (f"one old-revision engine pod {does} {_stable_position_words(pos)} on {shape}, under restart policy "
+            f"{RP_FULL[rp]}; {cause}; the ladder walks every step to Stable inside its budgets, the broken Instance ends "
+            f"on the canary revision serving, no repair is opened for it after the push, and the healthy Instances keep "
+            f"serving above N-1")
+
+
+def _emit_canary_stable_breaks(add):
+    for family, topo, n, w, nr in GATE_SHAPES:
+        shape = _canary_shape(topo, w, nr)
+        group = gate_group(topo)
+        for label, kind, form, lift, variant, rps, positions in STABLE_ROWS:
+            for pos in positions:
+                if is_mn(topo) and pos not in STABLE_POSITIONS_GANG:
+                    continue
+                policy = STABLE_POSITION_POLICY[pos]
+                for rp in rps:
+                    kv = gate_kv(topo, n, nr)
+                    kv.update(canary=policy, fault=f"{kind}:{STABLE_POSITIONS[pos]}", co="none", topo=topo)
+                    if form:
+                        kv["form"] = form
+                    if kind in ("crashloop", "imagepull") and lift != "once":
+                        kv["victims"] = 1
+                    if policy == "manual":
+                        kv["verbhold"] = BREAK_GATE_HOLD_S
+                    if lift == "once":
+                        kv["once"] = 1
+                    elif lift:
+                        kv["lift"] = lift
+                    kv.update(nophase="Failed", cell=f"canary/{STABLE_POSITION_STATE[pos]}/stableBroken[{variant}]")
+                    oneshot = lift is not None or form == "recover"
+                    desc = f"{GEN_MARK} canary fault-old {label} at {pos} {shape} N={n} rp {rp}"
+                    meta = dict(strat="SurgeThenDrain", verb=f"{label}@{pos}", rp=rp, shape=family,
+                                row=_ledger_row(kind, form, oneshot, "running"))
+                    timeout = LIFTED_READY_TIMEOUT if kind == "configkey" else None
+                    coord = lib.canary_block(story_ladder(policy), components=group, ready_timeout=timeout)
+                    body = None
+                    if kind == "configkey":
+                        body = functools.partial(_canary_configkey_body, topo=topo, n=n, w=w, nr=nr, rp=rp, coord=coord)
+                    add("gen-canary-fault-old", desc, kv, None if body else gate_comps(topo, n, w, nr, rp),
+                        _stable_row_reason(label, kind, form, lift, pos, rp, family, n, w), meta,
+                        cell=("stable-break", label, pos, topo, nr, rp), coord=coord, body=body)
 
 
 # ── gen-canary-fault-new: the push brings a broken revision ─────────────────
@@ -2849,6 +2976,182 @@ def emit_canary_fault_new(add):
                                 cell=("fault-new", name, exit_verb, topo, surge, rp, gate),
                                 coord=story_group(case_comps, story_ladder("auto", gate), ready_timeout=HELD_READY_TIMEOUT),
                                 runtime=(lib.CSR_METRICS if gate else None))
+    _emit_canary_pushed_breaks(add)
+
+
+# ── the remaining pushed-revision breaks under a canary, and a taint ────────
+# On the six shape families: the pushed engine revision reads a ConfigMap key
+# the ConfigMap lacks or never passes readiness (kept, under both exits at
+# the park; or taken away again once it has bitten), its image cannot be
+# pulled for a while, the runner of its first pod is killed exactly once at
+# start or after Ready, and a taint on every node armed before the push
+# holds the first capacity step, lifted after the wait has shown or kept.
+# (label, kind, form, lift, once, exits, cell variant, grid state, restart policies)
+PUSHED_ROWS = [
+    ("configkey kept", "configkey", None, "never", False, True, "configMissing", "Staging", ["None"]),
+    ("configkey lifted", "configkey", None, "after-settle", False, False, "configMissingOnce", "Staging", ["None"]),
+    ("readiness kept", "readiness", None, None, False, True, "readinessLost", "Staging", ["None"]),
+    ("readiness lifted", "readiness", "recover", None, False, False, "readinessLostOnce", "Staging", ["None"]),
+    ("imagepull lifted", "imagepull", None, "after-settle", False, False, "imagePullOnce", "Staging", ["None"]),
+    ("crashloop:start once", "crashloop", "start", None, True, False, "restartOnce", "Staging", RESTARTS),
+    ("crashloop:load once", "crashloop", "load", None, True, False, "restartOnce", "Serving", RESTARTS),
+]
+PENDING_CANARY_LIFTS = [("after-settle", "capacityReached[unschedulableLifted]", LIFTED_READY_TIMEOUT),
+                        ("never", "readyTimeout[unschedulable]", HELD_READY_TIMEOUT)]
+
+
+def _pushed_row_reason(label, kind, form, lift, once, exit_verb, rp, family, n, w):
+    shape = _gate_shape_words(family, n, w)
+    settle = lib_seconds("LIFT_SETTLE_S")
+    if once:
+        when = "at its first start, before it is Ready" if form == "start" else "once it is Ready, inside the first soak"
+        return (f"the runner of the pushed engine revision's first pod is killed exactly once {when} on {shape}, under "
+                f"restart policy {RP_FULL[rp]}; the kubelet starts it again, nothing escalates or holds the one restart, "
+                f"the ladder walks every step to Stable and every Instance ends on the canary revision serving, with a "
+                f"rebuild only where the restart policy promises one")
+    if exit_verb:
+        how = {"configkey": "reads a ConfigMap key the ConfigMap lacks, so its pod waits in CreateContainerConfigError",
+               "readiness": "runs and never passes readiness"}[kind]
+        then = {"rollback": "a rollback drains the broken revision and holds at RolledBack with the rejected revision recorded",
+                "rebump-fix": ("a fix push that drops the runner override lands on every Instance, serving, with nothing "
+                               "left on the broken revision")}[exit_verb]
+        return (f"the pushed engine revision {how} on {shape}, under restart policy {RP_FULL[rp]}; the ladder stops at "
+                f"the step where the break bites and parks with a reason, no traffic names the broken revision at the "
+                f"park while the stable side keeps serving every Instance the broken revision had not replaced, nothing "
+                f"promotes the broken revision, and then {then}")
+    how = {"configkey": (f"reads a ConfigMap key the ConfigMap lacks, so its first pod waits in CreateContainerConfigError "
+                         f"until the key is added {settle}s after the wait showed"),
+           "readiness": (f"has the readiness switch set in its first pod as it starts, so the pod runs without passing "
+                         f"readiness until the switch is lifted {settle}s after the drop has settled"),
+           "imagepull": (f"has its first pod pointed at an image that cannot be pulled as it starts, and pointed back at "
+                         f"its image {settle}s after the pull failure showed")}[kind]
+    return (f"the pushed engine revision {how} on {shape}, under restart policy {RP_FULL[rp]}; the capacity step waits "
+            f"inside its bound and never parks, the same pod passes once the cause is gone, nothing escalates or holds "
+            f"it, and the ladder walks every step to Stable with every Instance on the canary revision serving")
+
+
+def _pending_canary_reason(lift, family, n, w):
+    shape = _gate_shape_words(family, n, w)
+    out = (f"every schedulable node carries a NoSchedule taint before the push lands on {shape}, so the first step's "
+           f"canary pod cannot be placed; the Instance waits with reason Unschedulable on its row, no row reads Failed "
+           f"and nothing settled is taken down to make room")
+    if lift == "after-settle":
+        return out + (f"; the taint is lifted {lib_seconds('LIFT_SETTLE_S')}s after the wait showed and the ladder walks "
+                      f"every step to Stable with every Instance on the canary revision serving")
+    return out + ("; the taint stays, so the capacity step parks the ladder Failed at its ready timeout with the wait "
+                  "still reported, the stable revision keeps serving every Instance and nothing rolls back")
+
+
+def _emit_canary_pushed_breaks(add):
+    for family, topo, n, w, nr in GATE_SHAPES:
+        shape = _canary_shape(topo, w, nr)
+        group = gate_group(topo)
+        for label, kind, form, lift, once, kept, variant, state, rps in PUSHED_ROWS:
+            exits = NEW_BREAK_EXITS if kept else [(None, None)]
+            for exit_verb, terminal in exits:
+                for rp in rps:
+                    kv = gate_kv(topo, n, nr)
+                    kv.update(canary="auto", fault=f"{kind}:{CRASHLOOP_NEW_HOOK}", co="none", topo=topo)
+                    if form:
+                        kv["form"] = form
+                    if lift:
+                        kv["lift"] = lift
+                    if once:
+                        kv["once"] = 1
+                    if kind != "configkey":
+                        kv["victimcomp"] = "engine"
+                    if exit_verb:
+                        kv.update(during="canary-failed", verb=exit_verb, terminal=terminal,
+                                  cell=f"canary/{state}/canaryBroken[{variant}],{NEW_BREAK_EXIT_CELL[exit_verb]}")
+                        timeout = HELD_READY_TIMEOUT
+                    else:
+                        kv.update(nophase="Failed", cell=f"canary/{state}/canaryBroken[{variant}]")
+                        timeout = LIFTED_READY_TIMEOUT
+                    desc = (f"{GEN_MARK} canary fault-new {label}" + (f" exit {exit_verb}" if exit_verb else "")
+                            + f" {shape} N={n} rp {rp}")
+                    meta = dict(strat="SurgeThenDrain", verb=f"{kind}:new:{label}" + (f":{exit_verb}" if exit_verb else ""),
+                                rp=rp, shape=family, row=_ledger_row(kind, form, not kept, "new"))
+                    coord = lib.canary_block(story_ladder("auto"), components=group, ready_timeout=timeout)
+                    body = None
+                    if kind == "configkey":
+                        body = functools.partial(_canary_configkey_body, topo=topo, n=n, w=w, nr=nr, rp=rp, coord=coord)
+                    add("gen-canary-fault-new", desc, kv, None if body else gate_comps(topo, n, w, nr, rp),
+                        _pushed_row_reason(label, kind, form, lift, once, exit_verb, rp, family, n, w), meta,
+                        cell=("pushed-break", label, exit_verb, topo, nr, rp), coord=coord, body=body)
+        for lift, cell, timeout in PENDING_CANARY_LIFTS:
+            kv = gate_kv(topo, n, nr)
+            kv.update(canary="auto", fault="taint:all", lift=lift, co="none", topo=topo, cell=f"canary/Staging/{cell}")
+            if lift == "never":
+                kv["terminal"] = "Failed"
+            else:
+                kv["nophase"] = "Failed"
+            desc = f"{GEN_MARK} canary fault-new taint lift {lift} {shape} N={n}"
+            meta = dict(strat="SurgeThenDrain", verb=f"taint:{lift}", rp=GATE_RP, shape=family,
+                        row=f"pod Pending, {'one-shot' if lift == 'after-settle' else 'persistent'}")
+            add("gen-canary-fault-new", desc, kv, gate_comps(topo, n, w, nr, GATE_RP),
+                _pending_canary_reason(lift, family, n, w), meta, cell=("pushed-pending", lift, topo, nr),
+                coord=lib.canary_block(story_ladder("auto"), components=group, ready_timeout=timeout))
+
+
+# ── the deletion and the eviction under a canary, once and again ────────────
+# On the six shape families at the first split: an old-revision engine pod
+# (a gang member on the gangs) deleted by hand again each time it is back,
+# under both restart policies; evicted once under a timed soak and under a
+# manual gate held until the dip closes, and evicted again each time it is
+# back (the eviction loop runs under policy None).
+POD_FAULT_HOOK = "canary-serving@0"
+
+
+def _pod_fault_reason(kind, repeat, policy, member, rp, family, n, w):
+    shape = _gate_shape_words(family, n, w)
+    what = (f"the {member} pod of one old-revision engine gang" if member else "one old-revision engine pod")
+    took = "deleted by hand" if kind == "podkill" else "evicted through the Eviction API (as a node drain would)"
+    where = ("while the ladder waits at its first manual gate, which the harness promotes once the Instance is whole again"
+             if policy == "manual" else "while the first step soaks its split")
+    if repeat:
+        return (f"{what} is {took} {where} on {shape}, and again each time what it took is back, {repeat} times in all, "
+                f"under restart policy {RP_FULL[rp]}; each loss is reported on its row and repaired within the policy's "
+                f"scope, the controller creates no more pods than the roll and the repairs explain, no pod comes back on "
+                f"a revision the service never pushed, and the ladder walks every step to Stable with every Instance on "
+                f"the canary revision serving")
+    return (f"{what} is {took} {where} on {shape}, under restart policy {RP_FULL[rp]}; the step keeps its state across "
+            f"the capacity dip, the replacement comes back on the revision it ran, and the ladder walks every step to "
+            f"Stable with every Instance on the canary revision serving")
+
+
+def _emit_canary_pod_faults(add):
+    for family, topo, n, w, nr in GATE_SHAPES:
+        shape = _canary_shape(topo, w, nr)
+        group = gate_group(topo)
+        members = GANG_MEMBERS if is_mn(topo) else [None]
+        rows = [("podkill", HOOK_REPEAT_N, "auto", rp, member) for rp in RESTARTS for member in members]
+        rows += [("evict", 0, "auto", GATE_RP, None), ("evict", 0, "manual", GATE_RP, None),
+                 ("evict", HOOK_REPEAT_N, "auto", GATE_RP, None)]
+        for kind, repeat, policy, rp, member in rows:
+            kv = gate_kv(topo, n, nr)
+            kv.update(canary=policy, fault=f"{kind}:{POD_FAULT_HOOK}", victim="stable", victimcomp="engine",
+                      co="none", topo=topo)
+            if member:
+                kv["kill"] = member
+            if repeat:
+                kv["repeat"] = repeat
+            if policy == "manual":
+                kv["verbhold"] = BREAK_GATE_HOLD_S
+            variant = {("podkill", True): "gangRepeat" if is_mn(topo) else "stableRepeat",
+                       ("evict", True): "evictedRepeat", ("evict", False): "evicted"}[(kind, bool(repeat))]
+            kv.update(nophase="Failed",
+                      cell=f"canary/Serving{'[M]' if policy == 'manual' else ''}/capacityDropped[{variant}]")
+            desc = (f"{GEN_MARK} canary podkill {kind} {'again' if repeat else 'once'} at {policy} {shape} N={n} rp {rp}"
+                    + (f" target {member}" if member else ""))
+            lost = "gang member lost" if is_mn(topo) else "pod deleted by hand"
+            row = (f"{lost}, persistent" if kind == "podkill"
+                   else f"evicted or preempted, {'persistent' if repeat else 'one-shot'}")
+            meta = dict(strat="SurgeThenDrain", verb=f"{kind}@{policy}" + (f" x{repeat}" if repeat else ""), rp=rp,
+                        shape=family, row=row)
+            add("gen-canary-podkill", desc, kv, gate_comps(topo, n, w, nr, rp),
+                _pod_fault_reason(kind, repeat, policy, member, rp, family, n, w), meta,
+                cell=("pod-fault", kind, repeat, policy, topo, nr, rp, member),
+                coord=lib.canary_block(story_ladder(policy), components=group))
 
 
 # ── gen-canary-fault-gate: what a step's gates read breaks ──────────────────
@@ -7247,6 +7550,32 @@ def manifest(rows):
         " ConfigMap key, which no verb arms on a template and whose bite is a"
         " container that never starts, the crash-at-start cell; and a manual"
         " policy, since a broken revision parks before any gate is reached.",
+        "- The further rows of gen-canary-fault-old (continued at p11500), gen-canary-fault-new"
+        " and gen-canary-podkill run the engine unit's ladder on the ledger's six shape"
+        " families (the gate family's shapes). The stable side: a serving pod that stops"
+        " passing readiness, kept or lifted; the key put back once its wait has shown; a"
+        " crash and a pull failure taken away again; and the runner of one Ready stable"
+        " pod killed exactly once, before the push (single-pod fleets), at the second"
+        " step's soak and at the same step's manual gate. The pushed revision: a missing"
+        " key and a revision that never passes readiness under both exits at the park;"
+        " the key added, the switch lifted and the image put back once they have bitten;"
+        " the runner of the first canary pod killed once at start and after Ready under"
+        " both restart policies; and a taint on every node armed before the push, lifted"
+        " after the wait has shown or kept to the park. The pod faults: an old-revision"
+        " engine pod (a gang member on the gangs) deleted again each time it is back, and"
+        " evicted once under a soak, once at a manual gate held until the Instance is"
+        " whole, and again each time it is back. Left out, with the reason: the running"
+        " revision's key kept away (both revisions read it, so the push is never its fix"
+        " and the ladder would park at whichever step reaches the Instance: no decided"
+        " exit); one kill at start on the running side at a grid state (a running pod has"
+        " no first start to catch; its one-shot form is the lifted crash); a preemption at"
+        " a grid state (its press runs in the pending driver's own watch; the eviction"
+        " fills the ledger row); the idle position on the gangs (as the gate family: a"
+        " fleet of two reads a gang as a single pod); the manual gate for a lifted crash"
+        " or pull failure (the gate's hold after a break is the fault-old gate step's);"
+        " the readiness rows under RecreateInstanceOnPodRestart (readiness loss opens no"
+        " repair under either policy); and the one-shot pushed breaks under"
+        " RecreateInstanceOnPodRestart (a pod that never started has no restart to read).",
         "- gen-canary-fault-gate drives the engine unit's ladder on the ledger's six"
         " shape families (the router, where present, is outside the group and idle;"
         f" single-pod fleets at {STORY_N} Instances, gangs at 2 Instances of 1 leader + 1"
