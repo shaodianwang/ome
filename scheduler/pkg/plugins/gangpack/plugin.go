@@ -447,38 +447,13 @@ func nodeInfosInDomain(nodes []framework.NodeInfo, topologyKey, domain string) [
 	return out
 }
 
-// matchingCandidateNodes restricts the current member to nodes that leave a
-// complete matching for every remaining heterogeneous member. Proving that a
-// domain has some matching is insufficient: placing a flexible member on the
-// only node usable by a constrained sibling would destroy that matching.
-func matchingCandidateNodes(nodes []framework.NodeInfo, topologyKey, domain string, templates []*v1.Pod) sets.Set[string] {
-	return matchingCandidateNodesForNeed(nodes, topologyKey, domain, templates, len(templates))
-}
-
+// matchingCandidateNodesForNeed restricts the current member to the domain's
+// nodes that leave room for the need-1 remaining members it brings along.
 func matchingCandidateNodesForNeed(nodes []framework.NodeInfo, topologyKey, domain string, templates []*v1.Pod, need int) sets.Set[string] {
-	out := sets.New[string]()
 	if len(templates) == 0 {
-		return out
+		return sets.New[string]()
 	}
-	current, remaining := templates[0], templates[1:]
-	domainNodes := make([]framework.NodeInfo, 0)
-	for _, node := range nodes {
-		if domainOf(node.Node(), topologyKey) == domain {
-			domainNodes = append(domainNodes, node)
-		}
-	}
-	for candidateIndex, candidate := range domainNodes {
-		if !nodeFitsPod(candidate, current) {
-			continue
-		}
-		left := make([]framework.NodeInfo, 0, len(domainNodes)-1)
-		left = append(left, domainNodes[:candidateIndex]...)
-		left = append(left, domainNodes[candidateIndex+1:]...)
-		if maxGangMatching(remaining, left, need-1) >= need-1 {
-			out.Insert(candidate.Node().Name)
-		}
-	}
-	return out
+	return newGangRoom(nodeInfosInDomain(nodes, topologyKey, domain), templates, need).candidates(need - 1)
 }
 
 func nodeNamesByDomain(nodes []framework.NodeInfo, topologyKey string) map[string][]string {
@@ -496,19 +471,6 @@ func nodeNamesByDomain(nodes []framework.NodeInfo, topologyKey string) map[strin
 
 func nodeNamesInDomain(nodes []framework.NodeInfo, topologyKey, domain string) []string {
 	return nodeNamesByDomain(nodes, topologyKey)[domain]
-}
-
-// nodesInDomain returns the names of nodes whose domain matches — the candidate
-// set PreFilter narrows to.
-func nodesInDomain(nodes []framework.NodeInfo, topologyKey, domain string) sets.Set[string] {
-	out := sets.New[string]()
-	for _, ni := range nodes {
-		n := ni.Node()
-		if n != nil && domainOf(n, topologyKey) == domain {
-			out.Insert(n.Name)
-		}
-	}
-	return out
 }
 
 // gangTemplates returns the concrete remaining members used for simultaneous
