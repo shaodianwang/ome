@@ -1,0 +1,27 @@
+# p5083: [gen] crashloop:new load decoder pd N=4 SurgeThenDrain s1 rp RecreateInstance  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 fault=crashloop:new co=rolling topo=pd bump=engine,decoder form=load victimcomp=decoder
+# reason: the rollingUpdate group lists engine and decoder, so the bump carries both and the group paces them as one run; the pushed decoder revision passes readiness, is promoted, and exits a few seconds later, every time the kubelet restarts it (Ready counted for the budget: the new pod was promoted, then crashed); at most 2 decoder Instances are off the running revision, which keeps serving at N-2; status says why (a rolloutHold on the decoder from the retry ladder or the budget, or a Failed decoder row, and a RetryHeld or InstanceFailed event naming it) and every further attempt at that revision is a retry the ladder announced, none once it has held; the engine, a sound member of the group, converges on its own new revision meanwhile or holds with the group's reason; the fix push then lands on every bumped Instance, serving, and nothing rebuilds the crashing revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p5083 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          rollingUpdate: {}

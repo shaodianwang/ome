@@ -584,9 +584,19 @@ def classify_operation(h, mode, size):
     if h.get("rollback"):
         return "rollback", f"the starting revision re-applied at {during}", "push"
     if during == "idle":
+        kind = str(h.get("fault", "")).partition(":")[0]
+        if h.get("push") and not h.get("pauseat"):
+            # The operator's next move after a break of the running revision
+            # at idle: the fix pushed, with no pause around it.
+            return "push", f"the fix pushed after a {kind} break at idle", ""
         pause = {"true": "pause", "freeze": "freeze"}.get(str(h.get("pause", ""))) if h.get("pauseat") else ""
-        window = str(h.get("fault", "")).partition(":")[0] in ("webhook", "conflict")
-        detail = ("window fault at idle" if window else "persistent fault at idle") + (f", {pause} {h['pauseat']} the repair" if pause else "")
+        if kind in ("webhook", "conflict"):
+            detail = "window fault at idle"
+        elif kind == "ctrlrestart":
+            detail = "manager restart at idle" + (f" x{h['repeat']}" if h.get("repeat") else "")
+        else:
+            detail = "persistent fault at idle"
+        detail += f", {pause} {h['pauseat']} the repair" if pause else ""
         detail += ", the fix pushed while paused" if h.get("push") else ""
         return "steady state", detail, pause or ""
     detail = f"{edit} edit" if edit in ROLLOUT_EDITS else "annotation bump"

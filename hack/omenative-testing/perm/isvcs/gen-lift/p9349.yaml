@@ -1,0 +1,20 @@
+# p9349: [gen] readiness lifted fix push engine-mn W1+router N=2 SurgeThenDrain s1 rp None  Ne=2 Nd=0 Nr=2 ceil_e=3 ceil_d=0 ceil_r=2 restart=None fault=readiness:old floor_soft=1 co=none topo=engine-mn form=recover during=idle push=fix
+# reason: the fixture's readiness switch file is set in the highest engine Instance's gang leader, so it keeps running and stops passing readiness: it leaves the Ready endpoints and its row reports the drop, and restart policy None rebuilds nothing, since readiness is the runtime's own out-of-rotation signal and not a failure; once the drop has shown for the settle window the operator pushes the fix with no pause around it: an ordinary bump, whose re-rendered pods carry no switch file; the switch is lifted as the fix lands, so the same pod may return to rotation while the roll is already replacing it, and the roll still owns it; the SurgeThenDrain roll lands the new revision on every engine Instance within its budget, the broken Instance Ready and serving on the new revision and never the last to land the fix, since its capacity is already lost; no repair is recorded for it after the push, because its revision stopped being the target at the bump and the roll owns it; every row settles with no operation open and no hold is left behind; the floor is reported, not judged, for the one Instance the break took; the router stays as it was
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9349 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

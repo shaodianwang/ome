@@ -159,6 +159,15 @@ class OperationTest(unittest.TestCase):
 
     def test_plain_bump_is_a_push(self):
         self.assertEqual(("push", ""), self.op(topo="engine"))
+
+    def test_the_fix_pushed_after_a_break_at_idle_is_a_push(self):
+        self.assertEqual(("push", ""), self.op(fault="configkey:missing", during="idle", lift="never", push="fix", topo="engine"))
+        self.assertEqual(("push", ""), self.op(fault="readiness:old", form="recover", during="idle", push="fix", topo="engine"))
+        # With pauseat= the push lands while the service is paused around a repair.
+        self.assertEqual(("steady state", "pause"),
+                         self.op(fault="crashloop:old", form="start", during="idle", pause="true", pauseat="before",
+                                 push="fix", expect="repaired", topo="engine"))
+        self.assertEqual(("steady state", ""), self.op(fault="ctrlrestart:idle", during="idle", topo="engine"))
         self.assertEqual("env edit", self.corpus.write(topo="engine", edit="env").operation_detail)
 
     def test_kill_is_steady_state_or_the_pause_it_runs_under(self):

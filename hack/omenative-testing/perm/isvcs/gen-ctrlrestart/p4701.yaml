@@ -1,0 +1,18 @@
+# p4701: [gen] ctrlrestart idle once engine+router N=4  Ne=4 Nd=0 Nr=2 ceil_e=4 ceil_d=0 ceil_r=2 fault=ctrlrestart:idle co=none topo=engine during=idle
+# reason: nothing is pushed on engine behind a router, single-pod; the manager pod is deleted once while the service is settled: no pod of the service is created or deleted, every Instance stays Ready and serving on its running revision and no repair is recorded; the restarted manager carries nothing in memory and reads a fleet with no operation open from status, so it starts none; after the restart every row is Ready with no operation open and no hold
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p4701 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

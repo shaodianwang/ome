@@ -2715,6 +2715,35 @@ def emit_ctrlrestart_hooks(add):
                         faultop=f"ctrlrestart {op}", op=op, hook=hook, half="hook")
             add("gen-ctrlrestart", desc, kv, _op_comps(op, topo, n, w, nr, False), _ctrl_hook_reason(op, topo, w, nr),
                 meta, cell=("ctrl-hook", op, topo, w, nr), dedicated=(op == "runtime"))
+
+
+# ── gen-ctrlrestart, the idle half: the manager restarts once on the settled service ──
+# The one-shot form of the manager restart with no operation in flight, on
+# the six ledger shapes: the manager pod is deleted once while nothing moves
+# (fault=ctrlrestart:idle during=idle, no repeat=). A restarted manager
+# reads a settled fleet from status and must start nothing. The persistent
+# form (repeat=) is the repeating family's steady-state row.
+def _ctrl_idle_reason(topo, w, nr):
+    out = (f"nothing is pushed on {shape_words(topo, w, nr)}; the manager pod is deleted once while the service is "
+           f"settled: no pod of the service is created or deleted, every Instance stays Ready and serving on its "
+           f"running revision and no repair is recorded; the restarted manager carries nothing in memory and reads "
+           f"a fleet with no operation open from status, so it starts none; after the restart every row is Ready "
+           f"with no operation open and no hold")
+    if is_mn(topo):
+        out += "; each Instance is a gang and stays whole"
+    return out
+
+
+def emit_ctrlrestart_idle(add):
+    """The idle half of gen-ctrlrestart, minted after the hook half."""
+    for topo, n, w, nr in CTRL_SHAPES:
+        kv = dict(**counts(topo, n, nr), **ceilings(topo, n, "SurgeThenDrain", 0, nr),
+                  fault=f"ctrlrestart:{IDLE_PHASE}", co="none", topo=topo, during=IDLE_PHASE)
+        meta = dict(strat="(dormant: nothing rolls)", verb=f"ctrlrestart:{IDLE_PHASE}", faultop="ctrlrestart idle",
+                    half="idle")
+        add("gen-ctrlrestart", f"{GEN_MARK} ctrlrestart idle once {shape_tag(topo, w, nr)} N={n}", kv,
+            comps(topo, n, w, lib.lifecycle(), nr=nr), _ctrl_idle_reason(topo, w, nr), meta,
+            cell=("ctrl-idle", topo, w, nr))
 # ── gen-canary-*: operator stories driven through a canary ──────────────────
 # Every story family walks the same ladder: four steps of capacity ahead of
 # traffic with a timed soak in place of an analysis gate, on a
@@ -4188,6 +4217,32 @@ def _crash_new_reason(form, strat, co, budget, n):
     return out
 
 
+# The pushed sibling revision that crash-loops: the decoder bumped beside
+# the engine in a rollingUpdate group, the router by name beside the engine.
+# (topo, N, W, routers on an engine shape, the sibling.)
+CRASH_NEW_SIBLINGS = [("engine", 4, 0, lib.NR, "router"), ("engine-mn", 2, 1, lib.NR, "router"),
+                      ("pd", 4, 0, 0, "decoder"), ("pd-mn", 2, 1, 0, "decoder")]
+
+
+def _crash_new_sibling_reason(sibling, form, n_sibling):
+    allowance = _crash_new_allowance(form, "SurgeThenDrain", 1, n_sibling)
+    how = (f"the pushed {sibling} revision dies at every start (its runner image has no shell for the fixture command)"
+           if form == "start" else
+           f"the pushed {sibling} revision passes readiness, is promoted, and exits a few seconds later, every time "
+           f"the kubelet restarts it (Ready counted for the budget: the new pod was promoted, then crashed)")
+    plural = "Instances are" if allowance != 1 else "Instance is"
+    floor = (f"which keeps serving at N-{allowance}" if allowance < n_sibling
+             else "which then has no Instance left serving until the fix lands")
+    engine = ("the engine, a sound member of the group, converges on its own new revision meanwhile or holds with "
+              "the group's reason" if sibling == "decoder" else
+              "the engine rolls to its own new revision meanwhile, since nothing pairs it with the router")
+    return (f"{_crash_once_sibling_bumped_words(sibling)}; {how}; at most {allowance} {sibling} {plural} off the running "
+            f"revision, {floor}; status says why (a rolloutHold on the {sibling} from the retry ladder or the budget, "
+            f"or a Failed {sibling} row, and a RetryHeld or InstanceFailed event naming it) and every further attempt "
+            f"at that revision is a retry the ladder announced, none once it has held; {engine}; the fix push then "
+            f"lands on every bumped Instance, serving, and nothing rebuilds the crashing revision")
+
+
 def emit_crashloop_new(add):
     for topo, n, w in CRASH_SHAPES:
         for strat, surge, unavail in NEW_CRASH_STRATS:
@@ -4207,6 +4262,26 @@ def emit_crashloop_new(add):
                         _crash_new_reason(form, strat, co, max(surge, unavail), n), meta,
                         cell=("crashloop-new", form, topo, w, n, strat, surge, unavail, rp, co),
                         coord=lib.coord_for(co) if co != "none" else None)
+    strat, surge, unavail = NEW_CRASH_STRATS[0]
+    for topo, n, w, nr, sibling in CRASH_NEW_SIBLINGS:
+        for rp in RESTARTS:
+            for form in CRASH_FORMS:
+                kv = dict(**counts(topo, n, nr), **ceilings(topo, n, strat, surge, nr),
+                          fault="crashloop:new", form=form, topo=topo, victimcomp=sibling)
+                if sibling == "decoder":
+                    kv.update(co="rolling", bump="engine,decoder", ceil_d=n + surge)
+                    coord = lib.coord_for("rolling")
+                else:
+                    kv.update(co="none", bump="engine,router", ceil_r=nr + surge)
+                    coord = None
+                meta = dict(strat=strat, verb=f"crashloop:new:{form}", rp=rp, victim=sibling)
+                desc = (f"{GEN_MARK} crashloop:new {form} {sibling} {shape_tag(topo, w, nr)} N={n} {strat} "
+                        f"{budget_tag(strat, surge, unavail)} rp {rp}")
+                life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                add("gen-crashloop-new", desc, kv,
+                    comps(topo, n, w, life, d_life=(life if is_pd(topo) else None), r_life=(life if sibling == "router" else None), nr=nr),
+                    _crash_new_sibling_reason(sibling, form, lib.NR if sibling == "router" else n), meta,
+                    cell=("crashloop-new", form, topo, w, n, strat, surge, unavail, rp, sibling), coord=coord)
 
 
 # ── gen-crashloop-group: a running-revision crash under the group policies ──
@@ -8017,6 +8092,70 @@ def _crash_once_comps(topo, n, w, router, life, rp):
     return cs
 
 
+# The sibling broken once: the router behind the engine on the router
+# shapes, the decoder on the prefill/decode ones; the engine is the
+# negative control. (topo, N, W, a router on an engine shape, the sibling.)
+CRASH_ONCE_SIBLINGS = [("engine", 4, 0, True, "router"), ("engine-mn", 2, 1, True, "router"),
+                       ("pd", 4, 0, True, "decoder"), ("pd-mn", 2, 1, True, "decoder")]
+
+
+def _crash_once_sibling_comps(topo, n, w, router, life, rp, sibling):
+    """The crash-once fleet with the sibling under the case's restart policy,
+    the Component whose repair the verdict reads."""
+    cs = _crash_once_comps(topo, n, w, router, life, rp)
+    if sibling == "router":
+        cs[-1] = lib.comp("router", lib.NR, 0, lib.lifecycle(restart=RP_FULL[rp]))
+    return cs
+
+
+def _crash_once_sibling_reason(sibling, form, rp, topo):
+    pod = "the leader pod of" if is_mn(topo) and sibling != "router" else "the pod of"
+    when = ("during its first start, before it was ever Ready" if form == "start"
+            else "once it is Ready and serving")
+    out = (f"{pod} the {sibling}'s highest Instance has its runner killed once, {when}; the kubelet starts the "
+           f"container again and nothing kills it twice; nothing is pushed, so the {sibling}'s own restart policy "
+           f"decides the repair: {_crash_once_policy_words('old', form, rp, 'idle')}")
+    out += (f"; at the end the {sibling} Instance is Ready and serving on its running revision, no row reads Failed, "
+            f"no hold or retry ladder was opened for it, the rows settle with no operation open, and every pod "
+            f"carries the label of what it runs")
+    if sibling == "decoder":
+        return out + "; the engine and the router, which nothing broke, keep their pods and serve N"
+    return out + "; the engine, which nothing broke, keeps its pods and serves N"
+
+
+def _crash_once_bumped_sibling_comps(topo, n, w, router, life, rp, sibling):
+    """The crash-once fleet with the sibling bumped beside the engine: it
+    rolls under the same strategy and restart policy."""
+    cs = _crash_once_comps(topo, n, w, router, life, rp)
+    if sibling == "router":
+        cs[-1] = lib.comp("router", lib.NR, 0, life)
+    return cs
+
+
+def _crash_once_sibling_bumped_words(sibling):
+    return ("the rollingUpdate group lists engine and decoder, so the bump carries both and the group paces them as one run"
+            if sibling == "decoder" else
+            "the engine and the router are bumped together by name and roll side by side, each under its own surge")
+
+
+def _crash_once_sibling_push_reason(sibling, side, form, rp, topo):
+    pod = "the leader pod of" if is_mn(topo) and sibling != "router" else "the pod of"
+    when = ("during its first start, before it was ever Ready" if form == "start" else "once it is Ready and serving")
+    end = ("no row reads Failed, no hold or retry ladder was opened for it, the rows settle with no operation open, and "
+           "the floor allows for the one Instance the kill takes while it restarts")
+    if side == "old":
+        return (f"the engine is bumped alone and, as the bump lands, {pod} the {sibling}'s highest Instance has its runner "
+                f"killed once, {when}; the kubelet starts the container again and nothing kills it twice; the roll never "
+                f"touches the {sibling}, so its own restart policy decides the repair: "
+                f"{_crash_once_policy_words('old', form, rp, 'idle')}; the SurgeThenDrain roll lands the new revision on "
+                f"every engine Instance within its budget; at the end the {sibling} Instance is Ready and serving on its "
+                f"running revision, {end}")
+    return (f"{_crash_once_sibling_bumped_words(sibling)}; {pod} the first {sibling} Instance the push brings up has its "
+            f"runner killed once, {when}; the kubelet starts the container again and nothing kills it twice; "
+            f"{_crash_once_policy_words('new', form, rp, 'push')}; every bumped Instance ends on the new revision serving "
+            f"within the roll's budget, the killed one included, {end}")
+
+
 def _crash_once_victim(side, form, topo):
     pod = "the leader pod of" if is_mn(topo) else "the pod of"
     who = (f"{pod} the first engine Instance the push brings up" if side == "new"
@@ -8097,6 +8236,58 @@ def emit_crash_once(add):
                         add("gen-crash-once", desc, kv, _crash_once_comps(topo, n, w, router, life, rp),
                             _crash_once_reason(side, form, rp, "push", strat, topo, router), meta,
                             cell=("crash-once", "push", side, form, topo, w, router, rp, strat))
+    # The sibling broken once on the settled service: the router on the
+    # router shapes, the decoder on the prefill/decode ones; nothing is
+    # pushed and the restart policy of the sibling decides the repair.
+    for topo, n, w, router, sibling in CRASH_ONCE_SIBLINGS:
+        shape = shape_tag(topo, w) + ("+router" if router and not is_pd(topo) else "")
+        strat, surge, unavail = CRASH_ONCE_IDLE_STRAT
+        for form in CRASH_FORMS:
+            for rp in RESTARTS:
+                kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, 0),
+                          restart=rp, fault="crashloop:old", form=form, once=1, during=IDLE_PHASE, victimcomp=sibling,
+                          co="none", topo=topo)
+                meta = dict(strat="(dormant: nothing rolls)", verb=f"crashonce:old:{form}", rp=rp, victim=sibling,
+                            oneshot=f"{form} on the running revision's {sibling} at idle")
+                desc = f"{GEN_MARK} crash once {form} idle {sibling} {shape} N={n} rp {rp}"
+                life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                add("gen-crash-once", desc, kv, _crash_once_sibling_comps(topo, n, w, router, life, rp, sibling),
+                    _crash_once_sibling_reason(sibling, form, rp, topo), meta,
+                    cell=("crash-once", "idle", "old", form, topo, w, router, rp, sibling))
+    # The sibling broken once under a push: on the running revision, which an
+    # engine-only bump leaves alone, so the sibling's own restart policy
+    # decides the repair; and on the pushed revision, the sibling bumped
+    # beside the engine (the decoder in a rollingUpdate group, the router by
+    # name) and its first new pod killed once.
+    for topo, n, w, router, sibling in CRASH_ONCE_SIBLINGS:
+        shape = shape_tag(topo, w) + ("+router" if router and not is_pd(topo) else "")
+        strat, surge, unavail = CRASH_ONCE_IDLE_STRAT
+        for form in CRASH_FORMS:
+            for rp in RESTARTS:
+                life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, surge),
+                          restart=rp, fault="crashloop:old", form=form, once=1, floor_slack=1, co="none", topo=topo,
+                          victimcomp=sibling, bump="engine")
+                meta = dict(strat=strat, verb=f"crashonce:old:{form}", rp=rp, victim=sibling,
+                            oneshot=f"{form} on the running revision's {sibling} under an engine push")
+                desc = f"{GEN_MARK} crash once {form} old {sibling} {shape} N={n} {strat} {budget_tag(strat, surge, unavail)} rp {rp}"
+                add("gen-crash-once", desc, kv, _crash_once_sibling_comps(topo, n, w, router, life, rp, sibling),
+                    _crash_once_sibling_push_reason(sibling, "old", form, rp, topo), meta,
+                    cell=("crash-once", "push", "old", form, topo, w, router, rp, strat, sibling))
+                kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, surge),
+                          restart=rp, fault="crashloop:new", form=form, once=1, floor_slack=1, topo=topo, victimcomp=sibling)
+                if sibling == "decoder":
+                    kv.update(co="rolling", bump="engine,decoder", ceil_d=n + surge)
+                    coord = lib.coord_for("rolling")
+                else:
+                    kv.update(co="none", bump="engine,router", ceil_r=lib.NR + surge)
+                    coord = None
+                meta = dict(strat=strat, verb=f"crashonce:new:{form}", rp=rp, victim=sibling,
+                            oneshot=f"{form} on the pushed revision's {sibling} under a push")
+                desc = f"{GEN_MARK} crash once {form} new {sibling} {shape} N={n} {strat} {budget_tag(strat, surge, unavail)} rp {rp}"
+                add("gen-crash-once", desc, kv, _crash_once_bumped_sibling_comps(topo, n, w, router, life, rp, sibling),
+                    _crash_once_sibling_push_reason(sibling, "new", form, rp, topo), meta,
+                    cell=("crash-once", "push", "new", form, topo, w, router, rp, strat, sibling), coord=coord)
 
 
 # ── gen-lift: a cause kept to the end, or taken away after a while ──────────
@@ -8116,6 +8307,15 @@ LIFT_ROW_CONFIG_NEW_LIFTED = "config missing, one-shot, new"
 LIFT_ROW_READINESS_NEW_LIFTED = "readiness never passes, one-shot, new"
 LIFT_ROW_IMAGEPULL_RUNNING_LIFTED = "image pull, one-shot, running"
 LIFT_ROW_IMAGEPULL_NEW_LIFTED = "image pull, one-shot, new"
+# The push rows: the fix pushed after a break of the running revision at
+# idle, with no pause around it, and the pull failure as the bump lands,
+# lifted once it has shown.
+FIX_PUSH = "fix"
+LIFT_ROW_CONFIG_RUNNING_KEPT_PUSH = "config missing, persistent, running (fix push)"
+LIFT_ROW_CONFIG_RUNNING_LIFTED_PUSH = "config missing, one-shot, running (fix push)"
+LIFT_ROW_READINESS_RUNNING_KEPT_PUSH = "readiness never passes, persistent, running (fix push)"
+LIFT_ROW_READINESS_RUNNING_LIFTED_PUSH = "readiness never passes, one-shot, running (fix push)"
+LIFT_ROW_IMAGEPULL_RUNNING_LIFTED_PUSH = "image pull, one-shot, running (push)"
 # The pushed-revision rows run under one restart policy: a pod that never
 # started has no restart for a policy to read.
 LIFT_PUSH_RP = "None"
@@ -8225,6 +8425,60 @@ def _lift_imagepull_new_reason(rp, topo, router):
     return out + (f"; {untouched}" if untouched else "")
 
 
+def _fix_push_tail(topo, router):
+    out = ("; the SurgeThenDrain roll lands the new revision on every engine Instance within its budget, the broken "
+           "Instance Ready and serving on the new revision and never the last to land the fix, since its capacity is "
+           "already lost; no repair is recorded for it after the push, because its revision stopped being the target "
+           "at the bump and the roll owns it; every row settles with no operation open and no hold is left behind; "
+           "the floor is reported, not judged, for the one Instance the break took")
+    untouched = _lift_untouched(topo, router)
+    return out + (f"; {untouched}" if untouched else "")
+
+
+def _fix_push_configkey_reason(lift, rp, topo, router):
+    where = "gang leader" if is_mn(topo) else "pod"
+    waits = ("the crash-loop repair opens as soon as the wait is seen and rebuilds the pod, which waits on the same key"
+             if rp == "None" else "the runner-restart repair rebuilds the pod, which waits on the same key")
+    out = (f"the engine runner's ConfigMap key is removed on the highest Instance's {where} and the runner restarted, "
+           f"so its next start waits in CreateContainerConfigError; {waits}; once the wait has shown for the settle "
+           f"window the operator pushes the fix with no pause around it: a bump that gives the engine runner a literal "
+           f"value in place of the key it cannot read, so no pod of the new revision waits on the ConfigMap")
+    if lift == "never":
+        out += "; the key stays away, so the broken Instance's pod waits until the roll replaces it"
+    else:
+        out += ("; the key is put back as the fix lands, so the broken pod may start again on its running revision "
+                "while the roll is already replacing it, and the roll still owns it")
+    return out + _fix_push_tail(topo, router)
+
+
+def _fix_push_readiness_reason(form, rp, topo, router):
+    where = "gang leader" if is_mn(topo) else "pod"
+    out = (f"the fixture's readiness switch file is set in the highest engine Instance's {where}, so it keeps running "
+           f"and stops passing readiness: it leaves the Ready endpoints and its row reports the drop, and restart policy "
+           f"{RP_FULL[rp]} rebuilds nothing, since readiness is the runtime's own out-of-rotation signal and not a "
+           f"failure; once the drop has shown for the settle window the operator pushes the fix with no pause around "
+           f"it: an ordinary bump, whose re-rendered pods carry no switch file")
+    if form == "persist":
+        out += "; the switch stays set, so the broken pod stays out of rotation until the roll replaces it"
+    else:
+        out += ("; the switch is lifted as the fix lands, so the same pod may return to rotation while the roll is "
+                "already replacing it, and the roll still owns it")
+    return out + _fix_push_tail(topo, router)
+
+
+def _lift_imagepull_push_reason(rp, topo, router):
+    pod = "leader pod" if is_mn(topo) else "pod"
+    out = (f"the {pod} of the engine's highest Instance is pointed at an image that cannot be pulled as the bump lands, "
+           f"so the kubelet stops its container and parks it in ImagePullBackOff while the roll starts; once the pull "
+           f"failure has held for the settle window the pod is pointed back at the image it ran, unless the roll has "
+           f"already replaced it; the Instance was off the target from the bump, so the roll owns it under restart "
+           f"policy {RP_FULL[rp]}: it ends on the new revision serving with no repair recorded for it after the bump, "
+           f"the SurgeThenDrain roll converges within its budget with every engine Instance on the new revision, and "
+           f"the floor is reported, not judged, for the one Instance the break took")
+    untouched = _lift_untouched(topo, router)
+    return out + (f"; {untouched}" if untouched else "")
+
+
 def emit_lift(add):
     for topo, n, w, router in LIFT_SHAPES:
         shape = _lift_shape(topo, w, router)
@@ -8294,6 +8548,48 @@ def emit_lift(add):
             add("gen-lift", desc, kv, _crash_once_comps(topo, n, w, router, life, rp),
                 _lift_imagepull_new_reason(rp, topo, router), meta,
                 cell=("lift", "imagepull", "after-settle", "new", topo, w, router, rp))
+    # The fix pushed after a break of the running revision at idle, with no
+    # pause around it: the key gone or a serving pod out of readiness, kept
+    # or taken away as the fix lands, then push=fix once the break has shown.
+    for topo, n, w, router in LIFT_SHAPES:
+        shape = _lift_shape(topo, w, router)
+        strat, surge, unavail = LIFT_IDLE_STRAT
+        for rp in RESTARTS:
+            life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+            for lift, row in (("never", LIFT_ROW_CONFIG_RUNNING_KEPT_PUSH), ("after-settle", LIFT_ROW_CONFIG_RUNNING_LIFTED_PUSH)):
+                kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, surge),
+                          restart=rp, fault="configkey:missing", floor_soft=1, co="none", topo=topo, during=IDLE_PHASE,
+                          lift=lift, push=FIX_PUSH)
+                meta = dict(strat=strat, verb=f"configkey:{lift}:fixpush", rp=rp, liftrow=row)
+                desc = (f"{GEN_MARK} configkey {'kept' if lift == 'never' else 'lifted'} fix push {shape} N={n} {strat} "
+                        f"{budget_tag(strat, surge, unavail)} rp {rp}")
+                add("gen-lift", desc, kv, None, _fix_push_configkey_reason(lift, rp, topo, router), meta,
+                    cell=("lift", "configkey", lift, "old", "fixpush", topo, w, router, rp),
+                    body=functools.partial(_lift_configkey_body, topo=topo, n=n, w=w, router=router, life=life, rp=rp))
+            for form, row in (("persist", LIFT_ROW_READINESS_RUNNING_KEPT_PUSH), ("recover", LIFT_ROW_READINESS_RUNNING_LIFTED_PUSH)):
+                kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, surge),
+                          restart=rp, fault="readiness:old", floor_soft=1, co="none", topo=topo, form=form,
+                          during=IDLE_PHASE, push=FIX_PUSH)
+                meta = dict(strat=strat, verb=f"readiness:old:{form}:fixpush", rp=rp, liftrow=row)
+                desc = (f"{GEN_MARK} readiness {'kept' if form == 'persist' else 'lifted'} fix push {shape} N={n} {strat} "
+                        f"{budget_tag(strat, surge, unavail)} rp {rp}")
+                add("gen-lift", desc, kv, _crash_once_comps(topo, n, w, router, life, rp),
+                    _fix_push_readiness_reason(form, rp, topo, router), meta,
+                    cell=("lift", "readiness", form, "old", "fixpush", topo, w, router, rp))
+    # The image that cannot be pulled, pointed at the running revision's pod
+    # as the bump lands and back once the failure has shown.
+    for topo, n, w, router in LIFT_SHAPES:
+        shape = _lift_shape(topo, w, router)
+        strat, surge, unavail = LIFT_IDLE_STRAT
+        for rp in RESTARTS:
+            kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, surge),
+                      restart=rp, fault="imagepull:old", floor_soft=1, co="none", topo=topo, lift="after-settle")
+            meta = dict(strat=strat, verb="imagepull:old:after-settle:push", rp=rp, liftrow=LIFT_ROW_IMAGEPULL_RUNNING_LIFTED_PUSH)
+            desc = f"{GEN_MARK} imagepull lifted push {shape} N={n} {strat} {budget_tag(strat, surge, unavail)} rp {rp}"
+            life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+            add("gen-lift", desc, kv, _crash_once_comps(topo, n, w, router, life, rp),
+                _lift_imagepull_push_reason(rp, topo, router), meta,
+                cell=("lift", "imagepull", "after-settle", "old", "push", topo, w, router, rp))
 
 
 # ── assembly ─────────────────────────────────────────────────────────────────
@@ -8363,6 +8659,7 @@ def build_outputs():
     emit_node_hooks(add)
     emit_ctrlrestart(add)
     emit_ctrlrestart_hooks(add)
+    emit_ctrlrestart_idle(add)
     emit_canary_crash(add)
     emit_canary_retarget(add)
     emit_canary_podkill(add)
@@ -9172,6 +9469,22 @@ def lift_notes():
         " failure has settled; one rebuild may be reported under"
         " RecreateInstanceOnPodRestart, never required, never twice; both restart policies"
         " under SurgeThenDrain.",
+        f"- `{LIFT_ROW_CONFIG_RUNNING_KEPT_PUSH}` and `{LIFT_ROW_CONFIG_RUNNING_LIFTED_PUSH}`:"
+        " `configkey:missing during=idle lift=never|after-settle push=fix`; the key is removed"
+        " on the running revision and, once the wait has shown for the settle window, the fix"
+        " is pushed with no pause around it: a bump that gives the runner a literal in place of"
+        " the key it cannot read; under lift=after-settle the key is put back as the fix lands."
+        " The roll lands on every Instance, the broken one Ready on the new revision and never"
+        " the last, with no repair recorded for it after the push; both restart policies.",
+        f"- `{LIFT_ROW_READINESS_RUNNING_KEPT_PUSH}` and `{LIFT_ROW_READINESS_RUNNING_LIFTED_PUSH}`:"
+        " `readiness:old during=idle form=persist|recover push=fix`; a serving pod stops passing"
+        " readiness and, once the drop has shown for the settle window, an ordinary bump is"
+        " pushed, whose re-rendered pods carry no switch file; under form=recover the switch is"
+        " lifted as the fix lands. The same roll verdict; both restart policies.",
+        f"- `{LIFT_ROW_IMAGEPULL_RUNNING_LIFTED_PUSH}`: `imagepull:old lift=after-settle` with no"
+        " during=; the running revision's pod is pointed at the unpullable image as the bump"
+        " lands and back once the failure has held for the settle window, unless the roll has"
+        " replaced it first; the roll owns the Instance either way; both restart policies.",
         "- No group axis: a kept cause changes no fleet for a group to pace, and a lifted"
         " one leaves the roll to finish as any plain push; the group families cover the gates.",
     ]

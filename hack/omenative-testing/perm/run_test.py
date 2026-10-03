@@ -6745,6 +6745,47 @@ class GeneratedCtrlHookFamilyTest(unittest.TestCase):
                 self.assertEqual([], run.validate_case_file(path), name)
 
 
+class GeneratedCtrlIdleFamilyTest(unittest.TestCase):
+    """gen-ctrlrestart, the idle half: the manager pod is deleted once on
+    the settled service of the six ledger shapes, with nothing in flight."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-ctrlrestart" and m.get("half") == "idle"]
+
+    def test_one_case_per_shape_minted_after_the_hook_half(self):
+        self.assertEqual(6, len(self.fam))
+        shapes = {(t, generate_cases.router_count(t, nr)) for t, _n, _w, nr in generate_cases.CTRL_SHAPES}
+        self.assertEqual(shapes, {(kv["topo"], kv["Nr"]) for _n, kv, _m in self.fam})
+        ids = sorted(int(n[1:]) for n, _kv, _m in self.fam)
+        self.assertEqual((4698, 4703), (ids[0], ids[-1]))
+        self.assertLess(ids[-1], generate_cases.GEN_BLOCKS["gen-ctrlrestart"][1])
+
+    def test_every_row_is_the_one_shot_idle_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, kv, _m in self.fam:
+                self.assertEqual(("ctrlrestart:idle", "idle", "none"), (kv["fault"], kv["during"], kv["co"]), name)
+                for k in ("repeat", "mode", "lift", "victim", "victimcomp", "expect"):
+                    self.assertNotIn(k, kv, name)
+                self.assertEqual((kv["Ne"], kv["Nd"], kv["Nr"]), (kv["ceil_e"], kv["ceil_d"], kv["ceil_r"]),
+                                 f"{name}: nothing rolls, so nothing may surge")
+                text = self.outputs[f"gen-ctrlrestart/{name}.yaml"]
+                self.assertIn("the manager pod is deleted once", text.splitlines()[1], name)
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(text)
+                self.assertEqual([], run.validate_case_file(path), name)
+
+    def test_ledger_reads_the_one_shot_restart_at_steady_state(self):
+        import coverage
+        cases = [c for c in coverage.load_cases(coverage.ISVCS / "gen-ctrlrestart")
+                 if c.header.get("during") == "idle" and "repeat" not in c.header]
+        self.assertEqual(6, len(cases))
+        for case in cases:
+            self.assertEqual(("controller restart", "one-shot", "-"), case.fault_rows()[0], case.id)
+            self.assertEqual(("steady state", "manager restart at idle"), (case.operation, case.operation_detail), case.id)
+
+
 class CtrlHookHeaderTest(unittest.TestCase):
     """fault=ctrlrestart:<hook> at a hook of a rollback, a mid-roll edit, a
     runtime edit or a delete, and repeat= under those, a scale-down, a move
@@ -7253,7 +7294,7 @@ class GeneratedCtrlRestartFamilyTest(unittest.TestCase):
 
     def _rows(self):
         outputs, rows = generate_cases.build_outputs()
-        return outputs, [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-ctrlrestart" and m.get("half") != "hook"]
+        return outputs, [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-ctrlrestart" and not m.get("half")]
 
     def test_generated_family_crosses_every_axis(self):
         outputs, fam = self._rows()
@@ -9679,7 +9720,7 @@ class CrashloopNewFaultTest(unittest.TestCase):
 
     def test_generated_new_family_crosses_every_axis(self):
         outputs, rows = generate_cases.build_outputs()
-        fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-crashloop-new"]
+        fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-crashloop-new" and not kv.get("victimcomp")]
         self.assertEqual(72, len(fam))
         self.assertEqual({"crashloop:new:start", "crashloop:new:load"}, {m["verb"] for _n, _kv, m in fam})
         self.assertEqual({s for s, _su, _un in generate_cases.NEW_CRASH_STRATS}, {m["strat"] for _n, _kv, m in fam})
@@ -9708,6 +9749,38 @@ class CrashloopNewFaultTest(unittest.TestCase):
                 self.assertIn("promoted, then crashed", reason, "a crash after Ready says what Ready meant for the budget")
             if m["strat"] == "InPlaceIfPossible" and kv["form"] == "load":
                 self.assertIn("resolves to a recreate", reason)
+
+    def test_generated_new_family_breaks_the_pushed_sibling(self):
+        """The pushed sibling revision crash-loops: the decoder bumped beside
+        the engine in a rollingUpdate group, the router by name."""
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-crashloop-new" and kv.get("victimcomp")]
+        self.assertEqual(16, len(fam))
+        self.assertEqual({("engine", "router"), ("engine-mn", "router"), ("pd", "decoder"), ("pd-mn", "decoder")},
+                         {(kv["topo"], kv["victimcomp"]) for _n, kv, _m in fam})
+        self.assertEqual({(f, rp) for f in ("start", "load") for rp in ("None", "RecreateInstance")},
+                         {(kv["form"], m["rp"]) for _n, kv, m in fam if kv["topo"] == "engine"})
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, kv, m in fam:
+                self.assertEqual(("crashloop:new", "SurgeThenDrain", kv["victimcomp"]), (kv["fault"], m["strat"], m["victim"]), name)
+                if kv["victimcomp"] == "decoder":
+                    self.assertEqual(("rolling", "engine,decoder", kv["Nd"] + 1), (kv["co"], kv["bump"], kv["ceil_d"]), name)
+                else:
+                    self.assertEqual(("none", "engine,router", kv["Nr"] + 1), (kv["co"], kv["bump"], kv["ceil_r"]), name)
+                text = outputs[f"gen-crashloop-new/{name}.yaml"]
+                reason = text.splitlines()[1]
+                self.assertIn(f"the pushed {kv['victimcomp']} revision", reason, name)
+                self.assertIn("status says why", reason, name)
+                self.assertIn("fix push", reason, name)
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(text)
+                self.assertEqual([], run.validate_case_file(path), name)
+        import coverage
+        cases = [c for c in coverage.load_cases(coverage.ISVCS / "gen-crashloop-new") if c.header.get("victimcomp")]
+        self.assertEqual(16, len(cases))
+        for case in cases:
+            self.assertEqual(("sibling broken", "persistent", "new"), case.fault_rows()[0], case.id)
+            self.assertEqual("push", case.operation, case.id)
 
     def test_generated_group_family_crosses_every_axis(self):
         outputs, rows = generate_cases.build_outputs()
@@ -14042,6 +14115,8 @@ class RepeatingFaultHeaderTest(unittest.TestCase):
         self.assertEqual([], self._errs(self.BASE + " fault=evict:rotating victim=stable floor_slack=1 order_soft=1 repeat=3"))
         self.assertEqual([], self._errs(self.BASE + " fault=ctrlrestart:settling repeat=3"))
         self.assertEqual([], self._errs(self.BASE + " fault=ctrlrestart:idle during=idle repeat=3"))
+        self.assertEqual([], self._errs(self.BASE + " fault=ctrlrestart:idle during=idle"),
+                         "the one-shot form: the manager deleted once on the settled service")
         self.assertEqual([], self._errs(self.SCALE + " fault=podkill:settling floor_slack=1 repeat=3"))
         self.assertEqual([], self._errs(self.SCALE + " fault=evict:settling floor_slack=1 repeat=3"))
         self.assertEqual([], self._errs(self.SCALE + " fault=ctrlrestart:settling repeat=3"))
@@ -14055,7 +14130,7 @@ class RepeatingFaultHeaderTest(unittest.TestCase):
         self.assertTrue(any("pause= is lifted once" in e for e in self._errs(self.KILL + " pause=true repeat=3")))
         self.assertTrue(any("needs lift=after-settle" in e for e in self._errs(self.KILL + " via=preempt lift=never repeat=2")))
         self.assertTrue(any("needs a phase hook" in e for e in self._errs(self.BASE + " fault=ctrlrestart:idle repeat=3")))
-        self.assertTrue(any("needs a persistent fault" in e for e in self._errs(self.BASE + " fault=ctrlrestart:idle during=idle")))
+        self.assertTrue(any("needs a persistent fault" in e for e in self._errs(self.BASE + " fault=ctrlrestart:settling during=idle")))
         self.assertTrue(any("do not combine with it" in e
                             for e in self._errs(self.BASE + " fault=podkill:rotating rollback=1 during=last repeat=2")))
 
@@ -14644,13 +14719,14 @@ class CrashOnceTest(unittest.TestCase):
     def test_generated_family_crosses_the_rows_the_ledger_was_missing(self):
         outputs, rows = generate_cases.build_outputs()
         fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-crash-once"]
-        self.assertEqual(120, len(fam))
+        self.assertEqual(168, len(fam))
         self.assertTrue(all(kv["once"] == 1 and kv["fault"] in ("crashloop:old", "crashloop:new") for _n, kv, _m in fam))
-        cells = {(kv["fault"], kv["form"], kv.get("during", "push"), kv["restart"], kv["topo"], kv["Nr"] > 0, m["strat"])
+        cells = {(kv["fault"], kv["form"], kv.get("during", "push"), kv["restart"], kv["topo"], kv["Nr"] > 0, m["strat"],
+                  kv.get("victimcomp", "engine"))
                  for _n, kv, m in fam}
-        self.assertEqual(120, len(cells), "every case is its own cell")
+        self.assertEqual(168, len(cells), "every case is its own cell")
         idle = [kv for _n, kv, _m in fam if kv.get("during") == "idle"]
-        self.assertEqual(24, len(idle))
+        self.assertEqual(40, len(idle))
         self.assertTrue(all(kv["fault"] == "crashloop:old" for kv in idle), "the pushed side needs a push")
         pushed = [kv for _n, kv, _m in fam if "during" not in kv]
         self.assertEqual({"crashloop:old", "crashloop:new"}, {kv["fault"] for kv in pushed})
@@ -14665,13 +14741,107 @@ class CrashOnceTest(unittest.TestCase):
     def test_ledger_reads_once_as_the_one_shot_form(self):
         import coverage
         cases = coverage.load_cases(coverage.ISVCS / "gen-crash-once")
-        self.assertEqual(120, len(cases))
+        self.assertEqual(168, len(cases))
         for case in cases:
             kind, form, side = case.fault_rows()[0]
             self.assertEqual("one-shot", form, case.id)
             self.assertEqual("new" if case.header["fault"].endswith(":new") else "running", side, case.id)
-            self.assertEqual("crash at start" if case.header["form"] == "start" else "crash after Ready", kind, case.id)
+            if case.header.get("victimcomp", "engine") != "engine":
+                self.assertEqual("sibling broken", kind, case.id)
+            else:
+                self.assertEqual("crash at start" if case.header["form"] == "start" else "crash after Ready", kind, case.id)
             self.assertEqual("steady state" if case.header.get("during") == "idle" else "push", case.operation, case.id)
+
+    def test_sibling_broken_once_at_idle_on_the_four_sibling_shapes(self):
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-crash-once" and kv.get("victimcomp") and kv.get("during") == "idle"]
+        self.assertEqual(16, len(fam))
+        self.assertEqual({("engine", "router"), ("engine-mn", "router"), ("pd", "decoder"), ("pd-mn", "decoder")},
+                         {(kv["topo"], kv["victimcomp"]) for _n, kv, _m in fam})
+        self.assertEqual({("start", "None"), ("start", "RecreateInstance"), ("load", "None"), ("load", "RecreateInstance")},
+                         {(kv["form"], kv["restart"]) for _n, kv, _m in fam if kv["topo"] == "pd"})
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, kv, m in fam:
+                self.assertEqual(("crashloop:old", 1, "idle", "none"), (kv["fault"], kv["once"], kv["during"], kv["co"]), name)
+                self.assertEqual(kv["victimcomp"], m["victim"], name)
+                text = outputs[f"gen-crash-once/{name}.yaml"]
+                reason = text.splitlines()[1]
+                self.assertIn(f"the {kv['victimcomp']}'s highest Instance has its runner killed once", reason, name)
+                self.assertIn("nothing is pushed", reason, name)
+                # The sibling carries the case's restart policy beside the engine: its repair is the verdict's.
+                self.assertEqual(2, text.count(f'restartPolicy: "{generate_cases.RP_FULL[kv["restart"]]}"'), name)
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(text)
+                self.assertEqual([], run.validate_case_file(path), name)
+
+    def test_sibling_broken_once_under_a_push_on_either_side(self):
+        """The running revision's sibling, which an engine-only bump leaves
+        alone, and the pushed revision's first sibling pod, the sibling bumped
+        beside the engine: the decoder in a rollingUpdate group, the router by
+        name."""
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-crash-once" and kv.get("victimcomp") and "during" not in kv]
+        self.assertEqual(32, len(fam))
+        old = [(n, kv) for n, kv, _m in fam if kv["fault"] == "crashloop:old"]
+        new = [(n, kv) for n, kv, _m in fam if kv["fault"] == "crashloop:new"]
+        self.assertEqual((16, 16), (len(old), len(new)))
+        self.assertTrue(all(kv["bump"] == "engine" and kv["co"] == "none" for _n, kv in old), "the push leaves the sibling alone")
+        for _n, kv in new:
+            if kv["victimcomp"] == "decoder":
+                self.assertEqual(("rolling", "engine,decoder", kv["Nd"] + 1), (kv["co"], kv["bump"], kv["ceil_d"]))
+            else:
+                self.assertEqual(("none", "engine,router", kv["Nr"] + 1), (kv["co"], kv["bump"], kv["ceil_r"]))
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, kv, m in fam:
+                self.assertEqual((1, 1, kv["Ne"] + 1), (kv["once"], kv["floor_slack"], kv["ceil_e"]), name)
+                text = outputs[f"gen-crash-once/{name}.yaml"]
+                reason = text.splitlines()[1]
+                self.assertIn("killed once", reason, name)
+                if kv["fault"] == "crashloop:old":
+                    self.assertIn("the roll never touches the " + kv["victimcomp"], reason, name)
+                else:
+                    self.assertIn(f"the first {kv['victimcomp']} Instance the push brings up", reason, name)
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(text)
+                self.assertEqual([], run.validate_case_file(path), name)
+        import coverage
+        cases = [c for c in coverage.load_cases(coverage.ISVCS / "gen-crash-once")
+                 if c.header.get("victimcomp") and "during" not in c.header]
+        self.assertEqual(32, len(cases))
+        for case in cases:
+            side = "new" if case.header["fault"].endswith(":new") else "running"
+            self.assertEqual(("sibling broken", "one-shot", side), case.fault_rows()[0], case.id)
+            self.assertEqual("push", case.operation, case.id)
+
+    def test_a_sibling_the_push_leaves_alone_is_judged_by_its_own_policy(self):
+        f = self._f()
+        f["crash_comp"] = "decoder"
+        notes, checks = [], []
+        self.assertEqual("PASS", run._once_checks(f, self._out(op="push", side="old", sibling=True, rp="None"), "PASS", notes, checks))
+        self.assertTrue(any("a sibling the push leaves alone" in c for c in checks), checks)
+        self.assertTrue(any("no repair under restart policy None" in c for c in checks), checks)
+        # Under RecreateInstanceOnPodRestart a restart after Ready owes a rebuild, as at idle.
+        self.assertEqual("FAIL", run._once_checks(dict(f), self._out(op="push", side="old", sibling=True, rp="RecreateInstance"),
+                                                  "PASS", [], []))
+        self.assertEqual("PASS", run._once_checks(dict(f), self._out(op="push", side="old", sibling=True, rp="RecreateInstance",
+                                                                   repairs=["x"]), "PASS", [], []))
+        # The engine under the same push is the roll's: a repair after the bump fails it.
+        self.assertEqual("FAIL", run._once_checks(self._f(), self._out(op="push", side="old", rp="None", expect_new=True,
+                                                                       repairs=["x"]), "PASS", [], []))
+
+    def test_push_checks_read_a_sibling_against_its_running_revision(self):
+        seen = []
+        orig = (run._once_observe, run._once_checks)
+        run._once_observe = lambda cid, f, ps, oh, expect_new, N, configured, settle, surges=None: seen.append(expect_new) or {}
+        run._once_checks = lambda f, out, verdict, notes, checks: out["sibling"]
+        try:
+            f = self._f()
+            self.assertFalse(run._once_push_checks(f, "p1", {}, {"old"}, {}, {}, set(), "PASS", [], [], bumped={"engine"}))
+            f["crash_comp"] = "decoder"
+            self.assertTrue(run._once_push_checks(f, "p1", {}, {"old"}, {}, {}, set(), "PASS", [], [], bumped={"engine"}))
+            self.assertEqual([True, False], seen, "the engine is read on the new revision, the sibling on its running one")
+        finally:
+            run._once_observe, run._once_checks = orig
 
 
 def _gang_pod(name, inst, runner, ready, uid, hash_="old"):
@@ -14921,8 +15091,11 @@ class CanaryGateFaultHeaderTest(unittest.TestCase):
         self.assertEqual([], self._errs(self.ROUTER + " fault=imagepull:idle victimcomp=router victims=1 lift=after-settle"))
         self.assertEqual([], self._errs(self.PD + " fault=crashloop:canary-serving@2 form=load victim=canary victimcomp=decoder lift=after-settle"))
         self.assertEqual([], self._errs(self.ROUTER + " bump=engine,router img=example.com/canary-test/missing:none imgcomp=router terminal=Stable"))
+        # As a plain push lands the heal is the push's own (push_heal); at a
+        # hook it names, the break has no home.
+        self.assertEqual([], self._errs(self.ROLLOUT + " fault=crashloop:old form=start lift=after-settle"))
         self.assertTrue(any("heals the harness's own break under a canary" in e
-                            for e in self._errs(self.ROLLOUT + " fault=crashloop:old form=start lift=after-settle")))
+                            for e in self._errs(self.ROLLOUT + " fault=crashloop:old form=start lift=after-settle during=rotating")))
         self.assertTrue(any("needs Nr>0" in e for e in self._errs(self.BASE + " fault=crashloop:canary-serving@1 form=load victimcomp=router")))
 
 
@@ -16038,6 +16211,200 @@ class PressSparesTheControlPlaneTest(unittest.TestCase):
         self.assertTrue(any("deployment/ome-scheduler" in c for c in log_calls))
 
 
+class FixPushTest(unittest.TestCase):
+    """push=fix with no pause: the fix pushed after a break of the running
+    revision at idle, once the break has shown; and a break as the bump
+    lands healed again once it has shown (lift=after-settle under a plain
+    push)."""
+
+    BASE = "# p999: x mode=rollout Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 restart=None co=none topo=engine"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_header_takes_the_key_and_readiness_breaks_in_both_forms(self):
+        for good in (" fault=configkey:missing during=idle lift=never push=fix floor_soft=1",
+                     " fault=configkey:missing during=idle lift=after-settle push=fix",
+                     " fault=readiness:old form=persist during=idle push=fix",
+                     " fault=readiness:old form=recover during=idle push=fix"):
+            self.assertEqual([], self._errs(self.BASE + good), good)
+        for bad, words in ((" fault=configkey:missing during=idle lift=after-failed push=fix", "keeps the key away"),
+                           (" fault=crashloop:old form=start during=idle push=fix", "without pauseat= is the fix pushed"),
+                           (" fault=configkey:missing during=idle lift=never push=fix expect=failed", "does not combine with push=fix"),
+                           (" fault=configkey:missing lift=never push=fix", "without pauseat= is the fix pushed"),
+                           (" fault=readiness:old during=idle push=fix", "keeps the switch set")):
+            errs = self._errs(self.BASE + bad)
+            self.assertTrue(any(words in e for e in errs), (bad, errs))
+        self.assertTrue(run._fix_push_case({"push": "fix", "during": "idle"}))
+        self.assertFalse(run._fix_push_case({"push": "fix", "during": "idle", "pauseat": "before"}))
+        self.assertFalse(run._fix_push_case({"during": "idle"}))
+
+    def test_a_healed_break_under_a_push_rides_the_plain_push_alone(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=imagepull:old lift=after-settle floor_soft=1"))
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=load lift=after-settle floor_soft=1"))
+        self.assertTrue(run._push_heal_hdr({"fault": "imagepull:old", "lift": "after-settle"}))
+        for hdr in ({"fault": "imagepull:old", "lift": "after-settle", "during": "idle"},
+                    {"fault": "imagepull:old", "lift": "after-settle", "rollback": 1},
+                    {"fault": "imagepull:old", "lift": "after-settle", "mode": "canary"},
+                    {"fault": "imagepull:new", "lift": "after-settle"},
+                    {"fault": "crashloop:old", "form": "load", "lift": "after-settle", "once": 1},
+                    {"fault": "imagepull:old"}):
+            self.assertFalse(run._push_heal_hdr(hdr), hdr)
+        self.assertTrue(run._fault_new("p999", {"fault": "imagepull:old", "lift": "after-settle"})["push_heal"])
+        self.assertFalse(run._fault_new("p999", {"fault": "imagepull:old"})["push_heal"])
+
+    def test_heal_tick_points_the_pod_back_once_the_break_has_shown(self):
+        healed = []
+        orig = run._break_heal
+
+        def heal(f):
+            healed.append(f["crash_pod"])
+            f["healed_at"] = 1.0
+        run._break_heal = heal
+        try:
+            f = run._fault_new("p999", {"fault": "imagepull:old", "lift": "after-settle"})
+            f.update(fired=True, crash_pod="e3", crash_uid="u3", crash_inst="3", crash_comp="engine")
+            pods = {"e3": {"alive": True, "ready": True, "uid": "u3", "comp": "engine", "inst": "3"}}
+            ctx = {"fault": f, "pod_state": pods}
+            run._break_heal_tick(ctx, 100.0)
+            self.assertEqual([], healed, "a Ready pod has not shown the break")
+            pods["e3"]["ready"] = False
+            run._break_heal_tick(ctx, 100.0)
+            run._break_heal_tick(ctx, 100.0 + run.LIFT_SETTLE_S - 1)
+            self.assertEqual([], healed, "the break must hold for the settle window")
+            run._break_heal_tick(ctx, 100.0 + run.LIFT_SETTLE_S)
+            self.assertEqual(["e3"], healed)
+            run._break_heal_tick(ctx, 200.0 + run.LIFT_SETTLE_S)
+            self.assertEqual(["e3"], healed, "healed once")
+        finally:
+            run._break_heal = orig
+
+    def test_shown_reads_the_wait_the_drop_a_replacement_or_the_row(self):
+        f = {"kind": "configkey", "crash_comp": "engine", "crash_inst": "3", "crash_pod": "e3", "crash_uid": "u3"}
+        orig = (run._get_pod, run._pod_waiting_reason, run._ir_row_phase)
+        waiting, phase = {"e3": ""}, {"3": "Ready"}
+        run._get_pod = lambda name, ns=None: {"name": name}
+        run._pod_waiting_reason = lambda obj: waiting.get(obj["name"], "")
+        run._ir_row_phase = lambda cid, comp, inst: phase.get(str(inst), "")
+        try:
+            pods = {"e3": {"alive": True, "ready": True, "uid": "u3", "comp": "engine", "inst": "3"}}
+            self.assertEqual("", run._fix_push_shown(f, pods, "p1"))
+            waiting["e3"] = run.CONFIGKEY_WAITING
+            self.assertIn(run.CONFIGKEY_WAITING, run._fix_push_shown(f, pods, "p1"))
+            waiting["e3"] = ""
+            pods["e3"]["ready"] = False
+            self.assertIn("stopped reporting Ready", run._fix_push_shown(f, pods, "p1"))
+            pods["e3"]["ready"] = True
+            pods["e3b"] = {"alive": True, "ready": False, "uid": "u3b", "comp": "engine", "inst": "3"}
+            self.assertIn("a repair opened", run._fix_push_shown(f, pods, "p1"))
+            del pods["e3b"]
+            phase["3"] = "Failed"
+            self.assertIn("reads Failed", run._fix_push_shown(f, pods, "p1"))
+        finally:
+            run._get_pod, run._pod_waiting_reason, run._ir_row_phase = orig
+
+    def test_fix_env_gives_the_runner_a_literal_in_place_of_the_key(self):
+        orig = (run._get_pod, run._configkey_env_ref, run._crashloop_pick_pod)
+        run._get_pod = lambda name, ns=None: {"name": name} if name else None
+        run._configkey_env_ref = lambda obj: ("TEST_CONFIG_VALUE", "p1-config", "value") if obj and obj["name"] == "e1" else None
+        run._crashloop_pick_pod = lambda ps, oh, comp, inst=None: "e1"
+        want = [{"name": "TEST_CONFIG_VALUE", "value": run.FIX_PUSH_CONFIG_VALUE}]
+        try:
+            ctx = {"pod_state": {}, "old_hashes": set()}
+            self.assertEqual(want, run._fix_push_env(ctx, {"crash_comp": "engine", "crash_pod": "e1"}))
+            self.assertEqual(want, run._fix_push_env(ctx, {"crash_comp": "engine", "crash_pod": "gone"}),
+                             "a peer names the key when the broken pod is gone")
+            run._crashloop_pick_pod = lambda ps, oh, comp, inst=None: None
+            self.assertIsNone(run._fix_push_env(ctx, {"crash_comp": "engine", "crash_pod": "gone"}))
+        finally:
+            run._get_pod, run._configkey_env_ref, run._crashloop_pick_pod = orig
+
+    def _out(self, **over):
+        out = {"shown_at": 12.0, "shown": "e3 waits", "pushed_at": 33.0, "lifted_at": None, "state": "CONVERGED",
+               "converged_at": 90.0, "victim_final": "3", "victim_serving_new": True, "victim_detail": "",
+               "repairs_after_push": [], "rows_settled": True, "rows_why": "", "holds": []}
+        out.update(over)
+        return out
+
+    def test_verdict_is_the_fix_landing_on_the_broken_instance(self):
+        f = {"crash_comp": "engine", "crash_inst": "3", "kind": "configkey", "notes": []}
+        notes, checks = [], []
+        self.assertEqual("PASS", run._fix_push_checks(f, False, self._out(), "PASS", notes, checks))
+        self.assertTrue(any("the roll owned it" in c for c in checks), checks)
+        self.assertEqual("PASS", run._fix_push_checks(dict(f), True, self._out(lifted_at=30.0), "PASS", [], []))
+        for over, words in (({"state": "ROTATE_TIMEOUT"}, "did not land"),
+                            ({"victim_serving_new": False}, "did not end on the new revision"),
+                            ({"repairs_after_push": ["OMENative component=engine instance=3 restart triggered"]},
+                             "repaired after the fix push"),
+                            ({"rows_settled": False, "rows_why": "engine/3 Restarting"}, "mid-operation"),
+                            ({"holds": [("engine", "Budget", "x")]}, "hold is left behind")):
+            notes = []
+            self.assertEqual("FAIL", run._fix_push_checks(dict(f), False, self._out(**over), "PASS", notes, []), over)
+            self.assertTrue(any(words in n for n in notes), (over, notes))
+        notes = []
+        self.assertEqual("FAIL", run._fix_push_checks(dict(f), True, self._out(), "PASS", notes, []),
+                         "the one-shot form takes the cause away")
+        self.assertIn("never taken away", notes[0])
+        g = dict(f)
+        run._fix_push_checks(g, False, self._out(shown_at=None), "PASS", [], [])
+        self.assertIn("never showed", g["infra_fail"])
+
+    def test_generated_family_pushes_the_fix_on_the_six_shapes(self):
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift" and kv.get("push")]
+        self.assertEqual(48, len(fam))
+        self.assertEqual(6, len({(kv["topo"], kv["Nd"] > 0, kv["Nr"] > 0) for _n, kv, _m in fam}), "six shape families")
+        forms = {(kv["fault"], kv.get("lift") or kv.get("form"), kv["restart"])
+                 for _n, kv, _m in fam if kv["topo"] == "engine" and not kv["Nr"]}
+        self.assertEqual({("configkey:missing", lift, rp) for lift in ("never", "after-settle") for rp in ("None", "RecreateInstance")}
+                         | {("readiness:old", form, rp) for form in ("persist", "recover") for rp in ("None", "RecreateInstance")},
+                         forms)
+        self.assertEqual({generate_cases.LIFT_ROW_CONFIG_RUNNING_KEPT_PUSH, generate_cases.LIFT_ROW_CONFIG_RUNNING_LIFTED_PUSH,
+                          generate_cases.LIFT_ROW_READINESS_RUNNING_KEPT_PUSH, generate_cases.LIFT_ROW_READINESS_RUNNING_LIFTED_PUSH},
+                         {m["liftrow"] for _n, _kv, m in fam})
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, kv, _m in fam:
+                self.assertEqual(("idle", "fix", 1, kv["Ne"] + 1), (kv["during"], kv["push"], kv["floor_soft"], kv["ceil_e"]), name)
+                self.assertNotIn("expect", kv, name)
+                self.assertNotIn("pauseat", kv, name)
+                text = outputs[f"gen-lift/{name}.yaml"]
+                reason = text.splitlines()[1]
+                self.assertIn("pushes the fix with no pause around it", reason, name)
+                self.assertIn("never the last to land the fix", reason, name)
+                if kv["fault"] == "configkey:missing":
+                    self.assertIn("kind: ConfigMap", text, name)
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(text)
+                self.assertEqual([], run.validate_case_file(path), name)
+        pulled = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift" and kv["fault"] == "imagepull:old" and "during" not in kv]
+        self.assertEqual(12, len(pulled))
+        for name, kv, m in pulled:
+            self.assertEqual(("after-settle", 1, kv["Ne"] + 1, generate_cases.LIFT_ROW_IMAGEPULL_RUNNING_LIFTED_PUSH),
+                             (kv["lift"], kv["floor_soft"], kv["ceil_e"], m["liftrow"]), name)
+            self.assertNotIn("expect", kv, name)
+
+    def test_ledger_reads_the_fix_push_as_a_push_on_the_running_revision_row(self):
+        import coverage
+        cases = [c for c in coverage.load_cases(coverage.ISVCS / "gen-lift") if c.header.get("push")]
+        self.assertEqual(48, len(cases))
+        for case in cases:
+            h = case.header
+            kind = "config missing" if h["fault"] == "configkey:missing" else "readiness never passes"
+            form = "one-shot" if h.get("lift") == "after-settle" or h.get("form") == "recover" else "persistent"
+            self.assertEqual((kind, form, "running"), case.fault_rows()[0], case.id)
+            self.assertEqual(("push", f"the fix pushed after a {h['fault'].partition(':')[0]} break at idle"),
+                             (case.operation, case.operation_detail), case.id)
+        pulled = [c for c in coverage.load_cases(coverage.ISVCS / "gen-lift")
+                  if c.header.get("fault") == "imagepull:old" and "during" not in c.header]
+        self.assertEqual(12, len(pulled))
+        for case in pulled:
+            self.assertEqual(("image pull", "one-shot", "running"), case.fault_rows()[0], case.id)
+            self.assertEqual("push", case.operation, case.id)
+
+
 class LiftFamilyTest(unittest.TestCase):
     """gen-lift: a cause kept to the end of the case (lift=never) or taken
     away after a bounded time, on the running revision and on the pushed
@@ -16102,7 +16469,8 @@ class LiftFamilyTest(unittest.TestCase):
     def test_ledger_reads_a_kept_cause_as_the_persistent_running_row(self):
         import coverage
         cases = coverage.load_cases(coverage.ISVCS / "gen-lift")
-        kept = [c for c in cases if c.header.get("lift") == "never" and c.header.get("fault") == "configkey:missing"]
+        kept = [c for c in cases if c.header.get("lift") == "never" and c.header.get("fault") == "configkey:missing"
+                and "push" not in c.header]
         self.assertEqual(12, len(kept))
         for case in kept:
             self.assertEqual(("config missing", "persistent", "running"), case.fault_rows()[0], case.id)
@@ -16402,7 +16770,7 @@ class LiftHealedPullTest(unittest.TestCase):
 
     def test_generated_family_fills_the_healed_pull_row(self):
         outputs, rows = generate_cases.build_outputs()
-        fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift" and kv["fault"] == "imagepull:old"]
+        fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift" and kv["fault"] == "imagepull:old" and kv.get("during") == "idle"]
         self.assertEqual(12, len(fam))
         self.assertEqual({generate_cases.LIFT_ROW_IMAGEPULL_RUNNING_LIFTED}, {m["liftrow"] for _n, _kv, m in fam})
         self.assertEqual(6, len({(kv["topo"], kv["Nd"] > 0, kv["Nr"] > 0) for _n, kv, _m in fam}), "six shape families")
@@ -16417,7 +16785,8 @@ class LiftHealedPullTest(unittest.TestCase):
 
     def test_ledger_reads_the_healed_pull_as_one_shot_running(self):
         import coverage
-        cases = [c for c in coverage.load_cases(coverage.ISVCS / "gen-lift") if c.header.get("fault") == "imagepull:old"]
+        cases = [c for c in coverage.load_cases(coverage.ISVCS / "gen-lift")
+                 if c.header.get("fault") == "imagepull:old" and c.header.get("during") == "idle"]
         self.assertEqual(12, len(cases))
         for case in cases:
             self.assertEqual(("image pull", "one-shot", "running"), case.fault_rows()[0], case.id)
@@ -16429,7 +16798,7 @@ class LiftHealedPullTest(unittest.TestCase):
         before the settle window ends: the reason states that, not a repair
         that opens only after the pod has sat."""
         outputs, rows = generate_cases.build_outputs()
-        fam = [n for f, n, kv, m in rows if f == "gen-lift" and kv["fault"] == "imagepull:old"]
+        fam = [n for f, n, kv, m in rows if f == "gen-lift" and kv["fault"] == "imagepull:old" and kv.get("during") == "idle"]
         self.assertEqual(12, len(fam))
         for name in fam:
             reason = outputs[f"gen-lift/{name}.yaml"].splitlines()[1]
@@ -16680,8 +17049,9 @@ class LiftPushedPullTest(unittest.TestCase):
                 path.write_text(outputs[f"gen-lift/{name}.yaml"])
                 self.assertEqual([], run.validate_case_file(path), name)
         whole = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift"]
-        self.assertEqual(72, len(whole))
-        self.assertEqual(6, len({m["liftrow"] for _n, _kv, m in whole}), "six ledger rows, one family")
+        self.assertEqual(132, len(whole))
+        self.assertEqual(11, len({m["liftrow"] for _n, _kv, m in whole}),
+                         "the six idle and pushed-revision rows and the five push rows of the running revision, one family")
 
     def test_ledger_reads_the_pushed_pull_as_one_shot_new(self):
         import coverage

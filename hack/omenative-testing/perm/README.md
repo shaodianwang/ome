@@ -115,7 +115,7 @@ perm/
 │   ├── gen-fault-move/ gen-fault-edit/  — generated faults crossed with a move and with a runtime edit
 │   ├── gen-repeat/            — generated: faults that keep repeating until they are lifted (`repeat=<n>`)
 │   ├── gen-webhook/ gen-conflict/  — generated window faults: the admission webhook unreachable, a competing writer
-│   ├── gen-crash-once/  — generated: a crash that happens exactly once (once=1), at start or after Ready, on either revision
+│   ├── gen-crash-once/  — generated: a crash that happens exactly once (once=1), at start or after Ready, on either revision, the engine's or a sibling's
 │   └── gen-lift/        — generated: a cause kept to the end of the case or taken away after a while (the config key, readiness and image pull, on either revision)
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
@@ -1695,7 +1695,11 @@ cell on the six shape families (the surge strategy, the env edit):
   never crashes is `INFRA-FAIL` (the arm failed, not the product). The
   generated `isvcs/gen-crashloop-new/` family crosses both forms with
   topology, strategy (SurgeThenDrain, RecreatePod and InPlaceIfPossible at
-  their canonical budgets), restart policy and, on PD, a rolling group.
+  their canonical budgets), restart policy and, on PD, a rolling group. A
+  sibling's pushed revision crash-looping — `victimcomp=decoder` with the
+  decoder bumped beside the engine in a `rollingUpdate` group,
+  `victimcomp=router bump=engine,router` — is judged the same way on the
+  sibling (from p5072), the engine rolling to its own new revision beside it.
 
 - **`once=1`** (with `fault=crashloop:old|new` and `form=start|load`, rollout
   mode) is a crash that happens exactly once: the runner of one pod is
@@ -1737,7 +1741,15 @@ cell on the six shape families (the surge strategy, the env edit):
   through `IDLE_HOLD_S` with no second generation of pods and no new
   revision; under a push `floor_slack=1` allows for the one Instance the
   kill takes while it restarts, and the usual rollout checks judge the
-  roll. The generated `isvcs/gen-crash-once/` family (`p8400`+) crosses
+  roll. A sibling broken once at idle — `victimcomp=decoder|router`, the
+  router behind the engine or the decoder of a prefill/decode service — is
+  read the same way: nothing is pushed, so the sibling's own restart policy
+  decides the repair and the engine must keep its pods. Under a push the
+  sibling is read the same way when the push leaves it alone (`bump=engine`),
+  and as the pushed revision's first pod when the push bumps it beside the
+  engine (`crashloop:new once=1 victimcomp=decoder` in a `rollingUpdate`
+  group, `victimcomp=router bump=engine,router`). The generated
+  `isvcs/gen-crash-once/` family (`p8400`+) crosses
   both forms with the running revision at idle and under a push and the
   pushed revision under a push, the six shape families of the coverage
   ledger (the engine alone, behind a router and with a decoder and a
@@ -1945,6 +1957,14 @@ cell on the six shape families (the surge strategy, the env edit):
   (from p4668) runs the one-shot form of a rollback, a strategy edit, a
   runtime edit, a scale-up and a delete on the six shape families; the
   persistent form is `repeat=` in `isvcs/gen-repeat/` (below).
+  **`fault=ctrlrestart:idle` with `during=idle`** and no `repeat=` is the
+  one-shot restart on the settled service: the manager pod is deleted once
+  while nothing is in flight, and across the restart and a settle after it
+  no pod of the service is created or deleted, every Instance stays Ready
+  and serving, no repair is recorded, and every row ends Ready with no
+  operation open and no hold; the idle half of `isvcs/gen-ctrlrestart/`
+  (from p4698) runs it on the six shape families, and `repeat=<n>` is the
+  same loop applied again each time the manager is Ready.
 
 - **`fault=readiness:old` with `form=persist|recover`** (rollout mode,
   `during=idle` only) makes one serving pod of the running revision — the
@@ -2003,6 +2023,13 @@ cell on the six shape families (the surge strategy, the env edit):
   one-shot pushed-revision verdict applies, with one rebuild reported (the
   kubelet's restart of the container may be read as a runner restart by
   `RecreateInstanceOnPodRestart`), never required, never twice.
+  **`fault=imagepull:old` with `lift=after-settle` and no `during=`** is the
+  running revision's pull failure as the bump lands, pointed back once it
+  has held for `LIFT_SETTLE_S` unless the roll has replaced the pod first:
+  the Instance was off the target from the bump, so the roll owns it either
+  way and it ends on the new revision serving with no repair recorded after
+  the bump; `isvcs/gen-lift/` (from p9370) runs it on the six shape families
+  under both restart policies.
 
 - **`fault=podkill:<phase>` with `kill=leader|worker`** (gang topologies)
   aims the podkill at one gang member instead of the lowest gang's leader,
@@ -2133,6 +2160,27 @@ cell on the six shape families (the surge strategy, the env edit):
   so the repair fits the unavailability budget, and the grouped cells run
   live: a repair of an Instance that serves nothing is admitted without the
   budget or the gate.
+
+- **`push=fix` alone** (rollout mode, `during=idle` with `fault=configkey:missing
+  lift=never|after-settle` or `fault=readiness:old form=persist|recover`, no
+  `pauseat=`) is the operator's next move after a break of the running
+  revision, with no pause around it: the key is removed or the serving pod's
+  readiness switch set as above, and once the break has shown on the
+  Instance (its pod waiting on the key or out of Ready, a pod of it
+  replaced, or its row off Ready) for `FIX_PUSH_SETTLE_S` the fix is pushed
+  — a bump whose template no longer carries the cause: the runner given a
+  literal value in place of the key it cannot read, a re-rendered pod with
+  no switch file. The one-shot forms (`lift=after-settle`, `form=recover`)
+  take the cause away as the fix lands, so the broken pod may come back on
+  its running revision while the roll is already replacing it. The verdict
+  is what the fix push promises: the roll lands on every bumped Instance
+  within the rotate budget, the broken Instance Ready and serving on the new
+  revision and never the last to land the fix (reported where the fleet has
+  fewer than two peers), no `RestartTriggered` naming it after the push (the
+  roll owns it), every row settled, no hold left, the peaks within the
+  ceilings and the floor reported (`floor_soft=1`) for the one Instance the
+  break took. `isvcs/gen-lift/` (from p9322) runs the four forms on the six
+  shape families under both restart policies.
 
 - **`via=evict` (mode=kill) and `fault=evict:<phase>` (rollout mode)**
   remove the pod through the Eviction API, the way a node drain does,
@@ -2691,7 +2739,9 @@ Four generators write into `isvcs/`; re-run one after editing it:
   away on the running revision or missing for the pushed one, the pushed
   revision's pod failing readiness for a while, the image that cannot be
   pulled for a while on either revision; the six ledger rows no other family
-  filled, each on the six shape families), plus
+  filled, each on the six shape families; from p9322 the fix pushed after a
+  key or a readiness loss at idle, with no pause around it, and the pull
+  failure lifted again as the bump lands), plus
   `isvcs/MANIFEST.md` (per-dimension counts, the
   constraint ledger with every omitted cell and its reason, missing-hook
   catalog). The story families are canary lanes in CI: the pipeline gives

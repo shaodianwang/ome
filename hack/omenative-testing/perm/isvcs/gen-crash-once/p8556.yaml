@@ -1,0 +1,23 @@
+# p8556: [gen] crash once load old decoder pd N=4 SurgeThenDrain s1 rp None  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 restart=None fault=crashloop:old co=none topo=pd bump=engine form=load victimcomp=decoder once=1 floor_slack=1
+# reason: the engine is bumped alone and, as the bump lands, the pod of the decoder's highest Instance has its runner killed once, once it is Ready and serving; the kubelet starts the container again and nothing kills it twice; the roll never touches the decoder, so its own restart policy decides the repair: restart policy None promises no repair for a container the kubelet restarts: no RestartTriggered event names the Instance and its pod keeps its identity; the SurgeThenDrain roll lands the new revision on every engine Instance within its budget; at the end the decoder Instance is Ready and serving on its running revision, no row reads Failed, no hold or retry ladder was opened for it, the rows settle with no operation open, and the floor allows for the one Instance the kill takes while it restarts
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8556 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

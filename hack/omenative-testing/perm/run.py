@@ -5278,6 +5278,19 @@ def _fault_ok(v):
     return False
 
 
+def _push_heal_hdr(hdr):
+    """True when a break of the running revision lands as a plain push does
+    and is healed again once it has shown (fault=<kind>:old lift=after-settle
+    with no during= and no operation but the push beside it): the roll owns
+    the Instance either way, and the heal asks whether a cause gone mid-roll
+    changes that."""
+    hdr = hdr or {}
+    kind, _, param = str(hdr.get("fault") or "").partition(":")
+    return (kind in BREAK_FAULTS and param == CRASHLOOP_VICTIM and str(hdr.get("lift") or "") == HEAL_LIFT
+            and not hdr.get("once") and str(hdr.get("mode", "rollout") or "rollout") == "rollout"
+            and not any(hdr.get(k) for k in ("during", "rollback", "edit", "at", "stuck", "pool", "pauseat")))
+
+
 def _fault_new(case_id, hdr):
     """Parsed fault header state (or None). fired latches the one-shot phase
     faults; infra_fail routes apparatus errors to the INFRA-FAIL verdict."""
@@ -5299,6 +5312,7 @@ def _fault_new(case_id, hdr):
             "member": str(hdr.get("kill") or ""),
             "target": str(hdr.get("target") or ""),
             "at": str(hdr.get("at") or ""),
+            "push_heal": _push_heal_hdr(hdr),
             "repeat": int(hdr.get("repeat") or 0), "fired_count": 0, "cycles": [], "victim_insts": set(),
             "fleet": {"engine": int(hdr.get("Ne") or 0), "decoder": int(hdr.get("Nd") or 0),
                       "router": int(hdr.get("Nr") or 0)},
@@ -6321,7 +6335,9 @@ def _once_checks(f, out, verdict, notes, checks):
     side, op, rp = out["side"], out["op"], out["rp"]
     final = str(out.get("final") or inst)
     who = f"{comp} Instance {inst}" + (f" (replaced at Instance {final} by its gang surge)" if final != str(inst) else "")
-    label = f"crash once ({'at start' if form == 'start' else 'after Ready'}, {'pushed' if side == 'new' else 'running'} revision)"
+    sibling = bool(out.get("sibling"))
+    label = (f"crash once ({'at start' if form == 'start' else 'after Ready'}, {'pushed' if side == 'new' else 'running'} revision"
+             + (", a sibling the push leaves alone" if sibling else "") + ")")
     if not out["fired"] or not out["kills"]:
         f["infra_fail"] = _once_never_landed(f, "the case ended")
         return verdict
@@ -6354,7 +6370,7 @@ def _once_checks(f, out, verdict, notes, checks):
     else:
         checks.append(f"  ✓ {label}: nothing escalated {who} to Failed or held it")
     repairs = out["repairs"]
-    if op == "push" and side == "old":
+    if op == "push" and side == "old" and not sibling:
         if repairs:
             fail(f"{who} was repaired after the bump", f"a repair was recorded for {who} after the bump; its revision was not the roll target, so the roll owns it: {repairs[0][:160]}")
         else:
@@ -6368,7 +6384,9 @@ def _once_checks(f, out, verdict, notes, checks):
         fail(f"{who} was repaired {len(repairs)} times", f"{who} was rebuilt {len(repairs)} times for one restart: {repairs[0][:120]} … {repairs[-1][:120]}")
     elif repairs:
         checks.append(f"  ✓ {label}: RecreateInstanceOnPodRestart rebuilt {who} once: {repairs[0][:160]}")
-    elif op == "idle" and form == "load":
+    elif (op == "idle" or sibling) and form == "load":
+        # Nothing rolls the Instance, so the policy owns it: a sibling the push
+        # leaves alone is read as at idle.
         fail(f"{who} was not rebuilt under RecreateInstanceOnPodRestart", f"RecreateInstanceOnPodRestart promises a rebuild for a runner that restarts after Ready, and none was recorded for {who}")
     else:
         checks.append(f"  ⓘ {label}: RecreateInstanceOnPodRestart recorded no rebuild of {who} "
@@ -6386,17 +6404,21 @@ def _once_checks(f, out, verdict, notes, checks):
     return verdict
 
 
-def _once_push_checks(f, case_id, pod_state, old_hashes, hdr, N, configured, verdict, notes, checks, surges=None):
+def _once_push_checks(f, case_id, pod_state, old_hashes, hdr, N, configured, verdict, notes, checks, surges=None,
+                      bumped=None):
     """After a converged push: the one-shot verdict over the roll's end state
     (the victim ends on the new revision on either side, at the index its
-    gang surge left it at)."""
+    gang surge left it at). A victim on a sibling the push leaves alone
+    (bumped names the members) stays on its running revision, and its own
+    restart policy decides the repair, as at idle."""
     if not _fault_once(f) or f.get("infra_fail"):
         return verdict
     if not f.get("fired"):
         f["infra_fail"] = _once_never_landed(f, "the roll converged")
         return verdict
-    out = _once_observe(case_id, f, pod_state, old_hashes, True, N, configured, ROWS_SETTLE_S, surges=surges)
-    out.update(side=("new" if f.get("param") == CRASHLOOP_NEW else "old"), op="push",
+    sibling = bumped is not None and f.get("crash_comp") not in bumped
+    out = _once_observe(case_id, f, pod_state, old_hashes, not sibling, N, configured, ROWS_SETTLE_S, surges=surges)
+    out.update(side=("new" if f.get("param") == CRASHLOOP_NEW else "old"), op="push", sibling=sibling,
                rp=str(hdr.get("restart") or "RecreateInstance"))
     return _once_checks(f, out, verdict, notes, checks)
 
@@ -7489,7 +7511,8 @@ def _break_heal_tick(ctx, now):
     killer stops or a pod is pointed back at its image, the key is put back,
     the readiness switch is lifted."""
     f = ctx.get("fault")
-    if not _canary_break_heals(f) or not f.get("fired") or f.get("infra_fail") or f.get("healed_at"):
+    if not (_canary_break_heals(f) or (f or {}).get("push_heal")) or not f.get("fired") or f.get("infra_fail") \
+            or f.get("healed_at"):
         return
     if f.get("bite_ts") is None:
         if _break_bitten(f, ctx["pod_state"]):
@@ -8643,6 +8666,8 @@ def _fault_tick(ctx):
             _once_bite_tick(f)   # the victim is read live until its restart shows
         _node_lift_tick(ctx, f, time.time())
         _ctrl_back_tick(f, time.time())
+        if f.get("push_heal"):
+            _break_heal_tick(ctx, time.time())   # a break as the push lands, healed once it has shown (lift=after-settle)
         _repeat_tick(f, ctx)
         return
     if f.get("hook_op") and not f.get("hook_op_fired"):
@@ -10409,28 +10434,223 @@ def _readiness_checks(f, form, out, verdict, notes, checks):
     return verdict
 
 
+# ── The fix pushed after a break at idle, with no pause around it (push=fix) ─
+# How long the break must have shown on the broken Instance before the
+# operator's fix is pushed, and the literal the fix gives a runner in place
+# of the ConfigMap key it cannot read.
+FIX_PUSH_SETTLE_S = LIFT_SETTLE_S
+FIX_PUSH_CONFIG_VALUE = "fixed"
+
+
+def _fix_push_case(hdr):
+    """True when the case pushes the fix after a break of the running
+    revision at idle, with no pause around it (push=fix without pauseat=)."""
+    hdr = hdr or {}
+    return bool(hdr.get("push")) and not hdr.get("pauseat") and str(hdr.get("during") or "") == IDLE_FAULT_PHASE
+
+
+def _fix_push_shown(f, pod_state, case_id):
+    """What shows the break on the broken Instance, "" while nothing does:
+    the pod waiting on its key or out of Ready, a pod of the Instance
+    replaced (a repair opened), or its row off Ready."""
+    comp, inst, pod = f["crash_comp"], f["crash_inst"], f["crash_pod"]
+    if f["kind"] == "configkey" and _pod_waiting_reason(_get_pod(pod)) == CONFIGKEY_WAITING:
+        return f"{pod} waits in {CONFIGKEY_WAITING}"
+    p = pod_state.get(pod)
+    if p is not None and not p["ready"]:
+        return f"{pod} stopped reporting Ready"
+    if any(q.get("uid") and q["uid"] != f.get("crash_uid") for _n, q in _instance_pods(pod_state, comp, inst)):
+        return f"{comp} Instance {inst} has a new pod (a repair opened)"
+    phase = _ir_row_phase(case_id, comp, inst)
+    if phase and phase != "Ready":
+        return f"row {comp}/{inst} reads {phase}"
+    return ""
+
+
+def _fix_push_env(ctx, f):
+    """The env the fix push gives the broken runner: the literal value in
+    place of the ConfigMap key it cannot read, the variable read off a live
+    pod of the running revision (the broken pod, else a peer). None when no
+    such pod names a key."""
+    comp = f["crash_comp"]
+    ref = _configkey_env_ref(_get_pod(f["crash_pod"]))
+    if ref is None:
+        peer = _crashloop_pick_pod(ctx["pod_state"], ctx["old_hashes"], comp)
+        ref = _configkey_env_ref(_get_pod(peer)) if peer else None
+    if ref is None:
+        return None
+    var, _cm_name, _cm_key = ref
+    return [{"name": var, "value": FIX_PUSH_CONFIG_VALUE}]
+
+
+def _fix_push_checks(f, oneshot, out, verdict, notes, checks):
+    """The fix-push verdict (see _idle_fix_push). The break must have shown
+    (apparatus otherwise); then the fix pushed once it had, the cause taken
+    away beside it in the one-shot form, the roll converged within its
+    budget, the broken Instance Ready and serving on the new revision, no
+    repair recorded for it after the push, every row settled, no hold."""
+    comp, inst, kind = f["crash_comp"], f["crash_inst"], f["kind"]
+    final = str(out.get("victim_final") or inst)
+    who = f"{comp} Instance {inst}" + (f" (replaced at Instance {final} by its gang surge)" if final != str(inst) else "")
+    label = f"fix push after {kind}"
+    if out["shown_at"] is None:
+        f["infra_fail"] = f"push=fix: the {kind} break never showed on {who}"
+        return verdict
+    bad = []
+
+    def fail(note, line):
+        bad.append(note)
+        checks.append(f"  ✗ {label}: {line}")
+
+    checks.append(f"  ✓ {label}: the break showed {out['shown_at']:.0f}s after it was armed ({out['shown']}); "
+                  f"the fix was pushed at {out['pushed_at']:.0f}s")
+    if oneshot:
+        if out["lifted_at"] is None:
+            fail("the cause was never taken away", "the one-shot form takes the cause away as the fix lands, and it never was")
+        else:
+            checks.append(f"  ✓ {label}: the cause was taken away as the fix landed ({out['lifted_at']:.0f}s)")
+    if out["state"] == "CONVERGED":
+        checks.append(f"  ✓ {label}: the fix landed on every bumped Instance {out['converged_at']:.0f}s after the push")
+    else:
+        fail(f"the fix did not land (state={out['state']})",
+             f"the fix did not land on every bumped Instance within the budget (state={out['state']})")
+    if out["victim_serving_new"]:
+        checks.append(f"  ✓ {label}: {who} is Ready and serving on the new revision")
+    else:
+        fail(f"{who} did not end on the new revision serving",
+             f"{who} must end Ready and serving on the new revision; {out['victim_detail']}")
+    if out["repairs_after_push"]:
+        fail(f"{who} was repaired after the fix push",
+             f"a repair was recorded for {who} after the fix push; its revision was no longer the target, so the roll "
+             f"owns it: {out['repairs_after_push'][0][:160]}")
+    else:
+        checks.append(f"  ✓ {label}: no RestartTriggered event named {who} after the fix push (the roll owned it)")
+    if out["rows_settled"]:
+        checks.append(f"  ✓ {label}: every Instance row settled (Ready, no operation open)")
+    else:
+        fail("a row was left mid-operation", f"a row did not settle after the roll ({out['rows_why']}) — left mid-operation")
+    if out["holds"]:
+        fail("a rollout hold is left behind",
+             "a rollout hold is left behind after the fix: " + "; ".join(f"{c} gate={g} {r}" for c, g, r in out["holds"]))
+    else:
+        checks.append(f"  ✓ {label}: no rollout hold left behind")
+    if bad:
+        verdict = "FAIL"
+        notes.extend(f"push=fix: {b}" for b in bad)
+    return verdict
+
+
+def _idle_fix_push(ctx, f, hdr):
+    """push=fix with no pause: a break of the running revision at idle (the
+    ConfigMap key gone, or a serving pod out of readiness) and, once it has
+    shown for FIX_PUSH_SETTLE_S, the operator's fix — a bump whose template
+    no longer carries the cause: the runner given a literal in place of the
+    key it cannot read, a re-rendered pod with no switch file. The one-shot
+    forms take the cause away as the fix lands (the key put back, the switch
+    lifted). (state, verdict, notes, checks): the roll lands on every bumped
+    Instance within its budget, the broken one Ready and serving on the new
+    revision and never the last to land the fix, no repair recorded for it
+    after the push (the roll owns it), the rows settled and no hold left."""
+    case_id, N, configured = ctx["case_id"], ctx["N"], ctx["configured"]
+    comp, inst, kind, t0 = f["crash_comp"], f["crash_inst"], f["kind"], ctx["trigger_ts"]
+    oneshot = (f.get("lift") == HEAL_LIFT) if kind == "configkey" else (f.get("form") == "recover")
+    bumped = _bumped(ctx)
+    if comp not in bumped:
+        f["infra_fail"] = f"push=fix: {comp} is not a member the push bumps ({sorted(bumped)})"
+        return "INFRA-FAIL", "INFRA-FAIL", [], []
+    ctx["track_comps"] = sorted(configured)
+    budget = _idle_budget(ctx)
+    out = {"shown_at": None, "shown": "", "pushed_at": None, "lifted_at": None, "state": "WATCHING",
+           "converged_at": None, "victim_final": inst, "victim_serving_new": False, "victim_detail": "",
+           "repairs_after_push": [], "rows_settled": False, "rows_why": "", "holds": []}
+    print(f"  Phase 3: waiting for the break to show on {comp} Instance {inst}, then {FIX_PUSH_SETTLE_S}s more "
+          f"before the fix (≤{budget}s)")
+    shown_since = None
+    while time.time() - t0 < budget and not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        if shown_since is None:
+            shown = _fix_push_shown(f, ctx["pod_state"], case_id)
+            if shown:
+                shown_since, out["shown_at"], out["shown"] = now, now - t0, shown
+                print(f"    the break shows: {shown} ({out['shown_at']:.0f}s)")
+        elif now - shown_since >= FIX_PUSH_SETTLE_S:
+            break
+    if shown_since is None:
+        f["infra_fail"] = f"push=fix: the {kind} break never showed on {comp} Instance {inst} within {budget}s"
+        return "INFRA-FAIL", "INFRA-FAIL", [], []
+    if oneshot:
+        print(f"  Phase 4: the cause goes away as the fix lands — "
+              f"{'the key put back' if kind == 'configkey' else 'the readiness switch lifted'}")
+        if not (_configkey_restore(f) if kind == "configkey" else _readiness_restore(f)):
+            f["infra_fail"] = f"push=fix: taking the {kind} cause away failed"
+            return "INFRA-FAIL", "INFRA-FAIL", [], []
+        out["lifted_at"] = time.time() - t0
+    env = None
+    if kind == "configkey":
+        env = _fix_push_env(ctx, f)
+        if env is None:
+            f["infra_fail"] = f"push=fix: no live {comp} pod names the ConfigMap key the fix replaces"
+            return "INFRA-FAIL", "INFRA-FAIL", [], []
+    what = (f"the {comp} runner given {FIX_PUSH_CONFIG_VALUE!r} in place of the key it cannot read" if kind == "configkey"
+            else "a bump that re-renders the broken pod without its switch file")
+    print(f"  Phase 5: push the fix on {sorted(bumped)}: {what}")
+    if not _bump_rev(ctx, bumped, env=env, image_comps={comp} if env else None):
+        f["infra_fail"] = f"fix push refused: {ctx.get('trigger_error', 'patch failed')}"
+        return "INFRA-FAIL", "INFRA-FAIL", [], []
+    push_ts = ctx["trigger_ts"]
+    out["pushed_at"] = push_ts - t0
+    f["notes"].append(f"fix pushed {out['pushed_at']:.0f}s after the break: {what}")
+    print(f"  Phase 6: watching the fix land on every bumped Instance (≤{budget}s)")
+    out["state"] = _watch_convergence(ctx, bumped, budget, set(ctx["old_hashes"]))
+    out["converged_at"] = ctx.get("converged_at")
+    events = _isvc_events_since(case_id, push_ts)
+    final = _victim_index_now(comp, inst, (ctx.get("inv") or {}).get("surges"), events)
+    pods = _instance_pods(ctx["pod_state"], comp, final)
+    off = [n for n, p in pods if not _pod_on_new(p, ctx["old_hashes"])]
+    down = [n for n, p in pods if not (p.get("ready") and p.get("serving"))]
+    out.update(victim_final=final, victim_serving_new=bool(pods) and not off and not down,
+               victim_detail=f"pods={len(pods)} old-revision={off} not-serving={down}",
+               repairs_after_push=_victim_repairs(case_id, push_ts, comp, inst))
+    out["rows_settled"], out["rows_why"] = _wait_rows_settled(case_id, N, configured, ROWS_SETTLE_S)
+    out["holds"] = _rollout_holds(case_id, configured)
+    verdict, notes, checks = "PASS", [], []
+    verdict = _fix_push_checks(f, oneshot, out, verdict, notes, checks)
+    verdict = _crashloop_fix_order(f, ctx["pod_state"], ctx["old_hashes"], verdict, notes, checks)
+    verdict = _ceiling_checks(ctx, verdict, notes, checks)
+    verdict = index_collision_checks(ctx, sorted(configured), verdict, notes, checks)
+    verdict = gang_atomicity_checks(ctx, sorted(bumped), verdict, notes, checks)
+    verdict = surge_before_drain_checks(ctx, sorted(bumped), verdict, notes, checks)
+    verdict = min_ready_checks(ctx, sorted(bumped), verdict, notes, checks)
+    return out["state"], verdict, notes, checks
+
+
 def _idle_ctrl_loop(ctx, f, hdr):
-    """fault=ctrlrestart:idle repeat=<n> (during=idle): the manager is
-    deleted again each time it is Ready, n times, on a service nobody
-    touched. (state, verdict, notes, checks): across the window and a settle
-    after the last restart no pod of the service was created or deleted,
-    every Instance is Ready and serving, no repair was recorded, and at the
-    end every row is Ready with no operation open and no hold."""
+    """fault=ctrlrestart:idle (during=idle): the manager is deleted on a
+    service nobody touched, once, or again each time it is Ready, n times
+    (repeat=<n>). (state, verdict, notes, checks): across the window and a
+    settle after the last restart no pod of the service was created or
+    deleted, every Instance is Ready and serving, no repair was recorded,
+    and at the end every row is Ready with no operation open and no hold."""
     N, configured, ppi = ctx["N"], ctx["configured"], ctx["pods_per_inst"]
-    n = int(hdr.get("repeat") or 0)
+    n = int(hdr.get("repeat") or 1)
     ctx["trigger_ts"] = time.time()
     ctx["track_comps"] = sorted(configured)
     _repeat_observe(f, ctx["pod_state"])
     base = set(f["base_uids"])
     verdict, notes, checks = "PASS", [], []
-    print(f"  Phase 2: the manager is deleted {n} times on the idle service, each once it is Ready again")
+    print("  Phase 2: the manager is deleted once on the idle service" if n == 1 else
+          f"  Phase 2: the manager is deleted {n} times on the idle service, each once it is Ready again")
+    returns = []
     for k in range(1, n + 1):
         _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
         if f["infra_fail"]:
             return "INFRA-FAIL", "INFRA-FAIL", notes, checks
         if f.get("ctrl_gated"):
             break
-        cycle = f["cycles"][-1]
+        # A repeating restart keeps a record per cycle; the one-shot form has
+        # only this firing to wait out.
+        cycle = f["cycles"][-1] if f.get("cycles") else {"fired_at": f.get("fired_ts") or time.time(), "back_at": None}
         deadline = time.time() + CTRL_READY_S
         while time.time() < deadline and not ctx["closed"]:
             _read_one(ctx)
@@ -10438,7 +10658,8 @@ def _idle_ctrl_loop(ctx, f, hdr):
             now = time.time()
             if _ctrl_back(f, now):
                 cycle["back_at"] = now
-                print(f"    ⟳ repeat: the manager is Ready again {now - cycle['fired_at']:.0f}s after restart {k}")
+                returns.append(now - cycle["fired_at"])
+                print(f"    ⟳ the manager is Ready again {now - cycle['fired_at']:.0f}s after restart {k}")
                 break
         if cycle["back_at"] is None:
             f["infra_fail"] = f"ctrlrestart: no Ready manager pod within {CTRL_READY_S}s of restart {k}"
@@ -10465,6 +10686,19 @@ def _idle_ctrl_loop(ctx, f, hdr):
     else:
         checks.append("  ✓ every Instance Ready and serving after the restarts")
     verdict = _idle_peak_checks(ctx, verdict, notes, checks)
+    if not _fault_repeats(f) and returns:
+        # The one-shot form: the restart itself and the repairs it must not
+        # open (the repeating form reads both from its cycle records).
+        checks.append(f"  ✓ ctrlrestart: the manager pod(s) {' '.join(f.get('ctrl_pods') or [])} deleted once on the idle "
+                      f"service; Ready again under new names {returns[0]:.0f}s later")
+        repairs = [m for reason, m in _isvc_events_since(ctx["case_id"], ctx["trigger_ts"]) if reason == "RestartTriggered"]
+        if repairs:
+            verdict = "FAIL"
+            notes.append(f"{len(repairs)} repair(s) opened on an idle service under the manager's restart")
+            checks.append(f"  ✗ ctrlrestart: {len(repairs)} repair(s) opened on a service nobody touched while the manager "
+                          f"restarted: {repairs[0][:160]}")
+        else:
+            checks.append("  ✓ ctrlrestart: no repair opened on the idle service across the manager's restart")
     verdict = _repeat_checks(f, ppi, set(), 0, ctx["trigger_ts"], verdict, notes, checks)
     verdict = _repeat_end_checks(ctx["case_id"], N, configured, verdict, notes, checks)
     return ("HELD" if verdict != "FAIL" else "MOVED"), verdict, notes, checks
@@ -10501,7 +10735,9 @@ def _idle_fault(case_id, yaml_file, desc, hdr):
         return _finish(case_id, desc, hdr, ctx, *_idle_ctrl_loop(ctx, f, hdr))
     if f["kind"] in WINDOW_FAULTS:
         return _finish(case_id, desc, hdr, ctx, *_idle_window(ctx, f, hdr))
-    if f["kind"] == READINESS_FAULT:
+    if _fix_push_case(hdr):
+        expect = "the fix pushed once the break shows"
+    elif f["kind"] == READINESS_FAULT:
         expect = f"readiness lost, {f['form']}"
     elif f["kind"] in LIFT_FAULTS or _break_heals_at_idle(f):
         expect = hdr.get("expect")
@@ -10509,13 +10745,16 @@ def _idle_fault(case_id, yaml_file, desc, hdr):
         expect = _idle_break_expect(hdr)
     if _fault_once(f):
         return _finish(case_id, desc, hdr, ctx, *_idle_once(ctx, f, hdr))
-    print(f"  Phase 2: {f['kind']} fault on the idle service (expect {expect}; no bump follows)")
+    print(f"  Phase 2: {f['kind']} fault on the idle service (expect {expect}; "
+          f"{'the fix push follows' if _fix_push_case(hdr) else 'no bump follows'})")
     _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
     ctx["trigger_ts"] = time.time()
     if f.get("skip"):
         return _finish(case_id, desc, hdr, ctx, "SKIP", "SKIP", [f["skip"]], [])
     if f["infra_fail"]:
         return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
+    if _fix_push_case(hdr):
+        return _finish(case_id, desc, hdr, ctx, *_idle_fix_push(ctx, f, hdr))
     if f["kind"] == READINESS_FAULT:
         return _finish(case_id, desc, hdr, ctx, *_idle_readiness(ctx, f, hdr))
     if f["kind"] in LIFT_FAULTS or _break_heals_at_idle(f):
@@ -14664,6 +14903,9 @@ def validate_case_file(path):
         errs.append(f"{path}:1: readd=1 only applies to mode=compremove")
     during = str(fields.get("during", ""))
     fault_kind, _, fault_param = str(fields.get("fault", "")).partition(":")
+    # The fix pushed after a break at idle with no pause around it (push=fix
+    # alone); with pauseat= the push lands while the service is paused.
+    fix_push = "push" in fields and "pauseat" not in fields
     # A scale or a delete landing on a service with one broken Instance.
     broken_op = mode in BROKEN_OP_MODES and during == IDLE_FAULT_PHASE
     # A break of the running revision landed on the settled service before a
@@ -14689,10 +14931,12 @@ def validate_case_file(path):
             errs.append(f"{path}:1: during={during} is a canary hook (mode=canary)")
     elif during == IDLE_FAULT_PHASE:
         if mode == "rollout":
-            idle_restart = fault_kind == "ctrlrestart" and fault_param == IDLE_FAULT_PHASE and "repeat" in fields
+            # The manager deleted on the settled service: once, or again each
+            # time it is Ready (repeat=<n>).
+            idle_restart = fault_kind == "ctrlrestart" and fault_param == IDLE_FAULT_PHASE
             if fault_kind not in IDLE_FAULTS and not idle_restart:
                 errs.append(f"{path}:1: during={IDLE_FAULT_PHASE} needs a persistent fault to fire "
-                            f"(fault={'|'.join(sorted(IDLE_FAULTS))}:…, or fault=ctrlrestart:{IDLE_FAULT_PHASE} repeat=<n>)")
+                            f"(fault={'|'.join(sorted(IDLE_FAULTS))}:…, or fault=ctrlrestart:{IDLE_FAULT_PHASE} [repeat=<n>])")
         elif broken_op:
             break_param = CONFIGKEY_PARAM if fault_kind == "configkey" else CRASHLOOP_VICTIM
             if fault_kind in BROKEN_OP_PENDING:
@@ -15014,8 +15258,12 @@ def validate_case_file(path):
     canary_stable_hook = mode == "canary" and (fault_param == IDLE_FAULT_PHASE or _canary_hook_ok(fault_param))
     canary_pull_once = mode == "canary" and fault_kind == "imagepull" and fault_param == CRASHLOOP_NEW \
         and str(fields.get("lift", "")) == HEAL_LIFT
+    # The break as the bump lands, healed again once it has shown: the roll
+    # owns the Instance whether or not the cause is still there.
+    push_heal = (heals_itself and mode == "rollout" and fault_param == CRASHLOOP_VICTIM and not during
+                 and "once" not in fields and not rollback_break and not edit_break and not at_move)
     if heals_itself and not idle_heal and not pushed_pull_once and not broken_op and not rollback_break and not edit_break \
-            and not canary_stable_hook and not canary_pull_once and not at_move and not runtimerev_break:
+            and not canary_stable_hook and not canary_pull_once and not at_move and not runtimerev_break and not push_heal:
         errs.append(f"{path}:1: lift={HEAL_LIFT} on fault={fields.get('fault')} heals the harness's own break under a canary "
                     f"(mode=canary, fault={fault_kind}:canary-<state> or fault={fault_kind}:{IDLE_FAULT_PHASE}), on the "
                     f"settled service (mode=rollout, fault={fault_kind}:{CRASHLOOP_VICTIM} during={IDLE_FAULT_PHASE} expect=heals) "
@@ -15269,9 +15517,10 @@ def validate_case_file(path):
     if crash_new and mode == "rollout":
         if during:
             errs.append(f"{path}:1: fault=crashloop:{CRASHLOOP_NEW} is armed by the push itself (no during= hook applies)")
-        if str(fields.get("victimcomp") or BREAK_DEFAULT_COMP) != BREAK_DEFAULT_COMP and str(fields.get("co", "none")) == "none":
+        if str(fields.get("victimcomp") or BREAK_DEFAULT_COMP) != BREAK_DEFAULT_COMP and str(fields.get("co", "none")) == "none" \
+                and str(fields.get("victimcomp")) not in str(fields.get("bump", "")).split(","):
             errs.append(f"{path}:1: victimcomp={fields.get('victimcomp')} under fault=crashloop:{CRASHLOOP_NEW} names a member "
-                        f"the push bumps (needs a group: co=rolling|ratio|percomp|seq|bluegreen)")
+                        f"the push bumps (needs a group: co=rolling|ratio|percomp|seq|bluegreen, or bump= naming it)")
     # Under a canary the runner of one pod is killed once: a Ready stable pod at
     # a grid state (form=load), or the pushed revision's first pod (form=start|load).
     canary_once = mode == "canary" and fault_kind == "crashloop" and (
@@ -15633,9 +15882,9 @@ def validate_case_file(path):
                         f"or at a moment of a move (needs mode=migrate at=<moment>)")
         if lift not in phases:
             errs.append(f"{path}:1: fault={fields.get('fault')} needs lift={'|'.join(sorted(phases))} (when the cause is lifted)")
-        if expect not in outcomes and not at_move:
+        if expect not in outcomes and not at_move and not fix_push:
             errs.append(f"{path}:1: fault={fields.get('fault')} needs expect={'|'.join(sorted(outcomes))} (what the Instance comes to)")
-        if fault_kind == "configkey" and (lift == KEPT_LIFT) != (expect == KEPT_EXPECT) and not at_move:
+        if fault_kind == "configkey" and (lift == KEPT_LIFT) != (expect == KEPT_EXPECT) and not at_move and not fix_push:
             errs.append(f"{path}:1: lift={KEPT_LIFT} keeps the key away to the end of the case and is read as "
                         f"expect={KEPT_EXPECT} (the row parks Failed with its reason and stays); both or neither")
         if fault_kind == "configkey" and expect == "parked":
@@ -15665,8 +15914,23 @@ def validate_case_file(path):
     elif mode == "rollout" and "pause" in fields:
         errs.append(f"{path}:1: pause= on a rollout case needs pauseat={'|'.join(sorted(PAUSE_MOMENTS))} "
                     f"(when the pause lands against the repair); the pause verb alone is a dead knob here")
-    if "push" in fields and "pauseat" not in fields:
-        errs.append(f"{path}:1: push={fields['push']} is pushed while the service is paused (needs pauseat=)")
+    if fix_push:
+        kept_key = fault_kind == "configkey" and fault_param == CONFIGKEY_PARAM
+        lost_readiness = fault_kind == READINESS_FAULT and fault_param == CRASHLOOP_VICTIM
+        if mode != "rollout" or during != IDLE_FAULT_PHASE or not (kept_key or lost_readiness):
+            errs.append(f"{path}:1: push={fields['push']} without pauseat= is the fix pushed after a break of the running revision "
+                        f"at idle (mode=rollout during={IDLE_FAULT_PHASE} with fault=configkey:{CONFIGKEY_PARAM} "
+                        f"lift={KEPT_LIFT}|{HEAL_LIFT} or fault={READINESS_FAULT}:{CRASHLOOP_VICTIM} form=persist|recover); "
+                        f"a push while the service is paused needs pauseat=")
+        elif kept_key and str(fields.get("lift", "")) not in (KEPT_LIFT, HEAL_LIFT):
+            errs.append(f"{path}:1: fault=configkey:{CONFIGKEY_PARAM} before push={fields['push']} keeps the key away "
+                        f"(lift={KEPT_LIFT}) or puts it back as the fix lands (lift={HEAL_LIFT})")
+        elif lost_readiness and str(fields.get("form", "")) not in ("persist", "recover"):
+            errs.append(f"{path}:1: fault={READINESS_FAULT}:{CRASHLOOP_VICTIM} before push={fields['push']} keeps the switch set "
+                        f"(form=persist) or lifts it as the fix lands (form=recover)")
+        for k in ("expect", "pause", "once", "rollback", "edit", "fixfirst", "victims", "repeat"):
+            if k in fields:
+                errs.append(f"{path}:1: {k}= does not combine with push={fields['push']} (the fix push's landing is the verdict)")
     if not re.search(rf"\bname:\s*{re.escape(cid)}\b", text):
         errs.append(f"{path}:1: no document with metadata name '{cid}' (run.py gets the ISVC by case id)")
     return errs
@@ -24637,7 +24901,7 @@ def run_case(case_id):
         verdict = _crashloop_checks(fault, pod_state, old_hashes, trigger_ts, verdict, notes, checks,
                                     bumped=bumped, surges=inv.get("surges"))
         verdict = _once_push_checks(fault, case_id, pod_state, old_hashes, hdr, N, configured, verdict, notes, checks,
-                                    surges=inv.get("surges"))
+                                    surges=inv.get("surges"), bumped=bumped)
         verdict = _gang_member_checks(fault, pod_state, trigger_ts, hdr, verdict, notes, checks, info=info)
     # Check 6b': a repeating fault across its window, and the end state once
     # it stopped. The roll's own pods are what the operation explains: every

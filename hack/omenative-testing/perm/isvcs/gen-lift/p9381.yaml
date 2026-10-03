@@ -1,0 +1,27 @@
+# p9381: [gen] imagepull lifted push pd-mn W1 N=2 SurgeThenDrain s1 rp RecreateInstance  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=2 ceil_r=2 restart=RecreateInstance fault=imagepull:old floor_soft=1 co=none topo=pd-mn lift=after-settle
+# reason: the leader pod of the engine's highest Instance is pointed at an image that cannot be pulled as the bump lands, so the kubelet stops its container and parks it in ImagePullBackOff while the roll starts; once the pull failure has held for the settle window the pod is pointed back at the image it ran, unless the roll has already replaced it; the Instance was off the target from the bump, so the roll owns it under restart policy RecreateInstanceOnPodRestart: it ends on the new revision serving with no repair recorded for it after the bump, the SurgeThenDrain roll converges within its budget with every engine Instance on the new revision, and the floor is reported, not judged, for the one Instance the break took; decoder and router stay as they were
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9381 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

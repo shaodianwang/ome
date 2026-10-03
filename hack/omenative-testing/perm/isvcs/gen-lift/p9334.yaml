@@ -1,0 +1,20 @@
+# p9334: [gen] configkey kept fix push engine-mn W1 N=2 SurgeThenDrain s1 rp RecreateInstance  Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 restart=RecreateInstance fault=configkey:missing floor_soft=1 co=none topo=engine-mn during=idle lift=never push=fix
+# reason: the engine runner's ConfigMap key is removed on the highest Instance's gang leader and the runner restarted, so its next start waits in CreateContainerConfigError; the runner-restart repair rebuilds the pod, which waits on the same key; once the wait has shown for the settle window the operator pushes the fix with no pause around it: a bump that gives the engine runner a literal value in place of the key it cannot read, so no pod of the new revision waits on the ConfigMap; the key stays away, so the broken Instance's pod waits until the roll replaces it; the SurgeThenDrain roll lands the new revision on every engine Instance within its budget, the broken Instance Ready and serving on the new revision and never the last to land the fix, since its capacity is already lost; no repair is recorded for it after the push, because its revision stopped being the target at the bump and the roll owns it; every row settles with no operation open and no hold is left behind; the floor is reported, not judged, for the one Instance the break took
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9334 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: { runner: { name: "ome-container", env: [{ name: "TEST_CONFIG_VALUE", valueFrom: { configMapKeyRef: { name: "p9334-config", key: "value" } } }] } }
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: p9334-config }
+data: { value: "1" }

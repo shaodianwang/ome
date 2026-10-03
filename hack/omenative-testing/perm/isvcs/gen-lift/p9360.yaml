@@ -1,0 +1,23 @@
+# p9360: [gen] readiness kept fix push pd N=4 SurgeThenDrain s1 rp RecreateInstance  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 restart=RecreateInstance fault=readiness:old floor_soft=1 co=none topo=pd form=persist during=idle push=fix
+# reason: the fixture's readiness switch file is set in the highest engine Instance's pod, so it keeps running and stops passing readiness: it leaves the Ready endpoints and its row reports the drop, and restart policy RecreateInstanceOnPodRestart rebuilds nothing, since readiness is the runtime's own out-of-rotation signal and not a failure; once the drop has shown for the settle window the operator pushes the fix with no pause around it: an ordinary bump, whose re-rendered pods carry no switch file; the switch stays set, so the broken pod stays out of rotation until the roll replaces it; the SurgeThenDrain roll lands the new revision on every engine Instance within its budget, the broken Instance Ready and serving on the new revision and never the last to land the fix, since its capacity is already lost; no repair is recorded for it after the push, because its revision stopped being the target at the bump and the roll owns it; every row settles with no operation open and no hold is left behind; the floor is reported, not judged, for the one Instance the break took; decoder and router stay as they were
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9360 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
