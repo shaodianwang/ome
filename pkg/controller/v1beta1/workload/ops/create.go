@@ -47,16 +47,19 @@ func Create(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 
 // CreateFreshIndices runs the Create pass for ONLY surge-free Instance
 // indices — those with no in-flight surge state the Update pass owns. It
-// lets a scale-up of brand-new gangs proceed even while a rollout is
-// mid-flight on another index, instead of starving scale-out behind the
-// rollout.
+// lets a scale-up of brand-new gangs proceed, and a row that lost every
+// pod be rebuilt, even while a rollout is mid-flight or held on another
+// index, instead of starving either behind the rollout.
 //
 // A surge-free index is immune to both corruption modes the dispatcher's
-// skip-Create-while-updating gate guards against: its ActiveOrdinal is a
-// genuine 0 (never existed, not a stale snapshot of a flipped ordinal),
-// and it has no RunningRevision to mis-stamp — its pods are created
-// carrying the target rev-hash, so existingPodsMatchTargetRevision
-// promotes correctly. See the surgeFreeIndex predicate.
+// skip-Create-while-updating gate guards against. Its ActiveOrdinal is
+// one no in-flight operation is moving: a genuine 0 for an index that
+// never existed, or the ordinal a demoted row was promoted at, which only
+// an Update flips and none owns such a row. And its promote mis-stamps no
+// revision: its pods are created carrying the target rev-hash, so
+// existingPodsMatchTargetRevision promotes correctly, onto the revision a
+// demoted row on the target already records. See the surgeFreeIndex
+// predicate.
 //
 // No-op (returns ctrl.Result{}, nil) when no index qualifies, so pure
 // rollouts are unaffected.
@@ -139,8 +142,14 @@ func createFinishableAt(s *workload.InstanceStatus, target *appsv1.ControllerRev
 }
 
 // surgeFreeIndex reports whether the Instance at idx has NO in-flight
-// surge state — i.e. its ObservedState entry is absent (never created)
-// or mid-Create (Phase=Creating with no operation, or a Create one).
+// surge state — i.e. its ObservedState entry is absent (never created),
+// mid-Create (Phase=Creating with no operation, or a Create one), or
+// settled Pending with no operation: the shape a Ready row is demoted to
+// for losing every pod. The Create pass owns that row and no operation
+// is moving it, so it is rebuilt at this scope as the full pass would
+// rebuild it, whether or not the roll around it is admitted — a podless
+// row on the target holds a slot in the roll's budget, and the start
+// that slot denies must not stand between the row and its own rebuild.
 // Updating / Migrating carry an in-flight surge (stale ActiveOrdinal /
 // RunningRevision hazard); Ready-but-degraded is Restart/Recreate
 // territory. A Creating entry carrying an Update or Migrate operation
@@ -149,7 +158,7 @@ func createFinishableAt(s *workload.InstanceStatus, target *appsv1.ControllerRev
 // plan and scale-down deletes it mid-surge. All excluded.
 func surgeFreeIndex(input workload.ReconcileInput, idx int32) bool {
 	s := input.ObservedState.Instance(idx)
-	if s == nil {
+	if s == nil || workload.StateOf(s) == workload.StatePending {
 		return true
 	}
 	return s.Phase == workload.InstancePhaseCreating &&

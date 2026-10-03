@@ -7888,3 +7888,162 @@ func TestMoveRequestedAsAGangPushLands_FollowsTheInstanceAndCompletes(t *testing
 		})
 	}
 }
+
+// rowSettledOn reports whether Instance idx is Ready with no operation,
+// records rev as its running revision and holds exactly one live pod.
+func (h *recoveryHarness) rowSettledOn(idx int32, rev *appsv1.ControllerRevision) bool {
+	s := h.instance(idx)
+	return s != nil && s.Phase == workloadtypes.InstancePhaseReady && s.Operation == nil &&
+		s.RunningRevision == rev.Name && len(h.podsOf(idx)) == 1
+}
+
+// requirePeersOn fails the test unless every Instance other than idx is
+// settled Ready on rev with no operation.
+func (h *recoveryHarness) requirePeersOn(idx int32, rev *appsv1.ControllerRevision, label string) {
+	h.t.Helper()
+	for _, s := range h.irStatuses() {
+		if s.Index == idx {
+			continue
+		}
+		if s.Phase != workloadtypes.InstancePhaseReady || s.Operation != nil || s.RunningRevision != rev.Name {
+			h.dumpState(label)
+			h.t.Fatalf("Instance %d left %s while Instance %d on the target serves nothing: %+v", s.Index, rev.Name, idx, s)
+		}
+	}
+}
+
+// TestPodlessRolledRow_RebuiltUnderTheBudgetItHolds pins the canary
+// shape: a two-Instance single-pod Component rolls one Instance onto the
+// target under a partition of one, the step is promoted, and the rolled
+// Instance's only pod is deleted as the partition drops to zero. The
+// podless row counts against the roll's budget as an Instance on the
+// target that does not serve it, which denies the other Instance's
+// start; the row must still be rebuilt, from the target's template, and
+// the roll must then finish. Until the rebuilt pod serves, the other
+// Instance stays in rotation on the stable revision: the slot the
+// podless row holds keeps the roll from creeping forward, and only the
+// row's own rebuild is let through. No repair policy, so the Create pass
+// owns the rebuild. SurgeThenDrain with maxSurge one and RecreatePod with
+// maxUnavailable one: the two arms the budget is charged on.
+//
+// Cells: instance/Ready/pod.deleted[source]/before, instance/Ready/gate.deny[Budget]/before
+func TestPodlessRolledRow_RebuiltUnderTheBudgetItHolds(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		strategy workloadtypes.UpdateStrategyType
+	}{
+		{name: "SurgeThenDrain maxSurge 1", strategy: workloadtypes.UpdateStrategySurgeThenDrain},
+		{name: "RecreatePod maxUnavailable 1", strategy: workloadtypes.UpdateStrategyRecreatePod},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryHarness(t, false)
+			h.replicas = 2
+			noRepair := workloadtypes.RestartPolicyNone
+			h.lifecycle.RestartPolicy = &noRepair
+			h.useRollingBudget(tc.strategy)
+			if !h.run(40, func() bool { return h.settledOn(h.revV1, 2) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled on v1 for two Instances")
+			}
+
+			// The canary step: Instance 1 moves to the target, Instance 0 is held.
+			partition := int32(1)
+			h.lifecycle.UpdateStrategy.RollingUpdate.Partition = &partition
+			h.setTarget(h.revFixed, fixedImage)
+			if !h.run(60, func() bool { return h.rowSettledOn(1, h.revFixed) && h.rowSettledOn(0, h.revV1) }) {
+				h.dumpState("canary step")
+				t.Fatalf("the canary step never came to rest with Instance 1 on the target and Instance 0 held")
+			}
+
+			// The step is promoted and the canary pod is deleted by hand at
+			// the same moment.
+			partition = 0
+			h.setTarget(h.revFixed, fixedImage)
+			h.losePods(1)
+
+			heldStays := func() {
+				if h.rowSettledOn(1, h.revFixed) {
+					return
+				}
+				h.requirePeersOn(1, h.revV1, "roll crept forward")
+			}
+			rebuilt := false
+			finished := h.runWithInvariant(80, func() bool {
+				if !rebuilt && len(h.podsOf(1)) == 1 {
+					rebuilt = true
+					h.requirePodsRender(1, h.revFixed, fixedImage)
+				}
+				return h.settledOn(h.revFixed, 2)
+			}, heldStays)
+			if !finished {
+				h.dumpState("after the canary pod was deleted")
+				t.Fatalf("the podless Instance was never rebuilt and the roll never finished: rebuilt=%v, budget holds naming it=%d", rebuilt, h.notServingHolds())
+			}
+			if h.notServingHolds() == 0 {
+				t.Fatalf("the budget never held the roll on the podless Instance; the story did not run")
+			}
+		})
+	}
+}
+
+// TestPodlessRolledRow_RebuiltAtTheTargetMidRoll: three single-pod
+// Instances roll under SurgeThenDrain with maxSurge one, and the first
+// Instance the roll moved onto the target loses its pod before the next
+// start is admitted. The podless row holds the roll's one surge slot, so
+// no further Instance leaves the stable revision, and the row is rebuilt
+// from the target's template under the target's revision label: the
+// revision the roll put it on, not the one its peers still run. The roll
+// then lands on all three.
+//
+// Cells: instance/Ready/pod.deleted[source]/before, instance/Ready/gate.deny[Budget]/before
+func TestPodlessRolledRow_RebuiltAtTheTargetMidRoll(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.replicas = 3
+	noRepair := workloadtypes.RestartPolicyNone
+	h.lifecycle.RestartPolicy = &noRepair
+	h.useRollingBudget(workloadtypes.UpdateStrategySurgeThenDrain)
+	if !h.run(60, func() bool { return h.settledOn(h.revV1, 3) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 for three Instances")
+	}
+
+	h.setTarget(h.revFixed, fixedImage)
+	moved := int32(-1)
+	if !h.run(60, func() bool {
+		for _, s := range h.irStatuses() {
+			if h.rowSettledOn(s.Index, h.revFixed) {
+				moved = s.Index
+				return true
+			}
+		}
+		return false
+	}) {
+		h.dumpState("first Instance")
+		t.Fatalf("no Instance was moved onto the target")
+	}
+	h.requirePeersOn(moved, h.revV1, "roll moved more than one Instance before the first served")
+
+	h.losePods(moved)
+
+	peersStay := func() {
+		if h.rowSettledOn(moved, h.revFixed) {
+			return
+		}
+		h.requirePeersOn(moved, h.revV1, "roll crept forward")
+	}
+	rebuilt := false
+	finished := h.runWithInvariant(100, func() bool {
+		if !rebuilt && len(h.podsOf(moved)) == 1 {
+			rebuilt = true
+			h.requirePodsRender(moved, h.revFixed, fixedImage)
+		}
+		return h.settledOn(h.revFixed, 3)
+	}, peersStay)
+	if !finished {
+		h.dumpState("after the moved Instance lost its pod")
+		t.Fatalf("Instance %d was never rebuilt and the roll never finished: rebuilt=%v, budget holds naming it=%d", moved, rebuilt, h.notServingHolds())
+	}
+	if h.notServingHolds() == 0 {
+		t.Fatalf("the budget never held the roll on the podless Instance; the story did not run")
+	}
+}

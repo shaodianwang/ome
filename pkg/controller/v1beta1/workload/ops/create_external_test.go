@@ -4582,3 +4582,63 @@ func TestCreate_InvalidPodSpec_IsNotAnAdmissionOutage(t *testing.T) {
 		t.Errorf("rejection events: got %d want 1 (%v)", got, events)
 	}
 }
+
+// A Ready row demoted to Pending for losing every pod — no operation, the
+// revision it ran still recorded — is the Create pass's to rebuild, and
+// the fresh scope rebuilds it as the full pass would: no in-flight
+// operation owns the row, so neither hazard the scope exists to avoid —
+// an ordinal an Update just flipped, a running revision a promote would
+// mis-stamp — can arise on it. The row opens a Create at its own
+// incarnation, keeps the revision it records, and its missing pod is
+// created; the Ready peer beside it is left exactly as it was.
+//
+// Cells: instance/Pending/spec.unpause/boundary@T-pending-create
+func TestCreateFreshIndices_RebuildsADemotedPodlessRow(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 2)
+	ir := seedInstanceStatuses(isvc,
+		v1beta1.OMENativeInstanceStatus{
+			Index: 0, Incarnation: 3,
+			Phase:           v1beta1.OMENativeInstanceReady,
+			RunningRevision: "llama-70b-engine-priorrev",
+		},
+		v1beta1.OMENativeInstanceStatus{
+			Index: 1, Incarnation: 2,
+			Phase:           v1beta1.OMENativeInstancePending,
+			RunningRevision: "llama-70b-engine-" + testRevisionHash,
+		},
+	)
+	pod0 := podForInstance(isvc, 0, true /* ready */, true /* serving */)
+	c := newFakeClient(t, isvc, ir, pod0)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	plan := buildPlanSinglePodEngine(2)
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-" + testRevisionHash, Namespace: "prod"},
+	}
+
+	if _, err := ops.CreateFreshIndices(context.Background(), workload.Deps{Client: c}, input, plan, target); err != nil {
+		t.Fatalf("CreateFreshIndices: %v", err)
+	}
+
+	rebuilt := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 1)
+	if rebuilt == nil || rebuilt.Phase != v1beta1.OMENativeInstanceCreating || rebuilt.Operation == nil ||
+		rebuilt.Operation.Type != v1beta1.InstanceOperationCreate || rebuilt.Incarnation != 2 ||
+		rebuilt.RunningRevision != "llama-70b-engine-"+testRevisionHash {
+		t.Fatalf("the demoted row must open a Create at its own incarnation and keep the revision it records, got %+v", rebuilt)
+	}
+	peer := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+	if peer == nil || peer.Phase != v1beta1.OMENativeInstanceReady || peer.Operation != nil || peer.Incarnation != 3 {
+		t.Fatalf("the Ready peer must be left exactly as it was, got %+v", peer)
+	}
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	got := map[string]bool{}
+	for _, p := range pods.Items {
+		got[p.Name] = true
+	}
+	if len(pods.Items) != 2 || !got[pod0.Name] || !got["llama-70b-engine-1-default-0"] {
+		t.Fatalf("expected the peer's pod plus the rebuilt pod, got %v", got)
+	}
+}

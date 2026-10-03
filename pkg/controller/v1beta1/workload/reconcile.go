@@ -330,8 +330,8 @@ const (
 	// pass at its own position in the pipeline.
 	createScopeFull createScope = iota
 	// createScopeFresh materializes only surge-free indices, so a
-	// scale-up is not starved behind another Instance's in-flight
-	// rollout or held repair.
+	// scale-up, or the rebuild of a row that lost every pod, is not
+	// starved behind another Instance's in-flight rollout or held repair.
 	createScopeFresh
 )
 

@@ -118,14 +118,19 @@ func executeUpdatePass(ctx context.Context, deps types.Deps, input types.Reconci
 		input.RecordRolloutHold(firstDenial)
 	}
 	if anyUpdating || anyGated || anyUpdateRan {
-		// About to requeue without the full Create pass. Brand-new
-		// (surge-free) indices legitimately bypass the skip-Create
-		// gate above: they have a genuine ActiveOrdinal=0 and no
-		// RunningRevision to mis-stamp, so the stale-observation hazard
-		// above does not apply — see ops.CreateFreshIndices. Materialize them
-		// now so a concurrent scale-up isn't starved behind the
-		// in-flight rollout. The full Create pass still owns
-		// surge-sensitive (touched) indices once the rollout drains.
+		// About to requeue without the full Create pass. Surge-free
+		// indices — brand-new ones, and rows demoted for losing every
+		// pod — legitimately bypass the skip-Create gate above: no
+		// Update this pass could have moved their ordinal or their
+		// running revision, so the stale-observation hazard above does
+		// not apply — see ops.CreateFreshIndices. Materialize them now
+		// so a concurrent scale-up isn't starved behind the in-flight
+		// rollout, and so a row that lost its pods is rebuilt whether
+		// or not a start is admitted around it: a podless row on the
+		// target holds a slot in the budget that denies the start, and
+		// nothing but its rebuild releases it. The full Create pass
+		// still owns surge-sensitive (touched) indices once the rollout
+		// drains.
 		if _, createErr := createPass(ctx, deps, input, plan, target, createScopeFresh); createErr != nil {
 			return ctrl.Result{}, false, createErr
 		}
