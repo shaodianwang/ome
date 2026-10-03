@@ -7134,6 +7134,56 @@ class CrashloopNewFaultTest(unittest.TestCase):
                          "a strategy the spec does not name keeps the strict budget")
         self.assertEqual(1, run._crash_new_allowance(spec("RecreatePod", 0, 1), "engine", 4))
 
+    def test_allowance_table_by_strategy_fleet_and_form(self):
+        # form=start never promotes anything: the budget everywhere. form=load:
+        # a drain-first strategy admits one start beside the promoted crash on
+        # any fleet; the surge strategy keeps the strict budget unless it rolls
+        # the whole fleet inside the crash window — a fleet of two at the
+        # fixture's 15s startup and 20s crash exit — where the whole fleet is off.
+        def spec(strat, surge, unavail, min_ready=None):
+            life = {"updateStrategy": {"type": strat, "rollingUpdate": {"maxSurge": surge, "maxUnavailable": unavail}}}
+            if min_ready is not None:
+                life["minReadySeconds"] = min_ready
+            return {"engine": {"lifecycle": life}}
+        strategies = {"SurgeThenDrain": (1, 0), "RecreatePod": (0, 1), "InPlaceIfPossible": (0, 1)}
+        with mock.patch.object(run, "RUNNER_STARTUP_S", 15), mock.patch.object(run, "CRASH_EXIT_AFTER_S", 20):
+            table = {(strat, n, form): run._crash_new_allowance(spec(strat, *budgets), "engine", n, form=form)
+                     for strat, budgets in strategies.items() for n in (2, 3, 4) for form in ("start", "load")}
+            want = {(strat, n, "start"): 1 for strat in strategies for n in (2, 3, 4)}
+            want.update({(strat, n, "load"): 2 for strat in ("RecreatePod", "InPlaceIfPossible") for n in (2, 3, 4)})
+            want.update({("SurgeThenDrain", 2, "load"): 2, ("SurgeThenDrain", 3, "load"): 1, ("SurgeThenDrain", 4, "load"): 1})
+            self.assertEqual(want, table)
+            self.assertEqual(1, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0, min_ready=10), "engine", 2, form="load"),
+                             "minReadySeconds that holds the second promotion past the crash window keeps the strict budget")
+            self.assertEqual(2, run._crash_new_allowance(spec("SurgeThenDrain", 2, 0), "engine", 2, form="load"),
+                             "a budget already covering the fleet is the allowance")
+            with mock.patch.object(run, "RUNNER_STARTUP_S", 5):
+                self.assertEqual(4, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0), "engine", 4, form="load"),
+                                 "a fixture that comes up faster rolls a larger fleet inside the window")
+                self.assertEqual(1, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0), "engine", 5, form="load"))
+            with mock.patch.object(run, "CRASH_EXIT_AFTER_S", 10):
+                self.assertEqual(1, run._crash_new_allowance(spec("SurgeThenDrain", 1, 0), "engine", 2, form="load"),
+                                 "a crash that shows before the second Instance is up keeps the strict budget")
+
+    def test_case_allowance_notes_where_the_instances_beyond_the_budget_come_from(self):
+        def spec(strat, surge, unavail):
+            return {"engine": {"lifecycle": {"updateStrategy": {
+                "type": strat, "rollingUpdate": {"maxSurge": surge, "maxUnavailable": unavail}}}}}
+        whole = ("allowance 2 = the whole fleet of 2: under SurgeThenDrain at minReadySeconds 0 the roll of the "
+                 "1 Instance(s) after the first promoted one, about 15s each, completes inside its 20s crash window "
+                 "(form=load), before its first restart is visible")
+        beside = ("allowance 2 = budget 1 + the start a drain-first strategy admits while the promoted crashing "
+                  "Instance is still healthy (form=load, minReadySeconds 0)")
+        rows = (("SurgeThenDrain", 1, 0, 2, 2, [whole]), ("SurgeThenDrain", 1, 0, 4, 1, []),
+                ("RecreatePod", 0, 1, 2, 2, [beside]), ("RecreatePod", 0, 1, 4, 2, [beside]))
+        with mock.patch.object(run, "RUNNER_STARTUP_S", 15), mock.patch.object(run, "CRASH_EXIT_AFTER_S", 20):
+            for strat, surge, unavail, n, want, notes in rows:
+                f = {"form": "load", "notes": []}
+                with mock.patch.object(run, "_isvc_spec", lambda cid, _s=spec(strat, surge, unavail): _s):
+                    self.assertEqual(want, run._crash_new_case_allowance({"case_id": "p999", "N": {"engine": n}}, f, "engine"),
+                                     (strat, n))
+                self.assertEqual(notes, f["notes"], (strat, n))
+
     def test_tally_splits_instances_by_what_they_run(self):
         old, crash = {"old"}, {"bad"}
         pods = {

@@ -1395,7 +1395,16 @@ shapes.
   recreate) with `form=load`: the promoted crashing Instance admits the
   next start before it crashes (minReadySeconds is zero), so two are off
   at once at the floor, as a Deployment reaches too, while the surge
-  strategy keeps the strict budget; status says why the roll stopped — a `rolloutHold` on
+  strategy keeps the strict budget, except on a fleet it rolls whole inside
+  the crash window: each further Instance takes one startup to come up
+  (`RUNNER_STARTUP_S`, the fixture's `TEST_STARTUP_DELAY`, 15) and the
+  first crash shows `CRASH_EXIT_AFTER_S` (20) after the first promotion,
+  so on a fleet of two the second promote and drain land before any
+  restart is visible and the whole fleet is the allowance
+  (`_surge_roll_fits_crash_window`: `(N - 1) × (startup + minReadySeconds)
+  < crash exit`; the verdict's note states it), while a larger fleet,
+  whose first crash is visible before the roll completes, keeps the strict
+  budget; status says why the roll stopped — a `rolloutHold` on
   the victim Component from the retry ladder (`RetryBlock`, `Held`) or the
   budget (`Budget`), or one of its Instance rows at `Failed`, and a
   `RetryHeld` or `InstanceFailed` event naming it — within the rotate

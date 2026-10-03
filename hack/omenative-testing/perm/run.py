@@ -2062,6 +2062,10 @@ CRASHLOOP_FORMS = {"start", "load"}
 # (rebump-fix) drops the runner override.
 CRASH_EXIT_ENV = "TEST_EXIT_AFTER"
 CRASH_EXIT_AFTER_S = int(float(os.environ.get("OME_TEST_CRASH_EXIT_AFTER_S", "20")))
+# The fixture runtime's startup delay (TEST_STARTUP_DELAY in runtime/csr*.yaml;
+# OME_TEST_STARTUP_DELAY_S tells the harness of a changed fixture): how long a
+# replacement takes to come up, so how long a roll takes per Instance.
+RUNNER_STARTUP_S = int(float(os.environ.get("OME_TEST_STARTUP_DELAY_S", "15")))
 # What the kubelet reports on a pod whose container dies at every start, and
 # on one whose image cannot be pulled.
 CRASH_START_REASONS = {"CrashLoopBackOff", "StartError", "RunContainerError", "CreateContainerError"}
@@ -7340,33 +7344,64 @@ def _surge_count(n, surge):
 # minReadySeconds at zero the roll admits the next Instance's start while
 # the promoted one is still healthy; when it crashes two Instances are off
 # at once, the floor a Deployment reaches too. The surge strategy promotes
-# the replacement beside its source and keeps the strict budget.
+# the replacement beside its source and keeps the strict budget, except on
+# a fleet it rolls whole inside the crash window (_surge_roll_fits_crash_window).
 DRAIN_FIRST_STRATEGIES = {"RecreatePod", "InPlaceIfPossible", "InPlaceOnly"}
+SURGE_STRATEGY = "SurgeThenDrain"
+
+
+def _surge_roll_fits_crash_window(n, min_ready=0):
+    """True when a surge roll replaces the whole fleet of n inside the first
+    promoted Instance's crash window: each of the n-1 Instances after it
+    takes one startup to come up plus the minReadySeconds its promotion
+    waits, and the first crash shows CRASH_EXIT_AFTER_S after the first
+    promotion, so no restart is visible before the last drain and the
+    product has nothing to withhold it on."""
+    return n > 1 and (n - 1) * (RUNNER_STARTUP_S + max(0, min_ready)) < CRASH_EXIT_AFTER_S
+
+
+def _crash_new_allowance_why(spec, comp, n, form=None):
+    """(allowance, budget, why): how many Instances of a Component may be
+    off the running revision at once while a push whose revision crashes
+    rolls. The budget is the larger of its surge and unavailability
+    budgets, resolved against n; under form=load the allowance may exceed
+    it, and why says where the Instances beyond it come from: the one
+    start a drain-first strategy admits beside the promoted crash
+    (DRAIN_FIRST_STRATEGIES), or the whole fleet a surge roll replaces
+    inside the crash window (_surge_roll_fits_crash_window)."""
+    lifecycle = (((spec or {}).get(comp) or {}).get("lifecycle") or {})
+    strategy = lifecycle.get("updateStrategy") or {}
+    ru = strategy.get("rollingUpdate") or {}
+    budget = max(_surge_count(n, ru.get("maxSurge", 0)), resolve_max_unavailable(ru.get("maxUnavailable", 0), n))
+    kind = str(strategy.get("type") or "")
+    try:
+        min_ready = int(lifecycle.get("minReadySeconds") or 0)
+    except (TypeError, ValueError):
+        min_ready = 0
+    if form == "load" and kind in DRAIN_FIRST_STRATEGIES:
+        return budget + 1, budget, (f"budget {budget} + the start a drain-first strategy admits while the promoted "
+                                    f"crashing Instance is still healthy (form={form}, minReadySeconds {min_ready})")
+    if form == "load" and kind == SURGE_STRATEGY and n > budget and _surge_roll_fits_crash_window(n, min_ready):
+        return n, budget, (f"the whole fleet of {n}: under {SURGE_STRATEGY} at minReadySeconds {min_ready} the roll "
+                           f"of the {n - 1} Instance(s) after the first promoted one, about {RUNNER_STARTUP_S}s each, "
+                           f"completes inside its {CRASH_EXIT_AFTER_S}s crash window (form={form}), before its first "
+                           f"restart is visible")
+    return budget, budget, ""
 
 
 def _crash_new_allowance(spec, comp, n, form=None):
-    """How many Instances of a Component may be off the running revision at
-    once while a push whose revision crashes rolls: the larger of its surge
-    and unavailability budgets, resolved against n, plus the one start a
-    drain-first strategy admits beside the promoted crash under form=load
-    (DRAIN_FIRST_STRATEGIES)."""
-    strategy = ((((spec or {}).get(comp) or {}).get("lifecycle") or {}).get("updateStrategy") or {})
-    ru = strategy.get("rollingUpdate") or {}
-    budget = max(_surge_count(n, ru.get("maxSurge", 0)), resolve_max_unavailable(ru.get("maxUnavailable", 0), n))
-    if form == "load" and str(strategy.get("type") or "") in DRAIN_FIRST_STRATEGIES:
-        return budget + 1
-    return budget
+    """The allowance alone (_crash_new_allowance_why)."""
+    return _crash_new_allowance_why(spec, comp, n, form)[0]
 
 
 def _crash_new_case_allowance(ctx, f, victim):
-    """The case's allowance for the victim Component (_crash_new_allowance
+    """The case's allowance for the victim Component (_crash_new_allowance_why
     against the live spec), noted on the fault when it exceeds the budget
-    so the verdict says where the extra Instance comes from."""
+    so the verdict says where the Instances beyond the budget come from."""
     spec, n = _isvc_spec(ctx["case_id"]), ctx["N"][victim]
-    budget, allowance = _crash_new_allowance(spec, victim, n), _crash_new_allowance(spec, victim, n, f["form"])
+    allowance, budget, why = _crash_new_allowance_why(spec, victim, n, f["form"])
     if allowance > budget:
-        f["notes"].append(f"allowance {allowance} = budget {budget} + the start a drain-first strategy admits while "
-                          f"the promoted crashing Instance is still healthy (form={f['form']}, minReadySeconds 0)")
+        f["notes"].append(f"allowance {allowance} = {why}")
     return allowance
 
 
