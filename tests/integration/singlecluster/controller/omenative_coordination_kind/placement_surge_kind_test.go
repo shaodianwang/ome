@@ -341,8 +341,14 @@ var _ = ginkgo.Describe("placement member surge coordination", func() {
 })
 
 func fixtureEngineRenderingHash(g Gomega, service *v1beta1.InferenceService) string {
-	rt, err := (resolution.Resolver{Client: k8sClient, OperatorNamespace: constants.OMENamespace}).Resolve(suiteCtx, service, nil)
-	g.Expect(err).NotTo(HaveOccurred())
+	// A runtime input may change between two reads; the resolver refuses
+	// that and the read is repeated.
+	var rt *resolution.Runtime
+	Eventually(func(g Gomega) {
+		resolved, err := (resolution.Resolver{Client: k8sClient, OperatorNamespace: constants.OMENamespace}).Resolve(suiteCtx, service, nil)
+		g.Expect(err).NotTo(HaveOccurred())
+		rt = resolved
+	}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	cm := &corev1.ConfigMap{}
 	g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: constants.OMENamespace, Name: constants.InferenceServiceConfigMapName}, cm)).To(Succeed())
 	cfg, deploy, err := controllerconfig.RenderingConfig(cm)
