@@ -4278,6 +4278,33 @@ class CrashloopFaultTest(unittest.TestCase):
             self._grouped_or_plain(kv, outputs[f"gen-crashloop-sibling/{n}.yaml"])
         self.assertEqual([], [n for n, _kv, m in fam if "parked" in m], "every cell runs live")
 
+    def test_sibling_rolling_rows_allow_the_broken_decoder(self):
+        """A rollingUpdate cell bumps the decoder too, so the decoder's floor
+        is read under the roll; the break costs its one Instance until the
+        roll replaces it, so those cells carry floor_slack=1 (the floor still
+        asserts N-1) and their reason says so. Every other cell bumps the
+        engine alone: the decoder is a negative control the floor does not
+        read, and no slack is carried."""
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv) for folder, n, kv, _m in rows if folder == "gen-crashloop-sibling"]
+        rolling = [(n, kv) for n, kv in fam if kv["co"] == "rolling"]
+        others = [(n, kv) for n, kv in fam if kv["co"] != "rolling"]
+        self.assertEqual(6, len(rolling))
+        self.assertEqual(24, len(others))
+        self.assertEqual({"none", "bluegreen", "seq", "canary"}, {kv["co"] for _n, kv in others})
+        clause = "the broken decoder's own capacity is the one Instance the floor allows"
+        for n, kv in rolling:
+            header, reason = outputs[f"gen-crashloop-sibling/{n}.yaml"].splitlines()[:2]
+            self.assertEqual(1, kv["floor_slack"], n)
+            self.assertIn(" floor_slack=1", header, n)
+            self.assertNotIn("floor_soft", kv, n)
+            self.assertIn(clause, reason, n)
+        for n, kv in others:
+            header, reason = outputs[f"gen-crashloop-sibling/{n}.yaml"].splitlines()[:2]
+            self.assertNotIn("floor_slack", kv, n)
+            self.assertNotIn("floor_slack", header, n)
+            self.assertNotIn(clause, reason, n)
+
     def test_idle_cell_parks_through_the_table_alone(self):
         """A PARKED entry keyed as the table documents parks exactly that
         crashloop-idle cell, replacing the family's reason with its own, and

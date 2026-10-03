@@ -1656,7 +1656,9 @@ def _sibling_reason(form, co):
                 f"{_break_how(form, 'decoder')}; both rolls converge within their budgets with every Instance on "
                 f"the new revision, and the decoder's broken Instance is the roll's to land, not a repair's: it "
                 f"ends on the new revision serving and no RestartTriggered event names it after the bump, while "
-                f"the group's gate paces the two members as one run")
+                f"the group's gate paces the two members as one run; the broken decoder's own capacity is the one "
+                f"Instance the floor allows while the roll takes it first (floor_slack=1): no healthy decoder "
+                f"Instance is drained below N-1 while its replacement surges within the ceiling")
     out = (f"the engine is bumped alone and, as the bump lands, {_break_how(form, 'decoder')}; the engine "
            f"roll converges within its budget with every engine Instance on the new revision, while the "
            f"decoder, which nothing bumped, keeps N with nothing rotated and its broken Instance is rebuilt "
@@ -1713,6 +1715,10 @@ def emit_crashloop_sibling(add):
                               victimcomp="decoder", bump=bump)
                     if co == "rolling":
                         kv["ceil_d"] = n + 1
+                        # The decoder rolls too, so its floor is read under
+                        # the roll: the broken Instance's own capacity is the
+                        # one the floor allows while the roll takes it first.
+                        kv["floor_slack"] = 1
                     if co == "canary":
                         kv["canary"] = "auto"
                     meta = dict(strat="SurgeThenDrain", verb=f"crashloop:{form}@sibling", rp=rp, victim="decoder")
