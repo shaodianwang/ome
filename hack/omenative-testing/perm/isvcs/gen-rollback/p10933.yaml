@@ -1,0 +1,31 @@
+# p10933: [gen] rollback at last over crashloop start after-settle pd-mn W1 N=2 InPlaceIfPossible u1 co rolling  Ne=2 Nd=2 Nr=2 ceil_e=2 ceil_d=2 ceil_r=2 fault=crashloop:old co=rolling topo=pd-mn form=start during=last rollback=1 lift=after-settle
+# reason: the operator pushes a revision over a fleet whose engine is already broken: the leader pod of the engine's highest Instance is pointed at an image whose runner dies at every start on the settled service, and the push follows once the status has reacted to it; the cause is taken away once the rollback has fired; the starting revision is re-applied at the last Instance, every other one already on the new revision; every Instance of the bumped members ends on the starting revision, no pod of the new revision remains, the capacity floor (lowered by the broken Instance) holds throughout and no Instance is left mid-operation; the broken engine Instance ends Ready and serving on the starting revision, rebuilt by a repair or by the roll back or healed in place (the repairs that named it are reported, not judged); a gang in-place roll comes back as a whole-gang recreate within the unavailable budget; the run that targeted the new revision closes as superseded and a fresh run brings the group back
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p10933 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/rev: "v1" }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/rev: "v1" }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          rollingUpdate: {}

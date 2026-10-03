@@ -104,7 +104,17 @@ runners (run.py + the KIND CI lane) already implement:
                           last|held; held breaks the new revision with
                           break=stuck so the roll parks at its budget first),
                           crossed with topology x strategy x hook x group;
-                          every Instance must end on the starting revision
+                          every Instance must end on the starting revision.
+                          Continued at p10800+ with a break beside the
+                          rollback on the six shape families: the running
+                          revision broken before the push (a crash at start
+                          or after Ready, an unpullable image, the key
+                          removed, readiness lost; kept, or lifted once the
+                          rollback has fired) and rolled back at each hook,
+                          a sibling broken the same way, and the push held
+                          by break=crash-start|crash-load|imagepull|configkey
+                          (once=1 for one kill of the first runner; the
+                          grouped decoder's revision too) and rolled back
     gen-crashloop-new/ p5000+  the push brings a revision whose pods crash
                           (fault=crashloop:new, form=start|load), crossed
                           with topology x strategy x restartPolicy x group;
@@ -655,6 +665,7 @@ GEN_CONTINUATIONS = {
     "gen-ops-held": (10000, 10100),
     "gen-webhook": (10300, 10450),
     "gen-conflict": (10450, 10700),
+    "gen-rollback": (10800, 11100),
 }
 
 
@@ -2983,6 +2994,233 @@ def _rollback_reason(hook, strat, topo, co):
     return out
 
 
+# A break beside the rollback, on the six shape families. The running
+# revision breaks before the push (crash at start or after Ready, an image
+# that cannot be pulled, the ConfigMap key removed, readiness that stops
+# passing; kept, or taken away once the rollback has fired) and the roll is
+# rolled back at each of its hooks, one (strategy, group) pair per hook so
+# the family's axes are all touched; a sibling nobody bumped (the router of
+# an engine fleet, the decoder outside a group) breaks the same way at the
+# first new pod. The pushed revision breaks at the held moment (break=
+# beyond stuck) under each strategy, the crash kinds also as one kill of
+# the first runner, and on a grouped prefill/decode service the decoder's
+# pushed revision breaks instead of the engine's.
+ROLLBACK_FAULT_SHAPES = [("engine", 4, 0, False), ("engine-mn", 2, 1, False), ("engine", 4, 0, True),
+                         ("engine-mn", 2, 1, True), ("pd", 4, 0, True), ("pd-mn", 2, 1, True)]
+ROLLBACK_FAULT_ROWS = [
+    ("crashloop:old", "start", ""), ("crashloop:old", "start", "after-settle"),
+    ("crashloop:old", "load", ""), ("crashloop:old", "load", "after-settle"),
+    ("imagepull:old", "", ""), ("imagepull:old", "", "after-settle"),
+    ("configkey:missing", "", "never"), ("configkey:missing", "", "after-settle"),
+    ("readiness:old", "persist", ""), ("readiness:old", "recover", ""),
+]
+ROLLBACK_FAULT_MOMENTS = [("settling", "SurgeThenDrain", 1, 0, "none"), ("rotating", "RecreatePod", 0, 1, "none"),
+                          ("draining", "SurgeThenDrain", 1, 0, "rolling"), ("last", "InPlaceIfPossible", 0, 1, "rolling")]
+ROLLBACK_SIBLING_ROWS = [("crashloop:old", "start", ""), ("crashloop:old", "start", "after-settle")]
+ROLLBACK_SIBLING_MOMENT = ROLLBACK_FAULT_MOMENTS[0][:4]
+ROLLBACK_HELD_BREAKS = ["crash-start", "crash-load", "imagepull", "configkey"]
+ROLLBACK_HELD_STRATS = [("SurgeThenDrain", 1, 0), ("RecreatePod", 0, 1), ("InPlaceIfPossible", 0, 1)]
+ROLLBACK_HELD_ONCE = ["crash-start", "crash-load"]
+ROLLBACK_HELD_SIBLING_SHAPES = [("pd", 4, 0, True), ("pd-mn", 2, 1, True)]
+# The bumped members' Instance ready timeout under a pushed-revision break:
+# a revision that never comes up parks its row Failed within the wait the
+# runner gives the status to say why.
+ROLLBACK_HELD_READY_TIMEOUT = READINESS_NEW_TIMEOUT
+ROLLBACK_BREAK_WORDS = {"crash-start": "a runner that dies at every start", "crash-load": "a runner that exits after Ready",
+                        "imagepull": "an image that cannot be pulled", "configkey": "a ConfigMap key the ConfigMap lacks"}
+
+
+def _rollback_fault_kept(fault, form, lift):
+    return (fault == "configkey:missing" and lift == "never") or (fault == "readiness:old" and form == "persist")
+
+
+def _rollback_fault_oneshot(fault, form, lift):
+    return lift == "after-settle" or (fault == "readiness:old" and form == "recover")
+
+
+def _rollback_fault_comps(topo, n, w, router, life, co, cm):
+    """The rollback family's fleet on a six-family shape: the engine on the
+    annotated starting revision (its runner reading a key of the ConfigMap
+    cm names, where the case has one), the decoder of a prefill/decode
+    service (sharing the engine's strategy under a group), and the router
+    where the shape carries one."""
+    cw = w if is_mn(topo) else 0
+    runner = lib.configmap_env(cm, HEAL_CONFIG_KEY, HEAL_CONFIG_VAR, gang=is_mn(topo)) if cm else None
+    cs = [lib.comp("engine", n, cw, life, ann=ROLLBACK_START_ANN, runner=runner)]
+    if is_pd(topo):
+        cs.append(lib.comp("decoder", n, cw, life if co != "none" else lib.lifecycle(), ann=ROLLBACK_START_ANN))
+    if router_count(topo, lib.NR if router else 0):
+        cs.append(lib.comp("router", lib.NR, 0, lib.lifecycle()))
+    return cs
+
+
+def _rollback_fault_body(name, topo, n, w, router, life, co, configkey, coord):
+    """The case body as a function of the minted name: where the break needs
+    a ConfigMap key, the engine runner reads one of a ConfigMap named after
+    the case, carried as a second document so the apply creates it and the
+    teardown removes it with the case."""
+    cm = f"{name}{HEAL_CONFIG_SUFFIX}" if configkey else None
+    cs = _rollback_fault_comps(topo, n, w, router, life, co, cm)
+    docs = [lib.configmap_doc(cm, {HEAL_CONFIG_KEY: HEAL_CONFIG_VALUE})] if cm else []
+    return lib.render(name, cs, coord=coord, docs=docs)
+
+
+def _rollback_fault_words(fault, form, lift, victim, topo):
+    pod = "leader pod" if is_mn(topo) else "pod"
+    where = f"the {pod} of the {victim}'s highest Instance"
+    what = {("crashloop:old", "start"): f"{where} is pointed at an image whose runner dies at every start",
+            ("crashloop:old", "load"): f"{where} has its runner killed every few seconds once it is up",
+            ("imagepull:old", ""): f"{where} is pointed at an image that cannot be pulled",
+            ("configkey:missing", ""): f"the ConfigMap key the {victim} runner reads is removed and {where} restarted, "
+                                       f"so it waits in CreateContainerConfigError",
+            ("readiness:old", form if fault == "readiness:old" else ""): f"{where} gets the readiness switch and stops passing readiness"}
+    key = (fault, form) if fault != "readiness:old" else ("readiness:old", form)
+    out = what[key] + " on the settled service, and the push follows once the status has reacted to it"
+    if _rollback_fault_oneshot(fault, form, lift):
+        out += "; the cause is taken away once the rollback has fired"
+    elif _rollback_fault_kept(fault, form, lift):
+        out += "; the cause stays for the whole case"
+    return out
+
+
+def _rollback_fault_reason(fault, form, lift, hook, strat, co, topo, router, victim):
+    kept = _rollback_fault_kept(fault, form, lift)
+    out = (f"the operator pushes a revision over a fleet whose {victim} is already broken: "
+           f"{_rollback_fault_words(fault, form, lift, victim, topo)}; the starting revision is re-applied at "
+           f"{ROLLBACK_MOMENT[hook]}; every Instance of the bumped members ends on the starting revision, no pod of the "
+           f"new revision remains, the capacity floor (lowered by the broken Instance) holds throughout and no Instance "
+           f"is left mid-operation")
+    if kept:
+        out += (f"; the broken {victim} Instance cannot serve while its cause stays, so it ends on the starting revision "
+                f"without serving, its Component one Instance short, and its row reads other than Ready")
+    else:
+        out += (f"; the broken {victim} Instance ends Ready and serving on the starting revision, rebuilt by a repair or "
+                f"by the roll back or healed in place (the repairs that named it are reported, not judged)")
+    if victim != "engine":
+        out += f"; the {victim} is not bumped, so only a repair or the heal brings its Instance back"
+    if strat == "SurgeThenDrain":
+        out += "; Instances already on the new revision come back under the surge budget"
+    elif strat == "RecreatePod":
+        out += "; Instances already on the new revision come back drain-first within the unavailable budget"
+    elif is_mn(topo):
+        out += "; a gang in-place roll comes back as a whole-gang recreate within the unavailable budget"
+    else:
+        out += "; an in-place roll comes back in place (UIDs stable)"
+    if co != "none":
+        out += "; the run that targeted the new revision closes as superseded and a fresh run brings the group back"
+    return out
+
+
+def _rollback_held_reason(kind, once, strat, co, topo, router, victim):
+    pod = "leader pod" if is_mn(topo) else "pod"
+    if once:
+        how = (f"the push's first {victim} {pod} has its runner killed once, "
+               f"{'during its first start, before it was ever Ready' if kind == 'crash-start' else 'once it is Ready and serving'}, "
+               f"and the kubelet restarts it; the starting revision is re-applied as soon as the restart shows")
+    else:
+        how = (f"the push gives the {victim} runner {ROLLBACK_BREAK_WORDS[kind]}, so the roll parks on its first {pod}: the "
+               f"kubelet shows the break, the status says why (a rolloutHold gate from the retry ladder or the budget, a "
+               f"Failed row, a RetryHeld or InstanceFailed event), and only then is the starting revision re-applied")
+    out = (f"the operator rolls back a push its first pod cannot carry: {how}; every Instance of the bumped members ends "
+           f"on the starting revision and serving, no pod of the withdrawn revision remains, none is created after the "
+           f"rollback fired and no repair names a bumped Instance after it; the capacity floor holds throughout")
+    if kind in ("crash-start", "imagepull", "configkey") and not once:
+        out += "; nothing of the broken revision ever served"
+    if strat == "InPlaceIfPossible":
+        out += ("; the runner change is patched in place where the strategy allows and recreated otherwise, and the "
+                "rollback comes back the same way within the unavailable budget")
+    elif strat == "RecreatePod":
+        out += "; the first Instance drained is rebuilt on the broken revision and comes back drain-first within the unavailable budget"
+    else:
+        out += "; the broken surge Instance never joins rotation and is withdrawn under the surge budget"
+    if victim != "engine":
+        out += f"; the engine's own roll converges or holds meanwhile and comes back with the {victim}"
+    if co != "none":
+        out += "; the run that targeted the new revision closes as superseded and a fresh run brings the group back"
+    return out
+
+
+def _emit_rollback_faults(add):
+    for topo, n, w, router in ROLLBACK_FAULT_SHAPES:
+        shape = _lift_shape(topo, w, router)
+        for fault, form, lift in ROLLBACK_FAULT_ROWS:
+            for hook, strat, surge, unavail, co in ROLLBACK_FAULT_MOMENTS:
+                kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, surge),
+                          fault=fault, co=co, topo=topo, rollback=1, during=hook)
+                if form:
+                    kv["form"] = form
+                if lift:
+                    kv["lift"] = lift
+                if co != "none" and is_pd(topo):
+                    kv["ceil_d"] = kv["ceil_e"]
+                words = fault.partition(":")[0] + (f" {form}" if form else "") + (f" {lift}" if lift else "")
+                meta = dict(strat=strat, verb=f"rollback:{hook}:{fault}", hook=hook, fault=fault, form=form, lift=lift)
+                desc = (f"{GEN_MARK} rollback at {hook} over {words} {shape} N={n} {strat} "
+                        f"{budget_tag(strat, surge, unavail)} co {co}")
+                configkey = fault == "configkey:missing"
+                life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail,
+                                     ready_timeout=(HEAL_FAILED_READY_TIMEOUT if configkey else None))
+                coord = lib.coord_for(co, comps=("engine", "decoder") if is_pd(topo) else ("engine",)) if co != "none" else None
+                add("gen-rollback", desc, kv, None, _rollback_fault_reason(fault, form, lift, hook, strat, co, topo, router, "engine"),
+                    meta, cell=("rollback-fault", fault, form, lift, hook, topo, w, router),
+                    body=functools.partial(_rollback_fault_body, topo=topo, n=n, w=w, router=router, life=life, co=co,
+                                           configkey=configkey, coord=coord))
+    hook, strat, surge, unavail = ROLLBACK_SIBLING_MOMENT
+    for topo, n, w, router in ROLLBACK_FAULT_SHAPES:
+        victim = "decoder" if is_pd(topo) else ("router" if router else "")
+        if not victim:
+            continue
+        shape = _lift_shape(topo, w, router)
+        for fault, form, lift in ROLLBACK_SIBLING_ROWS:
+            kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, surge),
+                      fault=fault, form=form, co="none", topo=topo, rollback=1, during=hook, victimcomp=victim)
+            if lift:
+                kv["lift"] = lift
+            words = f"crashloop {form}" + (f" {lift}" if lift else "")
+            meta = dict(strat=strat, verb=f"rollback:{hook}:{fault}:{victim}", hook=hook, fault=fault, form=form, lift=lift)
+            desc = f"{GEN_MARK} rollback at {hook} over {words} on the {victim} {shape} N={n} {strat} {budget_tag(strat, surge, unavail)} co none"
+            life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+            add("gen-rollback", desc, kv, None, _rollback_fault_reason(fault, form, lift, hook, strat, "none", topo, router, victim),
+                meta, cell=("rollback-fault", fault, form, lift, hook, topo, w, victim),
+                body=functools.partial(_rollback_fault_body, topo=topo, n=n, w=w, router=router, life=life, co="none",
+                                       configkey=False, coord=None))
+
+
+def _emit_rollback_held_breaks(add):
+    def one(topo, n, w, router, kind, once, strat, surge, unavail, co, victim):
+        shape = _lift_shape(topo, w, router)
+        kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, surge),
+                  co=co, topo=topo, rollback=1, during="held")
+        kv["break"] = kind
+        if once:
+            kv["once"] = 1
+        if victim != "engine":
+            kv["victimcomp"] = victim
+        if co != "none" and is_pd(topo):
+            kv["ceil_d"] = kv["ceil_e"]
+        words = kind + (" once" if once else "") + (f" on the {victim}" if victim != "engine" else "")
+        meta = dict(strat=strat, verb=f"rollback:held:{kind}" + (":once" if once else ""), hook="held", held_break=kind, once=once)
+        desc = f"{GEN_MARK} rollback at held by {words} {shape} N={n} {strat} {budget_tag(strat, surge, unavail)} co {co}"
+        life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, ready_timeout=(None if once else ROLLBACK_HELD_READY_TIMEOUT))
+        coord = lib.coord_for(co, comps=("engine", "decoder") if is_pd(topo) else ("engine",)) if co != "none" else None
+        add("gen-rollback", desc, kv, None, _rollback_held_reason(kind, once, strat, co, topo, router, victim), meta,
+            cell=("rollback-held", kind, once, strat, co, topo, w, router, victim),
+            body=functools.partial(_rollback_fault_body, topo=topo, n=n, w=w, router=router, life=life, co=co,
+                                   configkey=(kind == "configkey"), coord=coord))
+
+    for topo, n, w, router in ROLLBACK_FAULT_SHAPES:
+        for kind in ROLLBACK_HELD_BREAKS:
+            for strat, surge, unavail in ROLLBACK_HELD_STRATS:
+                one(topo, n, w, router, kind, False, strat, surge, unavail, "none", "engine")
+        for kind in ROLLBACK_HELD_ONCE:
+            strat, surge, unavail = ROLLBACK_HELD_STRATS[0]
+            one(topo, n, w, router, kind, True, strat, surge, unavail, "none", "engine")
+    for topo, n, w, router in ROLLBACK_HELD_SIBLING_SHAPES:
+        strat, surge, unavail = ROLLBACK_HELD_STRATS[0]
+        one(topo, n, w, router, "crash-start", False, strat, surge, unavail, "rolling", "decoder")
+        one(topo, n, w, router, "crash-start", True, strat, surge, unavail, "rolling", "decoder")
+
+
 def emit_rollback(add):
     for topo, n, w in ROLLBACK_SHAPES:
         for strat in ROLLBACK_BUDGETS:
@@ -3008,6 +3246,8 @@ def emit_rollback(add):
                         add("gen-rollback", desc, kv, _rollback_comps(topo, n, w, life, co),
                             _rollback_reason(hook, strat, topo, co), meta,
                             cell=("rollback", hook, topo, w, strat, surge, unavail, co), coord=coord)
+    _emit_rollback_faults(add)
+    _emit_rollback_held_breaks(add)
 
 
 # ── gen-crashloop-new: the push brings a revision whose pods crash ──────────

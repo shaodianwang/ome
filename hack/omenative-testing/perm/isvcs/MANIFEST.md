@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **5087**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **5423**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -26,7 +26,7 @@ Total generated cases: **5087**. The whole-corpus per-PR cap (hand + generated) 
 | gen-canary-fault-old | 188 | p6400..p6587 |
 | gen-canary-fault-new | 52 | p6600..p6651 |
 | gen-canary-fault-gate | 173 | p9050..p9222 |
-| gen-rollback | 126 | p5800..p5925 |
+| gen-rollback | 462 | p5800..p11061 |
 | gen-crashloop-new | 72 | p5000..p5071 |
 | gen-crashloop-group | 72 | p5400..p5471 |
 | gen-pause-repair | 180 | p6000..p6179 |
@@ -58,20 +58,20 @@ Total generated cases: **5087**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| engine | 1466 |
-| engine-mn | 1317 |
-| pd | 1287 |
-| pd-mn | 1017 |
+| engine | 1576 |
+| engine-mn | 1427 |
+| pd | 1345 |
+| pd-mn | 1075 |
 
 ### By update strategy
 
 | value | cases |
 |---|---|
 | (dormant: nothing rolls) | 750 |
-| InPlaceIfPossible | 458 |
+| InPlaceIfPossible | 542 |
 | InPlaceOnly | 281 |
-| RecreatePod | 1021 |
-| SurgeThenDrain | 2577 |
+| RecreatePod | 1105 |
+| SurgeThenDrain | 2745 |
 
 ### By failure verb / phase
 
@@ -334,10 +334,34 @@ Total generated cases: **5087**. The whole-corpus per-PR cap (hand + generated) 
 | resources@held | 4 |
 | resources@recreate | 2 |
 | rollback:draining | 22 |
+| rollback:draining:configkey:missing | 12 |
+| rollback:draining:crashloop:old | 24 |
+| rollback:draining:imagepull:old | 12 |
+| rollback:draining:readiness:old | 12 |
 | rollback:held | 26 |
+| rollback:held:configkey | 18 |
+| rollback:held:crash-load | 18 |
+| rollback:held:crash-load:once | 6 |
+| rollback:held:crash-start | 20 |
+| rollback:held:crash-start:once | 8 |
+| rollback:held:imagepull | 18 |
 | rollback:last | 26 |
+| rollback:last:configkey:missing | 12 |
+| rollback:last:crashloop:old | 24 |
+| rollback:last:imagepull:old | 12 |
+| rollback:last:readiness:old | 12 |
 | rollback:rotating | 26 |
+| rollback:rotating:configkey:missing | 12 |
+| rollback:rotating:crashloop:old | 24 |
+| rollback:rotating:imagepull:old | 12 |
+| rollback:rotating:readiness:old | 12 |
 | rollback:settling | 26 |
+| rollback:settling:configkey:missing | 12 |
+| rollback:settling:crashloop:old | 24 |
+| rollback:settling:crashloop:old:decoder | 4 |
+| rollback:settling:crashloop:old:router | 4 |
+| rollback:settling:imagepull:old | 12 |
+| rollback:settling:readiness:old | 12 |
 | rtedit@canary-serving@0 | 8 |
 | rtedit@canary-staging | 8 |
 | scale:down | 8 |
@@ -360,7 +384,7 @@ Total generated cases: **5087**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (unset — baseline) | 1458 |
+| (unset — baseline) | 1794 |
 | None | 2041 |
 | RecreateInstance | 1588 |
 
@@ -369,14 +393,14 @@ Total generated cases: **5087**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 4793 |
+| off | 5129 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 4907 |
+| (no pause around a repair) | 5243 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -385,7 +409,7 @@ Total generated cases: **5087**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 4907 |
+| (no pause around a repair) | 5243 |
 | fix | 90 |
 | none | 90 |
 
@@ -395,9 +419,9 @@ Total generated cases: **5087**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 54 |
 | canary | 30 |
-| none | 4325 |
+| none | 4537 |
 | ratio | 16 |
-| rolling | 628 |
+| rolling | 752 |
 | seq | 34 |
 
 ### By mid-roll edit (gen-switch)
@@ -439,7 +463,7 @@ Total generated cases: **5087**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 3672 |
+| (no break) | 4008 |
 | decoder | 106 |
 | engine | 1243 |
 | router | 66 |
@@ -515,10 +539,11 @@ Total generated cases: **5087**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
+|  | 124 |
 | after-hold | 84 |
-| after-settle | 216 |
+| after-settle | 316 |
 | after-window | 84 |
-| never | 162 |
+| never | 186 |
 
 ### By window operation (webhook and conflict families)
 

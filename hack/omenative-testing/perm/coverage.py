@@ -181,7 +181,7 @@ HEADER_VALUES = {
     "health": {"pass", "breach", "inconclusive"},
     "oninconclusive": {"hold", "rollback", "rollbackonstall"},
     "expect": {"reject", "roll", "noroll", "recover", "fail"} | IDLE_EXPECTS | BROKEN_UP_EXPECTS,
-    "break": {"stuck"},
+    "break": {"stuck", "crash-start", "crash-load", "imagepull", "configkey"},
     "remove": {"decoder", "router"},
     "mig": {"Auto", "Surge", "Never"},
     "restart": {"None", "RecreateInstance"},
@@ -643,6 +643,11 @@ def podkill_victim(h, phase, strategy, pods):
     return component, side
 
 
+# The fault row each held-moment break (rollback=1 during=held break=) fills.
+HELD_BREAK_ROWS = {"stuck": "readiness never passes", "crash-start": "crash at start", "crash-load": "crash after Ready",
+                   "imagepull": "image pull", "configkey": "config missing"}
+
+
 def classify_faults(h, mode, pods, strategy, verbs):
     """Every fault the case carries as (kind, form, side, component), the
     `fault=` header first; a canary's unpullable image, a stuck surge pod, a
@@ -722,8 +727,12 @@ def classify_faults(h, mode, pods, strategy, verbs):
         component = str(h.get("imgcomp") or h.get("bump", "engine"))
         sibling = component in ("decoder", "router")
         faults.append(("sibling broken" if sibling else "image pull", "persistent", "new", component))
-    if h.get("break") == "stuck":
-        faults.append(("readiness never passes", "persistent", "new", "engine"))
+    if h.get("break"):
+        # the pushed revision's break at a rollback's held moment, on the engine or the
+        # decoder victimcomp= names; once=1 (the first runner killed once) is the one-shot form
+        component = str(h.get("victimcomp") or "engine")
+        faults.append(("sibling broken" if component != "engine" else HELD_BREAK_ROWS[str(h["break"])],
+                       "one-shot" if h.get("once") else "persistent", "new", component))
     if mode == "runtimerev" and h.get("expect") == "recover" and h.get("break") != "stuck":
         faults.append(("image pull", "persistent", "new", "runtime image"))
     if (h.get("analysis") == "breach" or h.get("health") == "breach") and kind != "metric":

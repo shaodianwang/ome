@@ -1,0 +1,19 @@
+# p5954: [gen] rollback at settling over configkey after-settle engine N=4 SurgeThenDrain s1 co none  Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=configkey:missing co=none topo=engine during=settling rollback=1 lift=after-settle
+# reason: the operator pushes a revision over a fleet whose engine is already broken: the ConfigMap key the engine runner reads is removed and the pod of the engine's highest Instance restarted, so it waits in CreateContainerConfigError on the settled service, and the push follows once the status has reacted to it; the cause is taken away once the rollback has fired; the starting revision is re-applied at the moment the bump has landed, before any Instance moved; every Instance of the bumped members ends on the starting revision, no pod of the new revision remains, the capacity floor (lowered by the broken Instance) holds throughout and no Instance is left mid-operation; the broken engine Instance ends Ready and serving on the starting revision, rebuilt by a repair or by the roll back or healed in place (the repairs that named it are reported, not judged); Instances already on the new revision come back under the surge budget
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p5954 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/rev: "v1" }
+    runner: { env: [{ name: "TEST_CONFIG_VALUE", valueFrom: { configMapKeyRef: { name: "p5954-config", key: "value" } } }] }
+    lifecycle: { instanceReadyTimeout: "90s", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: p5954-config }
+data: { value: "1" }

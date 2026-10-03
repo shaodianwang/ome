@@ -3353,13 +3353,15 @@ def _rollback_run_checks(case_id, since, grouped, verdict, notes, checks):
 
 
 def _rollback_checks(rb, case_id, state, converged_at, pod_state, old_hashes, pods_per_inst,
-                     N, bumped, configured, grouped, trigger_ts, verdict, notes, checks):
+                     N, bumped, configured, grouped, trigger_ts, verdict, notes, checks, kept=None):
     """The operator's end state after a rollback: every Instance of the bumped
     members back on the starting revision and serving, no pod of the new
     revision left, the controller's rows settled with no open operation, and
     on a grouped service the run that targeted the new revision closed as
     superseded. How many Instances that never left the starting revision were
-    rebuilt anyway is measured, not asserted."""
+    rebuilt anyway is measured, not asserted. kept names a break victim
+    (Component, Instance) whose cause outlives a rebuild: its Component ends
+    one serving Instance short and its row is read by _rollback_fault_rows."""
     if rb["error"]:
         notes.append(f"INFRA-FAIL: {rb['error']}")
         checks.append(f"  ✗ INFRA-FAIL (rollback apparatus): {rb['error']}")
@@ -3376,7 +3378,7 @@ def _rollback_checks(rb, case_id, state, converged_at, pod_state, old_hashes, po
     served = " ".join(f"{c} {serving.get(c, 0)}/{N[c]}" for c in sorted(bumped))
     leftover = sorted(n for n, p in pod_state.items()
                       if p and p["alive"] and p.get("comp") in bumped and _pod_on_new(p, old_hashes))
-    short = [c for c in sorted(bumped) if serving.get(c, 0) != N[c]]
+    short = [c for c in sorted(bumped) if serving.get(c, 0) != N[c] - (1 if kept and kept[0] == c else 0)]
     if state != "CONVERGED":
         verdict = "FAIL"
         notes.append(f"did not settle back on the starting revision (state={state}, serving {served}, "
@@ -3391,9 +3393,10 @@ def _rollback_checks(rb, case_id, state, converged_at, pod_state, old_hashes, po
         checks.append(f"  ✗ end state: {sorted(bumped)} must be fully on the starting revision and serving (serving {served}); "
                       f"{len(leftover)} pod(s) of the new revision remain {leftover[:4]}")
     else:
-        checks.append(f"  ✓ every Instance of {sorted(bumped)} ends on the starting revision and serving ({served}); "
-                      f"no pod of the new revision remains")
-    settled, why = _rollback_ir_settled(_fetch_initial_ir_items(case_id), N, configured, bumped, old_hashes)
+        checks.append(f"  ✓ every Instance of {sorted(bumped)} ends on the starting revision and serving ({served}"
+                      + (f"; the kept break victim {kept[0]}/{kept[1]} excepted" if kept else "")
+                      + "); no pod of the new revision remains")
+    settled, why = _rollback_fault_rows(_fetch_initial_ir_items(case_id), N, configured, bumped, old_hashes, kept)
     if settled:
         checks.append("  ✓ controller rows settled: every Instance Ready with no open operation; "
                       "current and update revision are the starting revision")
@@ -3408,6 +3411,543 @@ def _rollback_checks(rb, case_id, state, converged_at, pod_state, old_hashes, po
     checks.append(f"  ⓘ rollback: {len(rebuilt)} of {len(rb['on_start_at_fire'])} Instance(s) that were on the starting "
                   f"revision at the rollback were rebuilt anyway" + (f" ({', '.join(rebuilt[:6])})" if rebuilt else ""))
     return verdict
+
+
+# A break beside a rollback. On the running revision (fault=<kind>:old, or
+# configkey:missing, at during=settling|rotating|draining|last) the break
+# lands on the settled service before the push, the status reacts to it,
+# the push follows and the starting revision is re-applied at the hook; the
+# one-shot forms (lift=after-settle on a crash, a pull failure or the
+# missing key, form=recover on readiness) take the cause away once the
+# rollback has fired. The victim must end on the starting revision too:
+# serving (rebuilt by a repair or by the roll back, or healed in place)
+# unless its cause outlives a rebuild (the key kept away, the readiness
+# switch kept), when it ends on the starting revision without serving and
+# the status says so. On the pushed revision (during=held break=<kind>) the
+# push carries the break, the roll parks on its first broken pod with the
+# status saying why, and the rollback withdraws the revision: nothing of it
+# is left and no repair is opened for it.
+ROLLBACK_BREAK_FAULTS = BREAK_FAULTS | {READINESS_FAULT, "configkey"}
+ROLLBACK_FAULT_HOOKS = {"settling", "rotating", "draining", "last"}
+# What parks the push at the held moment: the readiness probe it never
+# passes (stuck), a runner that dies at every start (crash-start), one that
+# exits after Ready (crash-load), an image that cannot be pulled (imagepull)
+# or a ConfigMap key the ConfigMap lacks (configkey). once=1 on a crash
+# kind kills the pushed revision's first runner exactly once instead.
+ROLLBACK_BREAKS = {ROLLBACK_BREAK, "crash-start", "crash-load", "imagepull", "configkey"}
+ROLLBACK_ONCE_BREAKS = {"crash-start", "crash-load"}
+# How long the parked roll is given to say why after its first pod has shown
+# the break, before the rollback lands anyway (the verdict then wants the
+# reason).
+HELD_BREAK_WHY_WAIT_S = HOLD_REASON_WAIT_S
+HELD_BREAK_POLL_S = 2.0
+# How long a pushed-revision pod must stay Ready and serving to count as
+# having served: an in-place image patch leaves the old container Ready
+# for the moment before the kubelet replaces it.
+HELD_BREAK_SERVED_S = int(5 * TIMEOUT_MULT)
+
+
+def _rollback_fault_case(hdr):
+    """True for a rollback with a break of the running revision beside it."""
+    kind = str(hdr.get("fault", "") or "").partition(":")[0]
+    return (hdr.get("mode", "rollout") == "rollout" and hdr.get("rollback") == 1
+            and kind in ROLLBACK_BREAK_FAULTS and str(hdr.get("during", "")) in ROLLBACK_FAULT_HOOKS)
+
+
+def _rollback_held_break_case(hdr):
+    """True for a rollback at the held moment whose push carries a break
+    beyond the readiness probe."""
+    return (hdr.get("mode", "rollout") == "rollout" and hdr.get("rollback") == 1
+            and str(hdr.get("during", "")) == "held"
+            and str(hdr.get("break", "")) in ROLLBACK_BREAKS - {ROLLBACK_BREAK})
+
+
+def _rollback_break_kept(f):
+    """True when the break's cause outlives a rebuild for the whole case: the
+    key kept away (configkey lift=never), the readiness switch kept
+    (readiness form=persist). Such a victim cannot serve again."""
+    if not f:
+        return False
+    if f.get("kind") == "configkey":
+        return f.get("lift") != HEAL_LIFT
+    if f.get("kind") == READINESS_FAULT:
+        return f.get("form") != "recover"
+    return False
+
+
+def _rollback_break_oneshot(f):
+    """True when the harness takes the cause away once the rollback has
+    fired: the one-shot forms of each kind."""
+    if not f:
+        return False
+    if f.get("kind") == READINESS_FAULT:
+        return f.get("form") == "recover"
+    return f.get("lift") == HEAL_LIFT
+
+
+def _rollback_break_lift(f):
+    """Take a one-shot break's cause away: a healed crash or pull failure,
+    the key put back, the readiness switch lifted."""
+    if f["kind"] in BREAK_FAULTS:
+        _break_heal(f)
+        return
+    ok = _configkey_restore(f) if f["kind"] == "configkey" else _readiness_restore(f)
+    what = "the key put back" if f["kind"] == "configkey" else "the readiness switch lifted"
+    f["notes"].append(f"break lifted once the rollback fired: {what}" if ok else f"the lift failed: {what} did not land")
+    f["healed_at"] = time.time()
+    print(f"    ⚡ {f['notes'][-1]}")
+
+
+def _rollback_fault_done(ctx, acting, kept):
+    """The rollback's end state with a break victim: every configured
+    Component at N alive and Ready (N-1 Ready on the kept victim's), nothing
+    of the acting members counted as updated and no alive pod of theirs on
+    the new revision."""
+    N, agg, pod_state, old = ctx["N"], ctx.get("agg") or {}, ctx["pod_state"], ctx["old_hashes"]
+    for c in ctx["configured"]:
+        a, rd, up = agg.get(c, (0, 0, 0))
+        want_ready = N[c] - (1 if kept and kept[0] == c else 0)
+        if a != N[c] or rd < want_ready:
+            return False
+        if c in acting and (up != 0 or any(p and p["alive"] and p["comp"] == c and _pod_on_new(p, old)
+                                          for p in pod_state.values())):
+            return False
+    return True
+
+
+def _rollback_fault_rows(items, N, configured, bumped, old_hashes, kept):
+    """The controller's view after a rollback beside a break: without a kept
+    cause the plain rollback rule; with one, every row but the kept victim's
+    Ready with no open operation, its Component's counters short by that
+    one row, and the victim's row reporting a phase other than Ready."""
+    if not kept:
+        return _rollback_ir_settled(items, N, configured, bumped, old_hashes)
+    kcomp, kinst = kept
+    others = [it for it in items or [] if (it.get("spec") or {}).get("component") != kcomp]
+    ok, why = _rollback_ir_settled(others, N, configured - {kcomp}, bumped - {kcomp}, old_hashes)
+    if not ok:
+        return False, why
+    mine = [it for it in items or [] if (it.get("spec") or {}).get("component") == kcomp]
+    if len(mine) != 1:
+        return False, f"{kcomp}: observed {len(mine)} InferenceReplicas, want 1"
+    st = mine[0].get("status") or {}
+    try:
+        rows = irstatus.instance_statuses(st)
+    except irstatus.DecodeError as e:
+        return False, f"{kcomp}: per-Instance status undecodable: {e}"
+    if not isinstance(rows, list) or len(rows) != N[kcomp]:
+        return False, f"{kcomp}: instanceStatuses {len(rows) if isinstance(rows, list) else 0}/{N[kcomp]}"
+    victim = None
+    for row in rows:
+        if str(row.get("index")) == str(kinst):
+            victim = row
+            continue
+        if row.get("phase") != "Ready" or row.get("operation") is not None:
+            return False, f"{kcomp}/{row.get('index', '?')}: Instance is not settled"
+    if victim is None:
+        return False, f"{kcomp}: no row at the kept victim's index {kinst}"
+    if victim.get("phase") == "Ready":
+        return False, f"{kcomp}/{kinst}: the kept victim's row reads Ready while its cause stays"
+    if kcomp in bumped:
+        cur = _revision_hash(st.get("currentRevision"))
+        if cur not in (old_hashes or set()):
+            return False, f"{kcomp}: currentRevision {cur or '(none)'} is not the starting revision"
+    return True, f"settled with the kept victim's row at {victim.get('phase')}"
+
+
+def _rollback_victim_checks(f, ctx, acting, kept, verdict, notes, checks):
+    """The break victim after the rollback, read at the index its gang
+    surges left it at: on the starting revision and serving (rebuilt by a
+    repair or the roll back, or healed in place), or with a kept cause on
+    the starting revision without serving, the status saying so. The
+    repairs that named it are reported, not judged: a repair of the
+    starting revision is the policy at work once that revision is the
+    target again."""
+    if not f or not f.get("fired") or f.get("infra_fail"):
+        return verdict
+    pod_state, old = ctx["pod_state"], ctx["old_hashes"] or set()
+    since = f.get("fired_ts") or 0
+    events = _isvc_events_since(ctx["case_id"], since)
+    for rec in _break_victims(f):
+        comp, inst = rec["crash_comp"], rec["crash_inst"]
+        chain = _victim_index_chain(comp, inst, (ctx.get("inv") or {}).get("surges"), events)
+        final = chain[-1]
+        where = f"{comp} Instance {inst}" + (f" (replaced at Instance {final} by its gang surge)" if final != inst else "")
+        side = "" if comp in acting else " (a sibling nobody bumped)"
+        pods = _instance_pods(pod_state, comp, final)
+        off = [n for n, p in pods if not p.get("hash") or p["hash"] not in old]
+        down = [n for n, p in pods if not (p.get("ready") and p.get("serving"))]
+        survivor = any(p.get("uid") and p["uid"] == rec.get("crash_uid") for _n, p in pods)
+        repairs = [m for reason, m in events
+                   if reason == "RestartTriggered" and any(_event_names_instance(m, comp, i) for i in chain)]
+        label = f"{f['kind']} beside the rollback"
+        if kept:
+            if not pods or off or not down:
+                verdict = "FAIL"
+                notes.append(f"{f['kind']} victim {comp}/{inst} with its cause kept did not end on the starting "
+                             f"revision without serving (pods={len(pods)} off-revision={off} serving={len(pods) - len(down)})")
+                checks.append(f"  ✗ {label}: {where}{side} keeps its cause, so it must end on the starting revision and not "
+                              f"serving; pods={len(pods)} off-revision={off} serving pods={len(pods) - len(down)}")
+            else:
+                checks.append(f"  ✓ {label}: {where}{side} ends on the starting revision without serving, as its kept "
+                              f"cause ({f.get('cause') or f['kind']}) leaves it")
+        elif not pods or off or down:
+            verdict = "FAIL"
+            notes.append(f"{f['kind']} victim {comp}/{inst} is not serving on the starting revision after the rollback "
+                         f"(pods={len(pods)} off-revision={off} not-serving={down})")
+            checks.append(f"  ✗ {label}: {where}{side} must end Ready and serving on the starting revision; "
+                          f"pods={len(pods)} off-revision={off} not-serving={down}")
+        else:
+            how = "healed in place (the pod the break hit serves again)" if survivor else "rebuilt"
+            checks.append(f"  ✓ {label}: {where}{side} ends Ready and serving on the starting revision, {how}")
+        checks.append(f"  ⓘ {label}: {len(repairs)} RestartTriggered event(s) name {where} since the break"
+                      + (f": {repairs[0][:120]}" if repairs else ""))
+        if rec.get("kills") is not None and f.get("form") == "load":
+            checks.append(f"  ⓘ {label}: runner killed {rec['kills']} time(s)")
+    return verdict
+
+
+def _rollback_break_land(ctx, f):
+    """Land the running revision's break on the settled service and wait
+    for it to bite and for the status to react, whatever its kind (a crash,
+    a pull failure, the missing key, the readiness switch), so the push
+    lands on a service the product already knows is broken. (True, "") or
+    (False, why)."""
+    _fault_fire(f, ctx["pod_state"], ctx["pods_per_inst"], ctx["old_hashes"], inv=ctx.get("inv"))
+    if f["infra_fail"]:
+        return False, f["infra_fail"]
+    bitten = _wait_break_bitten(ctx, f, BREAK_BITE_S)
+    if bitten is None:
+        return False, f"{f['kind']}: the break on the settled service did not bite within {BREAK_BITE_S}s"
+    f["notes"].append(f"the break had bitten {bitten:.0f}s after it landed")
+    print(f"    {f['notes'][-1]}")
+    waited, how = _wait_break_reacted(ctx, f, BREAK_REACT_S)
+    f["notes"].append(f"the push follows {how}" if waited is not None
+                      else f"the push follows although {how} within {BREAK_REACT_S}s")
+    print(f"    {f['notes'][-1]}")
+    return True, ""
+
+
+def _rollback_fault(case_id, yaml_file, desc, hdr):
+    """A break of the running revision beside a rollback: the break lands on
+    the settled service and the status reacts to it, the push follows, the
+    starting revision is re-applied at during=<hook>, and a one-shot cause
+    is taken away once the rollback has fired. The verdict is the rollback's
+    end state with the victim judged by its kind and form."""
+    kind = str(hdr.get("fault", "")).partition(":")[0]
+    reason = _fault_capability(kind)
+    if reason:
+        print(f"  ⓘ {kind} fault unavailable here: {reason}")
+        return _write_fail(case_id, desc, hdr, "SKIP", f"{kind} fault unavailable here: {reason}")
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    f, configured, ppi, N = ctx["fault"], ctx["configured"], ctx["pods_per_inst"], ctx["N"]
+    oneshot = _rollback_break_oneshot(f)
+    print(f"  Phase 2: {hdr.get('fault')} on the settled service, then the push and a rollback at {hdr.get('during')}"
+          + (" (the cause lifted once the rollback has fired)" if oneshot else " (the cause kept)"))
+    ok, why = _rollback_break_land(ctx, f)
+    if not ok:
+        f["infra_fail"] = f["infra_fail"] or why
+        return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [why], [f"  ✗ {why}"])
+    ctx["floor_allowance"] = {f["crash_comp"]: len(_break_victims(f))}
+    kept = (f["crash_comp"], f["crash_inst"]) if _rollback_break_kept(f) else None
+    st = _op_launch(ctx, hdr, "rollback", "the rollback at its hook")
+    if st["error"]:
+        return _finish(case_id, desc, hdr, ctx, "TRIGGER_FAIL", "FAIL",
+                       [f"trigger failed: {st['error']}"], [f"  ✗ trigger failed: {st['error']}"])
+    rb, acting, budget = st["rb"], st["acting"], st["budget"]
+    moved = {"seen": False}
+
+    def done():
+        # The end state is read only once the roll has visibly started: before
+        # the first pod moves the whole fleet reads settled on the starting revision.
+        if not moved["seen"]:
+            agg = ctx.get("agg") or {}
+            moved["seen"] = any(agg.get(c, (0, 0, 0))[2] > 0 for c in acting) or any(
+                p and p["alive"] and p.get("comp") in acting and _pod_on_new(p, ctx["old_hashes"])
+                for p in ctx["pod_state"].values())
+        return moved["seen"] and _rollback_fault_done(ctx, acting, kept)
+
+    reached, why = _window_wait_hook(ctx, "rollback", "settling", rb, None, None, acting, done, budget)
+    verdict, notes, checks = "PASS", [], []
+    state = "HOOK_MISSED"
+    if reached:
+        if oneshot:
+            _rollback_break_lift(f)
+        print(f"  Phase 3: watching the fleet come back onto the starting revision (≤{budget}s)")
+        t0, stable, rows_why = time.time(), None, None
+        while time.time() - t0 < budget and not ctx["closed"]:
+            _read_one(ctx)
+            now = time.time()
+            if not _rollback_fault_done(ctx, acting, kept):
+                stable = None
+                continue
+            stable = stable or now
+            if now - stable < STABILITY_S:
+                continue
+            settled, why_rows = _rollback_fault_rows(_fetch_initial_ir_items(case_id), N, configured, acting,
+                                                     ctx["old_hashes"], kept)
+            if settled:
+                state = "CONVERGED"
+                ctx["converged_at"] = stable - ctx["trigger_ts"]
+                print(f"  ✓ CONVERGED at {ctx['converged_at']:.1f}s post-trigger ({why_rows})")
+                break
+            if why_rows != rows_why:
+                print(f"  … pods are back on the starting revision; waiting for the controller's rows ({why_rows})")
+                rows_why = why_rows
+        else:
+            state = "ROTATE_TIMEOUT"
+    grouped = bool(ctx["info"].get("policy")) and bool(ctx["info"].get("members"))
+    verdict = _rollback_checks(rb, case_id, state, ctx.get("converged_at"), ctx["pod_state"], ctx["old_hashes"], ppi,
+                               N, acting, configured, grouped, ctx["trigger_ts"], verdict, notes, checks, kept=kept)
+    verdict = _rollback_victim_checks(f, ctx, acting, kept, verdict, notes, checks)
+    verdict = _ceiling_checks(ctx, verdict, notes, checks)
+    verdict = min_ready_checks(ctx, sorted(acting), verdict, notes, checks)
+    verdict = gang_atomicity_checks(ctx, sorted(acting), verdict, notes, checks)
+    if state == "CONVERGED":
+        verdict = index_collision_checks(ctx, sorted(acting), verdict, notes, checks)
+    verdict = surge_before_drain_checks(ctx, sorted(acting), verdict, notes, checks)
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
+def _held_break_arm(ctx, kind, bumped, victim):
+    """The push that carries the held moment's break on the victim member's
+    runner: the shell-less image (crash-start), the unpullable image
+    (imagepull), the fixture runtime's exit switch (crash-load) or a
+    ConfigMap key the ConfigMap lacks (configkey). (ok, what was armed)."""
+    if kind == "crash-start":
+        image = _crashloop_image()
+        return _bump_rev(ctx, bumped, image=image, image_comps={victim}), f"image {image}"
+    if kind == "imagepull":
+        image = _break_image("imagepull")
+        return _bump_rev(ctx, bumped, image=image, image_comps={victim}), f"image {image}"
+    if kind == "crash-load":
+        return _crash_new_arm(ctx, bumped, victim, "load")
+    pod = _crashloop_pick_pod(ctx["pod_state"], ctx["old_hashes"], victim)
+    ref = _configkey_env_ref(_get_pod(pod)) if pod else None
+    if ref is None:
+        ctx["trigger_error"] = (f"the {victim} runner reads no ConfigMap key "
+                                f"(the case must give it an env valueFrom.configMapKeyRef)")
+        return False, ""
+    var, cm_name, cm_key = ref
+    missing = f"{cm_key}{CONFIGKEY_NEW_SUFFIX}"
+    env = [{"name": var, "valueFrom": {"configMapKeyRef": {"name": cm_name, "key": missing}}}]
+    return _bump_rev(ctx, bumped, env=env, image_comps={victim}), f"ConfigMap key {cm_name}/{missing}"
+
+
+def _held_break_symptom(kind, pod_state, victim, old_hashes, ready_seen):
+    """What the kubelet shows on the pushed revision's victim pods: the
+    first pod whose main container waits for the kind's reason, has
+    restarted, or (crash-load) was Ready and is not any more. (pod, what)
+    or (None, "")."""
+    fresh = sorted(n for n, p in pod_state.items()
+                   if p and p["alive"] and p.get("comp") == victim and _pod_on_new(p, old_hashes))
+    if kind == "crash-load":
+        gone = [n for n in sorted(ready_seen) if not (pod_state.get(n) and pod_state[n]["alive"] and pod_state[n].get("ready"))]
+        if gone:
+            return gone[0], "was Ready and then was not"
+    reasons = {"crash-start": CRASH_START_REASONS, "crash-load": CRASH_START_REASONS,
+               "imagepull": IMAGEPULL_REASONS, "configkey": {CONFIGKEY_WAITING}}[kind]
+    for name in fresh:
+        obj = _get_pod(name)
+        waiting = _pod_waiting_reason(obj)
+        if waiting in reasons:
+            return name, f"waits in {waiting}"
+        restarts = sum(int(cs.get("restartCount") or 0) for cs in ((obj or {}).get("status") or {}).get("containerStatuses") or []
+                       if cs.get("name") == MAIN_CONTAINER)
+        if kind in ROLLBACK_ONCE_BREAKS and restarts:
+            return name, f"restarted {restarts} time(s)"
+    return None, ""
+
+
+def _rollback_held_break(case_id, yaml_file, desc, hdr):
+    """during=held break=<kind> beyond the readiness probe: the push carries
+    a break on the victim member's runner, the roll parks on its first pod
+    (the kubelet shows the break, the status says why), and the starting
+    revision is re-applied. once=1 kills the pushed revision's first runner
+    exactly once instead and rolls back as soon as the restart shows. The
+    verdict reads the held reason first, then the rollback's end state:
+    nothing of the withdrawn revision left, no further pod of it created
+    and no repair opened for it once the rollback fired."""
+    kind, once = str(hdr.get("break")), bool(hdr.get("once"))
+    victim = str(hdr.get("victimcomp") or BREAK_DEFAULT_COMP)
+    hdr2 = dict(hdr)
+    if once:
+        # The one-shot kill rides the crash-once machinery on the pushed revision's first pod.
+        hdr2.update(fault=f"crashloop:{CRASHLOOP_NEW}", form="start" if kind == "crash-start" else "load")
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr2)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    f, configured, ppi, N = ctx["fault"], ctx["configured"], ctx["pods_per_inst"], ctx["N"]
+    bumped = _bumped(ctx)
+    if victim not in bumped:
+        return _finish(case_id, desc, hdr, ctx, "CASE_ERROR", "FAIL",
+                       [f"victimcomp={victim} is not a member the push bumps ({sorted(bumped)})"], [])
+    ctx["modes"] = update_modes(ctx["info"], configured, "env" if kind in ("crash-load", "configkey") else None)
+    ctx["track_comps"] = sorted(bumped)
+    rb = _rollback_new(hdr)
+    if not _rollback_snapshot(rb, _isvc_spec(case_id), bumped):
+        return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [rb["error"]], [f"  ✗ {rb['error']}"])
+    old = set(ctx["old_hashes"])
+    print(f"  Phase 2: push a revision whose {victim} {'first runner is killed once' if once else 'runner is broken'} "
+          f"({kind}) on {sorted(bumped)}, roll back once the roll is held on it")
+    if once:
+        ok, armed = _bump_rev(ctx, bumped), "a plain bump; the kill lands on the first pod"
+    else:
+        ok, armed = _held_break_arm(ctx, kind, bumped, victim)
+    if not ok:
+        return _finish(case_id, desc, hdr, ctx, "TRIGGER_FAIL", "FAIL",
+                       [f"trigger failed: {ctx.get('trigger_error')}"], [f"  ✗ trigger failed: {ctx.get('trigger_error')}"])
+    push_ts = ctx["trigger_ts"]
+    hb = {"kind": kind, "once": once, "armed": armed, "bite_at": None, "bite": "", "why_at": None, "why": "",
+          "event": "", "served": None, "fire_at": None, "late_pods": [], "late_repairs": []}
+    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in bumped))
+    print(f"  Phase 3: waiting for the roll to park on the broken pod (≤{budget}s"
+          + ("" if once else f"; then {HELD_BREAK_WHY_WAIT_S}s for the status to say why") + ")")
+    ready_seen, new_uids, last_poll, served_since = set(), {}, 0.0, {}
+    while time.time() - push_ts < budget and not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        for name, p in ctx["pod_state"].items():
+            if p and p["alive"] and p.get("comp") in bumped and _pod_on_new(p, old):
+                if p.get("uid") and p["uid"] not in new_uids:
+                    new_uids[p["uid"]] = now
+                if p.get("comp") == victim and p.get("ready"):
+                    ready_seen.add(name)
+                if p.get("comp") == victim and p.get("ready") and p.get("serving"):
+                    since = served_since.setdefault(name, now)
+                    if hb["served"] is None and now - since >= HELD_BREAK_SERVED_S:
+                        hb["served"] = since - push_ts
+                else:
+                    served_since.pop(name, None)
+        if now - last_poll < HELD_BREAK_POLL_S:
+            continue
+        last_poll = now
+        if hb["bite_at"] is None:
+            if once:
+                if f.get("restart_seen"):
+                    hb["bite_at"], hb["bite"] = now - push_ts, f"{f.get('crash_pod')} restarted after the one kill"
+            else:
+                pod, what = _held_break_symptom(kind, ctx["pod_state"], victim, old, ready_seen)
+                if pod:
+                    hb["bite_at"], hb["bite"] = now - push_ts, f"{pod} {what}"
+            if hb["bite_at"] is not None:
+                print(f"    bite: {hb['bite']} ({hb['bite_at']:.0f}s)")
+            else:
+                continue
+        if hb["why_at"] is None:
+            status, said = _crash_new_why(_ir_snapshot(case_id), _isvc_events_since(case_id, push_ts), victim)
+            status = status or _broken_revision_hold(case_id, bumped, old, push_ts)
+            if status:
+                hb["why_at"], hb["why"], hb["event"] = now - push_ts, status, (said[0] if said else "")
+                print(f"    why: {status} ({hb['why_at']:.0f}s)")
+        if hb["why_at"] is not None or once or now - push_ts - hb["bite_at"] >= HELD_BREAK_WHY_WAIT_S:
+            break
+    verdict, notes, checks = "PASS", [], []
+    state = "HOOK_MISSED"
+    if hb["bite_at"] is None:
+        f["infra_fail"] = f"{kind}: the pushed revision never showed the break within {budget}s ({armed})"
+    else:
+        _rollback_fire(rb, case_id, bumped, ctx["pod_state"], old, ppi, time.time() - push_ts)
+        hb["fire_at"] = time.time()
+        if rb["error"]:
+            state = "TRIGGER_FAIL"
+        else:
+            watch = min(MAX_BUDGET_S, 2 * budget)
+            print(f"  Phase 4: watching the fleet come back onto the starting revision (≤{watch}s)")
+            t0, stable, rows_why = time.time(), None, None
+            while time.time() - t0 < watch and not ctx["closed"]:
+                _read_one(ctx)
+                now = time.time()
+                for name, p in ctx["pod_state"].items():
+                    if p and p.get("uid") and p.get("comp") in bumped and _pod_on_new(p, old) and p["uid"] not in new_uids:
+                        new_uids[p["uid"]] = now
+                        hb["late_pods"].append(name)
+                if not _rollback_settled_pods(ctx["pod_state"], ctx["agg"], N, configured, bumped, old):
+                    stable = None
+                    continue
+                stable = stable or now
+                if now - stable < STABILITY_S:
+                    continue
+                settled, why_rows = _rollback_ir_settled(_fetch_initial_ir_items(case_id), N, configured, bumped, old)
+                if settled:
+                    state = "CONVERGED"
+                    ctx["converged_at"] = stable - push_ts
+                    print(f"  ✓ CONVERGED at {ctx['converged_at']:.1f}s post-trigger")
+                    break
+                if why_rows != rows_why:
+                    print(f"  … pods are back on the starting revision; waiting for the controller's rows ({why_rows})")
+                    rows_why = why_rows
+            else:
+                state = "ROTATE_TIMEOUT"
+            hb["late_repairs"] = [m for reason, m in _isvc_events_since(case_id, hb["fire_at"], opened=True)
+                                  if reason == "RestartTriggered" and any(f"component={c}" in m for c in bumped)]
+    verdict = _held_break_checks(hb, victim, verdict, notes, checks)
+    grouped = bool(ctx["info"].get("policy")) and bool(ctx["info"].get("members"))
+    verdict = _rollback_checks(rb, case_id, state, ctx.get("converged_at"), ctx["pod_state"], old, ppi,
+                               N, bumped, configured, grouped, push_ts, verdict, notes, checks)
+    if once and f.get("fired") and not f.get("infra_fail"):
+        out = _once_observe(case_id, f, ctx["pod_state"], old, False, N, configured, ROWS_SETTLE_S,
+                            surges=(ctx.get("inv") or {}).get("surges"))
+        out.update(side="new", op="rollback", rp=str(hdr.get("restart") or "RecreateInstance"))
+        verdict = _once_checks(f, out, verdict, notes, checks)
+    verdict = _ceiling_checks(ctx, verdict, notes, checks)
+    verdict = min_ready_checks(ctx, sorted(bumped), verdict, notes, checks)
+    verdict = gang_atomicity_checks(ctx, sorted(bumped), verdict, notes, checks)
+    if state == "CONVERGED":
+        verdict = index_collision_checks(ctx, sorted(bumped), verdict, notes, checks)
+    verdict = surge_before_drain_checks(ctx, sorted(bumped), verdict, notes, checks)
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
+def _held_break_checks(hb, victim, verdict, notes, checks):
+    """The held moment's verdict before the rollback's: the pushed revision
+    showed its break, the status said why the roll parked (asked of a kept
+    break; a one-shot kill may be over before the status reacts), nothing of
+    a revision that cannot start ever served, and once the rollback fired no
+    further pod of the withdrawn revision was created and no repair named a
+    bumped Instance."""
+    kind, once = hb["kind"], hb["once"]
+    label = f"held by {kind}" + (" once" if once else "")
+    if hb["bite_at"] is None:
+        return verdict   # the apparatus failure is on the fault record
+    checks.append(f"  ✓ {label}: the pushed revision's {victim} pod showed the break {hb['bite_at']:.0f}s after the push ({hb['bite']})")
+    if hb["why_at"] is not None:
+        checks.append(f"  ✓ {label}: status said why the roll parked {hb['why_at']:.0f}s after the push: {hb['why']}"
+                      + (f"; event {hb['event'][:100]}" if hb["event"] else ""))
+    elif once:
+        checks.append(f"  ⓘ {label}: the status reported no hold before the rollback (one restart need not open one)")
+    else:
+        verdict = "FAIL"
+        notes.append(f"the roll parked on the broken {victim} pod but status never said why")
+        checks.append(f"  ✗ {label}: the status said nothing about why the roll parked within {HELD_BREAK_WHY_WAIT_S}s "
+                      f"of the break showing (no rolloutHold gate, Failed row, RetryHeld or InstanceFailed event)")
+    if kind in ("crash-start", "imagepull", "configkey") and not once:
+        if hb["served"] is not None:
+            verdict = "FAIL"
+            notes.append(f"a pod of the revision that cannot start served ({hb['served']:.0f}s after the push)")
+            checks.append(f"  ✗ {label}: a {victim} pod of the broken revision was Ready and serving {hb['served']:.0f}s after the push")
+        else:
+            checks.append(f"  ✓ {label}: nothing of the broken revision ever served")
+    if hb["fire_at"] is None:
+        return verdict
+    if hb["late_pods"]:
+        verdict = "FAIL"
+        notes.append(f"{len(hb['late_pods'])} pod(s) of the withdrawn revision created after the rollback")
+        checks.append(f"  ✗ {label}: {len(hb['late_pods'])} pod(s) of the withdrawn revision were created after the rollback "
+                      f"fired ({', '.join(hb['late_pods'][:4])}) — the revision was retried after it was withdrawn")
+    else:
+        checks.append(f"  ✓ {label}: no pod of the withdrawn revision was created after the rollback fired")
+    if hb["late_repairs"]:
+        verdict = "FAIL"
+        notes.append("a repair was opened for a bumped Instance after the rollback")
+        checks.append(f"  ✗ {label}: a repair was opened for a bumped Instance after the rollback fired "
+                      f"(the rollback owns every Instance): {hb['late_repairs'][0][:160]}")
+    else:
+        checks.append(f"  ✓ {label}: no repair was opened for a bumped Instance after the rollback fired")
+    return verdict
+
 
 
 CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix", "rtedit",
@@ -12424,7 +12964,7 @@ HDR_VALIDATORS = {
     # during=settling|rotating.
     "edit": lambda v: v in {"material", "noop", "image", "resources", "env", "probe"} or _midroll_edit(v) is not None,
     "img": lambda v: bool(str(v)) and not runtime_fixtures.unknown_tokens(str(v)),
-    "break": lambda v: v == "stuck",
+    "break": lambda v: v in ROLLBACK_BREAKS,
     # Scenario knobs. during= times a destructive op against an in-flight one:
     # recreate deletes mid-rollout/mid-migration; migrate files its request
     # mid-rotate (both must complete; ordering unasserted — the product may
@@ -12707,6 +13247,11 @@ def validate_case_file(path):
     fault_kind, _, fault_param = str(fields.get("fault", "")).partition(":")
     # A scale or a delete landing on a service with one broken Instance.
     broken_op = mode in BROKEN_OP_MODES and during == IDLE_FAULT_PHASE
+    # A break of the running revision beside a rollback (fires before the
+    # push; the rollback's hook is the during=).
+    rollback_break = mode == "rollout" and fields.get("rollback") == 1 and fault_kind in ROLLBACK_BREAK_FAULTS
+    held_once = (mode == "rollout" and fields.get("rollback") == 1 and "once" in fields
+                 and str(fields.get("break", "")) in ROLLBACK_ONCE_BREAKS)
     if during and _canary_hook_ok(during):
         if mode != "canary":
             errs.append(f"{path}:1: during={during} is a canary hook (mode=canary)")
@@ -12763,9 +13308,54 @@ def validate_case_file(path):
                         f"(when the starting revision is re-applied)")
         if _midroll_edit(fields.get("edit")) is not None:
             errs.append(f"{path}:1: rollback=1 and edit={fields['edit']} would both fire at during=; a case carries one")
-        if (fields.get("break") == ROLLBACK_BREAK) != (during == "held"):
-            errs.append(f"{path}:1: during=held is a roll parked by break={ROLLBACK_BREAK} "
-                        f"(the new revision never turns Ready): both or neither")
+        if ("break" in fields) != (during == "held"):
+            errs.append(f"{path}:1: during=held is a roll parked by break={'|'.join(sorted(ROLLBACK_BREAKS))} "
+                        f"(the pushed revision's first pod never serves): both or neither")
+        if "break" in fields:
+            # The pushed revision's break: what parks the roll at the held moment.
+            if "fault" in fields:
+                errs.append(f"{path}:1: break={fields['break']} is the pushed revision's break; fault={fields['fault']} "
+                            f"breaks the running one — a rollback case carries one break")
+            if "lift" in fields:
+                errs.append(f"{path}:1: lift= does not combine with break= (once=1 on break="
+                            f"{'|'.join(sorted(ROLLBACK_ONCE_BREAKS))} is the one-shot form of the held moment)")
+            if "once" in fields and str(fields["break"]) not in ROLLBACK_ONCE_BREAKS:
+                errs.append(f"{path}:1: once=1 kills the pushed revision's first runner once "
+                            f"(needs break={'|'.join(sorted(ROLLBACK_ONCE_BREAKS))})")
+            vcomp = str(fields.get("victimcomp", ""))
+            if vcomp and vcomp != BREAK_DEFAULT_COMP:
+                if vcomp != "decoder" or fields.get("Nd", 0) == 0 or str(fields.get("co", "none")) == "none":
+                    errs.append(f"{path}:1: victimcomp={vcomp} under break= names a member the push bumps beside the "
+                                f"engine (the decoder of a prefill/decode service under a group: Nd>0, co!=none)")
+        elif fault_kind in ROLLBACK_BREAK_FAULTS:
+            # The running revision's break beside the rollback.
+            if during not in ROLLBACK_FAULT_HOOKS:
+                errs.append(f"{path}:1: fault={fields.get('fault')} beside rollback=1 breaks the running revision before "
+                            f"the push and rolls back at a hook of the roll (during={'|'.join(sorted(ROLLBACK_FAULT_HOOKS))})")
+            if fault_kind in BREAK_FAULTS and fault_param != CRASHLOOP_VICTIM:
+                errs.append(f"{path}:1: fault={fields.get('fault')} beside rollback=1 breaks the running revision "
+                            f"(fault={fault_kind}:{CRASHLOOP_VICTIM}); the pushed revision's break is break=<kind> at during=held")
+            if fault_kind == "configkey" and fault_param != CONFIGKEY_PARAM:
+                errs.append(f"{path}:1: fault={fields.get('fault')} beside rollback=1 removes the running revision's key "
+                            f"(fault=configkey:{CONFIGKEY_PARAM}); the pushed revision's missing key is break=configkey at during=held")
+            if fault_kind == "configkey" and str(fields.get("lift", "")) not in (HEAL_LIFT, KEPT_LIFT):
+                errs.append(f"{path}:1: fault=configkey:{CONFIGKEY_PARAM} beside rollback=1 needs lift={KEPT_LIFT} (the key stays "
+                            f"away: the victim ends on the starting revision without serving) or lift={HEAL_LIFT} "
+                            f"(put back once the rollback has fired)")
+            if fault_kind == READINESS_FAULT and fault_param != "old":
+                errs.append(f"{path}:1: fault={fields.get('fault')} beside rollback=1 breaks a serving pod of the running "
+                            f"revision (fault={READINESS_FAULT}:old form={'|'.join(sorted(READINESS_FORMS))})")
+            if fault_kind in BREAK_FAULTS and "lift" in fields and str(fields["lift"]) != HEAL_LIFT:
+                errs.append(f"{path}:1: lift={fields['lift']} beside rollback=1: a crash or a pull failure of the running "
+                            f"revision is kept, or healed once the rollback has fired (lift={HEAL_LIFT})")
+            if "once" in fields:
+                errs.append(f"{path}:1: once=1 does not combine with rollback=1; the one-shot form of a break beside a "
+                            f"rollback is lift={HEAL_LIFT} (form=recover on fault={READINESS_FAULT}:old)")
+            if "expect" in fields:
+                errs.append(f"{path}:1: expect= is the idle break's vocabulary; beside rollback=1 the victim's end state "
+                            f"follows from the break's kind and form")
+        elif fault_kind in BREAK_FAULTS | {"configkey", READINESS_FAULT}:
+            errs.append(f"{path}:1: fault={fields.get('fault')} does not combine with rollback=1 at during={during}")
     elif mode == "rollout" and "break" in fields:
         errs.append(f"{path}:1: break={fields['break']} on a rollout case breaks the revision a rollback leaves "
                     f"(needs rollback=1 during=held)")
@@ -12860,8 +13450,10 @@ def validate_case_file(path):
         errs.append(f"{path}:1: victim= aims a podkill or an eviction (needs fault=podkill:<hook>, fault=evict:<hook> or verb=podkill), "
                     f"a move-moment fault (needs mode=migrate at=<moment>), or names the side a metric breach or a break "
                     f"at a canary hook hits (victim=stable|canary)")
+    held_break = mode == "rollout" and fields.get("rollback") == 1 and "break" in fields
     if "victimcomp" in fields and fault_kind not in ("podkill", "evict", "preempt", METRIC_FAULT) and fault_kind not in BREAK_FAULTS \
-            and "podkill" not in hook_verbs and fault_kind != READINESS_FAULT and not (fault_kind == "configkey" and broken_op):
+            and "podkill" not in hook_verbs and fault_kind != READINESS_FAULT and not (fault_kind == "configkey" and broken_op) \
+            and not held_break:
         errs.append(f"{path}:1: victimcomp= aims a podkill, an eviction, a preemption, a break or a metric breach at one Component "
                     f"(needs fault=podkill:<phase>, fault=evict:<phase>, fault=preempt:<phase>, verb=podkill, fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM}, "
                     f"fault=configkey:{CONFIGKEY_PARAM} before a scale or a delete, or fault={METRIC_FAULT}:<hook>)")
@@ -12895,12 +13487,13 @@ def validate_case_file(path):
     heals_itself = fault_kind in BREAK_FAULTS and str(fields.get("lift", "")) == HEAL_LIFT
     pushed_pull_once = (fault_kind == "imagepull" and fault_param == CRASHLOOP_NEW and mode == "rollout"
                         and str(fields.get("lift", "")) == HEAL_LIFT)
-    if heals_itself and not idle_heal and not pushed_pull_once and not broken_op \
+    if heals_itself and not idle_heal and not pushed_pull_once and not broken_op and not rollback_break \
             and not (mode == "canary" and (fault_param == IDLE_FAULT_PHASE or _canary_hook_ok(fault_param))):
         errs.append(f"{path}:1: lift={HEAL_LIFT} on fault={fields.get('fault')} heals the harness's own break under a canary "
                     f"(mode=canary, fault={fault_kind}:canary-<state> or fault={fault_kind}:{IDLE_FAULT_PHASE}), on the "
                     f"settled service (mode=rollout, fault={fault_kind}:{CRASHLOOP_VICTIM} during={IDLE_FAULT_PHASE} expect=heals) "
-                    f"or right after a scale or a delete lands on it (mode={'|'.join(sorted(BROKEN_OP_MODES))} during={IDLE_FAULT_PHASE})")
+                    f"or right after a scale or a delete lands on it (mode={'|'.join(sorted(BROKEN_OP_MODES))} during={IDLE_FAULT_PHASE}), "
+                    f"or once a rollback beside it has fired (rollback=1 during={'|'.join(sorted(ROLLBACK_FAULT_HOOKS))})")
     via = str(fields.get("via", ""))
     if via and mode != "kill":
         errs.append(f"{path}:1: via={via} says how mode=kill removes the pod (mode=kill)")
@@ -13059,15 +13652,16 @@ def validate_case_file(path):
     if "once" in fields:
         # A one-shot crash: the running revision's pod at idle or under a
         # push, or the pushed revision's first pod; nothing else rides it.
-        if fault_kind != "crashloop" or mode != "rollout":
+        if (fault_kind != "crashloop" or mode != "rollout") and not held_once:
             errs.append(f"{path}:1: once=1 is a crash that happens exactly once (needs mode=rollout and "
-                        f"fault=crashloop:{CRASHLOOP_VICTIM}|{CRASHLOOP_NEW} with form=start|load)")
-        if during and during != IDLE_FAULT_PHASE:
+                        f"fault=crashloop:{CRASHLOOP_VICTIM}|{CRASHLOOP_NEW} with form=start|load, or rollback=1 "
+                        f"during=held break={'|'.join(sorted(ROLLBACK_ONCE_BREAKS))})")
+        if during and during != IDLE_FAULT_PHASE and not held_once:
             errs.append(f"{path}:1: once=1 fires on the idle service (during={IDLE_FAULT_PHASE}) or under a push (no during=)")
         if crash_new and during:
             errs.append(f"{path}:1: once=1 on fault=crashloop:{CRASHLOOP_NEW} is the pushed revision's first pod (no during=)")
         for k in ("expect", "victims", "fixfirst", "pauseat", "pause", "push", "rollback", "edit", "lift", "blocked"):
-            if k in fields:
+            if k in fields and not (held_once and k == "rollback"):
                 errs.append(f"{path}:1: {k}= does not combine with once=1 (the verdict is the operator's end state after one restart)")
     if "fixfirst" in fields:
         if fault_kind not in BREAK_FAULTS or crash_new or during == IDLE_FAULT_PHASE:
@@ -13139,7 +13733,7 @@ def validate_case_file(path):
             errs.append(f"{path}:1: fault={fields.get('fault')} is a rollout-mode fault (mode=rollout), or breaks one "
                         f"Instance before a scale or a delete (mode={'|'.join(sorted(BROKEN_OP_MODES))} during={IDLE_FAULT_PHASE})")
         if side == "old":
-            if during != IDLE_FAULT_PHASE:
+            if during != IDLE_FAULT_PHASE and not rollback_break:
                 errs.append(f"{path}:1: fault={READINESS_FAULT}:old breaks a serving pod of the running revision on the "
                             f"idle service (needs during={IDLE_FAULT_PHASE})")
             if str(fields.get("form", "")) not in READINESS_FORMS:
@@ -13347,7 +13941,7 @@ def validate_case_file(path):
         for k in ("expect", "victimcomp", "victims", "pauseat", "fixfirst", "rollback", "edit", "once", "form"):
             if k in fields:
                 errs.append(f"{path}:1: {k}= does not combine with fault=configkey:{CRASHLOOP_NEW} (the lift says what follows)")
-    elif fault_kind in LIFT_FAULTS and not broken_op:
+    elif fault_kind in LIFT_FAULTS and not broken_op and not rollback_break:
         phases = LIFT_PHASES_BY_FAULT[fault_kind]
         if during != IDLE_FAULT_PHASE and not at_move:
             errs.append(f"{path}:1: fault={fields.get('fault')} fires on the idle service (needs during={IDLE_FAULT_PHASE}) "
@@ -20590,6 +21184,10 @@ def run_case(case_id):
     if reason:
         print(f"  ⓘ {fault_kind} fault unavailable here: {reason}")
         return _write_fail(case_id, desc, hdr, "SKIP", f"{fault_kind} fault unavailable here: {reason}")
+    if _rollback_fault_case(hdr):
+        return _rollback_fault(case_id, yaml_file, desc, hdr)
+    if _rollback_held_break_case(hdr):
+        return _rollback_held_break(case_id, yaml_file, desc, hdr)
     if str(hdr.get("fault", "")) == f"crashloop:{CRASHLOOP_NEW}" and not hdr.get("once"):
         return _crashloop_new(case_id, yaml_file, desc, hdr)
     if str(hdr.get("fault", "")) == f"{READINESS_FAULT}:new":

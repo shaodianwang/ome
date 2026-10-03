@@ -1,0 +1,15 @@
+# p10802: [gen] rollback at settling over readiness recover engine-mn W1 N=2 SurgeThenDrain s1 co none  Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 fault=readiness:old co=none topo=engine-mn form=recover during=settling rollback=1
+# reason: the operator pushes a revision over a fleet whose engine is already broken: the leader pod of the engine's highest Instance gets the readiness switch and stops passing readiness on the settled service, and the push follows once the status has reacted to it; the cause is taken away once the rollback has fired; the starting revision is re-applied at the moment the bump has landed, before any Instance moved; every Instance of the bumped members ends on the starting revision, no pod of the new revision remains, the capacity floor (lowered by the broken Instance) holds throughout and no Instance is left mid-operation; the broken engine Instance ends Ready and serving on the starting revision, rebuilt by a repair or by the roll back or healed in place (the repairs that named it are reported, not judged); Instances already on the new revision come back under the surge budget
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p10802 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/rev: "v1" }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

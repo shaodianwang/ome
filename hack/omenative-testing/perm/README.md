@@ -911,8 +911,41 @@ strategy (budget 1, plus maxSurge 2 on the single-pod engine) and a
 `rollingUpdate` group (what puts the roll under the run model, so the
 engine-only shapes carry a single-member group); the starting revision
 carries `perm.test/rev: "v1"` so the rollback is an annotation update, not
-a removal. `rollback=1` in canary mode keeps its own meaning (the
-`ome.io/rollout-rollback` probe).
+a removal. Its continuation (`p10800`+) puts a break beside the rollback on
+the six shape families: each running-revision break, kept and one-shot, at
+each hook under a (strategy, group) pair of its own, the sibling forms at
+the first hook, and the held-moment breaks under every strategy, the crash
+kinds once, and on the grouped decoder. `rollback=1` in canary mode keeps
+its own meaning (the `ome.io/rollout-rollback` probe).
+
+A break rides beside the rollback in two places. On the running revision,
+`fault=crashloop:old form=start|load`, `fault=imagepull:old`,
+`fault=configkey:missing lift=never|after-settle` or `fault=readiness:old
+form=persist|recover` (`victimcomp=decoder|router` for a sibling) lands on
+the settled service before the push, the status reacts to it, the push
+follows and the starting revision is re-applied at
+`during=settling|rotating|draining|last`; the one-shot forms
+(`lift=after-settle`, readiness `form=recover`) take the cause away once
+the rollback has fired. The victim must end on the starting revision too:
+Ready and serving (rebuilt by a repair or the roll back, or healed in
+place; the repairs that named it are reported, not judged), unless its
+cause outlives a rebuild (the key kept away, the readiness switch kept),
+when it ends on the starting revision without serving, its Component one
+short, and its row reads other than Ready. On the pushed revision,
+`during=held break=crash-start|crash-load|imagepull|configkey` (beside
+`break=stuck`) arms the bumped runner (`victimcomp=decoder` under a group
+on a prefill/decode service) so the roll parks on its first pod: the
+kubelet shows the break, the status says why (a rolloutHold gate from the
+retry ladder or the budget, a Failed row, a RetryHeld or InstanceFailed
+event; waited for up to `HOLD_REASON_WAIT_S` after the break shows), and
+the starting revision is re-applied. `once=1` on a crash kind kills the
+pushed revision's first runner exactly once instead and rolls back as soon
+as the restart shows (the status need not have said why). The verdict
+reads the held reason first, then the rollback's end state, and adds that
+nothing of a revision that cannot start ever served, no pod of the
+withdrawn revision was created and no repair named a bumped Instance once
+the rollback fired. `once=1` and `lift=` do not combine with a rollback
+otherwise; `expect=` is the idle break's vocabulary and does not apply.
 
 ### Small fleets and the engine behind a router (`gen-size/`, `gen-router-gang/`)
 
@@ -2296,7 +2329,7 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `gen_cases.py`'s feature counters).
 - `gen_runtime.py` — the runtime-triggered cases (`p400`+) → `isvcs/runtime-rev/`.
 - `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p2799`,
-  `p3000`–`p4999`, `p5000`–`p5799`, `p5800`–`p5999` `p6000`–`p6199`, `p6200`–`p6399`, `p6800`–`p6999` and `p7400`–`p7599`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
+  `p3000`–`p4999`, `p5000`–`p5799`, `p5800`–`p5999` (continued at `p10800`–`p11099`), `p6000`–`p6199`, `p6200`–`p6399`, `p6800`–`p6999` and `p7400`–`p7599`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
   `isvcs/gen-restart/`, `isvcs/gen-crashloop/`, `isvcs/gen-switch/`,
   `isvcs/gen-crashloop-idle/`, `isvcs/gen-crashloop-sibling/`,
   `isvcs/gen-heal/`, `isvcs/gen-imagepull/`, `isvcs/gen-node/`,

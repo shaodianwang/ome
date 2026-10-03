@@ -1,0 +1,27 @@
+# p11058: [gen] rollback at held by crash-start on the decoder pd N=4 SurgeThenDrain s1 co rolling  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 co=rolling topo=pd during=held victimcomp=decoder rollback=1 break=crash-start
+# reason: the operator rolls back a push its first pod cannot carry: the push gives the decoder runner a runner that dies at every start, so the roll parks on its first pod: the kubelet shows the break, the status says why (a rolloutHold gate from the retry ladder or the budget, a Failed row, a RetryHeld or InstanceFailed event), and only then is the starting revision re-applied; every Instance of the bumped members ends on the starting revision and serving, no pod of the withdrawn revision remains, none is created after the rollback fired and no repair names a bumped Instance after it; the capacity floor holds throughout; nothing of the broken revision ever served; the broken surge Instance never joins rotation and is withdrawn under the surge budget; the engine's own roll converges or holds meanwhile and comes back with the decoder; the run that targeted the new revision closes as superseded and a fresh run brings the group back
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11058 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/rev: "v1" }
+    lifecycle: { instanceReadyTimeout: "90s", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/rev: "v1" }
+    lifecycle: { instanceReadyTimeout: "90s", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          rollingUpdate: {}

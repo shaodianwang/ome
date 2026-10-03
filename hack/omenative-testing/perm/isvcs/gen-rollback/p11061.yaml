@@ -1,0 +1,31 @@
+# p11061: [gen] rollback at held by crash-start once on the decoder pd-mn W1 N=2 SurgeThenDrain s1 co rolling  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=3 ceil_r=2 co=rolling topo=pd-mn during=held victimcomp=decoder rollback=1 break=crash-start once=1
+# reason: the operator rolls back a push its first pod cannot carry: the push's first decoder leader pod has its runner killed once, during its first start, before it was ever Ready, and the kubelet restarts it; the starting revision is re-applied as soon as the restart shows; every Instance of the bumped members ends on the starting revision and serving, no pod of the withdrawn revision remains, none is created after the rollback fired and no repair names a bumped Instance after it; the capacity floor holds throughout; the broken surge Instance never joins rotation and is withdrawn under the surge budget; the engine's own roll converges or holds meanwhile and comes back with the decoder; the run that targeted the new revision closes as superseded and a fresh run brings the group back
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11061 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/rev: "v1" }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/rev: "v1" }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          rollingUpdate: {}
