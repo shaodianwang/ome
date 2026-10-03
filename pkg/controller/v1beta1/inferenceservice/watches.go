@@ -1,12 +1,51 @@
 package inferenceservice
 
 import (
+	"context"
 	"reflect"
 
+	v1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 )
+
+// isvcGroupKind identifies an InferenceService controller owner reference,
+// matched by group and kind so a same-kind owner from another API group does
+// not count.
+var isvcGroupKind = v1beta1.SchemeGroupVersion.WithKind("InferenceService").GroupKind()
+
+// endpointSliceToISVC maps an EndpointSlice of an OMENative headless Service
+// to the InferenceService the Service belongs to. The name parse selects the
+// Services (`<prefix>-<component>-headless`, prefix being a replica's name
+// prefix); the Service's controller owner, when it is an InferenceService,
+// names the service, since the prefix is the service name only for a
+// projected replica. A Service that cannot be read, or that another kind
+// controls, keeps the parsed name. Slices of any other Service map to
+// nothing.
+func (r *InferenceServiceReconciler) endpointSliceToISVC(ctx context.Context, obj client.Object) []reconcile.Request {
+	reqs := omenative.EndpointSliceToISVC(ctx, obj)
+	slice, ok := obj.(*discoveryv1.EndpointSlice)
+	if len(reqs) == 0 || !ok {
+		return nil
+	}
+	svc := &v1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: slice.Namespace, Name: slice.Labels[discoveryv1.LabelServiceName]}, svc); err == nil {
+		if ref := metav1.GetControllerOf(svc); ref != nil &&
+			schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind).GroupKind() == isvcGroupKind {
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: slice.Namespace, Name: ref.Name}}}
+		}
+	}
+	return reqs
+}
 
 // isvcReconcileTriggerPredicate gates the controller's For(&InferenceService{})
 // watch so the reconciler reacts to spec and metadata changes but NOT to its

@@ -1571,13 +1571,13 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.servicesReferencingReplica),
 		).
 		// EndpointSlice events for OMENative headless Services enqueue
-		// the parent ISVC so drain checks (IsPodDrained / IsPodInRotation)
-		// react to kube-proxy convergence without waiting on the periodic
-		// requeue. The mapper rejects slices that don't target an
-		// OMENative-managed Service.
+		// the ISVC the Service belongs to so drain checks (IsPodDrained /
+		// IsPodInRotation) react to kube-proxy convergence without waiting
+		// on the periodic requeue. The mapper rejects slices that don't
+		// target an OMENative-managed Service.
 		Watches(
 			&discoveryv1.EndpointSlice{},
-			handler.EnqueueRequestsFromMapFunc(omenative.EndpointSliceToISVC),
+			handler.EnqueueRequestsFromMapFunc(r.endpointSliceToISVC),
 		)
 
 	// Owned only when the CRD is present; ignore status-only churn like the HPA.

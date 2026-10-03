@@ -816,7 +816,7 @@ func TestInferenceReplicaFetchInventory(t *testing.T) {
 	approve("pkg/controller/v1beta1/workload/replay/driver.go", "driver.bumpGeneration", "Get", 1, passThroughSpecMetadata+" (replay owner generation bump)")
 
 	// ISVC-side raw accessors and their callers.
-	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector/irstatus_read.go", "ComponentIR", "Get", 1, passThroughTopLevelStatus+" (raw accessor for callers that inspect no rows)")
+	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector/irstatus_read.go", "componentIRAt", "Get", 1, passThroughTopLevelStatus+" (raw accessor behind ComponentIR and ComponentIRFor, for callers that inspect no rows)")
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector/status.go", "aggregateOneComponent", "Get", 1, passThroughTopLevelStatus+" (counters, revisions, RolloutHold, Conditions mirrored onto the ISVC)")
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector/projector.go", "EnsureInferenceReplica", "Get", 1, passThroughSpecMetadata+" (spec projection)")
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/dispatch.go", "reconcileRollbackSignal", "Get", 1, passThroughTopLevelStatus+" (revision pointers and observedGeneration)")
@@ -868,7 +868,7 @@ func TestInferenceReplicaFetchInventory(t *testing.T) {
 func TestInferenceReplicaDecodedReadsCarryADecoder(t *testing.T) {
 	decodedAccessors := map[string]map[string]bool{
 		codecPackagePath:     {decodedAccessor: true},
-		projectorPackagePath: {"DecodedComponentIR": true, "DecodedComponentIRStatus": true},
+		projectorPackagePath: {"DecodedComponentIR": true, "DecodedComponentIRStatus": true, "DecodedComponentIRFor": true, "DecodedComponentIRStatusFor": true, "decodedComponentIRAt": true},
 	}
 	inv := loadStatusInventory(t)
 	calls := 0

@@ -9,7 +9,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -221,11 +220,12 @@ func Dispatch(ctx context.Context, d DispatchDeps) (Outcome, error) {
 	// a ControllerRevision's protocol is immutable from create, so a cache
 	// read can only lag into "" (pairs with anything) for a just-minted CR,
 	// which the meaningful-diff traffic write corrects on the next pass.
-	canaryProtocol, _, err := coordination.PairingProtocolForRevision(ctx, d.Client, d.ISVC.Namespace, d.ISVC.Name, primary, canaryHash)
+	primaryPrefix := irprojector.RoleReplicaPrefix(d.ISVC, primary)
+	canaryProtocol, _, err := coordination.PairingProtocolForRevision(ctx, d.Client, d.ISVC.Namespace, primaryPrefix, primary, canaryHash)
 	if err != nil {
 		return Outcome{}, err
 	}
-	stableProtocol, _, err := coordination.PairingProtocolForRevision(ctx, d.Client, d.ISVC.Namespace, d.ISVC.Name, primary, stableHash)
+	stableProtocol, _, err := coordination.PairingProtocolForRevision(ctx, d.Client, d.ISVC.Namespace, primaryPrefix, primary, stableHash)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -332,7 +332,7 @@ func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.
 		return false, nil
 	}
 	ir := &v1beta1.InferenceReplica{}
-	key := types.NamespacedName{Namespace: isvc.Namespace, Name: irprojector.InferenceReplicaName(isvc.Name, comp)}
+	key := irprojector.RoleReplicaKey(isvc, comp)
 	if err := reads.Get(ctx, key, ir); err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, nil
@@ -391,7 +391,7 @@ func stableRevisionName(ctx context.Context, reads client.Reader, isvc *v1beta1.
 	}
 	list := &appsv1.ControllerRevisionList{}
 	sel := labels.SelectorFromSet(labels.Set{
-		constants.InferenceServicePodLabelKey: isvc.Name,
+		constants.InferenceServicePodLabelKey: irprojector.RoleReplicaPrefix(isvc, comp),
 		constants.OMEComponentLabel:           string(comp),
 		query.LabelManagedBy:                  query.ManagedByOMENative,
 	})
@@ -491,11 +491,12 @@ func secondaryRevisions(ctx context.Context, reads client.Reader, isvc *v1beta1.
 			ReadyCanaryCapacity: readyCapacityCount(readyPerRev[comp][target], observed[comp].readyTargetInstanceCount(observedPods[comp])),
 			DesiredReplicas:     componentReplicas(isvc, comp),
 		}
+		prefix := irprojector.RoleReplicaPrefix(isvc, comp)
 		var err error
-		if m.CanaryPairingProtocol, _, err = coordination.PairingProtocolForRevision(ctx, reads, isvc.Namespace, isvc.Name, comp, m.CanaryRevisionHash); err != nil {
+		if m.CanaryPairingProtocol, _, err = coordination.PairingProtocolForRevision(ctx, reads, isvc.Namespace, prefix, comp, m.CanaryRevisionHash); err != nil {
 			return nil, err
 		}
-		if m.StablePairingProtocol, _, err = coordination.PairingProtocolForRevision(ctx, reads, isvc.Namespace, isvc.Name, comp, m.StableRevisionHash); err != nil {
+		if m.StablePairingProtocol, _, err = coordination.PairingProtocolForRevision(ctx, reads, isvc.Namespace, prefix, comp, m.StableRevisionHash); err != nil {
 			return nil, err
 		}
 		out[comp] = m
@@ -738,7 +739,7 @@ func (r observedCanaryRevisions) readyTargetInstanceCount(pods []*corev1.Pod) *i
 func observeCanaryRevisions(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, c v1beta1.ComponentType) (observedCanaryRevisions, error) {
 	if reads != nil {
 		ir := &v1beta1.InferenceReplica{}
-		key := types.NamespacedName{Namespace: isvc.Namespace, Name: irprojector.InferenceReplicaName(isvc.Name, c)}
+		key := irprojector.RoleReplicaKey(isvc, c)
 		switch _, err := irstatus.GetDecoded(ctx, reads, key, ir); {
 		case err == nil:
 			currentHash := query.RevisionFromName(ir.Status.CurrentRevision).Hash()

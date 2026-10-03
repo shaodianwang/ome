@@ -2,6 +2,7 @@ package canary
 
 import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/rollout"
 )
@@ -93,10 +94,12 @@ func setTraffic(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, targets
 }
 
 // applyTraffic programs the step's external traffic weight on the primary: it
-// writes the per-revision weights onto its traffic targets and records the
-// applied weight on the canary status.
+// writes the per-revision weights onto its traffic targets, named under the
+// Component's replica prefix, and records the applied weight on the canary
+// status.
 func applyTraffic(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, canaryHash, stableHash, canaryProtocol, stableProtocol string, weight int32) {
-	setTraffic(isvc, c, coordination.BuildTrafficTargets(isvc.Name, c, canaryWeights(canaryHash, stableHash, canaryProtocol, stableProtocol, weight)))
+	prefix := irprojector.RoleReplicaPrefix(isvc, c)
+	setTraffic(isvc, c, coordination.BuildTrafficTargets(prefix, c, canaryWeights(canaryHash, stableHash, canaryProtocol, stableProtocol, weight)))
 	if cs := rollout.CanaryStatusFor(&isvc.Status, c); cs != nil {
 		cs.ObservedTrafficWeight = weight
 	}
@@ -108,7 +111,7 @@ func applyMemberTraffic(isvc *v1beta1.InferenceService, c v1beta1.ComponentType,
 	if len(weights) == 0 {
 		return
 	}
-	setTraffic(isvc, c, coordination.BuildTrafficTargets(isvc.Name, c, weights))
+	setTraffic(isvc, c, coordination.BuildTrafficTargets(irprojector.RoleReplicaPrefix(isvc, c), c, weights))
 }
 
 // applyGroupTraffic programs one step weight onto every member of the canary

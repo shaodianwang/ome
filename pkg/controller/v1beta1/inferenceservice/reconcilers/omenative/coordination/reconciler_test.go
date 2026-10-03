@@ -2328,3 +2328,68 @@ func TestReconcile_TrafficDropsRevisionHeldOutOfRotation(t *testing.T) {
 		t.Errorf("routing Service %s pairing label: got %q want %q", want, got, protocol)
 	}
 }
+
+// Referenced roles' pods, per-revision Services, traffic entries and orphan
+// sweep are keyed on each replica's own prefix while a projected role
+// beside them stays on the service name; the service owns every role's
+// Services.
+func TestReconcile_ReferencedRoleKeysPerRevisionObjectsOnTheReplicaPrefix(t *testing.T) {
+	isvc := testOMENativeISVC()
+	isvc.Spec.Router = &v1beta1.RouterSpec{}
+	isvc.Spec.ReplicaRefs = &v1beta1.ReplicaRefs{Engine: []string{"pool-a"}, Decoder: []string{"pool-d"}}
+	referencedPod := func(prefix string, c v1beta1.ComponentType) *corev1.Pod {
+		pod := buildPod(isvc, c, "hash1", 0).(*corev1.Pod)
+		pod.Name = podName(prefix, c, 0)
+		pod.Labels[constants.InferenceServicePodLabelKey] = prefix
+		return pod
+	}
+	stale := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pool-d-decoder-rev-old",
+			Namespace: isvc.Namespace,
+			Labels:    perRevisionServiceSelector("pool-d", v1beta1.DecoderComponent, "old"),
+		},
+		Spec: corev1.ServiceSpec{Selector: perRevisionServiceSelector("pool-d", v1beta1.DecoderComponent, "old")},
+	}
+	c := testClient(referencedPod("pool-a", v1beta1.EngineComponent), referencedPod("pool-d", v1beta1.DecoderComponent), buildPod(isvc, v1beta1.RouterComponent, "hash1", 0), stale)
+	if _, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent, v1beta1.DecoderComponent, v1beta1.RouterComponent),
+		ComponentRunnerPorts:     testComponentRunnerPorts(),
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, name := range []string{"pool-a-engine-rev-hash1", "pool-d-decoder-rev-hash1", "pool-d-decoder-rev-hash1-headless", "llama-router-rev-hash1"} {
+		svc := &corev1.Service{}
+		if err := c.Get(context.Background(), client.ObjectKey{Namespace: isvc.Namespace, Name: name}, svc); err != nil {
+			t.Fatalf("Service %s must exist: %v", name, err)
+		}
+		checkOwnerRef(t, svc, isvc)
+	}
+	decoderSvc := &corev1.Service{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: isvc.Namespace, Name: "pool-d-decoder-rev-hash1"}, decoderSvc); err != nil {
+		t.Fatal(err)
+	}
+	checkSelector(t, decoderSvc.Spec.Selector, "pool-d", "decoder", "hash1")
+	for _, name := range []string{"llama-engine-rev-hash1", "llama-decoder-rev-hash1"} {
+		if err := c.Get(context.Background(), client.ObjectKey{Namespace: isvc.Namespace, Name: name}, &corev1.Service{}); !apierrors.IsNotFound(err) {
+			t.Errorf("no per-revision Service may be named after the service for a referenced role (%s): err=%v", name, err)
+		}
+	}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: isvc.Namespace, Name: stale.Name}, &corev1.Service{}); !apierrors.IsNotFound(err) {
+		t.Errorf("the orphan sweep must collect the referenced role's stale Service under its prefix: err=%v", err)
+	}
+
+	decoder := isvc.Status.Components[v1beta1.DecoderComponent]
+	if len(decoder.Traffic) != 1 || decoder.Traffic[0].RevisionName != "pool-d-decoder-rev-hash1" {
+		t.Errorf("decoder Traffic must name the replica-prefixed Service: %+v", decoder.Traffic)
+	}
+	if decoder.LatestRolledoutRevision != "pool-d-decoder-rev-hash1" {
+		t.Errorf("decoder LatestRolledoutRevision: got %q want pool-d-decoder-rev-hash1", decoder.LatestRolledoutRevision)
+	}
+	router := isvc.Status.Components[v1beta1.RouterComponent]
+	if len(router.Traffic) != 1 || router.Traffic[0].RevisionName != "llama-router-rev-hash1" {
+		t.Errorf("router Traffic must keep the service-named Service: %+v", router.Traffic)
+	}
+}

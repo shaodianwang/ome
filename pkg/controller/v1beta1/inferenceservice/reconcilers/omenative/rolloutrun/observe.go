@@ -49,7 +49,7 @@ func observeGroupTargets(ctx context.Context, reads client.Reader, isvc *v1beta1
 				continue
 			}
 			ir := &v1beta1.InferenceReplica{}
-			key := types.NamespacedName{Namespace: isvc.Namespace, Name: irprojector.InferenceReplicaName(isvc.Name, comp)}
+			key := irprojector.RoleReplicaKey(isvc, comp)
 			if err := reads.Get(ctx, key, ir); err != nil {
 				if apierrors.IsNotFound(err) {
 					out[comp] = targetPair{}

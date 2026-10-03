@@ -1,6 +1,8 @@
 package irprojector
 
 import (
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/validation"
 )
@@ -62,9 +64,17 @@ func RoleReplicaName(isvc *v1beta1.InferenceService, c v1beta1.ComponentType) st
 	return InferenceReplicaName(isvc.Name, c)
 }
 
+// RoleReplicaKey returns the object key of the InferenceReplica behind a
+// role. A replica always lives in its service's namespace.
+func RoleReplicaKey(isvc *v1beta1.InferenceService, c v1beta1.ComponentType) types.NamespacedName {
+	return types.NamespacedName{Namespace: isvc.Namespace, Name: RoleReplicaName(isvc, c)}
+}
+
 // RoleReplicaPrefix returns the ome.io/inferenceservice label value of a
 // role's pods, which is its replica's name prefix: the referenced replica's
-// own name, else the service's.
+// own name, else the service's. The role's per-revision Services and
+// ControllerRevisions derive their names from it, so every per-revision
+// object the service names or selects for a role is keyed on it.
 func RoleReplicaPrefix(isvc *v1beta1.InferenceService, c v1beta1.ComponentType) string {
 	if name := RoleReplicaRef(isvc, c); name != "" {
 		return name

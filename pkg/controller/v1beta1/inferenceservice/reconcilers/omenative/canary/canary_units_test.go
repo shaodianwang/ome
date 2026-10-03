@@ -395,3 +395,28 @@ func TestReconcileRollback_HoldsForMemberStragglers(t *testing.T) {
 			isvc.Status.Components[v1beta1.EngineComponent].RolloutPhase)
 	}
 }
+
+// A referenced role's traffic targets name per-revision Services under the
+// replica's own prefix, which is where the Services exist; a projected role
+// keeps the service name.
+func TestApplyTraffic_ReferencedRoleNamesTheReplicaPrefix(t *testing.T) {
+	isvc := &v1beta1.InferenceService{}
+	isvc.Name = "svc"
+	isvc.Spec.ReplicaRefs = &v1beta1.ReplicaRefs{Engine: []string{"pool-a"}}
+	isvc.Status.Canary = &v1beta1.CanaryStatus{}
+
+	applyTraffic(isvc, v1beta1.EngineComponent, "new", "old", "", "", 10)
+	got := map[string]int32{}
+	for _, x := range isvc.Status.Components[v1beta1.EngineComponent].Traffic {
+		got[x.RevisionName] = x.Percent
+	}
+	if got["pool-a-engine-rev-new"] != 10 || got["pool-a-engine-rev-old"] != 90 {
+		t.Fatalf("referenced engine targets must carry the replica prefix: %+v", got)
+	}
+
+	applyMemberTraffic(isvc, v1beta1.DecoderComponent, []coordination.RevisionWeight{{RevisionHash: "new", Percent: 100}})
+	tr := isvc.Status.Components[v1beta1.DecoderComponent].Traffic
+	if len(tr) != 1 || tr[0].RevisionName != "svc-decoder-rev-new" {
+		t.Fatalf("projected decoder targets keep the service name: %+v", tr)
+	}
+}

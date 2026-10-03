@@ -9,7 +9,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	knapis "knative.dev/pkg/apis"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -110,8 +109,8 @@ func AggregateIRStatus(ctx context.Context, c client.Client, reads client.Reader
 // On apierrors.IsNotFound for the ISVC Update: returns nil so a
 // race with ISVC deletion drops cleanly.
 func aggregateOneComponent(ctx context.Context, c client.Client, reads client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType) error {
-	name := RoleReplicaName(isvc, component)
-	key := types.NamespacedName{Namespace: isvc.Namespace, Name: name}
+	key := RoleReplicaKey(isvc, component)
+	name := key.Name
 	ir := &v1beta1.InferenceReplica{}
 	if err := c.Get(ctx, key, ir); err != nil {
 		if apierrors.IsNotFound(err) {

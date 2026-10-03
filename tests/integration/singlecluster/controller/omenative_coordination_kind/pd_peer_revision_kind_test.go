@@ -75,7 +75,7 @@ var _ = ginkgo.Describe("behavior — PD per-revision peer endpoints", ginkgo.Or
 			own := pod.Labels[query.LabelRevisionHash]
 			want, known := pairing[own]
 			g.Expect(known).To(BeTrue(), "%s pod %s carries revision %q outside the expected set %v", component, pod.Name, own, pairing)
-			expected := coordination.BuildPeerEndpointEnv(isvcName, ns.Name, peer, want)
+			expected := coordination.BuildPeerEndpointEnv(isvcName, isvcName, ns.Name, peer, want)
 			for _, ctr := range pod.Spec.Containers {
 				got, ok := envOf(ctr, expected.RevisionName)
 				g.Expect(ok).To(BeTrue(), "pod %s container %s must carry %s", pod.Name, ctr.Name, expected.RevisionName)

@@ -2,6 +2,7 @@ package canary
 
 import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 )
 
@@ -51,28 +52,29 @@ func recordRolledBackRevisions(in ReconcileInputs, stableHash string) {
 	}
 }
 
-// setLatestReady writes one member's LatestReadyRevision; no hash writes
-// nothing.
+// setLatestReady writes one member's LatestReadyRevision, named under the
+// member's replica prefix; no hash writes nothing.
 func setLatestReady(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, hash string) {
 	if hash == "" {
 		return
 	}
 	cs := componentStatus(isvc, c)
-	coordination.SetLatestReadyRevision(&cs, isvc.Name, c, hash)
+	coordination.SetLatestReadyRevision(&cs, irprojector.RoleReplicaPrefix(isvc, c), c, hash)
 	isvc.Status.Components[c] = cs
 }
 
-// recordRolledOut writes one member's LatestRolledoutRevision, demoting the
-// superseded revision, and brings LatestReadyRevision level with it: a
-// revision that owns the traffic is one whose pods reached Ready. No hash
-// writes nothing.
+// recordRolledOut writes one member's LatestRolledoutRevision, named under
+// the member's replica prefix, demoting the superseded revision, and brings
+// LatestReadyRevision level with it: a revision that owns the traffic is one
+// whose pods reached Ready. No hash writes nothing.
 func recordRolledOut(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, hash, supersededHash string) {
 	if hash == "" {
 		return
 	}
+	prefix := irprojector.RoleReplicaPrefix(isvc, c)
 	cs := componentStatus(isvc, c)
-	coordination.RecordRolledOutRevision(&cs, isvc.Name, c, hash, supersededHash)
-	coordination.SetLatestReadyRevision(&cs, isvc.Name, c, hash)
+	coordination.RecordRolledOutRevision(&cs, prefix, c, hash, supersededHash)
+	coordination.SetLatestReadyRevision(&cs, prefix, c, hash)
 	isvc.Status.Components[c] = cs
 }
 

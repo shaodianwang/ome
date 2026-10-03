@@ -2,12 +2,15 @@ package inferenceservice
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -15,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -22,6 +26,66 @@ import (
 
 	v1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
+
+// endpointSliceToISVC admits exactly the OMENative headless Services the
+// name parse recognizes and, among those, enqueues the InferenceService
+// that controls the Service over the parsed prefix; a Service it cannot
+// read, or that another kind controls, keeps the parsed name.
+func TestEndpointSliceToISVC(t *testing.T) {
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{corev1.AddToScheme, discoveryv1.AddToScheme, v1beta1.AddToScheme} {
+		if err := add(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	isController := true
+	ownedBy := func(name, apiVersion, kind, owner string) *corev1.Service {
+		return &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "team-a",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: apiVersion, Kind: kind,
+				Name: owner, UID: types.UID(owner + "-uid"), Controller: &isController,
+			}},
+		}}
+	}
+	r := &InferenceServiceReconciler{Client: fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(
+		ownedBy("pool-a-engine-headless", v1beta1.SchemeGroupVersion.String(), "InferenceService", "svc"),
+		ownedBy("pool-d-decoder-headless", v1beta1.SchemeGroupVersion.String(), "InferenceReplica", "pool-d"),
+		ownedBy("other-engine-headless", "serving.example.com/v1", "InferenceService", "foreign"),
+		ownedBy("pool-a-engine-rev-abc", v1beta1.SchemeGroupVersion.String(), "InferenceService", "svc"),
+	).Build()}
+	slice := func(service string) *discoveryv1.EndpointSlice {
+		return &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{
+			Name: service + "-x7k2p", Namespace: "team-a",
+			Labels: map[string]string{discoveryv1.LabelServiceName: service},
+		}}
+	}
+	want := func(isvc string) []reconcile.Request {
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "team-a", Name: isvc}}}
+	}
+	for _, tc := range []struct {
+		name    string
+		service string
+		want    []reconcile.Request
+	}{
+		{"headless Service controlled by an InferenceService, by owner", "pool-a-engine-headless", want("svc")},
+		{"headless Service controlled by a replica, by name", "pool-d-decoder-headless", want("pool-d")},
+		{"headless Service controlled by a same-kind owner of another group, by name", "other-engine-headless", want("other")},
+		{"headless Service that cannot be read, by name", "svc-engine-headless", want("svc")},
+		{"per-revision Service", "pool-a-engine-rev-abc", nil},
+		{"foreign Service", "kube-dns", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := r.endpointSliceToISVC(context.Background(), slice(tc.service))
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("endpointSliceToISVC(%s) = %v, want %v", tc.service, got, tc.want)
+			}
+		})
+	}
+	if got := r.endpointSliceToISVC(context.Background(), &corev1.Pod{}); got != nil {
+		t.Fatalf("non-slice object: got %v, want nil", got)
+	}
+}
 
 // TestISVCReconcileTriggerPredicate_DropsStatusOnlyUpdate pins the For()
 // watch filter that breaks the HPA-status reconcile loop: a status-only ISVC

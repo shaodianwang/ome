@@ -426,7 +426,7 @@ func observePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1be
 		return total, ready, routing, observedPods, nil
 	}
 	for _, c := range components {
-		pods, err := query.ListOMENativePodsByName(ctx, reads, isvc.Namespace, isvc.Name, v1beta1convert.ComponentTypeToWorkload(c), useIndex)
+		pods, err := query.ListOMENativePodsByName(ctx, reads, isvc.Namespace, prefixFor(isvc, c), v1beta1convert.ComponentTypeToWorkload(c), useIndex)
 		if err != nil {
 			return nil, nil, nil, nil, fmt.Errorf("list pods for %s/%s: %w", isvc.Namespace, c, err)
 		}
@@ -524,15 +524,16 @@ func updateTrafficStatus(ctx context.Context, reads client.Reader, isvc *v1beta1
 		for _, n := range hashes {
 			total += n
 		}
-		latestHash, err := latestRevisionHashChecked(ctx, reads, isvc.Namespace, isvc.Name, c)
+		latestHash, err := latestRevisionHashChecked(ctx, reads, isvc, c)
 		if err != nil {
 			return err
 		}
 		weights := ComputeWeightsFromPods(hashes, total, latestHash)
-		if err := AttachPairingProtocols(ctx, reads, isvc.Namespace, isvc.Name, c, weights); err != nil {
+		prefix := prefixFor(isvc, c)
+		if err := AttachPairingProtocols(ctx, reads, isvc.Namespace, prefix, c, weights); err != nil {
 			return err
 		}
-		traffic := BuildTrafficTargets(isvc.Name, c, weights)
+		traffic := BuildTrafficTargets(prefix, c, weights)
 		cs := isvc.Status.Components[c]
 		changed := false
 		// The deadband suppresses pod-count jitter without suppressing
@@ -544,7 +545,7 @@ func updateTrafficStatus(ctx context.Context, reads client.Reader, isvc *v1beta1
 		}
 		// Revision metadata is reconciled independently from traffic weights so
 		// an already-correct traffic split cannot strand stale companion fields.
-		if latestHash != "" && hashes[latestHash] > 0 && SetLatestReadyRevision(&cs, isvc.Name, c, latestHash) {
+		if latestHash != "" && hashes[latestHash] > 0 && SetLatestReadyRevision(&cs, prefix, c, latestHash) {
 			changed = true
 		}
 		// LatestRolledoutRevision advances once the rollout is at 100% on a
@@ -552,7 +553,7 @@ func updateTrafficStatus(ctx context.Context, reads client.Reader, isvc *v1beta1
 		// prior value is the one demoted to PreviousRolledoutRevision.
 		if len(hashes) == 1 {
 			for hash := range hashes {
-				if RecordRolledOutRevision(&cs, isvc.Name, c, hash, "") {
+				if RecordRolledOutRevision(&cs, prefix, c, hash, "") {
 					changed = true
 				}
 			}
@@ -569,8 +570,8 @@ func updateTrafficStatus(ctx context.Context, reads client.Reader, isvc *v1beta1
 // status UpdateRevision; falls back to CurrentRevision. A read error
 // propagates — writing traffic with a fabricated empty latest hash
 // would flip LatestRevision flags on the HTTPRoute consumer.
-func latestRevisionHashChecked(ctx context.Context, reads client.Reader, namespace, isvcName string, c v1beta1.ComponentType) (string, error) {
-	summary, err := irprojector.ComponentIRStatus(ctx, reads, namespace, isvcName, c)
+func latestRevisionHashChecked(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, c v1beta1.ComponentType) (string, error) {
+	summary, err := irprojector.ComponentIRStatusFor(ctx, reads, isvc, c)
 	if err != nil {
 		return "", err
 	}
@@ -598,7 +599,7 @@ func buildGroupObservation(ctx context.Context, reads client.Reader, isvc *v1bet
 		Components: make(map[v1beta1.ComponentType]ComponentObservation, len(g.Components)),
 	}
 	for _, c := range g.Components {
-		summary, err := irprojector.DecodedComponentIRStatus(ctx, reads, isvc.Namespace, isvc.Name, c)
+		summary, err := irprojector.DecodedComponentIRStatusFor(ctx, reads, isvc, c)
 		if err != nil {
 			return GroupObservation{}, err
 		}
@@ -611,7 +612,7 @@ func buildGroupObservation(ctx context.Context, reads client.Reader, isvc *v1bet
 		// Canary-owned Components never reach this loop (their hold is the
 		// projected pacing partition, driven by the canary reconciler's own
 		// EffectivePartition path).
-		partition, err := irprojector.ComponentIRPartition(ctx, reads, isvc.Namespace, isvc.Name, c)
+		partition, err := irprojector.ComponentIRPartitionFor(ctx, reads, isvc, c)
 		if err != nil {
 			return GroupObservation{}, err
 		}
@@ -709,7 +710,7 @@ func sumPodCounts(in map[string]int32) int32 {
 // ahead of the pods that name them. Returns liveHashes as-is when the IR
 // reports no target yet.
 func retainedRevisionHashes(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, liveHashes map[string]int32) (map[string]int32, error) {
-	target, err := latestRevisionHashChecked(ctx, reads, isvc.Namespace, isvc.Name, component)
+	target, err := latestRevisionHashChecked(ctx, reads, isvc, component)
 	if err != nil {
 		return nil, err
 	}
@@ -731,8 +732,9 @@ func retainedRevisionHashes(ctx context.Context, reads client.Reader, isvc *v1be
 // whose revision-hash is not in `liveHashes` for `component`.
 //
 // The sweep lists Services in the ISVC's namespace that carry the
-// (inferenceservice + component + revision-hash) selector keys, then
-// drops every pair whose revision-hash isn't in `liveHashes`.
+// (inferenceservice + component + revision-hash) selector keys under the
+// Component's replica prefix, then drops every pair whose revision-hash
+// isn't in `liveHashes`.
 //
 // Idempotent: deleting an already-deleted Service is a NotFound
 // success per GCPerRevisionServices.
@@ -747,11 +749,12 @@ func gcOrphanedPerRevisionServices(ctx context.Context, c client.Client, isvc *v
 		}
 		live[h] = struct{}{}
 	}
+	prefix := prefixFor(isvc, component)
 	svcs := &corev1.ServiceList{}
 	if err := c.List(ctx, svcs,
 		client.InNamespace(isvc.Namespace),
 		client.MatchingLabels{
-			constants.InferenceServicePodLabelKey: isvc.Name,
+			constants.InferenceServicePodLabelKey: prefix,
 			constants.OMEComponentLabel:           string(component),
 		},
 	); err != nil {
@@ -768,11 +771,11 @@ func gcOrphanedPerRevisionServices(ctx context.Context, c client.Client, isvc *v
 		// Skip headless variant — GCPerRevisionServices already
 		// handles both halves of the pair when called with the
 		// routing hash. The routing variant's name is the bare
-		// `<isvc>-<c>-rev-<hash>` shape; headless adds `-headless`.
-		if svcs.Items[i].Name != PerRevisionServiceName(isvc.Name, component, hash) {
+		// `<prefix>-<c>-rev-<hash>` shape; headless adds `-headless`.
+		if svcs.Items[i].Name != PerRevisionServiceName(prefix, component, hash) {
 			continue
 		}
-		if err := GCPerRevisionServices(ctx, c, isvc.Namespace, isvc.Name, component, hash); err != nil {
+		if err := GCPerRevisionServices(ctx, c, isvc.Namespace, prefix, component, hash); err != nil {
 			return fmt.Errorf("gc service for %s/%s: %w", component, hash, err)
 		}
 	}
