@@ -37,6 +37,10 @@ const (
 	Kind    = "Slice"
 )
 
+// MaxNameLength is the longest Slice name the provider's admission webhook
+// accepts, shorter than the DNS-1123 label limit.
+const MaxNameLength = 49
+
 // GroupVersion is the Slice API group and version.
 var GroupVersion = schema.GroupVersion{Group: Group, Version: Version}
 
@@ -58,7 +62,7 @@ func NewObject() *unstructured.Unstructured {
 // Spec is a Slice to create.
 type Spec struct {
 	// Name is the Slice name. The provider copies it into a node label value,
-	// so it must be a DNS-1123 label.
+	// so it must be a DNS-1123 label of at most MaxNameLength characters.
 	Name string
 	// Type is the accelerator family the partition is carved from.
 	Type string
@@ -78,6 +82,9 @@ type Spec struct {
 func Build(spec Spec) (*unstructured.Unstructured, error) {
 	if errs := validation.IsDNS1123Label(spec.Name); len(errs) > 0 {
 		return nil, fmt.Errorf("slice name %q: %s", spec.Name, strings.Join(errs, "; "))
+	}
+	if len(spec.Name) > MaxNameLength {
+		return nil, fmt.Errorf("slice name %q: must be no more than %d characters", spec.Name, MaxNameLength)
 	}
 	if spec.Type == "" || spec.Topology == "" {
 		return nil, fmt.Errorf("slice %s: type and topology must both be set", spec.Name)

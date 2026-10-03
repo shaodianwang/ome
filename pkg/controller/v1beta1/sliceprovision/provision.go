@@ -175,13 +175,13 @@ func (p *Provisioner) OnReleaseDeferred(fn func(s gke.Slice, holders []string)) 
 	p.onDeferred = fn
 }
 
-// Name is the name of slot's slice: the owner name, cut to fit, then the slot
-// and a hash of the owner's identity. The hash keeps names distinct across
-// namespaces and across owners that reuse a name.
+// Name is the name of slot's slice: the owner name, cut so the whole name fits
+// gke.MaxNameLength, then the slot and a hash of the owner's identity. The hash
+// keeps names distinct across namespaces and across owners that reuse a name.
 func (p *Provisioner) Name(slot Slot) string {
 	suffix := fmt.Sprintf("-%d-%d-%s", slot.Instance, slot.Ordinal, p.hash)
 	base := strings.ReplaceAll(p.owner.Name, ".", "-")
-	if limit := validation.DNS1123LabelMaxLength - len(suffix); len(base) > limit {
+	if limit := gke.MaxNameLength - len(suffix); len(base) > limit {
 		base = base[:limit]
 	}
 	return strings.TrimRight(base, "-") + suffix

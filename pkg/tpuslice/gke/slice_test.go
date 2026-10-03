@@ -131,6 +131,7 @@ func TestBuildRejects(t *testing.T) {
 		{name: "uppercase name", mutate: func(s *Spec) { s.Name = "Ns-svc" }, wantErr: "slice name"},
 		{name: "dotted name", mutate: func(s *Spec) { s.Name = "ns.svc" }, wantErr: "slice name"},
 		{name: "name over 63", mutate: func(s *Spec) { s.Name = strings.Repeat("a", 64) }, wantErr: "slice name"},
+		{name: "name over the webhook limit", mutate: func(s *Spec) { s.Name = strings.Repeat("a", MaxNameLength+1) }, wantErr: "slice name"},
 		{name: "no type", mutate: func(s *Spec) { s.Type = "" }, wantErr: "type and topology"},
 		{name: "no topology", mutate: func(s *Spec) { s.Topology = "" }, wantErr: "type and topology"},
 		{name: "no owner", mutate: func(s *Spec) { s.Owner = nil }, wantErr: "owner labels"},
@@ -148,6 +149,14 @@ func TestBuildRejects(t *testing.T) {
 				t.Fatalf("Build error = %v, want containing %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestBuildAllowsLongestName(t *testing.T) {
+	spec := testSpec()
+	spec.Name = strings.Repeat("a", MaxNameLength)
+	if _, err := Build(spec); err != nil {
+		t.Fatalf("Build: %v", err)
 	}
 }
 

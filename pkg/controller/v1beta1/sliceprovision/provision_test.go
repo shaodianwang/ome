@@ -239,10 +239,10 @@ func TestName(t *testing.T) {
 	}
 }
 
-func TestNameFitsALabel(t *testing.T) {
+func TestNameFitsASliceName(t *testing.T) {
 	long := strings.Repeat("a.b-", 62) + "c"
 	// Each is cut just after its hyphen for one of the slots below.
-	cutAtHyphen := []string{strings.Repeat("a", 49) + "-b", strings.Repeat("a", 40) + "-b"}
+	cutAtHyphen := []string{strings.Repeat("a", 35) + "-b", strings.Repeat("a", 26) + "-b"}
 	for _, ownerName := range append(cutAtHyphen, long, "a") {
 		owner := testOwner
 		owner.Name = ownerName
@@ -252,9 +252,24 @@ func TestNameFitsALabel(t *testing.T) {
 			if errs := validation.IsDNS1123Label(name); len(errs) > 0 {
 				t.Fatalf("Name(%+v) for owner %q = %q: %v", slot, ownerName, name, errs)
 			}
+			if len(name) > gke.MaxNameLength {
+				t.Fatalf("Name(%+v) for owner %q = %q is %d characters, over %d", slot, ownerName, name, len(name), gke.MaxNameLength)
+			}
 			if strings.Contains(name, "--") {
 				t.Fatalf("Name(%+v) for owner %q = %q keeps a trailing hyphen of the cut owner name", slot, ownerName, name)
 			}
+		}
+	}
+}
+
+func TestNameKeepsAnOwnerNameThatFits(t *testing.T) {
+	// 36 characters leave room for exactly the suffix of a single-digit slot.
+	for _, ownerName := range []string{testOwner.Name, strings.Repeat("a", 36)} {
+		owner := testOwner
+		owner.Name = ownerName
+		p := newProvisioner(t, newFakeClient(), owner)
+		if got, want := p.Name(Slot{Instance: 4}), ownerName+"-4-0-"+p.hash; got != want {
+			t.Fatalf("Name for owner %q = %q, want %q", ownerName, got, want)
 		}
 	}
 }
@@ -828,7 +843,7 @@ func TestLostConfirmsLive(t *testing.T) {
 }
 
 func TestNames(t *testing.T) {
-	for _, ownerName := range []string{testOwner.Name, "svc.engine", strings.Repeat("a.b-", 62) + "c", strings.Repeat("a", 49) + "-b"} {
+	for _, ownerName := range []string{testOwner.Name, "svc.engine", strings.Repeat("a.b-", 62) + "c", strings.Repeat("a", 35) + "-b", strings.Repeat("a", 26) + "-b"} {
 		owner := testOwner
 		owner.Name = ownerName
 		p := newProvisioner(t, newFakeClient(), owner)
