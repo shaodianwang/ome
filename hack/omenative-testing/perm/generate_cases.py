@@ -2268,7 +2268,7 @@ STABLE_BREAK_STATE = {"prestart": "Idle", "capacity": "Staging", "traffic": "Ser
 
 
 def _stable_break_when(step, victims):
-    when = {"prestart": "before the push lands (the break bites on the idle service first)",
+    when = {"prestart": "before the push lands (the break bites on the idle service and the status reacts to it first)",
             "capacity": "while the first step builds canary capacity ahead of any traffic",
             "traffic": "while the second step soaks its split",
             "gate": f"while the second step waits at its manual gate, promoted {BREAK_GATE_HOLD_S}s after the break",
@@ -2286,7 +2286,7 @@ def _stable_break_reason(step, kind, form, victims, rp, gate):
            ("imagepull", "start"): "sit in ImagePullBackOff"}[(kind, form)]
     out = (f"{victims} old-revision engine Instance(s) {how} {_stable_break_when(step, victims)}, under restart policy "
            f"{RP_FULL[rp]}; the ladder walks every step to Stable inside its budgets, every broken Instance ends on "
-           f"the canary revision serving, no repair is recorded for one after the push, and the healthy Instances "
+           f"the canary revision serving, no repair is opened for one after the push, and the healthy Instances "
            f"keep serving above N-{victims}")
     if gate:
         out += "; every step before the cutover is gated on a passing analysis, which the broken stable pods do not feed"
@@ -3434,7 +3434,7 @@ def _edit_repair_reason(order, form, edit, strat, topo):
         out = (f"{how}; the product opens a repair of its Instance, and while the repair's replacement pod "
                f"is coming up {what}; the last change wins: every Instance, the repaired one included, ends on the "
                f"edited runtime's revision and serving, the repaired Instance is rebuilt at most once "
-               f"after the edit with no repair recorded for it from then on, and no Instance is left "
+               f"after the edit with no repair opened for it from then on, and no Instance is left "
                f"mid-operation")
     else:
         out = (f"{what} and, as the edit lands, {how}; its Instance is off the target from that moment, "

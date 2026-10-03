@@ -1,5 +1,5 @@
 # p6440: [gen] canary fault-old crashloop:load at prestart pd N=8 s2 rp None victims 1  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=10 ceil_d=9 ceil_r=3 fault=crashloop:idle co=none topo=pd canary=auto form=load victims=1 nophase=Failed cell=canary/Idle/stableBroken[crashLoad]
-# reason: 1 old-revision engine Instance(s) die after Ready and come back between crashes before the push lands (the break bites on the idle service first), under restart policy None; the ladder walks every step to Stable inside its budgets, every broken Instance ends on the canary revision serving, no repair is recorded for one after the push, and the healthy Instances keep serving above N-1
+# reason: 1 old-revision engine Instance(s) die after Ready and come back between crashes before the push lands (the break bites on the idle service and the status reacts to it first), under restart policy None; the ladder walks every step to Stable inside its budgets, every broken Instance ends on the canary revision serving, no repair is opened for one after the push, and the healthy Instances keep serving above N-1
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p6440 }

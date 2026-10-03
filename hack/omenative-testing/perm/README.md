@@ -445,8 +445,16 @@ such as the recovery half of a podkill, carries both ids.
   allowed for: the healthy Instances must hold `N - maxUnavailable - n`.
   `fault=<kind>:idle` lands the same break on the settled service before the
   push: the push waits until the break has visibly bitten (`BREAK_BITE_S`,
-  60 s scaled), so it meets a fleet that is already broken, and the verdict
-  reads the victims as above. Under `canary=manual` the harness holds its
+  60 s scaled) and the status has reacted to it (`BREAK_REACT_S`, 60 s
+  scaled: under `RecreateInstanceOnPodRestart` every victim's repair is open
+  — a `RestartTriggered` event names it, or its row reads `Restarting` or
+  carries an operation — or declared held by a `RepairHeld`; under `None`,
+  where no repair answers a broken pod, the break has been visible for
+  `PREARM_SETTLE_S`), so it meets a fleet the product already knows is
+  broken, and the verdict reads the victims as above. A repair is placed by
+  its event's first record: one the product opened before the push and
+  completed after it is not a repair after the push, whether or not its
+  event was recorded again. Under `canary=manual` the harness holds its
   promote `verbhold=` seconds (default 45) after a break fired at a hook, so
   the broken stable side is observed while the gate holds, as an operator
   would see it before promoting. Under a canary `victimcomp=router` is
@@ -1029,7 +1037,9 @@ may ride a runtime edit that rolls (`expect=roll`), in either order:
   every Instance, the repaired one included, ends on the post-edit revision
   serving; after the edit the repaired Instance got no more new pods than
   it has pod slots (rebuilt at most once; more is the repair and the roll
-  each rebuilding it) and no repair is recorded for it from then on.
+  each rebuilding it) and no repair is opened for it from then on (a repair
+  is placed by its event's first record, so the one the edit landed on does
+  not count however late its event is recorded again).
 
 Both orders add that every Instance row settles after the roll (Ready, no
 operation open; polled for `ROWS_SETTLE_S`): no Instance is left
@@ -1281,9 +1291,11 @@ shapes.
   image and an exec are available against a live pod, which is why neither
   form edits the template. On top of the usual rollout checks the verdict
   requires that Instance to end on the new revision with its pods serving,
-  and no `RestartTriggered` event naming it after the bump: an Instance whose
-  revision is not the roll target belongs to the roll, never to a repair on
-  the revision it was running. A gang under SurgeThenDrain is replaced at a
+  and no `RestartTriggered` event first recorded after the bump naming it
+  (a repair opened before the bump may complete, and have its event recorded
+  again, after it): an Instance whose revision is not the roll target
+  belongs to the roll, never to a repair on the revision it was running. A
+  gang under SurgeThenDrain is replaced at a
   fresh Instance index and its source index retired, so the verdict follows
   the Instance across the gang surges and reads the index it ended at. Every
   record that names a pair is read. The InferenceReplica's status rows: a

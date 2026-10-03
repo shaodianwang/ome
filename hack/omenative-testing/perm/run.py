@@ -2017,7 +2017,9 @@ def invariant_checks(inv, verdict, notes, checks):
 #                        available against a live pod, which is why neither
 #                        form edits the template. The verdict adds: that
 #                        Instance ends on the new revision and serving, and
-#                        no RestartTriggered event names it after the bump.
+#                        no RestartTriggered event first recorded after the
+#                        bump names it (a repair opened before the bump may
+#                        complete, and be recorded again, after it).
 #                        A gang under SurgeThenDrain is replaced at a fresh
 #                        Instance index and its source index retired, so
 #                        the verdict follows the Instance through its gang
@@ -2066,6 +2068,9 @@ CRASH_START_REASONS = {"CrashLoopBackOff", "StartError", "RunContainerError", "C
 IMAGEPULL_REASONS = {"ImagePullBackOff", "ErrImagePull"}
 # How long a break on the idle service is given to bite before the push lands.
 BREAK_BITE_S = int(60 * TIMEOUT_MULT)
+# How long the status is then given to react to it (the repair of every
+# victim open, or declared held) before the push lands anyway.
+BREAK_REACT_S = int(60 * TIMEOUT_MULT)
 CRASHLOOP_PARAMS = {CRASHLOOP_VICTIM, CRASHLOOP_NEW}
 # The events that say why a roll toward a crashing revision stopped: the
 # retry ladder's hold, or an Instance escalated to Failed.
@@ -3993,10 +3998,14 @@ def _fault_before_push(f):
 
 def _break_before_push(ctx, fault):
     """Fire a fault that lands on the idle service before the push: the
-    stable side breaks, its metrics breach or the gate's source goes, and a
-    break must have visibly bitten before the push follows (a breach and a
-    lost source show once the gate samples). A pod the break changes is
-    recorded on the watcher's invariant state. (True, "") or (False, why)."""
+    stable side breaks, its metrics breach or the gate's source goes. A
+    break must have visibly bitten, and the status must have reacted to it
+    (_wait_break_reacted), before the push follows: the story is a push on
+    a service the product already knows is broken, so what the product does
+    about the break is settled before the push can be the reason for it (a
+    breach and a lost source show once the gate samples). A pod the break
+    changes is recorded on the watcher's invariant state. (True, "") or
+    (False, why)."""
     _fault_fire(fault, ctx["pod_state"], ctx["pods_per_inst"], ctx["old_hashes"], inv=ctx.get("inv"))
     if fault["infra_fail"]:
         return False, fault["infra_fail"]
@@ -4004,7 +4013,11 @@ def _break_before_push(ctx, fault):
         bitten = _wait_break_bitten(ctx, fault, BREAK_BITE_S)
         if bitten is None:
             return False, f"{fault['kind']}: the break on the idle service did not bite within {BREAK_BITE_S}s"
-        fault["notes"].append(f"the break had bitten {bitten:.0f}s after it landed; the push follows")
+        fault["notes"].append(f"the break had bitten {bitten:.0f}s after it landed")
+        print(f"    {fault['notes'][-1]}")
+        waited, how = _wait_break_reacted(ctx, fault, BREAK_REACT_S)
+        fault["notes"].append(f"the push follows {how}" if waited is not None
+                              else f"the push follows although {how} within {BREAK_REACT_S}s")
         print(f"    {fault['notes'][-1]}")
     return True, ""
 
@@ -5484,10 +5497,15 @@ def _event_window_start(since_epoch):
     return math.floor(since_epoch)
 
 
-def _isvc_events_since(case_id, since_epoch):
+def _isvc_events_since(case_id, since_epoch, opened=False):
     """(reason, message) of every event recorded on the case's
     InferenceService whose latest occurrence is at or after since_epoch,
-    oldest first, a folded repeat listed once per occurrence."""
+    oldest first, a folded repeat listed once per occurrence. With opened,
+    only the events first recorded after since_epoch: the stamps carry
+    whole seconds, so an event stamped in the second the window opened in
+    may have been recorded before the opening and is left out, as is one
+    the product recorded before the window and recorded again inside it
+    (the same repair, folded onto its first record)."""
     r = kubectl("-n", NS, "get", "events", "--field-selector",
                 f"involvedObject.kind=InferenceService,involvedObject.name={case_id}", "-o", "json")
     if r.returncode != 0:
@@ -5499,13 +5517,18 @@ def _isvc_events_since(case_id, since_epoch):
     window_start = _event_window_start(since_epoch)
     found = []
     for it in items:
-        stamp = it.get("lastTimestamp") or it.get("eventTime") or (it.get("metadata") or {}).get("creationTimestamp") or ""
+        created = (it.get("metadata") or {}).get("creationTimestamp") or ""
+        stamp = it.get("lastTimestamp") or it.get("eventTime") or created
         try:
             when = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
         except ValueError:
             continue
         if when < window_start:
             continue
+        if opened:
+            first = _event_epoch(it.get("firstTimestamp") or it.get("eventTime") or created or stamp)
+            if first is None or first < since_epoch:
+                continue
         # The apiserver folds a repeat of an identical event into the
         # first one's count; one entry per occurrence keeps a tally of
         # starts against abandons honest.
@@ -5676,10 +5699,13 @@ def _instance_rebuilt_whole(pods, pre_uids, expected):
 
 def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, checks, bumped=None, surges=None):
     """The break verdict after a roll. A victim on a bumped Component ended
-    on the new revision with its pods serving, and no repair was recorded for
+    on the new revision with its pods serving, and no repair was opened for
     it after the bump: a repair on the old revision is the failure this fault
     exists to catch, since the Instance's revision is not the roll target and
-    the roll owns it. A victim on a sibling nobody bumped has no new revision
+    the roll owns it. A repair is placed by the first record of its event: a
+    repair the product opened before the bump and completed after it is the
+    product keeping its rule, so an event recorded again after the bump does
+    not count. A victim on a sibling nobody bumped has no new revision
     to reach, so the repair owns it: it must be rebuilt, Ready and serving on
     its running revision, with the repair recorded. Either way the Instance
     is followed through the gang surges that replaced it at a fresh index:
@@ -5697,22 +5723,34 @@ def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, chec
     events = _isvc_events_since(f["case_id"], since)
     for rec in _break_victims(f):
         chain, events = _victim_chain(f, rec, pod_state, since, events, surges)
-        verdict = _break_victim_checks(f, rec, pod_state, old_hashes, events, bumped, verdict, notes, checks, chain)
+        opened = _isvc_events_since(f["case_id"], since, opened=True)
+        verdict = _break_victim_checks(f, rec, pod_state, old_hashes, events, bumped, verdict, notes, checks, chain,
+                                       opened=opened)
     return verdict
 
 
-def _break_victim_checks(f, rec, pod_state, old_hashes, events, bumped, verdict, notes, checks, chain=None):
+def _repairs_naming(events, comp, chain):
+    """The RestartTriggered messages among events naming comp at any index
+    of the chain."""
+    return [m for reason, m in events
+            if reason == "RestartTriggered" and any(_event_names_instance(m, comp, i) for i in chain)]
+
+
+def _break_victim_checks(f, rec, pod_state, old_hashes, events, bumped, verdict, notes, checks, chain=None,
+                         opened=None):
     """The break verdict for one victim Instance (see _crashloop_checks),
     followed through the index chain its replacements made (read from the
-    events alone when the caller read none)."""
+    events alone when the caller read none). `opened` are the events first
+    recorded after the bump, which place a repair; the events themselves
+    stand in when the caller read none."""
     inst, comp, kind = rec["crash_inst"], rec["crash_comp"], f["kind"]
     chain = chain or _follow_gang_surges(inst, _gang_surge_replacements(events, comp))
     final = chain[-1]
     moved = f" (replaced at Instance {final} by its gang surge)" if final != inst else ""
     where = f"{comp} Instance {inst}{moved}"
     pods = _instance_pods(pod_state, comp, final)
-    repairs = [m for reason, m in events
-               if reason == "RestartTriggered" and any(_event_names_instance(m, comp, i) for i in chain)]
+    repairs = _repairs_naming(events, comp, chain)
+    after = _repairs_naming(events if opened is None else opened, comp, chain)
     down = [n for n, p in pods if not (p.get("ready") and p.get("serving"))]
     if bumped is not None and comp not in bumped:
         sibling = f"sibling {where}"
@@ -5767,13 +5805,14 @@ def _break_victim_checks(f, rec, pod_state, old_hashes, events, bumped, verdict,
         # A canary-side victim is on the roll target: a repair of it is the
         # restart policy at work, not a rebuild of a superseded revision.
         checks.append(f"  ⓘ {kind}: a repair rebuilt canary-side {where} after the break: {repairs[0][:120]}")
-    elif repairs:
+    elif after:
         verdict = "FAIL"
-        notes.append(f"{kind} Instance {comp}/{inst} was repaired after the bump: {repairs[0][:120]}")
-        checks.append(f"  ✗ {kind}: a repair was recorded for {where} after the bump "
-                      f"(its revision was not the roll target): {repairs[0][:160]}")
+        notes.append(f"{kind} Instance {comp}/{inst} was repaired after the bump: {after[0][:120]}")
+        checks.append(f"  ✗ {kind}: a repair was opened for {where} after the bump "
+                      f"(its revision was not the roll target): {after[0][:160]}")
     else:
-        checks.append(f"  ✓ {kind}: no RestartTriggered event named {where} after the bump")
+        checks.append(f"  ✓ {kind}: no RestartTriggered event first recorded after the bump names {where}"
+                      + (f" (one recorded again after it was opened before: {repairs[0][:100]})" if repairs else ""))
     if f.get("fixfirst"):
         verdict = _crashloop_fix_order(f, pod_state, old_hashes, verdict, notes, checks)
     if rec.get("kills") is not None and f["form"] == "load":
@@ -5801,6 +5840,62 @@ def _wait_break_bitten(ctx, f, budget_s):
         if _break_bitten(f, ctx["pod_state"]):
             return time.time() - t0
     return None
+
+
+def _break_reacted(case_id, f, since_epoch):
+    """{(component, instance): how} for every victim of a break the status
+    has reacted to since since_epoch: its repair is open (a RestartTriggered
+    event names its Instance, or its row reads Restarting or carries an
+    operation) or the product has said it holds the repair (a RepairHeld
+    event names it)."""
+    snapshot = _ir_snapshot(case_id)
+    events = _isvc_events_since(case_id, since_epoch)
+    out = {}
+    for rec in _break_victims(f):
+        comp, inst = rec["crash_comp"], rec["crash_inst"]
+        reasons = {reason for reason, m in events if _event_names_instance(m, comp, inst)}
+        row = next((r for r in (snapshot.get(comp) or {}).get("rows", []) if str(r.get("index")) == str(inst)), {})
+        if "RestartTriggered" in reasons:
+            out[(comp, inst)] = "a RestartTriggered event names it"
+        elif row.get("operation") is not None:
+            out[(comp, inst)] = f"its row reads {row.get('phase')} with an operation open"
+        elif str(row.get("phase")) == "Restarting":
+            out[(comp, inst)] = "its row reads Restarting"
+        elif "RepairHeld" in reasons:
+            out[(comp, inst)] = "a RepairHeld event names it"
+    return out
+
+
+def _wait_break_reacted(ctx, f, budget_s):
+    """Watch, once a break on the idle service has bitten, until the status
+    has reacted to it, so the push lands on a status that already shows the
+    break: under RecreateInstanceOnPodRestart until every victim's repair is
+    open or declared held (_break_reacted); under None, where no repair
+    answers a broken pod, until the break has been visible for
+    PREARM_SETTLE_S, the settle the case gives the manager to observe a
+    change before the push. (seconds it took, what the status showed), or
+    (None, what it still did not show) when the budget ran out first."""
+    policy = _restart_policy(ctx.get("hdr"), ctx.get("info"), f["crash_comp"])
+    t0 = time.time()
+    if policy != "RecreateInstance":
+        while time.time() - t0 < PREARM_SETTLE_S and not ctx["closed"]:
+            _read_one(ctx)
+        return time.time() - t0, (f"once the break had been visible for {PREARM_SETTLE_S}s "
+                                  f"(restart policy {policy}: no repair answers a broken pod)")
+    victims = [(rec["crash_comp"], rec["crash_inst"]) for rec in _break_victims(f)]
+    reacted, last_poll = {}, None
+    while time.time() - t0 < budget_s and not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        if last_poll is not None and now - last_poll < ROW_POLL_S:
+            continue
+        last_poll = now
+        reacted = _break_reacted(ctx["case_id"], f, f.get("fired_ts") or 0)
+        if all(v in reacted for v in victims):
+            shown = "; ".join(f"{c} Instance {i}: {how}" for (c, i), how in sorted(reacted.items()))
+            return now - t0, f"once the status showed the break ({shown}), {now - t0:.0f}s after it bit"
+    missing = ", ".join(f"{c} Instance {i}" for c, i in victims if (c, i) not in reacted)
+    return None, f"the status had not shown the break (no repair open or declared held for {missing})"
 
 
 def _break_heal(f):

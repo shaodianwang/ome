@@ -1,5 +1,5 @@
 # p6490: [gen] canary fault-old crashloop:load at capacity pd N=8 s2 rp RecreateInstance victims 1  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=10 ceil_d=9 ceil_r=3 fault=crashloop:canary-staging co=none topo=pd canary=auto form=load victims=1 nophase=Failed cell=canary/Staging/stableBroken[crashLoad]
-# reason: 1 old-revision engine Instance(s) die after Ready and come back between crashes while the first step builds canary capacity ahead of any traffic, under restart policy RecreateInstanceOnPodRestart; the ladder walks every step to Stable inside its budgets, every broken Instance ends on the canary revision serving, no repair is recorded for one after the push, and the healthy Instances keep serving above N-1
+# reason: 1 old-revision engine Instance(s) die after Ready and come back between crashes while the first step builds canary capacity ahead of any traffic, under restart policy RecreateInstanceOnPodRestart; the ladder walks every step to Stable inside its budgets, every broken Instance ends on the canary revision serving, no repair is opened for one after the push, and the healthy Instances keep serving above N-1
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p6490 }

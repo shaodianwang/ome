@@ -872,7 +872,8 @@ class BreakRegistersItsPodTest(unittest.TestCase):
             fault = ctx["fault"]
             self.assertTrue(run._fault_before_push(fault))
             with mock.patch.object(run, "kubectl", lambda *a, **k: _Resp("", rc, "denied")), \
-                    mock.patch.object(run, "_wait_break_bitten", lambda *a: bite):
+                    mock.patch.object(run, "_wait_break_bitten", lambda *a: bite), \
+                    mock.patch.object(run, "_wait_break_reacted", lambda *a: (1.0, "once the status showed the break")):
                 ok, why = run._break_before_push(ctx, fault)
             self.assertEqual(want_ok, ok, (rc, bite, why))
             if rc == 0:
@@ -885,6 +886,91 @@ class BreakRegistersItsPodTest(unittest.TestCase):
                 self.assertIn("did not bite", why)
             if want_ok:
                 self.assertTrue(any("the push follows" in n for n in fault["notes"]))
+
+    def test_the_push_follows_once_the_status_has_reacted_to_the_break(self):
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 3, "ceil_d": 0, "ceil_r": 0, "mode": "canary", "canary": "auto",
+               "fault": "crashloop:idle", "form": "start", "victims": 1, "topo": "engine"}
+        shown = "once the status showed the break (engine Instance 1: a RestartTriggered event names it), 1s after it bit"
+        unshown = "the status had not shown the break (no repair open or declared held for engine Instance 1)"
+        for reacted, phrase in (((1.0, shown), "the push follows once the status showed the break"),
+                                ((None, unshown), "the push follows although the status had not shown the break")):
+            ctx = self._ctx(hdr)
+            fault = ctx["fault"]
+            budgets = []
+            with mock.patch.object(run, "kubectl", lambda *a, **k: _Resp("", 0, "")), \
+                    mock.patch.object(run, "_wait_break_bitten", lambda *a: 2.0), \
+                    mock.patch.object(run, "_wait_break_reacted", lambda c, f, budget: budgets.append(budget) or reacted):
+                ok, why = run._break_before_push(ctx, fault)
+            self.assertTrue(ok, why)
+            self.assertEqual([run.BREAK_REACT_S], budgets, "the status is given BREAK_REACT_S to react")
+            self.assertEqual("the break had bitten 2s after it landed", fault["notes"][-2])
+            self.assertTrue(fault["notes"][-1].startswith(phrase), fault["notes"][-1])
+            if reacted[0] is None:
+                self.assertTrue(fault["notes"][-1].endswith(f"within {run.BREAK_REACT_S}s"), fault["notes"][-1])
+
+    def test_break_reacted_reads_the_repair_event_the_row_or_a_declared_hold(self):
+        f = {"crash_comp": "engine", "crash_inst": "1", "extra_victims": [{"crash_comp": "engine", "crash_inst": "0"}]}
+
+        def rows(*phases):
+            return {"engine": {"hold": None, "rows": [dict(index=i, **p) for i, p in enumerate(phases)]}}
+        ready = rows({"phase": "Ready"}, {"phase": "Ready"})
+        named = "OMENative component=engine instance=1 restart triggered: pod e1 CrashLoopBackOff (incarnation=2)"
+        cases = [
+            ("nothing", [], ready, {}),
+            ("event", [("RestartTriggered", named)], ready, {("engine", "1"): "a RestartTriggered event names it"}),
+            ("row", [], rows({"phase": "Ready"}, {"phase": "Restarting"}), {("engine", "1"): "its row reads Restarting"}),
+            ("operation", [], rows({"phase": "Ready"}, {"phase": "Updating", "operation": {"type": "Restart"}}),
+             {("engine", "1"): "its row reads Updating with an operation open"}),
+            ("held", [("RepairHeld", "OMENative component=engine instance=1 repair held: retry budget")], ready,
+             {("engine", "1"): "a RepairHeld event names it"}),
+            ("elsewhere", [("RestartTriggered", "OMENative component=engine instance=12 restart triggered: x"),
+                           ("RestartTriggered", "OMENative component=decoder instance=1 restart triggered: x")], ready, {}),
+            ("each victim", [("RestartTriggered", "OMENative component=engine instance=0 restart triggered: x")],
+             rows({"phase": "Ready"}, {"phase": "Restarting"}),
+             {("engine", "0"): "a RestartTriggered event names it", ("engine", "1"): "its row reads Restarting"}),
+        ]
+        for name, events, snapshot, want in cases:
+            with mock.patch.object(run, "_isvc_events_since", lambda cid, since, _e=events, **kw: _e), \
+                    mock.patch.object(run, "_ir_snapshot", lambda cid, _s=snapshot: _s):
+                self.assertEqual(want, run._break_reacted("p999", f, 1.0), name)
+
+    def test_wait_break_reacted_polls_the_repair_under_recreate_and_settles_under_none(self):
+        clock = [100.0]
+
+        def read_one(ctx, timeout=1.0):
+            clock[0] += 1.0
+        f = {"crash_comp": "engine", "crash_inst": "1", "fired_ts": 90.0,
+             "extra_victims": [{"crash_comp": "engine", "crash_inst": "0"}]}
+        reads = []
+
+        def reacted(cid, f_, since):
+            reads.append(since)
+            shown = {("engine", "1"): "its row reads Restarting"}
+            if len(reads) >= 3:
+                shown[("engine", "0")] = "a RestartTriggered event names it"
+            return shown
+        base = _ctx_for({"Ne": 2, "Nd": 0, "Nr": 0, "topo": "engine"}, {})
+        with mock.patch.object(run.time, "time", lambda: clock[0]), mock.patch.object(run, "_read_one", read_one), \
+                mock.patch.object(run, "_break_reacted", reacted), mock.patch.object(run, "ROW_POLL_S", 2.0), \
+                mock.patch.object(run, "PREARM_SETTLE_S", 5):
+            ctx = dict(base, hdr={"restart": "RecreateInstance"})
+            waited, how = run._wait_break_reacted(ctx, f, 60)
+            self.assertEqual(5.0, waited, "the third read, two ROW_POLL_S after the first, showed every victim")
+            self.assertEqual([90.0] * 3, reads, "the status is read since the fault fired")
+            self.assertEqual("once the status showed the break (engine Instance 0: a RestartTriggered event names it; "
+                             "engine Instance 1: its row reads Restarting), 5s after it bit", how)
+            reads.clear()
+            clock[0] = 100.0
+            waited, how = run._wait_break_reacted(dict(base, hdr={"restart": "None"}), f, 60)
+            self.assertEqual(5.0, waited)
+            self.assertEqual([], reads, "no repair answers a broken pod under None: the status is not read")
+            self.assertEqual("once the break had been visible for 5s (restart policy None: no repair answers a broken pod)", how)
+            reads.clear()
+            clock[0] = 100.0
+            with mock.patch.object(run, "_break_reacted", lambda cid, f_, since: {("engine", "1"): "its row reads Restarting"}):
+                waited, how = run._wait_break_reacted(ctx, f, 6)
+            self.assertIsNone(waited, "the budget ran out with one victim never shown")
+            self.assertEqual("the status had not shown the break (no repair open or declared held for engine Instance 0)", how)
 
     def test_podkill_records_nothing_and_its_replacement_is_judged(self):
         hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 3, "ceil_d": 0, "ceil_r": 0, "mode": "canary", "canary": "auto",
@@ -1980,6 +2066,33 @@ class WindowReadersTest(unittest.TestCase):
             self.assertEqual([("RestartTriggered", 1)], [(r, n) for _w, r, _m, n in found])
             self.assertEqual([], run._object_events("InferenceService", "p999", T0 + 1.0))
 
+    def test_an_opened_window_places_an_event_by_its_first_record(self):
+        """opened=True reads the first record: an event the product recorded
+        before the window and again inside it is the same record, and one
+        stamped in the second the window opened in may predate the opening."""
+        again = "OMENative component=engine instance=7 restart triggered: pod e7 CrashLoopBackOff (incarnation=2)"
+        fresh = "OMENative component=engine instance=7 restart triggered: pod e7 CrashLoopBackOff (incarnation=3)"
+        events = {"items": [
+            {"reason": "RestartTriggered", "message": again, "count": 2,
+             "firstTimestamp": "2026-10-01T09:59:58Z", "lastTimestamp": "2026-10-01T10:00:03Z"},
+            {"reason": "RestartTriggered", "message": fresh, "count": 1,
+             "firstTimestamp": "2026-10-01T10:00:01Z", "lastTimestamp": "2026-10-01T10:00:01Z"},
+            {"reason": "RestartTriggered", "message": "same second", "count": 1,
+             "firstTimestamp": "2026-10-01T10:00:00Z", "lastTimestamp": "2026-10-01T10:00:00Z"},
+        ]}
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(events), "")):
+            latest = run._isvc_events_since("p999", T0 + 0.4)
+            opened = run._isvc_events_since("p999", T0 + 0.4, opened=True)
+            before = run._isvc_events_since("p999", T0 - 0.5, opened=True)
+        self.assertEqual([("RestartTriggered", "same second"), ("RestartTriggered", fresh),
+                          ("RestartTriggered", again), ("RestartTriggered", again)], latest,
+                         "the latest record places every one of them inside the window")
+        self.assertEqual([("RestartTriggered", fresh)], opened,
+                         "only the event first recorded after the opening: the one recorded again inside the window "
+                         "and the one stamped in the opening's own second are out")
+        self.assertEqual([("RestartTriggered", "same second"), ("RestartTriggered", fresh)], before,
+                         "an opening before that second keeps the event stamped in it")
+
     def test_write_blocked_reason_reads_events_then_rows_then_conditions(self):
         with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(EVENTS), "")):
             where, text = run._write_blocked_reason("p999", [], T0)
@@ -2589,7 +2702,7 @@ class RolloutEditTest(unittest.TestCase):
         calls = []
         orig_kubectl, orig_events = run.kubectl, run._isvc_events_since
         run.kubectl = lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0, "", "")
-        run._isvc_events_since = lambda cid, since: [(run.HELD_PUSH_REASON, "OMENative component=engine instance=0 rejected update")]
+        run._isvc_events_since = lambda cid, since, **kw: [(run.HELD_PUSH_REASON, "OMENative component=engine instance=0 rejected update")]
         try:
             hold = run._held_push_new({"edit": "env", "expect": "held"})
             hold["until"] = 100.0
@@ -3825,18 +3938,18 @@ class CrashloopFaultTest(unittest.TestCase):
         stale = {"e1": {"alive": True, "hash": "old", "inst": "1", "comp": "engine", "ready": True, "serving": True}}
         orig = run._isvc_events_since
         try:
-            run._isvc_events_since = lambda case_id, since: []
+            run._isvc_events_since = lambda case_id, since, **kw: []
             notes, checks = [], []
             self.assertEqual("PASS", run._crashloop_checks(f, healed, {"old"}, 1.0, "PASS", notes, checks))
             notes, checks = [], []
             self.assertEqual("FAIL", run._crashloop_checks(f, stale, {"old"}, 1.0, "PASS", notes, checks))
             self.assertTrue(any("new revision" in n for n in notes))
-            run._isvc_events_since = lambda case_id, since: [
+            run._isvc_events_since = lambda case_id, since, **kw: [
                 ("RestartTriggered", "OMENative component=engine instance=1 restart triggered: pod e1 wedged")]
             notes, checks = [], []
             self.assertEqual("FAIL", run._crashloop_checks(f, healed, {"old"}, 1.0, "PASS", notes, checks))
             self.assertTrue(any("repaired after the bump" in n for n in notes))
-            run._isvc_events_since = lambda case_id, since: [
+            run._isvc_events_since = lambda case_id, since, **kw: [
                 ("RestartTriggered", "OMENative component=engine instance=0 restart triggered: pod e0 wedged")]
             notes, checks = [], []
             self.assertEqual("PASS", run._crashloop_checks(f, healed, {"old"}, 1.0, "PASS", notes, checks),
@@ -3867,7 +3980,7 @@ class CrashloopFaultTest(unittest.TestCase):
         reads = list(events) if events and isinstance(events[0], list) else [events]
         clock = [0.0]
 
-        def events_since(case_id, since):
+        def events_since(case_id, since, **kw):
             return reads[min(len(reads) - 1, int(clock[0]))]
 
         def tick(seconds):
@@ -4047,6 +4160,25 @@ class CrashloopFaultTest(unittest.TestCase):
             ("RestartTriggered", "OMENative component=decoder instance=1 restart triggered: pod d1 wedged (incarnation=2)")]
         verdict, notes, _checks = self._verdict(healed, elsewhere)
         self.assertEqual("PASS", verdict, "a repair on another Instance, or another Component, is not this verdict's")
+
+    def test_a_repair_opened_before_the_bump_is_the_products_rule_however_late_it_is_recorded_again(self):
+        # The repair's event is placed by its first record. One opened before
+        # the bump stays inside the latest-record window when the product
+        # records it again after the bump; it is not a repair after the bump.
+        f = {"kind": "crashloop", "fired": True, "infra_fail": None, "form": "start", "case_id": "p999",
+             "crash_inst": "1", "crash_comp": "engine", "crash_hash": "old", "kills": 0}
+        healed = {"e1": {"alive": True, "hash": "new", "inst": "1", "comp": "engine", "ready": True, "serving": True}}
+        repair = [("RestartTriggered", "OMENative component=engine instance=1 restart triggered: pod e1 wedged (incarnation=2)")]
+        for opened_after, want in ((False, "PASS"), (True, "FAIL")):
+            def events_since(case_id, since, opened=False, after=opened_after):
+                return repair if (after or not opened) else []
+            with mock.patch.object(run, "_isvc_events_since", events_since):
+                notes, checks = [], []
+                self.assertEqual(want, run._crashloop_checks(f, healed, {"old"}, 1.0, "PASS", notes, checks), notes)
+            if want == "PASS":
+                self.assertTrue(any("recorded again after it was opened before" in c for c in checks), checks)
+            else:
+                self.assertTrue(any("repaired after the bump" in n for n in notes), notes)
 
     @staticmethod
     def _row(index, phase, rev=None, op=None, pods=0):
@@ -4514,7 +4646,7 @@ class IdleBreakFaultTest(unittest.TestCase):
         healed = {"e1": {"alive": True, "hash": "new", "inst": "1", "comp": "engine", "ready": True, "serving": True, "uid": "u-new"}}
         orig_ev = run._isvc_events_since
         try:
-            run._isvc_events_since = lambda case_id, since: []
+            run._isvc_events_since = lambda case_id, since, **kw: []
             self.assertEqual("PASS", run._crashloop_checks(f, healed, {"old"}, 1.0, "PASS", notes, checks, bumped={"engine"}))
             self.assertTrue(any(c.startswith("  ✓ imagepull:") for c in checks))
         finally:
@@ -4528,7 +4660,7 @@ class IdleBreakFaultTest(unittest.TestCase):
         repair = [("RestartTriggered", "OMENative component=decoder instance=1 restart triggered: pod d1 wedged")]
         orig = run._isvc_events_since
         try:
-            run._isvc_events_since = lambda case_id, since: repair
+            run._isvc_events_since = lambda case_id, since, **kw: repair
             notes, checks = [], []
             self.assertEqual("PASS", run._crashloop_checks(f, rebuilt, {"old"}, 1.0, "PASS", notes, checks, bumped={"engine"}))
             notes, checks = [], []
@@ -4537,7 +4669,7 @@ class IdleBreakFaultTest(unittest.TestCase):
             notes, checks = [], []
             self.assertEqual("FAIL", run._crashloop_checks(f, rebuilt, {"old"}, 1.0, "PASS", notes, checks, bumped={"engine", "decoder"}),
                              "a bumped victim keeps the roll's claim: it must reach the new revision")
-            run._isvc_events_since = lambda case_id, since: []
+            run._isvc_events_since = lambda case_id, since, **kw: []
             notes, checks = [], []
             self.assertEqual("FAIL", run._crashloop_checks(f, rebuilt, {"old"}, 1.0, "PASS", notes, checks, bumped={"engine"}))
             self.assertTrue(any("no RestartTriggered" in n for n in notes))
@@ -5819,14 +5951,14 @@ class CanaryBreakFaultTest(unittest.TestCase):
         stale = dict(healed, e2={"alive": True, "hash": "old", "inst": "2", "comp": "engine", "ready": True, "serving": True})
         orig_ev = run._isvc_events_since
         try:
-            run._isvc_events_since = lambda case_id, since: []
+            run._isvc_events_since = lambda case_id, since, **kw: []
             notes, checks = [], []
             self.assertEqual("PASS", run._crashloop_checks(f, healed, {"old"}, 1.0, "PASS", notes, checks, bumped={"engine"}))
             self.assertEqual(2, sum(1 for c in checks if "ended on the new revision" in c))
             notes = []
             self.assertEqual("FAIL", run._crashloop_checks(f, stale, {"old"}, 1.0, "PASS", notes, [], bumped={"engine"}))
             self.assertTrue(any("engine/2 did not end on the new revision" in n for n in notes))
-            run._isvc_events_since = lambda case_id, since: [
+            run._isvc_events_since = lambda case_id, since, **kw: [
                 ("RestartTriggered", "OMENative component=engine instance=2 restart triggered: pod e2 wedged")]
             notes = []
             self.assertEqual("FAIL", run._crashloop_checks(f, healed, {"old"}, 1.0, "PASS", notes, [], bumped={"engine"}))
@@ -6488,7 +6620,7 @@ class GeneratedCanaryFaultFamiliesTest(unittest.TestCase):
         prestart = by_step["prestart"]
         self.assertTrue(all(kv["fault"].endswith(":idle") for kv in prestart))
         for name, kv, m in fam:
-            self.assertIn("no repair is recorded for one after the push", self._line2("gen-canary-fault-old", name))
+            self.assertIn("no repair is opened for one after the push", self._line2("gen-canary-fault-old", name))
             self.assertIn("ends on the canary revision serving", self._line2("gen-canary-fault-old", name))
 
     def test_pushed_breaks_cross_bite_exit_surge_policy_and_shape(self):
@@ -6767,21 +6899,21 @@ class PlainRollbackTest(unittest.TestCase):
     def test_grouped_run_must_close_as_superseded(self):
         orig = run._isvc_events_since
         try:
-            run._isvc_events_since = lambda cid, since: []
+            run._isvc_events_since = lambda cid, since, **kw: []
             checks = []
             self.assertEqual("PASS", run._rollback_run_checks("p999", 1.0, False, "PASS", [], checks))
             self.assertTrue(any("no rollout group" in c for c in checks))
             checks = []
             self.assertEqual("PASS", run._rollback_run_checks("p999", 1.0, True, "PASS", [], checks))
             self.assertTrue(any("no run opened" in c for c in checks))
-            run._isvc_events_since = lambda cid, since: [
+            run._isvc_events_since = lambda cid, since, **kw: [
                 (run.RUN_OPENED_EVENT, "run r1 opened"),
                 (run.RUN_CLOSED_EVENT, "run r1 superseded by a new target revision; opening a fresh run"),
                 (run.RUN_OPENED_EVENT, "run r2 opened"), (run.RUN_CLOSED_EVENT, "run r2 closed: Completed")]
             checks = []
             self.assertEqual("PASS", run._rollback_run_checks("p999", 1.0, True, "PASS", [], checks))
             self.assertTrue(any("closed as superseded" in c for c in checks))
-            run._isvc_events_since = lambda cid, since: [
+            run._isvc_events_since = lambda cid, since, **kw: [
                 (run.RUN_OPENED_EVENT, "run r1 opened"), (run.RUN_CLOSED_EVENT, "run r1 closed: Completed")]
             notes = []
             self.assertEqual("FAIL", run._rollback_run_checks("p999", 1.0, True, "PASS", notes, []))
@@ -6798,7 +6930,7 @@ class PlainRollbackTest(unittest.TestCase):
         orig_ir, orig_ev = run._fetch_initial_ir_items, run._isvc_events_since
         try:
             run._fetch_initial_ir_items = lambda cid: [inference_replica("engine", 2)]
-            run._isvc_events_since = lambda cid, since: []
+            run._isvc_events_since = lambda cid, since, **kw: []
             notes, checks = [], []
             self.assertEqual("PASS", run._rollback_checks(rb, "p999", "CONVERGED", 80.0, back, {"a"}, ppi, N, bumped,
                                                           configured, False, 1.0, "PASS", notes, checks))
@@ -7193,7 +7325,7 @@ class CrashloopNewFaultTest(unittest.TestCase):
         healed = {n: dict(p, ready=True, serving=True) for n, p in last.items() if p["alive"]}
         orig = run._isvc_events_since
         try:
-            run._isvc_events_since = lambda case_id, since: []
+            run._isvc_events_since = lambda case_id, since, **kw: []
             notes = []
             self.assertEqual("FAIL", run._crashloop_checks(full, healed, {"old"}, 1.0, "PASS", notes, []))
             self.assertTrue(any("last to land the fix" in n for n in notes))
@@ -7347,7 +7479,7 @@ class CrashloopNewLadderTest(unittest.TestCase):
                "closed": False, "pod_state": {}, "agg": {}}
         with mock.patch.object(run.time, "time", lambda: clock[0]), mock.patch.object(run, "_read_one", read_one), \
                 mock.patch.object(run, "_ir_snapshot", lambda case_id: state["snapshot"]), \
-                mock.patch.object(run, "_isvc_events_since", lambda case_id, since: list(state["events"])), \
+                mock.patch.object(run, "_isvc_events_since", lambda case_id, since, **kw: list(state["events"])), \
                 mock.patch.object(run, "_get_pod", lambda name: waiting), \
                 contextlib.redirect_stdout(io.StringIO()):
             hold = run._crash_new_watch_hold(ctx, "engine", {"engine"}, 1, set(), {})
@@ -7712,7 +7844,7 @@ class PauseRepairTest(unittest.TestCase):
 
     def test_victim_events_split_repairs_from_holds(self):
         orig = run._isvc_events_since
-        run._isvc_events_since = lambda case_id, since: [
+        run._isvc_events_since = lambda case_id, since, **kw: [
             ("RestartTriggered", "OMENative component=engine instance=1 restart triggered: pod e1 wedged"),
             ("RepairHeld", "OMENative component=engine instance=1 crash-loop repair held by Plan: no run open"),
             ("RepairHeld", "OMENative component=engine instance=0 crash-loop repair held by Plan: no run open"),
@@ -8429,7 +8561,7 @@ class GangMemberVerdictTest(unittest.TestCase):
             run._gang_member_tick(f, "p1", pods, {"engine": 2}, 120.0)
             self.assertIsNone(f["short_since"])
         verdict, notes, checks = "PASS", [], []
-        with mock.patch.object(run, "_isvc_events_since", lambda *a: []):
+        with mock.patch.object(run, "_isvc_events_since", lambda *a, **kw: []):
             verdict = run._gang_member_checks(f, pods, 1.0, {"restart": "None"}, verdict, notes, checks)
         self.assertEqual("FAIL", verdict)
         self.assertTrue(any("counted as serving while short" in c for c in checks))
@@ -8444,7 +8576,7 @@ class GangMemberVerdictTest(unittest.TestCase):
         f = self._fault(short_samples=2)
         pods = {"e0-l": _rec("engine", 0, "new", runner="leader"), "e0-w": _rec("engine", 0, "new", runner="worker")}
         events = [("RestartTriggered", "OMENative component=engine instance=0 restart triggered: pod count 1 below desired 2")]
-        with mock.patch.object(run, "_isvc_events_since", lambda *a: events):
+        with mock.patch.object(run, "_isvc_events_since", lambda *a, **kw: events):
             n, c = [], []
             v = run._gang_member_checks(f, pods, 1.0, {}, "PASS", n, c, info=live)
             self.assertEqual("PASS", v, "a push cell's header carries no restart=; the spec says the gang is rebuilt whole")
@@ -8463,7 +8595,7 @@ class GangMemberVerdictTest(unittest.TestCase):
         f = self._fault(short_samples=2)
         pods = {"e0-l": _rec("engine", 0, "new", runner="leader"), "e0-w": _rec("engine", 0, "new", runner="worker")}
         events = [("RestartTriggered", "OMENative component=engine instance=0 restart triggered: pod count 1 below desired 2")]
-        with mock.patch.object(run, "_isvc_events_since", lambda *a: events):
+        with mock.patch.object(run, "_isvc_events_since", lambda *a, **kw: events):
             n, c = [], []
             v = run._gang_member_checks(f, pods, 1.0, {"restart": "None"}, "PASS", n, c)
             self.assertEqual("FAIL", v)
@@ -8472,7 +8604,7 @@ class GangMemberVerdictTest(unittest.TestCase):
             v = run._gang_member_checks(f, pods, 1.0, {"restart": "RecreateInstance"}, "PASS", n, c)
             self.assertEqual("PASS", v)
             self.assertTrue(any("rebuilt as a whole" in x for x in c))
-        with mock.patch.object(run, "_isvc_events_since", lambda *a: []):
+        with mock.patch.object(run, "_isvc_events_since", lambda *a, **kw: []):
             n, c = [], []
             v = run._gang_member_checks(f, pods, 1.0, {"restart": "RecreateInstance"}, "PASS", n, c)
             self.assertEqual("PASS", v)
@@ -8551,14 +8683,14 @@ class CapacityHoldReadersTest(unittest.TestCase):
                 "operation": {"type": "Create", "waiting": "Unschedulable"},
                 "lastFailure": {"message": "0/3 nodes are available: 3 node(s) were unschedulable"}}]
         with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "inferencereplicas" in a, _ir_items("engine", rows))])), \
-                mock.patch.object(run, "_isvc_events_since", lambda *a: []):
+                mock.patch.object(run, "_isvc_events_since", lambda *a, **kw: []):
             tok, detail = run._capacity_hold("p1", {"engine"}, 0)
             self.assertEqual("Unschedulable", tok)
             self.assertIn("engine Instance 2", detail)
             self.assertIn("unschedulable", detail)
         events = [("InstanceQuotaBlocked", "OMENative component=engine instance=2 waiting on capacity: exceeded quota")]
         with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "inferencereplicas" in a, _ir_items("engine", rows[:1]))])), \
-                mock.patch.object(run, "_isvc_events_since", lambda *a: events):
+                mock.patch.object(run, "_isvc_events_since", lambda *a, **kw: events):
             self.assertEqual(run.HOLD_EVENT, run._capacity_hold("p1", {"engine"}, 0)[0])
             self.assertIsNone(run._capacity_hold("p1", {"decoder"}, 0))
 
@@ -8567,7 +8699,7 @@ class CapacityHoldReadersTest(unittest.TestCase):
                 {"index": 2, "phase": "Failed", "targetRevision": "p1-engine-new1",
                  "lastFailure": {"reason": "InstanceReadyTimeout", "message": "not Ready within 90s"}}]
         with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "inferencereplicas" in a, _ir_items("engine", rows))])), \
-                mock.patch.object(run, "_isvc_events_since", lambda *a: []):
+                mock.patch.object(run, "_isvc_events_since", lambda *a, **kw: []):
             hold = run._broken_revision_hold("p1", {"engine"}, {"old1"}, 0)
             self.assertIn("Instance 2 Failed: InstanceReadyTimeout", hold)
             self.assertEqual("", run._broken_revision_hold("p1", {"engine"}, {"old1", "new1"}, 0))
@@ -8734,7 +8866,7 @@ class HandlerSmokeTest(unittest.TestCase):
             finished.update(state=state, verdict=verdict, notes=notes, checks=checks)
             return 0
         base = {"_setup_and_ready": lambda *a: (ctx, None), "_read_one": fleet.read_one, "_finish": finish,
-                "_isvc_annotations": lambda *a: {}, "_isvc_events_since": lambda *a: [],
+                "_isvc_annotations": lambda *a, **kw: {}, "_isvc_events_since": lambda *a: [],
                 "STABILITY_S": 0.05, "LIFT_SETTLE_S": 0.2, "IDLE_HOLD_S": 0.4, "READINESS_RECOVER_AFTER_S": 0.1,
                 "INV_TICK_S": 0.05, "ROTATE_BASE_S": 3, "ROTATE_PER_POD_S": 0, "MAX_BUDGET_S": 10}
         base.update(patches)
@@ -11219,7 +11351,7 @@ class RepeatingFaultVerdictTest(unittest.TestCase):
 
     def _judge(self, rec, events=None, bumped=set(), op_pods=0):
         notes, checks = [], []
-        with mock.patch.object(run, "_isvc_events_since", lambda *_a: events or []):
+        with mock.patch.object(run, "_isvc_events_since", lambda *_a, **kw: events or []):
             verdict = run._repeat_checks(rec, {"engine": 1}, bumped, op_pods, 0.0, "PASS", notes, checks)
         return verdict, notes, "\n".join(checks)
 
@@ -11755,7 +11887,7 @@ class CrashOnceApparatusTest(unittest.TestCase):
 
     def _observe(self, f, pods, expect_new, surges=None, events=()):
         with mock.patch.object(run, "_pod_main_state", lambda name: None), \
-                mock.patch.object(run, "_isvc_events_since", lambda c, s: list(events)), \
+                mock.patch.object(run, "_isvc_events_since", lambda c, s, **kw: list(events)), \
                 mock.patch.object(run, "_wait_rows_settled", lambda *a, **k: (True, "")):
             return run._once_observe("p1", f, pods, {"old"}, expect_new, {"engine": 2}, {"engine"}, 1, surges=surges)
 
@@ -12370,7 +12502,7 @@ class CanaryGateFaultTest(unittest.TestCase):
         track = {}
         snapshot = {"router": {"hold": None, "rows": [{"index": 2, "phase": "Failed"}]}}
         with mock.patch.object(run, "_ir_snapshot", lambda cid: snapshot), \
-                mock.patch.object(run, "_isvc_events_since", lambda cid, since: []):
+                mock.patch.object(run, "_isvc_events_since", lambda cid, since, **kw: []):
             run._sibling_park_track(ctx, {"router"}, track, 200.0)
         self.assertIn("router", track["why"])
         self.assertIn("row Failed", track["why"]["router"][0])
@@ -12380,7 +12512,7 @@ class CanaryGateFaultTest(unittest.TestCase):
         self.assertTrue(any("whole on its running revision at the end (2/2 serving on it; 1 attempt(s)" in c for c in checks))
         pods["r2"].update(ready=True, serving=True)
         with mock.patch.object(run, "_ir_snapshot", lambda cid: snapshot), \
-                mock.patch.object(run, "_isvc_events_since", lambda cid, since: []):
+                mock.patch.object(run, "_isvc_events_since", lambda cid, since, **kw: []):
             run._sibling_park_track(ctx, {"router"}, track, 300.0)
         notes = []
         self.assertEqual("FAIL", run._sibling_park_checks(ctx, {"router"}, track, "PASS", notes, []))
@@ -12456,7 +12588,7 @@ class KillRepeatFollowsTheVictimTest(unittest.TestCase):
                 mock.patch.object(run, "_pending_checks", lambda f, lift, state, out, c, comps, allowance, verdict, notes, checks:
                                   allowed.append(dict(allowance)) or verdict), \
                 mock.patch.object(run, "_repeat_checks", repeat_checks), \
-                mock.patch.object(run, "_isvc_events_since", lambda *a: []), \
+                mock.patch.object(run, "_isvc_events_since", lambda *a, **kw: []), \
                 mock.patch.object(run, "_repeat_end_checks", lambda case_id, N, configured, verdict, notes, checks: verdict), \
                 mock.patch.object(run, "_finish", lambda case_id, desc, hdr, c, state, verdict, notes, checks:
                                   finished.append((state, verdict, notes, checks)) or 0):
@@ -12656,7 +12788,7 @@ class BrokenScaleOnTheWindowTest(unittest.TestCase):
             return verdict
         with mock.patch.multiple(run, _setup_and_ready=lambda *a: (ctx, None), _broken_fire_and_report=fire,
                                  _broken_rows=rows, _scale_patch=lambda *a: (True, ""), _read_one=read_one,
-                                 _wait_broken_rows_settled=settle, _isvc_events_since=lambda *a: list(events),
+                                 _wait_broken_rows_settled=settle, _isvc_events_since=lambda *a, **kw: list(events),
                                  _finish=finish, STABILITY_S=0):
             run._broken_scale("p1", "p1.yaml", "desc", hdr)
         return out
@@ -13120,7 +13252,7 @@ class LiftPushedKeyTest(unittest.TestCase):
     def test_verdict_is_the_roll_with_no_hold_behind_it(self):
         orig = (run._isvc_events_since, run._victim_index_chain, run._wait_rows_settled)
         events = []
-        run._isvc_events_since = lambda cid, since: list(events)
+        run._isvc_events_since = lambda cid, since, **kw: list(events)
         run._victim_index_chain = lambda comp, inst, surges, ev: [inst]
         run._wait_rows_settled = lambda cid, N, configured, budget: (True, "")
         good = {"bitten_at": 4.0, "lifted_at": 25.0, "held_at": None, "hold": ""}
@@ -13261,7 +13393,7 @@ class LiftPushedReadinessTest(unittest.TestCase):
     def test_verdict_keeps_the_pod_and_allows_no_repair(self):
         orig = (run._isvc_events_since, run._victim_index_chain, run._wait_rows_settled)
         events = []
-        run._isvc_events_since = lambda cid, since: list(events)
+        run._isvc_events_since = lambda cid, since, **kw: list(events)
         run._victim_index_chain = lambda comp, inst, surges, ev: [inst]
         run._wait_rows_settled = lambda cid, N, configured, budget: (True, "")
         good = {"bitten_at": 34.0, "lifted_at": 55.0, "held_at": None, "hold": ""}
@@ -13438,7 +13570,7 @@ class LiftPushedPullTest(unittest.TestCase):
         orig = (run._break_heal, run._isvc_events_since, run._victim_index_chain, run._wait_rows_settled)
         run._break_heal = lambda rec: healed.append(rec["crash_pod"])
         events = [("RestartTriggered", "OMENative component=engine instance=1 restart triggered: runner restarted")]
-        run._isvc_events_since = lambda cid, since: list(events)
+        run._isvc_events_since = lambda cid, since, **kw: list(events)
         run._victim_index_chain = lambda comp, inst, surges, ev: [inst]
         run._wait_rows_settled = lambda cid, N, configured, budget: (True, "")
         try:

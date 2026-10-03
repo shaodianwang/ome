@@ -1,5 +1,5 @@
 # p6537: [gen] canary fault-old crashloop:load at traffic pd N=8 s2 rp None victims 3  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=10 ceil_d=9 ceil_r=3 fault=crashloop:canary-serving@1 co=none topo=pd canary=auto form=load victims=3 nophase=Failed cell=canary/Serving[soak]/stableBroken[crashLoad]
-# reason: 3 old-revision engine Instance(s) die after Ready and come back between crashes while the second step soaks its split, under restart policy None; the ladder walks every step to Stable inside its budgets, every broken Instance ends on the canary revision serving, no repair is recorded for one after the push, and the healthy Instances keep serving above N-3
+# reason: 3 old-revision engine Instance(s) die after Ready and come back between crashes while the second step soaks its split, under restart policy None; the ladder walks every step to Stable inside its budgets, every broken Instance ends on the canary revision serving, no repair is opened for one after the push, and the healthy Instances keep serving above N-3
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p6537 }
