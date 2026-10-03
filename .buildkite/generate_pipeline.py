@@ -312,7 +312,7 @@ KIND_SPEC_GROUPS = (
     )),
     ("rolling-updates", "Rolling update strategies", (
         "rolling_recreatepod", "rolling_inplace", "rolling_inplaceonly_reject",
-        "rolling_cancel_revert",
+        "rolling_cancel_revert", "crashloop_after_ready_roll_holds",
     )),
     ("gang-recovery", "Gang recovery and wedge", (
         "gang_corrective_rollout", "gang_wedge_nonready", "crashloop_gang_coordination_gate",

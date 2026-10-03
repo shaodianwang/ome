@@ -746,6 +746,51 @@ func anyInFlightUpdateAt(statuses []workload.InstanceStatus, rev string) bool {
 	return false
 }
 
+// ProvenWindowSeconds is how long, in whole seconds, a promoted pod that
+// restarted since its Instance entered Ready must hold Ready again
+// before the roll reads it as serving: the Component's minReadySeconds
+// floored by the stuck-pod grace, the span the workload already grants
+// a pod to prove it is not crash-looping. With neither configured, Ready
+// is Available, as it is for a pod that never restarted.
+func ProvenWindowSeconds(minReadySeconds int32, stuckPodGrace time.Duration) int32 {
+	grace := math.Ceil(stuckPodGrace.Seconds())
+	if grace > math.MaxInt32 {
+		grace = math.MaxInt32
+	}
+	return max(minReadySeconds, int32(grace))
+}
+
+// RebuiltAfterFailure reports whether pod is the rebuild answering a death
+// of the set the roll is landing: the Instance's recorded failure names a
+// container of the set that died or wedged, it is younger than the
+// revision being rolled, and pod was created no earlier than it and
+// inside the proven window of it. The failure outlives the pod that
+// failed, so such a pod is the set's comeback, and the roll reads it as
+// serving only once it has held Ready for the window since its readiness
+// moved, exactly as a pod the kubelet restarted in place. The window is
+// measured from the recorded failure, so every rebuild created inside it
+// is bounded by it, however many answer the same record.
+//
+// A failure older than the revision being rolled belongs to a set of a
+// superseded revision, so a push that corrects a crashing revision rolls
+// its fresh sets unheld; a revision whose creation is not known cannot
+// be placed and does not exclude. A record with no container names a
+// wait the pod never served through, not a death of the set. A pod
+// created with no such failure recorded, or past the window of one, is a
+// fresh start, read by its serving state alone.
+func RebuiltAfterFailure(pod *corev1.Pod, failure *workload.InstanceTermination, revisionBorn time.Time, window int32) bool {
+	if pod == nil || failure == nil || failure.Time.IsZero() || failure.ContainerName == "" ||
+		pod.CreationTimestamp.IsZero() || window <= 0 {
+		return false
+	}
+	failedAt := failure.Time.Time
+	if !revisionBorn.IsZero() && !failedAt.After(revisionBorn) {
+		return false
+	}
+	created := pod.CreationTimestamp.Time
+	return !created.Before(failedAt) && created.Before(failedAt.Add(time.Duration(window)*time.Second))
+}
+
 // RolledInstanceNotServing reports whether row is an Instance the roll
 // already moved onto target that does not serve it: its pod set on that
 // revision is short of fully serving, or its runner container restarted
@@ -759,28 +804,42 @@ func anyInFlightUpdateAt(statuses []workload.InstanceStatus, rev string) bool {
 // a row a migration owns is the record's.
 //
 // A restart after Ready holds the slot while the container is down, and
-// while it is Ready again but has not held Ready for minReadySeconds:
-// that window is the bar every promotion applies before an Instance
-// enters Ready, and the kubelet moves the Ready condition's transition
-// time when a pod leaves and re-enters Ready across a restart, so
-// Available on the pod (podreadiness.IsPodAvailable) reads "Ready again
-// and held it for the window" off the clock the promote reads. The
-// duration is how long until a pod Ready again clears the window, zero
-// when only a watch event changes the verdict. A container that has
+// while it is Ready again but has not held Ready for window seconds:
+// the Component's minReadySeconds floored by the stuck-pod grace
+// (ProvenWindowSeconds). A comeback shorter than the span the workload
+// grants a pod to prove it is not crash-looping proves nothing, so the
+// set stays unproven and the roll starts nothing further on its
+// account. The kubelet moves the Ready condition's transition time when
+// a pod leaves and re-enters Ready across a restart, so Available on
+// the pod (podreadiness.IsPodAvailable) reads "Ready again and held it
+// for the window" off that clock. The duration is how long until a pod
+// Ready again clears the window, zero when only a watch event changes
+// the verdict. A rebuild is the set's restart as much as a restart in
+// place: the failure that opened it outlives the pod that failed, on
+// the row's LastFailure, and a pod created inside the window after a
+// death of the set on the revision being rolled is the rebuild answering
+// it (RebuiltAfterFailure), unproven until it has held Ready for the
+// window since its readiness moved. The hold belongs to sets of the
+// revision being rolled alone: a failure of the set the Instance ran on
+// a superseded revision never holds the new roll, so a corrected push
+// lands as a fresh roll. A pod that never restarted since Ready and
+// answers no such failure is read off its serving state alone:
+// minReadySeconds already paced its promotion. A container that has
 // restarted more than once since Ready (RunnerRestartedAgainSinceReady)
 // keeps restarting: it is up only between its crashes, so it keeps the
 // slot through those windows whatever their length, and the roll never
-// creeps forward on them.
-func RolledInstanceNotServing(row *workload.InstanceStatus, target string, pods []*corev1.Pod, desired, minReadySeconds int32, now time.Time) (bool, time.Duration) {
+// creeps forward on them. The reason names what holds the slot, for the
+// pass to log; it is empty when nothing does.
+func RolledInstanceNotServing(row *workload.InstanceStatus, target string, revisionBorn time.Time, pods []*corev1.Pod, desired, window int32, now time.Time) (bool, time.Duration, string) {
 	if row == nil || target == "" || row.RunningRevision != target {
-		return false, 0
+		return false, 0, ""
 	}
 	if workload.UpdateContinuation(row) || isMigrateOwnedStatus(row) {
-		return false, 0
+		return false, 0, ""
 	}
 	targetRev := query.RevisionFromName(target)
 	own := make([]*corev1.Pod, 0, len(pods))
-	held, wait := false, time.Duration(0)
+	held, wait, reason := false, time.Duration(0), ""
 	for _, pod := range pods {
 		if pod == nil || pod.DeletionTimestamp != nil {
 			continue
@@ -788,21 +847,32 @@ func RolledInstanceNotServing(row *workload.InstanceStatus, target string, pods 
 		if podRev := query.RevisionFromPod(pod); !podRev.IsZero() && !podRev.Same(targetRev) {
 			continue
 		}
+		comeback := ""
+		if RebuiltAfterFailure(pod, row.LastFailure, revisionBorn, window) {
+			comeback = fmt.Sprintf("pod %s rebuilt after the failure recorded at %s", pod.Name, row.LastFailure.Time.UTC().Format(time.RFC3339))
+		}
 		if _, restarted := RunnerRestartedSinceReady(pod, row.ReadySince); restarted {
 			if RunnerRestartedAgainSinceReady(pod, row.ReadySince) {
-				return true, 0
+				return true, 0, fmt.Sprintf("pod %s restarted again since Ready", pod.Name)
 			}
-			if available, remaining := podreadiness.IsPodAvailable(pod, minReadySeconds, now); !available {
+			comeback = fmt.Sprintf("pod %s restarted since Ready", pod.Name)
+		}
+		if comeback != "" {
+			if available, remaining := podreadiness.IsPodAvailable(pod, window, now); !available {
 				held = true
 				wait = max(wait, remaining)
+				reason = fmt.Sprintf("%s, Ready again for less than the %ds window (%s left)", comeback, window, remaining.Round(time.Second))
 			}
 		}
 		own = append(own, pod)
 	}
 	if held {
-		return true, wait
+		return true, wait, reason
 	}
-	return !query.PodSetFullyServing(own, desired), 0
+	if !query.PodSetFullyServing(own, desired) {
+		return true, 0, fmt.Sprintf("pod set not fully serving (%d of %d pods on the revision)", len(own), desired)
+	}
+	return false, 0, ""
 }
 
 // Wreckage is per-instance rollout debris keyed to a SUPERSEDED

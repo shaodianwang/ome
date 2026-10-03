@@ -1127,9 +1127,13 @@ const (
 	// the kubelet's restarts.
 	flapAfterServingImage = "registry.test/serving:flap-after-serving"
 	// crashOnceAfterServingImage serves the same way, dies once, and
-	// stays up after the kubelet's one restart: the shape of a promoted
-	// pod whose process was killed once.
+	// stays up after the kubelet's one restart, as does a rebuild of its
+	// Instance: the shape of a promoted pod whose process was killed once.
 	crashOnceAfterServingImage = "registry.test/serving:crash-once-after-serving"
+	// correctedImage is a sound image a story publishes after a crashing
+	// revision has been held: a revision born after that revision's
+	// failures, as an operator's corrected push is.
+	correctedImage = "registry.test/serving:corrected"
 
 	// terminationFinalizer is the harness's stand-in for a kubelet that
 	// has not finished terminating a deleted pod: the fake client keeps a
@@ -1282,6 +1286,9 @@ type recoveryHarness struct {
 	// serves before it dies: two, unless a story needs the roll to reach
 	// the next Instance before the promoted one crashes.
 	crashAfterServed int
+	// onceCrashed marks the Instances whose crashOnceAfterServingImage pod
+	// has died its once; a rebuild of such an Instance stays up.
+	onceCrashed map[int32]bool
 	// minReadySeconds is the Component's minReadySeconds: how long a pod
 	// must hold Ready before it is Available. Zero, as the default
 	// configuration leaves it, makes Available the same as Ready.
@@ -1366,6 +1373,7 @@ func newComponentRecoveryHarness(t *testing.T, multiPod bool, container string, 
 		container:        container,
 		component:        component,
 		crashes:          map[string]int{},
+		onceCrashed:      map[int32]bool{},
 		lastCrash:        map[string]time.Time{},
 		lastRunStart:     map[string]metav1.Time{},
 		servedPasses:     map[string]int{},
@@ -1409,7 +1417,24 @@ func (h *recoveryHarness) ensureRevision(spec *corev1.PodSpec) *appsv1.Controlle
 	if err != nil {
 		h.t.Fatalf("EnsureControllerRevision: %v", err)
 	}
+	// The API server stamps a revision's creation; the fake client does
+	// not, so a revision published by a story is born on the fake clock.
+	if cr.CreationTimestamp.IsZero() {
+		cr.CreationTimestamp = metav1.NewTime(h.clk.Now())
+		if err := h.c.Update(h.ctx, cr); err != nil {
+			h.t.Fatalf("stamp ControllerRevision creation: %v", err)
+		}
+	}
 	return cr
+}
+
+// pushRevision publishes a revision on image at the current clock and
+// points the loop at it: the harness analogue of an operator's push.
+func (h *recoveryHarness) pushRevision(image string) *appsv1.ControllerRevision {
+	h.t.Helper()
+	rev := h.ensureRevision(h.podSpec(image))
+	h.setTarget(rev, image)
+	return rev
 }
 
 // setTarget points the loop at (revision, image) — the harness analogue
@@ -1523,13 +1548,14 @@ func (h *recoveryHarness) kubelet() {
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
-		case image == crashOnceAfterServingImage && h.crashes[wedgeKey(pod)] == 0 && h.servedPasses[wedgeKey(pod)] >= h.crashAfterServed && h.promotedOn(pod):
+		case image == crashOnceAfterServingImage && h.crashes[wedgeKey(pod)] == 0 && !h.onceCrashed[instanceIndexOf(pod)] && h.servedPasses[wedgeKey(pod)] >= h.crashAfterServed && h.promotedOn(pod):
 			// The container died once, after its Instance was promoted on it:
 			// the kubelet starts it again at once, as it does before a first
 			// restart, and the new run has not passed readiness yet. The
 			// termination names when the run that died had started, as the
 			// kubelet reports it.
 			h.crashes[wedgeKey(pod)]++
+			h.onceCrashed[instanceIndexOf(pod)] = true
 			h.lastCrash[wedgeKey(pod)] = h.clk.Now()
 			h.lastRunStart[wedgeKey(pod)] = priorRunStart(pod)
 			pod.Status.Phase = corev1.PodRunning
@@ -1574,9 +1600,11 @@ func (h *recoveryHarness) kubelet() {
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
-		case image == crashLoadImage || image == flapAfterServingImage:
+		case (image == crashLoadImage || image == flapAfterServingImage) && !h.lastCrash[wedgeKey(pod)].IsZero():
 			// Back up between crashes: serving again, with the previous
-			// run's termination still on the container status.
+			// run's termination still on the container status. Before its
+			// first crash the pod is a healthy pod with no restart on its
+			// record, as the kubelet reports one.
 			h.crashes[wedgeKey(pod)]++
 			pod.Status.Phase = corev1.PodRunning
 			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
@@ -1617,11 +1645,13 @@ func (h *recoveryHarness) kubelet() {
 		default:
 			prior := priorContainerStatus(pod)
 			pod.Status.Phase = corev1.PodRunning
+			// A run starts at the pass that first reports it running, as the
+			// kubelet stamps it; a run already reported keeps its start.
 			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 				Name:  pod.Spec.Containers[0].Name,
 				Image: h.runtimeImageName(image),
 				Ready: true,
-				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(h.clk.Now())}},
 			}}
 			carryRestartEvidence(&pod.Status.ContainerStatuses[0], prior)
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionTrue, h.clk.Now())
@@ -1758,6 +1788,15 @@ func (h *recoveryHarness) crashesAfterRunning(pod *corev1.Pod) bool {
 		return h.servedPasses[wedgeKey(pod)] >= h.crashAfterServed && h.crashes[wedgeKey(pod)]%2 == 0
 	}
 	return false
+}
+
+// instanceIndexOf is the Instance index pod's labels name, -1 for a pod
+// that names none.
+func instanceIndexOf(pod *corev1.Pod) int32 {
+	if idx, ok := query.InstanceIdxFromLabels(pod); ok {
+		return idx
+	}
+	return -1
 }
 
 func podConditionTrue(pod *corev1.Pod, condType corev1.PodConditionType) bool {
@@ -5810,9 +5849,7 @@ func TestRepair_HoldsWhenTheStampedRevisionIsGone(t *testing.T) {
 // crashRevision publishes a revision on image and points the loop at it.
 func (h *recoveryHarness) crashRevision(image string) *appsv1.ControllerRevision {
 	h.t.Helper()
-	rev := h.ensureRevision(h.podSpec(image))
-	h.setTarget(rev, image)
-	return rev
+	return h.pushRevision(image)
 }
 
 // trackPodsOnImage returns a per-step hook that records every live pod UID
@@ -6130,17 +6167,22 @@ type rollBudgetCase struct {
 	// while the promoted Instance still serves, before its crash can be
 	// seen.
 	offAllowed int
-	// minReadySeconds is the Component's window: a pod that comes back
-	// between crashes holds the slot while it is up because it never
-	// holds Ready for the window.
+	// minReadySeconds and stuckGrace set the window a promoted pod that
+	// restarted must hold Ready again, minReadySeconds floored by the
+	// grace: a pod that comes back between crashes holds the slot while
+	// it is up because it never holds Ready for the window. A zero grace
+	// leaves the harness default in place.
 	minReadySeconds int32
+	stuckGrace      time.Duration
 }
 
 func rollBudgetCases() []rollBudgetCase {
 	return []rollBudgetCase{
 		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1", replicas: 4, strategy: workloadtypes.UpdateStrategySurgeThenDrain, image: crashAfterServingImage, offAllowed: 1},
 		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1, the pod comes back between crashes but never holds Ready for the window", replicas: 4, strategy: workloadtypes.UpdateStrategySurgeThenDrain, image: flapAfterServingImage, offAllowed: 1, minReadySeconds: 60},
+		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1, no minReadySeconds, the pod comes back between crashes but never holds Ready for the stuck-pod grace", replicas: 4, strategy: workloadtypes.UpdateStrategySurgeThenDrain, image: flapAfterServingImage, offAllowed: 1, stuckGrace: 90 * time.Second},
 		{name: "four single-pod Instances under RecreatePod maxUnavailable 1", replicas: 4, strategy: workloadtypes.UpdateStrategyRecreatePod, image: crashAfterServingImage, offAllowed: 2},
+		{name: "four single-pod Instances under RecreatePod maxUnavailable 1, no minReadySeconds, the pod comes back between crashes but never holds Ready for the stuck-pod grace", replicas: 4, strategy: workloadtypes.UpdateStrategyRecreatePod, image: flapAfterServingImage, offAllowed: 2, stuckGrace: 90 * time.Second},
 		{name: "two gangs under SurgeThenDrain maxSurge 1", multiPod: true, replicas: 2, strategy: workloadtypes.UpdateStrategySurgeThenDrain, image: crashAfterServingImage, offAllowed: 1},
 		{name: "three gangs under RecreatePod maxUnavailable 1", multiPod: true, replicas: 3, strategy: workloadtypes.UpdateStrategyRecreatePod, image: crashAfterServingImage, offAllowed: 2},
 	}
@@ -6239,6 +6281,9 @@ func TestCrashAfterPromotion_RollHoldsAtTheBudget(t *testing.T) {
 			// start already in flight as well as on the next one.
 			h.crashAfterServed = 4
 			h.minReadySeconds = tc.minReadySeconds
+			if tc.stuckGrace > 0 {
+				h.stuckGrace = tc.stuckGrace
+			}
 			h.useRollingBudget(tc.strategy)
 			if !h.run(60, func() bool { return h.settledOn(h.revV1, tc.replicas) }) {
 				h.dumpState("initial create")
@@ -6300,86 +6345,6 @@ func TestCrashAfterPromotion_RollHoldsAtTheBudget(t *testing.T) {
 	}
 }
 
-// promotedPodCrashedAgain reports whether a pod of an Instance promoted
-// onto rev has crashed, come back, and crashed a second time.
-func (h *recoveryHarness) promotedPodCrashedAgain(rev *appsv1.ControllerRevision) bool {
-	for _, s := range h.irStatuses() {
-		if s.RunningRevision != rev.Name {
-			continue
-		}
-		for _, pod := range h.podsOf(s.Index) {
-			if h.crashes[wedgeKey(pod)] >= 3 {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// TestCrashLoopAfterPromotionWithNoWindow_SecondCrashPinsTheInstance pins
-// the push whose promoted pod keeps dying under load when the Component
-// has no minReadySeconds window. Under no window Ready is Available, so
-// the first comeback reads as a container restarted once and releases
-// the slot: the roll may admit one further start then, the start a
-// Deployment admits too. The second crash proves the container keeps
-// restarting, and from then on the Instance holds its slot through every
-// comeback: no further Instance leaves the running revision, at most the
-// budget plus that one start is off it, the Component reports the Budget
-// hold naming the Instance, and a corrected revision lands everywhere.
-//
-// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Budget]/before
-func TestCrashLoopAfterPromotionWithNoWindow_SecondCrashPinsTheInstance(t *testing.T) {
-	const replicas = int32(4)
-	// The budget plus the one start the first comeback admits.
-	const offAllowed = 2
-	h := newRecoveryHarnessFor(t, false, constants.MainContainerName)
-	h.replicas = replicas
-	noRepair := workloadtypes.RestartPolicyNone
-	h.lifecycle.RestartPolicy = &noRepair
-	h.crashAfterServed = 4
-	h.useRollingBudget(workloadtypes.UpdateStrategyRecreatePod)
-	if !h.run(60, func() bool { return h.settledOn(h.revV1, replicas) }) {
-		h.dumpState("initial create")
-		t.Fatalf("initial create never settled on v1 for %d instances", replicas)
-	}
-
-	revCrash := h.crashRevision(flapAfterServingImage)
-	pinned, offAtPin := false, 0
-	h.runWithInvariant(40, func() bool { return false }, func() {
-		off := int(replicas) - h.instancesServingOn(goodImage)
-		if off > offAllowed {
-			h.dumpState("roll past the allowance")
-			t.Fatalf("%d Instances are off the running revision, allowance %d: the roll kept replacing Instances with a revision that keeps crashing", off, offAllowed)
-		}
-		if pinned && off > offAtPin {
-			h.dumpState("roll continued after the second crash")
-			t.Fatalf("a further Instance left the running revision after a promoted pod crashed a second time: %d off now, %d then", off, offAtPin)
-		}
-		if !pinned && h.promotedPodCrashedAgain(revCrash) {
-			pinned, offAtPin = true, off
-		}
-	})
-	if !pinned {
-		h.dumpState("no second crash")
-		t.Fatalf("no promoted pod crashed a second time; the story did not run")
-	}
-	hold := h.lastHold()
-	if hold == nil || hold.Gate != workloadtypes.RolloutHoldGateBudget || hold.Target != revCrash.Name || !strings.Contains(hold.Reason, "not serving") {
-		h.dumpState("hold")
-		t.Fatalf("the Component must report a Budget hold on %s naming the Instances not serving, got %+v", revCrash.Name, hold)
-	}
-	if floor := int(replicas) - offAllowed; h.instancesServingOn(goodImage) < floor {
-		h.dumpState("floor")
-		t.Fatalf("the running revision serves on %d Instances, floor %d", h.instancesServingOn(goodImage), floor)
-	}
-
-	h.setTarget(h.revFixed, fixedImage)
-	if !h.run(120, func() bool { return h.settledOn(h.revFixed, replicas) }) {
-		h.dumpState("corrected revision")
-		t.Fatalf("the corrected revision did not land on every Instance")
-	}
-}
-
 // notServingHolds counts the rollout holds the update pass has reported
 // that name an Instance on the target revision as not serving.
 func (h *recoveryHarness) notServingHolds() int {
@@ -6405,17 +6370,20 @@ func podReadyTransition(pod *corev1.Pod) time.Time {
 
 // TestCrashOnceAfterPromotion_RollResumesWhenTheInstanceServesAgain pins
 // the rule for a push whose promoted pod dies once and comes back: the
-// Instance holds its slot in the roll's budget only while it does not
-// serve. A pass that reads the pod Ready again for less than the
-// Component's minReadySeconds window still holds the slot, names the
-// Instance in a Budget hold and opens no start; the first pass that
-// reads it Ready for the whole window releases the slot and the roll
-// goes on. Under no window Ready is Available, so the comeback itself
-// releases the slot. Either way the revision lands on every Instance
-// with one pod per Instance, the pod that was restarted keeps its
-// identity with the one restart on its record, no row reads Failed, and
-// restart policy None opens no repair for a container the kubelet
-// restarted.
+// Instance holds its slot in the roll's budget until it has proven
+// itself again. The window it must serve is the Component's
+// minReadySeconds floored by the stuck-pod grace, measured from the
+// pod's newest Ready transition the way a Deployment measures
+// availability. A pass that reads the pod Ready again for less than
+// that window still holds the slot, names the Instance in a Budget hold
+// and opens no start; the first pass that reads it Ready for the whole
+// window releases the slot and the roll goes on without operator
+// action. With neither a minReadySeconds nor a grace configured, Ready
+// is Available and the comeback itself releases the slot. Either way
+// the revision lands on every Instance with one pod per Instance, the
+// pod that was restarted keeps its identity with the one restart on its
+// record, no row reads Failed, and restart policy None opens no repair
+// for a container the kubelet restarted.
 //
 // Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Budget]/before
 func TestCrashOnceAfterPromotion_RollResumesWhenTheInstanceServesAgain(t *testing.T) {
@@ -6423,11 +6391,14 @@ func TestCrashOnceAfterPromotion_RollResumesWhenTheInstanceServesAgain(t *testin
 		name            string
 		strategy        workloadtypes.UpdateStrategyType
 		minReadySeconds int32
+		stuckGrace      time.Duration
 	}{
-		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1, no window", strategy: workloadtypes.UpdateStrategySurgeThenDrain},
-		{name: "four single-pod Instances under RecreatePod maxUnavailable 1, no window", strategy: workloadtypes.UpdateStrategyRecreatePod},
-		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1, the comeback must hold Ready for the window", strategy: workloadtypes.UpdateStrategySurgeThenDrain, minReadySeconds: 90},
-		{name: "four single-pod Instances under RecreatePod maxUnavailable 1, the comeback must hold Ready for the window", strategy: workloadtypes.UpdateStrategyRecreatePod, minReadySeconds: 90},
+		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1, no minReadySeconds, the comeback must hold Ready for the stuck-pod grace", strategy: workloadtypes.UpdateStrategySurgeThenDrain, stuckGrace: 90 * time.Second},
+		{name: "four single-pod Instances under RecreatePod maxUnavailable 1, no minReadySeconds, the comeback must hold Ready for the stuck-pod grace", strategy: workloadtypes.UpdateStrategyRecreatePod, stuckGrace: 90 * time.Second},
+		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1, minReadySeconds above the grace, the comeback must hold Ready for minReadySeconds", strategy: workloadtypes.UpdateStrategySurgeThenDrain, minReadySeconds: 90, stuckGrace: 30 * time.Second},
+		{name: "four single-pod Instances under RecreatePod maxUnavailable 1, minReadySeconds above the grace, the comeback must hold Ready for minReadySeconds", strategy: workloadtypes.UpdateStrategyRecreatePod, minReadySeconds: 90, stuckGrace: 30 * time.Second},
+		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1, no minReadySeconds and no grace, the comeback itself releases the slot", strategy: workloadtypes.UpdateStrategySurgeThenDrain},
+		{name: "four single-pod Instances under RecreatePod maxUnavailable 1, no minReadySeconds and no grace, the comeback itself releases the slot", strategy: workloadtypes.UpdateStrategyRecreatePod},
 	}
 	const replicas = int32(4)
 	for _, tc := range cases {
@@ -6442,6 +6413,7 @@ func TestCrashOnceAfterPromotion_RollResumesWhenTheInstanceServesAgain(t *testin
 			// next Instance before it dies.
 			h.crashAfterServed = 4
 			h.minReadySeconds = tc.minReadySeconds
+			h.stuckGrace = tc.stuckGrace
 			h.useRollingBudget(tc.strategy)
 			if !h.run(80, func() bool { return h.settledOn(h.revV1, replicas) }) {
 				h.dumpState("initial create")
@@ -6449,7 +6421,9 @@ func TestCrashOnceAfterPromotion_RollResumesWhenTheInstanceServesAgain(t *testin
 			}
 
 			revOnce := h.crashRevision(crashOnceAfterServingImage)
-			window := time.Duration(tc.minReadySeconds) * time.Second
+			// The window the comeback must serve: minReadySeconds floored by
+			// the stuck-pod grace.
+			window := max(time.Duration(tc.minReadySeconds)*time.Second, tc.stuckGrace)
 			seen := map[types.UID]struct{}{}
 			var restartedUID types.UID
 			var restartedIndex int32
@@ -6527,6 +6501,404 @@ func TestCrashOnceAfterPromotion_RollResumesWhenTheInstanceServesAgain(t *testin
 			}
 			if status := priorContainerStatus(restarted); status == nil || status.RestartCount != 1 {
 				t.Fatalf("the pod the kubelet restarted once must carry that one restart, got %+v", status)
+			}
+		})
+	}
+}
+
+// holdNamesInstance reports whether hold's not-serving clause names idx:
+// the indices between "Instance"/"Instances" and " on revision".
+func holdNamesInstance(hold *workloadtypes.RolloutHold, idx int32) bool {
+	if hold == nil {
+		return false
+	}
+	reason := hold.Reason
+	start := strings.LastIndex(reason, "; Instance")
+	end := strings.LastIndex(reason, " on revision ")
+	if start < 0 || end < 0 || end <= start {
+		return false
+	}
+	clause := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(reason[start+len("; "):end], "Instances"), "Instance"))
+	for _, field := range strings.Split(clause, ",") {
+		if strings.TrimSpace(field) == strconv.Itoa(int(idx)) {
+			return true
+		}
+	}
+	return false
+}
+
+// rebuiltAfterFailure returns, by Instance index, the live pods of the
+// Instances promoted onto rev that answer the row's recorded failure: a
+// pod created no earlier than the failure.
+func (h *recoveryHarness) rebuiltAfterFailure(rev *appsv1.ControllerRevision) map[int32]*corev1.Pod {
+	out := map[int32]*corev1.Pod{}
+	for _, s := range h.irStatuses() {
+		if s.RunningRevision != rev.Name || s.LastFailure == nil || s.LastFailure.Time.IsZero() {
+			continue
+		}
+		for _, pod := range h.podsOf(s.Index) {
+			if !pod.CreationTimestamp.Time.Before(s.LastFailure.Time.Time) {
+				out[s.Index] = pod
+			}
+		}
+	}
+	return out
+}
+
+// everyPromotedCrashed reports whether every Instance promoted onto rev
+// has died on it: a failure recorded on the row, or a live pod of the
+// Instance that has crashed.
+func (h *recoveryHarness) everyPromotedCrashed(rev *appsv1.ControllerRevision) bool {
+	promoted := false
+	for _, s := range h.irStatuses() {
+		if s.RunningRevision != rev.Name {
+			continue
+		}
+		promoted = true
+		crashed := s.LastFailure != nil
+		for _, pod := range h.podsOf(s.Index) {
+			crashed = crashed || h.crashes[wedgeKey(pod)] > 0
+		}
+		if !crashed {
+			return false
+		}
+	}
+	return promoted
+}
+
+// firstFailureAt is the earliest failure recorded on an Instance promoted
+// onto rev, zero when none recorded one.
+func (h *recoveryHarness) firstFailureAt(rev *appsv1.ControllerRevision) time.Time {
+	var first time.Time
+	for _, s := range h.irStatuses() {
+		if s.RunningRevision != rev.Name || s.LastFailure == nil || s.LastFailure.Time.IsZero() {
+			continue
+		}
+		if at := s.LastFailure.Time.Time; first.IsZero() || at.Before(first) {
+			first = at
+		}
+	}
+	return first
+}
+
+// rollStartsOn records into started the Instances the roll has started
+// toward rev: those with a live pod on image while their row still runs
+// another revision. A rebuild of an Instance already on rev is a repair,
+// not a start, and is never recorded.
+func (h *recoveryHarness) rollStartsOn(image string, rev *appsv1.ControllerRevision, started map[int32]struct{}) {
+	for _, pod := range h.livePods() {
+		if pod.Spec.Containers[0].Image != image {
+			continue
+		}
+		idx := instanceIndexOf(pod)
+		if s := h.instance(idx); s != nil && s.RunningRevision != rev.Name {
+			started[idx] = struct{}{}
+		}
+	}
+}
+
+// TestCrashOnceAfterPromotion_RebuiltInstanceServesTheWindowBeforeTheRollResumes
+// pins the rule under RecreateInstanceOnPodRestart, where the promoted
+// pod's one death rebuilds its Instance instead of leaving the kubelet's
+// restart in place: the rebuilt pod is created inside the window after
+// the failure the row recorded, so it is the set's comeback and holds the
+// slot until it has held Ready for the window since its readiness moved.
+// A pass inside that window names the Instance in a Budget hold, opens no
+// start and drains no source; the first pass past it releases the slot,
+// and the roll lands the revision on every Instance.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Budget]/before
+func TestCrashOnceAfterPromotion_RebuiltInstanceServesTheWindowBeforeTheRollResumes(t *testing.T) {
+	cases := []struct {
+		name     string
+		strategy workloadtypes.UpdateStrategyType
+	}{
+		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1", strategy: workloadtypes.UpdateStrategySurgeThenDrain},
+		{name: "four single-pod Instances under RecreatePod maxUnavailable 1", strategy: workloadtypes.UpdateStrategyRecreatePod},
+	}
+	const replicas = int32(4)
+	// No minReadySeconds: the stuck-pod grace alone is the window.
+	const window = 90 * time.Second
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryHarnessFor(t, false, constants.MainContainerName)
+			h.replicas = replicas
+			rebuild := workloadtypes.RestartPolicyRecreateInstance
+			h.lifecycle.RestartPolicy = &rebuild
+			// The promoted pod serves long enough for the roll to reach the
+			// next Instance before it dies.
+			h.crashAfterServed = 4
+			h.stuckGrace = window
+			h.useRollingBudget(tc.strategy)
+			if !h.run(80, func() bool { return h.settledOn(h.revV1, replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+			}
+
+			revOnce := h.crashRevision(crashOnceAfterServingImage)
+			started := map[int32]struct{}{}
+			// passStart is the clock the pass under inspection ran at: the
+			// invariant runs after the step moved the clock on.
+			passStart := h.clk.Now()
+			holds, starts, off := h.notServingHolds(), 0, int(replicas)-h.instancesServingOn(goodImage)
+			rebuilt := false
+			h.runWithInvariant(200, func() bool { return h.settledOn(revOnce, replicas) }, func() {
+				h.rollStartsOn(crashOnceAfterServingImage, revOnce, started)
+				offNow := int(replicas) - h.instancesServingOn(goodImage)
+				for idx, pod := range h.rebuiltAfterFailure(revOnce) {
+					if !podConditionTrue(pod, corev1.PodReady) {
+						continue
+					}
+					rebuilt = true
+					availableAt := podReadyTransition(pod).Add(window)
+					moved := len(started) > starts || offNow > off
+					// The pass's hold speaks for this Instance only when it
+					// names it: another Instance's rebuild may be inside its
+					// own window while this one has served its.
+					var hold *workloadtypes.RolloutHold
+					if h.notServingHolds() > holds {
+						hold = h.lastHold()
+					}
+					switch held := holdNamesInstance(hold, idx); {
+					case held && !passStart.Before(availableAt):
+						h.dumpState("held while serving")
+						t.Fatalf("the roll was held on Instance %d, rebuilt and Ready since %s, at %s: a rebuild that has held Ready for the window serves and releases its slot: %q",
+							idx, podReadyTransition(pod).Format(time.RFC3339), passStart.Format(time.RFC3339), hold.Reason)
+					case held:
+						if hold.Gate != workloadtypes.RolloutHoldGateBudget || hold.Target != revOnce.Name {
+							t.Fatalf("a pass inside the window must report a Budget hold on %s naming Instance %d, got %+v", revOnce.Name, idx, hold)
+						}
+						if moved {
+							h.dumpState("start inside the window")
+							t.Fatalf("a start opened or a source left rotation while the rebuild of Instance %d was held inside its window", idx)
+						}
+					case passStart.Before(availableAt) && moved:
+						h.dumpState("start inside the window")
+						t.Fatalf("a start opened at %s while the rebuild of Instance %d had been Ready only since %s, window %s",
+							passStart.Format(time.RFC3339), idx, podReadyTransition(pod).Format(time.RFC3339), window)
+					}
+				}
+				holds, starts, off = h.notServingHolds(), len(started), offNow
+				passStart = h.clk.Now()
+			})
+			if !rebuilt {
+				h.dumpState("no rebuild")
+				t.Fatalf("no Instance was rebuilt after its promoted pod died; the story did not run")
+			}
+			if !h.settledOn(revOnce, replicas) {
+				h.dumpState("roll stalled")
+				t.Fatalf("the roll did not land %s on every Instance after the rebuild served the window; last hold %+v", revOnce.Name, h.lastHold())
+			}
+		})
+	}
+}
+
+// TestCrashAfterPromotion_RebuiltInstanceDiesAgainInsideTheWindow_NothingStarts
+// pins the push whose rebuilt Instances keep dying under
+// RecreateInstanceOnPodRestart: every rebuild is created inside the
+// window after the failure the row recorded, so each is the set's
+// comeback and none serves the roll before it dies again. Through the
+// window after that failure no further Instance leaves the running
+// revision: at most the budget, plus the one start admitted while the
+// promoted pod still looked healthy, is off it, the running revision
+// keeps serving on the rest, and a corrected revision lands everywhere.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Budget]/before
+func TestCrashAfterPromotion_RebuiltInstanceDiesAgainInsideTheWindow_NothingStarts(t *testing.T) {
+	cases := []struct {
+		name     string
+		strategy workloadtypes.UpdateStrategyType
+		// offAllowed bounds the Instances off the running revision at any
+		// pass: the budget under SurgeThenDrain, where no source leaves
+		// rotation beside the promoted crash; one more under RecreatePod,
+		// for the start admitted while the promoted pod still served.
+		offAllowed int
+	}{
+		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1", strategy: workloadtypes.UpdateStrategySurgeThenDrain, offAllowed: 1},
+		{name: "four single-pod Instances under RecreatePod maxUnavailable 1", strategy: workloadtypes.UpdateStrategyRecreatePod, offAllowed: 2},
+	}
+	const replicas = int32(4)
+	// No minReadySeconds: the stuck-pod grace alone is the window, long
+	// enough that a rebuild serves its passes and dies inside it.
+	const window = 300 * time.Second
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryHarnessFor(t, false, constants.MainContainerName)
+			h.replicas = replicas
+			rebuild := workloadtypes.RestartPolicyRecreateInstance
+			h.lifecycle.RestartPolicy = &rebuild
+			h.crashAfterServed = 4
+			h.stuckGrace = window
+			h.useRollingBudget(tc.strategy)
+			if !h.run(60, func() bool { return h.settledOn(h.revV1, replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+			}
+
+			revCrash := h.crashRevision(crashAfterServingImage)
+			started := map[int32]struct{}{}
+			var failedAt time.Time
+			offAtCrash, startsAtCrash, rebuilt := 0, 0, false
+			windowPassed := func() bool { return !failedAt.IsZero() && !h.clk.Now().Before(failedAt.Add(window)) }
+			h.runWithInvariant(60, windowPassed, func() {
+				h.rollStartsOn(crashAfterServingImage, revCrash, started)
+				off := int(replicas) - h.instancesServingOn(goodImage)
+				if off > tc.offAllowed {
+					h.dumpState("roll past the allowance")
+					t.Fatalf("%d Instances are off the running revision, allowance %d: the roll kept replacing Instances with a revision that keeps crashing", off, tc.offAllowed)
+				}
+				if len(h.rebuiltAfterFailure(revCrash)) > 0 {
+					rebuilt = true
+				}
+				if failedAt.IsZero() {
+					if at := h.firstFailureAt(revCrash); !at.IsZero() {
+						failedAt, offAtCrash, startsAtCrash = at, off, len(started)
+					}
+					return
+				}
+				if windowPassed() {
+					return
+				}
+				if off > offAtCrash {
+					h.dumpState("roll continued inside the window")
+					t.Fatalf("a further Instance left the running revision inside the window after a promoted Instance failed: %d off now, %d at the failure", off, offAtCrash)
+				}
+				if len(started) > startsAtCrash {
+					h.dumpState("start inside the window")
+					t.Fatalf("a start opened inside the window after a promoted Instance failed: %d Instances started, %d at the failure", len(started), startsAtCrash)
+				}
+			})
+			if failedAt.IsZero() || !rebuilt {
+				h.dumpState("no rebuild")
+				t.Fatalf("no promoted Instance failed and was rebuilt; the story did not run")
+			}
+			if floor := int(replicas) - tc.offAllowed; h.instancesServingOn(goodImage) < floor {
+				h.dumpState("floor")
+				t.Fatalf("the running revision serves on %d Instances, floor %d", h.instancesServingOn(goodImage), floor)
+			}
+
+			h.setTarget(h.revFixed, fixedImage)
+			if !h.run(150, func() bool { return h.settledOn(h.revFixed, replicas) }) {
+				h.dumpState("corrected revision")
+				t.Fatalf("the corrected revision did not land on every Instance")
+			}
+		})
+	}
+}
+
+// TestCorrectedPushAfterAHeldCrash_Converges pins the push that corrects
+// a revision the roll is holding on: the hold applies only to promoted
+// sets of the revision being rolled, measured since their newest restart
+// or rebuild, so a failure of a set on the superseded revision, whether
+// the crash the policy rebuilt it for or the crash loop the escalation
+// failed it for, never holds the new roll. An Instance promoted onto the
+// corrected revision whose pods carry no restart is serving the moment
+// it is Ready: under every strategy and restart policy, and whether the
+// crashing pod stayed down or came back between its crashes, no pass
+// reports a hold naming such an Instance, and the corrected revision
+// lands on every Instance.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Budget]/before
+func TestCorrectedPushAfterAHeldCrash_Converges(t *testing.T) {
+	cases := []struct {
+		name     string
+		strategy workloadtypes.UpdateStrategyType
+		policy   workloadtypes.RestartPolicy
+		image    string
+	}{
+		{name: "SurgeThenDrain maxSurge 1, restart policy None, the pod stays down", strategy: workloadtypes.UpdateStrategySurgeThenDrain, policy: workloadtypes.RestartPolicyNone, image: crashAfterServingImage},
+		{name: "SurgeThenDrain maxSurge 1, restart policy None, the pod comes back between crashes", strategy: workloadtypes.UpdateStrategySurgeThenDrain, policy: workloadtypes.RestartPolicyNone, image: flapAfterServingImage},
+		{name: "RecreatePod maxUnavailable 1, restart policy None, the pod stays down", strategy: workloadtypes.UpdateStrategyRecreatePod, policy: workloadtypes.RestartPolicyNone, image: crashAfterServingImage},
+		{name: "RecreatePod maxUnavailable 1, restart policy None, the pod comes back between crashes", strategy: workloadtypes.UpdateStrategyRecreatePod, policy: workloadtypes.RestartPolicyNone, image: flapAfterServingImage},
+		{name: "SurgeThenDrain maxSurge 1, RecreateInstanceOnPodRestart", strategy: workloadtypes.UpdateStrategySurgeThenDrain, policy: workloadtypes.RestartPolicyRecreateInstance, image: crashAfterServingImage},
+		{name: "RecreatePod maxUnavailable 1, RecreateInstanceOnPodRestart", strategy: workloadtypes.UpdateStrategyRecreatePod, policy: workloadtypes.RestartPolicyRecreateInstance, image: crashAfterServingImage},
+	}
+	const replicas = int32(4)
+	// No minReadySeconds: the stuck-pod grace alone is the window, long
+	// enough that a hold misread onto the corrected revision would stall
+	// its roll for the whole run, and that the crashing pod is escalated
+	// while it is held.
+	const window = 300 * time.Second
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryHarnessFor(t, false, constants.MainContainerName)
+			h.replicas = replicas
+			policy := tc.policy
+			h.lifecycle.RestartPolicy = &policy
+			h.crashAfterServed = 4
+			h.stuckGrace = window
+			h.useRollingBudget(tc.strategy)
+			if !h.run(60, func() bool { return h.settledOn(h.revV1, replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+			}
+
+			revCrash := h.pushRevision(tc.image)
+			// The roll is holding once a promoted pod has crashed and either a
+			// pass reported the hold or the policy has rebuilt the Instance;
+			// the correction follows the crash loop, as an operator's does,
+			// so every Instance the roll had promoted onto the crashing
+			// revision has died on it before the corrected revision exists.
+			held := func() bool {
+				return (len(h.rebuiltAfterFailure(revCrash)) > 0 || (h.promotedPodCrashed(revCrash) && h.notServingHolds() > 0)) &&
+					h.everyPromotedCrashed(revCrash)
+			}
+			if !h.run(60, held) {
+				h.dumpState("no hold")
+				t.Fatalf("the roll never held on the crashing revision; the story did not run")
+			}
+			if tc.policy == workloadtypes.RestartPolicyNone {
+				// Under restart policy None the escalation is what records the
+				// superseded set's failure, so the window passes before the
+				// correction is pushed; the policy's rebuild recorded it at the
+				// first crash, and the correction follows inside the window.
+				h.run(12, func() bool { return false })
+			}
+
+			revCorrected := h.pushRevision(correctedImage)
+			// A hold speaks for the state the pass read: only a hold reported
+			// this pass that names an Instance already promoted onto the
+			// corrected revision before the pass, with its pod Ready and no
+			// restart on it, holds a fresh set; a set still coming up holds
+			// as any start does. The failure record carries no revision, so
+			// the roll places a failure by when it was recorded: one older
+			// than the corrected revision is a superseded set's and never
+			// holds; one recorded after the corrected revision existed is
+			// read as the set's own, and holds for one window at most.
+			holds := len(h.holds)
+			promoted := map[int32]bool{}
+			h.runWithInvariant(80, func() bool { return h.settledOn(revCorrected, replicas) }, func() {
+				reported := len(h.holds) > holds
+				holds = len(h.holds)
+				hold := h.lastHold()
+				if reported && hold.Target == revCorrected.Name {
+					for _, s := range h.irStatuses() {
+						if !promoted[s.Index] || !holdNamesInstance(hold, s.Index) {
+							continue
+						}
+						if s.LastFailure != nil && s.LastFailure.Time.After(revCorrected.CreationTimestamp.Time) {
+							continue
+						}
+						for _, pod := range h.podsOf(s.Index) {
+							if _, restarted := workloadops.RunnerRestartedSinceReady(pod, s.ReadySince); restarted {
+								continue
+							}
+							h.dumpState("corrected set held")
+							t.Fatalf("Instance %d, promoted onto the corrected revision with no restart on its pod, is held by the roll: %q", s.Index, hold.Reason)
+						}
+					}
+				}
+				for _, s := range h.irStatuses() {
+					ready := s.RunningRevision == revCorrected.Name && s.Phase == workloadtypes.InstancePhaseReady && s.Operation == nil
+					for _, pod := range h.podsOf(s.Index) {
+						ready = ready && podConditionTrue(pod, corev1.PodReady)
+					}
+					promoted[s.Index] = ready && len(h.podsOf(s.Index)) > 0
+				}
+			})
+			if !h.settledOn(revCorrected, replicas) {
+				h.dumpState("corrected revision")
+				t.Fatalf("the corrected revision did not land on every Instance; last hold %+v", h.lastHold())
 			}
 		})
 	}

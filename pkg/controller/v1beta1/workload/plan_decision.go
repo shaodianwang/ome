@@ -635,6 +635,10 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 	// or plan-gate hold), then the user's rollingUpdate partition.
 	partition := escalation.EffectivePartition(input.DesiredSpec.Pacing, rollingUpdate)
 	heldIndices := escalation.PartitionHeldIndices(partition, input, plan.Instances, target.Name)
+	// The window a promoted pod that restarted must serve again before
+	// the roll reads it as serving: minReadySeconds floored by the
+	// stuck-pod grace.
+	provenWindow := workloadops.ProvenWindowSeconds(plan.MinReadySeconds, input.StuckPodGrace)
 	var retryBlockWait time.Duration
 	for _, inst := range plan.Instances {
 		// Partition hold (canary): hold the selected Instances on their
@@ -647,8 +651,10 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 				"component", plan.Component, "instance", inst.Index, "target", target.Name)
 			continue
 		}
-		if notServing, wait := workloadops.RolledInstanceNotServing(input.ObservedState.Instance(inst.Index), target.Name, updateByInstance[inst.Index], inst.TotalPods(), plan.MinReadySeconds, input.Now()); notServing {
+		if notServing, wait, why := workloadops.RolledInstanceNotServing(input.ObservedState.Instance(inst.Index), target.Name, target.CreationTimestamp.Time, updateByInstance[inst.Index], inst.TotalPods(), provenWindow, input.Now()); notServing {
 			selection.RolledNotServing = append(selection.RolledNotServing, inst.Index)
+			logf.FromContext(ctx).V(1).Info("rolled Instance not serving",
+				"component", plan.Component, "instance", inst.Index, "target", target.Name, "reason", why, "wait", wait)
 			// A pod Ready again inside its window raises no watch event
 			// when the window elapses; the pass comes back for it.
 			if wait > 0 {
