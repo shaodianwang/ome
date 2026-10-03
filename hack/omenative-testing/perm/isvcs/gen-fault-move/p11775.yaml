@@ -1,0 +1,15 @@
+# p11775: [gen] fault-move evict at drain on moved engine-mn W1 N=2  mode=migrate Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 fault=evict:migrating co=none topo=engine-mn victim=moved mig=Auto inst=0 at=drain
+# reason: a move of engine Instance 0 is requested on engine alone as gangs of 1 leader + 1 worker and as the source is being taken down, the moved Instance's replacement pod, Ready and serving, is evicted through the Eviction API, as a node drain would, asked again while the disruption budget refuses it; the move finishes, or is abandoned with a reason its record carries and the Instance kept whole and serving at its source index; the floor lowered by the one Instance the eviction took holds, nothing is left mid-operation and nothing exceeds N+1 alive; each Instance is a gang, rebuilt whole
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11775 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

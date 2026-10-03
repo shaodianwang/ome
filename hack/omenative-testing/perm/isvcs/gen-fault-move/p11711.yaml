@@ -1,0 +1,23 @@
+# p11711: [gen] fault-move crashloop:load healed at accept on sibling pd N=4  mode=migrate Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 fault=crashloop:old co=none topo=pd form=load victim=sibling mig=Auto inst=0 at=accept lift=after-settle
+# reason: a move of engine Instance 0 is requested on prefill/decode, single-pod and as soon as the request is recorded, before the replacement exists, the decoder's highest Instance's pod has its runner killed every few seconds while it is up, so it dies after Ready and comes back between crashes; once the break has bitten for a settle window the harness takes it away again (the killer stops, or the pod is pointed back at the image it ran); the move finishes, or is abandoned with a reason its record carries, within budget and is recorded once (one ledger row, one controller record), the engine holds N whole Instances on distinct indices, nothing exceeds N+1 alive and the floor, lowered by the one Instance the fault took, holds; the move completes (a broken sibling is not the move's to care about) and the broken Instance ends Ready and serving again, healed where it stood or rebuilt by a repair, which is reported, not demanded
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11711 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

@@ -556,9 +556,9 @@ def classify_operation(h, mode, size):
         return direction, f"engine {h.get('Ne')}->{h.get('to_e', h.get('Ne'))}", ""
     if mode == "migrate":
         detail = f"mig={h.get('mig', 'Auto')} inst={h.get('inst', 0)}" + (" dup" if h.get("dup") else "") + (" hint" if h.get("hint") else "")
-        # a push overlapping the move: filed at a moment of the move (then=bump at=), or the move
-        # requested at a moment of a roll (during=)
-        pushed = h.get("then") == "bump" or during in ("rollout", "settling", "rotating", "last")
+        # a push overlapping the move: filed at a moment of the move (then=bump at=), the move
+        # requested at a moment of a roll (during=), or requested on a push that is stuck (stuck=)
+        pushed = h.get("then") == "bump" or during in ("rollout", "settling", "rotating", "last") or bool(h.get("stuck"))
         return "migrate", detail, "push" if pushed else ""
     if mode == "recreate":
         return "delete", "delete and re-create the service", {"rollout": "push", "migrate": "migrate"}.get(during, "")

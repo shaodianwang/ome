@@ -1,0 +1,13 @@
+# p9885: [gen] fault-move readiness persist at surge on moved engine N=4  mode=migrate Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=readiness:old co=none topo=engine form=persist victim=moved mig=Auto inst=0 at=surge
+# reason: a move of engine Instance 0 is requested on engine alone, single-pod and as soon as it appears, before it is Ready, the moved Instance's replacement pod stops passing readiness while it keeps running (the readiness switch set in it); the switch stays set to the end of the case; the replacement never passes readiness, so the move is abandoned with a reason its record carries, or waits with the status saying why (the replacement's row not Ready with its wait recorded); the move is recorded once, the source keeps serving and nothing exceeds N+1 alive
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9885 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

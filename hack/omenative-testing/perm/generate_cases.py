@@ -259,7 +259,17 @@ runners (run.py + the KIND CI lane) already implement:
                           the source node dies; the move finishes or is
                           abandoned with a reason, the Instance ends whole
                           and serving on one pod set, a broken peer is
-                          repaired under its policy
+                          repaired under its policy. The same request beside
+                          the remaining faults (p11700+): a break healed again
+                          (lift=after-settle) or a runner killed once (once=1),
+                          the missing ConfigMap key and the readiness switch,
+                          kept or lifted, a pod deleted by hand at the request
+                          (kill=, repeat=), a pod evicted or preempted at a
+                          moment (evict|preempt:migrating at=), a taint that
+                          leaves the replacement nowhere to go (taint:all
+                          lift=), and a move requested while a push is stuck
+                          on a broken revision (stuck=held|failed with img= or
+                          break=, bump=decoder for the sibling's push)
     gen-packed-pool/ p8600+ a packed pool: fillers take every node's spare
                           CPU once the service has settled, so the only room
                           is what a broken pod vacates; a push whose revision
@@ -672,7 +682,7 @@ GEN_CONTINUATIONS = {
     "gen-evict": (9500, 9600),
     "gen-preempt": (9600, 9700),
     "gen-pending": [(9700, 9800), (10700, 10800)],
-    "gen-fault-move": (9800, 9900),
+    "gen-fault-move": [(9800, 9900), (11700, 12000)],
     "gen-fault-edit": (9900, 10000),
     "gen-ops-held": (10000, 10100),
     "gen-webhook": (10300, 10450),
@@ -6328,6 +6338,368 @@ def emit_fault_move(add):
                 add("gen-fault-move", desc, kv, comps(topo, n, w, life, r_life=lib.lifecycle(restart=RP_FULL[rp]), nr=nr),
                     _move_fault_reason(kind, form, at, "sibling", rp, topo, nr, sibling="router"), meta,
                     cell=("fault-move", kind, form, at, "sibling", "router", topo, w, rp, nr))
+    _emit_fault_move_more(add)
+
+
+# ── the move under the remaining faults ──────────────────────────────────────
+# The same six shapes and the same request, beside the faults the family's
+# first rows left out: a break of the running revision healed again or a
+# runner killed once, the missing ConfigMap key and the readiness switch
+# (kept or lifted), a pod deleted by hand at the request (a gang member
+# under kill=, again under repeat=), a pod evicted or preempted at a moment
+# of the move, a taint that leaves the replacement nowhere to go, and a move
+# requested while a push is stuck on a broken revision.
+MOVE_MORE_MOMENTS = ["accept", "surge"]
+# A runner killed once: the replacement at its first start, or Ready and
+# serving as the source is taken down.
+MOVE_ONCE_MOMENTS = [("start", "surge", "None"), ("load", "drain", "RecreateInstance")]
+MOVE_KEY_LIFTS = ["after-settle", "never"]
+MOVE_READINESS_FORMS = ["recover", "persist"]
+MOVE_READINESS_KEPT_MOMENTS = ["accept", "surge", "drain"]
+MOVE_HOOK_MOMENTS = ["accept", "surge", "drain"]
+MOVE_EVICT_REPEAT_AT = "surge"
+MOVE_PREEMPT_AT = "surge"
+MOVE_REPEAT_N = 2
+MOVE_PENDING_LIFTS = ["after-settle", "never"]
+# (the break the stuck push carries, the stuck states it is read at): the
+# unpullable image under both, the other kinds under the spent ladder.
+MOVE_STUCK_BREAKS = [("imagepull", ["held", "failed"]), ("crash-start", ["held"]), ("crash-load", ["held"]),
+                     ("configkey", ["held"]), ("stuck", ["held"])]
+MOVE_STUCK_STRAT = ("SurgeThenDrain", 1, 0)
+MOVE_STUCK_READY_TIMEOUT = READINESS_NEW_TIMEOUT
+MOVE_CONFIG_SUFFIX = "-config"
+MOVE_STUCK_HOW = {"imagepull": "an image that cannot be pulled",
+                  "crash-start": "a runner image with no shell, so its pods crash at every start",
+                  "crash-load": "an exit switch, so its runner dies a few seconds after Ready, every time the kubelet starts it",
+                  "configkey": "a ConfigMap key the ConfigMap lacks, so its pods wait in CreateContainerConfigError",
+                  "stuck": "a readiness probe that never passes, so its pods run and never become Ready"}
+MOVE_STUCK_STATE = {"held": "the retry ladder is spent (a retry block in state Held)",
+                    "failed": "its first attempt has failed (an Instance row reads Failed, the ladder still running)"}
+MOVE_SIBLING = {"engine": "router", "engine-mn": "router", "pd": "decoder", "pd-mn": "decoder"}
+
+
+def is_move_more_row(kv):
+    """True for a gen-fault-move row of the move beside the remaining
+    faults: a stuck push, a pod taken or pending, the missing key, the
+    readiness switch, a break healed again or a runner killed once."""
+    kind = str(kv.get("fault", "")).partition(":")[0]
+    return bool(kv.get("stuck") or kv.get("once") or kv.get("lift") == "after-settle"
+                or kind in ("configkey", "readiness", "podkill", "taint", "evict", "preempt"))
+
+
+def _move_request_words(topo, w, nr):
+    return f"a move of engine Instance 0 is requested on {shape_words(topo, w, nr)}"
+
+
+def _move_promise():
+    return ("the move finishes, or is abandoned with a reason its record carries, within budget and is recorded once "
+            "(one ledger row, one controller record), the engine holds N whole Instances on distinct indices, "
+            "nothing exceeds N+1 alive and the floor, lowered by the one Instance the fault took, holds")
+
+
+def _move_victim_words(at, victim, sibling):
+    when, pod = _move_fault_pod(at, victim, sibling)
+    return when, pod
+
+
+def _move_configkey_body(name, topo, n, w, nr, life, d_life, victim_comp):
+    """The case body of a missing-key cell at a move: the victim Component's
+    runner reads one key of a ConfigMap named after the case, carried as a
+    second document."""
+    cm = f"{name}{MOVE_CONFIG_SUFFIX}"
+    cs = comps(topo, n, w, life, d_life=d_life, nr=nr)
+    slot = 1 if victim_comp == "decoder" else 0
+    cs[slot]["runner"] = lib.configmap_env(cm, HEAL_CONFIG_KEY, HEAL_CONFIG_VAR, gang=is_mn(topo))
+    return lib.render(name, cs, docs=[lib.configmap_doc(cm, {HEAL_CONFIG_KEY: HEAL_CONFIG_VALUE})])
+
+
+def _move_healed_reason(kind, form, at, victim, topo, w, nr, sibling):
+    when, pod = _move_victim_words(at, victim, sibling)
+    out = (f"{_move_request_words(topo, w, nr)} and {when}, {pod} {MOVE_BREAK_HOW[(kind, form)]}; once the break has "
+           f"bitten for a settle window the harness takes it away again (the killer stops, or the pod is pointed back "
+           f"at the image it ran); {_move_promise()}")
+    if victim == "moved":
+        out += "; the moved Instance ends whole, Ready and serving on one pod set, healed where it stood or rebuilt by the move"
+    else:
+        out += (f"; the move completes (a broken {victim} is not the move's to care about) and the broken Instance "
+                f"ends Ready and serving again, healed where it stood or rebuilt by a repair, which is reported, not demanded")
+    return out
+
+
+def _move_once_reason(form, at, topo, w, nr, rp):
+    pod = "the moved Instance's replacement pod" if at == "surge" else "the moved Instance's replacement pod, Ready and serving,"
+    moment = "at its first start, before it is Ready" if form == "start" else "once it serves, as the source is being taken down"
+    out = (f"{_move_request_words(topo, w, nr)} and the runner of {pod} is killed exactly once {moment}; the kubelet "
+           f"starts it again and nothing kills it twice; {_move_promise()}; the moved Instance ends whole, Ready and "
+           f"serving on the running revision, nothing escalates the one restart to Failed or a hold, every row settles, "
+           f"and a rebuild is recorded only where restart policy {RP_FULL[rp]} promises one")
+    if rp == "RecreateInstance":
+        out += " (at most one, reported for a replacement that restarted mid-move)"
+    else:
+        out += " (none: the kubelet's restart is enough)"
+    return out
+
+
+def _move_key_reason(at, victim, lift, topo, w, nr):
+    when, pod = _move_victim_words(at, victim, "decoder")
+    comp = "decoder" if victim == "sibling" else "engine"
+    out = (f"{_move_request_words(topo, w, nr)} and {when}, the ConfigMap key {pod.replace(',', '')} reads is removed "
+           f"and its runner restarted, so it waits in CreateContainerConfigError, as does every new pod of the {comp} "
+           f"while the key is away")
+    if lift == "after-settle":
+        out += (f"; once the wait has bitten for a settle window the key is put back; {_move_promise()}; the moved "
+                f"Instance ends whole, Ready and serving on one pod set")
+        if victim != "moved":
+            out += (f"; the move completes and the broken {victim} ends Ready and serving again, healed where it stood "
+                    f"or rebuilt, which is reported, not demanded")
+        return out
+    out += "; the key stays away to the end of the case"
+    if victim == "sibling":
+        out += (f"; the move completes (the decoder's key is not the engine's) and the decoder's Instance ends not "
+                f"serving with the status saying so; the move is recorded once and the engine holds N whole Instances")
+    else:
+        out += (f"; the engine's replacement cannot start either, so the move is abandoned with a reason its record "
+                f"carries, or waits with the status saying why (a row not Ready with its wait or failure recorded); "
+                f"the move is recorded once, nothing exceeds N+1 alive and the broken pod serves nothing")
+    return out
+
+
+def _move_readiness_reason(at, victim, form, topo, w, nr):
+    when, pod = _move_victim_words(at, victim, "decoder")
+    out = (f"{_move_request_words(topo, w, nr)} and {when}, {pod} stops passing readiness while it keeps running "
+           f"(the readiness switch set in it)")
+    if form == "recover":
+        out += (f"; once the drop has bitten for a settle window the switch is lifted; {_move_promise()}; the moved "
+                f"Instance ends whole, Ready and serving on one pod set")
+        if victim != "moved":
+            out += f"; the move completes and the {victim} serves again where it stood, no repair demanded (readiness is repaired under neither restart policy)"
+        return out
+    out += "; the switch stays set to the end of the case"
+    if victim != "moved":
+        out += (f"; the move completes (a {victim} that stops serving is not the move's to care about) and that "
+                f"Instance ends not serving with the status saying so, no repair demanded; the move is recorded once "
+                f"and the engine holds N Instances on distinct indices")
+    elif at == "accept":
+        out += (f"; the source is drained by the move anyway, so {_move_promise()} and the moved Instance ends whole, "
+                f"Ready and serving on its replacement")
+    elif at == "surge":
+        out += (f"; the replacement never passes readiness, so the move is abandoned with a reason its record carries, "
+                f"or waits with the status saying why (the replacement's row not Ready with its wait recorded); the move "
+                f"is recorded once, the source keeps serving and nothing exceeds N+1 alive")
+    else:
+        out += (f"; the drain is already decided, so the move completes and the moved Instance ends not serving with "
+                f"the status saying so; the move is recorded once and the engine holds N Instances on distinct indices")
+    return out
+
+
+def _move_podkill_reason(member, repeat, topo, w, nr, rp):
+    pod = f"the {member} of one engine gang" if member else "one engine pod"
+    out = (f"{_move_request_words(topo, w, nr)} and as soon as the request is recorded {pod} is deleted by hand")
+    if repeat:
+        out += f", and again each time its Instance is back and serving, {repeat} times in all, then left alone"
+    out += (f"; the move completes end to end and is recorded once, the Instance the kill took is rebuilt under restart "
+            f"policy {RP_FULL[rp]} ({_recreate_scope(topo, rp)}), the floor lowered by that one Instance holds, "
+            f"nothing exceeds N+1 alive and no two gangs share an index")
+    if repeat:
+        out += ("; across the window the status reports each loss and never counts the short Instance whole, every "
+                "repair is for an Instance the kill took, the controller creates no more pods than the move and the "
+                "repairs explain, and after the lift every row is Ready with no operation open and no hold left behind")
+    return out
+
+
+def _move_taint_reason(lift, topo, w, nr):
+    out = (f"a NoSchedule taint on every schedulable node is in place when {_move_request_words(topo, w, nr)}; the "
+           f"replacement cannot be placed, so the move waits with the Instance's operation reporting Unschedulable "
+           f"inside its unschedulable grace, nothing settled is taken down to make room, the engine keeps N serving and "
+           f"no row reads Failed")
+    if lift == "after-settle":
+        out += ("; once the taint is lifted the replacement is placed, the move completes with its record Completed, "
+                "the request consumed and the moved Instance whole, Ready and serving on its new placement")
+    else:
+        out += "; the taint stays to the end, so the wait holds with its reason across the hold window"
+    if is_mn(topo):
+        out += "; each Instance is a gang, placed whole"
+    return out
+
+
+def _move_evict_reason(at, repeat, topo, w, nr):
+    when, pod = _move_victim_words(at, "moved", "decoder")
+    out = (f"{_move_request_words(topo, w, nr)} and {when}, {pod} is evicted through the Eviction API, as a node "
+           f"drain would, asked again while the disruption budget refuses it")
+    if repeat:
+        out += f", and again once what it took has come back, {repeat} times in all"
+    out += (f"; the move finishes, or is abandoned with a reason its record carries and the Instance kept whole and "
+            f"serving at its source index; the floor lowered by the one Instance the eviction took holds, nothing is "
+            f"left mid-operation and nothing exceeds N+1 alive")
+    if repeat:
+        out += ("; while an Instance is short the status says so and never counts it whole, every repair is for an "
+                "Instance the eviction took, and the controller creates no more pods than the move and the repairs explain")
+    if is_mn(topo):
+        out += "; each Instance is a gang, rebuilt whole"
+    return out
+
+
+def _move_preempt_reason(topo, w, nr):
+    out = (f"{_move_request_words(topo, w, nr)} and as the replacement pod appears fillers take the spare CPU of every "
+           f"node, the pending taint closes every node to the case, and a higher-priority filler presses on the "
+           f"replacement's node, so the scheduler preempts it; the replacement waits with reason Unschedulable, nothing "
+           f"settled is taken down to make room and no row reads Failed; once the lift opens the nodes and drops the "
+           f"fillers the replacement is placed and the move completes with the moved Instance whole, Ready and serving; "
+           f"floor and order waived, since the preemption itself takes a pod the budget cannot absorb")
+    if is_mn(topo):
+        out += "; each Instance is a gang, placed whole"
+    return out
+
+
+def _move_stuck_reason(kind, stuck, topo, w, nr, sibling):
+    pushed = f"the {sibling}" if sibling else "the engine"
+    out = (f"{pushed} is pushed onto a revision whose runner carries {MOVE_STUCK_HOW[kind]}; the push is left until "
+           f"{MOVE_STUCK_STATE[stuck]}; then {_move_request_words(topo, w, nr)}: the move finishes, or is abandoned "
+           f"with a reason its record carries, within budget and is recorded once; the moved Instance ends whole, Ready "
+           f"and serving on one pod set at the index the record names (the revision its replacement runs is reported, "
+           f"not judged); the Instances that served when the request was filed keep serving; the Components neither "
+           f"pushed nor moved keep their pods; and the status keeps reporting the push that has not landed"
+           + (", the hold itself" if stuck == "held" else ""))
+    if is_mn(topo):
+        out += "; each Instance is a gang, moved whole"
+    return out
+
+
+def _emit_fault_move_more(add):
+    for topo, n, w, nr in MOVE_SHAPES:
+        base = dict(mode="migrate", **counts(topo, n, nr), ceil_e=n + 1, ceil_d=(n if is_pd(topo) else 0),
+                    ceil_r=router_count(topo, nr), co="none", topo=topo, mig="Auto", inst=0)
+        sibling = MOVE_SIBLING[topo] if (is_pd(topo) or nr) else None
+        tag = shape_tag(topo, w, nr)
+
+        def lives(rp="None"):
+            life = lib.lifecycle(restart=RP_FULL[rp])
+            d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+            r_life = lib.lifecycle(restart=RP_FULL[rp]) if nr else None
+            return life, d_life, r_life
+
+        def shape_comps(rp="None"):
+            life, d_life, r_life = lives(rp)
+            return comps(topo, n, w, life, d_life=d_life, r_life=r_life, nr=nr)
+
+        # A break of the running revision healed again: on the moved Instance
+        # at accept and at surge, on the sibling at accept.
+        for kind, form, _rp in MOVE_BREAKS:
+            victims = [(at, "moved") for at in MOVE_MORE_MOMENTS] + ([("accept", "sibling")] if sibling else [])
+            for at, victim in victims:
+                kv = dict(base, fault=f"{kind}:old", victim=victim, at=at, lift="after-settle")
+                if form:
+                    kv["form"] = form
+                if victim == "sibling" and sibling == "router":
+                    kv["victimcomp"] = "router"
+                meta = dict(strat="SurgeThenDrain", verb=f"{_storm_label(kind, form)}@move-{at}:healed", rp="None",
+                            victim=(sibling if victim == "sibling" else "engine"), at=at, who=victim)
+                desc = f"{GEN_MARK} fault-move {_storm_label(kind, form)} healed at {at} on {victim} {tag} N={n}"
+                add("gen-fault-move", desc, kv, shape_comps(), _move_healed_reason(kind, form, at, victim, topo, w, nr, sibling),
+                    meta, cell=("fault-move-healed", kind, form, at, victim, topo, w, nr))
+        # A runner killed once on the moved Instance's replacement.
+        for form, at, rp in MOVE_ONCE_MOMENTS:
+            kv = dict(base, fault="crashloop:old", form=form, victim="moved", at=at, once=1)
+            meta = dict(strat="SurgeThenDrain", verb=f"crashloop:{form}@move-{at}:once", rp=rp, victim="engine", at=at, who="moved")
+            desc = f"{GEN_MARK} fault-move crashloop:{form} once at {at} on moved {tag} N={n} rp {rp}"
+            add("gen-fault-move", desc, kv, shape_comps(rp), _move_once_reason(form, at, topo, w, nr, rp), meta,
+                cell=("fault-move-once", form, at, topo, w, nr))
+        # The missing ConfigMap key: put back, or kept away.
+        key_rows = [(at, "moved", lift) for lift in MOVE_KEY_LIFTS for at in MOVE_MORE_MOMENTS] + [("accept", "peer", "after-settle")]
+        if is_pd(topo):
+            key_rows += [("accept", "sibling", lift) for lift in MOVE_KEY_LIFTS]
+        for at, victim, lift in key_rows:
+            kv = dict(base, fault="configkey:missing", victim=victim, at=at, lift=lift)
+            victim_comp = "decoder" if victim == "sibling" else "engine"
+            meta = dict(strat="SurgeThenDrain", verb=f"configkey@move-{at}:{lift}", rp="None", victim=victim_comp, at=at, who=victim)
+            desc = f"{GEN_MARK} fault-move configkey {lift} at {at} on {victim} {tag} N={n}"
+            life, d_life, _r = lives()
+            add("gen-fault-move", desc, kv, None, _move_key_reason(at, victim, lift, topo, w, nr), meta,
+                cell=("fault-move-key", at, victim, lift, topo, w, nr),
+                body=lambda name, vc=victim_comp, life=life, d_life=d_life: _move_configkey_body(name, topo, n, w, nr, life, d_life, vc))
+        # The readiness switch: lifted again, or kept.
+        ready_rows = [(at, "moved", "recover") for at in MOVE_MORE_MOMENTS] + [("accept", "peer", "recover")]
+        ready_rows += [(at, "moved", "persist") for at in MOVE_READINESS_KEPT_MOMENTS] + [("accept", "peer", "persist")]
+        if is_pd(topo):
+            ready_rows += [("accept", "sibling", form) for form in MOVE_READINESS_FORMS]
+        for at, victim, form in ready_rows:
+            kv = dict(base, fault="readiness:old", form=form, victim=victim, at=at)
+            victim_comp = "decoder" if victim == "sibling" else "engine"
+            meta = dict(strat="SurgeThenDrain", verb=f"readiness:{form}@move-{at}", rp="None", victim=victim_comp, at=at, who=victim)
+            desc = f"{GEN_MARK} fault-move readiness {form} at {at} on {victim} {tag} N={n}"
+            add("gen-fault-move", desc, kv, shape_comps(), _move_readiness_reason(at, victim, form, topo, w, nr), meta,
+                cell=("fault-move-readiness", at, victim, form, topo, w, nr))
+        # A pod deleted by hand at the request: once, and again under repeat=.
+        members = GANG_MEMBERS if is_mn(topo) else [None]
+        rp = "RecreateInstance" if is_mn(topo) else "None"
+        for member in members:
+            for repeat in (None, MOVE_REPEAT_N):
+                kv = dict(base, fault="podkill:migrating")
+                if member:
+                    kv["kill"] = member
+                if repeat:
+                    kv["repeat"] = repeat
+                meta = dict(strat="SurgeThenDrain", verb="podkill:migrating" + (f":{member}" if member else "") + (f" x{repeat}" if repeat else ""),
+                            rp=rp, victim="engine", at="accept", who="any")
+                desc = (f"{GEN_MARK} fault-move podkill at accept {tag} N={n} rp {rp}"
+                        + (f" target {member}" if member else "") + (f" x{repeat}" if repeat else ""))
+                add("gen-fault-move", desc, kv, shape_comps(rp), _move_podkill_reason(member, repeat, topo, w, nr, rp), meta,
+                    cell=("fault-move-podkill", member, repeat, topo, w, nr))
+        # A taint before the request: the replacement has nowhere to go.
+        for lift in MOVE_PENDING_LIFTS:
+            kv = dict(base, fault="taint:all", lift=lift)
+            meta = dict(strat="SurgeThenDrain", verb=f"pending:taint:move:{lift}", rp="None", victim="engine", at="accept", who="moved", lift=lift)
+            desc = f"{GEN_MARK} fault-move pending taint {tag} N={n} lift {lift}"
+            add("gen-fault-move", desc, kv, shape_comps(), _move_taint_reason(lift, topo, w, nr), meta,
+                cell=("fault-move-pending", "taint", lift, topo, w, nr))
+        # The moved Instance's pod evicted at each moment, again under repeat=, and preempted as it appears.
+        for at in MOVE_HOOK_MOMENTS:
+            for repeat in ([None, MOVE_REPEAT_N] if at == MOVE_EVICT_REPEAT_AT else [None]):
+                kv = dict(base, fault="evict:migrating", victim="moved", at=at)
+                if repeat:
+                    kv["repeat"] = repeat
+                meta = dict(strat="SurgeThenDrain", verb=f"evict@move-{at}" + (f" x{repeat}" if repeat else ""), rp="None",
+                            victim="engine", at=at, who="moved")
+                desc = f"{GEN_MARK} fault-move evict at {at} on moved {tag} N={n}" + (f" x{repeat}" if repeat else "")
+                add("gen-fault-move", desc, kv, shape_comps(), _move_evict_reason(at, repeat, topo, w, nr), meta,
+                    cell=("fault-move-evict", at, repeat, topo, w, nr))
+        kv = dict(base, fault="preempt:migrating", victim="moved", at=MOVE_PREEMPT_AT, lift="after-settle")
+        meta = dict(strat="SurgeThenDrain", verb=f"preempt@move-{MOVE_PREEMPT_AT}", rp="None", victim="engine",
+                    at=MOVE_PREEMPT_AT, who="moved", lift="after-settle")
+        desc = f"{GEN_MARK} fault-move preempt at {MOVE_PREEMPT_AT} on moved {tag} N={n} lift after-settle"
+        add("gen-fault-move", desc, kv, shape_comps(), _move_preempt_reason(topo, w, nr), meta,
+            cell=("fault-move-preempt", MOVE_PREEMPT_AT, topo, w, nr))
+        # A move requested while a push is stuck on a broken revision.
+        strat, surge, unavail = MOVE_STUCK_STRAT
+        for kind, states in MOVE_STUCK_BREAKS:
+            for stuck in states:
+                kv = dict(base, ceil_e=n + 1 + surge, stuck=stuck)
+                if kind == "imagepull":
+                    kv["img"] = runtime_fixtures.UNPULLABLE_IMAGE
+                else:
+                    kv["break"] = kind
+                ready_timeout = MOVE_STUCK_READY_TIMEOUT if kind == "stuck" else None
+                life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, ready_timeout=ready_timeout)
+                d_life = lib.lifecycle() if is_pd(topo) else None
+                meta = dict(strat=strat, verb=f"push:{stuck}:{kind}+move", rp="None", stuck=stuck, victim="engine", at="accept", who="moved")
+                desc = f"{GEN_MARK} fault-move stuck {stuck} {kind} {tag} N={n} {strat} {budget_tag(strat, surge, unavail)}"
+                if kind == "configkey":
+                    add("gen-fault-move", desc, kv, None, _move_stuck_reason(kind, stuck, topo, w, nr, None), meta,
+                        cell=("fault-move-stuck", kind, stuck, topo, w, nr),
+                        body=lambda name, life=life, d_life=d_life: _move_configkey_body(name, topo, n, w, nr, life, d_life, "engine"))
+                else:
+                    add("gen-fault-move", desc, kv, comps(topo, n, w, life, d_life=d_life, nr=nr),
+                        _move_stuck_reason(kind, stuck, topo, w, nr, None), meta,
+                        cell=("fault-move-stuck", kind, stuck, topo, w, nr))
+        if is_pd(topo):
+            # The decoder's push stuck beside the engine's move.
+            kv = dict(base, ceil_d=n + surge, stuck="held", img=runtime_fixtures.UNPULLABLE_IMAGE, bump="decoder")
+            d_life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+            meta = dict(strat=strat, verb="push:held:imagepull:decoder+move", rp="None", stuck="held", victim="decoder", at="accept", who="sibling")
+            desc = f"{GEN_MARK} fault-move stuck held imagepull on decoder {tag} N={n} {strat} {budget_tag(strat, surge, unavail)}"
+            add("gen-fault-move", desc, kv, comps(topo, n, w, lib.lifecycle(), d_life=d_life, nr=nr),
+                _move_stuck_reason("imagepull", "held", topo, w, nr, "decoder"), meta,
+                cell=("fault-move-stuck", "imagepull", "held", "decoder", topo, w, nr))
 
 
 # ── gen-webhook / gen-conflict: the admission webhook unreachable, a competing writer ──
@@ -7837,7 +8209,24 @@ def manifest(rows):
         " the move cannot finish; that fate is the node family's parked cell);"
         " the readiness switch (fault=readiness:old is repaired under neither"
         " restart policy, so it is the broken-Instance families' break and is"
-        " not fired at a move moment).",
+        " not fired at a move moment as a break the product repairs). The"
+        " family's later rows put the same request beside the remaining"
+        " faults: a crash or a pull failure healed again once it has bitten"
+        " (lift=after-settle) and a runner killed once on the replacement"
+        " (once=1); the missing key put back or kept away and the readiness"
+        " switch lifted or kept (victim=moved|peer, the decoder as sibling);"
+        " a pod deleted by hand at the request, a gang member under kill=,"
+        " again under repeat=; the moved Instance's pod evicted at each"
+        " moment, again under repeat= at surge, and preempted as the"
+        " replacement appears; a NoSchedule taint before the request; and a"
+        " move on a push stuck on an unpullable image (held and failed), a"
+        " crash at start, a crash after Ready, a missing key or a readiness"
+        " that never passes (held), the decoder's push stuck beside the"
+        " engine's move on the prefill/decode shapes. Left out: the router's"
+        " push stuck beside a move (the router is bumped by no group, so a"
+        " stuck router push has no driver) and the missing key or the"
+        " readiness switch on the router (its image carries neither the"
+        " fixture's ConfigMap env nor the readiness switch).",
         "- gen-fault-edit edits the dedicated runtime every Component inherits"
         " (engine, decoder and router each roll onto their own revision) under"
         " the surge and the drain-first strategies, and breaks a pod of the"

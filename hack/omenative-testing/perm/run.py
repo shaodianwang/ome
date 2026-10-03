@@ -2143,7 +2143,8 @@ HEAL_LIFT = "after-settle"
 # comes from the cluster's lifecycle configuration, so the wait for held
 # covers every attempt and backoff a chart-sized ladder can take.
 STUCK_KINDS = {"held", "failed"}
-STUCK_MODES = {"scaledown", "recreate"}
+# A scale, a delete or a move landing on a Component whose push is stuck.
+STUCK_MODES = {"scaledown", "recreate", "migrate"}
 STUCK_HELD_WAIT_S = int(900 * TIMEOUT_MULT)
 RETRY_BLOCK_HELD = "Held"
 # The modes a break may ride: a rollout, or a runtime edit that rolls. A
@@ -2253,7 +2254,16 @@ BROKEN_READINESS_ONCE = "recover"
 # sibling (the decoder's highest Instance).
 MOVE_HOOKS = {"accept", "surge", "drain"}
 MOVE_VICTIMS = {"moved", "peer", "sibling"}
-MOVE_FAULTS = BREAK_FAULTS | {"node"}
+# The faults the migrate handler fires itself at a moment of the move: the
+# breaks (healed again under lift=after-settle, killed once under once=1),
+# the missing ConfigMap key (put back at lift=after-settle, kept at never),
+# the readiness switch (form=recover lifts it, persist keeps it) and the
+# source node's loss. An eviction or a preemption at a move moment is the
+# hook-op driver's (evict|preempt:migrating at=<moment>), and a pod deleted
+# by hand at the request is the migrating phase hook's (podkill:migrating,
+# with kill= and repeat=).
+MOVE_FAULTS = BREAK_FAULTS | {"node", "configkey", "readiness"}
+MOVE_BREAK_KINDS = BREAK_FAULTS | {"configkey", "readiness"}
 MOVE_DEFAULT_VICTIM = "moved"
 # How long a moment that has arrived waits for its victim pod to exist.
 MOVE_VICTIM_GRACE_S = int(60 * TIMEOUT_MULT)
@@ -3446,6 +3456,8 @@ ROLLBACK_FAULT_HOOKS = {"settling", "rotating", "draining", "last"}
 # or a ConfigMap key the ConfigMap lacks (configkey). once=1 on a crash
 # kind kills the pushed revision's first runner exactly once instead.
 ROLLBACK_BREAKS = {ROLLBACK_BREAK, "crash-start", "crash-load", "imagepull", "configkey"}
+# The breaks a stuck push may carry beside the unpullable image (stuck= with break=).
+STUCK_BREAKS = set(ROLLBACK_BREAKS)
 ROLLBACK_ONCE_BREAKS = {"crash-start", "crash-load"}
 # How long the parked roll is given to say why after its first pod has shown
 # the break, before the rollback lands anyway (the verdict then wants the
@@ -5278,9 +5290,11 @@ def _fault_at_idle(f):
 
 
 def _fault_at_move(f):
-    """True when the case fires its fault at a moment of a move (mode=migrate
-    at=<moment>): the migrate handler fires it, the phase hooks leave it alone."""
-    return bool(f) and bool(f.get("at"))
+    """True when the migrate handler itself fires the fault at a moment of
+    the move (mode=migrate at=<moment> with a break, the missing key, the
+    readiness switch or the node loss); the phase hooks leave it alone. An
+    eviction or a preemption at a move moment is the hook-op driver's."""
+    return bool(f) and bool(f.get("at")) and f.get("kind") in MOVE_FAULTS
 
 
 def _fault_on_new(f):
@@ -5565,6 +5579,15 @@ def _fault_setup(f, case_id, hdr):
         return False, f["infra_fail"]
 
 
+def _aimed_pod(f, pod_state):
+    """The pod a handler aimed the fault at (aim_pod), while it is live;
+    None otherwise, so the kind's own victim rule picks. A move-moment fault
+    is aimed this way: the moved Instance's pod, a peer's or the sibling's."""
+    name = (f or {}).get("aim_pod")
+    pod = pod_state.get(name) if name else None
+    return name if pod and pod.get("alive") else None
+
+
 def _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=None, comp=None, member=None, prefer_inst=None):
     """Deterministic podkill victim: (1) gang topology → the leader pod of the
     lowest live instance index (heads the whole gang); (2) surge in flight (an
@@ -5670,8 +5693,8 @@ def _fault_evict_fire(f, pod_state, pods_per_inst, old_hashes):
     """Evict the podkill victim. A budget refusal leaves the fault unfired
     and due again after FAULT_RETRY_S, the way a drain keeps asking; the
     victim is picked again each time, since the roll moves on meanwhile."""
-    victim = _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=f.get("victim"),
-                             comp=f.get("victimcomp") or None, prefer_inst=_repeat_prefer(f))
+    victim = _aimed_pod(f, pod_state) or _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=f.get("victim"),
+                                                         comp=f.get("victimcomp") or None, prefer_inst=_repeat_prefer(f))
     if not victim:
         f["infra_fail"] = "evict: no live pod to evict"
         return
@@ -5690,6 +5713,7 @@ def _fault_evict_fire(f, pod_state, pods_per_inst, old_hashes):
         f["infra_fail"] = f"evict: evicting {victim} failed: {msg}"
         return
     f["refused_since"] = None
+    f.pop("aim_pod", None)   # a repetition takes the pod that came back, by its Instance
     _fault_record_victim(f, victim, pod_state, old_hashes)
     f["crash_pod"] = victim
     f["notes"].append(f"fault fired: evict {victim} ({f['param']})"
@@ -6009,7 +6033,7 @@ def _fault_readiness_fire(f, pod_state, old_hashes):
     running and stops passing readiness. The lift is registered before the
     switch is set."""
     comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
-    victim = _crashloop_pick_pod(pod_state, old_hashes, comp, inst=f.get("inst") or None)
+    victim = _aimed_pod(f, pod_state) or _crashloop_pick_pod(pod_state, old_hashes, comp, inst=f.get("inst") or None)
     if not victim:
         f["infra_fail"] = f"{READINESS_FAULT}: no live {comp} pod to break"
         return
@@ -6091,6 +6115,9 @@ def _once_candidate(f, pod_state, old_hashes):
     wants it not yet Ready, form=load wants it Ready."""
     comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
     want_ready = f.get("form") == "load"
+    aimed = _aimed_pod(f, pod_state)
+    if aimed:
+        return aimed if bool(pod_state[aimed].get("ready")) == want_ready else None
     if f.get("param") == CRASHLOOP_NEW:
         fresh = [n for n in _once_new_side_pods(pod_state, comp, old_hashes) if bool(pod_state[n].get("ready")) == want_ready]
         return fresh[0] if fresh else None
@@ -6477,7 +6504,7 @@ def _fault_configkey_fire(f, pod_state, old_hashes):
     pod, so a runtime-level or an ISVC-level env works alike. The restore is
     registered before the key is removed."""
     comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
-    victim = _crashloop_pick_pod(pod_state, old_hashes, comp, inst=f.get("inst") or None)
+    victim = _aimed_pod(f, pod_state) or _crashloop_pick_pod(pod_state, old_hashes, comp, inst=f.get("inst") or None)
     if not victim:
         f["infra_fail"] = f"configkey: no live {comp} pod to break"
         return
@@ -11752,8 +11779,8 @@ def _preempt_fill(f, target, node, pod_state):
 def _fault_preempt_fire(f, pod_state, pods_per_inst, old_hashes):
     """Aim the preemption at the node of the podkill victim. A victim not
     bound yet leaves the fault due again after FAULT_RETRY_S."""
-    target = _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=f.get("victim"),
-                             comp=f.get("victimcomp") or None)
+    target = _aimed_pod(f, pod_state) or _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=f.get("victim"),
+                                                         comp=f.get("victimcomp") or None)
     if not target:
         f["infra_fail"] = "preempt: no live pod to aim at"
         return
@@ -11762,6 +11789,7 @@ def _fault_preempt_fire(f, pod_state, pods_per_inst, old_hashes):
         f["fired"] = False
         f["retry_at"] = time.time() + FAULT_RETRY_S
         return
+    f.pop("aim_pod", None)
     _preempt_fill(f, target, node, pod_state)
 
 
@@ -12167,8 +12195,8 @@ def _pending_roll(case_id, yaml_file, desc, hdr):
     verdict = _pending_checks(f, lift, state, out, ctx, sorted(configured), allowance, verdict, notes, checks)
     if lift == "after-settle" and state == "DONE":
         agg = ctx.get("agg") or {}
-        if op == "rollback":
-            verdict = _window_op_checks(ctx, op, state, rb, medit, None, bumped, verdict, notes, checks)
+        if op in ("rollback", "move"):
+            verdict = _window_op_checks(ctx, op, state, rb, medit, st["mv"], bumped, verdict, notes, checks)
         else:
             unrotated = [c for c in sorted(bumped) if agg.get(c, (0, 0, 0))[2] != N[c]]
             if unrotated:
@@ -12920,8 +12948,18 @@ def _window_move_poll(mv, case_id, now, every=OVERLAP_POLL_S):
 def _window_move_done(ctx, f, mv):
     """The move is over: its ledger row reads Completed, the request
     annotation is consumed, no source pod is alive and the moved Component
-    holds N whole serving Instances on distinct indices."""
+    holds N whole serving Instances on distinct indices. Where the caller
+    accepts an abandoned move (accept_abandoned: a pod taken at a moment of
+    the move, a move on a stuck push), a row that reads Failed with a reason
+    closes it too, the Instance whole and serving at its source index."""
     entry = mv.get("entry") or {}
+    if entry.get("phase") == "Failed" and mv.get("accept_abandoned") and mv["seen"][2]:
+        reason = str(entry.get("reason") or entry.get("message") or "")
+        if not reason:
+            return False
+        ok, why = _move_end_state(ctx, f, mv["comp"], mv["inst"], set(), False)
+        mv["end"], mv["abandoned"] = (ok, why, mv["inst"]), reason
+        return ok
     if entry.get("phase") != "Completed" or not mv["seen"][2]:
         return False
     idx = _surge_index_allocated(entry)
@@ -13034,7 +13072,10 @@ def _window_op_checks(ctx, op, state, rb, medit, mv, acting, verdict, notes, che
             checks.append(f"  ✓ edit: {medit['kind']}={medit['value']} is on the live spec of {sorted(acting)}")
     elif op == "move":
         phase = (mv.get("entry") or {}).get("phase")
-        if mv.get("end") and mv["end"][0] and state == "CONVERGED":
+        if mv.get("end") and mv["end"][0] and state in ("CONVERGED", "DONE") and mv.get("abandoned"):
+            checks.append(f"  ✓ move: abandoned with a reason ({mv['abandoned'][:120]}), the request annotation is "
+                          f"consumed, Instance {mv['end'][2]} is {mv['end'][1]} at its source index")
+        elif mv.get("end") and mv["end"][0] and state in ("CONVERGED", "DONE"):
             checks.append(f"  ✓ move: the ledger row reads Completed, the request annotation is consumed, "
                           f"Instance {mv['end'][2]} is {mv['end'][1]}")
         else:
@@ -13259,7 +13300,7 @@ def _window_op(case_id, yaml_file, desc, hdr):
 # so the operation waits with reason Unschedulable until the lift.
 HOOK_OP_FAULTS = {"evict", "preempt"}
 HOOK_OPS = {"rollback", "edit", "scale", "runtime", "delete"}
-HOOK_FAULT_MODES = {"rollout", "scaledown", "runtimerev", "recreate"}
+HOOK_FAULT_MODES = {"rollout", "scaledown", "runtimerev", "recreate", "migrate"}
 # The hooks each operation offers: a roll's own, and the moment the others
 # land.
 HOOK_OP_HOOKS = {"rollback": {"settling"}, "edit": {"settling"}, "scale": {"settling"}, "delete": {"settling"},
@@ -13272,6 +13313,8 @@ def _hook_op_pods(st, ppi):
     at most once in each direction), a scale-up's new Instances, nothing
     for a scale-down or a delete."""
     op, acting, N0, target = st["op"], st["acting"], st["N0"], st["target"]
+    if op == "move":
+        return ppi.get(st["mcomp"], 1)   # the move's one replacement
     if op == "scale":
         return sum(max(0, target[c] - N0[c]) * ppi.get(c, 1) for c in acting)
     if op in ("edit", "runtime", "rollback"):
@@ -13335,14 +13378,28 @@ def _hook_op(case_id, yaml_file, desc, hdr):
                        [f"trigger failed: {st['error']}"], [f"  ✗ trigger failed: {st['error']}"])
     N0, target, rb, medit, mv = st["N0"], st["target"], st["rb"], st["medit"], st["mv"]
     acting, done, budget = st["acting"], st["done"], st["budget"]
+    if mv is not None:
+        mv["accept_abandoned"] = True   # a move may answer a pod taken at its moment by abandoning with a reason
     reached, why = _window_wait_hook(ctx, op, hook, rb, medit, mv, acting, done, budget)
     if not reached:
         f["infra_fail"] = f"{kind}:{hook}: the hook was never reached — {why}"
         return _finish(case_id, desc, hdr, ctx, "HOOK_MISSED", "INFRA-FAIL", [why], [f"  ✗ {f['infra_fail']}"])
+    if mv is not None:
+        # The pod the moment names: the moved Instance's (its source at
+        # accept, its replacement after), a peer's or the sibling's.
+        aim = _move_victim(f.get("victim") or MOVE_DEFAULT_VICTIM, mv["at"], kind, ctx["pod_state"], ctx["old_hashes"],
+                           mv["comp"], mv["inst"], mv["orig_uids"], sibling_comp=f.get("victimcomp") or "decoder")
+        if aim is None:
+            f["infra_fail"] = f"{kind} at {mv['at']} of the move: no {f.get('victim') or MOVE_DEFAULT_VICTIM} pod was live at the moment"
+            return _finish(case_id, desc, hdr, ctx, "HOOK_MISSED", "INFRA-FAIL", [f["infra_fail"]], [f"  ✗ {f['infra_fail']}"])
+        f["aim_pod"] = aim
+        ctx["fault_migrating"] = True   # the migrating hook is reached: a refused eviction asks again from here
     _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
     f["hook_op_fired"] = True
     if f["infra_fail"]:
         return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
+    if mv is not None and kind == "evict":
+        ctx["floor_allowance"] = {st["mcomp"]: 1}   # the eviction takes one Instance of the moved Component
     what = WINDOW_WHAT[op]
     verdict, notes, checks = "PASS", [], []
     if kind == "preempt":
@@ -14041,12 +14098,22 @@ def validate_case_file(path):
         if mode not in STUCK_MODES:
             errs.append(f"{path}:1: stuck= lands an operation on a Component stuck on an unpullable revision "
                         f"(mode={'|'.join(sorted(STUCK_MODES))})")
-        if "img" not in fields:
-            errs.append(f"{path}:1: stuck={fields['stuck']} needs img=<unpullable image> (the revision the push cannot pull)")
+        if "img" not in fields and "break" not in fields:
+            errs.append(f"{path}:1: stuck={fields['stuck']} needs img=<unpullable image> (the revision the push cannot pull) "
+                        f"or break={'|'.join(sorted(STUCK_BREAKS))} (the break the pushed revision carries)")
+        if "break" in fields and str(fields["break"]) not in STUCK_BREAKS:
+            errs.append(f"{path}:1: break={fields['break']} under stuck= is one of {'|'.join(sorted(STUCK_BREAKS))}")
+        if "break" in fields and "img" in fields and str(fields["break"]) != "imagepull":
+            errs.append(f"{path}:1: img= is the unpullable image; break={fields['break']} breaks the pushed revision another way (one or the other)")
         if "fault" in fields:
             errs.append(f"{path}:1: stuck= is the case's break; fault= does not combine with it")
         if "during" in fields:
             errs.append(f"{path}:1: stuck= decides when the operation lands; during= does not combine with it")
+        if mode == "migrate" and any(k in fields for k in ("at", "then", "dup", "hint", "expect", "lift")):
+            errs.append(f"{path}:1: a move on a stuck push files one plain request; at=, then=, dup=, hint=, expect= and lift= "
+                        f"do not combine with stuck= (mode=migrate)")
+        if mode == "migrate" and fields.get("mig") == "Never":
+            errs.append(f"{path}:1: a move on a stuck push needs a move the policy admits (mig=Never rejects the request)")
     elif "img" in fields and mode in STUCK_MODES:
         errs.append(f"{path}:1: img= in mode={mode} is the revision stuck= pushes (needs stuck=held|failed)")
     if mode == "runtimerev" and "rt" not in fields:
@@ -14292,9 +14359,10 @@ def validate_case_file(path):
         if k in fields and mode != "canary":
             errs.append(f"{path}:1: {k}= is a canary-mode knob (mode=canary)")
     if "bump" in fields:
-        if mode not in ("rollout", "canary"):
-            errs.append(f"{path}:1: bump= names the members a rollout or a canary bumps (mode=rollout|canary)")
-        if mode == "rollout":
+        if mode not in ("rollout", "canary") and not (mode == "migrate" and "stuck" in fields):
+            errs.append(f"{path}:1: bump= names the members a rollout or a canary bumps (mode=rollout|canary), "
+                        f"or the members a stuck push bumps beside a move (mode=migrate stuck=)")
+        if mode in ("rollout", "migrate"):
             for m in str(fields["bump"]).split(","):
                 count_key = {"engine": "Ne", "decoder": "Nd", "router": "Nr"}.get(m)
                 if count_key and fields.get(count_key, 0) == 0:
@@ -14321,7 +14389,7 @@ def validate_case_file(path):
     held_break = (mode == "rollout" and fields.get("rollback") == 1 and "break" in fields) or edit_held
     if "victimcomp" in fields and fault_kind not in ("podkill", "evict", "preempt", METRIC_FAULT) and fault_kind not in BREAK_FAULTS \
             and "podkill" not in hook_verbs and fault_kind != READINESS_FAULT and not (fault_kind == "configkey" and broken_op) \
-            and not held_break:
+            and not held_break and "stuck" not in fields:
         errs.append(f"{path}:1: victimcomp= aims a podkill, an eviction, a preemption, a break or a metric breach at one Component "
                     f"(needs fault=podkill:<phase>, fault=evict:<phase>, fault=preempt:<phase>, verb=podkill, fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM}, "
                     f"fault=configkey:{CONFIGKEY_PARAM} before a scale or a delete, or fault={METRIC_FAULT}:<hook>)")
@@ -14362,7 +14430,7 @@ def validate_case_file(path):
     canary_pull_once = mode == "canary" and fault_kind == "imagepull" and fault_param == CRASHLOOP_NEW \
         and str(fields.get("lift", "")) == HEAL_LIFT
     if heals_itself and not idle_heal and not pushed_pull_once and not broken_op and not rollback_break and not edit_break \
-            and not canary_stable_hook and not canary_pull_once:
+            and not canary_stable_hook and not canary_pull_once and not at_move:
         errs.append(f"{path}:1: lift={HEAL_LIFT} on fault={fields.get('fault')} heals the harness's own break under a canary "
                     f"(mode=canary, fault={fault_kind}:canary-<state> or fault={fault_kind}:{IDLE_FAULT_PHASE}), on the "
                     f"settled service (mode=rollout, fault={fault_kind}:{CRASHLOOP_VICTIM} during={IDLE_FAULT_PHASE} expect=heals) "
@@ -14373,6 +14441,10 @@ def validate_case_file(path):
     via = str(fields.get("via", ""))
     if via and mode != "kill":
         errs.append(f"{path}:1: via={via} says how mode=kill removes the pod (mode=kill)")
+    if mode == "migrate" and fault_kind in HOOK_OP_FAULTS | {"podkill"} and fault_param != WINDOW_MOVE_PHASE:
+        errs.append(f"{path}:1: fault={fault_kind}:<hook> under a move fires at the request (fault={fault_kind}:{WINDOW_MOVE_PHASE})")
+    if mode == "migrate" and fault_kind in HOOK_OP_FAULTS and not at_move:
+        errs.append(f"{path}:1: fault={fault_kind}:{WINDOW_MOVE_PHASE} needs at={'|'.join(sorted(MOVE_HOOKS))} (the moment of the move the pod is taken at)")
     if fault_kind == "evict" and mode not in HOOK_FAULT_MODES and not (mode == "canary" and _canary_hook_ok(fault_param)):
         errs.append(f"{path}:1: fault=evict:<phase> evicts the podkill victim of a rollout, scale, runtime-edit or delete case "
                     f"(mode={'|'.join(sorted(HOOK_FAULT_MODES))}) or of a canary at a grid state (mode=canary, "
@@ -14382,7 +14454,9 @@ def validate_case_file(path):
     # step's capacity; a quota under a canary is the canary's own park.
     pending = (fault_kind in PENDING_FAULTS and during != IDLE_FAULT_PHASE
                and (mode in ("rollout", "kill", "runtimerev") or (mode in ("scaledown", "recreate") and fault_kind == "preempt")
-                    or (mode == "canary" and fault_kind == "taint"))
+                    or (mode == "canary" and fault_kind == "taint")
+                    or (mode == "migrate" and fault_kind == "taint" and not at_move)
+                    or (mode == "migrate" and fault_kind == "preempt" and at_move))
                and (fault_kind != "quota" or mode == "kill" or lift in PENDING_LIFTS) and not _tight_cell(fields)) \
         or (broken_op and fault_kind in BROKEN_OP_PENDING)
     if via == "preempt":
@@ -14415,6 +14489,9 @@ def validate_case_file(path):
                 errs.append(f"{path}:1: repeat= keeps taking the pod; pause= is lifted once and does not combine with it")
             if via == "preempt" and lift != "after-settle":
                 errs.append(f"{path}:1: repeat= with via=preempt needs lift=after-settle (the fillers are dropped so the pod lands again)")
+        elif mode == "migrate" and fault_kind in ("podkill", "evict"):
+            if fault_param != WINDOW_MOVE_PHASE:
+                errs.append(f"{path}:1: repeat= under a move applies fault={fault_kind} again at the request (fault={fault_kind}:{WINDOW_MOVE_PHASE})")
         elif mode in ("rollout", "scaledown", "runtimerev") and fault_kind in REPEAT_FAULTS:
             idle_restart = fault_kind == "ctrlrestart" and fault_param == IDLE_FAULT_PHASE and during == IDLE_FAULT_PHASE and mode == "rollout"
             if not idle_restart and (fault_param not in REPEAT_PHASES or during == IDLE_FAULT_PHASE):
@@ -14434,8 +14511,8 @@ def validate_case_file(path):
         else:
             errs.append(f"{path}:1: repeat= is the persistent form of a kill (mode=kill) or of "
                         f"fault={'|'.join(sorted(REPEAT_FAULTS))}:<hook> under a push, a scale or a runtime edit "
-                        f"(mode=rollout|scaledown|runtimerev), or of fault={'|'.join(sorted(CANARY_REPEAT_FAULTS))}:canary-<state> "
-                        f"under a canary")
+                        f"(mode=rollout|scaledown|runtimerev), of fault=podkill|evict:{WINDOW_MOVE_PHASE} under a move, "
+                        f"or of fault={'|'.join(sorted(CANARY_REPEAT_FAULTS))}:canary-<state> under a canary")
     # A window fault: the admission webhook unreachable, or a competing
     # writer, on the settled service (idle, with during=idle), as an
     # operation lands (settling), at a hook of the roll a push or a runtime
@@ -14547,7 +14624,8 @@ def validate_case_file(path):
         # A one-shot crash: the running revision's pod at idle or under a
         # push, or the pushed revision's first pod; nothing else rides it,
         # except the rollback or the mid-roll edit the held moment carries.
-        if (fault_kind != "crashloop" or mode != "rollout") and not held_once and not edit_once and not canary_once:
+        move_once = at_move and mode == "migrate" and fault_kind == "crashloop"
+        if (fault_kind != "crashloop" or mode != "rollout") and not held_once and not edit_once and not canary_once and not move_once:
             errs.append(f"{path}:1: once=1 is a crash that happens exactly once (needs mode=rollout and "
                         f"fault=crashloop:{CRASHLOOP_VICTIM}|{CRASHLOOP_NEW} with form=start|load, or rollback=1 "
                         f"during=held break={'|'.join(sorted(ROLLBACK_ONCE_BREAKS))}), or the one-shot form of a "
@@ -14628,7 +14706,7 @@ def validate_case_file(path):
     if fault_kind == READINESS_FAULT:
         side = str(fields.get("fault", "")).partition(":")[2]
         canary_readiness = mode == "canary" and (side == CRASHLOOP_NEW or canary_stable_hook)
-        if mode != "rollout" and not broken_op and not canary_readiness:
+        if mode != "rollout" and not broken_op and not canary_readiness and not at_move:
             errs.append(f"{path}:1: fault={fields.get('fault')} is a rollout-mode fault (mode=rollout), breaks one "
                         f"Instance before a scale or a delete (mode={'|'.join(sorted(BROKEN_OP_MODES))} during={IDLE_FAULT_PHASE}), "
                         f"or under a canary a serving stable pod before the push or at a grid state "
@@ -14638,7 +14716,7 @@ def validate_case_file(path):
             errs.append(f"{path}:1: fault={fields.get('fault')} under a canary needs form={'|'.join(sorted(READINESS_FORMS))} "
                         f"(whether the switch stays or is lifted once it has bitten)")
         if side == "old":
-            if during != IDLE_FAULT_PHASE and not rollback_break and not edit_break:
+            if during != IDLE_FAULT_PHASE and not rollback_break and not edit_break and not at_move:
                 errs.append(f"{path}:1: fault={READINESS_FAULT}:old breaks a serving pod of the running revision on the "
                             f"idle service (needs during={IDLE_FAULT_PHASE}), before a rollback (rollback=1) or before "
                             f"a mid-roll edit (edit= during={'|'.join(sorted(EDIT_HOOKS))})")
@@ -14773,11 +14851,32 @@ def validate_case_file(path):
         if mode != "migrate":
             errs.append(f"{path}:1: at={fields['at']} is the moment of a move a fault fires at (mode=migrate)")
         window_move = fault_kind in WINDOW_FAULTS and fault_param == WINDOW_MOVE_PHASE
-        if not (fault_kind in BREAK_FAULTS and break_param == CRASHLOOP_VICTIM) and not window_move \
+        hook_move = fault_kind in HOOK_OP_FAULTS and fault_param == WINDOW_MOVE_PHASE
+        key_move = fault_kind == "configkey" and fault_param == CONFIGKEY_PARAM
+        readiness_move = fault_kind == READINESS_FAULT and fault_param == "old"
+        if not (fault_kind in BREAK_FAULTS and break_param == CRASHLOOP_VICTIM) and not window_move and not hook_move \
+                and not key_move and not readiness_move \
                 and not (fault_kind == "node" and str(fields.get("fault", "")).partition(":")[2] == NODE_PARAM):
-            errs.append(f"{path}:1: at={fields['at']} fires a break of the running fleet, a node loss or a window fault "
-                        f"(fault=crashloop|imagepull:{CRASHLOOP_VICTIM}, fault=node:{NODE_PARAM} or "
+            errs.append(f"{path}:1: at={fields['at']} fires a break of the running fleet, the missing key, the readiness "
+                        f"switch, a node loss, a pod taken or a window fault "
+                        f"(fault=crashloop|imagepull:{CRASHLOOP_VICTIM}, fault=configkey:{CONFIGKEY_PARAM}, "
+                        f"fault={READINESS_FAULT}:old, fault=node:{NODE_PARAM}, "
+                        f"fault={'|'.join(sorted(HOOK_OP_FAULTS))}:{WINDOW_MOVE_PHASE} or "
                         f"fault={'|'.join(sorted(WINDOW_FAULTS))}:{WINDOW_MOVE_PHASE})")
+        if fault_kind in BREAK_FAULTS and "lift" in fields and str(fields["lift"]) != HEAL_LIFT:
+            errs.append(f"{path}:1: a break at a move moment is kept, healed again (lift={HEAL_LIFT}) or killed once (once=1)")
+        if key_move and str(fields.get("lift", "")) not in (HEAL_LIFT, KEPT_LIFT):
+            errs.append(f"{path}:1: fault=configkey:{CONFIGKEY_PARAM} at a move moment needs lift={HEAL_LIFT} (the key put back "
+                        f"once the wait has bitten) or lift={KEPT_LIFT} (kept away to the end)")
+        if readiness_move and str(fields.get("form", "")) not in READINESS_FORMS:
+            errs.append(f"{path}:1: fault={READINESS_FAULT}:old at a move moment needs form={'|'.join(sorted(READINESS_FORMS))} "
+                        f"(whether the switch stays or is lifted once it has bitten)")
+        if fault_kind == "preempt" and str(fields.get("lift", "")) != "after-settle":
+            errs.append(f"{path}:1: fault=preempt:{WINDOW_MOVE_PHASE} at a move moment needs lift=after-settle (the nodes opened again once the wait has held)")
+        if "repeat" in fields and fault_kind != "evict":
+            errs.append(f"{path}:1: repeat= at a move moment is the eviction's persistent form (fault=evict:{WINDOW_MOVE_PHASE})")
+        if "once" in fields and (fault_kind != "crashloop" or str(fields.get("victim", MOVE_DEFAULT_VICTIM)) != MOVE_DEFAULT_VICTIM):
+            errs.append(f"{path}:1: once=1 at a move moment kills the moved Instance's pod once (fault=crashloop:{CRASHLOOP_VICTIM} victim={MOVE_DEFAULT_VICTIM})")
         if move_victim not in MOVE_VICTIMS:
             errs.append(f"{path}:1: victim={fields.get('victim')} under at= names whose pod breaks "
                         f"(victim={'|'.join(sorted(MOVE_VICTIMS))})")
@@ -14871,7 +14970,7 @@ def validate_case_file(path):
             errs.append(f"{path}:1: fault={fields.get('fault')} needs lift={'|'.join(sorted(phases))} (when the cause is lifted)")
         if expect not in outcomes and not at_move:
             errs.append(f"{path}:1: fault={fields.get('fault')} needs expect={'|'.join(sorted(outcomes))} (what the Instance comes to)")
-        if fault_kind == "configkey" and (lift == KEPT_LIFT) != (expect == KEPT_EXPECT):
+        if fault_kind == "configkey" and (lift == KEPT_LIFT) != (expect == KEPT_EXPECT) and not at_move:
             errs.append(f"{path}:1: lift={KEPT_LIFT} keeps the key away to the end of the case and is read as "
                         f"expect={KEPT_EXPECT} (the row parks Failed with its reason and stays); both or neither")
         if fault_kind == "configkey" and expect == "parked":
@@ -16872,6 +16971,17 @@ def _move_fire(f, mv, ctx):
     never a failure)."""
     pod_state, name = ctx["pod_state"], mv["pod"]
     f["fired"], f["fired_ts"] = True, time.time()
+    if f["kind"] in ("configkey", READINESS_FAULT) or _fault_once(f):
+        # The kind's own fire, aimed at the moment's pod: a one-shot kill
+        # waits until that pod is in the state its form needs.
+        f["aim_pod"] = name
+        if _fault_once(f):
+            _once_fire(f, pod_state, ctx["old_hashes"])
+        elif f["kind"] == "configkey":
+            _fault_configkey_fire(f, pod_state, ctx["old_hashes"])
+        else:
+            _fault_readiness_fire(f, pod_state, ctx["old_hashes"])
+        return
     if f["kind"] == "node":
         node = (pod_state.get(name) or {}).get("node")
         if not node or not _node_allowed(node, _nodes_info(), _manager_nodes()):
@@ -16908,11 +17018,82 @@ def _move_tick(ctx, f, mv, now, mcomp, inst, reqs, src_uids, orig_uids):
     _move_fire(f, mv, ctx)
     if f.get("skip") or f.get("infra_fail"):
         return
+    if not f["fired"]:
+        return   # a one-shot kill waits for its pod to be in the form's state; asked again next tick
     mv["fired"], mv["fired_at"] = True, time.time()
-    if f["kind"] in BREAK_FAULTS:
+    mv["path"] = _move_break_path(f, mv, mcomp)
+    if f["kind"] in MOVE_BREAK_KINDS:
         ctx["floor_allowance"] = {f["crash_comp"]: 1}
     print(f"    ⚡ at {mv['at']} of the move ({mv['fired_at'] - ctx['trigger_ts']:.0f}s after the request; "
           f"record {mv['fired_phase'] or 'not yet written'}): {f['kind']} on the {mv['victim']} pod {mv['pod']}")
+
+
+def _move_break_kept(f):
+    """True when the cause of a move-moment break outlives the case: the key
+    kept away (configkey lift=never), the readiness switch kept (form=persist)."""
+    return _rollback_break_kept(f)
+
+
+def _move_break_rebuilds(f):
+    """True when the product's repair is what mends the broken Instance: a
+    crash or a pull failure it keeps hitting. A key put back, a readiness
+    switch lifted or one kill heal the pod where it stands, so a rebuild is
+    reported there, never demanded."""
+    return bool(f) and f.get("kind") in BREAK_FAULTS and not _fault_once(f) and f.get("lift") != HEAL_LIFT
+
+
+def _move_break_path(f, mv, mcomp):
+    """How a move-moment break's end state is read.
+    settle: the move finishes or is abandoned with a reason and every
+    Instance ends whole and serving (a cause healed, a pod rebuilt).
+    kept: the cause stays on a pod the move does not need, so the move
+    completes and that Instance ends not serving, the status saying so.
+    drain-kept: the replacement stops passing readiness as the source is
+    taken down, so the move completes and the moved Instance ends not
+    serving, the status saying so.
+    wait: the cause holds the replacement itself (a key the moved Component
+    cannot read, or a replacement that never passes readiness), so the move
+    is abandoned with a reason or waits with the status saying why."""
+    if not f or f.get("kind") not in MOVE_BREAK_KINDS or not _move_break_kept(f):
+        return "settle"
+    victim, at = mv["victim"], mv["at"]
+    if f["kind"] == "configkey":
+        return "kept" if victim == "sibling" else "wait"
+    if victim in ("peer", "sibling") or at == "accept":
+        return "kept" if victim != "moved" else "settle"
+    return "drain-kept" if at == "drain" else "wait"
+
+
+def _move_break_unserving(ctx, f):
+    """(True, why) when the Instance a kept break hit reads not serving with
+    the status saying so: no pod of it is Ready and serving, and its row is
+    not Ready or reports fewer serving pods than it has."""
+    comp, inst = f.get("crash_comp"), f.get("crash_inst")
+    pods = _instance_pods(ctx["pod_state"], comp, inst)
+    serving = [n for n, p in pods if p.get("ready") and p.get("serving")]
+    if serving:
+        return False, f"{comp} Instance {inst} still serves on {', '.join(serving)}"
+    row = _broken_row(ctx["case_id"], comp, inst)
+    if row is not None and not _row_not_healthy(row):
+        return False, f"{comp} Instance {inst} serves nothing but its row reads Ready"
+    return True, f"{comp} Instance {inst} serves nothing and its row reads {str((row or {}).get('phase') or 'absent')}"
+
+
+def _move_wait_reason(ctx, mcomp, record, entry):
+    """Why a move that has not finished is waiting, as the status tells it:
+    the record's or the ledger row's message, a row of the moved Component
+    that is not Ready with an operation open or a recorded failure, or ""."""
+    for src in (record or {}, entry or {}):
+        text = str(src.get("message") or src.get("reason") or "")
+        if text:
+            return f"the record says {text[:120]}"
+    for (comp, idx), row in sorted(_ir_rows_by_index(ctx["case_id"], [mcomp]).items()):
+        if _row_not_healthy(row):
+            op = row.get("operation") or {}
+            fail = row.get("lastFailure") or {}
+            why = op.get("waiting") or fail.get("reason") or op.get("phase") or row.get("phase")
+            return f"{comp} Instance {idx} reads {row.get('phase')} ({why})"
+    return ""
 
 
 def _move_end_state(ctx, f, mcomp, idx, src_uids, completed):
@@ -16930,8 +17111,8 @@ def _move_end_state(ctx, f, mcomp, idx, src_uids, completed):
     live = {p["uid"]: p for p in ctx["pod_state"].values() if p and p["alive"] and p.get("uid")}
     if completed and src_uids & set(live):
         return False, "a source pod is still alive after the move completed"
-    hit = live.get(f.get("crash_uid"))
-    if f["kind"] in BREAK_FAULTS and hit is not None and not (hit.get("ready") and hit.get("serving")):
+    hit = live.get((f or {}).get("crash_uid"))
+    if (f or {}).get("kind") in MOVE_BREAK_KINDS and hit is not None and not (hit.get("ready") and hit.get("serving")):
         return False, f"the pod the fault hit ({f.get('crash_pod')}) is still there and not serving"
     by = _instances_by_index(ctx["pod_state"], {mcomp})
     whole = [i for i, ps in by.items() if len(ps) == ppi and all(p.get("ready") and p.get("serving") for p in ps)]
@@ -16946,14 +17127,26 @@ def _move_fault_settled(ctx, f, mv, mcomp, idx, src_uids, completed):
     is rebuilt whole, Ready and serving on new pods. The repair's end state
     is read together with the move's so the verdict never judges a rebuild
     that has only just opened."""
+    path = mv.get("path") or "settle"
+    if path == "drain-kept":
+        ok, why = _move_break_unserving(ctx, f)
+        return ok, why
+    if path == "kept":
+        ok, why = _move_end_state(ctx, f, mcomp, idx, src_uids, completed)
+        if not ok:
+            return ok, why
+        return _move_break_unserving(ctx, f)
     ok, why = _move_end_state(ctx, f, mcomp, idx, src_uids, completed)
-    if not ok or mv["victim"] not in ("peer", "sibling") or f["kind"] not in BREAK_FAULTS:
+    if not ok or mv["victim"] not in ("peer", "sibling") or f["kind"] not in MOVE_BREAK_KINDS:
         return ok, why
     comp, binst = f.get("crash_comp"), f.get("crash_inst")
     pods = _instance_pods(ctx["pod_state"], comp, binst)
-    if _instance_rebuilt_whole(pods, {f.get("crash_uid")}, max(1, ctx["pods_per_inst"].get(comp, 1))):
-        return True, why
-    return False, f"the broken {mv['victim']} ({comp} Instance {binst}) is not rebuilt and serving yet"
+    ppi = max(1, ctx["pods_per_inst"].get(comp, 1))
+    if len(pods) == ppi and all(p.get("ready") and p.get("serving") for _n, p in pods):
+        if not _move_break_rebuilds(f) or _instance_rebuilt_whole(pods, {f.get("crash_uid")}, ppi):
+            return True, why
+    how = "rebuilt and serving" if _move_break_rebuilds(f) else "serving again"
+    return False, f"the broken {mv['victim']} ({comp} Instance {binst}) is not {how} yet"
 
 
 def _move_wait_end(ctx, f, mv, mcomp, inst, entry, ph, src_uids):
@@ -16964,12 +17157,16 @@ def _move_wait_end(ctx, f, mv, mcomp, inst, entry, ph, src_uids):
     completed = ph == "Completed"
     idx = str(entry.get("surgeInstance")) if completed and entry.get("surgeInstance") is not None else str(inst)
     mv["end_index"] = idx
+    if mv.get("path") == "wait":
+        mv["end"] = (None, "the cause holds the replacement; the move's record and the status are read instead")
+        return
     budget = _relocation_budget(ctx, mcomp, ctx.get("force_delete")) if f["kind"] == "node" else _idle_budget(ctx)
     deadline = time.time() + budget
     print(f"  Phase 4: watching {mcomp} Instance {idx} settle after the move (≤{budget}s)")
     stable, held, why = None, False, "not read"
     while time.time() < deadline and not ctx["closed"]:
         _read_one(ctx)
+        _break_heal_tick(ctx, time.time())
         ok, why = _move_fault_settled(ctx, f, mv, mcomp, idx, src_uids, completed)
         if not ok:
             stable = None
@@ -17012,17 +17209,26 @@ def _move_fault_checks(ctx, f, mv, mcomp, inst, reqs, entries, ir_entries, verdi
     ph = record.get("phase") or entry.get("phase")
     reason = str(record.get("reason") or entry.get("reason") or record.get("message") or entry.get("message") or "")
     on_peer = mv["victim"] in ("peer", "sibling")
+    path = mv.get("path") or "settle"
+    must_finish = (on_peer and path != "wait") or path in ("kept", "drain-kept")
     if ph == "Completed":
         checks.append(f"  ✓ the move finished (surgeInstance={entry.get('surgeInstance', record.get('surgeInstance'))})")
-    elif ph == "Failed" and on_peer:
+    elif ph == "Failed" and must_finish:
         fail(f"the move was abandoned although the break hit a {mv['victim']} ({reason or 'no reason'})",
-             f"  ✗ the move must finish when the break hits a {mv['victim']}, not the moved Instance; it was "
-             f"abandoned ({reason or 'no reason recorded'})")
+             f"  ✗ the move must finish when the break does not touch its replacement ({mv['victim']} broken at "
+             f"{mv['at']}); it was abandoned ({reason or 'no reason recorded'})")
     elif ph == "Failed" and reason:
         checks.append(f"  ✓ the move was abandoned with a reason: {reason[:160]}")
     elif ph == "Failed":
         fail("the move was abandoned without a reason",
              "  ✗ the move was abandoned and neither the controller's record nor the ledger says why")
+    elif path == "wait":
+        waiting = _move_wait_reason(ctx, mcomp, record, entry)
+        if waiting:
+            checks.append(f"  ✓ the move waits on the kept cause and the status says why: {waiting}")
+        else:
+            fail(f"the move waits (phase={ph}) and nothing says why",
+                 f"  ✗ the move neither finished nor was abandoned (phase={ph}) and no record, row or event says why it waits")
     else:
         fail(f"the move never finished (phase={ph})",
              f"  ✗ the move neither finished nor was abandoned within budget (phase={ph}) — the fault wedged it")
@@ -17045,33 +17251,62 @@ def _move_fault_checks(ctx, f, mv, mcomp, inst, reqs, entries, ir_entries, verdi
                  f"  ✗ the controller holds {n_ir} record(s) for the request (want exactly one)")
     ok, why = mv["end"] or (False, "not read")
     idx = mv["end_index"]
-    if ok:
+    if path == "wait":
+        held, held_why = _move_break_unserving(ctx, f)
+        checks.append(f"  {'✓' if held else 'ⓘ'} the kept cause: {held_why}")
+    elif path == "drain-kept" and ok:
+        checks.append(f"  ✓ the moved Instance (index {idx}) ends not serving with the status saying so: {why} "
+                      f"(the readiness switch set on its replacement is kept)")
+    elif ok:
         checks.append(f"  ✓ the moved Instance (index {idx}) ends whole, Ready and serving on "
                       f"{', '.join(mv['end_nodes']) or '?'}, and {mcomp} holds N whole Instances")
+    elif path in ("kept", "drain-kept"):
+        fail(f"the end state did not settle: {why}",
+             f"  ✗ the moved Instance (index {idx}) must end whole and serving and the Instance the kept cause hit "
+             f"must end not serving with the status saying so: {why}")
     else:
         fail(f"the moved Instance (index {idx}) did not end whole and serving: {why}",
              f"  ✗ the moved Instance (index {idx}) must end whole, Ready and serving on one pod set: {why}")
     comp, binst = f.get("crash_comp"), f.get("crash_inst")
     events = _isvc_events_since(case_id, f.get("fired_ts") or t0)
     repairs = [m for r, m in events if r == "RestartTriggered" and _event_names_instance(m, comp, binst)]
-    if on_peer:
+    if on_peer and path == "kept":
+        checks.append(f"  ⓘ {len(repairs)} RestartTriggered event(s) name the {mv['victim']} ({comp} Instance {binst}) "
+                      f"whose cause is kept" + (f": {repairs[0][:120]}" if repairs else ""))
+    elif on_peer and path != "wait":
         pods = _instance_pods(ctx["pod_state"], comp, binst)
-        if _instance_rebuilt(pods, {f.get("crash_uid")}):
+        rebuilt = _instance_rebuilt(pods, {f.get("crash_uid")})
+        serving = bool(pods) and all(p.get("ready") and p.get("serving") for _n, p in pods)
+        if _move_break_rebuilds(f) and rebuilt:
             checks.append(f"  ✓ the broken {mv['victim']} ({comp} Instance {binst}) was rebuilt and serves again")
-        else:
+        elif _move_break_rebuilds(f):
             down = [n for n, p in pods if not (p.get("ready") and p.get("serving"))]
             fail(f"the broken {mv['victim']} {comp}/{binst} was not rebuilt to serving",
                  f"  ✗ the broken {mv['victim']} ({comp} Instance {binst}) must be rebuilt, Ready and serving: "
                  f"{len(pods)} pod(s), not serving {down}")
+        elif serving:
+            checks.append(f"  ✓ the broken {mv['victim']} ({comp} Instance {binst}) serves again, "
+                          f"{'rebuilt' if rebuilt else 'healed where it stood'} once the cause was gone")
+        else:
+            down = [n for n, p in pods if not (p.get("ready") and p.get("serving"))]
+            fail(f"the broken {mv['victim']} {comp}/{binst} does not serve again",
+                 f"  ✗ the broken {mv['victim']} ({comp} Instance {binst}) must serve again once the cause is gone: "
+                 f"{len(pods)} pod(s), not serving {down}")
         if repairs:
             checks.append(f"  ✓ a RestartTriggered event names {comp} Instance {binst}: {repairs[0][:160]}")
-        else:
+        elif _move_break_rebuilds(f):
             fail(f"no RestartTriggered event named the broken {mv['victim']} {comp}/{binst}",
                  f"  ✗ no RestartTriggered event named the broken {mv['victim']} ({comp} Instance {binst}) — a rebuild "
                  f"the product did not record as a repair is not its repair")
-    elif f["kind"] in BREAK_FAULTS:
+        else:
+            checks.append(f"  ⓘ no RestartTriggered event names {comp} Instance {binst} (none is owed: the cause healed where it stood)")
+    elif f["kind"] in MOVE_BREAK_KINDS:
         checks.append(f"  ⓘ {'a repair was' if repairs else 'no repair was'} recorded for the moved Instance after "
                       f"the break" + (f": {repairs[0][:120]}" if repairs else "") + " (the move or the repair may own it)")
+    if _fault_once(f) and f.get("fired") and not f.get("infra_fail"):
+        out = _once_observe(case_id, f, ctx["pod_state"], ctx["old_hashes"], False, ctx["N"], ctx["configured"], ROWS_SETTLE_S)
+        out.update(side="old", op="move", rp=_restart_policy(ctx.get("hdr"), ctx.get("info"), comp))
+        verdict = _once_checks(f, out, verdict, notes, checks)
     if f.get("kills") is not None and f.get("form") == "load":
         checks.append(f"  ⓘ {f['kind']}: runner killed {f['kills']} time(s) while the pod the fault hit ran")
     for c in sorted(ctx["configured"] - {mcomp, comp}):
@@ -17216,6 +17451,8 @@ def _migrate(case_id, yaml_file, desc, hdr):
     budget = rotate_budget
     if ov or mv:
         budget = min(MAX_BUDGET_S, 2 * budget)   # two ops (rollout or repair + migration) share the window
+    if _fault_repeats(f):
+        budget = min(MAX_BUDGET_S, budget + REPEAT_CYCLE_S * int(f["repeat"]))
     never_grace = 90
     print(f"  Phase 3: watching migration (ledger {case_id}-ome-migration-audit; ≤{budget}s)")
     surge_seen, surge_nodes, last_poll, state = set(), {}, 0.0, "WATCHING"
@@ -17264,6 +17501,9 @@ def _migrate(case_id, yaml_file, desc, hdr):
                 print(f"    ↷ in-flight rollout converged at {now - ov['t0']:.0f}s")
         if mv:
             _move_tick(ctx, f, mv, now, mcomp, inst, reqs, src_uids, orig_uids)
+            _break_heal_tick(ctx, now)
+        if f and f["kind"] == "podkill" and f.get("fired") and "floor_allowance" not in ctx:
+            ctx["floor_allowance"] = {f.get("victim_comp") or mcomp: 1}   # the pod the kill took
         if now - last_poll >= 5:
             last_poll = now
             ents = {i: (_migration_ledger_entry(case_id, ru) or {}) for i, (ru, _, _) in reqs.items()}
@@ -17302,6 +17542,11 @@ def _migrate(case_id, yaml_file, desc, hdr):
                 rollout_conv_ts = time.time()
                 print(f"    ↷ in-flight rollout converged at {rollout_conv_ts - ov['t0']:.0f}s (post-migration)")
                 break
+    if f and _fault_repeats(f) and not f.get("infra_fail"):
+        # The repetitions outlive the move: each fires once what it took has come back.
+        while (time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]
+               and int(f.get("fired_count") or 0) < int(f["repeat"])):
+            _read_one(ctx)
     if mv and f.get("skip"):
         return _finish(case_id, desc, hdr, ctx, "SKIP", "SKIP", [f["skip"]], [])
     # Collapse the per-source ledger into the single-inst vars the verdict block
@@ -17605,6 +17850,18 @@ def _migrate(case_id, yaml_file, desc, hdr):
             else:
                 checks.append(f"  ⓘ hint {hint_node} not taken (surge on {surge_node or '?'}) — "
                               f"a hint is a preference; capacity/schedulability may divert (soft)")
+        if f and f["kind"] == "podkill" and f.get("fired"):
+            # A pod deleted by hand at the request (a gang member under kill=), once or again each time it is back.
+            events = _isvc_events_since(case_id, f.get("fired_ts") or ctx["trigger_ts"])
+            repairs = [m for r, m in events if r == "RestartTriggered"
+                       and _event_names_instance(m, f.get("victim_comp"), f.get("victim_inst"))]
+            checks.append(f"  ⓘ the kill took {f.get('crash_pod')} ({f.get('victim_comp')} Instance {f.get('victim_inst')}, "
+                          f"{f.get('victim_runner')}); {len(repairs)} RestartTriggered event(s) name it"
+                          + (f": {repairs[0][:120]}" if repairs else ""))
+            if _fault_repeats(f):
+                verdict = _repeat_checks(f, ctx["pods_per_inst"], {mcomp}, ctx["pods_per_inst"].get(mcomp, 1),
+                                         ctx["trigger_ts"], verdict, notes, checks)
+                verdict = _repeat_end_checks(case_id, N, sorted(ctx["configured"]), verdict, notes, checks)
         # A migration surges a replacement before draining the source, so capacity
         # must never drop below the floor, gangs must stay whole, and no two gangs
         # may collapse onto one index (the fleet-wipe shape at migration scale).
@@ -17799,8 +18056,17 @@ def _drive_stuck(ctx, hdr):
     bumped = _bumped(ctx)
     image = str(hdr.get("img") or "")
     N, ppi = ctx["N"], ctx["pods_per_inst"]
-    print(f"  Phase 2: push {sorted(bumped)} onto an image that cannot be pulled; waiting for {stuck}")
-    if not _bump_rev(ctx, bumped, TRIGGER_VAL, image=image):
+    kind, victim = _stuck_break(hdr, bumped)
+    if kind == "imagepull" and "victimcomp" not in hdr:
+        print(f"  Phase 2: push {sorted(bumped)} onto an image that cannot be pulled; waiting for {stuck}")
+        ok = _bump_rev(ctx, bumped, TRIGGER_VAL, image=image)
+    elif kind == "stuck":
+        print(f"  Phase 2: push {sorted(bumped)} onto a revision whose pods never pass readiness; waiting for {stuck}")
+        ok = _bump_with_env(ctx, bumped, [{"name": READINESS_SWITCH_ENV, "value": "1"}], TRIGGER_VAL)
+    else:
+        print(f"  Phase 2: push {sorted(bumped)} with the {victim} runner broken ({kind}); waiting for {stuck}")
+        ok, _armed = _held_break_arm(ctx, kind, bumped, victim)
+    if not ok:
         return None
     budget = STUCK_HELD_WAIT_S if stuck == "held" else min(
         MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in bumped))
@@ -17816,6 +18082,17 @@ def _drive_stuck(ctx, hdr):
             print(f"    {stuck} reached {now - ctx['trigger_ts']:.0f}s after the push: {signal}")
             return signal
     return ""
+
+
+def _stuck_break(hdr, bumped):
+    """(kind, victim member) of the break a stuck push carries: img= is the
+    image that cannot be pulled, break= one of the held moment's kinds
+    (crash-start, crash-load, configkey, stuck: a readiness that never
+    passes); victimcomp= names the member whose runner carries it, else the
+    one bumped member, else the engine."""
+    kind = str(hdr.get("break") or "imagepull")
+    victim = str(hdr.get("victimcomp") or (sorted(bumped)[0] if len(bumped) == 1 else BREAK_DEFAULT_COMP))
+    return kind, victim
 
 
 def _stuck_reached_checks(stuck, reached, after_s, verdict, notes, checks):
@@ -17841,6 +18118,133 @@ def _stuck_delete_checks(ctx2, verdict, notes, checks):
     else:
         checks.append("  ✓ the same-name recreate carries nothing of the deleted service's push (no hold, no retry block, no Failed row)")
     return verdict
+
+
+def _stuck_move(case_id, yaml_file, desc, hdr):
+    """A move requested on a service whose push is stuck (stuck=failed: the
+    first attempt has failed; stuck=held: the retry ladder is spent), the
+    push broken by an image that cannot be pulled (img=) or by break=
+    (crash-start, crash-load, configkey, stuck) on the member victimcomp=
+    names. The verdict: the move finishes, or is abandoned with a reason its
+    record carries, within budget and is recorded once; the moved Instance
+    ends whole, Ready and serving on one pod set (the revision its
+    replacement runs is reported, not judged); the Instances that served
+    when the request was filed keep serving; the Components neither pushed
+    nor moved keep their pods; and the status keeps reporting the push that
+    has not landed, the hold itself under held."""
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    stuck = str(hdr.get("stuck"))
+    N, configured, ppi = ctx["N"], ctx["configured"], ctx["pods_per_inst"]
+    bumped = _bumped(ctx)
+    kind, victim = _stuck_break(hdr, bumped)
+    if victim not in bumped:
+        return _finish(case_id, desc, hdr, ctx, "CASE_ERROR", "FAIL",
+                       [f"victimcomp={victim} is not a member the push bumps ({sorted(bumped)})"], [])
+    ctx["modes"] = update_modes(ctx["info"], configured, "env" if kind in ("crash-load", "configkey", "stuck") else None)
+    mcomp = "engine" if "engine" in configured else sorted(configured)[0]
+    verdict, notes, checks = "PASS", [], []
+    reached = _drive_stuck(ctx, hdr)
+    if reached is None:
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", ctx.get("trigger_error") or "isvc bump failed")
+    verdict = _stuck_reached_checks(stuck, reached, time.time() - ctx["trigger_ts"], verdict, notes, checks)
+    if not reached:
+        return _finish(case_id, desc, hdr, ctx, "NOT_STUCK", verdict, notes, checks)
+    pre_ready = {c: ctx["agg"].get(c, (0, 0, 0))[1] for c in configured}
+    controls = configured - bumped - {mcomp}
+    control_uids = {c: {p["uid"] for p in ctx["pod_state"].values() if p and p["alive"] and p.get("comp") == c and p.get("uid")}
+                    for c in controls}
+    # The floor is what served when the request was filed: the stuck push
+    # already holds its Instances down, and the move surges before it drains.
+    ctx["floor_allowance"] = {c: max(0, N[c] - pre_ready[c]) for c in configured}
+    ctx["track_comps"] = sorted(configured)
+    mv = _window_move_request(ctx, hdr)
+    if mv is None:
+        return _finish(case_id, desc, hdr, ctx, "TRIGGER_FAIL", "FAIL",
+                       [f"trigger failed: {ctx.get('trigger_error')}"], [f"  ✗ trigger failed: {ctx.get('trigger_error')}"])
+    mv["accept_abandoned"] = True
+    budget = min(MAX_BUDGET_S, 2 * (ROTATE_BASE_S + ROTATE_PER_POD_S * N[mcomp] * ppi[mcomp]))
+    print(f"  Phase 3: move {mcomp} Instance {mv['inst']} while the push is {stuck} (≤{budget}s)")
+    state, stable = "WATCHING", None
+    while time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        _window_move_poll(mv, case_id, now, every=ROW_POLL_S * 2)
+        if _window_move_done(ctx, None, mv):
+            stable = stable or now
+            if now - stable >= STABILITY_S:
+                state = "CONVERGED"
+                ctx["converged_at"] = stable - ctx["trigger_ts"]
+                break
+        else:
+            stable = None
+    entry = mv.get("entry") or {}
+    phase, end = entry.get("phase"), mv.get("end")
+    verdict = _ceiling_checks(ctx, verdict, notes, checks)
+    if state == "CONVERGED" and mv.get("abandoned"):
+        checks.append(f"  ✓ the move was abandoned with a reason while the push was {stuck}: {mv['abandoned'][:160]}; "
+                      f"Instance {end[2]} keeps serving at its source index")
+    elif state == "CONVERGED":
+        checks.append(f"  ✓ the move finished while the push was {stuck}: Instance {end[2]} is {end[1]}")
+        hashes = {p.get("hash") for _n, p in _instance_pods(ctx["pod_state"], mcomp, end[2])}
+        on_running = bool(hashes) and hashes <= set(ctx["old_hashes"] or set())
+        checks.append(f"  ⓘ the replacement runs the {'running' if on_running else 'pushed'} revision (reported, not judged)")
+    elif phase == "Failed":
+        verdict = "FAIL"
+        notes.append("the move was abandoned without a reason, or left its Instance short" if not mv.get("abandoned")
+                     else f"the move was abandoned but its Instance did not settle: {end[1] if end else 'not read'}")
+        checks.append(f"  ✗ the move was abandoned ({str(entry.get('reason') or entry.get('message') or 'no reason recorded')[:120]}) "
+                      f"and the moved Instance did not end whole and serving at its source index: {end[1] if end else 'not read'}")
+    else:
+        verdict = "FAIL"
+        notes.append(f"the move neither finished nor was abandoned while the push was {stuck} (phase={phase})")
+        checks.append(f"  ✗ the move neither finished nor was abandoned with a reason within {budget}s while the push was "
+                      f"{stuck} (ledger phase {phase or 'not written'}; {end[1] if end else 'end state not read'})")
+    rows = _migration_ledger_moves(case_id)
+    mine = sum(1 for e in rows if e.get("requestUUID") == mv["uuid"])
+    if mine == 1 and len(rows) == 1:
+        checks.append("  ✓ the move is recorded once: one ledger row for the request and no other move")
+    else:
+        verdict = "FAIL"
+        notes.append(f"ledger rows: {mine} for the request, {len(rows)} moves in all (want 1 and 1)")
+        checks.append(f"  ✗ the move must be recorded once: {mine} ledger row(s) carry the request and {len(rows)} move row(s) exist")
+    ir_entries = _ir_status_migrations(case_id, mcomp)
+    if ir_entries is None:
+        checks.append("  ⓘ IR status.migrations unavailable on this build — the once-recorded check reads the ledger alone")
+    elif sum(1 for m in ir_entries if m.get("requestUUID") == mv["uuid"]) == 1:
+        checks.append("  ✓ the controller holds one record for the request")
+    else:
+        verdict = "FAIL"
+        notes.append("IR status.migrations does not hold exactly one record for the request")
+        checks.append("  ✗ the controller must hold exactly one record for the request")
+    verdict = min_ready_checks(ctx, sorted(configured), verdict, notes, checks)
+    for c in sorted(controls):
+        uids_now = {p["uid"] for p in ctx["pod_state"].values() if p and p["alive"] and p.get("comp") == c and p.get("uid")}
+        if ctx["peaks"][c] > N[c] or uids_now != control_uids[c]:
+            verdict = "FAIL"
+            notes.append(f"{c} (untouched) changed: peak={ctx['peaks'][c]} pods changed={uids_now != control_uids[c]}")
+            checks.append(f"  ✗ {c} was neither pushed nor moved but changed (peak {ctx['peaks'][c]}/{N[c]}, "
+                          f"pods changed={uids_now != control_uids[c]}) — isolation violated")
+        else:
+            checks.append(f"  ✓ {c} (neither pushed nor moved) stayed as it was")
+    unlanded = _push_unlanded(_ir_by_component(case_id), bumped)
+    for c in sorted(bumped):
+        if not unlanded[c]:
+            verdict = "FAIL"
+            notes.append(f"{c}: the status stopped reporting the push that has not landed")
+            checks.append(f"  ✗ {c}: after the move the status stopped saying the push has not landed "
+                          f"(no hold, no retry block, no Failed row, or the revisions read converged)")
+        elif stuck == "held" and RETRY_BLOCK_HELD not in unlanded[c]:
+            verdict = "FAIL"
+            notes.append(f"{c}: the hold is not reported after the move ({unlanded[c]})")
+            checks.append(f"  ✗ {c}: the hold is not reported after the move ({unlanded[c]}) — only a new revision or a release may lift it")
+        else:
+            checks.append(f"  ✓ {c}: the status still reports the push that has not landed ({unlanded[c]})")
+    verdict = gang_atomicity_checks(ctx, [mcomp], verdict, notes, checks)
+    if state == "CONVERGED":
+        verdict = index_collision_checks(ctx, [mcomp], verdict, notes, checks)
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
 def _stuck_scale(case_id, yaml_file, desc, hdr):
@@ -21811,6 +22215,12 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
         return _partition(case_id, yaml_file, desc, hdr)
     if mode == "rebump":
         return _rebump(case_id, yaml_file, desc, hdr)
+    if mode == "migrate" and mode_fault in HOOK_OP_FAULTS:
+        return _hook_op(case_id, yaml_file, desc, hdr)
+    if mode == "migrate" and mode_fault == "taint" and str(hdr.get("lift")) in PENDING_LIFTS:
+        return _pending_roll(case_id, yaml_file, desc, hdr)
+    if mode == "migrate" and hdr.get("stuck"):
+        return _stuck_move(case_id, yaml_file, desc, hdr)
     if mode == "migrate":
         return _migrate(case_id, yaml_file, desc, hdr)
     if mode == "kill":

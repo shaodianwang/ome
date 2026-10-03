@@ -20,6 +20,7 @@ import batch
 import casefiles
 import gen_cases
 import gen_mn
+import coverage
 import generate_cases
 import irstatus
 import run
@@ -5607,7 +5608,7 @@ class StuckOperationTest(unittest.TestCase):
         self.assertTrue(any("needs stuck=" in e for e in self._errs(self.SCALE + self.IMG)))
         self.assertTrue(any("malformed header value stuck=" in e for e in self._errs(self.SCALE + " stuck=soon" + self.IMG)))
         rollout = "# p999: x mode=rollout Ne=3 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 topo=engine"
-        self.assertTrue(any("mode=recreate|scaledown" in e for e in self._errs(rollout + " stuck=held" + self.IMG)))
+        self.assertTrue(any("mode=migrate|recreate|scaledown" in e for e in self._errs(rollout + " stuck=held" + self.IMG)))
         self.assertTrue(any("does not combine" in e for e in self._errs(self.SCALE + " stuck=held fault=podkill:settling" + self.IMG)))
         self.assertTrue(any("does not combine" in e for e in self._errs(self.RECREATE + " stuck=held during=rollout" + self.IMG)))
 
@@ -12069,6 +12070,170 @@ class MoveMomentFaultTest(unittest.TestCase):
         self.assertTrue(any("fires a break of the running fleet" in e for e in self._errs(ok(fault="fault=podkill:settling"))))
 
 
+class MoveUnderEveryFaultTest(unittest.TestCase):
+    """The move beside the remaining faults: the header forms the validator
+    admits and refuses, the helpers that aim a fault at the moment's pod and
+    read a kept cause, and the paths the verdict takes."""
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def _hdr(self, extra, nd=0, nr=0, topo="engine", ceil_e=5):
+        return (f"# p999: x mode=migrate mig=Auto inst=0 {extra} Ne=4 Nd={nd} Nr={nr} ceil_e={ceil_e} ceil_d={nd} "
+                f"ceil_r={nr} co=none topo={topo}")
+
+    def test_break_forms_at_a_move_moment(self):
+        self.assertEqual([], self._errs(self._hdr("fault=crashloop:old form=start at=accept victim=moved lift=after-settle")))
+        self.assertEqual([], self._errs(self._hdr("fault=imagepull:old at=surge victim=moved lift=after-settle")))
+        self.assertEqual([], self._errs(self._hdr("fault=crashloop:old form=load at=drain victim=moved once=1")))
+        self.assertEqual([], self._errs(self._hdr("fault=configkey:missing at=accept victim=peer lift=after-settle")))
+        self.assertEqual([], self._errs(self._hdr("fault=configkey:missing at=surge victim=moved lift=never")))
+        self.assertEqual([], self._errs(self._hdr("fault=readiness:old form=persist at=drain victim=moved")))
+        self.assertEqual([], self._errs(self._hdr("fault=readiness:old form=recover at=accept victim=sibling", nd=4, nr=2, topo="pd")))
+        self.assertTrue(any("healed again" in e for e in self._errs(self._hdr("fault=imagepull:old at=surge victim=moved lift=after-recover"))))
+        self.assertTrue(any("needs lift=after-settle" in e for e in self._errs(self._hdr("fault=configkey:missing at=accept victim=moved"))))
+        self.assertTrue(any("needs form=" in e for e in self._errs(self._hdr("fault=readiness:old at=accept victim=moved"))))
+        self.assertTrue(any("kills the moved Instance's pod once" in e
+                            for e in self._errs(self._hdr("fault=crashloop:old form=start at=surge victim=peer once=1"))))
+        self.assertTrue(any("persistent form" in e for e in self._errs(self._hdr("fault=crashloop:old form=start at=surge victim=moved repeat=2"))))
+
+    def test_hook_and_pending_forms_at_a_move(self):
+        self.assertEqual([], self._errs(self._hdr("fault=evict:migrating at=accept victim=moved")))
+        self.assertEqual([], self._errs(self._hdr("fault=evict:migrating at=surge victim=moved repeat=2")))
+        self.assertEqual([], self._errs(self._hdr("fault=preempt:migrating at=surge victim=moved lift=after-settle")))
+        self.assertEqual([], self._errs(self._hdr("fault=podkill:migrating kill=leader repeat=2", topo="engine-mn")))
+        self.assertEqual([], self._errs(self._hdr("fault=taint:all lift=after-settle")))
+        self.assertEqual([], self._errs(self._hdr("fault=taint:all lift=never")))
+        self.assertTrue(any("needs at=" in e for e in self._errs(self._hdr("fault=evict:migrating victim=moved"))))
+        self.assertTrue(any("fires at the request" in e for e in self._errs(self._hdr("fault=evict:rotating at=accept victim=moved"))))
+        self.assertTrue(any("needs lift=after-settle" in e for e in self._errs(self._hdr("fault=preempt:migrating at=surge victim=moved"))))
+        self.assertTrue(any("fires at the request" in e for e in self._errs(self._hdr("fault=podkill:settling repeat=2"))))
+        self.assertTrue(any("lift=" in e for e in self._errs(self._hdr("fault=taint:all"))))
+
+    def test_stuck_forms_under_a_move(self):
+        unpullable = runtime_fixtures.UNPULLABLE_IMAGE
+        self.assertEqual([], self._errs(self._hdr(f"stuck=held img={unpullable}", ceil_e=6)))
+        self.assertEqual([], self._errs(self._hdr("stuck=failed break=crash-start", ceil_e=6)))
+        self.assertEqual([], self._errs(self._hdr("stuck=held break=stuck", ceil_e=6)))
+        self.assertEqual([], self._errs(self._hdr(f"stuck=held img={unpullable} bump=decoder", nd=4, nr=2, topo="pd")))
+        self.assertTrue(any("needs img=" in e for e in self._errs(self._hdr("stuck=held"))))
+        self.assertTrue(any("is one of" in e for e in self._errs(self._hdr("stuck=held break=node"))))
+        self.assertTrue(any("one or the other" in e for e in self._errs(self._hdr(f"stuck=held img={unpullable} break=configkey"))))
+        self.assertTrue(any("one plain request" in e for e in self._errs(self._hdr(f"stuck=held img={unpullable} at=accept"))))
+        self.assertTrue(any("mig=Never" in e for e in self._errs(self._hdr(f"stuck=held img={unpullable}").replace("mig=Auto", "mig=Never"))))
+        self.assertTrue(any("does not combine" in e for e in self._errs(self._hdr(f"stuck=held img={unpullable} fault=podkill:migrating"))))
+
+    def test_the_aimed_pod_wins_while_it_is_live(self):
+        pods = {"a": {"alive": True, "ready": True}, "b": {"alive": False}}
+        self.assertEqual("a", run._aimed_pod({"aim_pod": "a"}, pods))
+        self.assertIsNone(run._aimed_pod({"aim_pod": "b"}, pods))
+        self.assertIsNone(run._aimed_pod({"aim_pod": "gone"}, pods))
+        self.assertIsNone(run._aimed_pod({}, pods))
+        self.assertIsNone(run._aimed_pod(None, pods))
+
+    def test_the_migrate_handler_fires_its_own_kinds_and_leaves_the_hook_faults(self):
+        self.assertTrue(run._fault_at_move({"at": "accept", "kind": "crashloop"}))
+        self.assertTrue(run._fault_at_move({"at": "surge", "kind": "configkey"}))
+        self.assertTrue(run._fault_at_move({"at": "drain", "kind": "readiness"}))
+        self.assertTrue(run._fault_at_move({"at": "accept", "kind": "node"}))
+        self.assertFalse(run._fault_at_move({"at": "accept", "kind": "evict"}))
+        self.assertFalse(run._fault_at_move({"at": "surge", "kind": "preempt"}))
+        self.assertFalse(run._fault_at_move({"at": "", "kind": "crashloop"}))
+
+    def test_kept_and_rebuilt_breaks(self):
+        self.assertTrue(run._move_break_kept({"kind": "configkey", "lift": "never"}))
+        self.assertFalse(run._move_break_kept({"kind": "configkey", "lift": "after-settle"}))
+        self.assertTrue(run._move_break_kept({"kind": "readiness", "form": "persist"}))
+        self.assertFalse(run._move_break_kept({"kind": "readiness", "form": "recover"}))
+        self.assertFalse(run._move_break_kept({"kind": "crashloop", "form": "start"}))
+        self.assertTrue(run._move_break_rebuilds({"kind": "crashloop", "form": "start", "lift": ""}))
+        self.assertTrue(run._move_break_rebuilds({"kind": "imagepull", "lift": ""}))
+        self.assertFalse(run._move_break_rebuilds({"kind": "imagepull", "lift": "after-settle"}))
+        self.assertFalse(run._move_break_rebuilds({"kind": "crashloop", "form": "load", "once": True}))
+        self.assertFalse(run._move_break_rebuilds({"kind": "readiness", "form": "recover"}))
+        self.assertFalse(run._move_break_rebuilds({"kind": "configkey", "lift": "after-settle"}))
+
+    def test_the_path_a_kept_cause_puts_the_verdict_on(self):
+        path = lambda f, victim, at: run._move_break_path(f, {"victim": victim, "at": at}, "engine")
+        healed = {"kind": "crashloop", "form": "start", "lift": "after-settle"}
+        for victim in ("moved", "peer", "sibling"):
+            for at in ("accept", "surge", "drain"):
+                self.assertEqual("settle", path(healed, victim, at))
+                self.assertEqual("settle", path({"kind": "readiness", "form": "recover"}, victim, at))
+                self.assertEqual("settle", path({"kind": "configkey", "lift": "after-settle"}, victim, at))
+        key = {"kind": "configkey", "lift": "never"}
+        self.assertEqual("wait", path(key, "moved", "accept"))
+        self.assertEqual("wait", path(key, "peer", "accept"))
+        self.assertEqual("kept", path(key, "sibling", "accept"))
+        ready = {"kind": "readiness", "form": "persist"}
+        self.assertEqual("settle", path(ready, "moved", "accept"))
+        self.assertEqual("wait", path(ready, "moved", "surge"))
+        self.assertEqual("drain-kept", path(ready, "moved", "drain"))
+        self.assertEqual("kept", path(ready, "peer", "accept"))
+        self.assertEqual("kept", path(ready, "sibling", "accept"))
+        self.assertEqual("settle", path(None, "moved", "surge"))
+        self.assertEqual("settle", path({"kind": "evict"}, "moved", "surge"))
+
+    def test_the_kept_cause_reads_as_unserving_with_the_status_saying_so(self):
+        ctx = {"case_id": "p999", "pod_state": {"e1": {"comp": "engine", "inst": "1", "alive": True, "ready": False, "serving": False}}}
+        f = {"crash_comp": "engine", "crash_inst": "1"}
+        with mock.patch.object(run, "_broken_row", return_value={"phase": "Failed", "index": "1"}):
+            ok, why = run._move_break_unserving(ctx, f)
+        self.assertTrue(ok)
+        self.assertIn("Failed", why)
+        with mock.patch.object(run, "_broken_row", return_value={"phase": "Ready", "index": "1", "podCount": 1, "servingPodCount": 1}):
+            ok, why = run._move_break_unserving(ctx, f)
+        self.assertFalse(ok)
+        self.assertIn("row reads Ready", why)
+        ctx["pod_state"]["e1"].update(ready=True, serving=True)
+        self.assertFalse(run._move_break_unserving(ctx, f)[0])
+
+    def test_why_a_move_waits_is_read_from_the_record_or_a_row(self):
+        ctx = {"case_id": "p999"}
+        with mock.patch.object(run, "_ir_rows_by_index", return_value={}):
+            self.assertIn("the record says", run._move_wait_reason(ctx, "engine", {"message": "surge pod not ready"}, {}))
+            self.assertIn("the record says", run._move_wait_reason(ctx, "engine", {}, {"reason": "ReadyTimeout"}))
+            self.assertEqual("", run._move_wait_reason(ctx, "engine", {}, {}))
+        rows = {("engine", "4"): {"phase": "Pending", "operation": {"waiting": "Unschedulable"}},
+                ("engine", "0"): {"phase": "Ready", "podCount": 1, "servingPodCount": 1}}
+        with mock.patch.object(run, "_ir_rows_by_index", return_value=rows):
+            self.assertIn("Instance 4 reads Pending (Unschedulable)", run._move_wait_reason(ctx, "engine", {}, {}))
+
+    def test_a_stuck_push_names_its_break_and_victim(self):
+        self.assertEqual(("imagepull", "engine"), run._stuck_break({"img": "x"}, {"engine"}))
+        self.assertEqual(("crash-start", "engine"), run._stuck_break({"break": "crash-start"}, {"engine"}))
+        self.assertEqual(("imagepull", "decoder"), run._stuck_break({"img": "x"}, {"decoder"}))
+        self.assertEqual(("configkey", "engine"), run._stuck_break({"break": "configkey"}, {"engine", "decoder"}))
+        self.assertEqual(("imagepull", "router"), run._stuck_break({"img": "x", "victimcomp": "router"}, {"engine", "router"}))
+
+    def test_the_move_explains_one_replacement_across_a_repeating_eviction(self):
+        st = {"op": "move", "acting": {"engine"}, "N0": {"engine": 4}, "target": {"engine": 4}, "mcomp": "engine"}
+        self.assertEqual(1, run._hook_op_pods(st, {"engine": 1}))
+        self.assertEqual(3, run._hook_op_pods(st, {"engine": 3}))
+
+    def _ctx(self, pods):
+        return {"case_id": "p999", "N": {"engine": 2, "decoder": 0, "router": 0}, "pods_per_inst": {"engine": 1},
+                "pod_state": pods, "configured": {"engine"}}
+
+    def test_an_abandoned_move_closes_only_where_the_caller_accepts_it(self):
+        pods = {"e0": {"comp": "engine", "inst": "0", "alive": True, "ready": True, "serving": True, "uid": "u0"},
+                "e1": {"comp": "engine", "inst": "1", "alive": True, "ready": True, "serving": True, "uid": "u1"}}
+        mv = {"comp": "engine", "inst": "0", "src_uids": {"u0"}, "seen": (None, None, True),
+              "entry": {"phase": "Failed", "reason": "SourceEvicted"}}
+        self.assertFalse(run._window_move_done(self._ctx(pods), None, dict(mv)))
+        accepted = dict(mv, accept_abandoned=True)
+        self.assertTrue(run._window_move_done(self._ctx(pods), None, accepted))
+        self.assertEqual("SourceEvicted", accepted["abandoned"])
+        self.assertEqual("0", accepted["end"][2])
+        silent = dict(mv, accept_abandoned=True, entry={"phase": "Failed"})
+        self.assertFalse(run._window_move_done(self._ctx(pods), None, silent))
+        pods["e0"]["serving"] = False
+        self.assertFalse(run._window_move_done(self._ctx(pods), None, dict(mv, accept_abandoned=True)))
+
+
 class GeneratedFaultMoveFamilyTest(unittest.TestCase):
     """gen-fault-move: a break, or a node loss, at a moment of a move, on the
     moved Instance, a peer or the decoder, under the restart policy that
@@ -12076,7 +12241,8 @@ class GeneratedFaultMoveFamilyTest(unittest.TestCase):
 
     def _rows(self):
         outputs, rows = generate_cases.build_outputs()
-        return outputs, [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-fault-move"]
+        return outputs, [(n, kv, m) for folder, n, kv, m in rows
+                         if folder == "gen-fault-move" and not generate_cases.is_move_more_row(kv)]
 
     def test_generated_family_crosses_every_axis(self):
         outputs, fam = self._rows()
@@ -12136,6 +12302,74 @@ class GeneratedFaultMoveFamilyTest(unittest.TestCase):
                 path = Path(tmp) / f"{name}.yaml"
                 path.write_text(outputs[f"gen-fault-move/{name}.yaml"])
                 self.assertEqual([], run.validate_case_file(path), name)
+
+    def _more_rows(self):
+        outputs, rows = generate_cases.build_outputs()
+        return outputs, [(n, kv, m) for folder, n, kv, m in rows
+                         if folder == "gen-fault-move" and generate_cases.is_move_more_row(kv)]
+
+    def test_the_move_under_every_fault_crosses_the_six_shapes(self):
+        outputs, fam = self._more_rows()
+        self.assertEqual(238, len(fam))
+        shapes = {("engine", 0), ("pd", 2), ("engine-mn", 0), ("engine", 2), ("engine-mn", 2), ("pd-mn", 2)}
+        self.assertEqual(shapes, {(kv["topo"], kv["Nr"]) for _n, kv, _m in fam})
+        ids = sorted(int(n[1:]) for n, _kv, _m in fam)
+        blocks = generate_cases.id_blocks("gen-fault-move")
+        self.assertEqual([(7800, 7900), (9800, 9900), (11700, 12000)], blocks)
+        self.assertEqual(9899, max(i for i in ids if i < 9900), "the first continuation is filled before the second")
+        self.assertEqual(11700, min(i for i in ids if i >= 11700))
+        kinds = {}
+        for _n, kv, _m in fam:
+            key = kv.get("stuck") and "stuck" or str(kv.get("fault", "")).partition(":")[0]
+            kinds[key] = kinds.get(key, 0) + 1
+        self.assertEqual({"crashloop": 44, "imagepull": 16, "configkey": 34, "readiness": 46, "podkill": 18,
+                          "taint": 12, "evict": 24, "preempt": 6, "stuck": 38}, kinds)
+        for name, kv, m in fam:
+            self.assertEqual(("migrate", "Auto", 0, "none"), (kv["mode"], kv["mig"], kv["inst"], kv["co"]))
+            self.assertTrue(run._cell_ok(kv["cell"]) if "cell" in kv else True)
+            text = outputs[f"gen-fault-move/{name}.yaml"]
+            reason = text.splitlines()[1]
+            self.assertTrue(reason.startswith("# reason: "), name)
+            self.assertIn("recorded once" if "stuck" in kv or kv.get("fault", "").startswith(("crashloop", "imagepull", "configkey", "readiness", "podkill")) else "move", reason, name)
+            if kv.get("fault", "").startswith("configkey") or kv.get("break") == "configkey":
+                self.assertIn("kind: ConfigMap", text, name)
+            if kv.get("break") == "stuck":
+                self.assertIn(f'instanceReadyTimeout: "{generate_cases.MOVE_STUCK_READY_TIMEOUT}"', text, name)
+            if "stuck" in kv:
+                self.assertNotIn("at", kv, name)
+                self.assertTrue("img" in kv or "break" in kv, name)
+            if kv.get("fault", "").startswith(("evict", "preempt")):
+                self.assertEqual(("migrating", "moved"), (kv["fault"].partition(":")[2], kv["victim"]), name)
+            if kv.get("once"):
+                self.assertEqual("moved", kv["victim"], name)
+
+    def test_every_new_cell_validates_and_lands_on_the_ledger_rows_it_names(self):
+        outputs, fam = self._more_rows()
+        rows = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, kv, _m in fam:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(outputs[f"gen-fault-move/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)
+                case = coverage.read_case(path)
+                self.assertEqual("migrate", case.operation, name)
+                for row in case.fault_rows():
+                    rows.setdefault(coverage.fault_row_label(row), set()).add(case.shape_family)
+        families = {"engine single", "engine gang", "engine+router single", "engine+router gang",
+                    "engine+decoder+router single", "engine+decoder+router gang"}
+        for row in ("crash at start, one-shot, running", "crash after Ready, one-shot, running", "image pull, one-shot, running",
+                    "config missing, one-shot, running", "config missing, persistent, running", "config missing, persistent, new",
+                    "readiness never passes, one-shot, running", "readiness never passes, persistent, running",
+                    "readiness never passes, persistent, new", "crash at start, persistent, new", "crash after Ready, persistent, new",
+                    "image pull, persistent, new", "pod Pending, one-shot", "pod Pending, persistent",
+                    "evicted or preempted, one-shot", "evicted or preempted, persistent"):
+            self.assertEqual(families, rows.get(row, set()), row)
+        self.assertEqual({f for f in families if f.endswith("single")}, rows["pod deleted by hand, persistent"])
+        self.assertEqual({f for f in families if f.endswith("gang")}, rows["gang member lost, one-shot"])
+        self.assertEqual({f for f in families if f.endswith("gang")}, rows["gang member lost, persistent"])
+        self.assertEqual({"engine+router single", "engine+router gang", "engine+decoder+router single", "engine+decoder+router gang"},
+                         rows["sibling broken, one-shot, running"])
+        self.assertEqual({"engine+decoder+router single", "engine+decoder+router gang"}, rows["sibling broken, persistent, new"])
 
     def test_node_cells_run_on_the_force_delete_lane(self):
         sys.path.insert(0, str(HERE.parents[2] / ".buildkite"))

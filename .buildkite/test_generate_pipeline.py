@@ -1549,7 +1549,9 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-fault-scale", "pd-mn", "")], 6)
         for topology, shards in (("engine", 4), ("engine-mn", 4), ("pd", 3), ("pd-mn", 3)):
             self.assertEqual(shard_counts[("gen-fault-delete", topology, "")], shards)
-        for topology, plain, policy in (("engine", 3, 4), ("engine-mn", 3, 4), ("pd", 2, 2), ("pd-mn", 2, 2)):
+        # The move beside the remaining faults rides the plain lanes; the
+        # exclusive taint and preemption cells shard on their own minutes.
+        for topology, plain, policy in (("engine", 9, 4), ("engine-mn", 10, 4), ("pd", 6, 2), ("pd-mn", 6, 2)):
             self.assertEqual(shard_counts[("gen-fault-move", topology, "")], plain)
             self.assertEqual(shard_counts[("gen-fault-move", topology, gp.EVAL_FORCE_DELETE_SLUG)], policy)
         self.assertEqual(shard_counts[("gen-fault-edit", "engine", "")], 4)
@@ -1585,7 +1587,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-lift", "engine-mn", "")], 2)
         self.assertEqual(shard_counts[("gen-lift", "pd", "")], 1)
         self.assertEqual(shard_counts[("gen-lift", "pd-mn", "")], 1)
-        self.assertEqual(job_count, 989)
+        self.assertEqual(job_count, 1010)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin
@@ -3059,9 +3061,9 @@ class TestEvalMode(PipelineTestCase):
         committed = sorted(case for _, _, cases in self.groups for case in cases)
         default = sorted(case for child in self.runner_jobs(self.full, scheduler="") for case in self.cases_of(child))
         self.assertEqual(default, committed)
-        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 989)
-        self.assertEqual(len(self.runner_jobs(self.full)), 2251)
-        self.assertEqual(len(self.full), 2265)
+        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 1010)
+        self.assertEqual(len(self.runner_jobs(self.full)), 2310)
+        self.assertEqual(len(self.full), 2324)
         self.assertEqual(len(self.smoke), 203)
         self.assertEqual(len(self.smoke_batches), 3)
         self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 312)
@@ -3233,7 +3235,7 @@ class TestPipelineUploads(PipelineTestCase):
     def test_todays_corpus_uploads_within_the_limit_and_the_total_is_pinned(self):
         self.assert_uploads_are_well_formed(self.batches, self.children)
         self.assertGreater(len(self.batches), 2)
-        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2375)
+        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2434)
 
     def test_the_full_round_records_its_verdicts_after_every_eval_group(self):
         last = self.batches[-1]
@@ -3318,7 +3320,9 @@ class TestPipelineUploads(PipelineTestCase):
             gp._eval_batches(children, 0)
 
     def test_a_single_eval_group_keeps_the_plain_key(self):
-        default_only = [item for item in self.children if item[0] == ""]
+        # The default scheduler's jobs span more than one upload today, so
+        # the single group is read on the slice of them that fits one.
+        default_only = [item for item in self.children if item[0] == ""][:gp.UPLOAD_JOB_LIMIT]
         self.patch_attr("_eval_children", lambda: default_only)
         groups = gp._gke_eval_groups()
         self.assertEqual([group["key"] for group in groups], ["omenative-e2e-kind-gke"])

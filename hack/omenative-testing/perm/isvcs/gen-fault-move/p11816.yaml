@@ -1,0 +1,18 @@
+# p11816: [gen] fault-move stuck failed imagepull engine+router N=4 SurgeThenDrain s1  mode=migrate Ne=4 Nd=0 Nr=2 ceil_e=6 ceil_d=0 ceil_r=2 co=none topo=engine img=example.com/canary-test/missing:none mig=Auto inst=0 stuck=failed
+# reason: the engine is pushed onto a revision whose runner carries an image that cannot be pulled; the push is left until its first attempt has failed (an Instance row reads Failed, the ladder still running); then a move of engine Instance 0 is requested on engine behind a router, single-pod: the move finishes, or is abandoned with a reason its record carries, within budget and is recorded once; the moved Instance ends whole, Ready and serving on one pod set at the index the record names (the revision its replacement runs is reported, not judged); the Instances that served when the request was filed keep serving; the Components neither pushed nor moved keep their pods; and the status keeps reporting the push that has not landed
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11816 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

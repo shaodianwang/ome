@@ -1,0 +1,27 @@
+# p11887: [gen] fault-move readiness persist at accept on sibling pd-mn W1 N=2  mode=migrate Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=2 ceil_r=2 fault=readiness:old co=none topo=pd-mn form=persist victim=sibling mig=Auto inst=0 at=accept
+# reason: a move of engine Instance 0 is requested on prefill/decode as gangs of 1 leader + 1 worker and as soon as the request is recorded, before the replacement exists, the decoder's highest Instance's pod stops passing readiness while it keeps running (the readiness switch set in it); the switch stays set to the end of the case; the move completes (a sibling that stops serving is not the move's to care about) and that Instance ends not serving with the status saying so, no repair demanded; the move is recorded once and the engine holds N Instances on distinct indices
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11887 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

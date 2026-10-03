@@ -1,0 +1,23 @@
+# p11726: [gen] fault-move readiness persist at drain on moved pd N=4  mode=migrate Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 fault=readiness:old co=none topo=pd form=persist victim=moved mig=Auto inst=0 at=drain
+# reason: a move of engine Instance 0 is requested on prefill/decode, single-pod and as the source is being taken down, the moved Instance's replacement pod, Ready and serving, stops passing readiness while it keeps running (the readiness switch set in it); the switch stays set to the end of the case; the drain is already decided, so the move completes and the moved Instance ends not serving with the status saying so; the move is recorded once and the engine holds N Instances on distinct indices
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11726 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

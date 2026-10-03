@@ -1,0 +1,18 @@
+# p11808: [gen] fault-move pending taint engine+router N=4 lift after-settle  mode=migrate Ne=4 Nd=0 Nr=2 ceil_e=5 ceil_d=0 ceil_r=2 fault=taint:all co=none topo=engine mig=Auto inst=0 lift=after-settle
+# reason: a NoSchedule taint on every schedulable node is in place when a move of engine Instance 0 is requested on engine behind a router, single-pod; the replacement cannot be placed, so the move waits with the Instance's operation reporting Unschedulable inside its unschedulable grace, nothing settled is taken down to make room, the engine keeps N serving and no row reads Failed; once the taint is lifted the replacement is placed, the move completes with its record Completed, the request consumed and the moved Instance whole, Ready and serving on its new placement
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11808 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

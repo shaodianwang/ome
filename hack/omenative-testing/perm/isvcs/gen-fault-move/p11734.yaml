@@ -1,0 +1,23 @@
+# p11734: [gen] fault-move evict at accept on moved pd N=4  mode=migrate Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 fault=evict:migrating co=none topo=pd victim=moved mig=Auto inst=0 at=accept
+# reason: a move of engine Instance 0 is requested on prefill/decode, single-pod and as soon as the request is recorded, before its replacement exists, the moved Instance's source pod is evicted through the Eviction API, as a node drain would, asked again while the disruption budget refuses it; the move finishes, or is abandoned with a reason its record carries and the Instance kept whole and serving at its source index; the floor lowered by the one Instance the eviction took holds, nothing is left mid-operation and nothing exceeds N+1 alive
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11734 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

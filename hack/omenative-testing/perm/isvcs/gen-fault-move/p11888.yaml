@@ -1,0 +1,27 @@
+# p11888: [gen] fault-move podkill at accept pd-mn W1 N=2 rp RecreateInstance target leader  mode=migrate Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=2 ceil_r=2 kill=leader fault=podkill:migrating co=none topo=pd-mn mig=Auto inst=0
+# reason: a move of engine Instance 0 is requested on prefill/decode as gangs of 1 leader + 1 worker and as soon as the request is recorded the leader of one engine gang is deleted by hand; the move completes end to end and is recorded once, the Instance the kill took is rebuilt under restart policy RecreateInstanceOnPodRestart (the whole Instance (leader and workers) is rebuilt), the floor lowered by that one Instance holds, nothing exceeds N+1 alive and no two gangs share an index
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11888 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

@@ -1395,6 +1395,49 @@ moments with the three victims, the three breaks and the node loss over the
 engine, PD and gang shapes; `isvcs/MANIFEST.md` lists what it leaves out and
 why.
 
+The same request runs beside the remaining faults (`p11700`+ of the same
+family). A break at a moment may be healed again (`lift=after-settle`: the
+killer stops or the pod is pointed back at its image once the break has
+bitten for `LIFT_SETTLE_S`) or be one kill of the replacement's runner
+(`once=1`, `victim=moved` at `surge` with `form=start` or at `drain` with
+`form=load`; the one-shot verdict is added to the move's). The missing key
+(`fault=configkey:missing lift=after-settle|never`) and the readiness
+switch (`fault=readiness:old form=recover|persist`) fire at the moment on
+the moved Instance, a peer or the decoder. A kept cause decides the path
+the verdict reads: a cause on a pod the move does not need (a peer's or the
+decoder's readiness switch, the decoder's key) leaves the move to complete
+and that Instance not serving with the status saying so; the source's
+switch at `accept` is drained with the source; a switch set on the
+replacement at `drain` leaves the move complete and the moved Instance not
+serving, the status saying so; a cause that holds the replacement itself
+(the engine's key, which every new engine pod reads, or a replacement that
+never passes readiness at `surge`) has the move abandoned with a reason or
+waiting with the status saying why (its record's message, or a row of the
+moved Component not Ready with its wait or failure recorded). A healed
+cause, a key put back, a switch lifted or one kill asks the broken
+Instance to serve again, rebuilt or healed where it stood; a rebuild by a
+`RestartTriggered` repair is demanded only for a crash or a pull failure
+the product keeps hitting. `fault=podkill:migrating` (with `kill=` on a
+gang and `repeat=` for the persistent form) deletes a pod by hand at the
+request; the move must complete, the floor lowered by one holds and the
+repeating verdict reads the window. `fault=evict:migrating at=<moment>` and
+`fault=preempt:migrating at=surge lift=after-settle` are the hook-op driver
+aimed at the moment's pod: the move finishes or is abandoned with a reason,
+its Instance whole and serving at its source index. `fault=taint:all
+lift=after-settle|never` is the pending form: the taint is armed before the
+request, the replacement waits with `Unschedulable` on its row, nothing
+settled is taken down, and the move completes after the lift or the wait
+holds across the hold window. `stuck=held|failed` under `mode=migrate`
+(with `img=`, or `break=crash-start|crash-load|configkey|stuck`; `bump=`
+names the member the push bumps, `victimcomp=` the one whose runner carries
+the break) requests the move once the push has reached the named state:
+the move finishes or is abandoned with a reason within budget, recorded
+once; the moved Instance ends whole and serving at the index the record
+names (the revision its replacement runs is reported, not judged); the
+Instances that served at the request keep serving; the Components neither
+pushed nor moved keep their pods; and the status keeps reporting the push
+that has not landed, the hold itself under `held`.
+
 ### A fault during a runtime edit (`mode=runtimerev` with a break, `expect=recover`)
 
 A break (`fault=crashloop:old form=start|load`, `fault=imagepull:old`,
