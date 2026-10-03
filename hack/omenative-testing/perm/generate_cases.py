@@ -66,6 +66,14 @@ runners (run.py + the KIND CI lane) already implement:
                           node is down with one (needs=forcedelete, the
                           force-delete lane); each half SKIPs on the other
                           lane's controller config
+                          and, from p4296, the same loss at a hook of an
+                          operation in flight (fault=node:<hook>): a push, a
+                          rollback, a strategy edit, a runtime edit, a scale
+                          up or down, a delete and the canary ladder on the
+                          six ledger shapes, transient (lift=after-settle) on
+                          every one and kept down until the policy relocates
+                          the Instance (lift=after-recover, needs=forcedelete)
+                          on the rows whose ledger cell has that form
     gen-ctrlrestart/ p4600+ the manager pod is deleted under an operation in
                           flight (fault=ctrlrestart:<hook>): mid-surge,
                           mid-drain, mid-migration, mid-canary and
@@ -447,6 +455,13 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     and neither mode moves a Ready Instance (Auto relocates on an expired
     attempt's deadline, which a Ready Instance never has). Restart policy
     and an idle rolling group change nothing either, and each cell says why.
+    At a hook of an operation in flight (fault=node:<hook>) the operation
+    must complete whichever form the loss takes: transient, the kubelet is
+    started again once the bite has held and the pods it never stopped serve
+    again; kept down, the policy frees the pods it held and the Instance is
+    rebuilt elsewhere before the kubelet returns. The floor is reported, not
+    judged, since the node takes every pod it ran. The move's node loss stays
+    the move family's (at=); its transient form is not emitted.
   - ctrlrestart has no hook inside a repair: the runner fires one fault per
     case and the idle-break handler fires no second one, so a restart while
     a crash-loop repair is open is not emitted (MISSING_HOOKS). The update
@@ -2405,6 +2420,113 @@ def emit_node_relocation(add):
                 d_life = lib.lifecycle(restart=RP_FULL[rp], mig={"mode": mig}) if is_pd(topo) else None
                 for co in NODE_COORDS:
                     _add_node_cell(add, topo, n, w, rp, mig, co, outcome, lift, life, d_life)
+
+
+# ── gen-node, the hook half: a node loss under an operation in flight ────────
+# The operations the hook families drive (a push, a rollback, a mid-roll
+# edit, a runtime edit, a scale, a delete) on the six ledger shapes, and the
+# canary ladder on the gate shapes, each with the kubelet under the victim
+# stopped at the operation's hook (fault=node:<hook>). The transient loss
+# (lift=after-settle: the kubelet is started again once the bite has held,
+# so the pods it ran serve again) runs on every operation and holds on
+# either lane; the loss the node does not come back from until the
+# force-delete policy has relocated the Instance (lift=after-recover,
+# needs=forcedelete) runs on the operations that keep the victim Instance
+# and whose ledger row has the persistent form: a rollback, an edit, a
+# runtime edit, a scale-down and the canary.
+NODE_HOOK_OPS = ["push", "rollback", "edit", "runtime", "scaledown", "scaleup", "delete"]
+NODE_HOOK_PERSISTENT_OPS = {"rollback", "edit", "runtime", "scaledown", "canary"}
+NODE_HOOK_FORMS = [("one-shot", "after-settle"), ("persistent", "after-recover")]
+# The hook each operation offers the loss: the first pod of the new revision
+# under a push or a runtime edit (the roll is visibly in flight), the first
+# traffic step's soak under the canary, the moment the others land.
+NODE_HOOK_AT = {"push": "rotating", "runtime": "rotating", "canary": "canary-serving@0"}
+NODE_HOOK_ROLLS = {"push", "rollback", "edit", "runtime"}
+
+
+def _node_hook_kv(op, topo, n, nr):
+    if op == "push":
+        strat, surge, unavail = HOOK_STRAT
+        return dict(**counts(topo, n, nr), **ceilings(topo, n, strat, surge, nr))
+    return _op_kv(op, topo, n, nr, False)
+
+
+def _node_hook_comps(op, topo, n, w, nr):
+    if op == "push":
+        strat, surge, unavail = HOOK_STRAT
+        return comps(topo, n, w, lib.lifecycle(strat=strat, surge=surge, unavail=unavail), nr=nr)
+    return _op_comps(op, topo, n, w, nr, False)
+
+
+def _node_hook_reason(op, form, shape, topo, gang):
+    does = {"push": "the engine is bumped under SurgeThenDrain",
+            "canary": "the engine is bumped under the story ladder with automatic promotion"}.get(op) or _op_does(op, False, topo)
+    at = {"push": "at the first pod of the new revision", "runtime": "at the first pod of the new revision",
+          "canary": "while the first step soaks its split"}.get(op, "as it lands")
+    victim = {"scaledown": "the highest engine Instance the scale keeps", "scaleup": "the highest engine Instance",
+              "delete": "the highest engine Instance", "canary": "the highest stable-side engine Instance"
+              }.get(op, "the highest engine Instance still on the starting revision")
+    out = (f"{does} on {shape}, and {at} the kubelet of the node under {victim} is stopped; the node reads NotReady "
+           f"on the cluster's own grace and no pod of the Instance on it serves, every other pod that node ran going "
+           f"with it, so the capacity floor is reported rather than judged")
+    if form == "one-shot" and op == "delete":
+        out += ("; once that has held for the settle window the kubelet is started again and the pods it held, already "
+                "on their way out, leave with the teardown")
+    elif form == "one-shot":
+        out += ("; nothing rebuilds the Instance elsewhere in the meantime, and once that has held for the settle window "
+                "the kubelet is started again: the pods it ran were never stopped, so they serve again on their own pods")
+    else:
+        out += ("; the node stays down: once its unreachable evidence is older than the deployed force-delete threshold "
+                "the policy frees the pod names it holds and the controller rebuilds the Instance on other nodes, Ready "
+                "and serving with every pod the node held replaced, while the node is still down; then the kubelet is "
+                "started again with nothing of the Instance left on it")
+    end = {"push": "the roll completes with every Instance on the new revision and serving",
+           "canary": "the ladder walks every step to Stable with every Instance on the canary revision and serving"
+           }.get(op) or _op_end(op)
+    out += f"; {end}, with every row settled, no hold left behind and the reset mailbox never written"
+    if gang:
+        out += ("; each Instance is a gang, so the loss takes the member the node ran and the restart policy decides "
+                "whether that member or the whole gang is rebuilt")
+    return out
+
+
+def emit_node_hooks(add):
+    """The hook half of gen-node, minted after the idle halves."""
+    for topo, n, w, nr in DISRUPT_SHAPES:
+        for op in NODE_HOOK_OPS:
+            strat, surge, unavail = HOOK_STRAT if op == "push" else _op_strategy(op, False)
+            for form, lift in NODE_HOOK_FORMS:
+                if form == "persistent" and op not in NODE_HOOK_PERSISTENT_OPS:
+                    continue
+                hook = NODE_HOOK_AT.get(op, HOOK_PHASE)
+                kv = dict(_node_hook_kv(op, topo, n, nr), fault=f"node:{hook}", lift=lift, co="none", topo=topo)
+                if op != "delete":
+                    kv["floor_soft"] = 1
+                if op in NODE_HOOK_ROLLS:
+                    kv["order_soft"] = 1
+                if form == "persistent":
+                    kv["needs"] = NODE_NEEDS["relocated"]
+                desc = (f"{GEN_MARK} node {op} {shape_tag(topo, w, nr)} N={n}"
+                        + (f" {strat} {budget_tag(strat, surge, unavail)}" if op in NODE_HOOK_ROLLS else "")
+                        + f" {form} lift {lift}")
+                meta = dict(strat=strat if op in NODE_HOOK_ROLLS else "(dormant: nothing rolls)", verb=f"node:{op}",
+                            faultop=f"node {op}", op=op, form=form, lift=lift, hook=hook)
+                add("gen-node", desc, kv, _node_hook_comps(op, topo, n, w, nr),
+                    _node_hook_reason(op, form, shape_words(topo, w, nr), topo, is_mn(topo)) + _op_controls(topo, nr, op),
+                    meta, cell=("node-hook", op, form, topo, w, nr), dedicated=(op == "runtime"))
+    for family, topo, n, w, nr in GATE_SHAPES:
+        for form, lift in NODE_HOOK_FORMS:
+            hook = NODE_HOOK_AT["canary"]
+            kv = dict(gate_kv(topo, n, nr), canary="auto", fault=f"node:{hook}", lift=lift, floor_soft=1, co="none", topo=topo)
+            if form == "persistent":
+                kv["needs"] = NODE_NEEDS["relocated"]
+            desc = f"{GEN_MARK} node canary {_canary_shape(topo, w, nr)} N={n} {form} lift {lift}"
+            meta = dict(strat="SurgeThenDrain", verb="node:canary", faultop="node canary", op="canary", form=form,
+                        lift=lift, hook=hook, shape=family)
+            add("gen-node", desc, kv, gate_comps(topo, n, w, nr, GATE_RP),
+                _node_hook_reason("canary", form, _gate_shape_words(family, n, w), topo, is_mn(topo)), meta,
+                cell=("node-hook", "canary", form, topo, w, nr),
+                coord=lib.canary_block(story_ladder("auto"), components=gate_group(topo)))
 
 
 # ── gen-ctrlrestart: the manager restarts under an operation in flight ──────
@@ -7982,6 +8104,7 @@ def build_outputs():
     emit_imagepull(add)
     emit_node(add)
     emit_node_relocation(add)
+    emit_node_hooks(add)
     emit_ctrlrestart(add)
     emit_canary_crash(add)
     emit_canary_retarget(add)

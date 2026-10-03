@@ -266,7 +266,10 @@ def _fault(v):
     if kind == "configkey":
         # the running revision's key removed (under a canary before the push, idle, or at a hook), or a pushed revision reading a missing key
         return param in ("missing", "new", "idle") or _hook(param)
-    return {"node": "notready"}.get(kind) == param
+    if kind == "node":
+        # the idle service or a move moment (notready), a hook of the roll or the moment another operation lands, or a canary grid state
+        return param == "notready" or param in FAULT_PHASES or _hook(param)
+    return False
 
 
 def _edit(v):

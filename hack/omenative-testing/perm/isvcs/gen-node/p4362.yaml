@@ -1,0 +1,22 @@
+# p4362: [gen] node canary engine N=8 one-shot lift after-settle  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 fault=node:canary-serving@0 floor_soft=1 co=none topo=engine canary=auto lift=after-settle
+# reason: the engine is bumped under the story ladder with automatic promotion on engine single (8 Instances), and while the first step soaks its split the kubelet of the node under the highest stable-side engine Instance is stopped; the node reads NotReady on the cluster's own grace and no pod of the Instance on it serves, every other pod that node ran going with it, so the capacity floor is reported rather than judged; nothing rebuilds the Instance elsewhere in the meantime, and once that has held for the settle window the kubelet is started again: the pods it ran were never stopped, so they serve again on their own pods; the ladder walks every step to Stable with every Instance on the canary revision and serving, with every row settled, no hold left behind and the reset mailbox never written
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p4362 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

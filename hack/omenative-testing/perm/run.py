@@ -5272,7 +5272,9 @@ def _fault_ok(v):
         # key the ConfigMap lacks (new).
         return param in (CONFIGKEY_PARAM, CRASHLOOP_NEW, IDLE_FAULT_PHASE) or _canary_hook_ok(param)
     if kind == "node":
-        return param == NODE_PARAM
+        # The idle service or a move moment (notready), a hook of a roll or
+        # the moment another operation lands, or a canary grid state.
+        return param == NODE_PARAM or param in FAULT_PHASES or _canary_hook_ok(param)
     return False
 
 
@@ -6771,10 +6773,11 @@ def _node_allowed(node, nodes, managers):
     return bool(info) and not info["control_plane"] and node not in managers and _node_is_container(node)
 
 
-def _node_pick(pod_state, old_hashes, comp):
+def _node_pick(pod_state, old_hashes, comp, inst=None):
     """(victim pod, its node) by the break rule over the pods whose node may
     lose its kubelet: a worker that is a running container and hosts no
-    manager pod. (None, reason) when no pod qualifies."""
+    manager pod; `inst` aims at one Instance index instead (an operation
+    whose natural victim must differ). (None, reason) when no pod qualifies."""
     nodes, managers, allowed = _nodes_info(), _manager_nodes(), {}
     eligible = {}
     for name, p in pod_state.items():
@@ -6785,7 +6788,7 @@ def _node_pick(pod_state, old_hashes, comp):
             allowed[node] = _node_allowed(node, nodes, managers)
         if allowed[node]:
             eligible[name] = p
-    victim = _crashloop_pick_pod(eligible, old_hashes, comp)
+    victim = _crashloop_pick_pod(eligible, old_hashes, comp, inst=inst)
     if not victim:
         return None, (f"no {comp} pod sits on a worker that is a running container and hosts no manager pod "
                       f"(nodes under the case: {', '.join(sorted(allowed)) or 'none'})")
@@ -6815,7 +6818,7 @@ def _fault_node_fire(f, pod_state, old_hashes):
     end-of-run sweep find it however the case ends. No eligible node is a
     skip, not a failure."""
     comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
-    victim, node = _node_pick(pod_state, old_hashes, comp)
+    victim, node = _node_pick(pod_state, old_hashes, comp, inst=f.get("aim_inst"))
     if not victim:
         f["skip"] = f"node fault unavailable here: {node}"
         f["notes"].append(f"ⓘ {f['skip']}")
@@ -6832,6 +6835,9 @@ def _node_stop(f, victim, node, pod_state):
              crash_hash=state.get("hash", ""), crash_uid=state.get("uid", ""), node=node,
              bite="its node NotReady with no pod of it serving there", cause=f"the kubelet of node {node}",
              kubelet_restored=False)
+    # The victim Instance's pods the node holds: replaced by a relocation, back after a transient loss.
+    f["lost_uids"] = {p["uid"] for _n, p in _instance_pods(pod_state, comp, f["crash_inst"])
+                      if p.get("uid") and p.get("node") == node}
     _FAULT_CLEANUPS.append(("kubelet", f))   # registered BEFORE the stop
     kubectl("label", "node", node, f"{KUBELET_LABEL}={f['case_id']}", "--overwrite")
     d = _docker("exec", node, "systemctl", "stop", "kubelet")
@@ -6861,6 +6867,153 @@ def _node_bite_held(node, pods):
     kubelet stop has bitten. Read on that node's pods alone, since a gang
     whose other members sit on live nodes keeps those members serving."""
     return not any(p.get("ready") and p.get("serving") for _n, p in pods if p.get("node") == node)
+
+
+def _node_hook_fault(f):
+    """A node loss at a hook of an operation in flight or at a canary grid
+    state (fault=node:<hook>), as against the idle service or a move moment
+    (fault=node:notready)."""
+    return bool(f) and f.get("kind") == "node" and f.get("param") != NODE_PARAM
+
+
+def _node_lift_tick(ctx, f, now):
+    """The lift of a node loss fired at a hook. The bite is the node reading
+    NotReady with no pod of the victim Instance on it serving (read every
+    other second). after-settle starts the kubelet again LIFT_SETTLE_S after
+    the bite; after-recover once every pod the node held is gone from the
+    API and the Instance is Ready and serving on other nodes (under a
+    delete, once those pods are gone), which the force-delete policy brings
+    about while the node stays down. The bite, the recovery and the lift are
+    recorded on the fault; a kubelet that cannot be started is apparatus."""
+    if not _node_hook_fault(f) or not f.get("fired") or not f.get("node") or f.get("infra_fail") or f.get("lifted_at"):
+        return
+    if now - f.get("node_poll_ts", 0.0) < 2.0:
+        return
+    f["node_poll_ts"] = now
+    comp, inst, node = f["crash_comp"], f["crash_inst"], f["node"]
+    pods = _instance_pods(ctx["pod_state"], comp, inst)
+    if f.get("bite_ts") is None:
+        if not _node_ready(node) and _node_bite_held(node, pods):
+            f["bite_ts"] = now
+            f["notes"].append(f"node {node} read NotReady with no pod of {comp} Instance {inst} serving there "
+                              f"{now - f['fired_ts']:.0f}s after the stop")
+            print(f"    bite: {f['notes'][-1]}")
+        return
+    if f.get("lift") == "after-recover":
+        lost = f.get("lost_uids") or set()
+        if f.get("reaped_at") is None and not _uids_present(ctx["pod_state"], lost):
+            f["reaped_at"] = now
+        due = f.get("reaped_at") is not None and (f.get("hook_op_kind") == "delete" or _instance_relocated(pods, lost, node))
+        if due:
+            f["recovered_at"] = now
+    else:
+        due = now - f["bite_ts"] >= LIFT_SETTLE_S
+    if not due:
+        return
+    if _node_restore(f):
+        f["lifted_at"] = now
+        f["notes"].append(f"node {node}: kubelet started again {now - f['fired_ts']:.0f}s after the stop (lift={f.get('lift')})")
+        print(f"    lift: {f['notes'][-1]}")
+    else:
+        f["infra_fail"] = f"node: starting the kubelet of {node} again failed"
+
+
+def _node_hook_budget(ctx, f, budget):
+    """The watch budget of an operation with a node loss at its hook: the
+    operation's own, plus the cluster's NotReady grace and the settle window
+    before the kubelet is started again, or the relocation budget while it
+    stays down, plus one base rotate budget for what the lift leaves to
+    finish; within MAX_BUDGET_S."""
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+    if f.get("lift") == "after-recover":
+        extra = _relocation_budget(ctx, comp, ctx.get("force_delete"))
+    else:
+        extra = NODE_NOTREADY_GRACE_S + LIFT_SETTLE_S
+    return min(MAX_BUDGET_S, budget + extra + ROTATE_BASE_S)
+
+
+def _node_hook_watch(ctx, f, done, budget):
+    """Watch an operation complete under a node loss at its hook: done()
+    sustained STABILITY_S once the lift tick has started the kubelet again,
+    so a transient loss is judged after the node is back and a relocation
+    after the policy has acted. Returns CONVERGED, ROTATE_TIMEOUT or
+    INFRA-FAIL."""
+    t0, stable = ctx["trigger_ts"], None
+    while not ctx["closed"] and time.time() - t0 < budget:
+        _read_one(ctx)
+        now = time.time()
+        if f.get("infra_fail"):
+            return "INFRA-FAIL"
+        if f.get("lifted_at") and done():
+            stable = stable or now
+            if now - stable >= STABILITY_S:
+                ctx["converged_at"] = stable - t0
+                return "CONVERGED"
+        else:
+            stable = None
+    return "ROTATE_TIMEOUT"
+
+
+def _node_hook_checks(f, what, completed, state, verdict, notes, checks):
+    """The verdict of a node loss at a hook of an operation. The fault must
+    have fired and the node bitten (apparatus otherwise); after-recover
+    needs the Instance relocated while the node was down (under a delete,
+    the pods it held gone) and nothing the node held left in the API; the
+    kubelet must have been started again at the lift's phase; the operation
+    must complete (completed is None where the caller's own verdict judges
+    that); and the reset mailbox stays unwritten where the caller read it."""
+    if not f or f.get("infra_fail") or f.get("skip"):
+        return verdict
+    kind, where, node, lift = f["kind"], f.get("param"), f.get("node"), f.get("lift")
+    comp, inst, t0 = f.get("crash_comp"), f.get("crash_inst"), f.get("fired_ts") or 0.0
+    if not f.get("fired"):
+        verdict = "FAIL"
+        notes.append(f"{kind}:{where} never fired")
+        checks.append(f"  ✗ {kind}:{where} never fired: {what} never reached {where}")
+        return verdict
+    if f.get("bite_ts") is None:
+        f["infra_fail"] = f"{kind}: node {node} never read NotReady with {comp} Instance {inst} down there"
+        return verdict
+    checks.append(f"  ✓ {kind}: node {node} read NotReady with no pod of {comp} Instance {inst} serving there "
+                  f"{f['bite_ts'] - t0:.0f}s after the stop at {where} of {what}")
+    if lift == "after-recover":
+        if f.get("recovered_at") is None:
+            verdict = "FAIL"
+            notes.append(f"{kind}: {comp} Instance {inst} was not relocated while node {node} was down")
+            checks.append(f"  ✗ {kind}: {comp} Instance {inst} never came back Ready and serving on other nodes with every "
+                          f"pod the node held replaced while the node was down (relocation needs the force-delete policy)")
+            return verdict
+        how = ("every pod the node held gone" if f.get("hook_op_kind") == "delete"
+               else "Ready and serving on other nodes with every pod the node held replaced")
+        checks.append(f"  ✓ {kind}: {comp} Instance {inst} relocated — {how} {f['recovered_at'] - t0:.0f}s after the stop, "
+                      f"while the node was still down")
+    if f.get("lifted_at") is None:
+        verdict = "FAIL"
+        notes.append(f"{kind}: the kubelet of {node} was never started again (lift={lift})")
+        checks.append(f"  ✗ {kind}: the watch ended before the kubelet of {node} was started again (lift={lift} never came due)")
+        return verdict
+    checks.append(f"  ✓ {kind}: the kubelet of {node} started again {f['lifted_at'] - t0:.0f}s after the stop (lift={lift})")
+    if lift == "after-recover":
+        if f.get("reaped_at") is None:
+            verdict = "FAIL"
+            notes.append(f"{kind}: pods the node held were still in the API")
+            checks.append(f"  ✗ {kind}: pods the node held were still in the API (the policy's sweep must leave nothing "
+                          f"of the Instance behind)")
+        else:
+            checks.append(f"  ✓ {kind}: every pod the node held was gone {f['reaped_at'] - t0:.0f}s after the stop")
+    if completed is True:
+        checks.append(f"  ✓ {what} completed with the node loss in its window")
+    elif completed is False:
+        verdict = "FAIL"
+        notes.append(f"{what} did not complete under the node loss ({state})")
+        checks.append(f"  ✗ {what} did not complete within budget under the node loss ({state})")
+    if f.get("reset_used") is True:
+        verdict = "FAIL"
+        notes.append(f"{kind}: the reset mailbox was written")
+        checks.append(f"  ✗ {kind}: {RESET_ANNO} is set on the ISVC — a recovery that needed the reset mailbox is not the policy's")
+    elif f.get("reset_used") is False:
+        checks.append(f"  ✓ {kind}: recovered without the reset mailbox ({RESET_ANNO} absent)")
+    return verdict
 
 
 def _event_window_start(since_epoch):
@@ -7757,7 +7910,7 @@ def _hook_fault_fired_checks(f, phases, verdict, notes, checks):
         return verdict
     mine = f.get("kind") in GATE_FAULTS or (f.get("kind") in BREAK_FAULTS
                                            and (f.get("lift") == HEAL_LIFT or f.get("victim") == "canary")) \
-        or (f.get("kind") in CANARY_STABLE_FAULTS - BREAK_FAULTS)
+        or (f.get("kind") in CANARY_STABLE_FAULTS - BREAK_FAULTS) or _node_hook_fault(f)
     where = str(f.get("param") or "")
     if not mine or where.partition("@")[0] not in CANARY_HOOKS:
         return verdict
@@ -8460,7 +8613,7 @@ def _fault_tick(ctx):
       draining  → first old-revision pod observed on its way out;
       migrating → migration accept observed (_migrate sets ctx['fault_migrating'])."""
     f = ctx.get("fault")
-    if not f or (f["kind"] not in HOOK_FAULTS and not _canary_stable_hook_fault(f)):
+    if not f or (f["kind"] not in HOOK_FAULTS and not _canary_stable_hook_fault(f) and not _node_hook_fault(f)):
         return
     if ctx.get("trigger_ts") is None or _fault_fired_by_handler(f) or _fault_before_push(f) or _metric_on_new(f):
         return
@@ -8471,6 +8624,7 @@ def _fault_tick(ctx):
     if f["fired"]:
         if _fault_once(f):
             _once_bite_tick(f)   # the victim is read live until its restart shows
+        _node_lift_tick(ctx, f, time.time())
         _repeat_tick(f, ctx)
         return
     if f.get("hook_op") and not f.get("hook_op_fired"):
@@ -13413,6 +13567,22 @@ HOOK_FAULT_MODES = {"rollout", "scaledown", "runtimerev", "recreate", "migrate"}
 # land.
 HOOK_OP_HOOKS = {"rollback": {"settling"}, "edit": {"settling"}, "scale": {"settling"}, "delete": {"settling"},
                  "runtime": WINDOW_ROLL_HOOKS}
+# A node loss at a hook of an operation in flight (fault=node:<hook>): the
+# kubelet under the victim is stopped at a hook of the roll under a push or
+# a runtime edit, as a rollback, an edit, a scale or a delete lands, or at a
+# canary grid state, instead of on the idle service. lift=after-settle
+# starts it again once the bite has held (the pods it ran were never
+# stopped, so they serve again); lift=after-recover keeps it down until the
+# force-delete policy has freed the pods it held and the Instance is Ready
+# and serving on other nodes (under a delete, until those pods are gone),
+# which needs that policy deployed (needs=forcedelete). The operation must
+# complete either way. The node turns NotReady on the cluster's own grace
+# before the bite is read.
+NODE_HOOK_LIFTS = {"after-settle", "after-recover"}
+NODE_HOOK_HOOKS = {"push": WINDOW_ROLL_HOOKS, "runtime": WINDOW_ROLL_HOOKS, "rollback": {"settling"},
+                   "edit": {"settling"}, "scale": {"settling"}, "delete": {"settling"}}
+NODE_HOOK_MODES = HOOK_FAULT_MODES - {"migrate"}
+NODE_NOTREADY_GRACE_S = int(60 * TIMEOUT_MULT)
 
 
 def _hook_op_pods(st, ppi):
@@ -13473,12 +13643,21 @@ def _hook_op(case_id, yaml_file, desc, hdr):
     if reason:
         print(f"  ⓘ {kind} fault unavailable here: {reason}")
         return _write_fail(case_id, desc, hdr, "SKIP", f"{kind} fault unavailable here: {reason}")
+    lifecycle = {}
+    if kind == "node" and hdr.get("needs"):
+        lifecycle, read_err = _controller_lifecycle_config()
+        reason = _needs_unmet(str(hdr["needs"]), lifecycle, read_err)
+        if reason:
+            print(f"  ⓘ {reason}")
+            return _write_fail(case_id, desc, hdr, "SKIP", reason)
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
     if err:
         return _write_fail(case_id, desc, hdr, *err)
+    ctx["force_delete"] = (lifecycle or {}).get(FORCE_DELETE_KEY)
     f, configured, ppi = ctx["fault"], ctx["configured"], ctx["pods_per_inst"]
     f["hook_op"] = True
     op, hook, lift = _window_operation(hdr), f["param"], str(hdr.get("lift") or "")
+    f["hook_op_kind"] = op
     when = f"at {hook}" if hook != "settling" else "as it lands"
     st = _op_launch(ctx, hdr, op, f"{kind}:{hook} {when}" + (f" (lift={lift})" if lift else ""))
     if st["error"]:
@@ -13486,6 +13665,11 @@ def _hook_op(case_id, yaml_file, desc, hdr):
                        [f"trigger failed: {st['error']}"], [f"  ✗ trigger failed: {st['error']}"])
     N0, target, rb, medit, mv = st["N0"], st["target"], st["rb"], st["medit"], st["mv"]
     acting, done, budget = st["acting"], st["done"], st["budget"]
+    if kind == "node":
+        budget = _node_hook_budget(ctx, f, budget)
+        comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+        if st["scale_down"] and comp in acting:
+            f["aim_inst"] = target[comp] - 1   # the highest Instance the scale keeps; the loss never rides one it takes
     if mv is not None:
         mv["accept_abandoned"] = True   # a move may answer a pod taken at its moment by abandoning with a reason
     reached, why = _window_wait_hook(ctx, op, hook, rb, medit, mv, acting, done, budget)
@@ -13504,6 +13688,8 @@ def _hook_op(case_id, yaml_file, desc, hdr):
         ctx["fault_migrating"] = True   # the migrating hook is reached: a refused eviction asks again from here
     _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
     f["hook_op_fired"] = True
+    if f.get("skip"):
+        return _finish(case_id, desc, hdr, ctx, "SKIP", "SKIP", [f["skip"]], [])
     if f["infra_fail"]:
         return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
     if mv is not None and kind == "evict":
@@ -13519,6 +13705,13 @@ def _hook_op(case_id, yaml_file, desc, hdr):
             allowance[f["crash_comp"]] += 1   # the press itself took a serving Instance down
         verdict = _pending_checks(f, lift, state, out, ctx, sorted(configured), allowance, verdict, notes, checks)
         completed = state == "DONE"
+    elif kind == "node":
+        print(f"  Phase 3: watching {what} complete under the node loss (lift={lift}; ≤{budget}s)")
+        state = _node_hook_watch(ctx, f, done, budget)
+        completed = state == "CONVERGED"
+        if op != "delete" and not f.get("infra_fail"):
+            f["reset_used"] = RESET_ANNO in (_isvc_annotations(case_id) or {})
+        verdict = _node_hook_checks(f, what, completed, state, verdict, notes, checks)
     else:
         print(f"  Phase 3: watching {what} complete after the eviction (≤{budget}s)")
         state = _hook_op_watch(ctx, f, done, budget)
@@ -13543,7 +13736,11 @@ def _hook_op(case_id, yaml_file, desc, hdr):
     verdict = _ceiling_checks(ctx, verdict, notes, checks)
     if op != "delete":
         verdict = min_ready_checks(ctx, sorted(configured if op == "scale" else acting), verdict, notes, checks)
-        verdict = gang_atomicity_checks(ctx, sorted(acting), verdict, notes, checks)
+        if kind == "node":
+            checks.append("  ⓘ gang atomicity not judged: the restart policy decides whether a member the node took "
+                          "is rebuilt alone or with its gang")
+        else:
+            verdict = gang_atomicity_checks(ctx, sorted(acting), verdict, notes, checks)
         if completed:
             verdict = index_collision_checks(ctx, sorted(acting), verdict, notes, checks)
         if op in ("rollback", "edit", "runtime"):
@@ -14749,6 +14946,37 @@ def validate_case_file(path):
         if hop == "delete" and fault_kind == "preempt":
             errs.append(f"{path}:1: fault={fields.get('fault')} holds a pod the operation places, and a delete places "
                         f"nothing until its recreate (an eviction is the pod fault a delete meets)")
+    # A node loss at a hook of an operation in flight (fault=node:<hook>): a
+    # roll's own hooks under a push or a runtime edit, the moment a rollback,
+    # an edit, a scale or a delete lands, or a canary grid state. The lift
+    # names the form; the persistent one reads the force-delete policy.
+    node_hook = fault_kind == "node" and fault_param != NODE_PARAM
+    if node_hook:
+        if mode == "canary":
+            if not _canary_hook_ok(fault_param):
+                errs.append(f"{path}:1: fault=node:<hook> under a canary names a grid state (fault=node:canary-<state>[@step])")
+        elif mode not in NODE_HOOK_MODES or during == IDLE_FAULT_PHASE or at_move:
+            errs.append(f"{path}:1: fault=node:{fault_param} is a node loss at a hook of an operation in flight (a push, "
+                        f"rollback=1, a mid-roll edit=, mode={'|'.join(sorted(NODE_HOOK_MODES - {'rollout'}))} or "
+                        f"mode=canary); the idle service and a move moment take fault=node:{NODE_PARAM}")
+        else:
+            hop = _window_operation(fields)
+            if fault_param not in NODE_HOOK_HOOKS.get(hop, set()):
+                errs.append(f"{path}:1: fault=node:{fault_param} at a hook of {WINDOW_WHAT[hop]} fires at "
+                            f"fault=node:{'|'.join(sorted(NODE_HOOK_HOOKS.get(hop, set())))}")
+            if hop == "rollback" and during not in WINDOW_ROLLBACK_HOOKS:
+                errs.append(f"{path}:1: a node loss over a rollback fires once the rollback has fired at "
+                            f"during={'|'.join(sorted(WINDOW_ROLLBACK_HOOKS))}")
+        if lift not in NODE_HOOK_LIFTS:
+            errs.append(f"{path}:1: fault=node:{fault_param} needs lift=after-settle (the kubelet started again once the bite "
+                        f"has held) or lift=after-recover (kept down until the Instance is relocated, or under a delete "
+                        f"until the pods it held are gone)")
+        if (lift == "after-recover") != (str(fields.get("needs", "")) == NEEDS_FORCE_DELETE):
+            errs.append(f"{path}:1: lift=after-recover under fault=node:{fault_param} is the force-delete policy's outcome "
+                        f"(needs={NEEDS_FORCE_DELETE}); lift=after-settle holds on either lane and names no needs=")
+        for k in ("repeat", "once", "form", "victim", "stuck", "pauseat", "break", "then"):
+            if k in fields:
+                errs.append(f"{path}:1: {k}= does not combine with fault=node:{fault_param} (the operation's completion is the verdict)")
     if fault_kind in BREAK_FAULTS | {READINESS_FAULT, "configkey"} and "victimcomp" in fields \
             and str(fields["victimcomp"]) not in BREAK_VICTIM_COMPS:
         errs.append(f"{path}:1: victimcomp={fields['victimcomp']}: a break victim is a pod of "
@@ -15133,7 +15361,7 @@ def validate_case_file(path):
             if k in fields:
                 errs.append(f"{path}:1: {k}= does not combine with fault=configkey:{CRASHLOOP_NEW} (the lift says what follows)")
     elif fault_kind in LIFT_FAULTS and not broken_op and not rollback_break and not edit_break and not canary_key \
-            and not runtimerev_break:
+            and not runtimerev_break and not node_hook:
         phases = LIFT_PHASES_BY_FAULT[fault_kind]
         if during != IDLE_FAULT_PHASE and not at_move:
             errs.append(f"{path}:1: fault={fields.get('fault')} fires on the idle service (needs during={IDLE_FAULT_PHASE}) "
@@ -21911,9 +22139,22 @@ def _canary(case_id, yaml_file, desc, hdr):
     revision). NOTE: gateway data-plane weighting is a downstream consumer
     (per-revision Services + weighted HTTPRoute) and is out of this harness's
     scope — the harness verifies the producer-side weights OME writes to status."""
+    lifecycle = {}
+    if _node_hook_fault(_fault_new(case_id, hdr)):
+        reason = _node_fault_capability()
+        if reason:
+            print(f"  ⓘ node fault unavailable here: {reason}")
+            return _write_fail(case_id, desc, hdr, "SKIP", f"node fault unavailable here: {reason}")
+        if hdr.get("needs"):
+            lifecycle, read_err = _controller_lifecycle_config()
+            reason = _needs_unmet(str(hdr["needs"]), lifecycle, read_err)
+            if reason:
+                print(f"  ⓘ {reason}")
+                return _write_fail(case_id, desc, hdr, "SKIP", reason)
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
     if err:
         return _write_fail(case_id, desc, hdr, *err)
+    ctx["force_delete"] = (lifecycle or {}).get(FORCE_DELETE_KEY)
     # The grid's Idle column is a service with no run pinned. The initial
     # rollout's run closes on a pass after the fleet settles, so a pre-arm
     # or a bump that lands before it reads a closing run, not Idle.
@@ -22156,6 +22397,8 @@ def _canary(case_id, yaml_file, desc, hdr):
         budget = min(MAX_BUDGET_S, budget + 300)
     if _fault_repeats(fault):
         budget = min(MAX_BUDGET_S, budget + REPEAT_CYCLE_S * int(fault["repeat"]))
+    if _node_hook_fault(fault):
+        budget = _node_hook_budget(ctx, fault, budget)
     print(f"  Phase 3: driving + observing the canary (≤{budget}s)")
 
     phases, traffic_by_step = set(), {}
@@ -22560,6 +22803,8 @@ def _canary(case_id, yaml_file, desc, hdr):
         verdict = _repeat_checks(ctx["fault"], ctx["pods_per_inst"], group, op_pods, ctx["trigger_ts"], verdict, notes, checks)
         verdict = _repeat_end_checks(case_id, N, ctx["configured"], verdict, notes, checks)
     verdict = _hook_fault_fired_checks(ctx.get("fault"), phases, verdict, notes, checks)
+    if _node_hook_fault(ctx.get("fault")):
+        verdict = _node_hook_checks(ctx["fault"], "the canary", None, "", verdict, notes, checks)
     if gate_fault:
         verdict = _gate_fault_checks(ctx, gate_fault, gate, on_inconclusive, failed_checks_peak, rejected, phases,
                                      verdict, notes, checks)
@@ -22976,6 +23221,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     if mode in ("migrate", "recreate", "runtimerev") and mode_fault in WINDOW_FAULTS:
         return _window_op(case_id, yaml_file, desc, hdr)
     if mode in ("recreate", "runtimerev") and mode_fault in HOOK_OP_FAULTS:
+        return _hook_op(case_id, yaml_file, desc, hdr)
+    if mode in NODE_HOOK_MODES and _node_hook_fault(_fault_new(case_id, hdr)):
         return _hook_op(case_id, yaml_file, desc, hdr)
     if mode == "scaledown" and mode_fault == "preempt" and hdr.get("during") != IDLE_FAULT_PHASE:
         return _hook_op(case_id, yaml_file, desc, hdr)
@@ -23474,6 +23721,8 @@ def run_case(case_id):
     if _tight_cell(hdr):
         return _tight_roll(case_id, yaml_file, desc, hdr)
     if fault_kind in HOOK_OP_FAULTS and _window_operation(hdr) in ("rollback", "edit"):
+        return _hook_op(case_id, yaml_file, desc, hdr)
+    if _node_hook_fault(_fault_new(case_id, hdr)):
         return _hook_op(case_id, yaml_file, desc, hdr)
     if fault_kind in PENDING_FAULTS and str(hdr.get("lift")) in PENDING_LIFTS:
         return _pending_roll(case_id, yaml_file, desc, hdr)

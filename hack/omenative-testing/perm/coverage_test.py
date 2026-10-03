@@ -807,5 +807,49 @@ class StuckBreakCellsTest(unittest.TestCase):
         self.assertEqual([("sibling broken", "persistent", "new", "decoder")], decoder.faults)
 
 
+class NodeHookCellsTest(unittest.TestCase):
+    """fault=node:<hook> files under the operation in flight on the node row:
+    one-shot at lift=after-settle, persistent at lift=after-recover, timed
+    at the fault's own hook (the canary grid state under a canary)."""
+
+    def setUp(self):
+        self.corpus = Corpus()
+        self.addCleanup(self.corpus.close)
+
+    def test_the_operations_and_the_two_forms(self):
+        push = self.corpus.write(fault="node:rotating", lift="after-settle", topo="engine", **counts(4, ceil_e=5))
+        self.assertEqual(("push", [("node", "one-shot", "-", "engine")], "rotating"), (push.operation, push.faults, push.timing))
+        back = self.corpus.write(rollback=1, during="rotating", fault="node:settling", lift="after-recover", needs="forcedelete",
+                                 topo="engine", **counts(4, ceil_e=5))
+        self.assertEqual(("rollback", "push", [("node", "persistent", "-", "engine")], "settling"),
+                         (back.operation, back.second_operation, back.faults, back.timing))
+        edit = self.corpus.write(edit="strategy:RecreatePod", during="rotating", fault="node:settling", lift="after-settle",
+                                 topo="engine", **counts(4, ceil_e=5))
+        self.assertEqual(("strategy or policy edit", [("node", "one-shot", "-", "engine")]), (edit.operation, edit.faults))
+        runtime = self.corpus.write(mode="runtimerev", rt="x", edit="env", expect="roll", fault="node:rotating", lift="after-recover",
+                                    needs="forcedelete", topo="engine", **counts(4, ceil_e=5))
+        self.assertEqual(("runtime edit", [("node", "persistent", "-", "engine")]), (runtime.operation, runtime.faults))
+        down = self.corpus.write(mode="scaledown", to_e=3, fault="node:settling", lift="after-settle", topo="engine", **counts(4))
+        self.assertEqual(("scale down", [("node", "one-shot", "-", "engine")]), (down.operation, down.faults))
+        up = self.corpus.write(mode="scaledown", to_e=5, fault="node:settling", lift="after-settle", topo="engine", **counts(4, ceil_e=5))
+        self.assertEqual("scale up", up.operation)
+        delete = self.corpus.write(mode="recreate", fault="node:settling", lift="after-settle", topo="engine", **counts(4))
+        self.assertEqual(("delete", [("node", "one-shot", "-", "engine")]), (delete.operation, delete.faults))
+        canary = self.corpus.write(mode="canary", canary="auto", fault="node:canary-serving@0", lift="after-recover",
+                                   needs="forcedelete", topo="engine", **counts(8, ceil_e=9))
+        self.assertEqual(("canary", [("node", "persistent", "-", "engine")]), (canary.operation, canary.faults))
+        self.assertTrue(canary.timing.startswith("canary"), canary.timing)
+        self.assertEqual([], [p for c in (push, back, edit, runtime, down, up, delete, canary) for p in c.problems])
+
+    def test_the_six_shape_families(self):
+        gang = self.corpus.write(mode="recreate", fault="node:settling", lift="after-settle", topo="engine-mn",
+                                 comps=engine_router(2, 1, 2), **counts(2, 0, 2))
+        self.assertEqual(("engine+router gang", "delete"), (gang.shape_family, gang.operation))
+        pd_single = self.corpus.write(mode="scaledown", to_e=3, fault="node:settling", lift="after-recover", needs="forcedelete",
+                                      topo="pd", comps=pd(4, 0, 2), **counts(4, 4, 2))
+        self.assertEqual(("engine+decoder+router single", "scale down", [("node", "persistent", "-", "engine")]),
+                         (pd_single.shape_family, pd_single.operation, pd_single.faults))
+
+
 if __name__ == "__main__":
     unittest.main()

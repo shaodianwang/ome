@@ -6406,7 +6406,7 @@ class GeneratedNodeFamilyTest(unittest.TestCase):
 
     def _rows(self):
         outputs, rows = generate_cases.build_outputs()
-        return outputs, [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-node"]
+        return outputs, [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-node" and kv.get("during") == "idle"]
 
     def test_generated_family_crosses_every_axis(self):
         outputs, fam = self._rows()
@@ -6458,6 +6458,234 @@ class GeneratedNodeFamilyTest(unittest.TestCase):
                 path = Path(tmp) / f"{name}.yaml"
                 path.write_text(outputs[f"gen-node/{name}.yaml"])
                 self.assertEqual([], run.validate_case_file(path))
+
+
+class GeneratedNodeHookFamilyTest(unittest.TestCase):
+    """gen-node, the hook half: the kubelet under the victim is stopped at a
+    hook of an operation in flight (fault=node:<hook>) on the six ledger
+    shapes, transient on every operation and kept down until the policy
+    relocates the Instance on the rows whose ledger cell has that form."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-node" and kv.get("during") != "idle"]
+
+    def test_counts_shapes_forms_and_ids(self):
+        self.assertEqual(78, len(self.fam))
+        self.assertEqual(66, sum(1 for _n, kv, _m in self.fam if kv.get("mode") != "canary"))
+        shapes = {(t, generate_cases.router_count(t, nr)) for t, _n, _w, nr in generate_cases.DISRUPT_SHAPES}
+        self.assertEqual(shapes, {(kv["topo"], kv["Nr"]) for _n, kv, _m in self.fam if kv.get("mode") != "canary"})
+        forms = collections.Counter((m["op"], m["form"]) for _n, _kv, m in self.fam)
+        self.assertEqual({("push", "one-shot"): 6, ("scaleup", "one-shot"): 6, ("delete", "one-shot"): 6,
+                          ("rollback", "one-shot"): 6, ("rollback", "persistent"): 6,
+                          ("edit", "one-shot"): 6, ("edit", "persistent"): 6,
+                          ("runtime", "one-shot"): 6, ("runtime", "persistent"): 6,
+                          ("scaledown", "one-shot"): 6, ("scaledown", "persistent"): 6,
+                          ("canary", "one-shot"): 6, ("canary", "persistent"): 6}, dict(forms))
+        ids = sorted(int(n[1:]) for n, _kv, _m in self.fam)
+        lo, hi = generate_cases.GEN_BLOCKS["gen-node"]
+        self.assertEqual((4296, 4373), (ids[0], ids[-1]), "minted after the idle halves, inside the family's block")
+        self.assertLess(ids[-1], hi)
+
+    def test_every_row_names_its_hook_its_lift_and_the_lane_it_reads(self):
+        for name, kv, m in self.fam:
+            op, form = m["op"], m["form"]
+            hook = generate_cases.NODE_HOOK_AT.get(op, generate_cases.HOOK_PHASE)
+            self.assertEqual(f"node:{hook}", kv["fault"], name)
+            self.assertEqual("after-recover" if form == "persistent" else "after-settle", kv["lift"], name)
+            self.assertEqual(form == "persistent", kv.get("needs") == "forcedelete", name)
+            self.assertNotIn("expect", kv, name) if op != "runtime" else self.assertEqual("roll", kv["expect"], name)
+            self.assertEqual(op != "delete", kv.get("floor_soft") == 1, name)
+            self.assertEqual(op in generate_cases.NODE_HOOK_ROLLS, kv.get("order_soft") == 1, name)
+            self.assertEqual({"push": None, "rollback": None, "edit": None, "runtime": "runtimerev", "scaledown": "scaledown",
+                              "scaleup": "scaledown", "delete": "recreate", "canary": "canary"}[op], kv.get("mode"), name)
+            if op == "rollback":
+                self.assertEqual((1, "rotating"), (kv["rollback"], kv["during"]), name)
+            if op == "edit":
+                self.assertEqual("strategy:RecreatePod", kv["edit"], name)
+            if op == "canary":
+                self.assertEqual("auto", kv["canary"], name)
+            reason = self.outputs[f"gen-node/{name}.yaml"].splitlines()[1]
+            self.assertIn("the kubelet of the node under", reason, name)
+            self.assertIn("reported rather than judged", reason, name)
+            if form == "persistent":
+                self.assertIn("force-delete threshold", reason, name)
+                self.assertIn("while the node is still down", reason, name)
+            elif op == "delete":
+                self.assertIn("leave with the teardown", reason, name)
+            else:
+                self.assertIn("never stopped", reason, name)
+            self.assertIn("reset mailbox never written", reason, name)
+            if kv["topo"].endswith("-mn"):
+                self.assertIn("each Instance is a gang", reason, name)
+
+    def test_every_row_validates_as_a_case_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, _kv, _m in self.fam:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(self.outputs[f"gen-node/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)
+
+
+class NodeHookHeaderTest(unittest.TestCase):
+    """fault=node:<hook>: the operations and hooks it takes, the lifts that
+    name its two forms, the lane the persistent form reads, and the knobs
+    that do not combine with it."""
+
+    BASE = "# p999: x Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine co=none floor_soft=1"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_the_grammar_takes_a_roll_hook_or_a_grid_state_beside_notready(self):
+        self.assertTrue(run._fault_ok("node:notready"))
+        self.assertTrue(run._fault_ok("node:rotating"))
+        self.assertTrue(run._fault_ok("node:settling"))
+        self.assertTrue(run._fault_ok("node:canary-serving@0"))
+        self.assertFalse(run._fault_ok("node:idle"))
+        self.assertFalse(run._fault_ok("node:held"))
+        self.assertTrue(run._node_hook_fault({"kind": "node", "param": "settling"}))
+        self.assertFalse(run._node_hook_fault({"kind": "node", "param": "notready"}))
+        self.assertFalse(run._node_hook_fault({"kind": "evict", "param": "settling"}))
+
+    def test_every_operation_takes_the_loss_at_its_hook(self):
+        base = self.BASE
+        self.assertEqual([], self._errs(base + " fault=node:rotating lift=after-settle order_soft=1"))
+        self.assertEqual([], self._errs(base + " rollback=1 during=rotating fault=node:settling lift=after-recover needs=forcedelete"))
+        self.assertEqual([], self._errs(base + " edit=strategy:RecreatePod during=rotating fault=node:settling lift=after-settle"))
+        self.assertEqual([], self._errs(base.replace("x Ne", "x mode=runtimerev rt=ome-coordtest-rt-p999 edit=env expect=roll Ne")
+                                        + " fault=node:draining lift=after-recover needs=forcedelete"))
+        self.assertEqual([], self._errs(base.replace("x Ne", "x mode=scaledown to_e=3 Ne") + " fault=node:settling lift=after-settle"))
+        self.assertEqual([], self._errs(base.replace("x Ne", "x mode=scaledown to_e=5 Ne") + " fault=node:settling lift=after-settle"))
+        self.assertEqual([], self._errs(base.replace("x Ne", "x mode=recreate Ne") + " fault=node:settling lift=after-settle"))
+        self.assertEqual([], self._errs("# p999: x mode=canary canary=auto Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 topo=engine "
+                                        "fault=node:canary-serving@0 lift=after-settle"))
+
+    def test_the_hook_the_operation_offers_the_form_and_the_lane(self):
+        base = self.BASE
+        self.assertTrue(any("fires at fault=node:settling" in e
+                            for e in self._errs(base.replace("x Ne", "x mode=scaledown to_e=5 Ne") + " fault=node:rotating lift=after-settle")))
+        self.assertTrue(any("fires at fault=node:settling" in e
+                            for e in self._errs(base + " rollback=1 during=rotating fault=node:draining lift=after-settle")))
+        self.assertTrue(any("needs lift=after-settle" in e for e in self._errs(base + " fault=node:rotating")))
+        self.assertTrue(any("needs=forcedelete" in e for e in self._errs(base + " fault=node:rotating lift=after-recover")))
+        self.assertTrue(any("names no needs=" in e for e in self._errs(base + " fault=node:rotating lift=after-settle needs=forcedelete")))
+        self.assertTrue(any("an operation in flight" in e for e in self._errs(base + " during=idle fault=node:settling lift=after-settle")))
+        self.assertTrue(any("an operation in flight" in e
+                            for e in self._errs(base.replace("x Ne", "x mode=migrate inst=0 at=accept Ne") + " fault=node:migrating lift=after-settle")))
+        self.assertTrue(any("names a grid state" in e
+                            for e in self._errs("# p999: x mode=canary canary=auto Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 topo=engine "
+                                                "fault=node:settling lift=after-settle")))
+        self.assertTrue(any("does not combine" in e for e in self._errs(base + " fault=node:rotating lift=after-settle repeat=2")))
+        self.assertTrue(any("does not combine" in e for e in self._errs(base + " fault=node:rotating lift=after-settle victim=stable")))
+        # the idle form keeps its own vocabulary
+        self.assertEqual([], self._errs(base.replace("ceil_e=5", "ceil_e=4").replace(" floor_soft=1", "")
+                                        + " during=idle fault=node:notready lift=after-settle expect=repaired"))
+
+
+class NodeHookLiftAndVerdictTest(unittest.TestCase):
+    """The lift tick of a node loss at a hook and the verdict block it feeds:
+    the bite, the two lift phases, the delete's recovery, and each failing
+    branch of the checks."""
+
+    def _fault(self, lift, **more):
+        f = {"kind": "node", "param": "settling", "lift": lift, "fired": True, "fired_ts": 100.0, "node": "worker-1",
+             "crash_comp": "engine", "crash_inst": "3", "lost_uids": {"u-old"}, "notes": [], "infra_fail": None,
+             "kubelet_restored": False}
+        f.update(more)
+        return f
+
+    def _ctx(self, pods):
+        return {"pod_state": pods, "closed": False, "trigger_ts": 90.0}
+
+    def test_the_bite_is_the_node_not_ready_with_no_victim_pod_serving_there(self):
+        f = self._fault("after-settle")
+        pods = {"e-3": {"comp": "engine", "inst": "3", "node": "worker-1", "ready": True, "serving": True, "uid": "u-old", "alive": True}}
+        with mock.patch.object(run, "_node_ready", return_value=False), mock.patch.object(run, "_node_restore") as restore:
+            run._node_lift_tick(self._ctx(pods), f, 110.0)
+            self.assertIsNone(f.get("bite_ts"), "a pod still serving on the node is no bite")
+            pods["e-3"]["ready"] = pods["e-3"]["serving"] = False
+            run._node_lift_tick(self._ctx(pods), f, 113.0)
+            self.assertEqual(113.0, f["bite_ts"])
+            run._node_lift_tick(self._ctx(pods), f, 113.0 + run.LIFT_SETTLE_S - 1)
+            restore.assert_not_called()
+            restore.return_value = True
+            run._node_lift_tick(self._ctx(pods), f, 113.0 + run.LIFT_SETTLE_S + 2)
+            restore.assert_called_once()
+            self.assertIsNotNone(f["lifted_at"])
+
+    def test_after_recover_waits_for_the_relocation_and_for_the_lost_pods_to_go(self):
+        f = self._fault("after-recover", bite_ts=120.0, node_poll_ts=0.0)
+        stuck = {"e-3": {"comp": "engine", "inst": "3", "node": "worker-1", "ready": False, "serving": False, "uid": "u-old", "alive": True}}
+        with mock.patch.object(run, "_node_ready", return_value=False), mock.patch.object(run, "_node_restore", return_value=True) as restore:
+            run._node_lift_tick(self._ctx(stuck), f, 130.0)
+            restore.assert_not_called()
+            rebuilt = {"e-3": {"comp": "engine", "inst": "3", "node": "worker-2", "ready": True, "serving": True, "uid": "u-new", "alive": True}}
+            run._node_lift_tick(self._ctx(rebuilt), f, 140.0)
+            restore.assert_called_once()
+            self.assertEqual((140.0, 140.0, 140.0), (f["reaped_at"], f["recovered_at"], f["lifted_at"]))
+
+    def test_under_a_delete_the_recovery_is_the_lost_pods_gone(self):
+        f = self._fault("after-recover", bite_ts=120.0, node_poll_ts=0.0, hook_op_kind="delete")
+        with mock.patch.object(run, "_node_ready", return_value=False), mock.patch.object(run, "_node_restore", return_value=True) as restore:
+            run._node_lift_tick(self._ctx({}), f, 140.0)
+            restore.assert_called_once()
+            self.assertEqual(140.0, f["recovered_at"])
+
+    def test_a_kubelet_that_will_not_start_is_apparatus(self):
+        f = self._fault("after-settle", bite_ts=120.0, node_poll_ts=0.0)
+        with mock.patch.object(run, "_node_ready", return_value=False), mock.patch.object(run, "_node_restore", return_value=False):
+            run._node_lift_tick(self._ctx({}), f, 120.0 + run.LIFT_SETTLE_S + 1)
+        self.assertIn("starting the kubelet", f["infra_fail"])
+
+    def test_the_budget_adds_the_grace_or_the_relocation_and_a_rotate_base(self):
+        ctx = {"force_delete": None, "pods_per_inst": {"engine": 1}, "N": {"engine": 4}, "configured": {"engine"}}
+        with mock.patch.object(run, "_idle_budget", return_value=600), mock.patch.object(run, "_relocation_budget", return_value=300):
+            self.assertEqual(100 + run.NODE_NOTREADY_GRACE_S + run.LIFT_SETTLE_S + run.ROTATE_BASE_S,
+                             run._node_hook_budget(ctx, self._fault("after-settle"), 100))
+            self.assertEqual(100 + 300 + run.ROTATE_BASE_S, run._node_hook_budget(ctx, self._fault("after-recover"), 100))
+
+    def _verdict(self, f, completed=True, state="CONVERGED"):
+        notes, checks = [], []
+        verdict = run._node_hook_checks(f, "the push", completed, state, "PASS", notes, checks)
+        return verdict, notes, "\n".join(checks)
+
+    def test_the_transient_loss_passes_once_bitten_lifted_and_completed(self):
+        f = self._fault("after-settle", bite_ts=140.0, lifted_at=165.0, reset_used=False)
+        verdict, notes, text = self._verdict(f)
+        self.assertEqual(("PASS", []), (verdict, notes))
+        self.assertIn("read NotReady", text)
+        self.assertIn("started again 65s after the stop", text)
+        self.assertIn("completed with the node loss", text)
+        self.assertIn("without the reset mailbox", text)
+
+    def test_each_failing_branch(self):
+        self.assertEqual("FAIL", self._verdict(self._fault("after-settle", fired=False))[0])
+        f = self._fault("after-settle")
+        self.assertEqual("PASS", self._verdict(f)[0])
+        self.assertIn("never read NotReady", f["infra_fail"])
+        self.assertEqual("FAIL", self._verdict(self._fault("after-settle", bite_ts=140.0))[0])
+        verdict, notes, _text = self._verdict(self._fault("after-recover", bite_ts=140.0))
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("not relocated", notes[0])
+        verdict, notes, _text = self._verdict(self._fault("after-recover", bite_ts=140.0, recovered_at=300.0, lifted_at=300.0))
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("still in the API", notes[0])
+        verdict, notes, _text = self._verdict(self._fault("after-settle", bite_ts=140.0, lifted_at=165.0), completed=False, state="ROTATE_TIMEOUT")
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("did not complete", notes[0])
+        verdict, notes, _text = self._verdict(self._fault("after-settle", bite_ts=140.0, lifted_at=165.0, reset_used=True))
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("reset mailbox", notes[0])
+        ok, _n, text = self._verdict(self._fault("after-recover", bite_ts=140.0, recovered_at=300.0, lifted_at=300.0,
+                                                 reaped_at=280.0, hook_op_kind="delete"), completed=None)
+        self.assertEqual("PASS", ok)
+        self.assertIn("every pod the node held gone", text)
+        self.assertNotIn("completed with", text)
 
 
 class GeneratedCtrlRestartFamilyTest(unittest.TestCase):

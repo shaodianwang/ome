@@ -1885,6 +1885,33 @@ cell on the six shape families (the surge strategy, the env edit):
   attempt's deadline, which a Ready Instance never has; the relocation is
   the force-delete sweep plus the ordinary rebuild), and each cell's line-2
   reason says what its restart policy and group do.
+  **`fault=node:<hook>` with `lift=after-settle|after-recover`** is the
+  same loss at a hook of an operation in flight: `node:settling|rotating|draining`
+  under a plain push or `mode=runtimerev`, `node:settling` beside
+  `rollback=1 during=<hook>`, a mid-roll `edit=`, `mode=scaledown` or
+  `mode=recreate` (the loss lands once the operation has, the rollback or
+  the edit fired at its own hook first), and `node:canary-<state>[@step]`
+  under `mode=canary`. The victim is the break rule's (the highest engine
+  Instance still on its starting pods; under a scale-down the highest
+  Instance the scale keeps, never one it takes). `lift=after-settle` is the
+  transient loss: the kubelet is started again once the bite has held
+  `LIFT_SETTLE_S`, the pods it never stopped serve again, and it holds on
+  either lane. `lift=after-recover` keeps the node down until the Instance
+  is Ready and serving on other nodes with every pod the node held
+  replaced (under a delete, until those pods are gone), which is the
+  force-delete policy's doing (`needs=forcedelete`, the policy twin); then
+  the kubelet is started again. Either way the operation must complete
+  within its budget plus the loss's (the NotReady grace and the settle
+  window, or the relocation budget), the rows settle, nothing is held and
+  the reset mailbox stays unwritten; `expect=` has no place, the
+  operation's completion is the verdict. The floor is reported rather than
+  judged (`floor_soft=1`): the node takes every pod it ran, the victim's
+  neighbours included; gang atomicity is not judged either, since the
+  restart policy decides whether a member the node took is rebuilt alone
+  or with its gang. The hook half of `isvcs/gen-node/` (from p4296) runs
+  one case per ledger cell of those operations on the six shape families:
+  transient on every operation, kept down on a rollback, a strategy edit,
+  a runtime edit, a scale-down and the canary.
 
 - **`fault=ctrlrestart:<hook>` under an operation in flight** is what the
   generated `isvcs/gen-ctrlrestart/` family drives: the manager pod is
@@ -2133,7 +2160,8 @@ cell on the six shape families (the surge strategy, the env edit):
   time what it took has come back, and the preemption's Instance waits
   with reason `Unschedulable` until the lift opens the nodes.
   `isvcs/gen-evict/` and `isvcs/gen-preempt/` run one case per ledger cell
-  of those operations. A pending
+  of those operations; `fault=node:settling` beside the same operations is
+  the node loss's hook form (see `fault=node:<hook>` above). A pending
   case that fails prints, before teardown, each pod of the case with its
   `PodScheduled` and `Ready` conditions, gates and pod group, the
   PodGroups, the pod events since the trigger with their reporter, and the

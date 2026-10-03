@@ -1457,9 +1457,12 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-imagepull", "pd", "")], 2)
         self.assertEqual(shard_counts[("gen-imagepull", "pd-mn", "")], 2)
         # Node losses run one at a time at 6-11 minutes each: two per shard.
-        for topology in ("engine", "pd", "engine-mn", "pd-mn"):
-            self.assertEqual(shard_counts[("gen-node", topology, "")], 8)
-            self.assertEqual(shard_counts[("gen-node", topology, gp.EVAL_FORCE_DELETE_SLUG)], 4)
+        # The idle half is four shapes deep; the hook half adds the six
+        # ledger shapes under every operation, the router shapes riding the
+        # engine lanes, and the policy twin carries the relocating rows.
+        for topology, plain, policy in (("engine", 16, 9), ("pd", 12, 7), ("engine-mn", 16, 9), ("pd-mn", 12, 7)):
+            self.assertEqual(shard_counts[("gen-node", topology, "")], plain)
+            self.assertEqual(shard_counts[("gen-node", topology, gp.EVAL_FORCE_DELETE_SLUG)], policy)
         # Manager restarts run one at a time at 2-3 minutes each: six per shard.
         self.assertEqual(shard_counts[("gen-ctrlrestart", "engine", "")], 4)
         self.assertEqual(shard_counts[("gen-ctrlrestart", "engine-mn", "")], 4)
@@ -1589,7 +1592,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-lift", "engine-mn", "")], 2)
         self.assertEqual(shard_counts[("gen-lift", "pd", "")], 1)
         self.assertEqual(shard_counts[("gen-lift", "pd-mn", "")], 1)
-        self.assertEqual(job_count, 1024)
+        self.assertEqual(job_count, 1064)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin
@@ -1633,9 +1636,9 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertFalse(plain_cases & needing)
         # The twin's node losses run one at a time, so it is sharded like
         # the plain lane: the variant names the label and the key.
-        self.assertIn("gen-node / engine [1/4] [forcedelete]", yaml_text)
-        self.assertIn("gen-node / engine [1/4] [ome-scheduler] [forcedelete]", yaml_text)
-        self.assertIn('key: "omenative-e2e-gen-node-engine-ome-scheduler-forcedelete-1-of-4"', yaml_text)
+        self.assertIn("gen-node / engine [1/9] [forcedelete]", yaml_text)
+        self.assertIn("gen-node / engine [1/9] [ome-scheduler] [forcedelete]", yaml_text)
+        self.assertIn('key: "omenative-e2e-gen-node-engine-ome-scheduler-forcedelete-1-of-9"', yaml_text)
 
     def test_eval_group_emits_unique_subshard_keys_and_readable_labels(self):
         with mock.patch.dict(
@@ -2174,7 +2177,7 @@ class TestEvalTargeted(PipelineTestCase):
         self.assertEqual(gp._top_level_keys(batches[-1]), ["chart-ome-release"])
         # The fixture round, 5% sampled under the pinned commit: the pin
         # moves with the corpus like the full and smoke totals.
-        self.assertEqual(sum(gp._job_count(document) for document in batches), 402)
+        self.assertEqual(sum(gp._job_count(document) for document in batches), 403)
 
 
 class TestEvalVerdicts(unittest.TestCase):
@@ -3063,9 +3066,9 @@ class TestEvalMode(PipelineTestCase):
         committed = sorted(case for _, _, cases in self.groups for case in cases)
         default = sorted(case for child in self.runner_jobs(self.full, scheduler="") for case in self.cases_of(child))
         self.assertEqual(default, committed)
-        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 1024)
-        self.assertEqual(len(self.runner_jobs(self.full)), 2349)
-        self.assertEqual(len(self.full), 2363)
+        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 1064)
+        self.assertEqual(len(self.runner_jobs(self.full)), 2427)
+        self.assertEqual(len(self.full), 2441)
         self.assertEqual(len(self.smoke), 203)
         self.assertEqual(len(self.smoke_batches), 3)
         self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 312)
@@ -3237,7 +3240,7 @@ class TestPipelineUploads(PipelineTestCase):
     def test_todays_corpus_uploads_within_the_limit_and_the_total_is_pinned(self):
         self.assert_uploads_are_well_formed(self.batches, self.children)
         self.assertGreater(len(self.batches), 2)
-        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2473)
+        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2551)
 
     def test_the_full_round_records_its_verdicts_after_every_eval_group(self):
         last = self.batches[-1]
