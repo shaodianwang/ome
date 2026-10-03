@@ -1,0 +1,13 @@
+# p1523: [gen] podkill scaleup engine N=4  mode=scaledown Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=podkill:settling co=none topo=engine to_e=5 floor_slack=1
+# reason: the engine is scaled from N to N+1 on engine alone, single-pod, and as it lands one serving engine pod of the running revision is deleted by hand; the controller replaces what the deletion took, and the replacement is labelled as what it runs (the image its revision's pods ran when the pod was deleted), the floor lowered by that one Instance holds, and the scale completes with the new Instance whole and serving and the survivors on their own pods (the Instance the deletion took rebuilt by design), with every row settled and no hold left behind
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1523 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

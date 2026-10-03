@@ -6920,6 +6920,331 @@ class CtrlHookWatchAndVerdictTest(unittest.TestCase):
         self.assertEqual("PASS", self._verdict(self._fault(ctrl_back_at=160.0), completed=False, state="INFRA-FAIL")[0])
 
 
+
+class GeneratedPodkillHookFamilyTest(unittest.TestCase):
+    """A pod deleted by hand at the remaining moments: the one-shot rows of
+    gen-fault (single pods) and gen-gang-member (gangs), the persistent rows
+    of gen-repeat, each minted after its family's first pass."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.fam = [(folder, n, kv, m) for folder, n, kv, m in rows
+                   if m.get("half") == "hook" and str(kv.get("fault", "")).startswith("podkill:")]
+
+    def _rows(self, folder):
+        return [(n, kv, m) for f, n, kv, m in self.fam if f == folder]
+
+    @staticmethod
+    def _ids(rows):
+        return sorted(int(n[1:]) for n, _kv, _m in rows)
+
+    def test_counts_shapes_ops_and_ids(self):
+        single, gang, persistent = self._rows("gen-fault"), self._rows("gen-gang-member"), self._rows("gen-repeat")
+        self.assertEqual((18, 18, 24), (len(single), len(gang), len(persistent)))
+        self.assertEqual(60, len(self.fam))
+        ops = generate_cases.PODKILL_HOOK_OPS
+        self.assertEqual({op: 3 for op in ops}, dict(collections.Counter(m["op"] for _n, _kv, m in single)))
+        self.assertEqual({op: 3 for op in ops}, dict(collections.Counter(m["op"] for _n, _kv, m in gang)))
+        self.assertEqual({op: 6 for op in generate_cases.PODKILL_REPEAT_OPS},
+                         dict(collections.Counter(m["op"] for _n, _kv, m in persistent)))
+        self.assertTrue(all(not kv["topo"].endswith("-mn") for _n, kv, _m in single))
+        self.assertTrue(all(kv["topo"].endswith("-mn") for _n, kv, _m in gang))
+        shapes = {(t, generate_cases.router_count(t, nr)) for t, _n, _w, nr in generate_cases.DISRUPT_SHAPES}
+        self.assertEqual(shapes, {(kv["topo"], kv["Nr"]) for _n, kv, _m in single + gang})
+        self.assertEqual(shapes, {(kv["topo"], kv["Nr"]) for _n, kv, _m in persistent})
+        self.assertEqual((1520, 1537), (self._ids(single)[0], self._ids(single)[-1]), "after gen-fault's first pass")
+        self.assertEqual((7172, 7189), (self._ids(gang)[0], self._ids(gang)[-1]), "after gen-gang-member's first pass")
+        self.assertEqual((8868, 8891), (self._ids(persistent)[0], self._ids(persistent)[-1]), "after the repeating family")
+        for folder in ("gen-fault", "gen-gang-member", "gen-repeat"):
+            lo, hi = generate_cases.GEN_BLOCKS[folder]
+            self.assertTrue(all(lo <= int(n[1:]) < hi for n, _kv, _m in self._rows(folder)), folder)
+
+    def test_every_row_carries_the_knobs_its_driver_reads(self):
+        for folder, name, kv, m in self.fam:
+            op, form = m["op"], m["form"]
+            hook = generate_cases.PODKILL_HOOK_AT.get(op, generate_cases.HOOK_PHASE)
+            self.assertEqual(f"podkill:{hook}", kv["fault"], name)
+            self.assertEqual({"rollback": None, "edit": None, "runtime": "runtimerev", "scaleup": "scaledown",
+                              "scaledown": "scaledown", "delete": "recreate"}[op], kv.get("mode"), name)
+            self.assertEqual(op in generate_cases.PODKILL_HOOK_ROLLS, kv.get("victim") == "stable", name)
+            self.assertEqual(op in generate_cases.PODKILL_HOOK_ROLLS, kv.get("order_soft") == 1, name)
+            self.assertEqual(op != "delete", kv.get("floor_slack") == 1, name)
+            self.assertEqual(kv["topo"].startswith("pd"), kv.get("victimcomp") == "engine", name)
+            self.assertEqual(form == "persistent", kv.get("repeat") == generate_cases.REPEAT_N, name)
+            self.assertEqual(form == "persistent", folder == "gen-repeat", name)
+            for k in ("lift", "needs", "once", "form", "floor_soft"):
+                self.assertNotIn(k, kv, name)
+            if kv["topo"].endswith("-mn"):
+                member, rp = generate_cases.PODKILL_HOOK_MEMBER[form]
+                self.assertEqual((member, rp, rp, member), (kv["kill"], kv["restart"], m["rp"], m["kill"]), name)
+            else:
+                self.assertNotIn("kill", kv, name)
+                self.assertNotIn("restart", kv, name)
+            if op == "rollback":
+                self.assertEqual((1, "rotating"), (kv["rollback"], kv["during"]), name)
+            if op == "edit":
+                self.assertEqual(("strategy:RecreatePod", "rotating"), (kv["edit"], kv["during"]), name)
+            if op == "runtime":
+                self.assertEqual(("env", "roll", f"ome-coordtest-rt-{name}"), (kv["edit"], kv["expect"], kv["rt"]), name)
+            if op == "scaleup":
+                self.assertEqual((kv["Ne"] + 1, kv["Ne"] + 1), (kv["to_e"], kv["ceil_e"]), name)
+            if op == "scaledown":
+                self.assertEqual((kv["Ne"] - 1, kv["Ne"]), (kv["to_e"], kv["ceil_e"]), name)
+            if op == "delete":
+                self.assertEqual((kv["Ne"], "one-shot"), (kv["ceil_e"], form), "a delete brings nothing back")
+
+    def test_every_reason_names_the_operator_the_break_and_the_promise(self):
+        for folder, name, kv, m in self.fam:
+            reason = self.outputs[f"{folder}/{name}.yaml"].splitlines()[1]
+            self.assertIn("is deleted by hand", reason, name)
+            if m["op"] == "delete":
+                self.assertIn("one more on its way out", reason, name)
+                self.assertIn("comes up whole on fresh pods", reason, name)
+            else:
+                self.assertIn("the controller replaces what the deletion took", reason, name)
+                self.assertIn("the floor lowered by that one Instance holds", reason, name)
+            if m["form"] == "persistent":
+                self.assertIn("again each time its Instance is back", reason, name)
+                self.assertIn("then left alone", reason, name)
+                self.assertIn("no hold left behind", reason, name)
+                self.assertNotIn("labelled as what it runs", reason, name)
+            else:
+                self.assertNotIn("again each time", reason, name)
+                if m["op"] != "delete":
+                    self.assertIn("labelled as what it runs", reason, name)
+            if kv["topo"].endswith("-mn") and m["op"] != "delete":
+                self.assertIn("never counted as serving while a member is missing", reason, name)
+                self.assertIn("RecreateInstanceOnPodRestart" if kv["restart"] == "RecreateInstance" else "only the lost",
+                              reason, name)
+            self.assertEqual(m["op"] in generate_cases.PODKILL_HOOK_ROLLS, "order waived" in reason, name)
+
+    def test_every_row_validates_as_a_case_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for folder, name, _kv, _m in self.fam:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(self.outputs[f"{folder}/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)
+
+
+class PodkillHookHeaderTest(unittest.TestCase):
+    """fault=podkill:<hook> at a hook of a rollback, a mid-roll edit, a
+    runtime edit or a delete, and repeat= beside the first three: the forms
+    the validator takes, the knobs it refuses and the driver each form
+    reaches (a scale keeps the scale driver)."""
+
+    BASE = "# p999: x Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine co=none"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_the_hook_op_case_predicate(self):
+        self.assertTrue(run._podkill_hook_op_case({"rollback": 1, "during": "rotating", "fault": "podkill:settling"}))
+        self.assertTrue(run._podkill_hook_op_case({"edit": "strategy:RecreatePod", "during": "rotating",
+                                                   "fault": "podkill:settling", "repeat": 3}))
+        self.assertTrue(run._podkill_hook_op_case({"mode": "runtimerev", "fault": "podkill:rotating"}))
+        self.assertTrue(run._podkill_hook_op_case({"mode": "recreate", "fault": "podkill:settling"}))
+        self.assertFalse(run._podkill_hook_op_case({"fault": "podkill:rotating"}), "a push keeps the rollout driver")
+        self.assertFalse(run._podkill_hook_op_case({"mode": "scaledown", "to_e": 3, "fault": "podkill:settling"}),
+                         "the scale driver owns a scale")
+        self.assertFalse(run._podkill_hook_op_case({"mode": "migrate", "fault": "podkill:migrating"}))
+        self.assertFalse(run._podkill_hook_op_case({"mode": "canary", "fault": "podkill:canary-serving"}))
+        self.assertFalse(run._podkill_hook_op_case({"mode": "kill", "kill": "leader"}))
+        self.assertFalse(run._podkill_hook_op_case({"during": "idle", "fault": "podkill:idle"}))
+        self.assertFalse(run._podkill_hook_op_case({"rollback": 1, "during": "rotating", "fault": "evict:settling"}))
+        self.assertFalse(run._podkill_hook_op_case({"rollback": 1, "during": "last", "fault": "podkill:rotating"}),
+                         "a deletion at a hook of the roll beside a rollback is the rollout driver's own form")
+        self.assertFalse(run._podkill_hook_op_case({"edit": "restartPolicy:None", "during": "settling", "fault": "podkill:rotating"}))
+
+    def test_every_remaining_operation_takes_the_deletion_at_its_hook(self):
+        base = self.BASE
+        self.assertEqual([], self._errs(base + " rollback=1 during=rotating fault=podkill:settling victim=stable floor_slack=1 order_soft=1"))
+        self.assertEqual([], self._errs(base + " rollback=1 during=rotating fault=podkill:settling victim=stable floor_slack=1 "
+                                        "order_soft=1 repeat=3"))
+        self.assertEqual([], self._errs(base + " edit=strategy:RecreatePod during=rotating fault=podkill:settling victim=stable floor_slack=1"))
+        self.assertEqual([], self._errs(base + " edit=strategy:RecreatePod during=rotating fault=podkill:settling repeat=3"))
+        runtime = base.replace("x Ne", "x mode=runtimerev rt=ome-coordtest-rt-p999 edit=env expect=roll Ne")
+        self.assertEqual([], self._errs(runtime + " fault=podkill:rotating victim=stable floor_slack=1 order_soft=1"))
+        self.assertEqual([], self._errs(runtime + " fault=podkill:draining repeat=3"))
+        delete = base.replace("x Ne", "x mode=recreate Ne").replace("ceil_e=5", "ceil_e=4")
+        self.assertEqual([], self._errs(delete + " fault=podkill:settling"))
+        self.assertEqual([], self._errs(base.replace("x Ne", "x mode=scaledown to_e=5 Ne") + " fault=podkill:settling floor_slack=1"))
+        self.assertEqual([], self._errs(base.replace("x Ne", "x mode=scaledown to_e=3 Ne").replace("ceil_e=5", "ceil_e=4")
+                                        + " fault=podkill:settling floor_slack=1 repeat=3"))
+        gang = ("# p999: x Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine-mn co=none restart=None kill=leader "
+                "rollback=1 during=rotating fault=podkill:settling victim=stable floor_slack=1 order_soft=1")
+        self.assertEqual([], self._errs(gang))
+
+    def test_the_hook_the_operation_offers_and_the_knobs_that_do_not_combine(self):
+        base = self.BASE
+        self.assertTrue(any("fires at fault=podkill:settling" in e
+                            for e in self._errs(base.replace("x Ne", "x mode=recreate Ne") + " fault=podkill:rotating")))
+        self.assertEqual([], self._errs(base + " rollback=1 during=last fault=podkill:rotating"),
+                         "a deletion at a hook of the roll beside a rollback keeps the rollout driver's form")
+        self.assertTrue(any("once the rollback has fired" in e
+                            for e in self._errs(base + " rollback=1 during=held break=stuck fault=podkill:settling")))
+        self.assertTrue(any("nothing to take again" in e
+                            for e in self._errs(base.replace("x Ne", "x mode=recreate Ne").replace("ceil_e=5", "ceil_e=4")
+                                                + " fault=podkill:settling repeat=3")))
+        for knob in ("lift=after-settle", "needs=forcedelete", "once=1", "stuck=held"):
+            self.assertTrue(any("does not combine with fault=podkill:settling" in e
+                                for e in self._errs(base + " rollback=1 during=rotating fault=podkill:settling " + knob)), knob)
+
+    def test_the_drivers_each_form_reaches(self):
+        routed = []
+        orig = (run._hook_op, run.find_isvc, run.parse_header, run.duplicate_id_errors, run.collect_case_files)
+        run._hook_op = lambda *a: routed.append("hook") or 0
+        run.find_isvc = lambda cid: Path("p999.yaml")
+        run.duplicate_id_errors = lambda cases: []
+        run.collect_case_files = lambda: []
+        try:
+            run.parse_header = lambda p: ("x", {"Ne": 4, "rollback": 1, "during": "rotating", "fault": "podkill:settling",
+                                                "victim": "stable"})
+            run.run_case("p999")
+            run.parse_header = lambda p: ("x", {"Ne": 4, "edit": "strategy:RecreatePod", "during": "rotating",
+                                                "fault": "podkill:settling", "repeat": 3})
+            run.run_case("p999")
+            with contextlib.redirect_stdout(io.StringIO()):
+                run.run_mode_case("p999", Path("p999.yaml"), "x", {"Ne": 4, "mode": "recreate", "fault": "podkill:settling"},
+                                  "recreate")
+                run.run_mode_case("p999", Path("p999.yaml"), "x", {"Ne": 4, "mode": "runtimerev", "fault": "podkill:rotating",
+                                                                   "rt": "r"}, "runtimerev")
+        finally:
+            (run._hook_op, run.find_isvc, run.parse_header, run.duplicate_id_errors, run.collect_case_files) = orig
+        self.assertEqual(["hook"] * 4, routed)
+
+
+class PodkillHookWatchAndVerdictTest(unittest.TestCase):
+    """The hook-op driver under a pod deleted by hand: the repetitions owed
+    hold the window, the first deletion's label-truth record and its
+    replacement, and each branch of the verdict block."""
+
+    TRUTH = {"pod": "p999-engine-0-0", "comp": "engine", "inst": "0", "hash": "aaa", "uid": "u-old", "image": "img:1",
+             "images_by_hash": {"aaa": ["img:1"]}, "replacement": None}
+    BACK = {"pod": "p999-engine-0-1", "uid": "u-new", "hash": "aaa", "image": "img:1", "at": 12.0}
+
+    def _fault(self, **more):
+        f = {"kind": "podkill", "param": "settling", "hook_op": True, "fired": True, "fired_ts": 100.0, "notes": [],
+             "infra_fail": None, "repeat": 0, "fired_count": 1, "victim_comp": "engine", "victim_inst": "0",
+             "victim_runner": "default", "victim_uid": "u-old", "member": "", "case_id": "p999"}
+        f.update(more)
+        return f
+
+    def test_a_repeating_deletion_at_a_hook_holds_the_window(self):
+        self.assertTrue(run._repeat_pending(self._fault(repeat=3, fired_count=1)))
+        self.assertFalse(run._repeat_pending(self._fault(repeat=3, fired_count=3)))
+        self.assertFalse(run._repeat_pending(self._fault(repeat=3, fired_count=1, hook_op=False)),
+                         "the push and the scale drivers keep their own convergence")
+        self.assertFalse(run._repeat_pending(self._fault(repeat=3, fired_count=1, fired=False)))
+        self.assertFalse(run._repeat_pending(self._fault(repeat=3, fired_count=1, infra_fail="x")))
+        self.assertFalse(run._repeat_pending(dict(self._fault(repeat=3, fired_count=1), kind="evict")))
+
+    def test_the_fire_records_label_truth_when_a_driver_asks(self):
+        pods = {"p999-engine-0-0": _rec("engine", 0, "aaa"), "p999-engine-1-0": _rec("engine", 1, "aaa")}
+        calls = []
+        f = self._fault(fired=False, fired_count=0, truth_wanted=True)
+        with mock.patch.object(run, "kubectl", lambda *a, **k: calls.append(a) or _Resp("", 0, "")), \
+                mock.patch.object(run, "_get_pod", lambda name, ns=None: {"name": name}), \
+                mock.patch.object(run, "_pod_image", lambda obj: "img:1"), \
+                mock.patch.object(run, "_case_pod_images", lambda cid: {"aaa": ["img:1"]}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            run._fault_fire(f, pods, {"engine": 1}, {"aaa"})
+        self.assertTrue(f["fired"])
+        self.assertIsNone(f["infra_fail"])
+        self.assertEqual(("p999-engine-0-0", "engine", "0", "aaa", "img:1", {"aaa": ["img:1"]}, None),
+                         tuple(f["truth"][k] for k in ("pod", "comp", "inst", "hash", "image", "images_by_hash", "replacement")))
+        self.assertTrue(any("delete" in a for a in calls))
+        plain = self._fault(fired=False, fired_count=0)
+        with mock.patch.object(run, "kubectl", lambda *a, **k: _Resp("", 0, "")), contextlib.redirect_stdout(io.StringIO()):
+            run._fault_fire(plain, pods, {"engine": 1}, {"aaa"})
+        self.assertNotIn("truth", plain, "the push and scale drivers do not pay for the record")
+
+    def test_the_replacement_is_tracked_on_the_fault(self):
+        f = self._fault(truth=dict(self.TRUTH))
+        pods = {"p999-engine-0-0": _rec("engine", 0, "aaa", alive=False, uid="u-old"),
+                "p999-engine-0-1": _rec("engine", 0, "aaa", uid="u-new")}
+        with mock.patch.object(run, "_get_pod", lambda name, ns=None: {"name": name}), \
+                mock.patch.object(run, "_pod_image", lambda obj: "img:1"), contextlib.redirect_stdout(io.StringIO()):
+            run._podkill_fault_track(f, pods, 12.0)
+        self.assertEqual(("p999-engine-0-1", "u-new", "aaa", "img:1", 12.0),
+                         tuple(f["truth"]["replacement"][k] for k in ("pod", "uid", "hash", "image", "at")))
+        run._podkill_fault_track(self._fault(), pods, 1.0)   # no record: nothing to do
+
+    def _verdict(self, f, op="rollback", completed=True, state="CONVERGED", ctx=None):
+        notes, checks = [], []
+        ctx = ctx or {"pod_state": {}, "trigger_ts": 0.0, "hdr": {}, "info": {}, "converged_at": 120.0}
+        what = {"rollback": "the rollback", "delete": "the delete", "runtime": "the runtime edit"}[op]
+        hook = "rotating" if op == "runtime" else "settling"
+        verdict = run._podkill_hook_checks(ctx, f, op, what, hook, completed, state, "PASS", notes, checks)
+        return verdict, notes, "\n".join(checks)
+
+    def test_the_one_shot_deletion_passes_with_its_replacement_on_the_label_it_names(self):
+        verdict, notes, text = self._verdict(self._fault(truth=dict(self.TRUTH, replacement=dict(self.BACK))))
+        self.assertEqual(("PASS", []), (verdict, notes))
+        self.assertIn("engine Instance 0 (default) deleted as the rollback landed", text)
+        self.assertIn("label truth", text)
+        self.assertIn("completed 120s after the trigger with the pod deletion in its window", text)
+        verdict, notes, text = self._verdict(self._fault(truth=dict(self.TRUTH, replacement=dict(self.BACK))), op="runtime")
+        self.assertEqual("PASS", verdict)
+        self.assertIn("deleted at rotating of the runtime edit", text)
+
+    def test_each_branch(self):
+        good = dict(self.TRUTH, replacement=dict(self.BACK))
+        wrong = dict(self.TRUTH, replacement=dict(self.BACK, image="img:2"))
+        verdict, notes, _text = self._verdict(self._fault(fired=False))
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("never fired", notes[0])
+        verdict, notes, _text = self._verdict(self._fault(truth=dict(self.TRUTH)))
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("never got a replacement", notes[0])
+        verdict, notes, _text = self._verdict(self._fault(truth=wrong))
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("runs img:2 under revision aaa", notes[0])
+        # under a delete nothing replaces the pod; a replacement before the teardown is a note
+        verdict, notes, text = self._verdict(self._fault(truth=dict(self.TRUTH)), op="delete")
+        self.assertEqual(("PASS", []), (verdict, notes))
+        self.assertIn("left with the teardown", text)
+        verdict, notes, text = self._verdict(self._fault(truth=wrong), op="delete")
+        self.assertEqual(("PASS", []), (verdict, notes))
+        self.assertIn("before the teardown took it too", text)
+        # a repeating deletion leaves the revisions to the repeat checks and names the count
+        verdict, notes, text = self._verdict(self._fault(repeat=3, fired_count=3, truth=dict(self.TRUTH)))
+        self.assertEqual(("PASS", []), (verdict, notes))
+        self.assertIn("3 time(s) in all", text)
+        self.assertIn("pod deletions in its window", text)
+        self.assertNotIn("label truth", text)
+        # the operation did not complete; the apparatus failing is not the product's
+        verdict, notes, _text = self._verdict(self._fault(truth=good), completed=False, state="ROTATE_TIMEOUT")
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("did not complete", notes[0])
+        self.assertEqual("PASS", self._verdict(self._fault(truth=good), completed=False, state="INFRA-FAIL")[0])
+        self.assertEqual("PASS", self._verdict(self._fault(infra_fail="x"), completed=False, state="INFRA-FAIL")[0])
+
+    def test_a_gang_member_is_judged_against_the_restart_policy(self):
+        pods = {"p999-engine-0-0": _rec("engine", 0, "aaa", uid="u-l"),
+                "p999-engine-0-1": _rec("engine", 0, "aaa", uid="u-new", runner="worker")}
+        ctx = {"pod_state": pods, "trigger_ts": 0.0, "hdr": {"restart": "None"}, "info": {}, "converged_at": 60.0}
+        truth = dict(self.TRUTH, replacement=dict(self.BACK))
+        lost = dict(member="worker", victim_runner="worker", victim_uid="u-w1", truth=truth)
+        with mock.patch.object(run, "_isvc_events_since", lambda cid, since: []):
+            verdict, notes, text = self._verdict(self._fault(**lost), ctx=ctx)
+        self.assertEqual(("PASS", []), (verdict, notes))
+        self.assertIn("the killed worker of engine Instance 0 is gone", text)
+        self.assertIn("restartPolicy None recorded no whole-gang repair", text)
+        with mock.patch.object(run, "_isvc_events_since",
+                               lambda cid, since: [("RestartTriggered", "component=engine instance=0 restarted")]):
+            verdict, notes, _text = self._verdict(self._fault(**lost), ctx=ctx)
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("rebuilt the whole gang", notes[0])
+        with mock.patch.object(run, "_isvc_events_since", lambda cid, since: []):
+            verdict, notes, text = self._verdict(self._fault(**lost), op="delete", ctx=ctx)
+        self.assertEqual(("PASS", []), (verdict, notes))
+        self.assertNotIn("gang member", text, "under a delete the gang goes with the rest")
+
+
 class GeneratedCtrlRestartFamilyTest(unittest.TestCase):
     """gen-ctrlrestart: the manager pod is deleted under an operation in
     flight. One runner mode and one hook per condition, crossed with the
@@ -11197,6 +11522,8 @@ class GeneratedFaultFamiliesTest(unittest.TestCase):
         cls.outputs, cls.rows = outputs, rows
         cls.by_folder = {}
         for folder, name, kv, meta in rows:
+            if folder == "gen-gang-member" and meta.get("half") == "hook":
+                continue   # the gang's member deleted at the remaining moments is GeneratedPodkillHookFamilyTest's
             cls.by_folder.setdefault(folder, []).append((name, kv, meta))
 
     def _hdr(self, folder, name):
@@ -13730,7 +14057,7 @@ class RepeatingFaultHeaderTest(unittest.TestCase):
         self.assertTrue(any("needs a phase hook" in e for e in self._errs(self.BASE + " fault=ctrlrestart:idle repeat=3")))
         self.assertTrue(any("needs a persistent fault" in e for e in self._errs(self.BASE + " fault=ctrlrestart:idle during=idle")))
         self.assertTrue(any("do not combine with it" in e
-                            for e in self._errs(self.BASE + " fault=podkill:settling rollback=1 during=settling repeat=2")))
+                            for e in self._errs(self.BASE + " fault=podkill:rotating rollback=1 during=last repeat=2")))
 
 
 class RepeatingFaultLoopTest(unittest.TestCase):
@@ -14083,24 +14410,26 @@ class GeneratedRepeatFamilyTest(unittest.TestCase):
         return "gang member lost" if kv["topo"].endswith("-mn") else "pod deleted by hand"
 
     def test_counts_and_cells(self):
-        self.assertEqual(168, len(self.fam))
+        self.assertEqual(192, len(self.fam))
         cells = {(self._row(kv), self._operation(kv), self._family(kv)) for _n, kv, _m in self.fam}
         families = {"engine single", "engine gang", "engine+router single", "engine+router gang",
                     "engine+decoder+router single", "engine+decoder+router gang"}
         ops = {"steady", "push", "scale-up"}
         ctrl_ops = ops | {"rollback", "edit", "runtime", "scale-down", "move", "delete", "canary"}
+        # The pod deleted again under the operations that bring it back; a delete brings nothing back.
+        pod_ops = ops | {"rollback", "edit", "runtime", "scale-down"}
         self.assertEqual({(f, o) for f in families for o in ctrl_ops},
                          {(f, o) for r, o, f in cells if r == "controller restart"})
         self.assertEqual({(f, o) for f in families for o in ops},
                          {(f, o) for r, o, f in cells if r == "evicted or preempted"})
-        self.assertEqual({(f, o) for f in families if f.endswith("single") for o in ops},
+        self.assertEqual({(f, o) for f in families if f.endswith("single") for o in pod_ops},
                          {(f, o) for r, o, f in cells if r == "pod deleted by hand"})
-        self.assertEqual({(f, o) for f in families if f.endswith("gang") for o in ops},
+        self.assertEqual({(f, o) for f in families if f.endswith("gang") for o in pod_ops},
                          {(f, o) for r, o, f in cells if r == "gang member lost"})
         by_row = {}
         for _n, kv, _m in self.fam:
             by_row[self._row(kv)] = by_row.get(self._row(kv), 0) + 1
-        self.assertEqual({"pod deleted by hand": 24, "gang member lost": 36, "evicted or preempted": 42, "controller restart": 66}, by_row)
+        self.assertEqual({"pod deleted by hand": 36, "gang member lost": 48, "evicted or preempted": 42, "controller restart": 66}, by_row)
 
     def test_every_cell_repeats_and_states_the_window_and_the_lift(self):
         for name, kv, m in self.fam:
@@ -14150,6 +14479,15 @@ class GeneratedRepeatFamilyTest(unittest.TestCase):
                 elif kv["topo"].endswith("-mn"):
                     self.assertEqual("RecreateInstance", m["rp"], "a gang member lost under a push rebuilds the gang whole")
                     self.assertIn(kv["kill"], ("leader", "worker"), name)
+            elif op in ("rollback", "edit", "runtime"):
+                hook = "rotating" if op == "runtime" else "settling"
+                self.assertEqual((hook, "stable", 1), (kv["fault"].partition(":")[2], kv["victim"], kv.get("order_soft")), name)
+                if kv["topo"].endswith("-mn"):
+                    self.assertEqual(("RecreateInstance", "worker"), (m["rp"], kv["kill"]),
+                                     "a gang member lost again under a roll rebuilds the gang whole")
+            elif op == "scale-down":
+                self.assertEqual(("settling", kv["Ne"] - 1, kv["Ne"]), (kv["fault"].partition(":")[2], kv["to_e"], kv["ceil_e"]), name)
+                self.assertNotIn("victim", kv, name)
             else:
                 self.assertEqual(("settling", kv["Ne"] + 1, kv["Ne"] + 1), (kv["fault"].partition(":")[2], kv["to_e"], kv["ceil_e"]), name)
                 self.assertNotIn("victim", kv, name)
@@ -16413,8 +16751,8 @@ class HookOperationTest(unittest.TestCase):
         self.assertTrue(any("places nothing until its recreate" in e
                             for e in self._errs(self.DELETE + " fault=preempt:settling lift=after-settle")))
         self.assertTrue(any("do not combine" in e for e in self._errs(
-            self.ROLL + " rollback=1 during=rotating fault=podkill:settling repeat=2")),
-            "a repeating podkill still rides a plain push")
+            self.ROLL + " rollback=1 during=last fault=podkill:rotating repeat=2")),
+            "a repeating podkill at a hook of the roll still rides a plain push; as the rollback lands it is the hook-op driver's")
         self.assertTrue(any("persistent form" in e for e in self._errs(self.DELETE + " fault=evict:settling repeat=2")),
                         "a delete brings nothing back the eviction could take again")
 

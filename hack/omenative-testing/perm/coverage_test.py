@@ -669,7 +669,9 @@ class CommittedCorpusTest(unittest.TestCase):
         for case in self.by_folder["gen-rollout"]:
             self.assertEqual(("push", []), (case.operation, case.faults), case.id)
         for case in self.by_folder["gen-fault"]:
-            self.assertEqual("push", case.operation, case.id)
+            # The hook half (from p1520) deletes the pod at the remaining operations' moments.
+            remaining = ("rollback", "strategy or policy edit", "runtime edit", "scale up", "scale down", "delete")
+            self.assertIn(case.operation, remaining if int(case.id[1:]) >= 1520 else ("push",), case.id)
             self.assertEqual(["one-shot"], [f[1] for f in case.faults], case.id)
             self.assertIn(case.timing, ("settling", "rotating"), case.id)
         for case in self.by_folder["gen-restart"]:
@@ -909,6 +911,53 @@ class CtrlHookCellsTest(unittest.TestCase):
                                       comps=pd(4, 0, 2), **counts(4, 4, 2, ceil_e=4))
         self.assertEqual(("engine+decoder+router single", "scale down", [("controller restart", "persistent", "-", "manager")]),
                          (pd_single.shape_family, pd_single.operation, pd_single.faults))
+
+
+class PodkillHookCellsTest(unittest.TestCase):
+    """fault=podkill:<hook> files under the operation it lands on, on the
+    pod-deleted-by-hand row (the gang-member-lost row on a gang): one-shot
+    without repeat=, persistent with it, timed at the fault's own hook."""
+
+    def setUp(self):
+        self.corpus = Corpus()
+        self.addCleanup(self.corpus.close)
+
+    def test_the_one_shot_forms_at_the_remaining_operations(self):
+        row = [("pod deleted by hand", "one-shot", "running", "engine")]
+        back = self.corpus.write(rollback=1, during="rotating", fault="podkill:settling", victim="stable", topo="engine",
+                                 **counts(4, ceil_e=5))
+        self.assertEqual(("rollback", "push", row, "settling"), (back.operation, back.second_operation, back.faults, back.timing))
+        edit = self.corpus.write(edit="strategy:RecreatePod", during="rotating", fault="podkill:settling", victim="stable",
+                                 topo="engine", **counts(4, ceil_e=5))
+        self.assertEqual(("strategy or policy edit", row), (edit.operation, edit.faults))
+        runtime = self.corpus.write(mode="runtimerev", rt="x", edit="env", expect="roll", fault="podkill:rotating", victim="stable",
+                                    topo="engine", **counts(4, ceil_e=5))
+        self.assertEqual(("runtime edit", row, "rotating"), (runtime.operation, runtime.faults, runtime.timing))
+        up = self.corpus.write(mode="scaledown", to_e=5, fault="podkill:settling", topo="engine", **counts(4, ceil_e=5))
+        self.assertEqual(("scale up", row), (up.operation, up.faults))
+        down = self.corpus.write(mode="scaledown", to_e=3, fault="podkill:settling", topo="engine", **counts(4, ceil_e=4))
+        self.assertEqual(("scale down", row), (down.operation, down.faults))
+        delete = self.corpus.write(mode="recreate", fault="podkill:settling", topo="engine", **counts(4, ceil_e=4))
+        self.assertEqual(("delete", row), (delete.operation, delete.faults))
+        self.assertEqual([], [p for c in (back, edit, runtime, up, down, delete) for p in c.problems])
+
+    def test_repeat_is_the_persistent_form_and_a_gang_is_a_lost_member(self):
+        persistent = [("pod deleted by hand", "persistent", "running", "engine")]
+        back = self.corpus.write(rollback=1, during="rotating", fault="podkill:settling", victim="stable", repeat=3, topo="engine",
+                                 **counts(4, ceil_e=5))
+        self.assertEqual(("rollback", persistent), (back.operation, back.faults))
+        down = self.corpus.write(mode="scaledown", to_e=3, fault="podkill:settling", repeat=3, topo="engine", **counts(4, ceil_e=4))
+        self.assertEqual(("scale down", persistent), (down.operation, down.faults))
+        gang = self.corpus.write(mode="recreate", fault="podkill:settling", kill="leader", restart="None", topo="engine-mn",
+                                 comps=engine_router(2, 1, 2), **counts(2, 0, 2, ceil_e=2))
+        self.assertEqual(("engine+router gang", "delete", [("gang member lost", "one-shot", "running", "engine")]),
+                         (gang.shape_family, gang.operation, gang.faults))
+        pd_gang = self.corpus.write(mode="runtimerev", rt="x", edit="env", expect="roll", fault="podkill:rotating", victim="stable",
+                                    victimcomp="engine", kill="worker", restart="RecreateInstance", repeat=3, topo="pd-mn",
+                                    comps=pd(2, 1, 2), **counts(2, 2, 2, ceil_e=3))
+        self.assertEqual(("engine+decoder+router gang", "runtime edit", [("gang member lost", "persistent", "running", "engine")]),
+                         (pd_gang.shape_family, pd_gang.operation, pd_gang.faults))
+        self.assertEqual([], [p for c in (back, down, gang, pd_gang) for p in c.problems])
 
 
 if __name__ == "__main__":

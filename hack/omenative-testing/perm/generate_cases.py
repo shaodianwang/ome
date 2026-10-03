@@ -8,7 +8,12 @@ into the generator-owned folders below, using ONLY verbs and hooks the
 runners (run.py + the KIND CI lane) already implement:
 
     gen-rollout/   p1000+  baseline revision-bump rollouts (failure=none)
-    gen-fault/     p1200+  rollouts with fault=podkill:settling|rotating
+    gen-fault/     p1200+  rollouts with fault=podkill:settling|rotating;
+                          from p1520, a serving pod deleted by hand as a
+                          rollback, a strategy edit, a scale up or down and a
+                          delete land and at the first pod of a runtime
+                          edit's new revision, on the single-pod ledger
+                          shapes
     gen-restart/   p1600+  mode=kill (steady-state pod kill), pause off|true|freeze
     gen-crashloop/ p2000+  rollouts where one old-revision Instance crashes
                           (fault=crashloop:old, form=start|load) from the
@@ -207,7 +212,11 @@ runners (run.py + the KIND CI lane) already implement:
                           (fault=podkill:<phase> kill=<member>) while a gang
                           settles, forms on the new revision, or serves beside
                           a draining one, crossed with shape x strategy x
-                          restartPolicy
+                          restartPolicy; from p7172, a serving gang's leader
+                          deleted as a rollback, a strategy edit, a scale up
+                          or down and a delete land and at the first pod of a
+                          runtime edit's new revision, on the gang ledger
+                          shapes
     gen-tight/     p7300+  a gang roll on a cluster with no room for its surge
                           gang (fault=quota:<w> or cordon:all) that must wait
                           with a reason, tear nothing down and complete once
@@ -262,9 +271,11 @@ runners (run.py + the KIND CI lane) already implement:
                           deleted again each time it is Ready, on the six
                           shape families at steady state (mode=kill, or the
                           manager on the idle service), under a push and
-                          under a scale-up, and the manager again under a
+                          under a scale-up, the manager again under a
                           rollback, a strategy edit, a runtime edit, a
-                          scale-down, a move, a delete and a canary; the
+                          scale-down, a move, a delete and a canary, and the
+                          pod (a gang's worker) again under a rollback, a
+                          strategy edit, a runtime edit and a scale-down; the
                           service keeps its floor, the status says why,
                           nothing is rebuilt on a wrong revision, and after
                           the lift every Instance is Ready with no row or
@@ -5936,6 +5947,121 @@ def _emit_preempt_ops(add):
                 cell=("preempt", op, topo, w, nr), dedicated=(op == "runtime"))
 
 
+# ── a pod deleted by hand at the remaining moments ──────────────────────────
+# A serving pod of the running revision (a gang's member under kill=) is
+# deleted by hand as a rollback or a mid-roll edit lands, at the first pod
+# of a runtime edit's new revision, as a scale up or down lands and as a
+# delete lands. The one-shot form on the single-pod shapes lives with
+# gen-fault, on the gangs with gen-gang-member; the persistent form
+# (repeat=) with gen-repeat. The controller replaces what the deletion took,
+# labelled as what it runs, and the operation still completes; a delete
+# brings nothing back, so it has no persistent form. The gang rows name the
+# restart policy the verdict reads: the one-shot loss under None (the lost
+# member alone comes back), the repeating loss under the rebuild-whole
+# policy, as the repeating family's push rows do.
+PODKILL_HOOK_OPS = ["rollback", "edit", "runtime", "scaleup", "scaledown", "delete"]
+PODKILL_HOOK_AT = {"runtime": "rotating"}
+PODKILL_HOOK_ROLLS = {"rollback", "edit", "runtime"}
+PODKILL_REPEAT_OPS = ["rollback", "edit", "runtime", "scaledown"]
+PODKILL_HOOK_MEMBER = {"one-shot": ("leader", "None"), "persistent": ("worker", "RecreateInstance")}
+PODKILL_HOOK_FOLDERS = {"one-shot": {False: "gen-fault", True: "gen-gang-member"},
+                        "persistent": {False: "gen-repeat", True: "gen-repeat"}}
+
+
+def _podkill_hook_kv(op, topo, n, nr, form, member, rp, hook):
+    kv = dict(_op_kv(op, topo, n, nr, False), fault=f"podkill:{hook}", co="none", topo=topo)
+    if op in PODKILL_HOOK_ROLLS:
+        kv.update(victim="stable", order_soft=1)
+    if op != "delete":
+        kv["floor_slack"] = 1
+    if is_pd(topo):
+        kv["victimcomp"] = "engine"
+    if member:
+        kv.update(kill=member, restart=rp)
+    if form == "persistent":
+        kv["repeat"] = REPEAT_N
+    return kv
+
+
+def _podkill_hook_comps(op, topo, n, w, nr, rp):
+    """The fleet of a podkill hook case: the operation's own on the
+    single-pod shapes, the gangs under the restart policy the row names."""
+    if rp is None:
+        return _op_comps(op, topo, n, w, nr, False)
+    strat, surge, unavail = _op_strategy(op, False)
+    life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+    return comps(topo, n, w, life, d_life=(lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None), nr=nr)
+
+
+def _podkill_hook_reason(op, form, topo, w, nr, member, rp, n):
+    """What the operator does, which pod is deleted by hand and what the
+    controller promises; n names the repetitions of the persistent form."""
+    at = "at the first pod of the new revision" if op == "runtime" else "as it lands"
+    if op == "delete":
+        pod = f"the {member} of one engine gang" if member else "one engine pod"
+    else:
+        pod = f"the {member} of one serving engine gang" if member else "one serving engine pod of the running revision"
+    out = f"{_op_does(op, False, topo)} on {shape_words(topo, w, nr)}, and {at} {pod} is deleted by hand"
+    if form == "persistent":
+        out += f", and again each time its Instance is back and serving, {n} times in all, then left alone"
+    if op == "delete":
+        out += ("; the deleted pod is one more on its way out: nothing is rebuilt on a service being deleted, every pod "
+                f"goes within the teardown budget and {_op_end(op)}")
+    else:
+        out += "; the controller replaces what the deletion took"
+        if form == "one-shot":
+            out += (", and the replacement is labelled as what it runs (the image its revision's pods ran when the pod "
+                    "was deleted)")
+        out += f", the floor lowered by that one Instance holds, and {_op_end(op)}"
+        if op in ("scaleup", "scaledown"):
+            out += " (the Instance the deletion took rebuilt by design)"
+        if form == "persistent":
+            out += ("; across the window " + REPEAT_WINDOW_CLAIMS.format(plus=" and the operation's own pods") + "; "
+                    + REPEAT_END_CLAIM)
+        else:
+            out += ", with every row settled and no hold left behind"
+        if member:
+            if rp == "RecreateInstance":
+                out += ("; under restart policy RecreateInstanceOnPodRestart the gang is rebuilt as a whole (a "
+                        "RestartTriggered names it) unless the operation takes it first")
+            else:
+                out += f"; under restart policy None only the lost {member} comes back and no whole-gang repair is recorded"
+            out += ", and the gang is never counted as serving while a member is missing"
+    if op in PODKILL_HOOK_ROLLS:
+        out += "; order waived — each deletion is a drain with no preceding surge"
+    return out + _op_controls(topo, nr, op)
+
+
+def emit_podkill_hooks(add):
+    """A pod deleted by hand at the remaining moments, minted after each
+    family's first pass: the one-shot rows on the disruption shapes, the
+    persistent rows on the repeating family's."""
+    persistent_shapes = [(topo, size, w, lib.NR if router else 0) for _label, topo, size, w, router in REPEAT_SHAPES]
+    for form, ops, shapes in (("one-shot", PODKILL_HOOK_OPS, DISRUPT_SHAPES),
+                              ("persistent", PODKILL_REPEAT_OPS, persistent_shapes)):
+        member, rp = PODKILL_HOOK_MEMBER[form]
+        for topo, n, w, nr in shapes:
+            gang = is_mn(topo)
+            for op in ops:
+                strat, surge, unavail = _op_strategy(op, False)
+                hook = PODKILL_HOOK_AT.get(op, HOOK_PHASE)
+                kv = _podkill_hook_kv(op, topo, n, nr, form, member if gang else None, rp, hook)
+                desc = (f"{GEN_MARK} {'repeat ' if form == 'persistent' else ''}podkill {op} {shape_tag(topo, w, nr)} N={n}"
+                        + (f" {strat} {budget_tag(strat, surge, unavail)}" if op in PODKILL_HOOK_ROLLS else "")
+                        + (f" rp {rp} target {member}" if gang else "")
+                        + (f" x{REPEAT_N}" if form == "persistent" else ""))
+                meta = dict(strat=strat if op in PODKILL_HOOK_ROLLS else "(dormant: nothing rolls)",
+                            verb=(f"repeat:podkill:{op}" if form == "persistent" else f"podkill:{op}"),
+                            faultop=f"podkill {op}", op=op, hook=hook, form=form, half="hook")
+                if gang:
+                    meta.update(rp=rp, kill=member)
+                if form == "persistent":
+                    meta["loop"] = f"podkill x{REPEAT_N} under {OP_WORDS[op]}"
+                add(PODKILL_HOOK_FOLDERS[form][gang], desc, kv, _podkill_hook_comps(op, topo, n, w, nr, rp if gang else None),
+                    _podkill_hook_reason(op, form, topo, w, nr, member if gang else None, rp, REPEAT_N), meta,
+                    cell=("podkill-hook", form, op, topo, w, nr), dedicated=(op == "runtime"))
+
+
 # ── gen-budget: percent budgets as the engine resolves them ─────────────────
 # The engine resolves a percent budget, maxSurge and maxUnavailable alike, as
 # N x percent / 100 rounded up and clamped to N (the per-Component budget of
@@ -8268,6 +8394,7 @@ def build_outputs():
     emit_packed_pool(add)
     emit_repeat(add)
     emit_repeat_ctrl_ops(add)
+    emit_podkill_hooks(add)
     emit_webhook(add)
     emit_conflict(add)
     emit_crash_once(add)
@@ -8738,7 +8865,14 @@ def manifest(rows):
         " already emits (kill=leader|worker x restart policy x strategy); this"
         " family adds the mid-roll timings, each bound to the gang it aims at"
         " (settling: a settled gang; rotating: the gang forming on the new"
-        " revision; draining: a serving gang beside the first one leaving).",
+        " revision; draining: a serving gang beside the first one leaving), and,"
+        " from p7172, a serving gang's leader deleted under restart policy None"
+        " as a rollback, a strategy edit, a scale up or down and a delete land"
+        " and at the first pod of a runtime edit's new revision, on the gang"
+        " ledger shapes; gen-fault carries the same moments on the single-pod"
+        " shapes from p1520 (the operation still completes, the replacement is"
+        " labelled as what it runs, a delete takes the deleted pod with the"
+        " rest), and gen-repeat the persistent form.",
         "- tight: RecreatePod under the quota squeeze has no lift axis — the drain"
         " frees the gang's own room, so the roll completes with no wait, and the"
         " cell asserts that instead.",
@@ -8917,7 +9051,10 @@ def manifest(rows):
         " strategy edit, a runtime edit, a scale-down, a move, a delete and a"
         " two-step canary too (from p8826), the window held open until the"
         " restarts are spent so the later ones land on the operation's settled"
-        " end. The"
+        " end, and the pod (a gang's worker under the rebuild-whole policy)"
+        " again under a rollback, a strategy edit, a runtime edit and a"
+        " scale-down (from p8868); a delete brings nothing back, so the pod"
+        " deleted as a delete lands has the one-shot form only. The"
         " loop takes the same Instance again once it is back (the deleter hits"
         " the pod that came back), the running revision's pods under the push"
         " (victim=stable), and the engine on the prefill/decode shapes"

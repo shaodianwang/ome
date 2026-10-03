@@ -1,0 +1,23 @@
+# p1530: [gen] podkill scaledown pd N=4  mode=scaledown Ne=4 Nd=4 Nr=2 ceil_e=4 ceil_d=4 ceil_r=2 fault=podkill:settling co=none topo=pd victimcomp=engine to_e=3 floor_slack=1
+# reason: the engine is scaled from N to N-1 on prefill/decode, single-pod, and as it lands one serving engine pod of the running revision is deleted by hand; the controller replaces what the deletion took, and the replacement is labelled as what it runs (the image its revision's pods ran when the pod was deleted), the floor lowered by that one Instance holds, and the scale completes with the engine at N-1 and the survivors on their own pods (the Instance the deletion took rebuilt by design), with every row settled and no hold left behind; decoder and router are negative controls (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1530 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

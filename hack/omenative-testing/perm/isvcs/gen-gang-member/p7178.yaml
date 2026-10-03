@@ -1,0 +1,20 @@
+# p7178: [gen] podkill rollback engine-mn W1+router N=2 SurgeThenDrain s1 rp None target leader  Ne=2 Nd=0 Nr=2 ceil_e=3 ceil_d=0 ceil_r=2 restart=None kill=leader fault=podkill:settling order_soft=1 co=none topo=engine-mn during=rotating victim=stable rollback=1 floor_slack=1
+# reason: the engine is bumped and the starting revision re-applied at the first pod of the new revision on engine behind a router as gangs of 1 leader + 1 worker, and as it lands the leader of one serving engine gang is deleted by hand; the controller replaces what the deletion took, and the replacement is labelled as what it runs (the image its revision's pods ran when the pod was deleted), the floor lowered by that one Instance holds, and the rollback completes with every Instance back on the starting revision and serving, no pod of the new revision left, with every row settled and no hold left behind; under restart policy None only the lost leader comes back and no whole-gang repair is recorded, and the gang is never counted as serving while a member is missing; order waived — each deletion is a drain with no preceding surge; the router is a negative control (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7178 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

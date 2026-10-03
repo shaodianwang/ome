@@ -1,0 +1,27 @@
+# p8888: [gen] repeat podkill rollback pd-mn W1 N=2 SurgeThenDrain s1 rp RecreateInstance target worker x3  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=2 ceil_r=2 restart=RecreateInstance kill=worker fault=podkill:settling order_soft=1 co=none topo=pd-mn during=rotating victim=stable victimcomp=engine rollback=1 floor_slack=1 repeat=3
+# reason: the engine is bumped and the starting revision re-applied at the first pod of the new revision on prefill/decode as gangs of 1 leader + 1 worker, and as it lands the worker of one serving engine gang is deleted by hand, and again each time its Instance is back and serving, 3 times in all, then left alone; the controller replaces what the deletion took, the floor lowered by that one Instance holds, and the rollback completes with every Instance back on the starting revision and serving, no pod of the new revision left; across the window the status reports each loss and never counts the short Instance whole, every repair recorded is for an Instance the fault took, the pods created are those repairs and the operation's own pods and no more (no hot loop), no pod comes back on a revision the service never pushed; after the lift every Instance is Ready and serving on its revision with no row mid-operation and no hold left behind; under restart policy RecreateInstanceOnPodRestart the gang is rebuilt as a whole (a RestartTriggered names it) unless the operation takes it first, and the gang is never counted as serving while a member is missing; order waived — each deletion is a drain with no preceding surge; decoder and router are negative controls (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p8888 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

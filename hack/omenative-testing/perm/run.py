@@ -5760,14 +5760,17 @@ def _fault_repeats(f):
 
 
 def _repeat_pending(f):
-    """True while a repeating manager restart still owes repetitions: the
-    operation's window stays open for them, so a short operation finishes
-    under the first restart and the later ones land on its settled end,
-    which must stay settled. Spent, gated off or failed as apparatus,
-    nothing is pending."""
-    return (_fault_repeats(f) and f.get("kind") == "ctrlrestart" and bool(f.get("fired"))
-            and not f.get("ctrl_gated") and not f.get("infra_fail")
-            and int(f.get("fired_count") or 0) < int(f["repeat"]))
+    """True while a repeating manager restart, or a repeating pod deletion
+    at a hook of an operation (the hook-op driver's), still owes
+    repetitions: the operation's window stays open for them, so a short
+    operation finishes under the first one and the later ones land on its
+    settled end, which must stay settled. Spent, gated off or failed as
+    apparatus, nothing is pending."""
+    if not _fault_repeats(f) or not f.get("fired") or f.get("ctrl_gated") or f.get("infra_fail"):
+        return False
+    if f.get("kind") != "ctrlrestart" and not (f.get("kind") == "podkill" and f.get("hook_op")):
+        return False
+    return int(f.get("fired_count") or 0) < int(f["repeat"])
 
 
 def _repeat_retrying(f, now):
@@ -5853,11 +5856,14 @@ def _fault_fire_once(f, pod_state, pods_per_inst, old_hashes, inv=None):
         if not victim:
             f["infra_fail"] = "podkill: no live pod to delete"
             return
+        truth = _podkill_fault_truth(f, victim, pod_state) if f.get("truth_wanted") and f.get("truth") is None else None
         r = kubectl("-n", NS, "delete", "pod", victim, "--wait=false")
         if r.returncode != 0:
             f["infra_fail"] = f"podkill: delete {victim} failed: {r.stderr.strip()[:120]}"
             return
         _fault_record_victim(f, victim, pod_state, old_hashes)
+        if truth is not None:
+            f["truth"] = truth
         f["notes"].append(f"fault fired: podkill {victim} ({f['param']}; {f['victim_comp']} instance {f['victim_inst']} "
                           f"{f['victim_runner']}{', new revision' if f['victim_new'] else ''})")
         print(f"    ⚡ {f['notes'][-1]}")
@@ -13613,6 +13619,37 @@ def _ctrl_hook_op_case(hdr):
     mode = str(hdr.get("mode", "rollout") or "rollout")
     return (kind == "ctrlrestart" and param != IDLE_FAULT_PHASE and mode in CTRL_HOOK_MODES
             and _window_operation(hdr) in CTRL_HOOK_OPS)
+
+
+# A pod deleted by hand at a hook of an operation beyond the push and the
+# scale (fault=podkill:<hook>): a serving pod of the running revision
+# (victim=stable; a gang's member under kill=) as a rollback or a mid-roll
+# edit lands once it has fired at its own hook or at a hook of the roll
+# under a runtime edit, any pod as a delete lands. The controller must
+# replace what the deletion took, labelled as what it runs, and the
+# operation must still complete; under a delete the deleted pod is one more
+# on its way out. repeat= deletes the pod again each time its Instance is
+# back, and the window stays open until the repetitions are spent. The
+# scale driver owns the deletion under a scale, as it owns the eviction.
+PODKILL_HOOK_OPS = {"rollback", "edit", "runtime", "delete"}
+PODKILL_HOOK_HOOKS = {"rollback": {"settling"}, "edit": {"settling"}, "runtime": WINDOW_ROLL_HOOKS, "delete": {"settling"}}
+PODKILL_HOOK_MODES = {"rollout", "runtimerev", "recreate"}
+
+
+def _podkill_hook_op_case(hdr):
+    """True for a pod deleted by hand as a rollback or a mid-roll edit
+    lands (podkill:settling beside them; a deletion at a hook of the roll
+    beside either is the rollout driver's own form), at a hook of a runtime
+    edit or as a delete lands (the hook-op driver's); the push, the scale,
+    the move, the canary and the idle service keep their own drivers."""
+    kind, _, param = str(hdr.get("fault", "") or "").partition(":")
+    mode = str(hdr.get("mode", "rollout") or "rollout")
+    if kind != "podkill" or param == IDLE_FAULT_PHASE or mode not in PODKILL_HOOK_MODES:
+        return False
+    op = _window_operation(hdr)
+    if op in ("rollback", "edit"):
+        return param == "settling"
+    return op in PODKILL_HOOK_OPS
 # A node loss at a hook of an operation in flight (fault=node:<hook>): the
 # kubelet under the victim is stopped at a hook of the roll under a push or
 # a runtime edit, as a rollback, an edit, a scale or a delete lands, or at a
@@ -13717,6 +13754,56 @@ def _ctrl_hook_checks(f, what, hook, completed, state, converged_at, verdict, no
     return verdict
 
 
+def _podkill_hook_tick(ctx, f):
+    """Per read under a pod deleted at a hook: the pod that replaces the
+    first victim (label truth) and the gang's row while it is short a
+    member."""
+    now = time.time()
+    _podkill_fault_track(f, ctx["pod_state"], now - (ctx.get("trigger_ts") or now))
+    _gang_member_tick(f, ctx["case_id"], ctx["pod_state"], ctx["pods_per_inst"], now)
+
+
+def _podkill_hook_checks(ctx, f, op, what, hook, completed, state, verdict, notes, checks):
+    """The verdict of a pod deleted by hand at a hook of an operation. The
+    deletion fired at the hook and names what it took; a one-shot
+    deletion's replacement runs the image its revision label names (under
+    a delete nothing replaces it: the deleted pod is one more on its way
+    out); a gang's lost member is judged against the restart policy; and
+    the operation completes within its budget, the repetitions of a
+    repeating deletion in its window (the repeat checks judge those)."""
+    if f.get("infra_fail") or f.get("skip"):
+        return verdict
+    where = f"as {what} landed" if hook == "settling" else f"at {hook} of {what}"
+    if not f.get("fired"):
+        verdict = "FAIL"
+        notes.append(f"podkill:{hook} never fired")
+        checks.append(f"  ✗ podkill: no pod was deleted {where}")
+        return verdict
+    checks.append(f"  ✓ podkill: {f.get('victim_comp')} Instance {f.get('victim_inst')} ({f.get('victim_runner')}) "
+                  f"deleted {where}" + (f", {int(f.get('fired_count') or 0)} time(s) in all" if _fault_repeats(f) else ""))
+    truth = f.get("truth") or {}
+    if op == "delete":
+        rep = truth.get("replacement")
+        if rep:
+            checks.append(f"  ⓘ podkill: {rep['pod']} replaced the deleted pod {rep['at']:.0f}s after the trigger, "
+                          f"before the teardown took it too")
+        else:
+            checks.append("  ✓ podkill: nothing replaced the deleted pod; it left with the teardown")
+    elif not _fault_repeats(f):
+        verdict = _podkill_truth_checks(truth, verdict, notes, checks)
+    if op != "delete" and f.get("member"):
+        verdict = _gang_member_checks(f, ctx["pod_state"], ctx.get("trigger_ts"), ctx.get("hdr"), verdict, notes, checks,
+                                      info=ctx.get("info"))
+    if completed:
+        checks.append(f"  ✓ {what} completed {ctx.get('converged_at') or 0:.0f}s after the trigger with the pod "
+                      f"{'deletions' if _fault_repeats(f) else 'deletion'} in its window")
+    elif state != "INFRA-FAIL":
+        verdict = "FAIL"
+        notes.append(f"{what} did not complete under the pod deletion ({state})")
+        checks.append(f"  ✗ {what} did not complete within budget under the pod deletion ({state})")
+    return verdict
+
+
 def _wait_webhook_admits_apply(yaml_file, budget_s):
     """Block until the admission webhooks answer for a create of the case's
     manifest (a server-side dry-run apply runs admission without creating
@@ -13744,7 +13831,10 @@ def _hook_op(case_id, yaml_file, desc, hdr):
     manager restart (fault=ctrlrestart:<hook>) loses no pod: the operation
     must resume from the status a fresh manager reads and complete, once
     or, under repeat=, with the manager deleted again each time it is
-    Ready."""
+    Ready. The pod deleted by hand (fault=podkill:<hook>) must be replaced
+    on the revision its label names (under a delete it is one more pod on
+    its way out) and the operation must still complete, once or, under
+    repeat=, with the pod deleted again each time its Instance is back."""
     kind = str(hdr.get("fault", "")).partition(":")[0]
     reason = _fault_capability(kind)
     if reason:
@@ -13795,12 +13885,16 @@ def _hook_op(case_id, yaml_file, desc, hdr):
             return _finish(case_id, desc, hdr, ctx, "HOOK_MISSED", "INFRA-FAIL", [f["infra_fail"]], [f"  ✗ {f['infra_fail']}"])
         f["aim_pod"] = aim
         ctx["fault_migrating"] = True   # the migrating hook is reached: a refused eviction asks again from here
+    if kind == "podkill":
+        f["truth_wanted"] = True   # the first deletion's replacement is held to its revision label
     _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
     f["hook_op_fired"] = True
     if f.get("skip"):
         return _finish(case_id, desc, hdr, ctx, "SKIP", "SKIP", [f["skip"]], [])
     if f["infra_fail"]:
         return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
+    if kind == "podkill":
+        ctx["on_read"] = lambda c: _podkill_hook_tick(c, f)
     if mv is not None and kind == "evict":
         ctx["floor_allowance"] = {st["mcomp"]: 1}   # the eviction takes one Instance of the moved Component
     what = WINDOW_WHAT[op]
@@ -13827,6 +13921,12 @@ def _hook_op(case_id, yaml_file, desc, hdr):
         state = _hook_op_watch(ctx, f, done, budget)
         completed = state == "CONVERGED"
         verdict = _ctrl_hook_checks(f, what, hook, completed, state, ctx.get("converged_at"), verdict, notes, checks)
+    elif kind == "podkill":
+        again = f" and again each time its Instance is back ({f['repeat']} in all)" if _fault_repeats(f) else ""
+        print(f"  Phase 3: watching {what} complete under the pod deletion{again} (≤{budget}s)")
+        state = _hook_op_watch(ctx, f, done, budget)
+        completed = state == "CONVERGED"
+        verdict = _podkill_hook_checks(ctx, f, op, what, hook, completed, state, verdict, notes, checks)
     else:
         print(f"  Phase 3: watching {what} complete after the eviction (≤{budget}s)")
         state = _hook_op_watch(ctx, f, done, budget)
@@ -14984,12 +15084,13 @@ def validate_case_file(path):
                 errs.append(f"{path}:1: repeat= with fault={fields.get('fault')} needs a phase hook "
                             f"({'|'.join(sorted(REPEAT_PHASES))}), or fault=ctrlrestart:{IDLE_FAULT_PHASE} "
                             f"during={IDLE_FAULT_PHASE} for the manager restarting on the settled service")
-            at_hook_op = fault_kind in ("evict", "ctrlrestart") and (fields.get("rollback") == 1 or _midroll_edit(fields.get("edit")) is not None)
+            at_hook_op = (fault_kind in ("evict", "ctrlrestart") or (fault_kind == "podkill" and fault_param == "settling")) \
+                and (fields.get("rollback") == 1 or _midroll_edit(fields.get("edit")) is not None)
             if any(k in fields for k in ("stuck", "blocked", "pauseat")) or (
                     not at_hook_op and (fields.get("rollback") == 1 or _midroll_edit(fields.get("edit")) is not None)):
                 errs.append(f"{path}:1: repeat= rides a plain push, a scale, a runtime edit, a delete under a manager restart, "
-                            f"or an eviction or a manager restart at a hook of a rollback or a mid-roll edit; "
-                            f"stuck=, blocked= and pauseat= do not combine with it")
+                            f"or an eviction, a pod deleted by hand or a manager restart at a hook of a rollback or a "
+                            f"mid-roll edit; stuck=, blocked= and pauseat= do not combine with it")
         elif mode == "canary" and fault_kind in CANARY_REPEAT_FAULTS | {"ctrlrestart"}:
             # A pod deleted by hand or evicted again each time it is back, or the
             # manager deleted again each time it is Ready, at a grid state of the ladder.
@@ -15088,6 +15189,28 @@ def validate_case_file(path):
             if k in fields:
                 errs.append(f"{path}:1: {k}= does not combine with fault=ctrlrestart:{fault_param} at a hook of "
                             f"{WINDOW_WHAT[hop]} (the restart loses no pod; the operation's completion is the verdict)")
+    # A pod deleted by hand at a hook of an operation beyond the push and
+    # the scale (fault=podkill:<hook>): as a rollback or a mid-roll edit
+    # lands once it has fired, at a hook of the roll under a runtime edit,
+    # as a delete lands. Each fires at the hook the operation offers; the
+    # aim knobs (victim=, victimcomp=, kill=) and the floor slack apply as
+    # under a push, and repeat= is the persistent form; a delete brings
+    # nothing back the deletion could take again.
+    if _podkill_hook_op_case(fields):
+        hop = _window_operation(fields)
+        if fault_param not in PODKILL_HOOK_HOOKS[hop]:
+            errs.append(f"{path}:1: fault={fields.get('fault')} at a hook of {WINDOW_WHAT[hop]} fires at "
+                        f"fault=podkill:{'|'.join(sorted(PODKILL_HOOK_HOOKS[hop]))}")
+        if hop == "rollback" and during not in WINDOW_ROLLBACK_HOOKS:
+            errs.append(f"{path}:1: a pod deleted by hand over a rollback fires once the rollback has fired at "
+                        f"during={'|'.join(sorted(WINDOW_ROLLBACK_HOOKS))}")
+        if hop == "delete" and "repeat" in fields:
+            errs.append(f"{path}:1: repeat= under a delete has nothing to take again (a delete brings no pod back); "
+                        f"fault=podkill:settling under mode=recreate is the one-shot form")
+        for k in ("once", "form", "lift", "needs", "stuck", "pauseat", "break", "at"):
+            if k in fields:
+                errs.append(f"{path}:1: {k}= does not combine with fault=podkill:{fault_param} at a hook of "
+                            f"{WINDOW_WHAT[hop]} (the deletion is the fault; the operation's completion is the verdict)")
     # A node loss at a hook of an operation in flight (fault=node:<hook>): a
     # roll's own hooks under a push or a runtime edit, the moment a rollback,
     # an edit, a scale or a delete lands, or a canary grid state. The lift
@@ -21778,6 +21901,23 @@ def _podkill_track(ctx, now_rel):
             return
 
 
+def _podkill_fault_truth(f, victim, pod_state):
+    """The label-truth record of a podkill fault's first deletion, the verb's
+    record on the fault: the pod, its Instance and revision, the image it
+    ran and what every revision ran at that moment."""
+    state = pod_state.get(victim) or {}
+    return {"pod": victim, "comp": state.get("comp", ""), "inst": str(state.get("inst", "0")),
+            "hash": state.get("hash", ""), "uid": state.get("uid", ""),
+            "image": _pod_image(_get_pod(victim)), "images_by_hash": _case_pod_images(f["case_id"]),
+            "replacement": None}
+
+
+def _podkill_fault_track(f, pod_state, now_rel):
+    """Record the first pod that replaced a podkill fault's first victim."""
+    if f and f.get("truth"):
+        _podkill_track({"podkill": f["truth"], "pod_state": pod_state}, now_rel)
+
+
 def _podkill_truth_checks(record, verdict, notes, checks):
     """Label truth for the replacement: it runs the image the pods of its
     revision ran when the pod was deleted. A pod rebuilt from a newer
@@ -23362,7 +23502,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     mode_fault = str(hdr.get("fault", "")).partition(":")[0]
     if mode in ("migrate", "recreate", "runtimerev") and mode_fault in WINDOW_FAULTS:
         return _window_op(case_id, yaml_file, desc, hdr)
-    if mode in ("recreate", "runtimerev") and (mode_fault in HOOK_OP_FAULTS or _ctrl_hook_op_case(hdr)):
+    if mode in ("recreate", "runtimerev") and (mode_fault in HOOK_OP_FAULTS or _ctrl_hook_op_case(hdr)
+                                               or _podkill_hook_op_case(hdr)):
         return _hook_op(case_id, yaml_file, desc, hdr)
     if mode in NODE_HOOK_MODES and _node_hook_fault(_fault_new(case_id, hdr)):
         return _hook_op(case_id, yaml_file, desc, hdr)
@@ -23432,6 +23573,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     surge_modes = {c: "surge" for c in configured}
     inv = _inv_new(case_id, hdr)     # continuous invariants (status-truth + endpoints)
     fault = _fault_new(case_id, hdr)  # optional fault=<kind>:<param> plumbing
+    if fault and fault["kind"] == "podkill":
+        fault["truth_wanted"] = True   # the first deletion's replacement is held to its revision label
 
     init_budget = min(MAX_BUDGET_S, INIT_BASE_S + INIT_PER_POD_S * sum(N[c] for c in configured))
     conv_budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] for c in configured)
@@ -23478,6 +23621,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                     # back, which may raise no watch event: ticked here too.
                     _fault_tick({"fault": fault, "trigger_ts": trigger_ts, "old_hashes": None,
                                  "pod_state": pod_state, "pods_per_inst": pods_per_inst, "inv": inv})
+                if state == "DRAINING" and fault and fault["kind"] == "podkill":
+                    _gang_member_tick(fault, case_id, pod_state, pods_per_inst, now)
                 if state == "INIT" and initial_pods_ready:
                     ir_items = _fetch_initial_ir_items(case_id)
                     settled, wait = _initial_rollout_settled(
@@ -23568,6 +23713,10 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                 # Fault phase hook (settling fires right after the trigger).
                 _fault_tick({"fault": fault, "trigger_ts": trigger_ts, "old_hashes": None,
                              "pod_state": pod_state, "pods_per_inst": pods_per_inst, "inv": inv})
+                if fault and fault["kind"] == "podkill":
+                    # The deleted pod's replacement (label truth) and the gang's row while short.
+                    _podkill_fault_track(fault, pod_state, now - trigger_ts)
+                    _gang_member_tick(fault, case_id, pod_state, pods_per_inst, now)
                 # Check C: capacity floor — every CONFIGURED component (not just the
                 # scaled one) must keep >= its target ready throughout the drain. A
                 # scaled component drains N→target (never below target); a non-scaled
@@ -23701,7 +23850,13 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     # orphan worker/leader) sustained >= GANG_TOL_S during the drain.
     mn_conf = [c for c in sorted(configured) if pods_per_inst.get(c, 1) > 1]
     if mn_conf:
-        td_viol = {k: v for k, v in teardown_worst.items() if v >= GANG_TOL_S}
+        # A gang the fault took a member from is short by the fault's doing,
+        # and the restart policy decides what is rebuilt: the gang-member
+        # checks judge it, so it is left out here.
+        td_viol = {k: v for k, v in teardown_worst.items() if v >= GANG_TOL_S and k not in taken_insts}
+        if any(k in taken_insts for k, v in teardown_worst.items() if v >= GANG_TOL_S):
+            checks.append("  ⓘ partial-teardown atomicity: the gang(s) the fault took a member from are left out: "
+                          + ", ".join(f"{c}/{i}" for c, i in sorted(taken_insts)))
         if td_viol:
             verdict = "FAIL"
             wk = max(td_viol, key=td_viol.get)
@@ -23738,6 +23893,13 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
         verdict = _repeat_checks(fault, pods_per_inst, set(), op_pods, trigger_ts, verdict, notes, checks)
         if state == "CONVERGED":
             verdict = _repeat_end_checks(case_id, target, configured, verdict, notes, checks)
+    # A pod deleted by hand as the scale lands: a one-shot deletion's
+    # replacement runs the image its revision label names, and a gang's
+    # lost member is judged against the restart policy.
+    if fault and fault["kind"] == "podkill" and fault.get("fired") and not fault.get("infra_fail"):
+        if not _fault_repeats(fault):
+            verdict = _podkill_truth_checks(fault.get("truth"), verdict, notes, checks)
+        verdict = _gang_member_checks(fault, pod_state, trigger_ts, hdr, verdict, notes, checks, info=info)
     verdict = soften_expected_fail(hdr, verdict, checks)
     # Check F: continuous invariants + fault apparatus — AFTER the softening
     # (same rationale as teardown_check): a status lie or a broken apparatus is
@@ -23862,7 +24024,8 @@ def run_case(case_id):
         return _window_op(case_id, yaml_file, desc, hdr)
     if _tight_cell(hdr):
         return _tight_roll(case_id, yaml_file, desc, hdr)
-    if (fault_kind in HOOK_OP_FAULTS or _ctrl_hook_op_case(hdr)) and _window_operation(hdr) in ("rollback", "edit"):
+    if (fault_kind in HOOK_OP_FAULTS or _ctrl_hook_op_case(hdr) or _podkill_hook_op_case(hdr)) \
+            and _window_operation(hdr) in ("rollback", "edit"):
         return _hook_op(case_id, yaml_file, desc, hdr)
     if _node_hook_fault(_fault_new(case_id, hdr)):
         return _hook_op(case_id, yaml_file, desc, hdr)

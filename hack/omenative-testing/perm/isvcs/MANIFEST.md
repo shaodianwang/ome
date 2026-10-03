@@ -3,14 +3,14 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **6708**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
 | folder | cases | id range |
 |---|---|---|
 | gen-rollout | 72 | p1000..p1071 |
-| gen-fault | 320 | p1200..p1519 |
+| gen-fault | 338 | p1200..p1537 |
 | gen-restart | 187 | p1600..p1786 |
 | gen-crashloop | 216 | p2000..p2215 |
 | gen-switch | 582 | p3800..p11281 |
@@ -36,7 +36,7 @@ Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) 
 | gen-runtime-edit-repair | 84 | p6900..p6983 |
 | gen-migrate-bump | 154 | p6200..p6353 |
 | gen-readiness | 60 | p7000..p7059 |
-| gen-gang-member | 72 | p7100..p7171 |
+| gen-gang-member | 90 | p7100..p7189 |
 | gen-tight | 28 | p7300..p7327 |
 | gen-evict | 102 | p7400..p9561 |
 | gen-preempt | 102 | p7440..p9641 |
@@ -48,7 +48,7 @@ Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) 
 | gen-fault-move | 406 | p7800..p11905 |
 | gen-fault-edit | 230 | p7900..p12029 |
 | gen-packed-pool | 96 | p8600..p8695 |
-| gen-repeat | 168 | p8700..p8867 |
+| gen-repeat | 192 | p8700..p8891 |
 | gen-webhook | 168 | p8900..p10407 |
 | gen-conflict | 264 | p8960..p10623 |
 | gen-crash-once | 120 | p8400..p8519 |
@@ -58,20 +58,20 @@ Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| engine | 1981 |
-| engine-mn | 1822 |
-| pd | 1560 |
-| pd-mn | 1285 |
+| engine | 2001 |
+| engine-mn | 1842 |
+| pd | 1570 |
+| pd-mn | 1295 |
 
 ### By update strategy
 
 | value | cases |
 |---|---|
-| (dormant: nothing rolls) | 804 |
+| (dormant: nothing rolls) | 828 |
 | InPlaceIfPossible | 602 |
 | InPlaceOnly | 281 |
 | RecreatePod | 1261 |
-| SurgeThenDrain | 3700 |
+| SurgeThenDrain | 3736 |
 
 ### By failure verb / phase
 
@@ -373,17 +373,23 @@ Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) 
 | pending:taint@delete | 12 |
 | pending:taint@down1 | 12 |
 | pending:taint@up1 | 12 |
+| podkill:delete | 6 |
 | podkill:draining:leader | 12 |
 | podkill:draining:worker | 12 |
+| podkill:edit | 6 |
 | podkill:migrating | 3 |
 | podkill:migrating x2 | 3 |
 | podkill:migrating:leader | 3 |
 | podkill:migrating:leader x2 | 3 |
 | podkill:migrating:worker | 3 |
 | podkill:migrating:worker x2 | 3 |
+| podkill:rollback | 6 |
 | podkill:rotating | 160 |
 | podkill:rotating:leader | 12 |
 | podkill:rotating:worker | 12 |
+| podkill:runtime | 6 |
+| podkill:scaledown | 6 |
+| podkill:scaleup | 6 |
 | podkill:settling | 160 |
 | podkill:settling:leader | 12 |
 | podkill:settling:worker | 12 |
@@ -464,8 +470,12 @@ Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) 
 | repeat:evict:push | 12 |
 | repeat:evict:scale-up | 6 |
 | repeat:evict:steady | 18 |
+| repeat:podkill:edit | 6 |
 | repeat:podkill:push | 24 |
+| repeat:podkill:rollback | 6 |
+| repeat:podkill:runtime | 6 |
 | repeat:podkill:scale-up | 18 |
+| repeat:podkill:scaledown | 6 |
 | repeat:podkill:steady | 18 |
 | repeat:preempt:steady | 6 |
 | resources@held | 4 |
@@ -523,23 +533,23 @@ Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (unset — baseline) | 2340 |
-| None | 2636 |
-| RecreateInstance | 1672 |
+| (unset — baseline) | 2370 |
+| None | 2654 |
+| RecreateInstance | 1684 |
 
 ### By pause
 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 6354 |
+| off | 6414 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 6468 |
+| (no pause around a repair) | 6528 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -548,7 +558,7 @@ Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 6468 |
+| (no pause around a repair) | 6528 |
 | fix | 90 |
 | none | 90 |
 
@@ -558,7 +568,7 @@ Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 54 |
 | canary | 30 |
-| none | 5638 |
+| none | 5698 |
 | ratio | 16 |
 | rolling | 876 |
 | seq | 34 |
@@ -704,7 +714,7 @@ Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 4809 |
+| (no break) | 4869 |
 | decoder | 134 |
 | engine | 1621 |
 | router | 84 |
@@ -745,20 +755,20 @@ Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | canary | 18 |
-| delete | 238 |
+| delete | 244 |
 | down1 | 124 |
 | down2 | 28 |
-| edit | 102 |
+| edit | 114 |
 | move | 42 |
 | push | 150 |
-| rollback | 102 |
-| runtime | 102 |
+| rollback | 114 |
+| runtime | 114 |
 | scale | 36 |
 | scale-down | 60 |
 | scale-one | 16 |
 | scale-up | 60 |
-| scaledown | 72 |
-| scaleup | 24 |
+| scaledown | 84 |
+| scaleup | 30 |
 | steady | 36 |
 | toone | 28 |
 | up1 | 112 |
@@ -841,6 +851,12 @@ Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) 
 | pending edit | 24 |
 | pending rollback | 24 |
 | pending runtime | 24 |
+| podkill delete | 6 |
+| podkill edit | 12 |
+| podkill rollback | 12 |
+| podkill runtime | 12 |
+| podkill scaledown | 12 |
+| podkill scaleup | 6 |
 | preempt edit | 6 |
 | preempt rollback | 6 |
 | preempt runtime | 6 |
@@ -877,20 +893,20 @@ Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | canary | 18 |
-| delete | 238 |
+| delete | 244 |
 | down1 | 124 |
 | down2 | 28 |
-| edit | 102 |
+| edit | 114 |
 | move | 42 |
 | push | 150 |
-| rollback | 102 |
-| runtime | 102 |
+| rollback | 114 |
+| runtime | 114 |
 | scale | 36 |
 | scale-down | 60 |
 | scale-one | 16 |
 | scale-up | 60 |
-| scaledown | 72 |
-| scaleup | 24 |
+| scaledown | 84 |
+| scaleup | 30 |
 | steady | 36 |
 | toone | 28 |
 | up1 | 112 |
@@ -968,6 +984,10 @@ Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) 
 | podkill x3 at steady state | 18 |
 | podkill x3 under a push | 24 |
 | podkill x3 under a scale-up | 18 |
+| podkill x3 under the roll under its edit | 6 |
+| podkill x3 under the rollback | 6 |
+| podkill x3 under the runtime edit | 6 |
+| podkill x3 under the scale-down | 6 |
 | preempt x2 at steady state | 6 |
 
 ### By ledger fault row (canary-fault-gate)
@@ -1041,7 +1061,7 @@ Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) 
 - The migrate-and-bump family moves one Instance by request only: the engine's own (automatic) migration is a born-terminal relocation record, written when an Instance whose node is gone is rebuilt elsewhere; it has no in-flight phase for a roll to overlap, and the one verb that provokes it, a node loss, belongs to the node-loss family.
 - `during=last` is not emitted with maxSurge 2: a surge of two promotes its last pair together, so the moment with exactly one Instance still off the new revision is not reliably observable.
 - readiness:old runs on the idle service at the canonical SurgeThenDrain budget: update budgets are dormant with no roll, so strategy multiplies only the readiness:new side; readiness:new has one form, since a revision that never passes readiness has no one-shot shape (a slow start is the startup delay, not a readiness failure).
-- gang-member cells at steady state are the mode=kill cells gen-restart already emits (kill=leader|worker x restart policy x strategy); this family adds the mid-roll timings, each bound to the gang it aims at (settling: a settled gang; rotating: the gang forming on the new revision; draining: a serving gang beside the first one leaving).
+- gang-member cells at steady state are the mode=kill cells gen-restart already emits (kill=leader|worker x restart policy x strategy); this family adds the mid-roll timings, each bound to the gang it aims at (settling: a settled gang; rotating: the gang forming on the new revision; draining: a serving gang beside the first one leaving), and, from p7172, a serving gang's leader deleted under restart policy None as a rollback, a strategy edit, a scale up or down and a delete land and at the first pod of a runtime edit's new revision, on the gang ledger shapes; gen-fault carries the same moments on the single-pod shapes from p1520 (the operation still completes, the replacement is labelled as what it runs, a delete takes the deleted pod with the rest), and gen-repeat the persistent form.
 - tight: RecreatePod under the quota squeeze has no lift axis — the drain frees the gang's own room, so the roll completes with no wait, and the cell asserts that instead.
 - evict has no lift: the Eviction API is a one-shot removal, so the family crosses topology x restartPolicy (x strategy under the roll) only. Its steady-state cells are the kill verdict with the removal done by the Eviction API; the product's disruption budget (`podDisruptionBudget.omeNative` in the chart) may refuse it while a pod is already down, the runner asks again as a drain does, and a budget that never admits one eviction fails the case.
 - preempt and pending cross `lift=after-settle|never` (the cause removed once the wait has held, or kept to the end so the hold is judged), run on one gang width, with `co=none` (a group changes nothing about where a pod can be placed) and under the two strategies a roll waits under (in-place strategies create no pod to place). Both verbs need a cluster the harness owns (every node is blocked); elsewhere the case is SKIP with the reason. The preempt roll cells waive the floor and the order (the preemption takes a pod the budget cannot absorb); the pending verdict keeps its own floor.
@@ -1052,7 +1072,7 @@ Total generated cases: **6648**. The whole-corpus per-PR cap (hand + generated) 
 - gen-fault-scale and gen-fault-delete break Instance 0 of the settled service, the lowest index, so a scale-down's natural victim (the highest index) and the broken Instance differ and the order of removal can be told apart. The engine runs under SurgeThenDrain with maxSurge 1 and maxUnavailable 1 in both families: nothing rolls, so the strategy is dormant, and the unavailability budget of one admits the repair that takes the broken Instance offline (the canonical budget of zero holds it). Readiness loss is repaired under neither restart policy, so its policy axis is collapsed to None; a crash at start, a crash after Ready and a pull failure run under both, and each scale-up cell states on line two what becomes of the broken Instance (expect=repaired|left) and why. On the gang fleet of two only down by one and up by one are emitted: to one is down by one there, and down by two asks for zero, which the API refuses (minReplicas 0 needs KEDA autoscaling). A rolling group is crossed in where a decoder exists; the delete family keeps the same axes.
 - gen-fault-move fires the fault at a moment of a move (at=accept, the request recorded; at=surge, the replacement pod up; at=drain, the source going) on the moved Instance (its source pod at accept, its replacement at surge and at drain), on a peer (the highest other Instance) or on the decoder (victim=sibling, PD only). Left out, with the reason: pd-mn (the move copies a whole gang whatever the decoder does; the gang axis is engine-mn's, the sibling axis pd's); the update strategy (dormant: no roll is in flight, a move surges whatever the strategy and a repair rebuilds in place); a rollout group (a repair of an Instance that serves nothing is admitted without its gate; the group axis is the steady-state crash-loop family's); the restart policy on a crash at start and a pull failure (both reach the crash-loop repair under either policy, so they run under None) while the after-Ready form runs under RecreateInstanceOnPodRestart, the one policy that promises its repair; a node loss anywhere but the source node (the story), at drain (the source is already going, its node dying then is the sweep of a terminating pod, which the surge moment reads with the replacement in place), and on the lane without the force-delete policy (a source pod on a silent node is never freed, so the move cannot finish; that fate is the node family's parked cell); the readiness switch (fault=readiness:old is repaired under neither restart policy, so it is the broken-Instance families' break and is not fired at a move moment as a break the product repairs). The family's later rows put the same request beside the remaining faults: a crash or a pull failure healed again once it has bitten (lift=after-settle) and a runner killed once on the replacement (once=1); the missing key put back or kept away and the readiness switch lifted or kept (victim=moved|peer, the decoder as sibling); a pod deleted by hand at the request, a gang member under kill=, again under repeat=; the moved Instance's pod evicted at each moment, again under repeat= at surge, and preempted as the replacement appears; a NoSchedule taint before the request; and a move on a push stuck on an unpullable image (held and failed), a crash at start, a crash after Ready, a missing key or a readiness that never passes (held), the decoder's push stuck beside the engine's move on the prefill/decode shapes. Left out: the router's push stuck beside a move (the router is bumped by no group, so a stuck router push has no driver) and the missing key or the readiness switch on the router (its image carries neither the fixture's ConfigMap env nor the readiness switch).
 - gen-fault-edit edits the dedicated runtime every Component inherits (engine, decoder and router each roll onto their own revision) under the surge and the drain-first strategies, and breaks a pod of the running revision on the engine or the decoder as the edit lands; its bad-edit half pushes an image that cannot be pulled or a readiness that never passes and then the corrective edit. Its further rows run one case per ledger cell under the surge strategy and the env edit: a break of the running revision landed on the settled service before the edit (a crash at start, after Ready and a pull failure healed once the edit has fired, a readiness loss kept and lifted, the key put back and the key kept away, which parks the roll with its reason; a sibling's crash after Ready healed), and a break the edited runtime itself carries (a crash at start, after Ready and a missing key kept until the corrective edit, and each kind plus a pull failure and a readiness loss once on the first pushed pod; a sibling's crash at start kept and once). Left out, with the reason: the in-place strategies (the switch family's); the env edit beyond the engine shape (under these strategies both edits are one new revision; the pod-template difference matters to an in-place strategy alone); the restart policy on a crash at start and a pull failure (they open no runner-restart trigger, so the roll owns the Instance either way; the after-Ready form runs under both); any restart policy but None on the bad edit (a revision that never becomes Ready restarts no runner); a rollout group, as in fault-move; the restart policy on the further rows (one policy per cell). The readiness-that-never-passes cell asserts the fix and the floor and reports whether the status said why: nothing escalates a pod that runs but never passes readiness before its ready timeout.
-- gen-repeat is the persistent form of a pod deleted by hand, a gang member lost, an eviction or a preemption and a manager restart: the fault is applied again each time what it took has come back (3 times; 2 for the preemption, whose fill-and-press cycle is the slowest), then stops, and the case reads the window and the end state after the lift. It runs on the six shape families at steady state (mode=kill; the manager on the idle service), under a push with the surge and the drain-first strategy and under a scale-up by one; the manager is deleted again each time it is Ready under a rollback, a strategy edit, a runtime edit, a scale-down, a move, a delete and a two-step canary too (from p8826), the window held open until the restarts are spent so the later ones land on the operation's settled end. The loop takes the same Instance again once it is back (the deleter hits the pod that came back), the running revision's pods under the push (victim=stable), and the engine on the prefill/decode shapes (victimcomp=engine), so the fault and the operation meet on one Component. The kill cells run at the canonical surge budget, dormant at steady state, so the floor reads N minus the killed Instance. Left out, with the reason: a gang member lost under a push with restart policy None (the one-shot gang-member family drives it; the repeating loss stresses the rebuild-whole path) and the eviction loop under a push or a scale with RecreateInstanceOnPodRestart (the policy only widens what is rebuilt, which the steady-state eviction cells cross; the eviction's own question is the disruption budget admitting each removal); the preemption loop under a push (a repeating preemption needs the kill's fill-and-press cycle, which the roll handler does not run) and with lift=never (nothing comes back while the fillers stay); the manager restarting while a repair is open, as in the one-shot family. The cluster-wide forms (the manager restarts, the preemptions) run one at a time after the pool, as every such case does.
+- gen-repeat is the persistent form of a pod deleted by hand, a gang member lost, an eviction or a preemption and a manager restart: the fault is applied again each time what it took has come back (3 times; 2 for the preemption, whose fill-and-press cycle is the slowest), then stops, and the case reads the window and the end state after the lift. It runs on the six shape families at steady state (mode=kill; the manager on the idle service), under a push with the surge and the drain-first strategy and under a scale-up by one; the manager is deleted again each time it is Ready under a rollback, a strategy edit, a runtime edit, a scale-down, a move, a delete and a two-step canary too (from p8826), the window held open until the restarts are spent so the later ones land on the operation's settled end, and the pod (a gang's worker under the rebuild-whole policy) again under a rollback, a strategy edit, a runtime edit and a scale-down (from p8868); a delete brings nothing back, so the pod deleted as a delete lands has the one-shot form only. The loop takes the same Instance again once it is back (the deleter hits the pod that came back), the running revision's pods under the push (victim=stable), and the engine on the prefill/decode shapes (victimcomp=engine), so the fault and the operation meet on one Component. The kill cells run at the canonical surge budget, dormant at steady state, so the floor reads N minus the killed Instance. Left out, with the reason: a gang member lost under a push with restart policy None (the one-shot gang-member family drives it; the repeating loss stresses the rebuild-whole path) and the eviction loop under a push or a scale with RecreateInstanceOnPodRestart (the policy only widens what is rebuilt, which the steady-state eviction cells cross; the eviction's own question is the disruption budget admitting each removal); the preemption loop under a push (a repeating preemption needs the kill's fill-and-press cycle, which the roll handler does not run) and with lift=never (nothing comes back while the fillers stay); the manager restarting while a repair is open, as in the one-shot family. The cluster-wide forms (the manager restarts, the preemptions) run one at a time after the pool, as every such case does.
 - gen-webhook points the admission webhook's configurations at a Service that does not exist on the settled service, as a push lands and as a scale-up lands, for a bounded time (lift=after-hold: pointed back once the status has said why a write waits, or after the settle window at idle) or across the hold window (lift=after-window), on every shape family of the coverage ledger at one gang width (the outage acts on the controller's writes, not on a gang's members). The push runs under the surge and the drain-first strategies: the outage refuses the pod a surge creates before anything is torn down, and the one a drain-first roll creates after a pod is gone; the steady state and the scale are dormant to the strategy. No rollout group: the engine is the only bumped member. The in-place strategies are left out: an annotation-only diff is patched onto the live pod and creates nothing for admission to refuse. A webhook case runs alone (the outage is cluster-wide: every ISVC write in the cluster is refused while it holds). The outage also opens at the push's later hooks (the first pod of the new revision, the first pod of the old one on its way out, under both strategies), as a rollback filed at the first new pod lands, as a strategy edit landed there lands, as a scale-down by one lands, as an env edit of the case's dedicated runtime lands (every Component rolls), as soon as a move's request is recorded, and as a delete lands (the same name is re-created once the window has closed); each reads the same window verdict, and the operation must complete once the webhook is back.
 - gen-conflict runs a competing writer (an annotation patch of the ISVC or of every InferenceReplica of the service; target=isvc|ir) once or until the operation completes (form=once|persist) over the same operations, hooks and shapes, under the canonical surge budget alone: a status write conflicts the same way under every strategy. The writer is per service, so its cases run in the concurrent pool. The reconcile counters are read on the webhook cases only (they run alone); a conflict case bounds the controller's events on its own objects.
 - Kill-family cells pinned by hand-written restart/ cases are excluded:

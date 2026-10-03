@@ -2020,6 +2020,40 @@ cell on the six shape families (the surge strategy, the env edit):
   claim (`N - maxUnavailable - k`) instead of a `floor_soft=1` waiver.
   `restart=` in the header names the policy the verdict reads.
 
+- **`fault=podkill:<hook>` beside the remaining operations** is the pod
+  deleted by hand at a moment of an operation beyond the push:
+  `podkill:settling` beside `rollback=1 during=<hook>` or a mid-roll
+  `edit=` (a serving pod of the running revision, `victim=stable`, is
+  deleted as the rollback or the edit lands, once it has fired at its own
+  hook), `podkill:rotating` under `mode=runtimerev` (at the first pod of
+  the new revision; any roll hook is accepted), `podkill:settling` under
+  `mode=scaledown` with `to_e` above or below N (as the scale lands; the
+  scale driver's, as the eviction under a scale is) and under
+  `mode=recreate` (as the delete lands). The aim knobs apply as under a
+  push: `kill=leader|worker` with `restart=` names the gang member and the
+  policy the verdict reads, `victimcomp=engine` keeps the deletion on the
+  engine of a prefill/decode service, `floor_slack=1` lowers the floor by
+  the Instance the deletion takes (not under a delete, which judges no
+  floor) and `order_soft=1` waives the surge-before-drain order the
+  deletion itself breaks under a roll. The verdict: the deletion fired at
+  the hook and names what it took; the first pod that replaces it runs the
+  image its revision label names (the `verb=podkill` label-truth record,
+  kept on the fault); a gang's lost member meets the gang-member contract
+  above (the scale driver leaves that gang out of its partial-teardown
+  check, since the restart policy decides what is rebuilt); the operation
+  completes within its budget with every row settled and no hold left;
+  under a delete nothing replaces the pod (a replacement before the
+  teardown is noted) and the same-name recreate comes up on fresh pods.
+  `repeat=<n>` is the persistent form beside the rollback, the edit, the
+  runtime edit and the scale-down: the pod is deleted again each time its
+  Instance is back, and the hook-op driver holds the operation's window
+  open until the repetitions are spent, as it does for the manager
+  restart; a delete brings nothing back, so it has the one-shot form only.
+  The one-shot rows live in `isvcs/gen-fault/` (from p1520, the single-pod
+  shapes) and `isvcs/gen-gang-member/` (from p7172, the gangs under restart
+  policy `None`); the persistent rows in `isvcs/gen-repeat/` (from p8868,
+  the gangs under `RecreateInstanceOnPodRestart`).
+
 - **`fault=cordon:all`** cordons every schedulable worker (the control plane
   and nodes already cordoned are left alone), so nothing new can be placed
   until the lift; each node is labelled `perm.test/cordoned=<case>` and
@@ -2238,9 +2272,11 @@ cell on the six shape families (the surge strategy, the env edit):
   pod deleted by hand, `via=evict` the eviction, `via=preempt lift=after-settle`
   the preemption; `kill=leader|worker` names the gang member), a
   `fault=podkill:<phase>` or `fault=evict:<phase>` under a push or a scale
-  (`mode=scaledown`; `victim=stable` keeps the deleter on the running
-  revision's pods, `victimcomp=engine` on the Component the operation works
-  on), `fault=ctrlrestart:<phase>` under a push, a scale, a runtime edit
+  (`mode=scaledown`, up or down; `victim=stable` keeps the deleter on the
+  running revision's pods, `victimcomp=engine` on the Component the
+  operation works on), `fault=podkill:settling` beside `rollback=1` or a
+  mid-roll `edit=` at their hook and `fault=podkill:<hook>` under
+  `mode=runtimerev`, `fault=ctrlrestart:<phase>` under a push, a scale, a runtime edit
   or a delete (`mode=recreate`), beside `rollback=1` or a mid-roll `edit=`
   at their hook, `fault=ctrlrestart:migrating` under a move and
   `fault=ctrlrestart:canary-<state>` under a canary, or
@@ -2249,7 +2285,8 @@ cell on the six shape families (the surge strategy, the env edit):
   window open until its repetitions are spent (the hook-op, scale, roll,
   move and canary watches alike), so a short operation finishes under the
   first restart and the later ones land on its settled end, which must
-  stay settled. A pod fault is due again once the Instance it took is
+  stay settled; a repeating pod deletion at a hook of a rollback, an edit
+  or a runtime edit holds the hook-op watch the same way. A pod fault is due again once the Instance it took is
   whole, Ready and serving on new pods — the deleter takes the pod that came
   back, the same Instance, as long as it still fits the aim — or once the
   roll has retired that Instance (a gang surge abandoned, a source drained)
@@ -2284,7 +2321,9 @@ cell on the six shape families (the surge strategy, the env edit):
   `rolloutHold` left on any Component, and the continuous invariants A to H
   as on every case. The generated `isvcs/gen-repeat/` family drives the four
   rows on the six shape families at steady state, under a push and under a
-  scale-up; `isvcs/MANIFEST.md` lists what it leaves out and why.
+  scale-up, the manager restart under the remaining operations and the
+  pod deleted again under a rollback, a strategy edit, a runtime edit and
+  a scale-down; `isvcs/MANIFEST.md` lists what it leaves out and why.
 
 - **`fault=taint:all` and `fault=quota:<n>` with `lift=after-settle|never`**
   (mode=kill, or rollout mode without `during=idle`) are the pending
@@ -2665,9 +2704,12 @@ Four generators write into `isvcs/`; re-run one after editing it:
   (`p8700`–`p8899`) → `isvcs/gen-repeat/` (a pod deleted by hand, a gang
   member lost, an eviction or a preemption applied again each time what it
   took has come back, and the manager deleted again each time it is Ready,
-  at steady state, under a push and under a scale-up, and the manager
+  at steady state, under a push and under a scale-up, the manager
   again under a rollback, a strategy edit, a runtime edit, a scale-down, a
-  move, a delete and a canary from p8826).
+  move, a delete and a canary from p8826, and the pod again under a
+  rollback, a strategy edit, a runtime edit and a scale-down from p8868;
+  the one-shot form of those moments sits with `isvcs/gen-fault/` from
+  p1520 and `isvcs/gen-gang-member/` from p7172).
 
 A generator owns exactly the case ids it mints. A gen-* folder whose id
 block is full mints from a continuation block (`GEN_CONTINUATIONS` in

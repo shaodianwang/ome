@@ -1,0 +1,20 @@
+# p7182: [gen] podkill scaledown engine-mn W1+router N=2 rp None target leader  mode=scaledown Ne=2 Nd=0 Nr=2 ceil_e=2 ceil_d=0 ceil_r=2 restart=None kill=leader fault=podkill:settling co=none topo=engine-mn to_e=1 floor_slack=1
+# reason: the engine is scaled from N to N-1 on engine behind a router as gangs of 1 leader + 1 worker, and as it lands the leader of one serving engine gang is deleted by hand; the controller replaces what the deletion took, and the replacement is labelled as what it runs (the image its revision's pods ran when the pod was deleted), the floor lowered by that one Instance holds, and the scale completes with the engine at N-1 and the survivors on their own pods (the Instance the deletion took rebuilt by design), with every row settled and no hold left behind; under restart policy None only the lost leader comes back and no whole-gang repair is recorded, and the gang is never counted as serving while a member is missing; the router is a negative control (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7182 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
