@@ -114,6 +114,12 @@ class PipelineTestCase(unittest.TestCase):
         ):
             self.patch_attr(attr, value)
 
+    def allow_heavy(self):
+        """The build carries OME_EVAL_ALLOW_HEAVY=1, as a scheduled round would."""
+        patcher = mock.patch.dict(os.environ, {gp.EVAL_ALLOW_HEAVY_VAR: "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def quarantine_entry(self, spec, owner="tester", reason="known defect", expires=None):
         """A valid entry by default; each test invalidates the one field it pins."""
         if expires is None:
@@ -503,7 +509,9 @@ class TestReleaseMarkerEmission(unittest.TestCase):
         # With the eval on, its lanes follow in their own uploads and the
         # marker is the one job of the last upload, gating every key of every
         # upload. Smoke is the smallest mode that carries lanes.
-        with mock.patch.object(gp, "BRANCH", "main"), mock.patch.object(gp, "EVAL_MODE", "smoke"):
+        with mock.patch.object(gp, "BRANCH", "main"), mock.patch.object(gp, "EVAL_MODE", "smoke"), mock.patch.dict(
+            os.environ, {gp.EVAL_ALLOW_HEAVY_VAR: "1"}
+        ):
             batches = gp.generate_pipeline_batches()
         self.assertGreater(len(batches), 1)
         self.assertNotIn('key: "chart-ome-release"', batches[0])
@@ -785,6 +793,7 @@ class TestImageReuseEmission(GitRepoTestCase):
 
     def test_publish_tags_follow_the_push_policy(self):
         sha = gp.COMMIT[:8]
+        self.allow_heavy()
         self.patch_attr("BRANCH", "feature/anything")
         self.patch_attr("EVAL_MODE", "off")
         self.assertIn('OME_IMAGE_PUBLISH_TAGS: ""', gp._build_image_step(*self.MANAGER))
@@ -825,6 +834,7 @@ class TestImageReuseEmission(GitRepoTestCase):
         self.assertNotEqual(moved, tag)
 
     def test_main_pipeline_probes_every_image_and_the_eval_image(self):
+        self.allow_heavy()
         self.patch_attr("BRANCH", "main")
         self.patch_attr("EVAL_MODE", "smoke")
         self.patch_attr("_eval_children", list)
@@ -870,6 +880,7 @@ class TestBranchImagePublishing(GitRepoTestCase):
 
     def setUp(self):
         super().setUp()
+        self.allow_heavy()
         self.patch_attr("EVAL_SELECTION", None)
         self.patch_attr("GKE_EVAL_ENABLED", True)
         self.patch_attr("GKE_KIND_ENABLED", True)
@@ -893,6 +904,22 @@ class TestBranchImagePublishing(GitRepoTestCase):
                 self.on(branch, mode)
                 self.patch_attr("GKE_EVAL_ENABLED", enabled)
                 self.assertIs(gp._images_published(), expected)
+
+    def test_without_the_override_a_small_selection_publishes_and_a_heavy_mode_is_refused(self):
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop(gp.EVAL_ALLOW_HEAVY_VAR, None)
+        self.on("feature/x", "cases")
+        self.patch_attr("EVAL_SELECTION", ("cases", [gp._eval_case_groups()[0][2][0]]))
+        self.assertIs(gp._images_published(), True)
+        pipeline = gp.generate_pipeline_batches()[0]
+        self.assertIn('key: "package-kind-eval-image"', pipeline)
+        self.assertIn("OME_EVAL_SOURCE_REGISTRY", pipeline)
+        self.on("feature/x", "smoke")
+        self.patch_attr("EVAL_SELECTION", None)
+        with self.assertRaisesRegex(RuntimeError, "unless it carries OME_EVAL_ALLOW_HEAVY=1"):
+            gp._images_published()
 
     def test_a_branch_with_the_eval_off_builds_without_publishing(self):
         self.on("feature/x", "off")
@@ -1547,6 +1574,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
                 "GKE_EVAL_CASE_CONCURRENCY": "4",
                 "GKE_EVAL_TARGET_WAVES": "4",
                 "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+                "OME_EVAL_ALLOW_HEAVY": "1",
             },
         ), mock.patch.object(gp, "EVAL_MODE", "full"):
             yaml_text = gp._gke_eval_group()
@@ -1589,6 +1617,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
                 "GKE_EVAL_CASE_CONCURRENCY": "4",
                 "GKE_EVAL_TARGET_WAVES": "4",
                 "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+                "OME_EVAL_ALLOW_HEAVY": "1",
             },
         ), mock.patch.object(gp, "EVAL_MODE", "full"):
             yaml_text = gp._gke_eval_group()
@@ -1772,6 +1801,7 @@ class TestPipelineDependenciesResolve(PipelineTestCase):
         return keys, targets
 
     def test_every_dependency_names_a_key_of_the_same_or_an_earlier_upload(self):
+        self.allow_heavy()
         cases = itertools.product(("main", "feature/anything"), (True, False), (True, False), ("smoke",))
         for branch, kind, alfred, mode in [*cases, ("main", True, True, "off")]:
             with self.subTest(branch=branch, kind=kind, alfred=alfred, mode=mode):
@@ -1804,6 +1834,7 @@ class TestEvalTargeted(PipelineTestCase):
         "GKE_EVAL_CASE_CONCURRENCY": "4",
         "GKE_EVAL_TARGET_WAVES": "4",
         "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+        "OME_EVAL_ALLOW_HEAVY": "1",
         "OME_EVAL_RESULTS_TOKEN": "fake-token",
         "BUILDKITE_ORGANIZATION_SLUG": "org-a",
         "BUILDKITE_PIPELINE_SLUG": "pipeline-a",
@@ -2374,6 +2405,7 @@ class TestEvalClusterName(unittest.TestCase):
                 "GKE_EVAL_CASE_CONCURRENCY": "4",
                 "GKE_EVAL_TARGET_WAVES": "4",
                 "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+                "OME_EVAL_ALLOW_HEAVY": "1",
             },
         ), mock.patch.object(gp, "EVAL_MODE", "full"):
             yaml_text = gp._gke_eval_group()
@@ -2482,6 +2514,7 @@ class TestEvalSoftFeatures(unittest.TestCase):
                 "GKE_EVAL_CASE_CONCURRENCY": "4",
                 "GKE_EVAL_TARGET_WAVES": "4",
                 "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+                "OME_EVAL_ALLOW_HEAVY": "1",
             },
         ), mock.patch.object(gp, "EVAL_MODE", "full"):
             yaml_text = gp._gke_eval_group()
@@ -2507,14 +2540,17 @@ class TestEvalSoftFeatures(unittest.TestCase):
 
 class TestEvalMode(PipelineTestCase):
     """OME_EVAL_MODE, else the trailer (OME_EVAL_SELECT, else the newest
-    Eval: line of the message), else the branch default says what the eval
-    group runs; _eval_selection is the one place a mode chooses cases, and
-    the emission packs whatever it returns."""
+    Eval: line of the message), else off says what the eval group runs;
+    _eval_selection is the one place a mode chooses cases, and the emission
+    packs whatever it returns. The eval shares its cluster with production
+    work, so without OME_EVAL_ALLOW_HEAVY=1 a build runs only cases= or
+    lanes= within OME_EVAL_MAX_CASES; the heavy renders here carry it."""
 
     EVAL_ENV = {
         "GKE_EVAL_CASE_CONCURRENCY": "4",
         "GKE_EVAL_TARGET_WAVES": "4",
         "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+        "OME_EVAL_ALLOW_HEAVY": "1",
     }
     RUNNER = "run_omenative_eval_gke.sh"
 
@@ -2558,44 +2594,160 @@ class TestEvalMode(PipelineTestCase):
         with mock.patch.object(gp, "_eval_children", lambda: children):
             return [group["group"] for group in gp._gke_eval_groups()]
 
-    def test_the_environment_wins_over_the_trailer_and_the_trailer_over_the_branch(self):
+    def test_the_environment_wins_over_the_trailer_and_no_source_is_off(self):
         resolve = gp._resolve_eval_mode
-        self.assertEqual(resolve("full", "Eval: smoke", "main", True), ("full", None))
-        self.assertEqual(resolve(" Smoke ", "", "feature/x", True), ("smoke", None))
-        self.assertEqual(resolve(None, "Eval: smoke", "main", True), ("smoke", None))
-        self.assertEqual(resolve(None, "", "main", True), ("targeted", None))
-        self.assertEqual(resolve(None, "", "feature/x", True), ("off", None))
+        self.assertEqual(resolve("full", "Eval: smoke", True), ("full", None))
+        self.assertEqual(resolve(" Smoke ", "", True), ("smoke", None))
+        self.assertEqual(resolve(None, "Eval: smoke", True), ("smoke", None))
+        # No source at all is off, on main as on every other branch.
+        self.assertEqual(resolve(None, "", True), ("off", None))
         # An empty variable is unset; the kill switch forces off from any source.
-        self.assertEqual(resolve("", "", "main", True), ("targeted", None))
-        self.assertEqual(resolve("full", "Eval: full", "main", False), ("off", None))
-        self.assertEqual(resolve(None, "Eval: cases=p3000", "main", False), ("off", ("cases", ["p3000"])))
+        self.assertEqual(resolve("", "", True), ("off", None))
+        self.assertEqual(resolve("full", "Eval: full", False), ("off", None))
+        self.assertEqual(resolve(None, "Eval: cases=p3000", False), ("off", ("cases", ["p3000"])))
         # The trailer's selection is kept beside a mode the environment set.
         self.assertEqual(
-            resolve("targeted", "Eval: families=gen-heal", "main", True),
+            resolve("targeted", "Eval: families=gen-heal", True),
             ("targeted", ("families", ["gen-heal"])),
         )
 
+    def without_override(self):
+        """The build as a push or a merge makes it: neither the override nor
+        a cap of its own in the environment."""
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop(gp.EVAL_ALLOW_HEAVY_VAR, None)
+        os.environ.pop(gp.EVAL_MAX_CASES_VAR, None)
+
+    @staticmethod
+    def runs_of(selection):
+        return sum(len(cases) for _, _, cases, _ in selection)
+
+    def test_a_heavy_mode_is_refused_without_the_override_and_runs_with_it(self):
+        self.without_override()
+        rule = (
+            r"runs more than a small named selection: the eval shares its cluster with"
+            r" production work.*cases=<ids> or lanes=.*unless it carries OME_EVAL_ALLOW_HEAVY=1"
+        )
+        for mode, selection in (
+            ("smoke", None),
+            ("targeted", None),
+            ("full", None),
+            ("families", ("families", ["gen-heal"])),
+            ("targeted", ("cases", ["p3000"])),
+        ):
+            with self.subTest(mode=mode, selection=selection):
+                self.patch_attr("EVAL_MODE", mode)
+                self.patch_attr("EVAL_SELECTION", selection)
+                with self.assertRaisesRegex(RuntimeError, "names " + repr(mode) + ", which " + rule):
+                    gp._eval_mode()
+                with self.assertRaisesRegex(RuntimeError, rule):
+                    gp.generate_pipeline_batches()
+                # On a branch the image gate asks whether the eval runs, and is refused too.
+                self.patch_attr("BRANCH", "feature/x")
+                with self.assertRaisesRegex(RuntimeError, rule):
+                    gp._images_published()
+                self.patch_attr("BRANCH", "main")
+                with mock.patch.dict(os.environ, {gp.EVAL_ALLOW_HEAVY_VAR: "1"}):
+                    self.assertEqual(gp._eval_mode(), mode)
+                    self.assertTrue(gp._eval_on())
+                # The kill switch is the strongest off: nothing is left to refuse.
+                self.patch_attr("GKE_EVAL_ENABLED", False)
+                self.assertEqual(gp._eval_mode(), "off")
+                self.patch_attr("GKE_EVAL_ENABLED", True)
+
+    def test_a_small_named_selection_runs_on_main_and_on_a_branch_within_the_cap(self):
+        self.without_override()
+        lanes = {(f, t): cases for f, t, cases in self.groups}
+        smallest = min(lanes, key=lambda lane: (len(lanes[lane]), lane))
+        named = "/".join(smallest)
+        two = [self.groups[0][2][0], self.groups[1][2][0]]
+        for mode, selection, runs in (
+            ("cases", ("cases", two), 2),
+            ("lanes", ("lanes", [named, named + "@" + gp.EVAL_GANG_SCHEDULER]), 2 * len(lanes[smallest])),
+        ):
+            for branch in ("main", "feature/x"):
+                with self.subTest(mode=mode, branch=branch):
+                    self.patch_attr("BRANCH", branch)
+                    self.patch_attr("EVAL_MODE", mode)
+                    self.patch_attr("EVAL_SELECTION", selection)
+                    self.assertLessEqual(runs, gp.EVAL_MAX_CASES_DEFAULT)
+                    self.assertEqual(self.runs_of(gp._eval_selection()), runs)
+                    self.assertTrue(gp._eval_on())
+                    self.assertTrue(gp._images_published())
+                    # One eval group per scheduler the selection names, each its own upload.
+                    batches = gp.generate_pipeline_batches()
+                    self.assertEqual(len(batches), 2 + len({s for _, _, _, s in gp._eval_selection()}))
+                    self.assertIn('key: "package-kind-eval-image"', batches[0])
+                    self.assertIn('key: "omenative-e2e-kind-gke', batches[1])
+                    self.assertIn("(KIND on GKE) (" + mode + ": ", batches[1])
+
+    def test_a_selection_above_the_case_cap_is_refused_and_the_override_lifts_it(self):
+        self.without_override()
+        self.assertEqual(gp.EVAL_MAX_CASES_DEFAULT, 24)
+        self.assertEqual(gp._eval_max_cases(), 24)
+        lanes = {(f, t): cases for f, t, cases in self.groups}
+        biggest = max(lanes, key=lambda lane: (len(lanes[lane]), lane))
+        big = lanes[biggest]
+        self.assertGreater(len(big), 24)
+        named = "/".join(biggest)
+        refused = (
+            r"the Eval: trailer or OME_EVAL_SELECT names {runs} case runs \(cases times schedulers\),"
+            r" above the {cap} of OME_EVAL_MAX_CASES: the eval shares its cluster with production work"
+            r".*unless it carries OME_EVAL_ALLOW_HEAVY=1; name fewer with cases=<ids>"
+        )
+        # Under the default cap a whole big lane is refused, at generation too,
+        # while a subset of its cases within the cap runs.
+        self.patch_attr("EVAL_MODE", "lanes")
+        self.patch_attr("EVAL_SELECTION", ("lanes", [named]))
+        with self.assertRaisesRegex(RuntimeError, refused.format(runs=len(big), cap=24)):
+            gp._eval_selection()
+        with self.assertRaisesRegex(RuntimeError, refused.format(runs=len(big), cap=24)):
+            gp.generate_pipeline_batches()
+        self.patch_attr("EVAL_MODE", "cases")
+        self.patch_attr("EVAL_SELECTION", ("cases", big[:24]))
+        self.assertEqual(self.runs_of(gp._eval_selection()), 24)
+        self.patch_attr("EVAL_SELECTION", ("cases", big[:25]))
+        with self.assertRaisesRegex(RuntimeError, refused.format(runs=25, cap=24)):
+            gp._eval_selection()
+        # A case counts once per scheduler it is named under.
+        self.patch_attr("EVAL_MODE", "lanes")
+        self.patch_attr("EVAL_SELECTION", ("lanes", [named, named + "@" + gp.EVAL_GANG_SCHEDULER]))
+        with mock.patch.dict(os.environ, {gp.EVAL_MAX_CASES_VAR: str(len(big))}):
+            with self.assertRaisesRegex(RuntimeError, refused.format(runs=2 * len(big), cap=len(big))):
+                gp._eval_selection()
+        with mock.patch.dict(os.environ, {gp.EVAL_MAX_CASES_VAR: " " + str(2 * len(big)) + " "}):
+            self.assertEqual(self.runs_of(gp._eval_selection()), 2 * len(big))
+        # The override lifts the cap; the cap itself must be a positive integer.
+        with mock.patch.dict(os.environ, {gp.EVAL_ALLOW_HEAVY_VAR: "1"}):
+            self.assertEqual(self.runs_of(gp._eval_selection()), 2 * len(big))
+        for raw in ("0", "-3", "x", "1.5"):
+            with self.subTest(raw=raw), mock.patch.dict(os.environ, {gp.EVAL_MAX_CASES_VAR: raw}):
+                with self.assertRaisesRegex(RuntimeError, "OME_EVAL_MAX_CASES must be a positive integer"):
+                    gp._eval_selection()
+
     def test_every_trailer_form_is_read_and_the_newest_line_wins(self):
         resolve = gp._resolve_eval_mode
-        self.assertEqual(resolve(None, "subject\n\nbody text\n\nEval: Full\n", "feature/x", True), ("full", None))
-        self.assertEqual(resolve(None, "eval:OFF", "main", True), ("off", None))
-        self.assertEqual(resolve(None, "  EVAL:  targeted  ", "main", True), ("targeted", None))
+        self.assertEqual(resolve(None, "subject\n\nbody text\n\nEval: Full\n", True), ("full", None))
+        self.assertEqual(resolve(None, "eval:OFF", True), ("off", None))
+        self.assertEqual(resolve(None, "  EVAL:  targeted  ", True), ("targeted", None))
         self.assertEqual(
-            resolve(None, "Eval: families=gen-heal, Reject,", "main", True),
+            resolve(None, "Eval: families=gen-heal, Reject,", True),
             ("families", ("families", ["gen-heal", "reject"])),
         )
         self.assertEqual(
-            resolve(None, "Eval: cases=p3000,p4267", "main", True),
+            resolve(None, "Eval: cases=p3000,p4267", True),
             ("cases", ("cases", ["p3000", "p4267"])),
         )
         self.assertEqual(
-            resolve(None, "Eval: smoke\nEval: cases=p3000\n", "main", True),
+            resolve(None, "Eval: smoke\nEval: cases=p3000\n", True),
             ("cases", ("cases", ["p3000"])),
         )
-        self.assertEqual(resolve(None, "Eval: cases=p3000\nEval: smoke\n", "main", True), ("smoke", None))
+        self.assertEqual(resolve(None, "Eval: cases=p3000\nEval: smoke\n", True), ("smoke", None))
         # Not a trailer: another word, no value, or the keyword inside a line.
         for message in ("Evaluation: full", "Eval:", "Eval:   ", "see Eval: full later"):
-            self.assertEqual(resolve(None, message, "feature/x", True), ("off", None), message)
+            self.assertEqual(resolve(None, message, True), ("off", None), message)
 
     def test_the_select_variable_is_the_trailer_by_another_name_and_wins_over_the_message(self):
         resolve = gp._resolve_eval_mode
@@ -2615,15 +2767,15 @@ class TestEvalMode(PipelineTestCase):
             # Empty or blank, the variable is unset and the message decides.
             (None, "Eval: cases=p3000", "", ("cases", ("cases", ["p3000"]))),
             (None, "Eval: cases=p3000", "   ", ("cases", ("cases", ["p3000"]))),
-            (None, "", "", ("targeted", None)),
+            (None, "", "", ("off", None)),
             # A value naming nothing known is kept for generation to refuse.
             (None, "", "bogus", ("bogus", None)),
             (None, "", "lanes=", ("lanes", ("lanes", []))),
         ):
             with self.subTest(env_mode=env_mode, message=message, env_select=env_select):
-                self.assertEqual(resolve(env_mode, message, "main", True, env_select=env_select), expected)
-        self.assertEqual(resolve(None, "", "feature/x", True, env_select="full"), ("full", None))
-        self.assertEqual(resolve(None, "", "main", False, env_select="full"), ("off", None))
+                self.assertEqual(resolve(env_mode, message, True, env_select=env_select), expected)
+        self.assertEqual(resolve(None, "", True, env_select="full"), ("full", None))
+        self.assertEqual(resolve(None, "", False, env_select="full"), ("off", None))
         # The refusals name the variable beside the trailer.
         self.patch_attr("EVAL_MODE", "bogus")
         with self.assertRaisesRegex(RuntimeError, "OME_EVAL_MODE, OME_EVAL_SELECT or the Eval: trailer must name"):
@@ -2650,6 +2802,8 @@ class TestEvalMode(PipelineTestCase):
             del os.environ["OME_EVAL_MODE"]
             os.environ["OME_EVAL_SELECT"] = ""
             self.assertEqual(fresh(), ("smoke", None))
+            os.environ["BUILDKITE_MESSAGE"] = "a subject with no trailer"
+            self.assertEqual(fresh(), ("off", None))
 
     def test_a_value_naming_nothing_known_is_refused_at_generation(self):
         self.patch_attr("EVAL_MODE", "bogus")
@@ -2799,12 +2953,12 @@ class TestEvalMode(PipelineTestCase):
     def test_lanes_resolve_from_the_trailer_with_their_scheduler_suffix(self):
         resolve = gp._resolve_eval_mode
         self.assertEqual(
-            resolve(None, "Eval: lanes=gen-heal/engine, gen-heal/engine@ome-scheduler, Reject/PD@Default", "main", True),
+            resolve(None, "Eval: lanes=gen-heal/engine, gen-heal/engine@ome-scheduler, Reject/PD@Default", True),
             ("lanes", ("lanes", ["gen-heal/engine", "gen-heal/engine@ome-scheduler", "reject/pd@default"])),
         )
         # Beside a mode the environment set, the lanes ride along as its selection.
         self.assertEqual(
-            resolve("targeted", "Eval: lanes=gen-heal/engine@ome-scheduler", "feature/x", True),
+            resolve("targeted", "Eval: lanes=gen-heal/engine@ome-scheduler", True),
             ("targeted", ("lanes", ["gen-heal/engine@ome-scheduler"])),
         )
         # lanes is a trailer form, not an OME_EVAL_MODE value; the refusal spells the form.
@@ -2901,6 +3055,7 @@ class TestEvalConcurrencyCap(PipelineTestCase):
         "GKE_EVAL_CASE_CONCURRENCY": "4",
         "GKE_EVAL_TARGET_WAVES": "4",
         "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+        "OME_EVAL_ALLOW_HEAVY": "1",
     }
 
     def setUp(self):
@@ -2932,15 +3087,16 @@ class TestEvalConcurrencyCap(PipelineTestCase):
         notes = [c for _, _, c in children if c["key"].endswith("-skipped")]
         self.assertTrue(lanes)
         self.assertTrue(notes)
+        self.assertEqual(gp.EVAL_MAX_CONCURRENCY_DEFAULT, 40)
         for child in lanes:
             self.assertEqual(child["concurrency_group"], "ome/gke-evals")
-            self.assertEqual(child["concurrency"], 120)
+            self.assertEqual(child["concurrency"], 40)
         for child in notes:
             self.assertNotIn("concurrency_group", child)
             self.assertNotIn("concurrency", child)
         rendered = gp._gke_eval_group()
         self.assertEqual(rendered.count('concurrency_group: "ome/gke-evals"'), len(lanes))
-        self.assertEqual(rendered.count("concurrency: 120"), len(lanes))
+        self.assertEqual(rendered.count("concurrency: 40"), len(lanes))
 
     def test_the_cap_reads_the_environment_and_refuses_anything_but_a_positive_integer(self):
         self.select(("gen-heal", "engine", ""))
@@ -2948,7 +3104,7 @@ class TestEvalConcurrencyCap(PipelineTestCase):
             children = gp._eval_children()
         self.assertEqual({c["concurrency"] for _, _, c in children}, {7})
         with mock.patch.dict(os.environ, {gp.EVAL_MAX_CONCURRENCY_VAR: ""}):
-            self.assertEqual(gp._eval_max_concurrency(), 120)
+            self.assertEqual(gp._eval_max_concurrency(), 40)
         for raw in ("0", "-3", "x", "1.5"):
             with self.subTest(raw=raw), mock.patch.dict(os.environ, {gp.EVAL_MAX_CONCURRENCY_VAR: raw}):
                 with self.assertRaisesRegex(RuntimeError, "GKE_EVAL_MAX_CONCURRENCY must be a positive integer"):
@@ -2968,6 +3124,7 @@ class TestPipelineUploads(PipelineTestCase):
         "GKE_EVAL_CASE_CONCURRENCY": "4",
         "GKE_EVAL_TARGET_WAVES": "4",
         "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+        "OME_EVAL_ALLOW_HEAVY": "1",
         "OME_EVAL_MODE": "full",
     }
 

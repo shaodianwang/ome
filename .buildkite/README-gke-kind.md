@@ -198,18 +198,42 @@ The OMENative eval group (`omenative-e2e-kind-gke`) and the
 mode is not `off`, on any branch. `OME_EVAL_MODE` names the mode outright;
 unset, the trailer decides: `OME_EVAL_SELECT` when set, else the newest
 `Eval: <value>` line of the commit message (`BUILDKITE_MESSAGE`,
-case-insensitive); with none of them, `main` runs `targeted` and every other
-branch nothing. `GKE_EVAL_ENABLED=0` forces `off`.
+case-insensitive); with none of them, nothing runs, on `main` as on every
+other branch. `GKE_EVAL_ENABLED=0` forces `off`.
+
+The eval shares its GKE cluster with production work, and a round of it can
+crowd that work out, so three rules bound what one build may run:
+
+1. A merge to `main` runs no eval unless its build names a selection: the
+   default mode is `off` everywhere.
+2. The heavy modes, `smoke`, `targeted`, `full` and `families=`, fail
+   generation unless the build carries `OME_EVAL_ALLOW_HEAVY=1`. Everything
+   behind them (the recorded round, the targeted selection, the trailer forms)
+   stays in place for a build that sets the override, such as a scheduled
+   full round.
+3. A build may run a small named selection on its own, `cases=` or `lanes=`
+   from the trailer or `OME_EVAL_SELECT` on any branch, as long as its case
+   runs (cases times the schedulers they are named under) stay within
+   `OME_EVAL_MAX_CASES` (default 24). Above the cap generation fails, naming
+   the count, the cap and the override; a lane with more cases than the cap
+   can still be named for a subset with `cases=`. `OME_EVAL_ALLOW_HEAVY=1`
+   lifts the cap too.
+
+The refusals read, for a heavy mode, `OME_EVAL_MODE, OME_EVAL_SELECT or the
+Eval: trailer names 'full', which runs more than a small named selection: ...
+unless it carries OME_EVAL_ALLOW_HEAVY=1`, and above the cap `the Eval: trailer
+or OME_EVAL_SELECT names 154 case runs (cases times schedulers), above the 24
+of OME_EVAL_MAX_CASES: ...`. `OME_EVAL_MAX_CASES` must be a positive integer.
 
 | value | runs |
 |---|---|
-| `off` | nothing: neither the image step nor the group |
-| `smoke` | the first shard of every feature/topology lane, default scheduler only |
-| `targeted` | from the newest recorded full round: every (case, scheduler) that failed (any verdict but `PASS`, `SKIP` or an `XFAIL` form: a skipped lane recurs every build for the same reason, a parked case is debt the ledger already carries, and neither is rerun nor sampled), under the scheduler it ran in; every corpus case the round has no row for; every case the trailer's `families=` or `cases=` name, default scheduler, and every case of its `lanes=`, under their schedulers; and a sample of the round's passing lanes. The group label reads `(targeted from round <build>: <n> cases)`. With no round to read it runs smoke plus the trailer, and the label says why: `(targeted: smoke, no results token)`, `no recorded round` or `round lookup failed` |
-| `full` | every case on every scheduler |
-| `families=<a,b>` | every case of those folders under `hack/omenative-testing/perm/isvcs/`, every scheduler |
-| `cases=<p1,p2>` | exactly those cases in their lanes, default scheduler; a case needing the force-delete policy runs in its lane's policy-on twin |
-| `lanes=<feature>/<topology>[@<scheduler>],...` | every case of those lanes (`gen-heal/engine`), each under the scheduler its suffix names: no suffix or `@default` is the cluster default scheduler, `@ome-scheduler` the gang-scheduler twin; the same lane may be named once per scheduler |
+| `off` | nothing: neither the image step nor the group; the default on every branch |
+| `smoke` | the first shard of every feature/topology lane, default scheduler only; needs `OME_EVAL_ALLOW_HEAVY=1` |
+| `targeted` | needs `OME_EVAL_ALLOW_HEAVY=1`; from the newest recorded full round: every (case, scheduler) that failed (any verdict but `PASS`, `SKIP` or an `XFAIL` form: a skipped lane recurs every build for the same reason, a parked case is debt the ledger already carries, and neither is rerun nor sampled), under the scheduler it ran in; every corpus case the round has no row for; every case the trailer's `families=` or `cases=` name, default scheduler, and every case of its `lanes=`, under their schedulers; and a sample of the round's passing lanes. The group label reads `(targeted from round <build>: <n> cases)`. With no round to read it runs smoke plus the trailer, and the label says why: `(targeted: smoke, no results token)`, `no recorded round` or `round lookup failed` |
+| `full` | every case on every scheduler; needs `OME_EVAL_ALLOW_HEAVY=1` |
+| `families=<a,b>` | every case of those folders under `hack/omenative-testing/perm/isvcs/`, every scheduler; needs `OME_EVAL_ALLOW_HEAVY=1` |
+| `cases=<p1,p2>` | exactly those cases in their lanes, default scheduler; a case needing the force-delete policy runs in its lane's policy-on twin; at most `OME_EVAL_MAX_CASES` of them without the override |
+| `lanes=<feature>/<topology>[@<scheduler>],...` | every case of those lanes (`gen-heal/engine`), each under the scheduler its suffix names: no suffix or `@default` is the cluster default scheduler, `@ome-scheduler` the gang-scheduler twin; the same lane may be named once per scheduler; the cases of every named lane and scheduler together stay within `OME_EVAL_MAX_CASES` without the override |
 
 `families=`, `cases=` and `lanes=` are trailer forms; `OME_EVAL_MODE` takes
 the four words, and a trailer selection stays beside a mode the variable set,
@@ -256,16 +280,18 @@ build falls back as the table says, logs the reason to the generator's stderr
 and never fails for it.
 
 Every lane carries `concurrency_group: "ome/gke-evals"` with
-`concurrency: <GKE_EVAL_MAX_CONCURRENCY>` (default 120), so across every build
+`concurrency: <GKE_EVAL_MAX_CONCURRENCY>` (default 40), so across every build
 of the organization at most that many lanes hold a GKE agent pod at once and
-the rest wait in order. The variable must be a positive integer; unset or
-empty means the default, and generation refuses anything else.
+the rest wait in order; the default leaves the cluster the eval shares with
+production work room for it. The variable must be a positive integer; unset
+or empty means the default, and generation refuses anything else.
 
 ### Running the eval from a branch
 
 A branch build whose eval mode is not `off` (an `Eval:` trailer or
-`OME_EVAL_MODE`) publishes what the eval needs for its commit, and nothing
-more. `_images_published()` in `generate_pipeline.py` is the one gate: true on
+`OME_EVAL_SELECT` naming `cases=` or `lanes=` within the cap, or a heavy mode
+with `OME_EVAL_ALLOW_HEAVY=1`) publishes what the eval needs for its commit,
+and nothing more. `_images_published()` in `generate_pipeline.py` is the one gate: true on
 `main` and on a branch whose eval runs. Every image step and the eval image
 step carry its decision as `OME_PUBLISH_IMAGES` (`1` publishes, `0` builds for
 validation only); `build_image.sh` and `package_kind_eval_image.sh` honour the

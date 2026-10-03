@@ -53,14 +53,24 @@ Environment variables read at runtime:
                                 "Eval: <value>" line of BUILDKITE_MESSAGE decides,
                                 the value a mode, families=<a,b>, cases=<p1,p2> or
                                 lanes=<feature>/<topology>[@<scheduler>],...;
-                                with none of them, main runs targeted and every
-                                other branch nothing
+                                with none of them, no branch runs the eval, main
+                                included
     OME_EVAL_SELECT           – the text an "Eval:" trailer would carry, for a
                                 build created without a message; it replaces the
                                 message's trailer, and beside OME_EVAL_MODE its
                                 selection rides along with that mode
+    OME_EVAL_ALLOW_HEAVY      – "1" lets the build run smoke, targeted, full or
+                                families=, and a cases= or lanes= selection above
+                                OME_EVAL_MAX_CASES. The eval shares its GKE
+                                cluster with production work, so without it a
+                                build runs only a small named selection and
+                                generation refuses the rest
+    OME_EVAL_MAX_CASES        – the case runs (cases times schedulers) a cases=
+                                or lanes= selection may total without the
+                                override (default: 24)
     GKE_EVAL_MAX_CONCURRENCY  – eval lanes running at once across the organization,
-                                the cap of their one concurrency group (default: 120)
+                                the cap of their one concurrency group (default: 40,
+                                leaving the shared cluster room for production work)
     OME_EVAL_RESULTS_TOKEN    – read-only Buildkite API token (read_builds,
                                 read_artifacts) targeted mode reads the newest
                                 recorded full round with; unset, targeted runs
@@ -500,10 +510,11 @@ GKE_EVAL_SCHEDULER_MAX_WORKERS = int(os.environ.get("GKE_EVAL_SCHEDULER_MAX_WORK
 # Every eval lane is in one Buildkite concurrency group, so across every
 # build of the organization at most GKE_EVAL_MAX_CONCURRENCY of them hold a
 # GKE agent pod at once and the rest wait in order. The cap is read at
-# generation by _eval_max_concurrency; unset or empty means the default.
+# generation by _eval_max_concurrency; unset or empty means the default, sized
+# to leave the cluster the eval shares with production work room for it.
 EVAL_CONCURRENCY_GROUP = "ome/gke-evals"
 EVAL_MAX_CONCURRENCY_VAR = "GKE_EVAL_MAX_CONCURRENCY"
-EVAL_MAX_CONCURRENCY_DEFAULT = 120
+EVAL_MAX_CONCURRENCY_DEFAULT = 40
 EVAL_GANG_SCHEDULER = "ome-scheduler"
 # Scheduler dimension of the KIND suite lanes: every semantic group again with
 # the fixture runtime selecting ome-scheduler, installed into the suite's
@@ -587,9 +598,9 @@ BRANCH = os.environ.get("BUILDKITE_BRANCH", "")
 COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
 # What the OMENative eval runs on this build. OME_EVAL_MODE names the mode;
 # unset, the trailer decides: OME_EVAL_SELECT when set, else the newest
-# "Eval: <value>" line of the commit message; with none of them, main runs
-# targeted and every other branch nothing. GKE_EVAL_ENABLED=0 forces off. The
-# trailer may name a selection instead of a mode.
+# "Eval: <value>" line of the commit message; with none of them, nothing runs
+# on any branch, main included. GKE_EVAL_ENABLED=0 forces off. The trailer may
+# name a selection instead of a mode.
 #   off             no eval image step and no eval group
 #   smoke           the first shard of every feature/topology lane, default scheduler
 #   targeted        smoke, plus every case the trailer's families or cases name
@@ -601,6 +612,24 @@ COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
 #                   the scheduler its suffix names: default, or the twin
 EVAL_MODES = ("off", "smoke", "targeted", "full")
 EVAL_SELECTION_KINDS = ("families", "cases", "lanes")
+# The eval shares its GKE cluster with production work, so a build runs only a
+# small named selection: cases= or lanes= whose case runs (a case once per
+# scheduler it is named under) total at most OME_EVAL_MAX_CASES. The modes that
+# run more, smoke, targeted, full and families=, and a selection above the cap
+# are refused at generation unless the build carries OME_EVAL_ALLOW_HEAVY=1,
+# the override for a build meant to run the corpus, such as a scheduled full
+# round. The kill switch GKE_EVAL_ENABLED=0 still turns everything off.
+EVAL_ALLOW_HEAVY_VAR = "OME_EVAL_ALLOW_HEAVY"
+EVAL_MAX_CASES_VAR = "OME_EVAL_MAX_CASES"
+EVAL_MAX_CASES_DEFAULT = 24
+EVAL_HEAVY_MODES = ("smoke", "targeted", "full", "families")
+EVAL_SMALL_SELECTION_KINDS = ("cases", "lanes")
+# The rule every refusal spells out beside what it refused.
+EVAL_SMALL_SELECTION_RULE = (
+    "the eval shares its cluster with production work, so a build runs only a small"
+    " named selection, cases=<ids> or lanes=<feature>/<topology>[@<scheduler>] of at most "
+    + EVAL_MAX_CASES_VAR + " case runs, unless it carries " + EVAL_ALLOW_HEAVY_VAR + "=1"
+)
 # The lanes= suffix for the cluster default scheduler, "" in EVAL_SCHEDULERS;
 # the twin is named by EVAL_GANG_SCHEDULER.
 EVAL_DEFAULT_SCHEDULER_NAME = "default"
@@ -610,10 +639,10 @@ EVAL_TRAILER = re.compile(r"^[ \t]*eval:[ \t]*(\S.*?)[ \t]*$", re.IGNORECASE | r
 
 
 def _resolve_eval_mode(
-    env_mode: str | None, message: str, branch: str, enabled: bool, env_select: str | None = None
+    env_mode: str | None, message: str, enabled: bool, env_select: str | None = None
 ) -> tuple[str, tuple[str, list[str]] | None]:
     """(mode, selection) for a build: the mode from OME_EVAL_MODE, else from
-    the trailer, else the branch default; the selection from the trailer
+    the trailer, else off on every branch; the selection from the trailer
     whenever it names families, cases or lanes. The trailer is OME_EVAL_SELECT
     when set, else the newest Eval: line of the message. A value naming
     nothing known is kept as written for generation to refuse."""
@@ -635,14 +664,13 @@ def _resolve_eval_mode(
     elif trailer is not None:
         mode = trailer
     else:
-        mode = "targeted" if branch == "main" else "off"
+        mode = "off"
     return (mode if enabled else "off"), selection
 
 
 EVAL_MODE, EVAL_SELECTION = _resolve_eval_mode(
     os.environ.get("OME_EVAL_MODE"),
     os.environ.get("BUILDKITE_MESSAGE", ""),
-    BRANCH,
     GKE_EVAL_ENABLED,
     os.environ.get("OME_EVAL_SELECT"),
 )
@@ -1716,7 +1744,8 @@ def _split_eval_cases(
 
 def _eval_mode() -> str:
     """EVAL_MODE, refused when it names neither a mode nor the kind of the
-    trailer's selection; off while the kill switch is on."""
+    trailer's selection, and when it names a heavy mode on a build without
+    the override; off while the kill switch is on."""
     known = EVAL_MODE in EVAL_MODES or (
         EVAL_SELECTION is not None and EVAL_MODE == EVAL_SELECTION[0]
     )
@@ -1728,7 +1757,14 @@ def _eval_mode() -> str:
             + " lanes=<feature>/<topology>[@<scheduler>]), not "
             + repr(EVAL_MODE)
         )
-    return EVAL_MODE if GKE_EVAL_ENABLED else "off"
+    if not GKE_EVAL_ENABLED:
+        return "off"
+    if EVAL_MODE in EVAL_HEAVY_MODES and not _eval_heavy_allowed():
+        raise RuntimeError(
+            "OME_EVAL_MODE, OME_EVAL_SELECT or the Eval: trailer names " + repr(EVAL_MODE)
+            + ", which runs more than a small named selection: " + EVAL_SMALL_SELECTION_RULE
+        )
+    return EVAL_MODE
 
 
 def _eval_on() -> bool:
@@ -1776,6 +1812,42 @@ def _eval_max_concurrency() -> int:
     if value < 1:
         raise RuntimeError(EVAL_MAX_CONCURRENCY_VAR + " must be a positive integer, not " + repr(raw))
     return value
+
+
+def _eval_heavy_allowed() -> bool:
+    """Whether the build carries OME_EVAL_ALLOW_HEAVY=1, which lets it run a
+    heavy mode and a named selection above the case cap."""
+    return _truthy(os.environ.get(EVAL_ALLOW_HEAVY_VAR, ""))
+
+
+def _eval_max_cases() -> int:
+    """The case runs a cases= or lanes= selection may total without the
+    override, from OME_EVAL_MAX_CASES; anything but a positive integer is
+    refused."""
+    raw = os.environ.get(EVAL_MAX_CASES_VAR, "").strip() or str(EVAL_MAX_CASES_DEFAULT)
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise RuntimeError(EVAL_MAX_CASES_VAR + " must be a positive integer, not " + repr(raw))
+    return value
+
+
+def _eval_check_small_selection(selected: list[tuple[str, str, list[str], str]]) -> None:
+    """Refuses a cases= or lanes= selection whose case runs, a case once per
+    scheduler it is named under, exceed the cap on a build without the
+    override."""
+    if _eval_heavy_allowed():
+        return
+    runs = sum(len(cases) for _, _, cases, _ in selected)
+    cap = _eval_max_cases()
+    if runs > cap:
+        raise RuntimeError(
+            EVAL_SELECTION_SOURCE + " names " + str(runs) + " case runs (cases times schedulers),"
+            " above the " + str(cap) + " of " + EVAL_MAX_CASES_VAR + ": " + EVAL_SMALL_SELECTION_RULE
+            + "; name fewer with cases=<ids>"
+        )
 
 
 def _eval_lane_shards(
@@ -2096,6 +2168,10 @@ def _eval_selection() -> list[tuple[str, str, list[str], str]]:
     families  every lane of the named folders on every scheduler
     cases     exactly the named cases in their lanes, default scheduler
     lanes     every case of the named lanes, each under its named scheduler
+
+    cases and lanes are the small named selections a build may run on its
+    own; their case runs stay within OME_EVAL_MAX_CASES unless the build
+    carries OME_EVAL_ALLOW_HEAVY=1, which the other modes need outright.
     """
     mode = _eval_mode()
     if mode == "off":
@@ -2134,12 +2210,15 @@ def _eval_selection() -> list[tuple[str, str, list[str], str]]:
     if mode in ("cases", "lanes") or (mode == "targeted" and EVAL_SELECTION is not None):
         for key, cases in _eval_named_selection(groups).items():
             chosen.setdefault(key, set()).update(cases)
-    return [
+    selected = [
         (feature, topology, [c for c in cases if c in chosen[(feature, topology, scheduler)]], scheduler)
         for scheduler in EVAL_SCHEDULERS
         for feature, topology, cases in groups
         if chosen.get((feature, topology, scheduler))
     ]
+    if mode in EVAL_SMALL_SELECTION_KINDS:
+        _eval_check_small_selection(selected)
+    return selected
 
 
 def _eval_children() -> list[tuple[str, str, dict]]:

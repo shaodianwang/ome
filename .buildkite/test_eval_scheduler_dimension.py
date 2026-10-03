@@ -14,6 +14,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 
+# The renders here cover the whole corpus, which only a build carrying the
+# override may run; the environment holds it for the module.
+_HEAVY = mock.patch.dict(os.environ, {"OME_EVAL_ALLOW_HEAVY": "1"})
+
+
+def setUpModule():
+    _HEAVY.start()
+
+
+def tearDownModule():
+    _HEAVY.stop()
+
+
 def load(env: dict[str, str]):
     with mock.patch.dict(os.environ, {"BUILDKITE_BRANCH": "main", "BUILDKITE_COMMIT": "HEAD", "OME_EVAL_MODE": "full", **env}, clear=False):
         import generate_pipeline as module
