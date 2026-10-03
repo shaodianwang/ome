@@ -10493,6 +10493,26 @@ class HandlerSmokeTest(unittest.TestCase):
         self.assertEqual({"engine-1-default-old": "p999-engine-1-0"}, ctx["inv"]["mutated_uids"])
         self.assertEqual("NO_REPAIR", out["state"], out["checks"])
 
+    def test_rollback_at_held_whose_kept_break_never_shows_reports_a_verdict(self):
+        """A kept break (no once=) carries no fault record, so the apparatus
+        failure of a break that never shows is written to the verdict itself:
+        INFRA-FAIL with the reason, not an exception."""
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 3, "ceil_d": 0, "ceil_r": 0, "rollback": 1, "during": "held",
+               "break": "imagepull", "topo": "engine"}
+        pods = {f"p999-engine-{i}-0": _rec("engine", i, "old") for i in range(2)}
+        ctx = _ctx_for(hdr, pods)
+        self.assertIsNone(ctx["fault"], "a kept break has no fault= and so no fault record")
+
+        def bump(ctx_, bumped, **kw):
+            ctx_["trigger_ts"] = time.time()
+            return True
+        out = self._run(run._rollback_held_break, ctx, _FakeFleet(ctx),
+                        {"_bump_rev": bump, "_isvc_spec": lambda cid: {"engine": {"runner": {"image": "x"}}},
+                         "ROTATE_BASE_S": 0.5, "HELD_BREAK_POLL_S": 0.05})
+        self.assertEqual(("HOOK_MISSED", "INFRA-FAIL"), (out["state"], out["verdict"]), out["checks"])
+        self.assertTrue(any("never showed the break" in n for n in out["notes"]), out["notes"])
+        self.assertTrue(any("INFRA-FAIL" in c and "never showed the break" in c for c in out["checks"]), out["checks"])
+
 
 class GeneratedFaultFamiliesTest(unittest.TestCase):
     """The readiness, gang-member and tight families: their size, and that
@@ -15103,6 +15123,164 @@ class LiftHealedPullTest(unittest.TestCase):
         for case in cases:
             self.assertEqual(("image pull", "one-shot", "running"), case.fault_rows()[0], case.id)
             self.assertEqual("steady state", case.operation, case.id)
+
+    def test_generated_family_says_the_repair_rebuilds_at_once(self):
+        """The stuck-pod grace counts from the pod's creation, so the repair
+        rebuilds a long-serving pod as soon as its wait is seen, usually
+        before the settle window ends: the reason states that, not a repair
+        that opens only after the pod has sat."""
+        outputs, rows = generate_cases.build_outputs()
+        fam = [n for f, n, kv, m in rows if f == "gen-lift" and kv["fault"] == "imagepull:old"]
+        self.assertEqual(12, len(fam))
+        for name in fam:
+            reason = outputs[f"gen-lift/{name}.yaml"].splitlines()[1]
+            self.assertTrue(reason.startswith("# reason: "), name)
+            self.assertIn("as soon as the wait is seen", reason, name)
+            self.assertIn("nothing left to lift", reason, name)
+            self.assertNotIn("sat past", reason, name)
+
+    @staticmethod
+    def _pod_api(live):
+        """A _get_pod over one live record: the pod's UID and its main
+        container's waiting reason ("" when it runs)."""
+        def get_pod(name, ns=None):
+            state = {"waiting": {"reason": live["waiting"]}} if live["waiting"] else {"running": {}}
+            return {"metadata": {"uid": live["uid"]},
+                    "spec": {"containers": [{"name": run.MAIN_CONTAINER, "image": "example.com/app:v1"}]},
+                    "status": {"containerStatuses": [{"name": run.MAIN_CONTAINER, "state": state}]}}
+        return get_pod
+
+    def _idle_lift_ctx(self, fault, **fields):
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 2, "ceil_d": 0, "ceil_r": 0, "fault": fault, "during": "idle",
+               "lift": "after-settle", "expect": "heals", "topo": "engine", "restart": "None"}
+        pods = {"p999-engine-0-0": _rec("engine", 0, "old"), "p999-engine-1-0": _rec("engine", 1, "old")}
+        ctx = _ctx_for(hdr, pods)
+        ctx["fault"].update(fired=True, crash_pod="p999-engine-1-0", crash_inst="1", crash_comp="engine",
+                            crash_hash="old", crash_uid=pods["p999-engine-1-0"]["uid"], **fields)
+        ctx["trigger_ts"] = time.time()
+        return ctx, hdr
+
+    def test_a_break_the_controller_rebuilt_before_the_lift_heals(self):
+        """The kubelet shows the pull failure, then the crash-loop repair
+        rebuilds the pod under the same name before the settle window ends:
+        the wait ends as healed before the lift, nothing is pointed back,
+        and the heal verdict reads the rebuilt Instance."""
+        ctx, hdr = self._idle_lift_ctx("imagepull:old", crash_image="example.com/app:v1",
+                                       bite="ErrImagePull|ImagePullBackOff", cause="the break image on p999-engine-1-0")
+        f = ctx["fault"]
+        live = {"uid": f["crash_uid"], "waiting": "ErrImagePull"}
+
+        def script(ctx_, n):
+            pod = ctx_["pod_state"]["p999-engine-1-0"]
+            if n < 3:
+                pod["ready"] = pod["serving"] = False
+            elif n == 3:
+                # Rebuilt under the same name: a new UID, still starting.
+                ctx_["pod_state"]["p999-engine-1-0"] = _rec("engine", 1, "old", ready=False, uid="engine-1-rebuilt")
+                live.update(uid="engine-1-rebuilt", waiting="")
+            else:
+                pod["ready"] = pod["serving"] = True
+        patched = []
+        kubectl = lambda *a, **kw: patched.append(a) or subprocess.CompletedProcess(a, 1, "", "no call expected")
+        fleet = _FakeFleet(ctx, script)
+        with mock.patch.object(run, "_read_one", fleet.read_one), mock.patch.object(run, "_get_pod", self._pod_api(live)), \
+                mock.patch.object(run, "_crashloop_pod_state", lambda name: (True, True, "old", True, live["uid"])), \
+                mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_ir_row_phase", lambda *a: "Ready"), \
+                mock.patch.object(run, "_isvc_annotations", lambda *a: {}), \
+                mock.patch.object(run, "STABILITY_S", 0.05), mock.patch.object(run, "LIFT_SETTLE_S", 5), \
+                mock.patch.object(run, "ROTATE_BASE_S", 5), mock.patch.object(run, "ROTATE_PER_POD_S", 0):
+            state, verdict, notes, checks = run._idle_lift(ctx, f, hdr)
+        self.assertEqual(("HEALED", "PASS"), (state, verdict), checks)
+        self.assertIsNone(f["infra_fail"])
+        self.assertTrue(any("healed before the lift: the controller rebuilt the pod" in c for c in checks), checks)
+        self.assertTrue(any("Ready and serving again" in c and "after the rebuild" in c for c in checks), checks)
+        self.assertEqual([], patched, "nothing is pointed back: the pod the harness broke is gone")
+        self.assertTrue(any("already replaced before the heal" in n for n in f["notes"]), f["notes"])
+
+    def test_a_break_still_bitten_is_not_read_as_healed(self):
+        """A bite that holds for the settle window is lifted by the harness:
+        the pod keeps its UID and its waiting reason, so the lift is due and
+        the image is pointed back; the heal follows the lift."""
+        ctx, hdr = self._idle_lift_ctx("imagepull:old", crash_image="example.com/app:v1",
+                                       bite="ErrImagePull|ImagePullBackOff", cause="the break image on p999-engine-1-0")
+        f = ctx["fault"]
+        live = {"uid": f["crash_uid"], "waiting": "ImagePullBackOff"}
+        healed = []
+
+        def heal(f_):
+            healed.append(f_["crash_pod"])
+            live["waiting"] = ""
+
+        def script(ctx_, n):
+            pod = ctx_["pod_state"]["p999-engine-1-0"]
+            pod["ready"] = pod["serving"] = bool(healed)
+        fleet = _FakeFleet(ctx, script)
+        with mock.patch.object(run, "_read_one", fleet.read_one), mock.patch.object(run, "_get_pod", self._pod_api(live)), \
+                mock.patch.object(run, "_break_heal", heal), mock.patch.object(run, "_ir_row_phase", lambda *a: "Ready"), \
+                mock.patch.object(run, "_isvc_annotations", lambda *a: {}), \
+                mock.patch.object(run, "STABILITY_S", 0.05), mock.patch.object(run, "LIFT_SETTLE_S", 0.2), \
+                mock.patch.object(run, "ROTATE_BASE_S", 5), mock.patch.object(run, "ROTATE_PER_POD_S", 0):
+            state, verdict, notes, checks = run._idle_lift(ctx, f, hdr)
+        self.assertEqual(("HEALED", "PASS"), (state, verdict), checks)
+        self.assertEqual(["p999-engine-1-0"], healed)
+        self.assertTrue(any("lifted" in c and "after the fault" in c for c in checks), checks)
+        self.assertFalse(any("healed before the lift" in c for c in checks), checks)
+
+    def test_a_configkey_lift_still_lifts_the_key_after_a_rebuild(self):
+        """The rebuilt pod of a missing-key break wedges on the same key, so
+        the rebuild is not a heal: the bite holds, the lift is due once it
+        has settled, the key is put back once, and the heal follows."""
+        ctx, hdr = self._idle_lift_ctx("configkey:missing", bite=run.CONFIGKEY_WAITING,
+                                       cause="ConfigMap key p999-config/value", cm_name="p999-config",
+                                       cm_key="value", cm_value="v")
+        f = ctx["fault"]
+        live = {"uid": f["crash_uid"], "waiting": run.CONFIGKEY_WAITING}
+        restored = []
+
+        def script(ctx_, n):
+            pod = ctx_["pod_state"]["p999-engine-1-0"]
+            if n == 3:
+                # Rebuilt under the same name, and wedged on the same key.
+                ctx_["pod_state"]["p999-engine-1-0"] = _rec("engine", 1, "old", ready=False, uid="engine-1-rebuilt")
+                live["uid"] = "engine-1-rebuilt"
+            elif restored:
+                live["waiting"] = ""
+                pod["ready"] = pod["serving"] = True
+            else:
+                pod["ready"] = pod["serving"] = False
+
+        def restore(f_):
+            restored.append(1)
+            return True
+        fleet = _FakeFleet(ctx, script)
+        with mock.patch.object(run, "_read_one", fleet.read_one), mock.patch.object(run, "_get_pod", self._pod_api(live)), \
+                mock.patch.object(run, "_configkey_restore", restore), mock.patch.object(run, "_ir_row_phase", lambda *a: "Ready"), \
+                mock.patch.object(run, "_isvc_annotations", lambda *a: {}), \
+                mock.patch.object(run, "STABILITY_S", 0.05), mock.patch.object(run, "LIFT_SETTLE_S", 0.2), \
+                mock.patch.object(run, "ROTATE_BASE_S", 5), mock.patch.object(run, "ROTATE_PER_POD_S", 0):
+            state, verdict, notes, checks = run._idle_lift(ctx, f, hdr)
+        self.assertEqual(("HEALED", "PASS"), (state, verdict), checks)
+        self.assertEqual(1, len(restored), "the lift puts the key back, once")
+        self.assertTrue(any("lifted" in c and "after the fault" in c for c in checks), checks)
+        self.assertFalse(any("healed before the lift" in c for c in checks), checks)
+
+    def test_lift_verdict_reads_a_heal_before_the_lift(self):
+        f = {"kind": "imagepull", "crash_inst": "1", "crash_comp": "engine", "infra_fail": None,
+             "bite": "ErrImagePull|ImagePullBackOff", "cause": "the break image on p999-engine-1-0"}
+        out = {"bitten_at": 2.0, "failed_at": None, "lifted_at": 40.0, "self_healed_at": 40.0, "healed_at": 25.0,
+               "park_broken": None, "phase_after": "Ready", "new_hash": False, "reset_used": False}
+        notes, checks = [], []
+        self.assertEqual("PASS", run._lift_checks(f, "heals", "after-settle", out, {}, "PASS", notes, checks))
+        self.assertIsNone(f["infra_fail"])
+        self.assertTrue(any("healed before the lift: the controller rebuilt the pod 40s after the fault" in c for c in checks), checks)
+        self.assertTrue(any("Ready and serving again 25s after the rebuild" in c for c in checks), checks)
+        notes = []
+        self.assertEqual("FAIL", run._lift_checks(dict(f), "heals", "after-settle", dict(out, healed_at=None), {}, "PASS", notes, []))
+        self.assertIn("after the rebuild", notes[0])
+        # A lift that never came is still the apparatus, not the product.
+        unlifted = dict(f)
+        run._lift_checks(unlifted, "heals", "after-settle", dict(out, lifted_at=None, self_healed_at=None), {}, "PASS", [], [])
+        self.assertIn("could not be lifted", unlifted["infra_fail"])
 
 
 class LiftPushedPullTest(unittest.TestCase):

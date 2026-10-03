@@ -3851,9 +3851,18 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
         if hb["why_at"] is not None or once or now - push_ts - hb["bite_at"] >= HELD_BREAK_WHY_WAIT_S:
             break
     verdict, notes, checks = "PASS", [], []
-    state = "HOOK_MISSED"
+    state, apparatus = "HOOK_MISSED", None
     if hb["bite_at"] is None:
-        f["infra_fail"] = f"{kind}: the pushed revision never showed the break within {budget}s ({armed})"
+        # A kept break has no fault record (no fault=), so the apparatus
+        # failure goes on the verdict itself and wins over the checks below,
+        # as _fault_finalize makes it win when there is a record.
+        msg = f"{kind}: the pushed revision never showed the break within {budget}s ({armed})"
+        if f is not None:
+            f["infra_fail"] = msg
+        else:
+            apparatus = msg
+            notes.append(f"INFRA-FAIL: {msg}")
+            checks.append(f"  ✗ INFRA-FAIL: {msg}")
     else:
         _rollback_fire(rb, case_id, bumped, ctx["pod_state"], old, ppi, time.time() - push_ts)
         hb["fire_at"] = time.time()
@@ -3904,6 +3913,8 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
     if state == "CONVERGED":
         verdict = index_collision_checks(ctx, sorted(bumped), verdict, notes, checks)
     verdict = surge_before_drain_checks(ctx, sorted(bumped), verdict, notes, checks)
+    if apparatus:
+        verdict = "INFRA-FAIL"
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
@@ -9557,9 +9568,11 @@ def _lift_checks(f, expect, lift, out, hdr, verdict, notes, checks):
     the lift phase must have arrived: a Failed row for after-failed, the
     Instance back on another node for after-recover. A park under a dead
     node is judged before the lift (nothing rebuilt the Instance while the
-    node was down, as configured without a force delete). Once the cause is
-    gone, heals and repaired need the Instance Ready and serving again on
-    its running revision with no bump and no reset mailbox, and a parked
+    node was down, as configured without a force delete). A break the
+    controller rebuilt before the lift was due counts as lifted at the
+    rebuild, with nothing left to lift. Once the cause is gone, heals and
+    repaired need the Instance Ready and serving again on its running
+    revision with no bump and no reset mailbox, and a parked
     Failed row must stay Failed with nothing serving across the hold window
     — the park the header ties to a tracked issue; a row that heals fails
     it as stale."""
@@ -9599,7 +9612,11 @@ def _lift_checks(f, expect, lift, out, hdr, verdict, notes, checks):
     if out.get("lifted_at") is None:
         f["infra_fail"] = f"{kind}: {cause} could not be lifted"
         return verdict
-    checks.append(f"  ✓ {kind}: {cause} lifted {out['lifted_at']:.0f}s after the fault")
+    if out.get("self_healed_at") is not None:
+        checks.append(f"  ✓ {kind}: healed before the lift: the controller rebuilt the pod {out['self_healed_at']:.0f}s "
+                      f"after the fault, with nothing left to lift")
+    else:
+        checks.append(f"  ✓ {kind}: {cause} lifted {out['lifted_at']:.0f}s after the fault")
     if expect == "relocated":
         if out.get("reaped_at") is None:
             verdict = "FAIL"
@@ -9629,13 +9646,14 @@ def _lift_checks(f, expect, lift, out, hdr, verdict, notes, checks):
             checks.append(f"  ✓ {kind}: relocated without the reset mailbox ({RESET_ANNO} absent)")
         return verdict
     if expect in ("heals", "repaired"):
+        after = "the rebuild" if out.get("self_healed_at") is not None else "the lift"
         if out.get("healed_at") is None:
             verdict = "FAIL"
-            notes.append(f"{kind}: {comp} Instance {inst} did not return to Ready+serving after the lift (row {out.get('phase_after') or '?'})")
-            checks.append(f"  ✗ {kind}: {comp} Instance {inst} never returned to Ready+serving within budget after the lift "
+            notes.append(f"{kind}: {comp} Instance {inst} did not return to Ready+serving after {after} (row {out.get('phase_after') or '?'})")
+            checks.append(f"  ✗ {kind}: {comp} Instance {inst} never returned to Ready+serving within budget after {after} "
                           f"(row phase {out.get('phase_after') or '?'})")
         else:
-            checks.append(f"  ✓ {kind}: {comp} Instance {inst} Ready and serving again {out['healed_at']:.0f}s after the lift")
+            checks.append(f"  ✓ {kind}: {comp} Instance {inst} Ready and serving again {out['healed_at']:.0f}s after {after}")
         if out.get("new_hash"):
             verdict = "FAIL"
             notes.append(f"{kind}: a new revision appeared while healing")
@@ -9703,7 +9721,8 @@ def _kept_checks(f, out, verdict, notes, checks):
 def _idle_lift(ctx, f, hdr):
     """Watch a lift fault: the bite, the lift phase (and, under a dead node,
     the park before the lift), the lift, and what the Instance does once
-    the cause is gone."""
+    the cause is gone. A break the controller rebuilds before the lift is
+    due ends the wait as healed before the lift."""
     case_id, comp, inst = ctx["case_id"], f["crash_comp"], f["crash_inst"]
     lift, expect = str(hdr.get("lift")), str(hdr.get("expect"))
     budget, t0 = _idle_budget(ctx), ctx["trigger_ts"]
@@ -9714,7 +9733,7 @@ def _idle_lift(ctx, f, hdr):
     lost_uids = {p["uid"] for _n, p in _instance_pods(ctx["pod_state"], comp, inst)
                  if p.get("uid") and (f["kind"] != "node" or p.get("node") == f.get("node"))}
     out = {"bitten_at": None, "failed_at": None, "recovered_at": None, "lifted_at": None, "healed_at": None,
-           "reaped_at": None, "serving_after_lift": False,
+           "self_healed_at": None, "reaped_at": None, "serving_after_lift": False,
            "park_broken": None, "phase_after": "", "new_hash": False, "reset_used": False}
 
     def pods():
@@ -9734,6 +9753,13 @@ def _idle_lift(ctx, f, hdr):
             return _pod_waiting_reason(_get_pod(f["crash_pod"])) in _break_wait_reasons(f["kind"])
         return _pod_waiting_reason(_get_pod(f["crash_pod"])) == f.get("bite")
 
+    # A break on a long-serving pod heals itself: the pod is past the
+    # stuck-pod grace, which counts from its creation, so the crash-loop
+    # repair rebuilds it as soon as the wait is seen, usually before the
+    # settle window ends. Once the bite is seen and released, the rebuilt
+    # pod (a new UID) ends the wait; a Ready window of a runner that dies
+    # after it serves is not a heal.
+    self_heals = _break_heals_at_idle(f)
     print(f"  Phase 3: waiting for the fault to bite, then for lift={lift} (≤{budget}s)")
     bitten_since, due, last_ir = None, False, 0.0
     while time.time() - t0 < budget and not ctx["closed"]:
@@ -9746,6 +9772,10 @@ def _idle_lift(ctx, f, hdr):
                 print(f"    bite: {comp} Instance {inst} shows {f.get('bite')} ({out['bitten_at']:.0f}s)")
         else:
             bitten_since = None
+        if self_heals and out["bitten_at"] is not None and bitten_since is None and rebuilt_pod():
+            out["self_healed_at"] = now - t0
+            print(f"    healed before the lift: the controller rebuilt {comp} Instance {inst} ({out['self_healed_at']:.0f}s)")
+            break
         if lift == "after-settle":
             due = bitten_since is not None and now - bitten_since >= LIFT_SETTLE_S
         elif lift == "after-recover":
@@ -9784,48 +9814,57 @@ def _idle_lift(ctx, f, hdr):
                 out["park_broken"] = time.time() - t0
                 break
         state = "PARKED" if out["park_broken"] is None else "REBUILT"
-    if due:
+    lifted_ts = None
+    if out["self_healed_at"] is not None:
+        # Nothing is left to lift: the pod the harness broke is gone. The
+        # heal still runs, to stop a killer and to record the replacement.
+        print(f"  Phase 4: nothing to lift — the controller rebuilt {f['crash_pod']} before the settle window ended")
+        _lift_cause(f)
+        lifted_ts = t0 + out["self_healed_at"]
+        out["lifted_at"] = out["self_healed_at"]
+    elif due:
         print(f"  Phase 4: lift — {f.get('cause', 'the cause')} put back")
         if _lift_cause(f):
             lifted_ts = time.time()
             out["lifted_at"] = lifted_ts - t0
-            if expect in ("heals", "repaired"):
-                print(f"  Phase 5: watching {comp} Instance {inst} for the heal (≤{budget}s)")
-                stable, state = None, "NOT_HEALED"
-                while time.time() - lifted_ts < budget and not ctx["closed"]:
-                    _read_one(ctx)
-                    if serving():
-                        stable = stable or time.time()
-                        if time.time() - stable >= STABILITY_S:
-                            out["healed_at"] = stable - lifted_ts
-                            ctx["converged_at"] = stable - t0
-                            state = "HEALED"
-                            break
-                    else:
-                        stable = None
-            elif expect == "relocated":
-                # The kubelet is back: the pods the node held must leave the
-                # API and the rebuilt Instance must keep serving.
-                print(f"  Phase 5: watching {comp} Instance {inst} after the lift — the pods the node held gone, "
-                      f"the Instance serving (≤{IDLE_HOLD_S}s)")
-                state, hold_end = "RELOCATED", time.time() + IDLE_HOLD_S
-                while time.time() < hold_end and not ctx["closed"]:
-                    _read_one(ctx)
-                    if out["reaped_at"] is None and not _uids_present(ctx["pod_state"], lost_uids):
-                        out["reaped_at"] = time.time() - lifted_ts
-                    if out["reaped_at"] is not None and serving():
-                        break
-                out["serving_after_lift"] = serving()
-                ctx["converged_at"] = out["recovered_at"]
-            elif f["kind"] == "configkey":
-                print(f"  Phase 5: watching {comp} Instance {inst} for the park (≤{IDLE_HOLD_S}s)")
-                hold_end, state = time.time() + IDLE_HOLD_S, "PARKED"
-                while time.time() < hold_end and not ctx["closed"]:
-                    _read_one(ctx)
-                    if serving() or _ir_row_phase(case_id, comp, inst) != "Failed":
-                        out["park_broken"] = time.time() - lifted_ts
+    if lifted_ts is not None:
+        if expect in ("heals", "repaired"):
+            print(f"  Phase 5: watching {comp} Instance {inst} for the heal (≤{budget}s)")
+            stable, state = None, "NOT_HEALED"
+            while time.time() - lifted_ts < budget and not ctx["closed"]:
+                _read_one(ctx)
+                if serving():
+                    stable = stable or time.time()
+                    if time.time() - stable >= STABILITY_S:
+                        out["healed_at"] = stable - lifted_ts
+                        ctx["converged_at"] = stable - t0
                         state = "HEALED"
                         break
+                else:
+                    stable = None
+        elif expect == "relocated":
+            # The kubelet is back: the pods the node held must leave the
+            # API and the rebuilt Instance must keep serving.
+            print(f"  Phase 5: watching {comp} Instance {inst} after the lift — the pods the node held gone, "
+                  f"the Instance serving (≤{IDLE_HOLD_S}s)")
+            state, hold_end = "RELOCATED", time.time() + IDLE_HOLD_S
+            while time.time() < hold_end and not ctx["closed"]:
+                _read_one(ctx)
+                if out["reaped_at"] is None and not _uids_present(ctx["pod_state"], lost_uids):
+                    out["reaped_at"] = time.time() - lifted_ts
+                if out["reaped_at"] is not None and serving():
+                    break
+            out["serving_after_lift"] = serving()
+            ctx["converged_at"] = out["recovered_at"]
+        elif f["kind"] == "configkey":
+            print(f"  Phase 5: watching {comp} Instance {inst} for the park (≤{IDLE_HOLD_S}s)")
+            hold_end, state = time.time() + IDLE_HOLD_S, "PARKED"
+            while time.time() < hold_end and not ctx["closed"]:
+                _read_one(ctx)
+                if serving() or _ir_row_phase(case_id, comp, inst) != "Failed":
+                    out["park_broken"] = time.time() - lifted_ts
+                    state = "HEALED"
+                    break
     out["phase_after"] = _ir_row_phase(case_id, comp, inst)
     out["new_hash"] = any(p and p["alive"] and p.get("hash") and p["hash"] not in ctx["old_hashes"]
                           for p in ctx["pod_state"].values())

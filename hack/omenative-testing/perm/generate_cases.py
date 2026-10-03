@@ -6757,15 +6757,17 @@ def _lift_readiness_new_reason(topo, router):
 
 def _lift_imagepull_idle_reason(rp, topo, router):
     where = "leader pod" if is_mn(topo) else "pod"
-    back = ("the crash-loop repair opens once the pod has sat past the stuck-pod grace and rebuilds the Instance, unless "
-            "the image returns first and the kubelet starts the container again"
+    back = ("where the wait does hold for the settle window the image is pointed back and the kubelet starts the "
+            "container again"
             if rp == "None" else
-            "the kubelet's restart of the container is the runner restart the policy reads, so a rebuild may follow the "
-            "return of the image, or the container simply starts again")
+            "where the wait does hold for the settle window the image is pointed back and the kubelet starts the "
+            "container again, a restart the policy may read as a runner restart and answer with a rebuild")
     out = (f"the {where} of the engine's highest Instance is pointed at an image that cannot be pulled, so the kubelet "
-           f"stops its container and parks it in ImagePullBackOff; once that has held for the settle window the image is "
-           f"pointed back; {back}; either way the Instance is Ready and serving again on its running revision within the "
-           f"budget, with no new revision and no reset mailbox, and no Component exceeds N alive")
+           f"stops its container and parks it in ImagePullBackOff; the stuck-pod grace counts from the pod's creation "
+           f"and a long-serving pod is past it, so the crash-loop repair rebuilds the Instance under either restart "
+           f"policy as soon as the wait is seen, usually before the settle window ends, with nothing left to lift; "
+           f"{back}; either way the Instance is Ready and serving again on its running revision within the budget, "
+           f"with no new revision and no reset mailbox, and no Component exceeds N alive")
     untouched = _lift_untouched(topo, router)
     return out + (f"; {untouched}" if untouched else "")
 

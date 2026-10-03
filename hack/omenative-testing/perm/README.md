@@ -1798,12 +1798,16 @@ shapes.
 - **`fault=imagepull:old` with `during=idle lift=after-settle expect=heals`**
   and **`fault=imagepull:new` with `lift=after-settle`** are the one-shot
   forms of the image pull. At idle the running revision's victim is pointed
-  at the unpullable reference as above, and once the kubelet's pull failure
-  (`ImagePullBackOff` or `ErrImagePull`) has held for `LIFT_SETTLE_S` the pod
-  is pointed back at the image it ran; the heal verdict of `configkey` applies
-  (Ready and serving again on the running revision, no new revision, no
-  reset mailbox, no Component above N alive), whether the kubelet started
-  the container again or a repair rebuilt the pod first. Under a push the
+  at the unpullable reference as above. The pod is past the stuck-pod grace,
+  which counts from its creation, so the crash-loop repair usually rebuilds
+  it as soon as the kubelet's pull failure (`ImagePullBackOff` or
+  `ErrImagePull`) is seen, before it has held for `LIFT_SETTLE_S`: the
+  rebuilt pod (a new UID) or the Instance serving again ends the wait as
+  healed before the lift, with nothing left to point back. Where the failure
+  does hold for `LIFT_SETTLE_S` the pod is pointed back at the image it ran.
+  Either way the heal verdict of `configkey` applies (Ready and serving again
+  on the running revision, no new revision, no reset mailbox, no Component
+  above N alive). Under a push the
   push's first engine pod is pointed at the unpullable reference while its
   runner is still starting and back once the failure has settled; the
   one-shot pushed-revision verdict applies, with one rebuild reported (the
