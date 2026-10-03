@@ -1,0 +1,62 @@
+# A repair parked at Failed on a cause the kubelet retries in place: the
+# ConfigMap key the container cannot find. A fresh pod set would wedge on
+# the same key, so the retry ladder (config.updateRetry) owes the park no
+# re-arm: past the ladder's first delay and far past its whole span the
+# row stays Failed with its reason, the wedged pod stays, and the
+# escalation pass says once what the park waits for. With the key back
+# the kubelet starts the pod it left in place and the repair resumes its
+# promote at the incarnation the pod already carries.
+scenario: failed-repair-waits-on-workload
+arrows:
+  - T-ready-restart
+  - T-restart-stuck
+  - T-failed-repair-resume
+cells:
+  - instance/Failed/timer.repairRetry/before
+  - instance/Failed/pod.containersReady[source]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 5m, maxDelay: 30m, multiplier: 2.0}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the rebuilt pod cannot find its ConfigMap key and is older than the grace when the wedge is read, so the row fails with its operation preserved
+    events:
+      - clock.advance: 2m
+      - pod.waiting[CreateContainerConfigError]: {pod: {index: 0}, message: "couldn't find key mode in ConfigMap"}
+  - tick: 4
+    note: the park is on a cause the kubelet retries in place, so the escalation pass records once what it waits for and no wake-up is owed to the ladder
+  - tick: 5
+    note: the ladder's first delay has passed since the recorded failure and nothing re-arms, the row keeps its reason and its pod
+    events:
+      - clock.advance: 6m
+  - tick: 6
+    note: far past the ladder's whole span nothing re-arms either, and nothing is announced again
+    events:
+      - clock.advance: 1h
+  - tick: 7
+    note: the key is back and the kubelet's retry starts the container, so the parked repair writes the serving gate on the pod it already has
+    events:
+      - pod.containersReady[source]: {pod: {index: 0}}
+  - tick: 8
+    note: the kubelet folds the gate into PodReady and the repair finishes with its promote, at the incarnation the pod carries
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

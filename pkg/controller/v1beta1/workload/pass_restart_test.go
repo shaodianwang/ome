@@ -1390,16 +1390,17 @@ func TestSpentRepair_RebuiltSetComesUp_ResumesThePromote(t *testing.T) {
 	}
 }
 
-// The rebuilt set stays wedged even after the cause is gone — the pods
-// cannot recover in place — so the parked repair re-arms on the ladder:
-// not before the configured delay from the recorded failure, then as a
-// whole rebuild at the next incarnation, which heals.
+// A rebuilt set parked in a crash loop stays wedged even after the cause
+// is gone — the pods cannot recover in place — so the parked repair
+// re-arms on the ladder: not before the configured delay from the
+// recorded failure, then as a whole rebuild at the next incarnation,
+// which heals.
 //
 // Cells: instance/Failed/timer.repairRetry/before
-func TestSpentRepair_WedgedSet_ReArmsOnTheLadderAndHeals(t *testing.T) {
+func TestSpentRepair_CrashLoopSet_ReArmsOnTheLadderAndHeals(t *testing.T) {
 	h := newRestartHarness(t, 1)
 	h.retryPolicy = retryLadder(3, 2*time.Minute)
-	parkRepair(t, h, "CreateContainerConfigError", true)
+	parkRepair(t, h, "CrashLoopBackOff", true)
 	parked := h.instance(0)
 	anchor := parked.LastFailure.Time.Time
 	notBefore := anchor.Add(2 * time.Minute)
@@ -1424,15 +1425,15 @@ func TestSpentRepair_WedgedSet_ReArmsOnTheLadderAndHeals(t *testing.T) {
 	}
 }
 
-// A gang whose members are all alive but wedged has no member to lose, so
-// only the ladder rebuilds it; the rebuild is the whole gang.
+// A gang whose members are all alive but crash-looping has no member to
+// lose, so only the ladder rebuilds it; the rebuild is the whole gang.
 //
 // Cells: instance/Failed/timer.repairRetry/before
 func TestSpentRepair_Gang_AllMembersWedged_ReArmsOnTheLadder(t *testing.T) {
 	h := newRecoveryHarness(t, true)
 	h.retryPolicy = retryLadder(3, time.Minute)
 	h.driveToReadyOnV1()
-	parkRepair(t, h, "CreateContainerConfigError", true)
+	parkRepair(t, h, "CrashLoopBackOff", true)
 	parked := h.instance(0)
 	if pods := h.podsOf(0); len(pods) != 2 {
 		t.Fatalf("parked gang has %d pods, want both members present and wedged", len(pods))
@@ -1488,7 +1489,7 @@ func TestSpentRepair_NeverHeals_ParksAfterTheLadderIsSpent(t *testing.T) {
 	h := newRestartHarness(t, 1)
 	h.retryPolicy = retryLadder(2, 30*time.Second)
 	h.recorder = record.NewFakeRecorder(64)
-	parkRepair(t, h, "CreateContainerConfigError", true)
+	parkRepair(t, h, "CrashLoopBackOff", true)
 	first := h.instance(0).Incarnation
 
 	spent := func() bool {
@@ -1513,15 +1514,15 @@ func TestSpentRepair_NeverHeals_ParksAfterTheLadderIsSpent(t *testing.T) {
 	}
 }
 
-// No ladder configured is the fail-safe: a wedged set stays parked, with
-// no rebuild and no attempt counted, until an operator acts.
+// No ladder configured is the fail-safe: a crash-looping set stays
+// parked, with no rebuild and no attempt counted, until an operator acts.
 //
 // Cells: instance/Failed/timer.repairRetry/before
 func TestSpentRepair_NoLadder_StaysParked(t *testing.T) {
 	h := newRestartHarness(t, 1)
 	h.retryPolicy = nil
 	h.recorder = record.NewFakeRecorder(64)
-	parkRepair(t, h, "CreateContainerConfigError", true)
+	parkRepair(t, h, "CrashLoopBackOff", true)
 	parked := h.instance(0)
 
 	h.settle(40)
@@ -1535,6 +1536,120 @@ func TestSpentRepair_NoLadder_StaysParked(t *testing.T) {
 	}
 }
 
+// A repair parked on a cause the kubelet retries in place — a ConfigMap
+// key the container cannot find, an image it cannot pull — owes no
+// re-arm: a fresh pod set would wedge on the same cause. Past the
+// ladder's first delay and past its whole span the row stays Failed with
+// its reason, the wedged pods stay where the kubelet retries them, no
+// Restarting stamp lands, and the status says once what the park waits
+// for. The recovery is the kubelet's: with the key or image back the
+// parked pods start, and the repair resumes its promote on the pods it
+// already has, single pod and gang alike.
+//
+// Cells: instance/Failed/timer.repairRetry/before, instance/Failed/pod.containersReady[source]/before
+func TestSpentRepair_KubeletRetriedCause_WaitsForTheFixWithoutReArm(t *testing.T) {
+	const note = "waiting for the configuration or image the pod needs; the kubelet retries in place"
+	for _, tc := range []struct {
+		name   string
+		reason string
+		gang   bool
+	}{
+		{"single pod/CreateContainerConfigError", "CreateContainerConfigError", false},
+		{"single pod/ImagePullBackOff", "ImagePullBackOff", false},
+		{"gang/CreateContainerConfigError", "CreateContainerConfigError", true},
+		{"gang/ImagePullBackOff", "ImagePullBackOff", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var h *recoveryHarness
+			pods := 1
+			if tc.gang {
+				h = newRecoveryHarness(t, true)
+				h.retryPolicy = retryLadder(3, time.Minute)
+				h.recorder = record.NewFakeRecorder(256)
+				h.driveToReadyOnV1()
+				pods = 2
+			} else {
+				h = newRestartHarness(t, 1)
+				h.retryPolicy = retryLadder(3, time.Minute)
+				h.recorder = record.NewFakeRecorder(256)
+			}
+			// The wedge is not sticky: the kubelet retries the parked pods
+			// in place once the cause is gone.
+			parkRepair(t, h, tc.reason, false)
+			parked := h.instance(0)
+			parkedPods := podKeys(h.podsOf(0))
+			if len(h.podsOf(0)) != pods {
+				t.Fatalf("parked set has %d pods, want %d present and wedged", len(h.podsOf(0)), pods)
+			}
+			restarts := eventCount(h, string(workloadtypes.EventReasonRestartTriggered))
+
+			// Every rung of the configured ladder, and a little more.
+			ladderSpan := time.Minute + 2*time.Minute + 4*time.Minute
+			until := parked.LastFailure.Time.Add(ladderSpan + time.Minute)
+			still := func() {
+				got := h.instance(0)
+				if !parkedRepair(h, 0) || got.Incarnation != parked.Incarnation || got.Operation.RetryCount != 0 {
+					h.dumpState("re-arm")
+					t.Fatalf("the park re-armed at %v: %+v", h.clk.Now(), got)
+				}
+				if got.LastFailure == nil || got.LastFailure.Reason != tc.reason {
+					t.Fatalf("lastFailure = %+v, want the reason %s kept", got.LastFailure, tc.reason)
+				}
+				if keys := podKeys(h.podsOf(0)); keys != parkedPods {
+					t.Fatalf("pods changed under the park: %s, want %s", keys, parkedPods)
+				}
+				if n := eventCount(h, string(workloadtypes.EventReasonRestartTriggered)); n != restarts {
+					t.Fatalf("RestartTriggered events = %d, want %d: no re-arm", n, restarts)
+				}
+			}
+			if !h.runWithInvariant(60, func() bool { return !h.clk.Now().Before(until) }, still) {
+				t.Fatalf("the clock never reached the end of the ladder's span")
+			}
+			got := h.instance(0)
+			if !strings.Contains(got.LastFailure.Message, note) {
+				t.Errorf("lastFailure.message = %q, want it to say what the park waits for", got.LastFailure.Message)
+			}
+			if n := eventCount(h, string(workloadtypes.EventReasonRepairWaitingOnWorkload)); n != 1 {
+				t.Errorf("RepairWaitingOnWorkload events = %d, want exactly 1", n)
+			}
+			if n := eventCount(h, string(workloadtypes.EventReasonRepairRetriesExhausted)); n != 0 {
+				t.Errorf("RepairRetriesExhausted events = %d, want none: the ladder is not what holds the row", n)
+			}
+
+			// The key or image is back: the kubelet starts the parked pods.
+			h.clearWedge()
+			if !h.run(40, func() bool { return servingReady(h, 0, pods) }) {
+				h.dumpState("resume")
+				t.Fatalf("the Instance never returned to Ready once the cause was gone")
+			}
+			got = h.instance(0)
+			if got.Incarnation != parked.Incarnation {
+				t.Errorf("incarnation = %d, want %d: the pods that came up are promoted, not rebuilt", got.Incarnation, parked.Incarnation)
+			}
+			if got.RunningRevision != h.revV1.Name {
+				t.Errorf("running revision = %q, want %q", got.RunningRevision, h.revV1.Name)
+			}
+			if keys := podKeys(h.podsOf(0)); keys != parkedPods {
+				t.Errorf("pods after the heal = %s, want the parked set %s: no controller rebuild", keys, parkedPods)
+			}
+			if n := eventCount(h, string(workloadtypes.EventReasonRestartTriggered)); n != restarts {
+				t.Errorf("RestartTriggered events = %d, want %d: the recovery is the kubelet's, not a re-arm", n, restarts)
+			}
+		})
+	}
+}
+
+// podKeys names a pod set by identity — name and creation instant, sorted
+// — so a rebuilt pod of the same name reads as a different pod.
+func podKeys(pods []*corev1.Pod) string {
+	keys := make([]string, 0, len(pods))
+	for _, pod := range pods {
+		keys = append(keys, wedgeKey(pod))
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
+}
+
 // The reset mailbox stays the immediate escape from a parked repair: with
 // the pods deleted and the spent operation cleared, the Create pass
 // rebuilds the Instance on the next pass, ladder or no ladder.
@@ -1543,7 +1658,7 @@ func TestSpentRepair_NoLadder_StaysParked(t *testing.T) {
 func TestSpentRepair_ResetMailboxStillRebuilds(t *testing.T) {
 	h := newRestartHarness(t, 1)
 	h.retryPolicy = retryLadder(1, 30*time.Second)
-	parkRepair(t, h, "CreateContainerConfigError", true)
+	parkRepair(t, h, "CrashLoopBackOff", true)
 	if !h.run(40, func() bool { return parkedRepair(h, 0) && h.instance(0).Operation.RetryCount == 1 }) {
 		h.dumpState("ladder")
 		t.Fatalf("the ladder was never spent")

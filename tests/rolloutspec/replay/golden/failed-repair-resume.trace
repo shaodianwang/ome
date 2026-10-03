@@ -17,10 +17,12 @@ tick=3 pass result=after:5s
 tick=4 note the key is back and the kubelet's retry starts the container, so the parked repair writes the serving gate on the pod it already has
 tick=4 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+2m0s
 tick=4 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=4 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=CreateContainerConfigError container=main message=couldn't find key mode in ConfigMap; waiting for the configuration or image the pod needs; the kubelet retries in place} announced=[RepairWaitingOnWorkload@op#1] precondition=ok
+tick=4 event Warning RepairWaitingOnWorkload OMENative component=engine instance=0 repair parked at Failed on pod svc-a-engine-0-default-0 container main stuck (CreateContainerConfigError): waiting for the configuration or image the pod needs; the kubelet retries in place, and the Instance resumes on its own once the pod starts
 tick=4 pass result=after:5s
 tick=5 note the kubelet folds the gate into PodReady and the repair finishes with its promote, at the incarnation the pod carries
 tick=5 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+2m0s
-tick=5 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+2m0s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=CreateContainerConfigError container=main message=couldn't find key mode in ConfigMap} precondition=ok
+tick=5 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+2m0s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=CreateContainerConfigError container=main message=couldn't find key mode in ConfigMap; waiting for the configuration or image the pod needs; the kubelet retries in place} announced=[RepairWaitingOnWorkload@op#1] precondition=ok
 tick=5 event Normal RestartCompleted OMENative component=engine instance=0 restart complete (incarnation=2)
 tick=5 row=0 write no-op precondition=no-change
 tick=5 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)

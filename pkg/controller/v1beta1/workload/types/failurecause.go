@@ -84,6 +84,18 @@ func IsWorkloadCausedReason(reason string) bool {
 	return ok
 }
 
+// RepairWaitsOnWorkload reports whether the row is a Restart parked at
+// Failed on a workload-caused failure. The kubelet retries such a cause
+// in place and a fresh pod set would wedge on it identically, so the
+// retry ladder owes the park no re-arm: the row stays Failed with its
+// reason until the configuration or image is fixed, and resumes on its
+// own once the kubelet starts the pod.
+func RepairWaitsOnWorkload(s *InstanceStatus) bool {
+	return s != nil && s.Phase == InstancePhaseFailed &&
+		s.Operation != nil && s.Operation.Type == InstanceOperationRestart &&
+		s.LastFailure != nil && IsWorkloadCausedReason(s.LastFailure.Reason)
+}
+
 // environmentCausedReasons are the failure reasons under which the
 // cluster refused to run the attempt at all: the scheduler found no
 // placement, the gang's deterministic PodGroup name belongs to another

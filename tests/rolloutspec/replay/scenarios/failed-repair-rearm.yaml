@@ -1,9 +1,10 @@
-# A repair parked at Failed whose rebuilt pod stays wedged. On the
-# operator's retry ladder (config.updateRetry, the one ladder every
-# attempt is paced by) the parked repair re-arms: the set is rebuilt at
-# the next incarnation under a fresh deadline, the operation counting the
-# re-arm. The ladder here allows one re-arm; when that attempt wedges too
-# the row parks for good and the escalation pass announces it once.
+# A repair parked at Failed whose rebuilt pod stays wedged in a crash
+# loop, a cause a fresh pod set may clear. On the operator's retry ladder
+# (config.updateRetry, the one ladder every attempt is paced by) the
+# parked repair re-arms: the set is rebuilt at the next incarnation under
+# a fresh deadline, the operation counting the re-arm. The ladder here
+# allows one re-arm; when that attempt wedges too the row parks for good
+# and the escalation pass announces it once.
 scenario: failed-repair-rearm
 arrows:
   - T-ready-restart
@@ -35,10 +36,10 @@ timeline:
     events:
       - pod.deleted[source]: {pod: {index: 0}}
   - tick: 3
-    note: the rebuilt pod cannot find its ConfigMap key and is older than the grace when the wedge is read, so the row fails with its operation preserved
+    note: the rebuilt pod crash-loops and is older than the grace when the wedge is read, so the row fails with its operation preserved
     events:
       - clock.advance: 2m
-      - pod.waiting[CreateContainerConfigError]: {pod: {index: 0}, message: "couldn't find key mode in ConfigMap"}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0}, message: "back-off restarting failed container"}
   - tick: 4
     note: the ladder's first delay has not elapsed since the recorded failure, so the row stays parked and the pass asks to be woken when it has
     events:
@@ -52,10 +53,10 @@ timeline:
     events:
       - pod.deleted[source]: {pod: {index: 0}}
   - tick: 7
-    note: the rebuilt pod wedges again past the grace, so the attempt parks with the re-arm on its record
+    note: the rebuilt pod crash-loops again past the grace, so the attempt parks with the re-arm on its record
     events:
       - clock.advance: 2m
-      - pod.waiting[CreateContainerConfigError]: {pod: {index: 0}, message: "couldn't find key mode in ConfigMap"}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0}, message: "back-off restarting failed container"}
   - tick: 8
     note: the ladder is spent, so however long the wait nothing re-arms, and the escalation pass says so once
     events:

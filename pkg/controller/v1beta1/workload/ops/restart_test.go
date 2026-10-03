@@ -1097,8 +1097,16 @@ func TestRestart_DeadlineFailedRowResumesItsPromote(t *testing.T) {
 }
 
 // spentRepairRow is a Restart parked at Failed an hour ago, with retries
-// re-arms already spent and the failure that parked it recorded.
+// re-arms already spent and the failure that parked it recorded: a crash
+// loop, a cause outside the set the kubelet retries in place, so the
+// ladder owes it a re-arm.
 func spentRepairRow(now time.Time, retries int32) v1beta1.OMENativeInstanceStatus {
+	return spentRepairRowOn(now, retries, "CrashLoopBackOff")
+}
+
+// spentRepairRowOn is spentRepairRow with the recorded failure's reason
+// chosen by the test.
+func spentRepairRowOn(now time.Time, retries int32, reason string) v1beta1.OMENativeInstanceStatus {
 	return v1beta1.OMENativeInstanceStatus{
 		Index:       0,
 		Incarnation: 2,
@@ -1110,7 +1118,7 @@ func spentRepairRow(now time.Time, retries int32) v1beta1.OMENativeInstanceStatu
 			RetryCount: retries,
 		},
 		LastFailure: &v1beta1.InstanceTermination{
-			PodName: "llama-70b-engine-0-default-0", Reason: "CreateContainerConfigError",
+			PodName: "llama-70b-engine-0-default-0", Reason: reason,
 			Time: metav1.NewTime(now.Add(-time.Hour)),
 		},
 	}
@@ -1146,18 +1154,26 @@ func retryLadder(maxAttempts int32, initial time.Duration) *workload.RetryPolicy
 }
 
 // spentRepairFixture is a parked repair whose rebuilt pod is still
-// wedged, with the ladder and the failure age the test names.
+// wedged in a crash loop, with the ladder and the failure age the test
+// names.
 //
 // now must be whole seconds: status timestamps round-trip at second
 // precision, and the ladder is measured from the stored failure time.
 func spentRepairFixture(t *testing.T, now time.Time, retries int32, failedAgo time.Duration, ladder *workload.RetryPolicy) (workload.ReconcileInput, workload.ComponentPlan, *corev1.Pod, client.Client, *v1beta1.InferenceService) {
 	t.Helper()
+	return spentRepairFixtureOn(t, now, retries, failedAgo, ladder, "CrashLoopBackOff")
+}
+
+// spentRepairFixtureOn is spentRepairFixture with the wedge's reason,
+// recorded on the row and shown by the pod, chosen by the test.
+func spentRepairFixtureOn(t *testing.T, now time.Time, retries int32, failedAgo time.Duration, ladder *workload.RetryPolicy, reason string) (workload.ReconcileInput, workload.ComponentPlan, *corev1.Pod, client.Client, *v1beta1.InferenceService) {
+	t.Helper()
 	resetExpectations(t)
 	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 2)
-	row := spentRepairRow(now, retries)
+	row := spentRepairRowOn(now, retries, reason)
 	row.LastFailure.Time = metav1.NewTime(now.Add(-failedAgo))
 	ir.Status.InstanceStatuses[0] = row
-	pod := wedgedRebuiltPod(isvc, 2, "CreateContainerConfigError", now.Add(-failedAgo-time.Minute))
+	pod := wedgedRebuiltPod(isvc, 2, reason, now.Add(-failedAgo-time.Minute))
 	c := newFakeClient(t, isvc, ir, pod)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
@@ -1182,7 +1198,7 @@ func TestDetectRestartTrigger_SpentRepairReArmsWhenTheLadderIsDue(t *testing.T) 
 	if !needs {
 		t.Fatalf("restart trigger: got false, want the re-arm now that the ladder is due")
 	}
-	if !strings.Contains(reason, "repair re-armed (attempt 1)") || !strings.Contains(reason, "CreateContainerConfigError") {
+	if !strings.Contains(reason, "repair re-armed (attempt 1)") || !strings.Contains(reason, "CrashLoopBackOff") {
 		t.Errorf("reason = %q, want the attempt number and the failure that parked the last one", reason)
 	}
 	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, reason); err != nil {
@@ -1330,6 +1346,167 @@ func TestDetectRestartTrigger_SpentRepairWithNoPodsIsNotDecidedHere(t *testing.T
 	}
 	if got := input.PassWake.Pending(); got != 0 {
 		t.Errorf("wake-up = %v, want none", got)
+	}
+}
+
+// kubeletRetriedReasons are the waiting reasons the kubelet retries in
+// place and a fresh pod set cannot clear: the workload-caused set. A
+// repair parked on one waits for the configuration or image instead of
+// re-arming on the ladder.
+var kubeletRetriedReasons = []string{"CreateContainerConfigError", "ErrImagePull", "ImagePullBackOff", "InvalidImageName"}
+
+// A repair parked on a cause the kubelet retries in place owes no re-arm:
+// past the ladder's first delay and past its whole span alike, the row
+// stays Failed with its reason, no wake-up is deposited, no Restarting
+// stamp lands and the wedged pod is left where the kubelet retries it.
+//
+// Cells: instance/Failed/timer.repairRetry/before
+func TestDetectRestartTrigger_SpentRepairOnAKubeletRetriedCauseOwesNoReArm(t *testing.T) {
+	for _, reason := range kubeletRetriedReasons {
+		for _, failedAgo := range []time.Duration{2 * time.Minute, time.Hour} {
+			t.Run(fmt.Sprintf("%s/%s", reason, failedAgo), func(t *testing.T) {
+				now := time.Now()
+				input, plan, pod, c, isvc := spentRepairFixtureOn(t, now, 0, failedAgo, retryLadder(3, time.Minute), reason)
+
+				if needs, got := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], []*corev1.Pod{pod}); needs {
+					t.Fatalf("restart trigger: got true (%q) want false: the kubelet retries %s in place", got, reason)
+				}
+				if got := input.PassWake.Pending(); got != 0 {
+					t.Errorf("wake-up = %v, want none: no re-arm is coming due", got)
+				}
+				done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, "")
+				if err != nil || done {
+					t.Fatalf("Restart on the parked row: done=%v err=%v, want (false, nil)", done, err)
+				}
+				s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+				if s == nil || s.Phase != v1beta1.OMENativeInstanceFailed || s.Incarnation != 2 ||
+					s.Operation == nil || s.Operation.ID != "restart-0-1" || s.Operation.RetryCount != 0 {
+					t.Fatalf("row = %+v, want the parked repair untouched", s)
+				}
+				if s.LastFailure == nil || s.LastFailure.Reason != reason {
+					t.Errorf("lastFailure = %+v, want the reason %s kept on the row", s.LastFailure, reason)
+				}
+				if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}); err != nil {
+					t.Errorf("the wedged pod must stay for the kubelet to retry: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// RepairRetryAt owes a re-arm to every parked cause but the ones the
+// kubelet retries in place, and to a park that recorded no failure at
+// all, which is measured from the operation's own timestamps.
+//
+// Cells: instance/Failed/timer.repairRetry/before
+func TestRepairRetryAt_OwesNoReArmToAKubeletRetriedCause(t *testing.T) {
+	now := time.Now()
+	input := workload.ReconcileInput{UpdateRetryPolicy: retryLadder(3, time.Minute), Clock: clocktesting.NewFakeClock(now)}
+	parked := func(reason string) *workload.InstanceStatus {
+		return &workload.InstanceStatus{
+			Index: 0, Incarnation: 2, Phase: workload.InstancePhaseFailed,
+			Operation: &workload.InstanceOperation{
+				ID: "restart-0-1", Type: workload.InstanceOperationRestart, Step: "Drain",
+				StartedAt: metav1.NewTime(now.Add(-2 * time.Hour)), LastProgressAt: metav1.NewTime(now.Add(-90 * time.Minute)),
+			},
+			LastFailure: &workload.InstanceTermination{PodName: "llama-70b-engine-0-default-0", Reason: reason, Time: metav1.NewTime(now.Add(-time.Hour))},
+		}
+	}
+	for _, reason := range kubeletRetriedReasons {
+		if at, owed := ops.RepairRetryAt(input, parked(reason)); owed {
+			t.Errorf("%s: owed a re-arm at %v, want none: the kubelet retries it in place", reason, at)
+		}
+	}
+	for _, reason := range []string{"CrashLoopBackOff", "RunContainerError", "CreateContainerError", "DeadlineExceeded", ""} {
+		row := parked(reason)
+		at, owed := ops.RepairRetryAt(input, row)
+		if !owed {
+			t.Errorf("%q: owed no re-arm, want one on the ladder", reason)
+			continue
+		}
+		if want := row.LastFailure.Time.Add(time.Minute); !at.Equal(want) {
+			t.Errorf("%q: re-arm at %v, want %v, the ladder's first delay from the recorded failure", reason, at, want)
+		}
+	}
+	row := parked("CrashLoopBackOff")
+	row.LastFailure = nil
+	if at, owed := ops.RepairRetryAt(input, row); !owed || !at.Equal(row.Operation.LastProgressAt.Add(time.Minute)) {
+		t.Errorf("no failure recorded: (%v, %v), want a re-arm measured from the operation's last progress", at, owed)
+	}
+}
+
+// A ladder spent on a cause the kubelet retries in place is not what
+// holds the row: the park waits for the configuration or image and
+// resumes on its own, so it is not read as exhausted.
+//
+// Cells: instance/Failed/timer.repairRetry/before
+func TestRepairRetriesExhausted_SkipsAKubeletRetriedCause(t *testing.T) {
+	now := time.Now()
+	input := workload.ReconcileInput{UpdateRetryPolicy: retryLadder(3, time.Minute)}
+	spent := func(reason string) *workload.InstanceStatus {
+		return &workload.InstanceStatus{
+			Phase:       workload.InstancePhaseFailed,
+			Operation:   &workload.InstanceOperation{ID: "restart-0-4", Type: workload.InstanceOperationRestart, RetryCount: 3},
+			LastFailure: &workload.InstanceTermination{Reason: reason, Time: metav1.NewTime(now.Add(-time.Hour))},
+		}
+	}
+	for _, reason := range kubeletRetriedReasons {
+		if ops.RepairRetriesExhausted(input, spent(reason)) {
+			t.Errorf("%s: read as exhausted, want a park that waits for the fix", reason)
+		}
+	}
+	if !ops.RepairRetriesExhausted(input, spent("CrashLoopBackOff")) {
+		t.Errorf("CrashLoopBackOff: a spent ladder must still read as exhausted")
+	}
+}
+
+// A re-arm already in flight is driven on whatever the recorded failure
+// says: the exclusion reads a parked row only, and the open repair runs
+// to its own park.
+//
+// Cells: instance/Failed/timer.repairRetry/after@T-failed-repair-rearm
+func TestDetectRestartTrigger_OpenRepairOnAKubeletRetriedCauseIsDrivenOn(t *testing.T) {
+	now := time.Now()
+	input, plan, _, _, _ := spentRepairFixtureOn(t, now, 1, time.Minute, retryLadder(3, time.Minute), "CreateContainerConfigError")
+	input.ObservedState.InstanceStatuses[0].Phase = workload.InstancePhaseRestarting
+
+	if needs, reason := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], nil); !needs || reason != "" {
+		t.Fatalf("open repair: got (%v, %q) want it driven on with no second re-arm", needs, reason)
+	}
+}
+
+// The recovery from such a park is the kubelet's: once the pod it left
+// in place comes up, the repair resumes its promote at the incarnation
+// the pod carries, with no re-arm in between and whether or not a ladder
+// is configured.
+//
+// Cells: instance/Failed/pod.containersReady[source]/before
+func TestRestart_KubeletRetriedCauseClearedResumesThePromote(t *testing.T) {
+	for _, ladder := range []*workload.RetryPolicy{retryLadder(3, time.Minute), nil} {
+		resetExpectations(t)
+		now := time.Now()
+		isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 2)
+		ir.Status.InstanceStatuses[0] = spentRepairRowOn(now, 0, "ImagePullBackOff")
+		pod := promotableRebuiltPod(isvc, 2, now)
+		c := newFakeClient(t, isvc, ir, pod)
+		plan := buildPlanSinglePodEngineForRestart(c, isvc)
+		input := buildTestInput(isvc, c, workload.ComponentEngine)
+		input.Clock = clocktesting.NewFakeClock(now)
+		input.UpdateRetryPolicy = ladder
+		input.PassWake = &workload.PassWake{}
+
+		needs, reason := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], []*corev1.Pod{pod})
+		if !needs || reason != "" {
+			t.Fatalf("restart trigger: got (%v, %q) want a resume with no new reason", needs, reason)
+		}
+		done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, reason)
+		if err != nil || !done {
+			t.Fatalf("Restart: done=%v err=%v, want the promote to land", done, err)
+		}
+		s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+		if s == nil || s.Phase != v1beta1.OMENativeInstanceReady || s.Operation != nil || s.Incarnation != 2 {
+			t.Fatalf("row = %+v, want Ready at incarnation 2 with the spent operation cleared", s)
+		}
 	}
 }
 

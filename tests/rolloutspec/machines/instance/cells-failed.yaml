@@ -25,9 +25,13 @@
 # promote at the incarnation the pods carry (T-failed-repair-resume), and a
 # set that stays wedged is rebuilt again on the operator's retry ladder,
 # lifecycle.updateRetry (T-failed-repair-rearm), whose delay runs from the
-# recorded failure and whose attempts are counted on the operation. No
-# ladder configured leaves the row parked for the reset mailbox or a new
-# revision.
+# recorded failure and whose attempts are counted on the operation. A park
+# whose recorded failure is workload-caused - a container config or image
+# the pod template names, which the kubelet retries in place and a fresh
+# pod set would wedge on identically - is owed no re-arm: it stays Failed
+# with its reason, says once what it waits for, and leaves through the
+# resume when the configuration or image is fixed. No ladder configured
+# leaves the row parked for the reset mailbox or a new revision.
 #
 # GAP: no event models the unconditioned re-create. A Failed row with no
 # pods and no RetryBlock at all is re-materialized by the Create pass on
@@ -62,9 +66,9 @@ cells:
     placement: unit
     coverage:
       perm: []
-      unit: [TestDetectUpdate_BackfillAdoptsRuntimeReadyPods, TestDetectUpdate_BackfillAdoptsEngineRenderedPods, TestDetectUpdate_BackfillRefusesWedgedPods, TestDetectUpdate_BackfillRollsPodSetWithAForeignRevision, TestDetectUpdate_WedgedPodsReachHeld, TestDetectUpdate_StuckPodOnTargetRelocates, TestPatchReadyOnRevision_PrunesBlock, TestPlan_Update_AdoptRevision, TestSpentRepair_RebuiltSetComesUp_ResumesThePromote, TestRestart_DeadlineFailedRowResumesItsPromote]
-      kind: []
-      replay: [failed-runtime-ready-adopt, failed-repair-resume]
+      unit: [TestDetectUpdate_BackfillAdoptsRuntimeReadyPods, TestDetectUpdate_BackfillAdoptsEngineRenderedPods, TestDetectUpdate_BackfillRefusesWedgedPods, TestDetectUpdate_BackfillRollsPodSetWithAForeignRevision, TestDetectUpdate_WedgedPodsReachHeld, TestDetectUpdate_StuckPodOnTargetRelocates, TestPatchReadyOnRevision_PrunesBlock, TestPlan_Update_AdoptRevision, TestSpentRepair_RebuiltSetComesUp_ResumesThePromote, TestRestart_DeadlineFailedRowResumesItsPromote, TestSpentRepair_KubeletRetriedCause_WaitsForTheFixWithoutReArm, TestRestart_KubeletRetriedCauseClearedResumesThePromote]
+      kind: [failed_repair_heal]
+      replay: [failed-runtime-ready-adopt, failed-repair-resume, failed-repair-waits-on-workload]
     status: decided
   - state: Failed
     event: pod.containersReady
@@ -503,25 +507,25 @@ cells:
     windows: [before]
     outcome: transition
     to: Restart/Drain
-    guard: a Restart parked at Failed whose live set is complete and wedged, lifecycle.updateRetry configured, its delay for the next attempt elapsed since the recorded failure, attempts not spent, and no RetryBlock denying the running revision
-    note: the ladder is lifecycle.updateRetry, the one retry ladder, but the clock is the Instance's own, distinct from a revision's RetryBlock. It runs from LastFailure.Time (the Failed stamps write it with the phase) and is indexed by the operation's RetryCount, which the re-armed Restart carries forward, so no per-Instance timestamp is added to the row. The re-arm is not a fresh open - the pods are not serving - so it is neither budget-charged nor gated, and it holds under the plain pause like every repair; a frozen pause suspends the pass. Not yet due, the pass deposits the remaining wait as its wake-up. With the attempts spent the row parks for good and the escalation pass announces RepairRetriesExhausted once; with no ladder configured nothing runs and the row waits for the reset mailbox or a new revision. A gang short of a member does not wait for this clock - the lost-member trigger re-arms it at once, and a row with no pod left is the Create pass's fresh start (ops/restart.go)
+    guard: a Restart parked at Failed whose live set is complete and wedged, its recorded failure not workload-caused (a cause the kubelet retries in place owes no re-arm), lifecycle.updateRetry configured, its delay for the next attempt elapsed since the recorded failure, attempts not spent, and no RetryBlock denying the running revision
+    note: the ladder is lifecycle.updateRetry, the one retry ladder, but the clock is the Instance's own, distinct from a revision's RetryBlock. It runs from LastFailure.Time (the Failed stamps write it with the phase) and is indexed by the operation's RetryCount, which the re-armed Restart carries forward, so no per-Instance timestamp is added to the row. The re-arm is not a fresh open - the pods are not serving - so it is neither budget-charged nor gated, and it holds under the plain pause like every repair; a frozen pause suspends the pass. Not yet due, the pass deposits the remaining wait as its wake-up. With the attempts spent the row parks for good and the escalation pass announces RepairRetriesExhausted once; with no ladder configured nothing runs and the row waits for the reset mailbox or a new revision. A park whose recorded failure is workload-caused (CreateContainerConfigError, ErrImagePull, ImagePullBackOff, InvalidImageName) is owed no re-arm by the ladder at all and is never read as exhausted - the kubelet retries the cause in place and a fresh set would wedge on it identically, so the row stays Failed with its reason, the escalation pass announces RepairWaitingOnWorkload once and notes on the failure message that the park waits for the configuration or image, and the resume exit takes the row the moment the pods it already has come up. A gang short of a member does not wait for this clock - the lost-member trigger re-arms it at once, and a row with no pod left is the Create pass's fresh start (ops/restart.go)
     invariants: [one.operation.per.instance]
     placement: unit
     coverage:
       perm: []
-      unit: [TestSpentRepair_WedgedSet_ReArmsOnTheLadderAndHeals, TestSpentRepair_Gang_AllMembersWedged_ReArmsOnTheLadder, TestSpentRepair_CrashLoopRepairUnderPolicyNone_ReArmsOnTheLadder, TestSpentRepair_NeverHeals_ParksAfterTheLadderIsSpent, TestSpentRepair_NoLadder_StaysParked, TestDetectRestartTrigger_SpentRepairReArmsWhenTheLadderIsDue, TestDetectRestartTrigger_SpentRepairWaitsForTheLadder, TestDetectRestartTrigger_SpentRepairLadderGrows, TestDetectRestartTrigger_SpentRepairWithoutALadderStaysParked, TestDetectRestartTrigger_SpentRepairStopsAtMaxAttempts, TestDetectRestartTrigger_SpentRepairOldIncarnationSetReArms, TestDetectRestartTrigger_SpentRepairWithNoPodsIsNotDecidedHere, TestEscalation_ExhaustedRepairIsAnnouncedOnce]
+      unit: [TestSpentRepair_CrashLoopSet_ReArmsOnTheLadderAndHeals, TestSpentRepair_Gang_AllMembersWedged_ReArmsOnTheLadder, TestSpentRepair_CrashLoopRepairUnderPolicyNone_ReArmsOnTheLadder, TestSpentRepair_NeverHeals_ParksAfterTheLadderIsSpent, TestSpentRepair_NoLadder_StaysParked, TestSpentRepair_KubeletRetriedCause_WaitsForTheFixWithoutReArm, TestDetectRestartTrigger_SpentRepairReArmsWhenTheLadderIsDue, TestDetectRestartTrigger_SpentRepairWaitsForTheLadder, TestDetectRestartTrigger_SpentRepairLadderGrows, TestDetectRestartTrigger_SpentRepairWithoutALadderStaysParked, TestDetectRestartTrigger_SpentRepairStopsAtMaxAttempts, TestDetectRestartTrigger_SpentRepairOldIncarnationSetReArms, TestDetectRestartTrigger_SpentRepairWithNoPodsIsNotDecidedHere, TestDetectRestartTrigger_SpentRepairOnAKubeletRetriedCauseOwesNoReArm, TestRepairRetryAt_OwesNoReArmToAKubeletRetriedCause, TestRepairRetriesExhausted_SkipsAKubeletRetriedCause, TestEscalation_ExhaustedRepairIsAnnouncedOnce, TestEscalation_RepairWaitingOnWorkloadIsAnnouncedOnce, TestAnnounceRepairWaiting_RecordsOncePerParkedAttempt]
       kind: [failed_repair_heal]
-      replay: [failed-repair-rearm]
+      replay: [failed-repair-rearm, failed-repair-waits-on-workload]
     status: decided
   - state: Failed
     event: timer.repairRetry
     windows: [boundary, after]
     outcome: ignore
-    note: the re-arm is written once; after it lands the row is Restarting and the open repair is driven on, never re-armed again until it parks anew and the ladder restarts from that failure
+    note: the re-arm is written once; after it lands the row is Restarting and the open repair is driven on, never re-armed again until it parks anew and the ladder restarts from that failure - and driven on whatever that park later records, since only a parked row is read for a cause the kubelet retries in place
     placement: unit
     coverage:
       perm: []
-      unit: [TestDetectRestartTrigger_SpentRepairReArmsWhenTheLadderIsDue]
+      unit: [TestDetectRestartTrigger_SpentRepairReArmsWhenTheLadderIsDue, TestDetectRestartTrigger_OpenRepairOnAKubeletRetriedCauseIsDrivenOn]
       kind: []
     status: decided
   - state: Failed

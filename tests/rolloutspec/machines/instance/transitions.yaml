@@ -367,7 +367,7 @@ transitions:
   - id: T-failed-repair-rearm
     from: Failed
     event: timer.repairRetry
-    guard: a Restart parked at Failed whose live pod set is complete but not one the resume takes, lifecycle.updateRetry is configured, its delay for the next attempt has elapsed since the recorded failure, the attempts are not spent, and no RetryBlock denies rebuilding the running revision
+    guard: a Restart parked at Failed whose live pod set is complete but not one the resume takes, its recorded failure not workload-caused (a cause the kubelet retries in place owes no re-arm and waits for the configuration or image), lifecycle.updateRetry is configured, its delay for the next attempt has elapsed since the recorded failure, the attempts are not spent, and no RetryBlock denies rebuilding the running revision
     to: Restart/Drain
     effects: [Incarnation bumped, Phase Restarting with a fresh Restart whose RetryCount continues the spent one's, the re-arm and the failure that parked the last attempt on its Reason, RestartTriggered event, the wedged set drained and rebuilt under a fresh deadline]
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go

@@ -177,6 +177,9 @@ func Run(ctx context.Context, in PassInput) error {
 			if err := announceRepairExhausted(ctx, deps, input, plan, row); err != nil {
 				return fmt.Errorf("announce exhausted repair (instance=%d): %w", row.Index, err)
 			}
+			if err := announceRepairWaiting(ctx, deps, input, plan, row); err != nil {
+				return fmt.Errorf("announce waiting repair (instance=%d): %w", row.Index, err)
+			}
 			continue
 		}
 		rowEvidence := evidenceFor(input.ObservedState.InstanceStatuses, byIdx, row.Index, now, input.StuckPodGrace, attemptTargetRevision(input, row))
@@ -364,6 +367,26 @@ func announceRepairExhausted(ctx context.Context, deps types.Deps, input types.R
 	deps.Recorder.Eventf(target, corev1.EventTypeWarning, string(types.EventReasonRepairRetriesExhausted),
 		"OMENative component=%s instance=%d repair parked at Failed after %d re-arm(s): %s; reset the Instance or publish a corrected revision",
 		plan.Component, row.Index, row.Operation.RetryCount, workloadops.RepairFailureSummary(&row))
+	return nil
+}
+
+// announceRepairWaiting records once per parked attempt that a repair is
+// parked on a cause the kubelet retries in place — the configuration or
+// image the pod template names — so the retry ladder owes it no re-arm:
+// the note lands on the row's failure message, and the Warning fires on
+// the write that recorded it. Nothing here moves the row; it resumes on
+// its own once the kubelet starts the pod (ops.RepairResumes).
+func announceRepairWaiting(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, row types.InstanceStatus) error {
+	if !types.RepairWaitsOnWorkload(&row) {
+		return nil
+	}
+	recorded, err := status.AnnounceRepairWaiting(ctx, input, row.Index, workloadops.RepairWaitingNote)
+	if err != nil || !recorded {
+		return err
+	}
+	types.RecordWarning(deps.Recorder, types.EventTarget(input), types.EventReasonRepairWaitingOnWorkload,
+		"OMENative %s repair parked at Failed on %s: %s, and the Instance resumes on its own once the pod starts",
+		types.InstanceKey(plan.Component, row.Index), workloadops.RepairFailureSummary(&row), workloadops.RepairWaitingNote)
 	return nil
 }
 

@@ -280,7 +280,15 @@ const (
 	// ladder (lifecycle.updateRetry) allows and its pods are still wedged.
 	// The row stays Failed until an operator resets it or a new revision
 	// arrives.
-	EventReasonRepairRetriesExhausted      EventReason = "RepairRetriesExhausted"
+	EventReasonRepairRetriesExhausted EventReason = "RepairRetriesExhausted"
+	// EventReasonRepairWaitingOnWorkload is a Warning fired once per parked
+	// attempt when a repair is parked on a cause the kubelet retries in
+	// place and a fresh pod set cannot clear: a container config or image
+	// the pod template names (IsWorkloadCausedReason). The retry ladder
+	// owes the park no re-arm; the row stays Failed with its reason until
+	// the configuration or image is fixed and resumes on its own once the
+	// kubelet starts the pod.
+	EventReasonRepairWaitingOnWorkload     EventReason = "RepairWaitingOnWorkload"
 	EventReasonMigrationSurgeCreateBlocked EventReason = "MigrationSurgeCreateBlocked"
 	// EventReasonMigrationFromNodeMismatch fires when a request's
 	// FromNode is not where the source runs. Normal when the move binds

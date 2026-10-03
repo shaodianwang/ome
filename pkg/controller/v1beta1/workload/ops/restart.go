@@ -782,9 +782,15 @@ func RestartOpensUnavailability(input workload.ReconcileInput, inst workload.Ins
 // set that stays wedged is rebuilt again on the operator's retry ladder
 // (lifecycle.updateRetry, the one ladder every attempt is paced by),
 // measured from the recorded failure and bounded by its attempt count, so
-// a cause that needs a fresh pod set to clear — a gang whose members
-// hung, a node-local fault — heals once it is gone. No ladder configured
-// means no re-arm: the row waits for the reset mailbox or a new revision.
+// a cause that needs a fresh pod set to clear — a crash loop, a gang
+// whose members hung, a node-local fault — heals once it is gone. A park
+// whose recorded cause is workload-caused (workload.RepairWaitsOnWorkload:
+// the container config or image the pod template names) is owed no
+// re-arm at all: the kubelet retries that cause in place and a fresh set
+// would wedge on it identically, so the row stays Failed with its reason
+// until the configuration or image is fixed and takes the first exit
+// when the pods come up. No ladder configured means no re-arm either:
+// the row waits for the reset mailbox or a new revision.
 
 // SpentRepair reports whether the row is a Restart parked at Failed.
 func SpentRepair(s *workload.InstanceStatus) bool {
@@ -828,11 +834,12 @@ func RepairResumes(s *workload.InstanceStatus, expected int32, pods []*corev1.Po
 
 // RepairRetryAt returns the instant a spent repair may re-arm — the
 // recorded failure plus the ladder's delay for the next attempt — and
-// false when no re-arm is owed: no ladder configured, every re-arm
-// spent, or no spent repair on the row.
+// false when no re-arm is owed: no spent repair on the row, a park on a
+// cause the kubelet retries in place (workload.RepairWaitsOnWorkload),
+// no ladder configured, or every re-arm spent.
 func RepairRetryAt(input workload.ReconcileInput, s *workload.InstanceStatus) (time.Time, bool) {
 	policy := input.UpdateRetryPolicy
-	if !SpentRepair(s) || policy == nil || policy.Exhausted(s.Operation.RetryCount) {
+	if !SpentRepair(s) || workload.RepairWaitsOnWorkload(s) || policy == nil || policy.Exhausted(s.Operation.RetryCount) {
 		return time.Time{}, false
 	}
 	return repairParkedAt(s).Add(policy.NextRetryDelay(s.Operation.RetryCount + 1)), true
@@ -853,11 +860,20 @@ func repairParkedAt(s *workload.InstanceStatus) time.Time {
 
 // RepairRetriesExhausted reports whether a spent repair has spent every
 // re-arm the operator's ladder allows, so the row stays parked until an
-// operator resets it or a new revision arrives.
+// operator resets it or a new revision arrives. A park on a cause the
+// kubelet retries in place is not held by the ladder — it waits for the
+// configuration or image and resumes on its own — so it is never read as
+// exhausted, whatever its attempt count.
 func RepairRetriesExhausted(input workload.ReconcileInput, s *workload.InstanceStatus) bool {
-	return SpentRepair(s) && input.UpdateRetryPolicy != nil &&
+	return SpentRepair(s) && !workload.RepairWaitsOnWorkload(s) && input.UpdateRetryPolicy != nil &&
 		input.UpdateRetryPolicy.Exhausted(s.Operation.RetryCount)
 }
+
+// RepairWaitingNote is what a park on a workload-caused failure records
+// on its failure message and says in its event: the cause is the
+// configuration or image the pod template names, which the kubelet
+// retries in place, so the row waits for the fix and no re-arm is owed.
+const RepairWaitingNote = "waiting for the configuration or image the pod needs; the kubelet retries in place"
 
 // spentRepairTrigger decides the exits of a spent repair whose pod set is
 // complete. An incomplete set is not decided here: a gang short of a
@@ -890,7 +906,8 @@ func spentRepairTrigger(input workload.ReconcileInput, s *workload.InstanceStatu
 
 // spentRepairParked reports whether a spent repair with a complete pod set
 // has nothing to do this pass: the set is wedged and the ladder has not
-// come due, is spent, or is denied by the revision's RetryBlock.
+// come due, is spent, owes nothing to a park the kubelet retries in
+// place, or is denied by the revision's RetryBlock.
 func spentRepairParked(input workload.ReconcileInput, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) bool {
 	if !SpentRepair(s) || expected <= 0 || int32(len(repairPodSet(pods))) < expected {
 		return false

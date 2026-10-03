@@ -2347,3 +2347,80 @@ func TestEscalation_ExhaustedRepairIsAnnouncedOnce(t *testing.T) {
 		})
 	}
 }
+
+// A repair parked on a cause the kubelet retries in place is announced
+// once per parked attempt as waiting for the configuration or image, and
+// the row's failure message says so beside the kubelet's own message:
+// ladder or no ladder, attempts left or spent, and never as exhausted. A
+// park on any other cause says nothing here.
+//
+// Cells: instance/Failed/timer.repairRetry/before
+func TestEscalation_RepairWaitingOnWorkloadIsAnnouncedOnce(t *testing.T) {
+	const note = "waiting for the configuration or image the pod needs; the kubelet retries in place"
+	now := time.Now()
+	parked := func(reason string, retries int32) []workloadtypes.InstanceStatus {
+		rows := failedOnDeadline(now)
+		rows[0].Operation.ID = "restart-0-1"
+		rows[0].Operation.RetryCount = retries
+		rows[0].LastFailure.Reason = reason
+		rows[0].LastFailure.Message = "couldn't find key mode in ConfigMap"
+		return rows
+	}
+	ladder := &workloadtypes.RetryPolicy{MaxAttempts: 2, InitialDelay: time.Minute, MaxDelay: 10 * time.Minute, Multiplier: 2}
+	for _, tc := range []struct {
+		name          string
+		rows          []workloadtypes.InstanceStatus
+		ladder        *workloadtypes.RetryPolicy
+		wantWaiting   int
+		wantExhausted int
+	}{
+		{"config key, attempts left", parked("CreateContainerConfigError", 0), ladder, 1, 0},
+		{"image pull, ladder spent", parked("ImagePullBackOff", 2), ladder, 1, 0},
+		{"config key, no ladder", parked("CreateContainerConfigError", 0), nil, 1, 0},
+		{"crash loop, attempts left", parked("CrashLoopBackOff", 0), ladder, 0, 0},
+		{"crash loop, ladder spent", parked("CrashLoopBackOff", 2), ladder, 0, 1},
+		{"deadline with no reason", parked(escalation.DeadlineExceededReason, 0), ladder, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input, rec := escalationFixture(tc.rows)
+			input.UpdateRetryPolicy = tc.ladder
+			input.EventTarget = &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "ns"}}
+			recorder := record.NewFakeRecorder(8)
+			deps := workloadtypes.Deps{Recorder: recorder}
+			for pass := 0; pass < 2; pass++ {
+				input.ObservedState.InstanceStatuses = append([]workloadtypes.InstanceStatus(nil), rec.store...)
+				if err := runEscalationPass(t, deps, input, singleInstancePlan(0, 1), nil); err != nil {
+					t.Fatalf("escalation pass %d: %v", pass, err)
+				}
+			}
+			waiting, exhausted := 0, 0
+			for done := false; !done; {
+				select {
+				case e := <-recorder.Events:
+					if strings.Contains(e, string(workloadtypes.EventReasonRepairWaitingOnWorkload)) {
+						waiting++
+					}
+					if strings.Contains(e, string(workloadtypes.EventReasonRepairRetriesExhausted)) {
+						exhausted++
+					}
+				default:
+					done = true
+				}
+			}
+			if waiting != tc.wantWaiting || exhausted != tc.wantExhausted {
+				t.Errorf("events over two passes: waiting=%d exhausted=%d, want %d and %d", waiting, exhausted, tc.wantWaiting, tc.wantExhausted)
+			}
+			row := rec.store[0]
+			if row.Phase != workloadtypes.InstancePhaseFailed || row.Operation == nil || row.LastFailure == nil ||
+				row.LastFailure.Reason != tc.rows[0].LastFailure.Reason {
+				t.Fatalf("row = %+v, want the parked repair left as it is", row)
+			}
+			if got := strings.Count(row.LastFailure.Message, note); got != tc.wantWaiting {
+				t.Errorf("failure message %q carries the note %d times, want %d", row.LastFailure.Message, got, tc.wantWaiting)
+			}
+			if !strings.HasPrefix(row.LastFailure.Message, "couldn't find key mode in ConfigMap") {
+				t.Errorf("failure message %q must keep the kubelet's own message", row.LastFailure.Message)
+			}
+		})
+	}
+}
