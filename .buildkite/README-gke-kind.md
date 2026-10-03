@@ -196,23 +196,37 @@ package and tool refreshes reach an image whose inputs have not changed.
 The OMENative eval group (`omenative-e2e-kind-gke`) and the
 `package-kind-eval-image` step it waits on are in the build whenever the eval
 mode is not `off`, on any branch. `OME_EVAL_MODE` names the mode outright;
-unset, the newest `Eval: <value>` line of the commit message
-(`BUILDKITE_MESSAGE`, case-insensitive) decides; with neither, `main` runs
-`targeted` and every other branch nothing. `GKE_EVAL_ENABLED=0` forces `off`.
+unset, the trailer decides: `OME_EVAL_SELECT` when set, else the newest
+`Eval: <value>` line of the commit message (`BUILDKITE_MESSAGE`,
+case-insensitive); with none of them, `main` runs `targeted` and every other
+branch nothing. `GKE_EVAL_ENABLED=0` forces `off`.
 
 | value | runs |
 |---|---|
 | `off` | nothing: neither the image step nor the group |
 | `smoke` | the first shard of every feature/topology lane, default scheduler only |
-| `targeted` | from the newest recorded full round: every (case, scheduler) that failed (any verdict but `PASS`, `SKIP` or an `XFAIL` form: a skipped lane recurs every build for the same reason, a parked case is debt the ledger already carries, and neither is rerun nor sampled), under the scheduler it ran in; every corpus case the round has no row for; every case the trailer's `families=` or `cases=` name, default scheduler; and a sample of the round's passing lanes. The group label reads `(targeted from round <build>: <n> cases)`. With no round to read it runs smoke plus the trailer, and the label says why: `(targeted: smoke, no results token)`, `no recorded round` or `round lookup failed` |
+| `targeted` | from the newest recorded full round: every (case, scheduler) that failed (any verdict but `PASS`, `SKIP` or an `XFAIL` form: a skipped lane recurs every build for the same reason, a parked case is debt the ledger already carries, and neither is rerun nor sampled), under the scheduler it ran in; every corpus case the round has no row for; every case the trailer's `families=` or `cases=` name, default scheduler, and every case of its `lanes=`, under their schedulers; and a sample of the round's passing lanes. The group label reads `(targeted from round <build>: <n> cases)`. With no round to read it runs smoke plus the trailer, and the label says why: `(targeted: smoke, no results token)`, `no recorded round` or `round lookup failed` |
 | `full` | every case on every scheduler |
 | `families=<a,b>` | every case of those folders under `hack/omenative-testing/perm/isvcs/`, every scheduler |
 | `cases=<p1,p2>` | exactly those cases in their lanes, default scheduler; a case needing the force-delete policy runs in its lane's policy-on twin |
+| `lanes=<feature>/<topology>[@<scheduler>],...` | every case of those lanes (`gen-heal/engine`), each under the scheduler its suffix names: no suffix or `@default` is the cluster default scheduler, `@ome-scheduler` the gang-scheduler twin; the same lane may be named once per scheduler |
 
-`families=` and `cases=` are trailer forms; `OME_EVAL_MODE` takes the four
-words, and a trailer selection stays beside a mode the variable set, which is
-how `targeted` gets its extra cases. A value naming nothing known, an unknown
-folder or case id, or an empty list fails generation with a message naming it.
+`families=`, `cases=` and `lanes=` are trailer forms; `OME_EVAL_MODE` takes
+the four words, and a trailer selection stays beside a mode the variable set,
+which is how `targeted` gets its extra cases. A value naming nothing known, an
+unknown folder, case id or lane, a suffix naming no scheduler, the twin while
+the build does not run it (`GKE_EVAL_SCHEDULER_ENABLED=0`), or an empty list
+fails generation with a message naming it.
+
+`OME_EVAL_SELECT` is the trailer's twin for a build created without a message
+(triggered through the API or on a schedule): it carries the text an `Eval:`
+line would, a mode word or one of the three selection forms. Set, it replaces
+the message's trailer, whatever each says. Beside `OME_EVAL_MODE` it behaves
+like that mode plus a selection trailer, so `OME_EVAL_MODE=targeted` with
+`OME_EVAL_SELECT=lanes=gen-heal/engine@ome-scheduler` adds that lane to the
+targeted selection and `OME_EVAL_SELECT=smoke` beside a mode changes nothing;
+alone it behaves exactly like the trailer. Empty or blank, it is unset. A
+value it carries is refused as a trailer's would be.
 The group label names the mode unless it is `full`, and the upload plan in the
 entrypoint's log ends with it. `_eval_selection()` in `generate_pipeline.py`
 is the one place a mode chooses cases; the emission packs and shards whatever

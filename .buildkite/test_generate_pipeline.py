@@ -1698,6 +1698,33 @@ class TestEvalTargeted(PipelineTestCase):
             if feature == family:
                 self.assertTrue({(case, "") for case in cases} <= pairs)
 
+    def test_the_trailer_adds_its_lanes_under_their_schedulers(self):
+        feature_a, topology_a, cases_a = self.groups[0]
+        feature_b, topology_b, cases_b = self.groups[-1]
+        lane_a = f"{feature_a}/{topology_a}@{self.gang}"
+        lane_b = f"{feature_b}/{topology_b}"
+        named = {(case, self.gang) for case in cases_a} | {(case, "") for case in cases_b}
+        self.patch_attr("EVAL_SELECTION", ("lanes", [lane_a, lane_b]))
+        with mock.patch.dict(os.environ, {"OME_EVAL_SAMPLE_PERCENT": "0"}):
+            pairs = self.pairs(self.selection())
+            label = self.label()
+        self.assertEqual(pairs, set(self.failed) | {(case, "") for case in self.new_cases} | named)
+        self.assertTrue(label.endswith(f" (plus lanes: {lane_a}, {lane_b})"), label)
+        # Without a round, targeted is smoke plus exactly what lanes= runs on its own.
+        gp._eval_round.cache_clear()
+        with mock.patch.dict(os.environ, {"OME_EVAL_RESULTS_TOKEN": ""}):
+            fallback = self.pairs(self.selection())
+        with mock.patch.object(gp, "EVAL_MODE", "lanes"):
+            standalone = self.selection()
+        self.assertEqual(self.pairs(standalone), named)
+        self.assertEqual([scheduler for _, _, _, scheduler in standalone], ["", self.gang])
+        self.assertEqual(fallback, self.pairs(self.smoke_selection()) | named)
+        # The twin the build does not run is refused beside targeted as well.
+        self.patch_attr("EVAL_SCHEDULERS", [""])
+        gp._eval_round.cache_clear()
+        with self.assertRaisesRegex(RuntimeError, "does not run.*" + re.escape(lane_a)):
+            self.selection()
+
     def test_the_sample_is_sized_by_the_percent_rounded_up_and_seeded_by_the_commit(self):
         fixed = set(self.failed) | {(case, "") for case in self.new_cases}
         candidates = len(self.passing)
@@ -2196,9 +2223,10 @@ class TestEvalSoftFeatures(unittest.TestCase):
 
 
 class TestEvalMode(PipelineTestCase):
-    """OME_EVAL_MODE, else the newest Eval: trailer, else the branch default
-    says what the eval group runs; _eval_selection is the one place a mode
-    chooses cases, and the emission packs whatever it returns."""
+    """OME_EVAL_MODE, else the trailer (OME_EVAL_SELECT, else the newest
+    Eval: line of the message), else the branch default says what the eval
+    group runs; _eval_selection is the one place a mode chooses cases, and
+    the emission packs whatever it returns."""
 
     EVAL_ENV = {
         "GKE_EVAL_CASE_CONCURRENCY": "4",
@@ -2285,6 +2313,60 @@ class TestEvalMode(PipelineTestCase):
         # Not a trailer: another word, no value, or the keyword inside a line.
         for message in ("Evaluation: full", "Eval:", "Eval:   ", "see Eval: full later"):
             self.assertEqual(resolve(None, message, "feature/x", True), ("off", None), message)
+
+    def test_the_select_variable_is_the_trailer_by_another_name_and_wins_over_the_message(self):
+        resolve = gp._resolve_eval_mode
+        lanes = ("lanes", ["gen-heal/engine@ome-scheduler", "reject/pd"])
+        for env_mode, message, env_select, expected in (
+            # Alone, the variable is the trailer: a mode word or a selection.
+            (None, "", "smoke", ("smoke", None)),
+            (None, "", " Lanes=gen-heal/engine@OME-Scheduler, reject/pd ", ("lanes", lanes)),
+            # Beside OME_EVAL_MODE its selection rides along and its mode word loses.
+            ("targeted", "", "families=gen-heal", ("targeted", ("families", ["gen-heal"]))),
+            ("targeted", "", "smoke", ("targeted", None)),
+            ("full", "Eval: smoke", "cases=p3000", ("full", ("cases", ["p3000"]))),
+            # The message's trailer loses to the variable, whatever each says.
+            (None, "Eval: cases=p3000", "families=gen-heal", ("families", ("families", ["gen-heal"]))),
+            (None, "Eval: cases=p3000", "smoke", ("smoke", None)),
+            (None, "Eval: smoke", "lanes=gen-heal/engine", ("lanes", ("lanes", ["gen-heal/engine"]))),
+            # Empty or blank, the variable is unset and the message decides.
+            (None, "Eval: cases=p3000", "", ("cases", ("cases", ["p3000"]))),
+            (None, "Eval: cases=p3000", "   ", ("cases", ("cases", ["p3000"]))),
+            (None, "", "", ("targeted", None)),
+            # A value naming nothing known is kept for generation to refuse.
+            (None, "", "bogus", ("bogus", None)),
+            (None, "", "lanes=", ("lanes", ("lanes", []))),
+        ):
+            with self.subTest(env_mode=env_mode, message=message, env_select=env_select):
+                self.assertEqual(resolve(env_mode, message, "main", True, env_select=env_select), expected)
+        self.assertEqual(resolve(None, "", "feature/x", True, env_select="full"), ("full", None))
+        self.assertEqual(resolve(None, "", "main", False, env_select="full"), ("off", None))
+        # The refusals name the variable beside the trailer.
+        self.patch_attr("EVAL_MODE", "bogus")
+        with self.assertRaisesRegex(RuntimeError, "OME_EVAL_MODE, OME_EVAL_SELECT or the Eval: trailer must name"):
+            gp._eval_mode()
+        self.patch_attr("EVAL_MODE", "lanes")
+        self.patch_attr("EVAL_SELECTION", ("lanes", []))
+        with self.assertRaisesRegex(RuntimeError, "the Eval: trailer or OME_EVAL_SELECT names no lane"):
+            gp._eval_selection()
+
+    def test_the_generator_reads_the_select_variable_beside_the_mode_and_the_message(self):
+        def fresh():
+            spec = importlib.util.spec_from_file_location("generate_pipeline_fresh", _MODULE_PATH)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module.EVAL_MODE, module.EVAL_SELECTION
+
+        lane = "gen-heal/engine@ome-scheduler"
+        env = {"BUILDKITE_BRANCH": "main", "BUILDKITE_MESSAGE": "Eval: smoke", "GKE_EVAL_ENABLED": "1", "OME_EVAL_SELECT": "lanes=" + lane}
+        with mock.patch.dict(os.environ, env):
+            os.environ.pop("OME_EVAL_MODE", None)
+            self.assertEqual(fresh(), ("lanes", ("lanes", [lane])))
+            os.environ["OME_EVAL_MODE"] = "targeted"
+            self.assertEqual(fresh(), ("targeted", ("lanes", [lane])))
+            del os.environ["OME_EVAL_MODE"]
+            os.environ["OME_EVAL_SELECT"] = ""
+            self.assertEqual(fresh(), ("smoke", None))
 
     def test_a_value_naming_nothing_known_is_refused_at_generation(self):
         self.patch_attr("EVAL_MODE", "bogus")
@@ -2430,6 +2512,76 @@ class TestEvalMode(PipelineTestCase):
         self.assertEqual(by_case[policy]["env"].get(gp.EVAL_FORCE_DELETE_ENV), "1")
         self.assertNotIn(gp.EVAL_FORCE_DELETE_ENV, by_case[plain]["env"])
         self.assertIn("(KIND on GKE) (cases: " + plain + ", " + policy + ")", self.group_labels(children)[0])
+
+    def test_lanes_resolve_from_the_trailer_with_their_scheduler_suffix(self):
+        resolve = gp._resolve_eval_mode
+        self.assertEqual(
+            resolve(None, "Eval: lanes=gen-heal/engine, gen-heal/engine@ome-scheduler, Reject/PD@Default", "main", True),
+            ("lanes", ("lanes", ["gen-heal/engine", "gen-heal/engine@ome-scheduler", "reject/pd@default"])),
+        )
+        # Beside a mode the environment set, the lanes ride along as its selection.
+        self.assertEqual(
+            resolve("targeted", "Eval: lanes=gen-heal/engine@ome-scheduler", "feature/x", True),
+            ("targeted", ("lanes", ["gen-heal/engine@ome-scheduler"])),
+        )
+        # lanes is a trailer form, not an OME_EVAL_MODE value; the refusal spells the form.
+        self.patch_attr("EVAL_MODE", "lanes")
+        with self.assertRaisesRegex(RuntimeError, r"lanes=<feature>/<topology>\[@<scheduler>\].*'lanes'"):
+            gp._eval_mode()
+
+    def test_lanes_run_every_case_of_the_named_lanes_under_their_schedulers(self):
+        gang = gp.EVAL_GANG_SCHEDULER
+        heal = next(cases for feature, topology, cases in self.groups if (feature, topology) == ("gen-heal", "engine"))
+        reject = next(cases for feature, topology, cases in self.groups if (feature, topology) == ("reject", "engine"))
+        names = ["gen-heal/engine", "gen-heal/engine@" + gang, "reject/engine@default"]
+        self.patch_attr("EVAL_MODE", "lanes")
+        self.patch_attr("EVAL_SELECTION", ("lanes", names))
+        # The seam: every case of each named lane, scheduler-major, then corpus order.
+        self.assertEqual(
+            gp._eval_selection(),
+            [("gen-heal", "engine", heal, ""), ("reject", "engine", reject, ""), ("gen-heal", "engine", heal, gang)],
+        )
+        children = gp._eval_children()
+        self.assertEqual({scheduler for scheduler, _, _ in children}, {"", gang})
+        default = self.runner_jobs(children, scheduler="")
+        self.assertEqual({self.lane_of(child) for child in default}, {("gen-heal", "engine"), ("reject", "engine")})
+        self.assertEqual(sorted(case for child in default for case in self.cases_of(child)), sorted(heal + reject))
+        for child in default:
+            self.assertNotIn("OME_EVAL_SCHEDULER", child["env"])
+        twins = self.runner_jobs(children, scheduler=gang)
+        self.assertEqual({self.lane_of(child) for child in twins}, {("gen-heal", "engine")})
+        emitted = [case for child in twins for case in self.cases_of(child)]
+        skipped = {case for child in twins for case in child["env"].get("OME_EVAL_SCHEDULER_SKIPPED", "").split()}
+        for owner, _, child in children:
+            if owner == gang and child["key"].endswith("-skipped"):
+                skipped.update(child["command"].split("twin: ")[1].rstrip("'").split())
+        self.assertEqual(set(emitted) | skipped, set(heal))
+        self.assertEqual(len(emitted), len(set(emitted)))
+        for child in twins:
+            self.assertEqual(child["env"].get("OME_EVAL_SCHEDULER"), gang)
+        for label in self.group_labels(children):
+            self.assertIn("(KIND on GKE) (lanes: " + ", ".join(names) + ")", label)
+
+    def test_an_unknown_lane_or_scheduler_and_a_twin_that_is_off_are_refused(self):
+        self.patch_attr("EVAL_MODE", "lanes")
+        for names, message in (
+            ([], "names no lane"),
+            (["gen-heal/nowhere"], "no corpus lane: gen-heal/nowhere"),
+            (["gen-heal", "p3000"], "no corpus lane: gen-heal, p3000"),
+            (["gen-heal/engine", "gen-heal/engine@volcano"], r"no scheduler \(@default or @ome-scheduler\): gen-heal/engine@volcano"),
+        ):
+            with self.subTest(names=names):
+                self.patch_attr("EVAL_SELECTION", ("lanes", names))
+                with self.assertRaisesRegex(RuntimeError, message):
+                    gp._eval_selection()
+        # With the twin switched off, naming it is refused; the lane under
+        # the default scheduler still runs, named once however often.
+        self.patch_attr("EVAL_SCHEDULERS", [""])
+        self.patch_attr("EVAL_SELECTION", ("lanes", ["gen-heal/engine@ome-scheduler"]))
+        with self.assertRaisesRegex(RuntimeError, "does not run.*: gen-heal/engine@ome-scheduler"):
+            gp._eval_selection()
+        self.patch_attr("EVAL_SELECTION", ("lanes", ["gen-heal/engine", "gen-heal/engine@default"]))
+        self.assertEqual([(f, t, s) for f, t, _, s in gp._eval_selection()], [("gen-heal", "engine", "")])
 
     def test_every_lane_of_every_mode_is_in_the_one_concurrency_group(self):
         cap = gp._eval_max_concurrency()

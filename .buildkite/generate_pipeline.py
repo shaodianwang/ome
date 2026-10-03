@@ -45,10 +45,16 @@ Environment variables read at runtime:
                                 of reusing a published image with the same inputs
     GKE_EVAL_ENABLED          – "0" drops the OMENative eval from the build
     OME_EVAL_MODE             – what the OMENative eval runs: off, smoke, targeted
-                                or full. Unset, the newest "Eval: <value>" line of
-                                BUILDKITE_MESSAGE decides, the value a mode,
-                                families=<a,b> or cases=<p1,p2>; with neither,
-                                main runs targeted and every other branch nothing
+                                or full. Unset, OME_EVAL_SELECT, else the newest
+                                "Eval: <value>" line of BUILDKITE_MESSAGE decides,
+                                the value a mode, families=<a,b>, cases=<p1,p2> or
+                                lanes=<feature>/<topology>[@<scheduler>],...;
+                                with none of them, main runs targeted and every
+                                other branch nothing
+    OME_EVAL_SELECT           – the text an "Eval:" trailer would carry, for a
+                                build created without a message; it replaces the
+                                message's trailer, and beside OME_EVAL_MODE its
+                                selection rides along with that mode
     GKE_EVAL_MAX_CONCURRENCY  – eval lanes running at once across the organization,
                                 the cap of their one concurrency group (default: 120)
     OME_EVAL_RESULTS_TOKEN    – read-only Buildkite API token (read_builds,
@@ -576,30 +582,43 @@ GKE_ALFRED_ENABLED = _truthy(os.environ.get("GKE_ALFRED_ENABLED", "1"))
 BRANCH = os.environ.get("BUILDKITE_BRANCH", "")
 COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
 # What the OMENative eval runs on this build. OME_EVAL_MODE names the mode;
-# unset, the newest "Eval: <value>" line of the commit message decides; with
-# neither, main runs targeted and every other branch nothing. GKE_EVAL_ENABLED=0
-# forces off. The trailer may name a selection instead of a mode.
+# unset, the trailer decides: OME_EVAL_SELECT when set, else the newest
+# "Eval: <value>" line of the commit message; with none of them, main runs
+# targeted and every other branch nothing. GKE_EVAL_ENABLED=0 forces off. The
+# trailer may name a selection instead of a mode.
 #   off             no eval image step and no eval group
 #   smoke           the first shard of every feature/topology lane, default scheduler
 #   targeted        smoke, plus every case the trailer's families or cases name
 #   full            every case on every scheduler
 #   families=<a,b>  every case of those corpus folders, every scheduler
 #   cases=<p1,p2>   exactly those cases in their lanes, default scheduler
+#   lanes=<f>/<t>[@<scheduler>],...
+#                   every case of those feature/topology lanes, each under
+#                   the scheduler its suffix names: default, or the twin
 EVAL_MODES = ("off", "smoke", "targeted", "full")
-EVAL_SELECTION_KINDS = ("families", "cases")
+EVAL_SELECTION_KINDS = ("families", "cases", "lanes")
+# The lanes= suffix for the cluster default scheduler, "" in EVAL_SCHEDULERS;
+# the twin is named by EVAL_GANG_SCHEDULER.
+EVAL_DEFAULT_SCHEDULER_NAME = "default"
+# Where a selection comes from, for the refusals that name a bad value.
+EVAL_SELECTION_SOURCE = "the Eval: trailer or OME_EVAL_SELECT"
 EVAL_TRAILER = re.compile(r"^[ \t]*eval:[ \t]*(\S.*?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
 
 
 def _resolve_eval_mode(
-    env_mode: str | None, message: str, branch: str, enabled: bool
+    env_mode: str | None, message: str, branch: str, enabled: bool, env_select: str | None = None
 ) -> tuple[str, tuple[str, list[str]] | None]:
     """(mode, selection) for a build: the mode from OME_EVAL_MODE, else from
-    the newest Eval: trailer of the message, else the branch default; the
-    selection from the trailer whenever it names families or cases. A value
-    naming nothing known is kept as written for generation to refuse."""
+    the trailer, else the branch default; the selection from the trailer
+    whenever it names families, cases or lanes. The trailer is OME_EVAL_SELECT
+    when set, else the newest Eval: line of the message. A value naming
+    nothing known is kept as written for generation to refuse."""
     trailer = None
-    for match in EVAL_TRAILER.finditer(message):
-        trailer = match.group(1).lower()
+    if env_select is not None and env_select.strip():
+        trailer = env_select.strip().lower()
+    else:
+        for match in EVAL_TRAILER.finditer(message):
+            trailer = match.group(1).lower()
     selection = None
     if trailer is not None:
         kind, _, names = trailer.partition("=")
@@ -617,7 +636,11 @@ def _resolve_eval_mode(
 
 
 EVAL_MODE, EVAL_SELECTION = _resolve_eval_mode(
-    os.environ.get("OME_EVAL_MODE"), os.environ.get("BUILDKITE_MESSAGE", ""), BRANCH, GKE_EVAL_ENABLED
+    os.environ.get("OME_EVAL_MODE"),
+    os.environ.get("BUILDKITE_MESSAGE", ""),
+    BRANCH,
+    GKE_EVAL_ENABLED,
+    os.environ.get("OME_EVAL_SELECT"),
 )
 # (label-suffix, ECR repo name under msl_infra/, Dockerfile)
 # Drop redundant "ome-" prefix in ECR names so we don't get "ome-ome-*".
@@ -1680,9 +1703,10 @@ def _eval_mode() -> str:
     )
     if not known:
         raise RuntimeError(
-            "OME_EVAL_MODE or the Eval: trailer must name one of "
+            "OME_EVAL_MODE, OME_EVAL_SELECT or the Eval: trailer must name one of "
             + ", ".join(EVAL_MODES)
-            + " (the trailer also families=<folders> or cases=<ids>), not "
+            + " (the trailer and OME_EVAL_SELECT also families=<folders>, cases=<ids> or"
+            + " lanes=<feature>/<topology>[@<scheduler>]), not "
             + repr(EVAL_MODE)
         )
     return EVAL_MODE if GKE_EVAL_ENABLED else "off"
@@ -1916,7 +1940,8 @@ def _eval_round_selection(
     """{(feature, topology, scheduler): cases} a targeted build runs from a
     recorded round: every lane that failed, under the scheduler it ran in
     (the default one when that twin is off); every corpus case the round
-    has no row for; every case the trailer names; and `percent` of the
+    has no row for; every case the trailer names, lanes= under the
+    schedulers it names; and `percent` of the
     passing lanes, rounded up, drawn with the commit as seed so a build is
     reproducible. A lane the harness skipped or parked
     (eval_verdicts.is_set_aside) is neither a failure nor a passing lane,
@@ -1940,8 +1965,8 @@ def _eval_round_selection(
         if case not in seen:
             chosen.setdefault(home + ("",), set()).add(case)
     if EVAL_SELECTION is not None:
-        for home, cases in _eval_named_cases(groups).items():
-            chosen.setdefault(home + ("",), set()).update(cases)
+        for key, cases in _eval_named_selection(groups).items():
+            chosen.setdefault(key, set()).update(cases)
     candidates = sorted(
         pair for pair in passing if pair[0] not in chosen.get(homes[pair[0]] + (pair[1],), ())
     )
@@ -1958,9 +1983,9 @@ def _eval_named_families(groups: list[tuple[str, str, list[str]]]) -> set[str]:
     known = {feature for feature, _, _ in groups}
     unknown = [name for name in names if name not in known]
     if not names:
-        raise RuntimeError("the Eval: trailer names no family")
+        raise RuntimeError(EVAL_SELECTION_SOURCE + " names no family")
     if unknown:
-        raise RuntimeError("the Eval: trailer names no corpus family: " + ", ".join(unknown))
+        raise RuntimeError(EVAL_SELECTION_SOURCE + " names no corpus family: " + ", ".join(unknown))
     return set(names)
 
 
@@ -1975,13 +2000,66 @@ def _eval_named_cases(groups: list[tuple[str, str, list[str]]]) -> dict[tuple[st
     homes = {case_id: (f, t) for f, t, cases in groups for case_id in cases}
     unknown = [name for name in names if name not in homes]
     if not names:
-        raise RuntimeError("the Eval: trailer names no case")
+        raise RuntimeError(EVAL_SELECTION_SOURCE + " names no case")
     if unknown:
-        raise RuntimeError("the Eval: trailer names no corpus case: " + ", ".join(unknown))
+        raise RuntimeError(EVAL_SELECTION_SOURCE + " names no corpus case: " + ", ".join(unknown))
     chosen: dict[tuple[str, str], set[str]] = {}
     for name in names:
         chosen.setdefault(homes[name], set()).add(name)
     return chosen
+
+
+def _eval_named_lanes(groups: list[tuple[str, str, list[str]]]) -> dict[tuple[str, str, str], set[str]]:
+    """The trailer's lanes= as {(feature, topology, scheduler): cases}: every
+    case of each named <feature>/<topology> lane, under the scheduler its
+    @<name> suffix picks; no suffix or @default is the cluster default, the
+    same lane may be named once per scheduler. A lane the corpus lacks, a
+    suffix naming no scheduler, the twin when this build does not run it,
+    and an empty list are refused."""
+    _, names = EVAL_SELECTION
+    if not names:
+        raise RuntimeError(EVAL_SELECTION_SOURCE + " names no lane")
+    lanes = {(feature, topology): cases for feature, topology, cases in groups}
+    chosen: dict[tuple[str, str, str], set[str]] = {}
+    unknown_lanes: list[str] = []
+    unknown_schedulers: list[str] = []
+    twin_off: list[str] = []
+    for name in names:
+        lane, _, suffix = name.partition("@")
+        feature, _, topology = lane.partition("/")
+        scheduler = "" if suffix in ("", EVAL_DEFAULT_SCHEDULER_NAME) else suffix
+        if (feature, topology) not in lanes:
+            unknown_lanes.append(name)
+        elif scheduler not in ("", EVAL_GANG_SCHEDULER):
+            unknown_schedulers.append(name)
+        elif scheduler not in EVAL_SCHEDULERS:
+            twin_off.append(name)
+        else:
+            chosen.setdefault((feature, topology, scheduler), set()).update(lanes[(feature, topology)])
+    if unknown_lanes:
+        raise RuntimeError(EVAL_SELECTION_SOURCE + " names no corpus lane: " + ", ".join(unknown_lanes))
+    if unknown_schedulers:
+        raise RuntimeError(
+            EVAL_SELECTION_SOURCE + " names no scheduler (@" + EVAL_DEFAULT_SCHEDULER_NAME
+            + " or @" + EVAL_GANG_SCHEDULER + "): " + ", ".join(unknown_schedulers)
+        )
+    if twin_off:
+        raise RuntimeError(
+            EVAL_SELECTION_SOURCE + " names the " + EVAL_GANG_SCHEDULER
+            + " twin, which this build does not run (GKE_EVAL_SCHEDULER_ENABLED=0): "
+            + ", ".join(twin_off)
+        )
+    return chosen
+
+
+def _eval_named_selection(groups: list[tuple[str, str, list[str]]]) -> dict[tuple[str, str, str], set[str]]:
+    """The trailer's selection with its scheduler, as {(feature, topology,
+    scheduler): cases}: lanes= under the schedulers it names, families= and
+    cases= under the default. What targeted adds to its round or its smoke,
+    and what a selection kind runs on its own."""
+    if EVAL_SELECTION[0] == "lanes":
+        return _eval_named_lanes(groups)
+    return {home + ("",): cases for home, cases in _eval_named_cases(groups).items()}
 
 
 def _eval_selection() -> list[tuple[str, str, list[str], str]]:
@@ -1998,6 +2076,7 @@ def _eval_selection() -> list[tuple[str, str, list[str], str]]:
               smoke plus the trailer's selection while no round can be read
     families  every lane of the named folders on every scheduler
     cases     exactly the named cases in their lanes, default scheduler
+    lanes     every case of the named lanes, each under its named scheduler
     """
     mode = _eval_mode()
     if mode == "off":
@@ -2024,7 +2103,7 @@ def _eval_selection() -> list[tuple[str, str, list[str], str]]:
                 for feature, topology, cases in groups
                 if by_lane.get((feature, topology, scheduler))
             ]
-    chosen: dict[tuple[str, str], set[str]] = {}
+    chosen: dict[tuple[str, str, str], set[str]] = {}
     if mode in ("smoke", "targeted"):
         packing = _eval_packing()
         for feature, topology, cases in groups:
@@ -2032,14 +2111,15 @@ def _eval_selection() -> list[tuple[str, str, list[str], str]]:
             # cases; that lane's first shard is the shape's smoke.
             lane = _eval_lane_variants(cases)[0][2]
             shards = _eval_lane_shards(feature, topology, lane, "", packing)[0]
-            chosen[(feature, topology)] = set(shards[0])
-    if mode == "cases" or (mode == "targeted" and EVAL_SELECTION is not None):
-        for lane_key, cases in _eval_named_cases(groups).items():
-            chosen.setdefault(lane_key, set()).update(cases)
+            chosen[(feature, topology, "")] = set(shards[0])
+    if mode in ("cases", "lanes") or (mode == "targeted" and EVAL_SELECTION is not None):
+        for key, cases in _eval_named_selection(groups).items():
+            chosen.setdefault(key, set()).update(cases)
     return [
-        (feature, topology, [c for c in cases if c in chosen[(feature, topology)]], "")
+        (feature, topology, [c for c in cases if c in chosen[(feature, topology, scheduler)]], scheduler)
+        for scheduler in EVAL_SCHEDULERS
         for feature, topology, cases in groups
-        if chosen.get((feature, topology))
+        if chosen.get((feature, topology, scheduler))
     ]
 
 
