@@ -316,7 +316,7 @@ KIND_SPEC_GROUPS = (
     )),
     ("gang-recovery", "Gang recovery and wedge", (
         "gang_corrective_rollout", "gang_wedge_nonready", "crashloop_gang_coordination_gate",
-        "gang_unpullable_push",
+        "gang_unpullable_push", "gang_unpullable_scale_down",
         "packed_pool_gang_vacated_room",
     )),
     ("gang-surge-multipod", "Gang surge and multi-pod", (

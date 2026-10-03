@@ -2149,3 +2149,95 @@ func TestDeleteBatchOverdueDrainAnnouncesDeferredRows(t *testing.T) {
 		t.Fatalf("DrainOverdue events = %d, want 2 (the driven row and the deferred one)", overdue)
 	}
 }
+
+// A scale-down wave that retires the row carrying an in-flight update
+// attempt owes the ladder the failed wave when the attempt's own pods
+// already show a workload-caused failure, and nothing otherwise: an
+// attempt that showed no failure, a failure on the pod the attempt
+// replaces, a row with no attempt, a gang surge pair the abandon
+// records itself, and a crash loop, which is not the revision's alone.
+// A wave of two such rows is one record.
+func TestRetiredAttemptFailure_RecordsOnlyAnAttemptFailingOnItsOwn(t *testing.T) {
+	const running, target = "model-engine-f94dbfff", "model-engine-cf0e7843"
+	parked := func(index int32, revision, reason string) *corev1.Pod {
+		pod := deleteFailurePod(index, false, revision)
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  "main",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}},
+		}}
+		return pod
+	}
+	recreate := func(index int32) workload.InstanceStatus {
+		return workload.InstanceStatus{
+			Index: index, Phase: workload.InstancePhaseUpdating, RunningRevision: running,
+			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepDrain, TargetRevision: target},
+		}
+	}
+	surgeIdx := int32(2)
+	cases := []struct {
+		name       string
+		candidates []deleteBatchCandidate
+		want       *status.AttemptFailure
+	}{
+		{
+			name:       "a recreate parked in ImagePullBackOff",
+			candidates: []deleteBatchCandidate{{status: recreate(0), pods: []*corev1.Pod{parked(0, "cf0e7843", "ImagePullBackOff")}}},
+			want:       &status.AttemptFailure{TargetRevision: target, Reason: "ImagePullBackOff", Cause: workload.CauseWorkload},
+		},
+		{
+			name:       "an attempt that shows no failure",
+			candidates: []deleteBatchCandidate{{status: recreate(0), pods: []*corev1.Pod{deleteFailurePod(0, false, "cf0e7843")}}},
+		},
+		{
+			name:       "a failure on the pod the attempt replaces",
+			candidates: []deleteBatchCandidate{{status: recreate(0), pods: []*corev1.Pod{parked(0, "f94dbfff", "ImagePullBackOff")}}},
+		},
+		{
+			name: "a row with no attempt",
+			candidates: []deleteBatchCandidate{{
+				status: workload.InstanceStatus{Index: 0, Phase: workload.InstancePhaseReady, RunningRevision: running},
+				pods:   []*corev1.Pod{parked(0, "f94dbfff", "ImagePullBackOff")},
+			}},
+		},
+		{
+			name: "a gang surge source",
+			candidates: []deleteBatchCandidate{{
+				status: workload.InstanceStatus{
+					Index: 0, Phase: workload.InstancePhaseUpdating, RunningRevision: running,
+					Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepSurge, TargetRevision: target, SurgeIndex: &surgeIdx},
+				},
+				pods: []*corev1.Pod{parked(2, "cf0e7843", "ImagePullBackOff")},
+			}},
+		},
+		{
+			name: "a gang surge target marker",
+			candidates: []deleteBatchCandidate{{
+				status: workload.InstanceStatus{
+					Index: 2, Phase: workload.InstancePhaseCreating,
+					Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepGangSurgeTarget, TargetRevision: target},
+				},
+				pods: []*corev1.Pod{parked(2, "cf0e7843", "ImagePullBackOff")},
+			}},
+		},
+		{
+			name:       "a crash loop",
+			candidates: []deleteBatchCandidate{{status: recreate(0), pods: []*corev1.Pod{parked(0, "cf0e7843", "CrashLoopBackOff")}}},
+		},
+		{
+			name: "one record for a wave of two",
+			candidates: []deleteBatchCandidate{
+				{status: recreate(1), pods: []*corev1.Pod{parked(1, "cf0e7843", "ErrImagePull")}},
+				{status: recreate(0), pods: []*corev1.Pod{parked(0, "cf0e7843", "ImagePullBackOff")}},
+			},
+			want: &status.AttemptFailure{TargetRevision: target, Reason: "ErrImagePull", Cause: workload.CauseWorkload},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := retiredAttemptFailure(tc.candidates)
+			if (got == nil) != (tc.want == nil) || (got != nil && *got != *tc.want) {
+				t.Fatalf("retiredAttemptFailure = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}

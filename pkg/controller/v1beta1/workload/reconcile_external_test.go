@@ -8087,3 +8087,202 @@ func TestPodlessRolledRow_RebuiltAtTheTargetMidRoll(t *testing.T) {
 		t.Fatalf("the budget never held the roll on the podless Instance; the story did not run")
 	}
 }
+
+// A scale-down lands while a RecreatePod attempt is in flight on a
+// revision that cannot be pulled: Instance 0's v1 pod has been drained and
+// its replacement sits in ImagePullBackOff inside the stuck-pod grace, so
+// the attempt is open and nothing has ended it yet. The wave retires
+// Instance 0, the one Instance that serves nothing, and the attempt ends
+// with its Instance: the ladder records the failed wave with the pull
+// failure the pod showed, so the survivors' v1 pods are left alone — Held
+// at the bound, paced by the backoff below it — and the status keeps
+// reporting the push that has not landed.
+
+// newStuckRecreateHarness is three single-pod Instances serving v1 under
+// RecreatePod with maxUnavailable=1 and the given ladder, pushed onto the
+// bad revision until Instance 0's replacement is parked in
+// ImagePullBackOff with the attempt still open. The stuck-pod grace is
+// longer than the story, so only the scale can end the attempt.
+func newStuckRecreateHarness(t *testing.T, ladder *workloadtypes.RetryPolicy) *recoveryHarness {
+	t.Helper()
+	h := newRecoveryHarness(t, false)
+	h.atomicStatus = true
+	h.replicas = 3
+	h.stuckGrace = time.Hour
+	maxSurge, maxUnavailable := intstr.FromInt(0), intstr.FromInt(1)
+	h.lifecycle.UpdateStrategy = &workloadtypes.UpdateStrategy{
+		Type:          workloadtypes.UpdateStrategyRecreatePod,
+		RollingUpdate: &workloadtypes.RollingUpdate{MaxSurge: &maxSurge, MaxUnavailable: &maxUnavailable},
+	}
+	h.retryPolicy = ladder
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(40, func() bool { return h.settledOn(h.revV1, 3) }) {
+		h.dumpState("initial create")
+		t.Fatalf("three instances never settled on v1")
+	}
+	h.setTarget(h.revBad, badImage)
+	parked := func() bool {
+		row := h.instance(0)
+		if row == nil || row.Phase != workloadtypes.InstancePhaseUpdating || row.Operation == nil ||
+			row.Operation.TargetRevision != h.revBad.Name {
+			return false
+		}
+		pods := h.podsOf(0)
+		if len(pods) != 1 || pods[0].Spec.Containers[0].Image != badImage || len(pods[0].Status.ContainerStatuses) != 1 {
+			return false
+		}
+		waiting := pods[0].Status.ContainerStatuses[0].State.Waiting
+		return waiting != nil && waiting.Reason == "ImagePullBackOff"
+	}
+	if !h.run(40, parked) {
+		h.dumpState("push")
+		t.Fatalf("the recreate onto the unpullable revision never parked Instance 0's replacement in ImagePullBackOff")
+	}
+	if got := len(h.servingPods()); got != 2 {
+		h.dumpState("push")
+		t.Fatalf("serving pods with the attempt open = %d, want the two v1 pods the roll has not reached", got)
+	}
+	if h.findBlock(h.revBad.Name) != nil {
+		t.Fatalf("a first attempt opens with no retry block; the story needs the wave to be the ladder's first record")
+	}
+	return h
+}
+
+// scaleStuckRecreateToTwo scales the harness from three to two while the
+// attempt is open and runs the wave to rest: two rows, Instance 0 and its
+// pods gone, none Deleting. Throughout, and for several passes after,
+// while untouched() holds Instances 1 and 2 serve through the very v1
+// pods they served through before the scale and no pod on the pushed
+// revision appears on them.
+func scaleStuckRecreateToTwo(t *testing.T, h *recoveryHarness, untouched func() bool) {
+	t.Helper()
+	before := map[int32]types.UID{}
+	for _, idx := range []int32{1, 2} {
+		pod := h.servingPodOnV1(idx)
+		if pod == nil {
+			t.Fatalf("instance %d does not serve on v1 before the scale", idx)
+		}
+		before[idx] = pod.UID
+	}
+	h.replicas = 2
+	h.setTarget(h.revBad, badImage)
+	atRest := func() bool {
+		rows := h.irStatuses()
+		if len(rows) != 2 || h.instance(0) != nil || len(h.podsOf(0)) != 0 {
+			return false
+		}
+		for _, row := range rows {
+			if row.Phase == workloadtypes.InstancePhaseDeleting {
+				return false
+			}
+		}
+		return true
+	}
+	keepServing := func() {
+		t.Helper()
+		if !untouched() {
+			return
+		}
+		if got := len(h.servingPods()); got < 2 {
+			h.dumpState("scale-down")
+			t.Fatalf("serving pods dropped to %d during the scale-down; the two Instances the roll never reached must keep serving", got)
+		}
+		for idx, uid := range before {
+			h.requireServingOnV1(idx, uid)
+			for _, pod := range h.podsOf(idx) {
+				if pod.Spec.Containers[0].Image == badImage {
+					h.dumpState("survivor taken")
+					t.Fatalf("instance %d was taken onto the pushed revision after the scale retired the attempt's Instance", idx)
+				}
+			}
+		}
+	}
+	if !h.runWithInvariant(40, atRest, keepServing) {
+		h.dumpState("scale-down")
+		t.Fatalf("the component never came to rest at two instances with the stuck one gone")
+	}
+	for i := 0; i < 4; i++ {
+		h.step()
+		keepServing()
+		if !atRest() {
+			h.dumpState("after the scale-down")
+			t.Fatalf("the component left its two-instance shape after the scale-down")
+		}
+	}
+}
+
+// TestScaleWhileRecreateAttemptOpen_LastAttemptEndsHeld: with a ladder of
+// one attempt, the scale that retires the attempt's Instance leaves the
+// revision Held with the pull failure as its reason, no attempt reopens on
+// a survivor, and the status still reports the push that has not landed.
+//
+// Cells: instance/Update/Drain/spec.replicasDown/before
+func TestScaleWhileRecreateAttemptOpen_LastAttemptEndsHeld(t *testing.T) {
+	ladder := &workloadtypes.RetryPolicy{MaxAttempts: 1, InitialDelay: time.Minute, MaxDelay: 30 * time.Minute, Multiplier: 2}
+	h := newStuckRecreateHarness(t, ladder)
+	scaleStuckRecreateToTwo(t, h, func() bool { return true })
+
+	block := h.findBlock(h.revBad.Name)
+	if block == nil {
+		t.Fatalf("the status stopped reporting the push that has not landed: no retry block for %s", h.revBad.Name)
+	}
+	if block.State != workloadtypes.RetryBlockHeld || block.AttemptsStarted != 1 || block.Reason != "ImagePullBackOff" {
+		t.Fatalf("block after the scale = (state=%s attempts=%d reason=%q), want Held after the one attempt the scale ended, with its pull failure",
+			block.State, block.AttemptsStarted, block.Reason)
+	}
+	if len(h.heldWarnings) != 1 {
+		t.Fatalf("held warnings = %v, want the one the wave's record raised", h.heldWarnings)
+	}
+	for _, idx := range []int32{1, 2} {
+		row := h.instance(idx)
+		if row == nil || row.Phase != workloadtypes.InstancePhaseReady || row.Operation != nil || row.RunningRevision != h.revV1.Name {
+			h.dumpState("survivor row")
+			t.Fatalf("instance %d must stay Ready on v1 with no attempt open while the revision is Held, got %+v", idx, row)
+		}
+	}
+}
+
+// TestScaleWhileRecreateAttemptOpen_BelowTheBoundTheNextAttemptWaits: with
+// attempts left on the ladder, the attempt the scale ended counts as one
+// and the survivors are left alone until the backoff the ladder records
+// for it; the next attempt then opens on a survivor, no sooner.
+//
+// Cells: instance/Update/Drain/spec.replicasDown/before
+func TestScaleWhileRecreateAttemptOpen_BelowTheBoundTheNextAttemptWaits(t *testing.T) {
+	h := newStuckRecreateHarness(t, pushRetryLadder)
+	var due, recordedAt time.Time
+	scaleStuckRecreateToTwo(t, h, func() bool {
+		if block := h.findBlock(h.revBad.Name); block != nil && due.IsZero() {
+			if block.State != workloadtypes.RetryBlockBackoff || block.AttemptsStarted != 1 ||
+				block.Reason != "ImagePullBackOff" || block.NextRetryAt == nil {
+				t.Fatalf("block as the wave recorded it = %+v, want Backoff after the one attempt the scale ended, with a retry ahead", block)
+			}
+			due, recordedAt = block.NextRetryAt.Time, h.clk.Now()
+		}
+		return due.IsZero() || h.clk.Now().Before(due)
+	})
+	if due.IsZero() {
+		t.Fatalf("the status stopped reporting the push that has not landed: no retry block for %s", h.revBad.Name)
+	}
+	if !due.After(recordedAt) {
+		t.Fatalf("the backoff was recorded due at %s, not ahead of %s", due.Format(time.RFC3339), recordedAt.Format(time.RFC3339))
+	}
+	reopened := func() bool {
+		for _, idx := range []int32{1, 2} {
+			if row := h.instance(idx); row != nil && row.Phase == workloadtypes.InstancePhaseUpdating {
+				return true
+			}
+		}
+		return false
+	}
+	if !h.run(20, reopened) {
+		h.dumpState("backoff")
+		t.Fatalf("the ladder has attempts left; the next must open on a survivor once the backoff is due")
+	}
+	if h.clk.Now().Before(due) {
+		t.Fatalf("the next attempt opened at %s, before the backoff due at %s", h.clk.Now().Format(time.RFC3339), due.Format(time.RFC3339))
+	}
+	if block := h.findBlock(h.revBad.Name); block == nil || block.State != workloadtypes.RetryBlockRetryInProgress || block.AttemptsStarted != 1 {
+		t.Fatalf("block with the next attempt open = %+v, want RetryInProgress after the one attempt the scale ended", block)
+	}
+}

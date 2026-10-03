@@ -16,6 +16,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
@@ -264,7 +265,57 @@ func selectDeleteBatch(
 }
 
 func admitDeleteBatch(ctx context.Context, input workload.ReconcileInput, plan workload.ComponentPlan, candidates []deleteBatchCandidate) (bool, error) {
-	return status.StampDeletingBatch(ctx, input, plan.InstanceReadyTimeout, candidateStatuses(candidates))
+	failure := retiredAttemptFailure(candidates)
+	committed, heldAttempts, err := status.StampDeletingBatch(ctx, input, plan.InstanceReadyTimeout, candidateStatuses(candidates), failure)
+	if committed && heldAttempts > 0 && input.WarnRetryHeld != nil {
+		input.WarnRetryHeld(failure.TargetRevision, heldAttempts, failure.Reason)
+	}
+	return committed, err
+}
+
+// retiredAttemptFailure is the failed wave a scale-down owes the ladder
+// for an attempt it retires. A candidate carrying a single-Instance
+// update attempt — a recreate, an in-place patch or a single-pod surge;
+// a gang surge pair is pinned in the plan and never a candidate — whose
+// pods on the attempt's revision show a workload-caused failure is an
+// attempt failing on its own; the wave is what ends it, so the wave
+// records it the way the escalation would, with the pod's reason. One
+// record per wave: the ladder counts waves, not rows. nil when the wave
+// retires no such attempt — an attempt that showed no failure is left to
+// the gate, which reads an authorization with no attempt behind it as
+// interrupted and lets the roll reopen it.
+func retiredAttemptFailure(candidates []deleteBatchCandidate) *status.AttemptFailure {
+	for _, candidate := range candidates {
+		row := candidate.status
+		if !retiresUpdateAttempt(&row) {
+			continue
+		}
+		pods := evidence.AttemptStuckPods(row, candidate.pods, row.Operation.TargetRevision)
+		pod, reason := evidence.FirstWorkloadCausedPod(pods)
+		if pod == nil {
+			continue
+		}
+		return &status.AttemptFailure{
+			TargetRevision: row.Operation.TargetRevision,
+			Reason:         reason,
+			Cause:          workload.FailureCauseOf(reason),
+		}
+	}
+	return nil
+}
+
+// retiresUpdateAttempt reports whether a wave candidate carries an
+// in-flight single-Instance update attempt at a pinned revision. A gang
+// surge source names its replacement through SurgeIndex and a surge
+// target marker carries the gang-target steps; both belong to the gang
+// abandon, which records their attempt itself.
+func retiresUpdateAttempt(row *workload.InstanceStatus) bool {
+	if !workload.UpdateContinuation(row) || row.Operation == nil {
+		return false
+	}
+	op := row.Operation
+	return op.Type == workload.InstanceOperationUpdate && op.TargetRevision != "" &&
+		op.SurgeIndex == nil && !isGangSurgeTargetMarker(row)
 }
 
 // candidateStatuses is the rows of a wave, in selection order.

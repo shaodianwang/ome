@@ -1220,3 +1220,25 @@ func TestResolveInstanceReadyTimeout(t *testing.T) {
 		})
 	}
 }
+
+// A shrinking budget retires the row a recreate holds open before any
+// Ready row, at every count below the fleet: the attempt's Instance serves
+// nothing while the Ready rows serve, and the Ready rows are kept lowest
+// index first.
+func TestInstancePlanIndices_ShrinkingBudgetRetiresTheOpenRecreateFirst(t *testing.T) {
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseUpdating, RunningRevision: "v1",
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepDrain, TargetRevision: "v2"}},
+		{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: "v1", PodCount: 1, ServingPodCount: 1},
+		{Index: 2, Phase: types.InstancePhaseReady, RunningRevision: "v1", PodCount: 1, ServingPodCount: 1},
+	}
+	if diff := cmp.Diff([]int32{1, 2}, instancePlanIndices(instances, 2)); diff != "" {
+		t.Fatalf("plan at two replicas (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]int32{1}, instancePlanIndices(instances, 1)); diff != "" {
+		t.Fatalf("plan at one replica (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]int32{0, 1, 2}, instancePlanIndices(instances, 3)); diff != "" {
+		t.Fatalf("plan at the full count (-want +got):\n%s", diff)
+	}
+}
