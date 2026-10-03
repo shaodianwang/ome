@@ -1296,6 +1296,9 @@ type recoveryHarness struct {
 	// holds records every rollout hold the update pass reported, in
 	// order; a pass that reported none appends nothing.
 	holds []workloadtypes.RolloutHold
+	// holdVerdicts counts the passes whose update pass reported a verdict,
+	// a hold or none; a pass that reported none appends nothing to holds.
+	holdVerdicts int
 
 	// component is the Component the loop drives. Every Component runs
 	// the same loop, so a story names one only to run under its pod
@@ -2468,6 +2471,7 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 		AbandonedReplacementGrace: h.abandonGrace,
 		DrainHolds:                &workloadtypes.DrainHolds{},
 		RecordRolloutHold: func(hold *workloadtypes.RolloutHold) {
+			h.holdVerdicts++
 			if hold != nil {
 				h.holds = append(h.holds, *hold)
 			}
@@ -6899,6 +6903,81 @@ func TestCorrectedPushAfterAHeldCrash_Converges(t *testing.T) {
 			if !h.settledOn(revCorrected, replicas) {
 				h.dumpState("corrected revision")
 				t.Fatalf("the corrected revision did not land on every Instance; last hold %+v", h.lastHold())
+			}
+		})
+	}
+}
+
+// TestCrashAfterPromotion_TheHoldIsReportedOnEveryPassWhileTheRollWaits
+// pins that every wait says why: while the roll is held on account of a
+// promoted set that is unproven or being rebuilt, every pass that
+// reports an update verdict and admits no start reports the hold naming
+// that set. Under RecreateInstanceOnPodRestart the policy's rebuild keeps
+// an attempt open beside the held roll, and an attempt that merely polls
+// is not forward progress: the hold stays reported through it. Under
+// SurgeThenDrain the withheld drain is the reported hold.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Budget]/before
+func TestCrashAfterPromotion_TheHoldIsReportedOnEveryPassWhileTheRollWaits(t *testing.T) {
+	cases := []struct {
+		name     string
+		strategy workloadtypes.UpdateStrategyType
+	}{
+		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1", strategy: workloadtypes.UpdateStrategySurgeThenDrain},
+		{name: "four single-pod Instances under RecreatePod maxUnavailable 1", strategy: workloadtypes.UpdateStrategyRecreatePod},
+	}
+	const replicas = int32(4)
+	// No minReadySeconds: the stuck-pod grace alone is the window, long
+	// enough that the rebuilds cycle several times inside it.
+	const window = 300 * time.Second
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryHarnessFor(t, false, constants.MainContainerName)
+			h.replicas = replicas
+			rebuild := workloadtypes.RestartPolicyRecreateInstance
+			h.lifecycle.RestartPolicy = &rebuild
+			h.crashAfterServed = 4
+			h.stuckGrace = window
+			h.useRollingBudget(tc.strategy)
+			if !h.run(60, func() bool { return h.settledOn(h.revV1, replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+			}
+
+			revCrash := h.crashRevision(crashAfterServingImage)
+			started := map[int32]struct{}{}
+			var failedAt time.Time
+			verdicts, holds, starts, silent, named := h.holdVerdicts, len(h.holds), 0, 0, false
+			windowPassed := func() bool { return !failedAt.IsZero() && !h.clk.Now().Before(failedAt.Add(window)) }
+			h.runWithInvariant(60, windowPassed, func() {
+				h.rollStartsOn(crashAfterServingImage, revCrash, started)
+				reported, admitted := h.holdVerdicts > verdicts, len(started) > starts
+				if len(h.holds) > holds {
+					for _, s := range h.irStatuses() {
+						if s.RunningRevision == revCrash.Name && holdNamesInstance(h.lastHold(), s.Index) {
+							named = true
+						}
+					}
+				}
+				if !failedAt.IsZero() && !windowPassed() && reported && !admitted && len(h.holds) == holds {
+					silent++
+					h.dumpState("silent wait")
+				}
+				verdicts, holds, starts = h.holdVerdicts, len(h.holds), len(started)
+				if failedAt.IsZero() {
+					failedAt = h.firstFailureAt(revCrash)
+				}
+			})
+			if failedAt.IsZero() {
+				h.dumpState("no failure")
+				t.Fatalf("no promoted Instance failed; the story did not run")
+			}
+			if !named {
+				h.dumpState("hold")
+				t.Fatalf("no pass reported a hold naming an Instance promoted onto %s", revCrash.Name)
+			}
+			if silent > 0 {
+				t.Fatalf("%d pass(es) reported an update verdict with no hold while the roll was held and admitted no start; every wait says why", silent)
 			}
 		})
 	}

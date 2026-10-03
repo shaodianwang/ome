@@ -101,12 +101,17 @@ func executeUpdatePass(ctx context.Context, deps types.Deps, input types.Reconci
 			anyUpdating = true
 		}
 	}
-	if anyUpdateRan {
+	if anyUpdateRan && len(selection.RolledNotServing) == 0 {
 		// Forward progress this pass: whatever was gated for a DIFFERENT
 		// Instance is superseded — the Component is not stuck, it will
 		// re-observe fresh state (including any still-active gate) next
 		// pass. Clearing here is also what lets a resolved hold disappear
 		// promptly instead of lingering until the next denial-free pass.
+		// A denial that stands on an Instance already rolled onto the
+		// target that does not serve it is not superseded by an attempt
+		// elsewhere: that attempt polling, or a rebuild of the set itself,
+		// moves nothing the roll waits on, and every pass of the wait
+		// reports the hold.
 		firstDenial = nil
 	}
 	// A drain the gate held is progress withheld, not an admission denial:
