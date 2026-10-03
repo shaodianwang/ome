@@ -2192,6 +2192,15 @@ func TestRetiredAttemptFailure_RecordsOnlyAnAttemptFailingOnItsOwn(t *testing.T)
 			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepGangSurgeTargetCleanup, TargetRevision: target},
 		}
 	}
+	// gangSourceSince is gangSource with the attempt dated: the operation
+	// started at since, and the row's record is dated as given.
+	attemptStart := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	gangSourceSince := func(since time.Time, failure *workload.InstanceTermination) workload.InstanceStatus {
+		row := gangSource(failure)
+		row.Phase = workload.InstancePhaseUpdating
+		row.Operation.StartedAt = metav1.NewTime(since)
+		return row
+	}
 	cases := []struct {
 		name       string
 		candidates []deleteBatchCandidate
@@ -2247,6 +2256,22 @@ func TestRetiredAttemptFailure_RecordsOnlyAnAttemptFailingOnItsOwn(t *testing.T)
 				{status: gangSource(&workload.InstanceTermination{PodName: "pod-2", Reason: "CrashLoopBackOff"}), pods: []*corev1.Pod{deleteFailurePod(0, true, "f94dbfff")}},
 			},
 			want: &status.AttemptFailure{TargetRevision: target, Reason: "CrashLoopBackOff", Cause: workload.CauseUnattributed},
+		},
+		{
+			// The row carries the failure of an attempt at a revision since
+			// withdrawn; the attempt the wave retires, toward the corrected
+			// revision, started after it and never failed.
+			name: "a gang surge source retired under a corrected roll, with a failure older than the attempt",
+			candidates: []deleteBatchCandidate{
+				{status: gangSourceSince(attemptStart, &workload.InstanceTermination{PodName: "pod-2", Reason: "ErrImagePull", Time: metav1.NewTime(attemptStart.Add(-time.Minute))}), pods: []*corev1.Pod{deleteFailurePod(0, true, "f94dbfff")}},
+			},
+		},
+		{
+			name: "a gang surge source whose row records the attempt's own failure",
+			candidates: []deleteBatchCandidate{
+				{status: gangSourceSince(attemptStart, &workload.InstanceTermination{PodName: "pod-2", Reason: "ErrImagePull", Time: metav1.NewTime(attemptStart.Add(time.Minute))}), pods: []*corev1.Pod{deleteFailurePod(0, true, "f94dbfff")}},
+			},
+			want: &status.AttemptFailure{TargetRevision: target, Reason: "ErrImagePull", Cause: workload.CauseWorkload},
 		},
 		{
 			name: "a failed gang surge source with no failure recorded anywhere",

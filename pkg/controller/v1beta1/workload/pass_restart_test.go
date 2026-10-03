@@ -2533,7 +2533,9 @@ func (h *recoveryHarness) restartsInFlight() int {
 // TestReconcile_CrashLoopRepair_OpensAtMostTheBatchPerPass is the
 // closed-loop story for lifecycle.repairBatchSize: a Component converged
 // on v1 has every Instance fall into a crash loop at once, under a budget
-// of zero so nothing but the limit paces the repairs. With a limit of
+// of zero and with no retry ladder configured, so nothing but the limit
+// paces the repairs (a configured ladder counts a crash of a promoted pod
+// set and admits one rebuild at a time). With a limit of
 // three, exactly three repairs open on the first pass and the next three
 // on the second, while the first three are still in flight and count for
 // nothing; the rest follow on the passes after, and every Instance ends
@@ -2563,6 +2565,7 @@ func TestReconcile_CrashLoopRepair_OpensAtMostTheBatchPerPass(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/%s", tc.name, policy), func(t *testing.T) {
 				h := offTargetCrashHarness(t, tc.gang, workloadtypes.UpdateStrategyRecreatePod, 0, 0, policy, tc.replicas)
 				h.repairBatchSize = tc.limit
+				h.retryPolicy = nil
 				for idx := int32(0); idx < tc.replicas; idx++ {
 					breakWholeInstance(t, h, idx, crashAtStart)
 				}

@@ -1168,6 +1168,9 @@ type recoveryHarness struct {
 	requeue         workloadtypes.RequeueIntervals
 	currentRevision string
 	heldWarnings    []string
+	// failedWarnings records every InstanceFailed warning the passes
+	// raised, as "instance=<idx> pod=<name> <reason>".
+	failedWarnings []string
 
 	revV1    *appsv1.ControllerRevision
 	revBad   *appsv1.ControllerRevision
@@ -1187,6 +1190,17 @@ type recoveryHarness struct {
 	// for no later wake-up still moves the clock this far.
 	// recoveryStepFloor unless a story needs a finer clock.
 	stepFloor time.Duration
+	// stepCap bounds how far one step moves the clock when the pass asks
+	// for a longer wait: the kubelet model runs once per step, so a story
+	// whose pods must keep serving, dying and restarting while the
+	// controller waits out a window caps the step and takes more of
+	// them. Zero leaves the step at the wait the pass asked for.
+	stepCap time.Duration
+	// kubeletLag is how far the clock moves between the kubelet's
+	// reports and the pass that reads them: a kubelet dates a container
+	// state before any pass observes it, so a record the pass dates
+	// itself is later than the kubelet's. Zero reads both at one instant.
+	kubeletLag time.Duration
 	// bareRequeues counts the consecutive passes that asked for the
 	// rate-limited backoff, which runOnWakeUps doubles per ask as the
 	// controller's per-item rate limiter does.
@@ -1282,6 +1296,25 @@ type recoveryHarness struct {
 	// started from: the kubelet restarts the container when the spec names
 	// another image, whatever name the runtime reports for either.
 	startedImage map[string]string
+	// crashOnceInComponent confines crashOnceAfterServingImage to one
+	// crash in the Component: every other pod, and a pod the controller
+	// builds after that crash, runs like a sound one.
+	crashOnceInComponent bool
+	// crashEverySet has every pod set built on crashOnceAfterServingImage
+	// die once, rebuilt sets included, where the image otherwise dies
+	// once per Instance.
+	crashEverySet bool
+	// crashedInstances counts, per Instance, the pods that crashed under
+	// crashOnceAfterServingImage.
+	crashedInstances map[int32]int
+	// crashExitCode is the exit code the kubelet model reports for a
+	// crashed runner; zero reads as a clean exit (Completed) the way a
+	// runner that stops itself reports, any other value as an Error.
+	crashExitCode *int32
+	// killOnce names the pods whose runner the kubelet model kills once
+	// on its next pass: the container restarts at once with its restart
+	// count raised and the termination dated now, and runs on.
+	killOnce map[string]bool
 	// crashAfterServed is how many passes a crashAfterServingImage pod
 	// serves before it dies: two, unless a story needs the roll to reach
 	// the next Instance before the promoted one crashes.
@@ -1293,6 +1326,10 @@ type recoveryHarness struct {
 	// must hold Ready before it is Available. Zero, as the default
 	// configuration leaves it, makes Available the same as Ready.
 	minReadySeconds int32
+	// crashLeaderOnly confines a crash image to the leader of a gang: the
+	// workers run it as a sound image, the shape of a runner fault that
+	// lives in the leader's process alone.
+	crashLeaderOnly bool
 	// holds records every rollout hold the update pass reported, in
 	// order; a pass that reported none appends nothing.
 	holds []workloadtypes.RolloutHold
@@ -1515,6 +1552,7 @@ func (h *recoveryHarness) kubelet() {
 			}
 		}
 		image := pod.Spec.Containers[0].Image
+		faulty := h.faultyImage(pod)
 		wedged := h.wedgeReasonFor(pod)
 		switch {
 		case wedged != "":
@@ -1551,33 +1589,35 @@ func (h *recoveryHarness) kubelet() {
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
-		case image == crashOnceAfterServingImage && h.crashes[wedgeKey(pod)] == 0 && !h.onceCrashed[instanceIndexOf(pod)] && h.servedPasses[wedgeKey(pod)] >= h.crashAfterServed && h.promotedOn(pod):
+		case h.killOnce[pod.Name] || (faulty == crashOnceAfterServingImage && h.crashes[wedgeKey(pod)] == 0 && (h.crashEverySet || !h.onceCrashed[instanceIndexOf(pod)]) && h.servedPasses[wedgeKey(pod)] >= h.crashAfterServed && h.promotedOn(pod) && !h.componentCrashedBefore()):
 			// The container died once, after its Instance was promoted on it:
 			// the kubelet starts it again at once, as it does before a first
 			// restart, and the new run has not passed readiness yet. The
 			// termination names when the run that died had started, as the
 			// kubelet reports it.
+			delete(h.killOnce, pod.Name)
 			h.crashes[wedgeKey(pod)]++
 			h.onceCrashed[instanceIndexOf(pod)] = true
+			if idx, ok := query.InstanceIdxFromLabels(pod); ok {
+				if h.crashedInstances == nil {
+					h.crashedInstances = map[int32]int{}
+				}
+				h.crashedInstances[idx]++
+			}
 			h.lastCrash[wedgeKey(pod)] = h.clk.Now()
 			h.lastRunStart[wedgeKey(pod)] = priorRunStart(pod)
 			pod.Status.Phase = corev1.PodRunning
 			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-				Name:         pod.Spec.Containers[0].Name,
-				Image:        image,
-				Ready:        false,
-				RestartCount: 1,
-				State:        corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(h.clk.Now())}},
-				LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-					ExitCode:   1,
-					Reason:     "Error",
-					StartedAt:  h.lastRunStart[wedgeKey(pod)],
-					FinishedAt: metav1.NewTime(h.clk.Now()),
-				}},
+				Name:                 pod.Spec.Containers[0].Name,
+				Image:                image,
+				Ready:                false,
+				RestartCount:         1,
+				State:                corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(h.clk.Now())}},
+				LastTerminationState: corev1.ContainerState{Terminated: h.crashTermination(pod)},
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
-		case image == crashStartImage || h.crashesAfterRunning(pod) || (image == crashLoadImage && h.crashes[wedgeKey(pod)]%2 == 0):
+		case faulty == crashStartImage || h.crashesAfterRunning(pod) || (faulty == crashLoadImage && h.crashes[wedgeKey(pod)]%2 == 0):
 			// The container died again: a run that ended after the pod
 			// became Ready, and a kubelet back-off before the next start.
 			// The termination names when the run that died had started,
@@ -1603,7 +1643,7 @@ func (h *recoveryHarness) kubelet() {
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
-		case (image == crashLoadImage || image == flapAfterServingImage) && !h.lastCrash[wedgeKey(pod)].IsZero():
+		case (faulty == crashLoadImage || faulty == flapAfterServingImage) && !h.lastCrash[wedgeKey(pod)].IsZero():
 			// Back up between crashes: serving again, with the previous
 			// run's termination still on the container status. Before its
 			// first crash the pod is a healthy pod with no restart on its
@@ -1780,7 +1820,7 @@ func carryRestartEvidence(status, prior *corev1.ContainerStatus) {
 // sound image starts the container over, so a pod that has crashed
 // before runs again once its image is not one of these.
 func (h *recoveryHarness) crashesAfterRunning(pod *corev1.Pod) bool {
-	switch pod.Spec.Containers[0].Image {
+	switch h.faultyImage(pod) {
 	case crashAfterReadyImage:
 		return h.crashes[wedgeKey(pod)] > 0 || podConditionTrue(pod, corev1.ContainersReady)
 	case crashAfterServingImage:
@@ -1800,6 +1840,15 @@ func instanceIndexOf(pod *corev1.Pod) int32 {
 		return idx
 	}
 	return -1
+}
+
+// faultyImage is the image the crash model reads for pod: its spec image,
+// or none for a worker of a gang whose crash is the leader's alone.
+func (h *recoveryHarness) faultyImage(pod *corev1.Pod) string {
+	if h.crashLeaderOnly && pod.Labels[query.LabelRunner] == workloadtypes.RunnerWorker {
+		return ""
+	}
+	return pod.Spec.Containers[0].Image
 }
 
 func podConditionTrue(pod *corev1.Pod, condType corev1.PodConditionType) bool {
@@ -1957,6 +2006,40 @@ func (h *recoveryHarness) wedgeLivePods(reason string) {
 // wedgeKey identifies one pod object across the kubelet model's passes: the
 // fake client mints no UID, and a rebuilt pod reuses its name, so the
 // creation instant the model stamps is what tells the two apart.
+// crashTermination is the termination the kubelet model reports for a
+// runner that just died: the run that died had started at the pod's
+// prior run start and ended now, with crashExitCode (1 when unset).
+func (h *recoveryHarness) crashTermination(pod *corev1.Pod) *corev1.ContainerStateTerminated {
+	code, reason := int32(1), "Error"
+	if h.crashExitCode != nil {
+		code = *h.crashExitCode
+		if code == 0 {
+			reason = "Completed"
+		}
+	}
+	return &corev1.ContainerStateTerminated{
+		ExitCode:   code,
+		Reason:     reason,
+		StartedAt:  h.lastRunStart[wedgeKey(pod)],
+		FinishedAt: metav1.NewTime(h.clk.Now()),
+	}
+}
+
+// componentCrashedBefore reports whether, under crashOnceInComponent, a
+// pod of the Component already crashed.
+func (h *recoveryHarness) componentCrashedBefore() bool {
+	return h.crashOnceInComponent && len(h.crashedInstances) > 0
+}
+
+// killRunnerOnce has the kubelet model kill pod's runner once on its next
+// pass, as an operator or a fault does to a serving pod.
+func (h *recoveryHarness) killRunnerOnce(pod *corev1.Pod) {
+	if h.killOnce == nil {
+		h.killOnce = map[string]bool{}
+	}
+	h.killOnce[pod.Name] = true
+}
+
 func wedgeKey(pod *corev1.Pod) string {
 	return pod.Name + "@" + pod.CreationTimestamp.UTC().Format(time.RFC3339)
 }
@@ -2479,6 +2562,9 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 		WarnRetryHeld: func(rev string, attempts int32, reason string) {
 			h.heldWarnings = append(h.heldWarnings, fmt.Sprintf("%s attempts=%d %s", rev, attempts, reason))
 		},
+		WarnInstanceFailed: func(idx int32, podName, reason string) {
+			h.failedWarnings = append(h.failedWarnings, fmt.Sprintf("instance=%d pod=%s %s", idx, podName, reason))
+		},
 		MutateRetryBlock: func(_ context.Context, rev string, mutate func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
 			h.mutateRetryBlock(rev, mutate)
 			return nil
@@ -2584,6 +2670,9 @@ func (h *recoveryHarness) stepResult() (ctrl.Result, error) {
 	if res.RequeueAfter > advance {
 		advance = res.RequeueAfter
 	}
+	if h.stepCap > 0 && advance > h.stepCap {
+		advance = h.stepCap
+	}
 	h.clk.Step(advance)
 	return res, err
 }
@@ -2596,6 +2685,9 @@ func (h *recoveryHarness) pass() (ctrl.Result, error) {
 	h.kubelet()
 	if h.routed {
 		h.endpointController()
+	}
+	if h.kubeletLag > 0 {
+		h.clk.Step(h.kubeletLag)
 	}
 	deps := workloadtypes.Deps{Client: h.c, APIReader: h.c, Expectations: workloadtypes.NewExpectations()}
 	if h.recorder != nil {
@@ -8205,6 +8297,14 @@ func TestGangPush_UnpullableRevisionIsHeldWithinTheLadder(t *testing.T) {
 				h.dumpState("corrected push")
 				t.Fatalf("the corrected push did not land on both gangs after the unpullable revision was Held")
 			}
+			// The failure the held revision left on the stuck gang's row is
+			// that revision's: retiring the gang's old set under the
+			// corrected roll charges nothing to the corrected revision.
+			h.settle(4)
+			if block := h.findBlock(h.revFixed.Name); block != nil {
+				h.dumpState("corrected revision charged")
+				t.Fatalf("the corrected revision carries a RetryBlock the held revision's failure left behind: %+v", *block)
+			}
 		})
 	}
 }
@@ -8885,5 +8985,665 @@ func TestScaleWhileRecreateAttemptOpen_BelowTheBoundTheNextAttemptWaits(t *testi
 	}
 	if block := h.findBlock(h.revBad.Name); block == nil || block.State != workloadtypes.RetryBlockRetryInProgress || block.AttemptsStarted != 1 {
 		t.Fatalf("block with the next attempt open = %+v, want RetryInProgress after the one attempt the scale ended", block)
+	}
+}
+
+// A push whose gang leaders crash after promotion, on a Component small
+// enough that the budget lets the roll move every gang: with
+// maxUnavailable 1 and minReadySeconds 0 the second gang's start is
+// admitted while the first still serves, so both gangs end on the
+// crashing revision and the Component's current revision follows them.
+// From then on nothing is left for the roll to admit, so no budget hold
+// is recorded, and the crashing leaders disagree with no current
+// revision. The product must still say why the Component is down: a row
+// on the crashing revision reads Failed naming the crash, and an
+// InstanceFailed warning names the Instance.
+
+// TestCrashAfterPromotion_WholeGangComponentMovedSaysWhy pins that rule
+// on two leader+worker gangs under RecreatePod maxUnavailable 1 whose
+// pushed leader comes back Ready between its crashes.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/pod.waiting[CrashLoopBackOff]/before
+func TestCrashAfterPromotion_WholeGangComponentMovedSaysWhy(t *testing.T) {
+	const replicas = 2
+	h := newRecoveryHarnessFor(t, true, constants.MainContainerName)
+	h.replicas = replicas
+	noRepair := workloadtypes.RestartPolicyNone
+	h.lifecycle.RestartPolicy = &noRepair
+	// The leader serves long enough after promotion for the roll to move
+	// the second gang before it dies, and only the leader dies; it dies
+	// inside the stuck-pod grace, as a crash a few seconds after a
+	// promotion reads on a cluster.
+	h.crashAfterServed = 10
+	h.crashLeaderOnly = true
+	h.stuckGrace = 10 * time.Minute
+	h.stepCap = recoveryStepFloor
+	h.useRollingBudget(workloadtypes.UpdateStrategyRecreatePod)
+	if !h.run(60, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+	}
+
+	revCrash := h.crashRevision(flapAfterServingImage)
+	moved, crashed := false, false
+	saysWhy := func() bool {
+		for _, s := range h.irStatuses() {
+			if s.Phase == workloadtypes.InstancePhaseFailed && s.RunningRevision == revCrash.Name {
+				return true
+			}
+		}
+		return false
+	}
+	// A repair may delete the crashed leader in the pass that saw it
+	// crash, so the crash is read off the kubelet model's ledger, which
+	// only a crash image writes to.
+	h.runWithInvariant(200, saysWhy, func() {
+		moved = moved || h.currentRevision == revCrash.Name
+		crashed = crashed || len(h.crashes) > 0
+	})
+	if !moved {
+		h.dumpState("roll")
+		t.Fatalf("the roll did not move both gangs onto the crashing revision; the story did not run")
+	}
+	if !crashed {
+		h.dumpState("no crash")
+		t.Fatalf("the promoted revision never crashed; the story did not run")
+	}
+	if !saysWhy() {
+		h.dumpState("silent")
+		t.Fatalf("no row on the crashing revision %s reads Failed: status never said why the Component is down (holds=%d, failed warnings=%v, held warnings=%v)",
+			revCrash.Name, len(h.holds), h.failedWarnings, h.heldWarnings)
+	}
+	if len(h.failedWarnings) == 0 {
+		t.Fatalf("no InstanceFailed warning named the crashed gang; warnings=%v", h.failedWarnings)
+	}
+}
+
+// A push whose gang leaders crash after promotion, on a Component large
+// enough that the budget stops the roll before every gang has moved,
+// under RecreateInstanceOnPodRestart: the policy rebuilds a gang whose
+// runner restarted after Ready, and the leader dies again a few passes
+// after every rebuild, inside the stuck-pod grace, so no pod ever reads
+// as wedged and the repair alone would rebuild the gang forever. The
+// running revision's retry ladder counts each crash and paces each
+// rebuild: the leader's first comeback releases the gang's slot and the
+// roll admits one further start, the ladder holds after its attempts
+// with a RetryHeld warning, the crashed gang parks Failed naming the
+// crash with an InstanceFailed warning, no repair opens on the revision
+// from the hold on, and the roll keeps its floor. A corrected revision
+// then lands on every gang.
+
+// TestCrashAfterPromotion_GangPushStopsAtItsBudgetAndSaysWhy pins that
+// rule on leader+worker gangs under RecreatePod maxUnavailable 1 and
+// under SurgeThenDrain maxSurge 1.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Budget]/before, instance/Ready/gate.deny[Held]/before
+func TestCrashAfterPromotion_GangPushStopsAtItsBudgetAndSaysWhy(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		replicas   int32
+		strategy   workloadtypes.UpdateStrategyType
+		offAllowed int
+	}{
+		// offAllowed leaves one gang on the running revision: the budget's
+		// arm, the start admitted while the promoted gang still serves under
+		// RecreatePod, and the one start the first comeback admits.
+		{name: "four gangs under RecreatePod maxUnavailable 1", replicas: 4, strategy: workloadtypes.UpdateStrategyRecreatePod, offAllowed: 3},
+		{name: "three gangs under SurgeThenDrain maxSurge 1", replicas: 3, strategy: workloadtypes.UpdateStrategySurgeThenDrain, offAllowed: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryHarnessFor(t, true, constants.MainContainerName)
+			h.replicas = tc.replicas
+			repair := workloadtypes.RestartPolicyRecreateInstance
+			h.lifecycle.RestartPolicy = &repair
+			// The leader serves long enough for the roll to reach the next
+			// gang before it dies, only the leader dies, and it dies well
+			// inside the stuck-pod grace.
+			h.crashAfterServed = 4
+			h.crashLeaderOnly = true
+			h.stuckGrace = 10 * time.Minute
+			// The roll waits out the stuck-pod grace after each promote;
+			// the leaders keep serving and dying meanwhile.
+			h.stepCap = recoveryStepFloor
+			h.useRollingBudget(tc.strategy)
+			if !h.run(60, func() bool { return h.settledOn(h.revV1, tc.replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled on v1 for %d instances", tc.replicas)
+			}
+
+			revCrash := h.crashRevision(flapAfterServingImage)
+			crashed, offAtCrash := false, 0
+			restartsAtHeld := -1
+			saysWhy := func() bool {
+				for _, s := range h.irStatuses() {
+					if s.Phase == workloadtypes.InstancePhaseFailed && s.RunningRevision == revCrash.Name {
+						return len(h.failedWarnings) > 0
+					}
+				}
+				return false
+			}
+			h.runWithInvariant(80, func() bool { return restartsAtHeld >= 0 && saysWhy() }, func() {
+				off := int(tc.replicas) - h.instancesServingOn(goodImage)
+				if off > tc.offAllowed {
+					h.dumpState("roll past the budget")
+					t.Fatalf("%d Instances are off the running revision, budget %d: the roll kept replacing gangs with a revision that crashes", off, tc.offAllowed)
+				}
+				if crashed && off > offAtCrash+1 {
+					h.dumpState("roll continued after the crash")
+					t.Fatalf("more than the one start the comeback admits left the running revision after a promoted gang crashed: %d off now, %d at the crash", off, offAtCrash)
+				}
+				if !crashed && h.promotedPodCrashed(revCrash) {
+					crashed, offAtCrash = true, off
+				}
+				if restartsAtHeld < 0 && len(h.heldWarnings) > 0 {
+					restartsAtHeld = h.restartsRecorded()
+				}
+			})
+			if !crashed {
+				h.dumpState("no crash")
+				t.Fatalf("the promoted revision never crashed; the story did not run")
+			}
+			if restartsAtHeld < 0 {
+				h.dumpState("ladder never held")
+				t.Fatalf("the retry ladder never held the crashing revision %s: no RetryHeld warning (failed warnings=%v, repairs=%d)", revCrash.Name, h.failedWarnings, h.restartsRecorded())
+			}
+			if !saysWhy() {
+				h.dumpState("silent")
+				t.Fatalf("no row on the crashing revision %s reads Failed with an InstanceFailed warning (failed warnings=%v, held warnings=%v)", revCrash.Name, h.failedWarnings, h.heldWarnings)
+			}
+			// A repair in flight owns the passes it runs in; the roll reports
+			// its hold once the pass reaches the update pass again, unless
+			// the held ladder denies every start before the budget is asked,
+			// in which case the Held block itself is the status that says why.
+			h.run(20, func() bool { return h.lastHold() != nil || h.heldOn(revCrash.Name) })
+			if got := h.restartsRecorded(); got != restartsAtHeld {
+				h.dumpState("repair after the hold")
+				t.Fatalf("repairs opened after the ladder held: %d at the hold, %d after", restartsAtHeld, got)
+			}
+			hold := h.lastHold()
+			if hold != nil && (hold.Target != revCrash.Name || (hold.Gate != workloadtypes.RolloutHoldGateBudget && hold.Gate != workloadtypes.RolloutHoldGateHeld)) {
+				h.dumpState("hold")
+				t.Fatalf("the Component must report a Budget or Held hold on %s, got %+v", revCrash.Name, hold)
+			}
+			if hold == nil && !h.heldOn(revCrash.Name) {
+				h.dumpState("hold")
+				t.Fatalf("the Component must report a Budget hold on %s or hold its ladder", revCrash.Name)
+			}
+			if floor := int(tc.replicas) - tc.offAllowed; h.instancesServingOn(goodImage) < floor {
+				h.dumpState("floor")
+				t.Fatalf("the running revision serves on %d gangs, floor %d", h.instancesServingOn(goodImage), floor)
+			}
+
+			h.setTarget(h.revFixed, fixedImage)
+			if !h.run(120, func() bool { return h.settledOn(h.revFixed, tc.replicas) }) {
+				h.dumpState("corrected revision")
+				t.Fatalf("the corrected revision did not land on every gang")
+			}
+		})
+	}
+}
+
+// A break of a pod set that held the crash window is a steady-state
+// repair, not the revision's failure: the repair opens at once, past the
+// stuck-pod grace, and the running revision's retry ladder records
+// nothing. Two breaks read so: a pod of a long-serving Instance pointed at
+// an image that crashes at start, and a promoted pod set on the
+// revision's own image whose runner first dies only after the window.
+
+// TestSteadyStateBreak_IsRepairedAtOnceAndRecordsNothing pins that rule
+// under both restart policies, on a single-pod Instance and on a
+// leader+worker gang.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/before, instance/Ready/pod.containerRestart/before
+func TestSteadyStateBreak_IsRepairedAtOnceAndRecordsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		multiPod bool
+		policy   workloadtypes.RestartPolicy
+		// late crashes the revision's own image after the pod set held the
+		// window; false points a pod at an image that crashes at start.
+		late bool
+	}{
+		{name: "single-pod Instance, pod pointed at a crashing image, policy None", policy: workloadtypes.RestartPolicyNone},
+		{name: "single-pod Instance, pod pointed at a crashing image, policy RecreateInstanceOnPodRestart", policy: workloadtypes.RestartPolicyRecreateInstance},
+		{name: "gang, leader pointed at a crashing image, policy None", multiPod: true, policy: workloadtypes.RestartPolicyNone},
+		{name: "gang, leader pointed at a crashing image, policy RecreateInstanceOnPodRestart", multiPod: true, policy: workloadtypes.RestartPolicyRecreateInstance},
+		{name: "single-pod Instance, the revision's own image dies after the window, policy None", late: true, policy: workloadtypes.RestartPolicyNone},
+		{name: "single-pod Instance, the revision's own image dies after the window, policy RecreateInstanceOnPodRestart", late: true, policy: workloadtypes.RestartPolicyRecreateInstance},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const replicas = 2
+			h := newRecoveryHarnessFor(t, tc.multiPod, constants.MainContainerName)
+			h.recorder = record.NewFakeRecorder(64)
+			h.replicas = replicas
+			policy := tc.policy
+			h.lifecycle.RestartPolicy = &policy
+			// The pod set holds the window (the stuck-pod grace, with no
+			// minReadySeconds) several times over before it breaks.
+			h.crashAfterServed = 6
+			h.useRollingBudget(workloadtypes.UpdateStrategyRecreatePod)
+			if tc.late {
+				h.crashRevision(flapAfterServingImage)
+				h.currentRevision = ""
+			}
+			if !h.run(60, func() bool { return h.settledOn(h.target, replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled for %d instances", replicas)
+			}
+			for i := 0; i < 3; i++ {
+				h.step()
+			}
+			before := map[int32]int64{}
+			for _, s := range h.irStatuses() {
+				before[s.Index] = s.Incarnation
+			}
+			h.events = nil
+			const broken = int32(0)
+			if !tc.late {
+				h.crashPod(broken, map[bool]string{true: "leader", false: ""}[tc.multiPod], crashStartImage)
+			}
+
+			repairedAt, pass := -1, 0
+			h.runWithInvariant(12, func() bool { return false }, func() {
+				pass++
+				if len(h.blocks) != 0 {
+					h.dumpState("ladder")
+					t.Fatalf("a steady-state break counted on the retry ladder: blocks=%+v", h.blocks)
+				}
+				if repairedAt < 0 && h.restartsRecorded() > 0 {
+					repairedAt = pass
+				}
+			})
+			if repairedAt < 0 {
+				h.dumpState("no repair")
+				t.Fatalf("no repair opened on the broken Instance within 12 passes (events=%v)", h.events)
+			}
+			rebuilt := false
+			for _, s := range h.irStatuses() {
+				if s.Index == broken && s.Incarnation > before[broken] {
+					rebuilt = true
+				}
+			}
+			if !rebuilt {
+				h.dumpState("not rebuilt")
+				t.Fatalf("the broken Instance was not rebuilt at a new incarnation")
+			}
+			for _, w := range append(append([]string(nil), h.failedWarnings...), h.heldWarnings...) {
+				t.Fatalf("a steady-state break was escalated: %s", w)
+			}
+		})
+	}
+}
+
+// One restart of a promoted runner is not a crash of the revision: under
+// RecreateInstanceOnPodRestart the policy rebuilds the Instance once, at
+// once, and under restart policy None the kubelet's restart is the whole
+// repair; the running revision's retry ladder records nothing, no row
+// reads Failed, nothing is escalated or held, and the roll lands the
+// revision on every Instance. The kubelet dates the restart before the
+// pass that reads it, as it does on a cluster, and the runner dies ten
+// seconds after its Instance entered Ready, inside the crash window.
+
+// TestCrashOnceAfterPromotion_IsNeverACrashOfTheRevision pins that rule
+// under both restart policies, on single-pod Instances and on
+// leader+worker gangs, under both rolling budgets.
+//
+// Cells: instance/Ready/pod.containerRestart/before
+func TestCrashOnceAfterPromotion_IsNeverACrashOfTheRevision(t *testing.T) {
+	cases := []struct {
+		name     string
+		strategy workloadtypes.UpdateStrategyType
+		multiPod bool
+		replicas int32
+		policy   workloadtypes.RestartPolicy
+	}{
+		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1, policy RecreateInstanceOnPodRestart", strategy: workloadtypes.UpdateStrategySurgeThenDrain, replicas: 4, policy: workloadtypes.RestartPolicyRecreateInstance},
+		{name: "four single-pod Instances under RecreatePod maxUnavailable 1, policy RecreateInstanceOnPodRestart", strategy: workloadtypes.UpdateStrategyRecreatePod, replicas: 4, policy: workloadtypes.RestartPolicyRecreateInstance},
+		{name: "two leader+worker gangs under RecreatePod maxUnavailable 1, policy RecreateInstanceOnPodRestart", strategy: workloadtypes.UpdateStrategyRecreatePod, multiPod: true, replicas: 2, policy: workloadtypes.RestartPolicyRecreateInstance},
+		{name: "two leader+worker gangs under SurgeThenDrain maxSurge 1, policy RecreateInstanceOnPodRestart", strategy: workloadtypes.UpdateStrategySurgeThenDrain, multiPod: true, replicas: 2, policy: workloadtypes.RestartPolicyRecreateInstance},
+		{name: "four single-pod Instances under RecreatePod maxUnavailable 1, policy None", strategy: workloadtypes.UpdateStrategyRecreatePod, replicas: 4, policy: workloadtypes.RestartPolicyNone},
+		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1, policy None", strategy: workloadtypes.UpdateStrategySurgeThenDrain, replicas: 4, policy: workloadtypes.RestartPolicyNone},
+		{name: "two leader+worker gangs under RecreatePod maxUnavailable 1, policy None", strategy: workloadtypes.UpdateStrategyRecreatePod, multiPod: true, replicas: 2, policy: workloadtypes.RestartPolicyNone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			replicas := tc.replicas
+			h := newRecoveryHarnessFor(t, tc.multiPod, constants.MainContainerName)
+			h.recorder = record.NewFakeRecorder(256)
+			h.replicas = replicas
+			h.crashLeaderOnly = tc.multiPod
+			policy := tc.policy
+			h.lifecycle.RestartPolicy = &policy
+			h.stepFloor = 5 * time.Second
+			h.kubeletLag = time.Second
+			h.crashAfterServed = 2
+			h.crashOnceInComponent = true
+			h.retryPolicy = &workloadtypes.RetryPolicy{MaxAttempts: 3, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2}
+			h.useRollingBudget(tc.strategy)
+			if !h.run(200, func() bool { return h.settledOn(h.revV1, replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+			}
+
+			revOnce := h.crashRevision(crashOnceAfterServingImage)
+			var restartedUID types.UID
+			restartedIndex := int32(-1)
+			rebuilds := 0
+			h.runWithInvariant(400, func() bool {
+				return restartedIndex >= 0 && h.settledOn(revOnce, replicas) && h.restartsRecorded() == rebuilds && !h.repairInFlight()
+			}, func() {
+				for _, s := range h.irStatuses() {
+					if s.Phase == workloadtypes.InstancePhaseFailed {
+						h.dumpState("failed row")
+						t.Fatalf("Instance %d reads Failed for a runner the kubelet restarted once (events=%v)", s.Index, h.events)
+					}
+				}
+				for _, w := range append(append([]string(nil), h.failedWarnings...), h.heldWarnings...) {
+					t.Fatalf("one restart of a promoted runner was escalated: %s", w)
+				}
+				if b := h.findBlock(revOnce.Name); b != nil {
+					h.dumpState("counted")
+					t.Fatalf("one restart of a promoted runner counted on %s's ladder: %+v", revOnce.Name, *b)
+				}
+				for idx := range h.crashedInstances {
+					if restartedIndex < 0 {
+						restartedIndex = idx
+					}
+				}
+				for _, pod := range h.livePods() {
+					if h.crashes[wedgeKey(pod)] > 0 && restartedUID == "" {
+						restartedUID = pod.UID
+					}
+				}
+				if restartedIndex >= 0 && tc.policy == workloadtypes.RestartPolicyRecreateInstance && rebuilds == 0 {
+					rebuilds = h.restartsRecorded()
+				}
+			})
+			if restartedIndex < 0 {
+				h.dumpState("no crash")
+				t.Fatalf("the promoted pod never crashed; the story did not run")
+			}
+			if !h.settledOn(revOnce, replicas) {
+				h.dumpState("roll stalled")
+				t.Fatalf("the roll did not land %s on every Instance; last hold %+v", revOnce.Name, h.lastHold())
+			}
+			var restarted *corev1.Pod
+			for _, pod := range h.livePods() {
+				if pod.UID == restartedUID {
+					restarted = pod
+				}
+			}
+			switch tc.policy {
+			case workloadtypes.RestartPolicyRecreateInstance:
+				if got := h.restartsRecorded(); got != 1 {
+					h.dumpState("rebuilds")
+					t.Fatalf("RecreateInstanceOnPodRestart rebuilt Instance %d %d times for one restart (events=%v)", restartedIndex, got, h.events)
+				}
+				for _, pod := range h.livePods() {
+					if h.crashes[wedgeKey(pod)] > 0 {
+						t.Fatalf("the pod the kubelet restarted once was not replaced under RecreateInstanceOnPodRestart: %s", pod.Name)
+					}
+				}
+			default:
+				if got := h.restartsRecorded(); got != 0 {
+					t.Fatalf("restart policy None opened %d repair(s) for a runner the kubelet restarted (events=%v)", got, h.events)
+				}
+				if restarted == nil {
+					t.Fatalf("the pod the kubelet restarted once must keep its identity under restart policy None; %s is gone", restartedUID)
+				}
+			}
+		})
+	}
+}
+
+// One kill of a serving runner, seconds after its Instance entered Ready
+// and with no roll in flight, is not a crash of the running revision:
+// under restart policy None the kubelet's restart is the whole repair and
+// under RecreateInstanceOnPodRestart the policy rebuilds the Instance
+// once, at once; the running revision's retry ladder records nothing, no
+// row reads Failed and nothing is escalated or held.
+
+// TestRunnerKilledOnceAfterReady_IsNeverACrashOfTheRevision pins that
+// rule under both restart policies, on a single-pod Instance and on a
+// leader+worker gang.
+//
+// Cells: instance/Ready/pod.containerRestart/before
+func TestRunnerKilledOnceAfterReady_IsNeverACrashOfTheRevision(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		multiPod bool
+		policy   workloadtypes.RestartPolicy
+	}{
+		{name: "single-pod Instance, policy None", policy: workloadtypes.RestartPolicyNone},
+		{name: "single-pod Instance, policy RecreateInstanceOnPodRestart", policy: workloadtypes.RestartPolicyRecreateInstance},
+		{name: "gang, the leader killed, policy None", multiPod: true, policy: workloadtypes.RestartPolicyNone},
+		{name: "gang, the leader killed, policy RecreateInstanceOnPodRestart", multiPod: true, policy: workloadtypes.RestartPolicyRecreateInstance},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const replicas = int32(2)
+			h := newRecoveryHarnessFor(t, tc.multiPod, constants.MainContainerName)
+			h.recorder = record.NewFakeRecorder(256)
+			h.replicas = replicas
+			policy := tc.policy
+			h.lifecycle.RestartPolicy = &policy
+			h.stepFloor = 5 * time.Second
+			h.kubeletLag = time.Second
+			h.retryPolicy = &workloadtypes.RetryPolicy{MaxAttempts: 3, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2}
+			h.useRollingBudget(workloadtypes.UpdateStrategyRecreatePod)
+			if !h.run(200, func() bool { return h.settledOn(h.revV1, replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+			}
+			var victim *corev1.Pod
+			for _, pod := range h.livePods() {
+				if idx, ok := query.InstanceIdxFromLabels(pod); ok && idx == 0 && (!tc.multiPod || strings.Contains(pod.Name, "leader")) {
+					victim = pod
+				}
+			}
+			if victim == nil {
+				t.Fatalf("no pod of Instance 0 to kill")
+			}
+			h.killRunnerOnce(victim)
+			h.events = nil
+			h.runWithInvariant(60, func() bool {
+				return h.crashes[wedgeKey(victim)] > 0 && h.settledOn(h.revV1, replicas) && !h.repairInFlight()
+			}, func() {
+				for _, s := range h.irStatuses() {
+					if s.Phase == workloadtypes.InstancePhaseFailed {
+						h.dumpState("failed row")
+						t.Fatalf("Instance %d reads Failed for a runner killed once (events=%v)", s.Index, h.events)
+					}
+				}
+				for _, w := range append(append([]string(nil), h.failedWarnings...), h.heldWarnings...) {
+					t.Fatalf("one kill of a serving runner was escalated: %s", w)
+				}
+				if len(h.blocks) != 0 {
+					h.dumpState("counted")
+					t.Fatalf("one kill of a serving runner counted on a retry ladder: %+v", h.blocks)
+				}
+			})
+			if h.crashes[wedgeKey(victim)] == 0 {
+				t.Fatalf("the kubelet model never killed %s; the story did not run", victim.Name)
+			}
+			if !h.settledOn(h.revV1, replicas) {
+				h.dumpState("not settled")
+				t.Fatalf("the Component did not settle after one kill of %s (events=%v)", victim.Name, h.events)
+			}
+			alive := false
+			for _, pod := range h.livePods() {
+				if pod.UID == victim.UID {
+					alive = true
+				}
+			}
+			switch tc.policy {
+			case workloadtypes.RestartPolicyRecreateInstance:
+				if got := h.restartsRecorded(); got != 1 {
+					t.Fatalf("RecreateInstanceOnPodRestart rebuilt the Instance %d times for one kill (events=%v)", got, h.events)
+				}
+				if alive {
+					t.Fatalf("the killed pod %s was not replaced under RecreateInstanceOnPodRestart", victim.Name)
+				}
+			default:
+				if got := h.restartsRecorded(); got != 0 {
+					t.Fatalf("restart policy None opened %d repair(s) for a runner killed once (events=%v)", got, h.events)
+				}
+				if !alive {
+					t.Fatalf("the killed pod %s must keep its identity under restart policy None", victim.Name)
+				}
+			}
+		})
+	}
+}
+
+// A pushed revision whose runner dies once on every set after it is
+// Ready, under RecreateInstanceOnPodRestart: the policy rebuilds the
+// first set at once, and from the rebuilt set's death on the running
+// revision's retry ladder counts the crash and paces the rebuild, so the
+// status says why before any further crash-revision pod is created, the
+// ladder holds after its attempts, and nothing rebuilds the revision past
+// the hold. The runner exits cleanly, as a runner that stops itself does.
+
+// TestCrashAfterPromotion_EverySetDiesOnceAfterReady_LadderSaysWhy pins
+// that rule on single-pod Instances and on leader+worker gangs, under
+// SurgeThenDrain maxSurge 1 and RecreatePod maxUnavailable 1.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Held]/before
+func TestCrashAfterPromotion_EverySetDiesOnceAfterReady_LadderSaysWhy(t *testing.T) {
+	cases := []struct {
+		name     string
+		strategy workloadtypes.UpdateStrategyType
+		multiPod bool
+		exitCode int32
+		// atomic drives the batched status writer the InferenceReplica
+		// adapter wires, the path a gang surge promotes its target through.
+		atomic bool
+	}{
+		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1, clean exit", strategy: workloadtypes.UpdateStrategySurgeThenDrain, exitCode: 0},
+		{name: "four single-pod Instances under RecreatePod maxUnavailable 1, clean exit", strategy: workloadtypes.UpdateStrategyRecreatePod, exitCode: 0},
+		{name: "four leader+worker gangs under SurgeThenDrain maxSurge 1, clean exit", strategy: workloadtypes.UpdateStrategySurgeThenDrain, multiPod: true, exitCode: 0},
+		{name: "four leader+worker gangs under SurgeThenDrain maxSurge 1, clean exit, batched status writes", strategy: workloadtypes.UpdateStrategySurgeThenDrain, multiPod: true, exitCode: 0, atomic: true},
+		{name: "four leader+worker gangs under RecreatePod maxUnavailable 1, clean exit", strategy: workloadtypes.UpdateStrategyRecreatePod, multiPod: true, exitCode: 0},
+		{name: "four leader+worker gangs under RecreatePod maxUnavailable 1, clean exit, batched status writes", strategy: workloadtypes.UpdateStrategyRecreatePod, multiPod: true, exitCode: 0, atomic: true},
+		{name: "four leader+worker gangs under RecreatePod maxUnavailable 1, exit 1", strategy: workloadtypes.UpdateStrategyRecreatePod, multiPod: true, exitCode: 1},
+	}
+	const replicas = int32(4)
+	const attempts = int32(3)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryHarnessFor(t, tc.multiPod, constants.MainContainerName)
+			h.recorder = record.NewFakeRecorder(512)
+			h.atomicStatus = tc.atomic
+			h.replicas = replicas
+			h.crashLeaderOnly = tc.multiPod
+			rebuild := workloadtypes.RestartPolicyRecreateInstance
+			h.lifecycle.RestartPolicy = &rebuild
+			h.stepFloor = 5 * time.Second
+			// The roll waits out the proven window after each promote; the
+			// runners keep serving and dying on their own clock meanwhile.
+			h.stepCap = h.stepFloor
+			h.kubeletLag = time.Second
+			// Every set dies twenty seconds after its Instance entered Ready,
+			// inside the stuck-pod grace that bounds the crash window.
+			h.crashAfterServed = 4
+			h.crashEverySet = true
+			code := tc.exitCode
+			h.crashExitCode = &code
+			h.retryPolicy = &workloadtypes.RetryPolicy{MaxAttempts: attempts, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2}
+			h.useRollingBudget(tc.strategy)
+			if !h.run(200, func() bool { return h.settledOn(h.revV1, replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+			}
+
+			revCrash := h.crashRevision(crashOnceAfterServingImage)
+			seen := map[types.UID]struct{}{}
+			// setsSeen records, per Instance, every crash-revision pod UID
+			// any pass observed; a UID beyond the ones at the loop's first
+			// sighting is a further set.
+			setsSeen := map[int32]map[types.UID]struct{}{}
+			setsAtLoop := map[int32]int{}
+			deaths := 0
+			saidWhyAt, heldAt := -1, -1
+			var uidsAtHeld int
+			pass := 0
+			parked := false
+			h.runWithInvariant(400, func() bool { return heldAt >= 0 && pass >= heldAt+12 }, func() {
+				pass++
+				h.trackPodsOnImage(crashOnceAfterServingImage, seen)()
+				for _, st := range h.irStatuses() {
+					if st.Phase == workloadtypes.InstancePhaseFailed {
+						parked = true
+					}
+				}
+				for _, pod := range h.livePods() {
+					idx, ok := query.InstanceIdxFromLabels(pod)
+					if !ok || pod.Spec.Containers[0].Image != crashOnceAfterServingImage {
+						continue
+					}
+					if setsSeen[idx] == nil {
+						setsSeen[idx] = map[types.UID]struct{}{}
+					}
+					setsSeen[idx][pod.UID] = struct{}{}
+				}
+				deaths = 0
+				for idx, n := range h.crashedInstances {
+					if n > deaths {
+						deaths = n
+					}
+					if n >= 2 {
+						if _, noted := setsAtLoop[idx]; !noted {
+							setsAtLoop[idx] = len(setsSeen[idx])
+						}
+					}
+				}
+				b := h.findBlock(revCrash.Name)
+				saysWhy := b != nil || len(h.heldWarnings) > 0 || len(h.failedWarnings) > 0
+				if saysWhy && saidWhyAt < 0 {
+					saidWhyAt = pass
+				}
+				if len(h.heldWarnings) > 0 && heldAt < 0 {
+					heldAt, uidsAtHeld = pass, len(seen)
+				}
+				// Once an Instance's rebuilt set has died too, the revision
+				// is looping: the ladder counts it before a third set of that
+				// Instance is built.
+				for idx, at := range setsAtLoop {
+					if len(setsSeen[idx]) > at && saidWhyAt < 0 {
+						h.dumpState("third set before any word")
+						t.Fatalf("Instance %d got a further crash-revision set (%d pods seen for it, %d at its second death) before the status said why", idx, len(setsSeen[idx]), at)
+					}
+				}
+				if heldAt >= 0 && len(seen) > uidsAtHeld {
+					h.dumpState("rebuilt after the hold")
+					t.Fatalf("a crash-revision pod was created after the ladder held (%d pods, %d at the hold)", len(seen), uidsAtHeld)
+				}
+				if b != nil && b.AttemptsStarted > attempts {
+					t.Fatalf("the ladder counted %d attempts, bound %d", b.AttemptsStarted, attempts)
+				}
+			})
+			if deaths < 2 {
+				h.dumpState("no loop")
+				t.Fatalf("the story did not run: %d crash-revision pod(s) died", deaths)
+			}
+			if saidWhyAt < 0 {
+				h.dumpState("silent")
+				t.Fatalf("the status never said why: no RetryBlock for %s, no RetryHeld or InstanceFailed warning (deaths=%d, pods=%d)", revCrash.Name, deaths, len(seen))
+			}
+			if heldAt < 0 {
+				h.dumpState("never held")
+				t.Fatalf("the ladder never held %s (deaths=%d, pods=%d, blocks=%+v)", revCrash.Name, deaths, len(seen), h.blocks)
+			}
+			b := h.findBlock(revCrash.Name)
+			if b == nil || b.State != workloadtypes.RetryBlockHeld || b.AttemptsStarted != attempts {
+				t.Fatalf("the held ladder must record %d attempts, got %+v", attempts, b)
+			}
+			// The row the hold parks reads Failed with an InstanceFailed
+			// warning naming the crash; a parked row whose pod set comes up
+			// again may resume Ready under the hold, which keeps saying why.
+			if !parked || len(h.failedWarnings) == 0 {
+				h.dumpState("no Failed row")
+				t.Fatalf("a row on the held revision must read Failed with an InstanceFailed warning (failed warnings=%v)", h.failedWarnings)
+			}
+		})
 	}
 }

@@ -184,7 +184,7 @@ func TestStampRestarting_ContinuesASpentRepairsRetryCount(t *testing.T) {
 		},
 	}
 	for idx, want := range map[int32]int32{0: 2, 1: 0, 2: 0} {
-		inc, err := StampRestarting(context.Background(), input, idx, "again", time.Hour)
+		inc, err := StampRestarting(context.Background(), input, idx, "again", time.Hour, nil)
 		if err != nil {
 			t.Fatalf("row %d: %v", idx, err)
 		}

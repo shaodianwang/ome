@@ -257,13 +257,24 @@ func StampRecreating(ctx context.Context, input types.ReconcileInput, idx int32,
 // A Restart stamped over a Failed row that already carries a Restart is
 // that repair's next attempt: the new operation's RetryCount continues
 // the spent one's, which is what the retry ladder is indexed by.
-func StampRestarting(ctx context.Context, input types.ReconcileInput, idx int32, reason string, timeout time.Duration) (int64, error) {
+//
+// failure, when given, is the termination of the pod set the restart
+// drains, captured into LastFailure in the same write, dated as
+// captured: the drain deletes the pod and its record with it, and a
+// rebuilt pod that keeps its name and dies the same way is a new failure
+// a reader anchored on the time must see. A stored record that differs
+// in nothing is left as it is.
+func StampRestarting(ctx context.Context, input types.ReconcileInput, idx int32, reason string, timeout time.Duration, failure *types.InstanceTermination) (int64, error) {
 	var observedIncarnation int64
 	err := input.MutateInstance(ctx, idx, func(s *types.InstanceStatus) bool {
 		if s.Phase == types.InstancePhaseRestarting &&
 			s.Operation != nil && s.Operation.Type == types.InstanceOperationRestart {
 			observedIncarnation = s.Incarnation
 			return false
+		}
+		if failure != nil && !(sameFailureIdentity(s.LastFailure, failure) && s.LastFailure.Time.Equal(&failure.Time)) {
+			captured := *failure
+			s.LastFailure = &captured
 		}
 		pinned := ""
 		retries := int32(0)
@@ -586,14 +597,41 @@ func RetryBlockStartAttempt(rb *types.RetryBlock) types.RetryBlockDisposition {
 	return types.RetryBlockPersist
 }
 
+// RowRemembersCrashOn reports whether a row Ready on rev records a
+// failure of its current promoted pod set: a LastFailure dated after the
+// row entered Ready. A rebuild enters Ready anew, so a record of the set
+// it replaced reads as none.
+func RowRemembersCrashOn(rows []types.InstanceStatus, rev string) bool {
+	for i := range rows {
+		row := &rows[i]
+		if row.Phase != types.InstancePhaseReady || row.RunningRevision != rev || row.LastFailure == nil || row.ReadySince == nil {
+			continue
+		}
+		if row.LastFailure.Time.After(row.ReadySince.Time) {
+			return true
+		}
+	}
+	return false
+}
+
 // RetryBlockPruneOnPromote removes the RetryBlock for rev once the
 // subject converges there: a converged subject leaves no active block.
+// A subject has not converged while a row Ready on rev remembers a crash
+// of its promoted pod set (RowRemembersCrashOn): the block counts that
+// crash and paces its rebuild, and the prune of a block its rows outlived
+// clears it once they do. A Held block is never pruned here: one row
+// converging on a revision whose ladder holds, on an attempt admitted
+// before the hold, does not make the revision sound, and the hold lasts
+// until a different target revision arrives or an operator releases it.
 // No-op when the adapter did not wire MutateRetryBlock, or rev is empty.
 func RetryBlockPruneOnPromote(ctx context.Context, input types.ReconcileInput, rev string) error {
-	if input.MutateRetryBlock == nil || rev == "" {
+	if input.MutateRetryBlock == nil || rev == "" || RowRemembersCrashOn(input.ObservedState.InstanceStatuses, rev) {
 		return nil
 	}
-	if err := input.MutateRetryBlock(ctx, rev, func(_ *types.RetryBlock) types.RetryBlockDisposition {
+	if err := input.MutateRetryBlock(ctx, rev, func(b *types.RetryBlock) types.RetryBlockDisposition {
+		if b.State == types.RetryBlockHeld {
+			return types.RetryBlockUnchanged
+		}
 		return types.RetryBlockRemove
 	}); err != nil {
 		return fmt.Errorf("prune retry block (rev=%s): %w", rev, err)

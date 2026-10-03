@@ -259,13 +259,13 @@ KIND_SPEC_GROUPS = (
     ("runtime-retry-recovery", "Runtime, retry, and recovery", (
         "bad_image", "crashloop_dark_rolls_first", "crashloop_new_revision_bound",
         "crashloop_new_revision_gang_bound",
-        "crashloop_off_target_roll", "crashloop_one_down_no_surge", "crashloop_open_repair_retarget", "disposition", "retry_block",
+        "crashloop_off_target_roll", "crashloop_one_down_no_surge", "crashloop_open_repair_retarget", "crashloop_gang_after_ready_says_why", "disposition", "retry_block",
         "runtime_corrective_recovery", "runtime_owned_runner_shape",
         "runtime_resolution", "failed_repair_heal",
     )),
     ("pd-topology-isolation", "PD topology and isolation", (
         "pd", "pd_isolation", "pd_three_way", "pd_concurrent", "independent",
-        "pairing_protocol", "pd_peer_revision",
+        "pairing_protocol", "pd_peer_revision", "rollback_last_instance_rolling_pd",
     )),
     ("bluegreen-core", "BlueGreen rollouts", (
         "bluegreen", "bluegreen_n3", "bluegreen_inplaceonly_happy",

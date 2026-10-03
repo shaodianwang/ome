@@ -17,7 +17,6 @@ tick=3 pass result=none
 tick=4 note the pod falls into a crash loop on its own revision and stops serving, so the repair opens a Restart
 tick=4 apply pod.servingOff[source] pod=svc-a-engine-0-default-0 now=t+2m0s
 tick=4 apply pod.waiting[CrashLoopBackOff] pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff now=t+2m0s
-tick=4 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#2{type=Restart step=Drain reason=pod svc-a-engine-0-default-0 wedged in CrashLoopBackOff past the stuck-pod grace started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} precondition=ok
-tick=4 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod svc-a-engine-0-default-0 wedged in CrashLoopBackOff past the stuck-pod grace (incarnation=2)
 tick=4 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#2{type=Restart step=Drain reason=pod svc-a-engine-0-default-0 wedged in CrashLoopBackOff past the stuck-pod grace started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=4 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod svc-a-engine-0-default-0 wedged in CrashLoopBackOff past the stuck-pod grace (incarnation=2)
 tick=4 pass result=after:5s

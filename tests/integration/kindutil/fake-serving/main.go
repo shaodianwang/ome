@@ -62,6 +62,21 @@ func main() {
 
 	nodeFault := nodeScopedFault()
 
+	// EXIT_AFTER_READY_SEC stops the process that many seconds after it
+	// starts serving, exiting 0: the shape of a runner that serves and
+	// then stops itself, which the kubelet restarts at once. It counts
+	// from the moment the listener is up, which is when a pod with no
+	// readiness probe reads Ready and within a probe period of it
+	// otherwise.
+	if d, err := strconv.Atoi(os.Getenv("EXIT_AFTER_READY_SEC")); err == nil && d > 0 {
+		exitAfterReady := time.Duration(d) * time.Second
+		go func() {
+			time.Sleep(exitAfterReady)
+			fmt.Printf("EXIT_AFTER_READY_SEC=%s elapsed since serving began, exiting 0\n", exitAfterReady)
+			os.Exit(0)
+		}()
+	}
+
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		if failAt == "ready" {
 			http.Error(w, "FAIL_AT=ready", http.StatusServiceUnavailable)

@@ -57,7 +57,7 @@ func observeGroupTargets(ctx context.Context, reads client.Reader, isvc *v1beta1
 				}
 				return nil, false, err
 			}
-			if ir.Status.ObservedGeneration != ir.Generation {
+			if ir.Status.ObservedGeneration != ir.Generation || projectionTrails(isvc, ir) {
 				fresh = false
 			}
 			current := query.RevisionFromName(ir.Status.CurrentRevision).Hash()
@@ -77,6 +77,24 @@ func observeGroupTargets(ctx context.Context, reads client.Reader, isvc *v1beta1
 }
 
 // groupKind is the progression kind a spec group declares, ref included.
+// projectionTrails reports whether ir was last projected from an older
+// generation of the service than the one it carries now: the projector
+// stamps the parent generation on every pass, and until it stamps this
+// one the member's revisions still describe the spec the service had
+// before. A run judged against them would close on a roll the service
+// has already withdrawn. A member with no stamp is read as current.
+func projectionTrails(isvc *v1beta1.InferenceService, ir *v1beta1.InferenceReplica) bool {
+	stamp, ok := ir.Annotations[constants.InferenceReplicaParentGenerationAnnotationKey]
+	if !ok {
+		return false
+	}
+	projected, err := strconv.ParseInt(stamp, 10, 64)
+	if err != nil {
+		return false
+	}
+	return projected < isvc.Generation
+}
+
 func groupKind(g *v1beta1.RolloutGroup) v1beta1.RolloutProgressionKind {
 	return g.DeclaredProgression()
 }

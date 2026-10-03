@@ -2956,7 +2956,7 @@ func TestCreate_BatchedReadyOnRevisionPromotesAndPrunesOnce(t *testing.T) {
 	}
 	input.ObservedState.RetryBlocks = []workload.RetryBlock{{
 		TargetRevision: target.Name,
-		State:          workload.RetryBlockHeld,
+		State:          workload.RetryBlockRetryInProgress,
 	}}
 	pruneCalls := 0
 	var pruneDisposition workload.RetryBlockDisposition
@@ -2965,7 +2965,7 @@ func TestCreate_BatchedReadyOnRevisionPromotesAndPrunesOnce(t *testing.T) {
 			return fmt.Errorf("prune revision: got %q, want %q", revision, target.Name)
 		}
 		pruneCalls++
-		block := workload.RetryBlock{TargetRevision: revision, State: workload.RetryBlockHeld}
+		block := workload.RetryBlock{TargetRevision: revision, State: workload.RetryBlockRetryInProgress}
 		pruneDisposition = mutate(&block)
 		return nil
 	}
@@ -3090,7 +3090,7 @@ func TestCreate_BatchedRetryBlockPruneFailureRestoresFailFastPrefix(t *testing.T
 	pruneCalls := 0
 	input.MutateRetryBlock = func(_ context.Context, _ string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
 		pruneCalls++
-		block := workload.RetryBlock{TargetRevision: target.Name, State: workload.RetryBlockHeld}
+		block := workload.RetryBlock{TargetRevision: target.Name, State: workload.RetryBlockRetryInProgress}
 		if got := mutate(&block); got != workload.RetryBlockRemove {
 			return fmt.Errorf("prune disposition: got %v, want Remove", got)
 		}

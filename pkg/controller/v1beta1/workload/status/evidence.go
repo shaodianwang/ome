@@ -106,6 +106,26 @@ func RecordLastFailure(ctx context.Context, input types.ReconcileInput, idx int3
 	})
 }
 
+// RecordDatedFailure stamps the row's LastFailure with the captured
+// termination, dated as captured: a stored record that differs only in
+// its time is rewritten, so a reader anchored on the time (a crash of
+// the row's promoted pod set remembered against the row's Ready and the
+// block's first failure) reads this sighting. Idempotent within a pass:
+// the same record at the same time writes once.
+func RecordDatedFailure(ctx context.Context, input types.ReconcileInput, idx int32, t *types.InstanceTermination) error {
+	if t == nil {
+		return nil
+	}
+	return input.MutateInstance(ctx, idx, func(s *types.InstanceStatus) bool {
+		if sameFailureIdentity(s.LastFailure, t) && s.LastFailure.Time.Equal(&t.Time) {
+			return false
+		}
+		captured := *t
+		s.LastFailure = &captured
+		return true
+	})
+}
+
 // RecordRefreshedFailure replaces a Failed row's LastFailure with
 // termination when the recorded reason is still the generic one, and
 // touches nothing else. The recorded time survives: what changes is the

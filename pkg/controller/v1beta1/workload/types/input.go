@@ -275,6 +275,10 @@ type ReconcileInput struct {
 	// (lifecycle.stuckPodGracePeriod); zero or negative disables fast
 	// escalation (the InstanceReadyTimeout backstop still fires).
 	StuckPodGrace time.Duration
+	// RevisionBorn is when the revision being rolled was created, zero
+	// when the pass has no target. A failure dated before it belongs to
+	// a set of a superseded revision and never reads as this revision's.
+	RevisionBorn time.Time
 
 	// UnschedulableGrace is how long a pod may carry
 	// PodScheduled=False/Unschedulable — or an Instance's PodGroup report

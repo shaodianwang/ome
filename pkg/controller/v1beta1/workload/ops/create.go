@@ -386,9 +386,9 @@ func createFilteredBatched(
 			continue
 		}
 		var mutation workload.InstanceMutation
-		if target != nil && existingPodsMatchTargetRevision(existing, target) {
+		onTarget := target != nil && existingPodsMatchTargetRevision(existing, target)
+		if onTarget {
 			mutation = status.ReadyOnRevisionMutation(inst.Index, target.Name, input.Now())
-			action.pruneRevision = target.Name
 		} else {
 			mutation = status.ReadyMutation(inst.Index, input.Now())
 		}
@@ -397,6 +397,14 @@ func createFilteredBatched(
 			probe = *observed
 		}
 		action.statusChanges = mutation.Mutate(&probe)
+		// The prune is the promote's other half: a row that converges on
+		// the target here leaves no active block. A row that already ran
+		// the target converges on nothing: its pod set was rebuilt for a
+		// failure the revision's block counts, and the block keeps
+		// counting until the rows outlive the failure.
+		if onTarget && action.statusChanges && (observed == nil || observed.RunningRevision != target.Name) {
+			action.pruneRevision = target.Name
+		}
 		action.transition.index = inst.Index
 		mutation.OnCommit = action.transition.capture
 		action.statusMutation = mutation

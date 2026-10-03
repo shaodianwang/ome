@@ -62,6 +62,9 @@ func Reconcile(ctx context.Context, deps types.Deps, input types.ReconcileInput,
 	// One pacing sink per pass. The op state machines report progress as
 	// (done, error) and a throttled write is neither, so the server's
 	// suggested delay is deposited here and floors the wake-up below.
+	if target != nil {
+		input.RevisionBorn = target.CreationTimestamp.Time
+	}
 	if input.Pacing == nil {
 		input.Pacing = &types.APIPacing{}
 	}
@@ -158,7 +161,7 @@ func Execute(ctx context.Context, deps types.Deps, input types.ReconcileInput, p
 // endOfPassBookkeeping runs the end-of-pass steps the Decision allows:
 // the terminal-failure escalation pass, which repairs from the evidence
 // and from the holds this pass already recorded, followed by the
-// RetryBlock supersede-prune.
+// RetryBlock supersede-prune and the prune of a block its rows outlived.
 //
 // A paused Component runs neither. A pause freezes repair, not
 // observation — the hold authorities ran at the top of the pass and
@@ -180,7 +183,10 @@ func endOfPassBookkeeping(ctx context.Context, deps types.Deps, input types.Reco
 	}); err != nil {
 		return err
 	}
-	return escalation.PruneSupersededRetryBlocks(ctx, input, target)
+	if err := escalation.PruneSupersededRetryBlocks(ctx, input, target); err != nil {
+		return err
+	}
+	return escalation.PruneOutlivedRetryBlocks(ctx, input, plan, target, snapshot.CachedPods)
 }
 
 // runHoldPass evaluates every external hold once, for every observed

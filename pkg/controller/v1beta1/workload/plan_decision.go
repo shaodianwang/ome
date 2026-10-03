@@ -70,6 +70,12 @@ type RestartSelection struct {
 	// whole Component repairs at the operator's pace instead of recycling
 	// every serving Instance at once.
 	OpensUnavailability bool
+
+	// LadderRevision names the revision whose retry ladder admits the
+	// rebuild this selection opens, "" for an open the ladder does not
+	// pace. The ladder authorizes one attempt at a revision at a time, so
+	// the executor opens one such rebuild per revision per pass.
+	LadderRevision string
 }
 
 // MigrationSelection is the migrate pass's work for one reconcile
@@ -513,6 +519,7 @@ func planRestartSelections(ctx context.Context, input types.ReconcileInput, plan
 			Reason:              reason,
 			OpensRepair:         workloadops.RestartOpensRepair(input, inst, liveByInstance[inst.Index]),
 			OpensUnavailability: workloadops.RestartOpensUnavailability(input, inst, liveByInstance[inst.Index]),
+			LadderRevision:      workloadops.RestartOpensLadderAttempt(input, plan, inst, liveByInstance[inst.Index]),
 		})
 	}
 	return restarts, nil

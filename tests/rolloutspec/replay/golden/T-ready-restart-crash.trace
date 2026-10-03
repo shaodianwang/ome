@@ -15,9 +15,8 @@ tick=3 row=0 write no-op precondition=no-change
 tick=3 pass result=none
 tick=4 note the runner container dies and comes back under the same pod, and the policy rebuilds the Instance around the loss
 tick=4 apply pod.containerRestart pod=svc-a-engine-0-default-0 container=ome-container reason=OOMKilled now=t+1m0s
-tick=4 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-8aa14b8b readySince=t+0s op=op#2{type=Restart step=Drain reason=pod svc-a-engine-0-default-0 container ome-container restarted after Ready: OOMKilled (exit 1) started=t+1m0s lastProgressAt=t+1m0s deadline=t+31m0s} precondition=ok
-tick=4 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod svc-a-engine-0-default-0 container ome-container restarted after Ready: OOMKilled (exit 1) (incarnation=2)
 tick=4 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-8aa14b8b readySince=t+0s op=op#2{type=Restart step=Drain reason=pod svc-a-engine-0-default-0 container ome-container restarted after Ready: OOMKilled (exit 1) started=t+1m0s lastProgressAt=t+1m0s deadline=t+31m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=OOMKilled container=ome-container exitCode=1} precondition=ok
+tick=4 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod svc-a-engine-0-default-0 container ome-container restarted after Ready: OOMKilled (exit 1) (incarnation=2)
 tick=4 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
 tick=4 pod delete name=svc-a-engine-0-default-0 grace=default
 tick=4 pass result=after:5s

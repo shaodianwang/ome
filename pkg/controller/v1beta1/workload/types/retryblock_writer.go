@@ -22,10 +22,16 @@ import (
 // and the workload-root disposition share ONE implementation without
 // closing the workload → workload/ops import cycle.
 func RecordUpdateFailureInRetryBlock(ctx context.Context, input ReconcileInput, targetRev, reason string, cause FailureCause) error {
+	return RecordUpdateFailureInRetryBlockAt(ctx, input, targetRev, reason, cause, metav1.NewTime(input.Now()))
+}
+
+// RecordUpdateFailureInRetryBlockAt is RecordUpdateFailureInRetryBlock
+// with the wave dated at now, for a caller that dates its own record of
+// the same failure alike.
+func RecordUpdateFailureInRetryBlockAt(ctx context.Context, input ReconcileInput, targetRev, reason string, cause FailureCause, now metav1.Time) error {
 	if input.MutateRetryBlock == nil || targetRev == "" {
 		return nil
 	}
-	now := metav1.NewTime(input.Now())
 	// heldAttempts captures the Held transition inside the mutate; the
 	// warning is emitted only after the write COMMITS so RMW conflict
 	// retries cannot duplicate the event.

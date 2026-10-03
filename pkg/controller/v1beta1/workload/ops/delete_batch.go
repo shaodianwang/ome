@@ -358,6 +358,13 @@ func retiredGangSurgeFailure(row *workload.InstanceStatus, candidates []deleteBa
 	if row.LastFailure == nil || row.LastFailure.Reason == "" {
 		return nil
 	}
+	// The record must be this attempt's: a failure dated before the
+	// attempt started belongs to an attempt the row made at a revision
+	// since withdrawn, and charging it here would hold the revision the
+	// row is moving to for a failure it never had.
+	if row.LastFailure.Time.Before(&row.Operation.StartedAt) {
+		return nil
+	}
 	reason := row.LastFailure.Reason
 	return &status.AttemptFailure{TargetRevision: target, Reason: reason, Cause: workload.FailureCauseOf(reason)}
 }

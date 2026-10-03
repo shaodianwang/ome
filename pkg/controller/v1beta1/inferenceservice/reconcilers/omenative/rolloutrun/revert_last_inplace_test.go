@@ -2,9 +2,11 @@ package rolloutrun
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -120,5 +122,80 @@ func TestRevertAtTheLastInPlaceInstanceClosesTheRunSuperseded(t *testing.T) {
 		if got := lastOutcome(); got != v1beta1.RolloutRunCompleted {
 			t.Fatalf("pass %d: the fresh run closed %q, want %q", i, got, v1beta1.RolloutRunCompleted)
 		}
+	}
+}
+
+// TestRevertAtTheLastInstanceWaitsForTheProjectionBeforeJudgingTheRun: the
+// service reverts to the old revision in the moment the last Instance
+// promotes onto the new one. The run pass sees the revert as a service
+// generation its members have not yet been projected from, and the
+// members report the roll complete. A run judged against them would
+// close Completed and a fresh run would open for the revert; instead the
+// pass waits, and once the projection reaches the members and their
+// target returns to the old revision the run closes as superseded.
+func TestRevertAtTheLastInstanceWaitsForTheProjectionBeforeJudgingTheRun(t *testing.T) {
+	isvc := isvcFixture(v1beta1.RolloutGroup{
+		Components:    []v1beta1.ComponentType{v1beta1.EngineComponent},
+		RollingUpdate: &v1beta1.GroupRollingUpdate{},
+	})
+	isvc.Generation = 1
+	current := oldRev
+	pass := func(t *testing.T, target string, projectedFrom int64, rows []workloadtypes.InstanceStatus) {
+		t.Helper()
+		current = workloadstatus.CurrentRevisionFor(rows, current, target)
+		local := isvc.DeepCopy()
+		local.ObjectMeta.ResourceVersion = ""
+		ir := irPublished(t, current, target, rows)
+		ir.Annotations = map[string]string{constants.InferenceReplicaParentGenerationAnnotationKey: strconv.FormatInt(projectedFrom, 10)}
+		if _, err := Reconcile(context.Background(), testInputs(t, local, ir)); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		isvc.Status = local.Status
+	}
+	active := func() *v1beta1.RolloutRun {
+		if isvc.Status.Rollout == nil {
+			return nil
+		}
+		return isvc.Status.Rollout.ActiveRun
+	}
+	lastOutcome := func() v1beta1.RolloutRunOutcome {
+		if isvc.Status.Rollout == nil || isvc.Status.Rollout.LastRun == nil {
+			return ""
+		}
+		return isvc.Status.Rollout.LastRun.Outcome
+	}
+
+	pass(t, oldRev, 1, []workloadtypes.InstanceStatus{readyOn(0, oldRev), readyOn(1, oldRev), readyOn(2, oldRev), readyOn(3, oldRev)})
+	if active() != nil {
+		t.Fatalf("converged workload opened a run: %+v", active())
+	}
+
+	// The push: generation 2, projected onto the member.
+	isvc.Generation = 2
+	pass(t, newRev, 2, []workloadtypes.InstanceStatus{patchingTo(0, oldRev, newRev), readyOn(1, oldRev), readyOn(2, oldRev), readyOn(3, oldRev)})
+	if active() == nil {
+		t.Fatalf("the push opened no run")
+	}
+	rolling := active().RunID
+
+	// The revert lands as generation 3 while the member, still projected
+	// from generation 2, reports every Instance Ready on the new revision.
+	isvc.Generation = 3
+	pass(t, newRev, 2, []workloadtypes.InstanceStatus{readyOn(0, newRev), readyOn(1, newRev), readyOn(2, newRev), readyOn(3, newRev)})
+	if active() == nil || active().RunID != rolling {
+		t.Fatalf("the run was judged against a member not yet projected from the service's spec: active=%+v last=%q", active(), lastOutcome())
+	}
+
+	// The projection reaches the member: its target returns to the old
+	// revision while its Instances still run the new one.
+	pass(t, oldRev, 3, []workloadtypes.InstanceStatus{readyOn(0, newRev), readyOn(1, newRev), readyOn(2, newRev), readyOn(3, newRev)})
+	if got := lastOutcome(); got != v1beta1.RolloutRunSuperseded {
+		t.Fatalf("the run that targeted the new revision closed %q, want %q", got, v1beta1.RolloutRunSuperseded)
+	}
+	if active() == nil || active().RunID == rolling {
+		t.Fatalf("the revert opened no fresh run: %+v", active())
+	}
+	if got := active().TargetRevisions[0].Revision; got != query.RevisionFromName(oldRev).Hash() {
+		t.Fatalf("the fresh run pinned %q, want the old revision %q", got, query.RevisionFromName(oldRev).Hash())
 	}
 }

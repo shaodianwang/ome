@@ -114,6 +114,14 @@ func DetectRestartTriggerWithPods(input workload.ReconcileInput, plan workload.C
 	if reason, wedged := crashLoopRepairReason(input, s, expected, instancePods); wedged {
 		return true, reason
 	}
+	// A crash of the promoted pod set inside its window is remembered on
+	// the row whatever the policy says, so a later sighting whose kubelet
+	// record no longer dates the first restart still reads as this set's
+	// crash. The ladder counts it only where the wedge or the policy's
+	// trigger would rebuild the set.
+	if l := readCrashLadder(input, s, expected, instancePods); l != nil && l.remember {
+		return true, l.crash.restartReason()
+	}
 	if plan.RestartPolicy != workload.RestartPolicyRecreateInstance {
 		return false, ""
 	}
@@ -135,10 +143,10 @@ func DetectRestartTriggerWithPods(input workload.ReconcileInput, plan workload.C
 			return false, ""
 		}
 	} else {
+		if reason, restarted := runnerRestartTrigger(input, s, expected, instancePods); restarted {
+			return true, reason
+		}
 		for _, pod := range instancePods {
-			if reason, restarted := RunnerRestartedSinceReady(pod, s.ReadySince); restarted {
-				return true, reason
-			}
 			if pod.Status.Phase == corev1.PodFailed {
 				// Build a richer reason from the failed pod's container
 				// termination so the RestartTriggered event names the actual
@@ -298,35 +306,45 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		// attempt opens: the pods already carry the row's incarnation, and
 		// the repair ends with the promote below.
 		newInc = observed.Incarnation
-		wasNotRestarting = false
 	case spentRepairParked(input, observed, inst.TotalPods(), pods):
 		// Wedged and not yet due on the retry ladder: the trigger declined
 		// this row, and a pass that reaches it anyway leaves it parked.
 		return false, nil
 	default:
-		newInc, err = status.StampRestarting(ctx, input, inst.Index, reason, plan.InstanceReadyTimeout)
+		// A crash of a promoted pod set is the failure of the attempt that
+		// promoted it, whatever trigger reads it: the running revision's
+		// retry ladder counts it, paces the rebuild, and parks the row
+		// Failed once it holds.
+		ladderRev := ""
+		if wasNotRestarting && observed != nil && observed.Phase == workload.InstancePhaseReady {
+			parked, rev, err := countCrashOnLadder(ctx, input, plan, inst, observed, pods)
+			if err != nil || parked {
+				return false, err
+			}
+			ladderRev = rev
+		}
+		// The failing pod's diagnostics travel in the stamp's write: the
+		// drain below deletes the pod, and its termination reason and exit
+		// code with it, so a gang that keeps restarting would otherwise
+		// leave no failure trace. A restart for a pod count below desired
+		// finds nothing to capture and leaves any prior record intact.
+		var failure *workload.InstanceTermination
+		if wasNotRestarting {
+			failure = firstFailedPodTermination(pods, metav1.NewTime(input.Now()))
+		}
+		newInc, err = status.StampRestarting(ctx, input, inst.Index, reason, plan.InstanceReadyTimeout, failure)
 		if err != nil {
 			return false, fmt.Errorf("patch status Restarting (instance=%d): %w", inst.Index, err)
+		}
+		if ladderRev != "" {
+			if err := status.RetryBlockAttemptStarted(ctx, input, ladderRev); err != nil {
+				return false, fmt.Errorf("Restart: start retry ladder attempt (instance=%d): %w", inst.Index, err)
+			}
 		}
 		if wasNotRestarting {
 			workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonRestartTriggered,
 				"OMENative %s restart triggered: %s (incarnation=%d)",
 				workload.InstanceKey(input.Key.Component, inst.Index), reason, newInc)
-		}
-	}
-
-	// On the first pass, preserve the failing pod's diagnostics into
-	// InstanceStatus.LastFailure BEFORE Phase A drains and deletes it —
-	// otherwise the container termination reason / exit code vanish with
-	// the pod and a gang that keeps restarting leaves no failure trace.
-	// Only a genuine pod-failure restart populates this; a "pod count
-	// below desired" restart (the pod already vanished) finds nothing to
-	// capture and leaves any prior LastFailure intact.
-	if wasNotRestarting {
-		if t := firstFailedPodTermination(pods); t != nil {
-			if err := status.RecordLastFailure(ctx, input, inst.Index, t); err != nil {
-				return false, fmt.Errorf("record LastFailure (instance=%d): %w", inst.Index, err)
-			}
 		}
 	}
 
@@ -522,8 +540,7 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 // worth preserving across the recreate. Returns nil when no pod yields a
 // signal (e.g. the failing pod already vanished — the "pod count below
 // desired" trigger). Order-deterministic by the input slice.
-func firstFailedPodTermination(pods []*corev1.Pod) *workload.InstanceTermination {
-	now := metav1.Now()
+func firstFailedPodTermination(pods []*corev1.Pod, now metav1.Time) *workload.InstanceTermination {
 	// Prefer an explicitly Failed pod — that's the pod the trigger fired on.
 	for _, pod := range pods {
 		if pod != nil && pod.Status.Phase == corev1.PodFailed {
@@ -725,29 +742,476 @@ func RunnerRestartedAgainSinceReady(pod *corev1.Pod, readySince *metav1.Time) bo
 // that serves nothing removes no serving capacity and is not. The
 // coordination gate is not asked either way: the parked member that
 // makes the wedge already puts the Instance inside the gate's
-// serving-based unavailability. The RetryBlock recorded against the
-// revision denies either once the attempts are spent, so a revision that
-// keeps crash-looping is held rather than recycled forever.
+// serving-based unavailability. The running revision's retry ladder
+// bounds the rebuilds: a crash of the runner after the row entered Ready
+// is a failed attempt at that revision, the rebuild waits for the
+// ladder's backoff and is its next attempt, and once the ladder holds
+// the row parks Failed naming the crash, so a revision that keeps
+// crash-looping is held and said so rather than recycled forever. A
+// wedge with no such restart answers to the RetryBlock as a repair of a
+// never-Ready Instance does.
 
 // crashLoopRepairReason reports whether this row holds a crash-loop
-// wedge the restart pass may repair: the wedge itself is
-// evidence.CrashLoopWedge, and the RetryBlock held against the revision
-// is what denies the rebuild — the same authority a repair of a
-// never-Ready Instance answers to. A pod parked inside the grace is not
-// a wedge yet, and the grace ending raises no watch event, so the pass
-// deposits the grace left and comes back when the repair can open.
+// wedge the restart pass acts on: the wedge itself is
+// evidence.CrashLoopWedge, and the running revision's retry ladder says
+// whether the rebuild opens, waits, or the row parks (readCrashLoopRepair).
 func crashLoopRepairReason(input workload.ReconcileInput, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) (string, bool) {
-	reason, wedged, graceLeft := evidence.CrashLoopWedge(input, s, expected, pods)
-	if !wedged {
+	r := readCrashLoopRepair(input, s, expected, pods)
+	if !r.fires {
+		return "", false
+	}
+	return r.restartReason(), true
+}
+
+// crashLoopRepair is the restart pass's reading of a crash-loop wedge on
+// a Ready row: whether the trigger selects the row this pass, whether the
+// selection opens the rebuild, and what the running revision's retry
+// ladder says about the crash (nil when the ladder does not read it). A
+// selection that fires without opening counts the crash on the ladder or
+// parks the row Failed under a ladder that holds.
+type crashLoopRepair struct {
+	pod    *corev1.Pod
+	reason string
+	fires  bool
+	opens  bool
+	ladder *crashLoopLadder
+}
+
+func (r crashLoopRepair) restartReason() string {
+	return fmt.Sprintf("pod %s wedged in %s past the stuck-pod grace", r.pod.Name, r.reason)
+}
+
+// runnerCrash is the crash of a promoted pod set: a pod carrying the
+// row's running revision, still running that revision's own image, whose
+// runner restarted after the row entered Ready, with the reason the
+// kubelet reports for it (the terminal waiting reason it is parked in,
+// else the termination's).
+type runnerCrash struct {
+	pod    *corev1.Pod
+	reason string
+}
+
+func (c runnerCrash) restartReason() string {
+	return fmt.Sprintf("pod %s crashed after promotion: %s", c.pod.Name, c.reason)
+}
+
+// readRunnerCrash finds the crash of a complete pod set on a Ready row
+// that is the revision's own. One restart of a runner after Ready is not
+// a crash: the kubelet starts it again and the set serves on, or the
+// policy rebuilds it; a crash is a loop (runnerLoops). A set short of a
+// pod is a loss, not a crash: its repair recovers capacity already gone
+// and is not the ladder's to pace. A pod whose runner no longer runs the
+// revision's image (podRunsDesiredRunnerImage) is a break made under the
+// row, not the revision's failure: its repair re-renders the revision at
+// once.
+func readRunnerCrash(input workload.ReconcileInput, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) (runnerCrash, bool) {
+	if s == nil || s.Phase != workload.InstancePhaseReady || s.RunningRevision == "" {
+		return runnerCrash{}, false
+	}
+	live := query.ExcludeTerminalPods(pods)
+	if expected <= 0 || int32(len(live)) < expected {
+		return runnerCrash{}, false
+	}
+	running := query.RevisionFromName(s.RunningRevision)
+	for _, pod := range live {
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		if podRev := query.RevisionFromPod(pod); !podRev.IsZero() && !running.IsZero() && !podRev.Same(running) {
+			continue
+		}
+		if _, restarted := RunnerRestartedSinceReady(pod, s.ReadySince); !restarted {
+			continue
+		}
+		if !podRunsDesiredRunnerImage(input, s, pod) || !runnerLoops(input, s, pod) {
+			continue
+		}
+		reason := ""
+		if parked, stuck := evidence.PodStuckInTerminalWaiting(pod, input.Now(), 0); stuck {
+			reason = parked
+		} else if t := workload.PodTermination(pod, metav1.NewTime(input.Now())); t != nil {
+			reason = t.Reason
+		}
+		if reason == "" {
+			reason = "Error"
+		}
+		return runnerCrash{pod: pod, reason: reason}, true
+	}
+	return runnerCrash{}, false
+}
+
+// runnerLoops reports whether a runner that restarted after the row
+// entered Ready is crash-looping rather than restarted once: the row
+// already remembers this set's crash, the runner restarted again since
+// Ready, it is parked in a terminal waiting state such as
+// CrashLoopBackOff, it is the first restart of a set that replaced one
+// the row rebuilt for a failure just before this set was created (the
+// policy's rebuild of a restarted runner, or the repair of a wedge), or
+// the running revision's ladder already reads the revision as failing
+// where the set stands (revisionFailing), so the revision crashes on set
+// after set.
+func runnerLoops(input workload.ReconcileInput, s *workload.InstanceStatus, pod *corev1.Pod) bool {
+	if crashRemembered(s) || RunnerRestartedAgainSinceReady(pod, s.ReadySince) {
+		return true
+	}
+	if _, stuck := evidence.PodStuckInTerminalWaiting(pod, input.Now(), 0); stuck {
+		return true
+	}
+	return rebuiltAfterFailure(input, s, pod) || revisionFailing(input, s, pod)
+}
+
+// revisionFailing reports whether the running revision's retry ladder
+// already reads the revision as failing where pod stands: the ladder
+// holds, so no restart on the revision is rebuilt and the row parks
+// Failed; or the set was created after the ladder recorded a failure,
+// so it is an attempt the ladder admitted, or one built while the
+// revision was already failing, and its crash is the revision's next
+// failure however the row's own record reads.
+func revisionFailing(input workload.ReconcileInput, s *workload.InstanceStatus, pod *corev1.Pod) bool {
+	block := workload.FindRetryBlock(input.ObservedState.RetryBlocks, s.RunningRevision)
+	if block == nil {
+		return false
+	}
+	if block.State == workload.RetryBlockHeld {
+		return true
+	}
+	if block.LastFailureAt == nil || pod.CreationTimestamp.IsZero() {
+		return false
+	}
+	return !pod.CreationTimestamp.Time.Before(block.LastFailureAt.Time)
+}
+
+// rebuiltAfterFailure reports whether pod belongs to a set the row built
+// right after a failure of the set before it, as the roll reads it
+// (RebuiltAfterFailure): the row's failure record predates this set's
+// Ready and this pod was created within the crash window of that
+// failure, and the failure is this revision's own, not one of a set the
+// row ran on a superseded revision.
+func rebuiltAfterFailure(input workload.ReconcileInput, s *workload.InstanceStatus, pod *corev1.Pod) bool {
+	if s.LastFailure == nil || s.ReadySince == nil || s.LastFailure.Time.After(s.ReadySince.Time) {
+		return false
+	}
+	return RebuiltAfterFailure(pod, s.LastFailure, input.RevisionBorn, ProvenWindowSeconds(input.DesiredSpec.MinReadySeconds, input.StuckPodGrace))
+}
+
+// podRunsDesiredRunnerImage reports whether pod's runner container runs
+// the image the row's running revision renders for it. The desired
+// template renders the spec target, so only a row running that revision
+// can be compared; any other row, and a pod whose runner image differs
+// from the template's, is read as not the revision's own.
+func podRunsDesiredRunnerImage(input workload.ReconcileInput, s *workload.InstanceStatus, pod *corev1.Pod) bool {
+	if s.RunningRevision == "" || s.RunningRevision != input.ObservedState.UpdateRevision {
+		return false
+	}
+	tmpl := input.DesiredSpec.PodSpec
+	if pod.Labels[query.LabelRunner] == workload.RunnerWorker && input.DesiredSpec.WorkerPodSpec != nil {
+		tmpl = input.DesiredSpec.WorkerPodSpec
+	}
+	if tmpl == nil {
+		return false
+	}
+	want, got := "", ""
+	for i := range tmpl.Containers {
+		if tmpl.Containers[i].Name == constants.MainContainerName {
+			want = tmpl.Containers[i].Image
+		}
+	}
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == constants.MainContainerName {
+			got = pod.Spec.Containers[i].Image
+		}
+	}
+	return want != "" && want == got
+}
+
+// crashWindow is the window after a row enters Ready inside which a
+// crash of its promoted pod set is the attempt's failure: the
+// Component's minReadySeconds, and no shorter than the stuck-pod grace,
+// the age below which a crash is not yet read as a wedge. A pod set that
+// held Ready for the window and breaks later is a steady-state break,
+// repaired as it always was and never counted.
+func crashWindow(input workload.ReconcileInput) time.Duration {
+	return time.Duration(ProvenWindowSeconds(input.DesiredSpec.MinReadySeconds, input.StuckPodGrace)) * time.Second
+}
+
+// firstRestartInsideWindow reports whether the runner's first restart
+// after the row entered Ready came within the crash window, as far as
+// the kubelet's record shows. The kubelet keeps only the latest
+// termination, so the first restart is bounded from above: by that
+// termination's end, or by the start of the run that died when that run
+// itself began after Ready. The bound drifts as a set keeps crashing,
+// which is why the row remembers the first sighting (crashRemembered).
+func firstRestartInsideWindow(input workload.ReconcileInput, s *workload.InstanceStatus, pod *corev1.Pod) bool {
+	if s.ReadySince == nil || s.ReadySince.IsZero() {
+		return false
+	}
+	for i := range pod.Status.ContainerStatuses {
+		cs := &pod.Status.ContainerStatuses[i]
+		if cs.Name != constants.MainContainerName {
+			continue
+		}
+		var first time.Time
+		if t := cs.LastTerminationState.Terminated; t != nil && t.FinishedAt.After(s.ReadySince.Time) {
+			first = t.FinishedAt.Time
+			if t.StartedAt.After(s.ReadySince.Time) {
+				first = t.StartedAt.Time
+			}
+		} else if r := cs.State.Running; r != nil && r.StartedAt.After(s.ReadySince.Time) {
+			first = r.StartedAt.Time
+		} else {
+			return false
+		}
+		return !first.After(s.ReadySince.Add(crashWindow(input)))
+	}
+	return false
+}
+
+// crashRemembered reports whether the row records a crash of its current
+// promoted pod set: a LastFailure dated after the row entered Ready. A
+// rebuild enters Ready anew, so the record of the set it replaced reads
+// as none.
+func crashRemembered(s *workload.InstanceStatus) bool {
+	return s.LastFailure != nil && s.ReadySince != nil && s.LastFailure.Time.After(s.ReadySince.Time)
+}
+
+// crashCountedOnBlock reports whether the ladder already counts the
+// remembered crash of this promoted set: the row's record is dated no
+// earlier than the block's first failure. The record and the block's
+// failure carry the one time of the pass that counted the crash
+// (rememberCrash), never the kubelet's earlier date, so a set counted
+// once is never counted again, however the block's state moves under
+// other attempts.
+func crashCountedOnBlock(s *workload.InstanceStatus, block *workload.RetryBlock) bool {
+	return crashRemembered(s) && block != nil && block.FirstFailureAt != nil &&
+		!s.LastFailure.Time.Time.Before(block.FirstFailureAt.Time)
+}
+
+// rememberCrash records the crash of the row's promoted pod set on the
+// row, dated at the pass that counts it with the time the block's failure
+// carries, so later passes read the window and the count off the row
+// rather than off a kubelet record that drifts or predates the count.
+func rememberCrash(ctx context.Context, input workload.ReconcileInput, idx int32, termination *workload.InstanceTermination, at metav1.Time) error {
+	dated := *termination
+	dated.Time = at
+	return status.RecordDatedFailure(ctx, input, idx, &dated)
+}
+
+// crashRebuildWarranted reports whether a trigger of the restart pass
+// would rebuild the row's pod set for its crash: the pod set is wedged
+// past the stuck-pod grace, or the policy rebuilds on a runner restart.
+// A crash that warrants no rebuild is only counted.
+func crashRebuildWarranted(input workload.ReconcileInput, plan workload.ComponentPlan, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) bool {
+	if pod, _, _ := evidence.CrashLoopWedgedPod(input, s, expected, pods); pod != nil {
+		return true
+	}
+	return plan.RestartPolicy == workload.RestartPolicyRecreateInstance && runnerRestartedSinceReady(pods, s.ReadySince)
+}
+
+// runnerRestartedSinceReady reports whether any pod's runner restarted
+// after the row entered Ready (RunnerRestartedSinceReady).
+func runnerRestartedSinceReady(pods []*corev1.Pod, readySince *metav1.Time) bool {
+	for _, pod := range pods {
+		if _, restarted := RunnerRestartedSinceReady(pod, readySince); restarted {
+			return true
+		}
+	}
+	return false
+}
+
+// crashLoopLadder is the running revision's retry ladder read against a
+// crash of a promoted pod set. The crash is the failure of the attempt
+// that promoted the set and the rebuild is the ladder's next attempt, so
+// the one ladder every attempt at the revision is paced by bounds the
+// rebuilds too: a loop exhausts it, where a crash that never comes back
+// costs one attempt the Component's rows outlive.
+type crashLoopLadder struct {
+	rev   string
+	crash runnerCrash
+	// remember marks the first sighting of this promoted set's crash: the
+	// row records it, dated, before anything else reads it.
+	remember bool
+	// record marks a crash the block does not count yet: this set's first
+	// count, outside a wave the block already records.
+	record bool
+	// held marks a ladder that holds once the crash is counted.
+	held bool
+	// open marks a ladder that admits the rebuild this pass; wait is how
+	// long until it would, when the backoff is not due.
+	open     bool
+	wait     time.Duration
+	attempts int32
+}
+
+// readCrashLoopRepair reads the wedge and the ladder for one row. A pod
+// parked inside the grace is not a wedge yet, and the grace ending raises
+// no watch event, so the pass deposits the grace left and comes back when
+// the repair can open; a ladder whose backoff is not due deposits that
+// wait the same way.
+func readCrashLoopRepair(input workload.ReconcileInput, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) crashLoopRepair {
+	pod, reason, graceLeft := evidence.CrashLoopWedgedPod(input, s, expected, pods)
+	if pod == nil {
 		if graceLeft > 0 {
 			input.PassWake.Observe(graceLeft)
 		}
-		return "", false
+		return crashLoopRepair{}
+	}
+	r := crashLoopRepair{pod: pod, reason: reason}
+	if ladder := readCrashLadder(input, s, expected, pods); ladder != nil {
+		r.ladder = ladder
+		r.opens = ladder.open
+		r.fires = ladder.open || ladder.record || ladder.held || ladder.remember
+		return r
 	}
 	if rebuildRetryBlockDenies(input, s) {
+		return r
+	}
+	r.fires, r.opens = true, true
+	return r
+}
+
+// runnerRestartTrigger is the RecreateInstanceOnPodRestart trigger for a
+// runner that restarted after Ready, paced by the running revision's
+// ladder: a ladder whose backoff is not due, or whose attempt is in
+// flight, leaves the row until it admits the rebuild, and a ladder that
+// holds fires so the row parks Failed.
+func runnerRestartTrigger(input workload.ReconcileInput, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) (string, bool) {
+	reason, restarted := "", false
+	for _, pod := range pods {
+		if reason, restarted = RunnerRestartedSinceReady(pod, s.ReadySince); restarted {
+			break
+		}
+	}
+	if !restarted {
+		return "", false
+	}
+	if ladder := readCrashLadder(input, s, expected, pods); ladder != nil && !(ladder.open || ladder.record || ladder.held || ladder.remember) {
 		return "", false
 	}
 	return reason, true
+}
+
+// readCrashLadder is the running revision's ladder once the crash of the
+// row's promoted pod set is counted against it, computed on a copy of
+// the block with the same transition the writer applies. Nil when there
+// is no such crash, the crash came after the pod set had held the crash
+// window on a revision whose ladder does not hold (a steady-state break,
+// repaired as before), or the ladder records nothing for it: no ladder
+// is configured, or the cause is the environment's. A set is counted once: a later sighting of the same
+// set, with the block moved on under other attempts, records nothing. A
+// ladder whose backoff is not due deposits that wait on the pass, which
+// no watch event ends.
+func readCrashLadder(input workload.ReconcileInput, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) *crashLoopLadder {
+	crash, ok := readRunnerCrash(input, s, expected, pods)
+	if !ok {
+		return nil
+	}
+	rev := s.RunningRevision
+	now := input.Now()
+	cur := workload.FindRetryBlock(input.ObservedState.RetryBlocks, rev)
+	// A revision whose ladder holds admits no rebuild of its sets, inside
+	// the window or after it: a restart on it is the hold's to park.
+	heldRevision := cur != nil && cur.State == workload.RetryBlockHeld
+	remembered := crashRemembered(s)
+	if !remembered && !heldRevision && !firstRestartInsideWindow(input, s, crash.pod) {
+		return nil
+	}
+	block := workload.RetryBlock{TargetRevision: rev}
+	if cur != nil {
+		block = *cur
+	}
+	l := &crashLoopLadder{rev: rev, crash: crash, remember: !remembered}
+	switch block.State {
+	case workload.RetryBlockHeld, workload.RetryBlockBackoff:
+		// Held is terminal, and a Backoff block already counts this wave
+		// and paces the rebuild.
+	default:
+		if !crashCountedOnBlock(s, cur) {
+			l.record = true
+			workload.ApplyUpdateFailureToRetryBlock(&block, input.UpdateRetryPolicy, metav1.NewTime(now), crash.reason, workload.FailureCauseOf(crash.reason))
+		}
+	}
+	l.attempts = block.AttemptsStarted
+	switch block.State {
+	case workload.RetryBlockHeld:
+		l.held = true
+	case "":
+		return nil
+	default:
+		denied, wait := evaluateRetryBlockGate(&block, now, anyInFlightAttemptAt(input, rev))
+		l.open, l.wait = !denied, wait
+		if !l.open && wait > 0 {
+			input.PassWake.Observe(wait)
+		}
+	}
+	return l
+}
+
+// anyInFlightAttemptAt reports whether any row carries an attempt at rev
+// the ladder must let finish before it admits another: a Create or Update
+// pinned to it, or a Restart rebuilding it.
+func anyInFlightAttemptAt(input workload.ReconcileInput, rev string) bool {
+	statuses := input.ObservedState.InstanceStatuses
+	if anyInFlightCreateAttempt(input, allInstances) || anyInFlightUpdateAt(statuses, rev) {
+		return true
+	}
+	for i := range statuses {
+		s := &statuses[i]
+		if s.Phase == workload.InstancePhaseRestarting && rebuildRevision(s) == rev {
+			return true
+		}
+	}
+	return false
+}
+
+// countCrashOnLadder reads the crash of a Ready row's promoted pod set
+// against the running revision's retry ladder before a repair opens,
+// whatever trigger selected the row. A crash the block does not count
+// yet is counted at its first sighting and remembered on the row, dated
+// alike, whether or not a rebuild opens: the loop is the revision's
+// failure, and the ladder's backoff is what the roll waits on and
+// announces. Where the wedge or the policy's trigger would rebuild the
+// set, a ladder that holds parks the row Failed naming the crash, with
+// an InstanceFailed warning, and a ladder whose backoff is not due leaves
+// the row until it is. parked is true when no rebuild opens this pass.
+// rev names the revision whose ladder attempt the rebuild is, "" when
+// the ladder does not read the row.
+func countCrashOnLadder(ctx context.Context, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, s *workload.InstanceStatus, pods []*corev1.Pod) (bool, string, error) {
+	l := readCrashLadder(input, s, inst.TotalPods(), pods)
+	if l == nil {
+		return false, "", nil
+	}
+	now := metav1.NewTime(input.Now())
+	termination := workload.PodTerminationWithReason(l.crash.pod, l.crash.reason, now)
+	// The block is written before the row: a pass that ends between the
+	// two re-enters here with the crash not yet remembered, and the block
+	// records nothing twice while it counts the wave.
+	if l.record {
+		if err := workload.RecordUpdateFailureInRetryBlockAt(ctx, input, l.rev, l.crash.reason, workload.FailureCauseOf(l.crash.reason), now); err != nil {
+			return false, "", fmt.Errorf("count crash on retry ladder (instance=%d, rev=%s): %w", inst.Index, l.rev, err)
+		}
+	}
+	if l.remember || l.record {
+		if err := rememberCrash(ctx, input, inst.Index, termination, now); err != nil {
+			return false, "", fmt.Errorf("remember crash on the row (instance=%d): %w", inst.Index, err)
+		}
+	}
+	if !crashRebuildWarranted(input, plan, s, inst.TotalPods(), pods) {
+		return true, "", nil
+	}
+	if l.held {
+		if err := status.StampFailed(ctx, input, inst.Index, termination); err != nil {
+			return false, "", fmt.Errorf("stamp Failed under held retry ladder (instance=%d): %w", inst.Index, err)
+		}
+		if input.WarnInstanceFailed != nil {
+			input.WarnInstanceFailed(inst.Index, l.crash.pod.Name,
+				fmt.Sprintf("%s: crash after promotion; revision %s held after %d failed attempts", l.crash.reason, l.rev, l.attempts))
+		}
+		return true, "", nil
+	}
+	if !l.open {
+		return true, "", nil
+	}
+	return false, l.rev, nil
 }
 
 // RestartOpensRepair reports whether a restart selection for inst would
@@ -757,9 +1221,20 @@ func crashLoopRepairReason(input workload.ReconcileInput, s *workload.InstanceSt
 // pod-loss and lost-member triggers repair an outage rather than causing
 // one. Only a fresh open counts against the per-pass repair batch.
 func RestartOpensRepair(input workload.ReconcileInput, inst workload.InstancePlan, instancePods []*corev1.Pod) bool {
+	return readCrashLoopRepair(input, input.ObservedState.Instance(inst.Index), inst.TotalPods(), instancePods).opens
+}
+
+// RestartOpensLadderAttempt names the revision whose retry ladder admits
+// the rebuild a restart selection for inst opens this pass, "" when the
+// open is not a ladder attempt. The ladder authorizes one attempt at a
+// revision at a time, so the pass opens one such rebuild per revision
+// and leaves the rest for the pass after.
+func RestartOpensLadderAttempt(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, instancePods []*corev1.Pod) string {
 	s := input.ObservedState.Instance(inst.Index)
-	_, wedged := crashLoopRepairReason(input, s, inst.TotalPods(), instancePods)
-	return wedged
+	if l := readCrashLadder(input, s, inst.TotalPods(), instancePods); l != nil && l.open && crashRebuildWarranted(input, plan, s, inst.TotalPods(), instancePods) {
+		return l.rev
+	}
+	return ""
 }
 
 // RestartOpensUnavailability reports whether a restart selection for

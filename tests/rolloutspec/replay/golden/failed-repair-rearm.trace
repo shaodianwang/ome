@@ -21,7 +21,6 @@ tick=5 note the delay elapses, so the parked repair re-arms as a fresh Restart a
 tick=5 apply timer.repairRetry to=t+7m1s now=t+7m1s
 tick=5 row=0 write incarnation=3 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#2{type=Restart step=Drain reason=repair re-armed (attempt 1) after pod svc-a-engine-0-default-0 container main stuck (CrashLoopBackOff) retryCount=1 started=t+7m1s lastProgressAt=t+7m1s deadline=t+37m1s} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
 tick=5 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: repair re-armed (attempt 1) after pod svc-a-engine-0-default-0 container main stuck (CrashLoopBackOff) (incarnation=3)
-tick=5 row=0 write no-op precondition=no-change
 tick=5 pod delete name=svc-a-engine-0-default-0 grace=default
 tick=5 pass result=after:5s
 tick=6 note the drained pod is gone, so the rebuild lands at the bumped incarnation

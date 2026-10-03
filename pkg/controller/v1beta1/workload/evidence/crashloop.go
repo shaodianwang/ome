@@ -34,14 +34,25 @@ import (
 // held against the revision, the unavailability budget, the coordination
 // gate — belongs to the restart pass that reads this.
 func CrashLoopWedge(input types.ReconcileInput, s *types.InstanceStatus, expected int32, pods []*corev1.Pod) (string, bool, time.Duration) {
+	pod, reason, graceLeft := CrashLoopWedgedPod(input, s, expected, pods)
+	if pod == nil {
+		return "", false, graceLeft
+	}
+	return fmt.Sprintf("pod %s wedged in %s past the stuck-pod grace", pod.Name, reason), true, 0
+}
+
+// CrashLoopWedgedPod is CrashLoopWedge's reading with the wedged pod and
+// its kubelet waiting reason instead of the repair's Reason: nil when the
+// row holds no wedge, with the grace left as CrashLoopWedge reports it.
+func CrashLoopWedgedPod(input types.ReconcileInput, s *types.InstanceStatus, expected int32, pods []*corev1.Pod) (*corev1.Pod, string, time.Duration) {
 	if s == nil || s.Phase != types.InstancePhaseReady || s.Operation != nil {
-		return "", false, 0
+		return nil, "", 0
 	}
 	if input.StuckPodGrace <= 0 {
-		return "", false, 0
+		return nil, "", 0
 	}
 	if query.PodSetFullyServing(pods, expected) {
-		return "", false, 0
+		return nil, "", 0
 	}
 	currentHash := query.RevisionFromName(input.ObservedState.CurrentRevision).Hash()
 	now := input.Now()
@@ -54,13 +65,13 @@ func CrashLoopWedge(input types.ReconcileInput, s *types.InstanceStatus, expecte
 			continue
 		}
 		if reason, stuck := PodStuckInTerminalWaiting(pod, now, input.StuckPodGrace); stuck {
-			return fmt.Sprintf("pod %s wedged in %s past the stuck-pod grace", pod.Name, reason), true, 0
+			return pod, reason, 0
 		}
 		if left := TerminalWaitingGraceLeft(pod, now, input.StuckPodGrace); left > 0 && (graceLeft == 0 || left < graceLeft) {
 			graceLeft = left
 		}
 	}
-	return "", false, graceLeft
+	return nil, "", graceLeft
 }
 
 // PodSetServesNothing reports whether a non-empty pod set is provably
