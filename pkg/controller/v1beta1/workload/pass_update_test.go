@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -1213,5 +1214,81 @@ func TestRollback_AtTheLastInstanceOfAnInPlaceRollComesBackInPlace(t *testing.T)
 	}
 	for idx := int32(0); idx < replicas; idx++ {
 		h.requirePodsRender(idx, h.revV1, goodImage)
+	}
+}
+
+// TestReconcile_AdmissionOutageOnASurgeHoldsAtTheCadence: a surge roll on
+// Instances that keep serving while the apiserver cannot take their
+// replacement creates to admission. The source pod stays in rotation for
+// the whole outage, so the row is serving and waiting at once. The wait
+// is announced once, the row is written once, and every refused pass asks
+// for the configured operation cadence. A status write is a watch event
+// that wakes the controller at once, so a pass that rewrote the row would
+// run the controller, and its events, at apiserver speed for as long as
+// the outage lasted. When admission answers again the create lands, the
+// token goes, and the roll completes.
+func TestReconcile_AdmissionOutageOnASurgeHoldsAtTheCadence(t *testing.T) {
+	const replicas = 2
+	h := newRecoveryHarness(t, false)
+	h.recorder = record.NewFakeRecorder(256)
+	h.replicas = replicas
+	h.useRollingBudget(types.UpdateStrategySurgeThenDrain)
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(40, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+	}
+	h.events = nil
+
+	h.admissionDown = true
+	h.setTarget(h.revFixed, fixedImage)
+	const refusedPasses = 6
+	for i := 1; i <= refusedPasses; i++ {
+		if i == 2 {
+			// The first refused pass records the wait; from here on the
+			// row's report is settled and nothing may rewrite it.
+			h.statusWrites = 0
+		}
+		res, err := h.stepResult()
+		if err != nil {
+			t.Fatalf("refused pass %d: %v (an admission outage is a wait, not an error)", i, err)
+		}
+		if res.Requeue || res.RequeueAfter != testRequeueIntervals.Operation {
+			t.Fatalf("refused pass %d: got %+v want RequeueAfter=%v, the configured operation cadence", i, res, testRequeueIntervals.Operation)
+		}
+	}
+	if got := h.eventCount(types.EventReasonInstanceAdmissionUnavailable); got != 1 {
+		t.Errorf("%s events over %d refused passes: got %d want 1, once per hold (%v)",
+			types.EventReasonInstanceAdmissionUnavailable, refusedPasses, got, h.events)
+	}
+	if h.statusWrites != 0 {
+		t.Errorf("status writes after the wait was recorded: got %d want 0; each is a watch event that wakes the controller at once", h.statusWrites)
+	}
+	held := 0
+	for _, s := range h.irStatuses() {
+		if s.Operation == nil || s.Operation.Waiting != types.RejectionReasonAdmissionUnavailable {
+			continue
+		}
+		held++
+		if s.LastFailure == nil || !strings.Contains(s.LastFailure.Message, "failed calling webhook") {
+			t.Errorf("instance %d: LastFailure %+v, want the apiserver's words naming the webhook", s.Index, s.LastFailure)
+		}
+	}
+	if held != 1 {
+		t.Errorf("rows holding the admission wait: got %d want 1, the one surge maxSurge=1 admits", held)
+	}
+	if got := h.instancesServingOn(goodImage); got != replicas {
+		t.Errorf("instances serving on the source image under the outage: got %d want %d", got, replicas)
+	}
+
+	h.admissionDown = false
+	if !h.run(60, func() bool { return h.settledOn(h.revFixed, replicas) }) {
+		h.dumpState("after admission returned")
+		t.Fatalf("the roll never completed once admission answered again")
+	}
+	for _, s := range h.irStatuses() {
+		if s.Operation != nil {
+			t.Errorf("instance %d: operation %+v left open after the roll", s.Index, s.Operation)
+		}
 	}
 }

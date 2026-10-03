@@ -122,11 +122,19 @@ func TestAdmission_RecordsTheRefusalFromTheWriteSite(t *testing.T) {
 		}
 	})
 
-	t.Run("a row in rotation retires the wait", func(t *testing.T) {
+	t.Run("a row in rotation keeps the wait", func(t *testing.T) {
+		// A surge or in-place roll writes to a row whose pods are serving,
+		// so rotation says nothing about whether admission took the
+		// write; only the write site learns that. Retiring the token
+		// here would have the site re-enter the wait on every pass.
 		store, in := newStore(creatingRow(types.RejectionReasonAdmissionUnavailable))
+		store.writes = 0
 		apply(t, in, plan, map[int32][]*corev1.Pod{0: {servingPod("svc-a-engine-0-default-0")}})
-		if got := store.waiting(0); got != "" {
-			t.Errorf("waiting = %q, want released: a serving row is waiting on nothing", got)
+		if got := store.waiting(0); got != types.RejectionReasonAdmissionUnavailable {
+			t.Errorf("waiting = %q, want the recorded wait kept on a serving row", got)
+		}
+		if store.writes != 0 {
+			t.Errorf("writes by the hold pass on a serving held row = %d, want 0", store.writes)
 		}
 	})
 }

@@ -1235,6 +1235,14 @@ type recoveryHarness struct {
 	wedgeSticky bool
 	wedgedPods  map[string]string
 
+	// admissionDown is the apiserver unable to reach its pod admission
+	// webhook: every pod create fails closed with the dispatcher's own
+	// error and nothing is created.
+	admissionDown bool
+	// statusWrites counts the InstanceStatus writes the passes committed
+	// through the one-row seam; a test zeroes it to measure a window.
+	statusWrites int
+
 	// badImageHeals makes the kubelet model treat the bad image as
 	// pullable from now on: the registry has the tag again.
 	badImageHeals bool
@@ -1946,10 +1954,34 @@ func setPodCondition(pod *corev1.Pod, condType corev1.PodConditionType, status c
 // interceptCreate stamps the UID the API server mints onto a new pod; the
 // delete wave preconditions every pod delete on the UID it observed.
 func (h *recoveryHarness) interceptCreate(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-	if pod, ok := obj.(*corev1.Pod); ok && pod.UID == "" {
-		pod.UID = uuid.NewUUID()
+	if pod, ok := obj.(*corev1.Pod); ok {
+		if h.admissionDown {
+			return webhookUnreachableCreateError()
+		}
+		if pod.UID == "" {
+			pod.UID = uuid.NewUUID()
+		}
 	}
 	return cl.Create(ctx, obj, opts...)
+}
+
+// webhookUnreachableCreateError is the apiserver failing closed on a pod
+// admission webhook it could not call: an InternalError carrying the
+// dispatcher's phrase, the webhook's name and the transport error.
+func webhookUnreachableCreateError() error {
+	return apierrors.NewInternalError(fmt.Errorf(
+		`failed calling webhook "pod-mutator.example.com": failed to call webhook: Post "https://ome-webhook.example.svc:443/mutate-pods?timeout=10s": dial tcp 10.0.0.1:443: connect: connection refused`))
+}
+
+// eventCount is how many recorded events carry reason.
+func (h *recoveryHarness) eventCount(reason workloadtypes.EventReason) int {
+	n := 0
+	for _, e := range h.events {
+		if strings.Contains(e, string(reason)) {
+			n++
+		}
+	}
+	return n
 }
 
 // interceptDelete is the kubelet termination model's apiserver half: with
@@ -2351,7 +2383,15 @@ func (h *recoveryHarness) mutateInstance() func(context.Context, int32, func(*wo
 		if err := h.mutateErr[idx]; err != nil {
 			return err
 		}
-		return delegate(ctx, idx, mutate)
+		committed := false
+		err := delegate(ctx, idx, func(s *workloadtypes.InstanceStatus) bool {
+			committed = mutate(s)
+			return committed
+		})
+		if err == nil && committed {
+			h.statusWrites++
+		}
+		return err
 	}
 }
 

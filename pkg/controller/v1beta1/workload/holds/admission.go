@@ -19,8 +19,11 @@ import (
 // evidence: an operator reading the row sees which webhook the apiserver
 // could not reach. The site that recorded it releases it once a write
 // of the same pods goes through admission (ReleaseAdmissionRefusal);
-// the pass only keeps the recorded report and retires it for a row that
-// is plainly in rotation.
+// the pass only keeps the recorded report. A serving pod set does not
+// retire it: a surge or in-place roll writes to a row that is in
+// rotation, so rotation says nothing about whether admission took the
+// write, and a pass that retired the token on it would have the site
+// re-enter the wait, rewrite the row and announce it again every pass.
 var admissionHold = authority{
 	token:  types.RejectionReasonAdmissionUnavailable,
 	mayOwn: anyOwner,
@@ -28,19 +31,13 @@ var admissionHold = authority{
 }
 
 // reportAdmission keeps the row's recorded wait: it cannot re-ask the
-// apiserver, so the token stands until the write site releases it. A
-// fully-serving pod set retires it — a row in rotation is waiting on
-// nothing, whatever a stale record says.
-func reportAdmission(ctx context.Context, in PassInput, row Row) (reading, error) {
+// apiserver, so the token stands until the write site releases it, and
+// the row's pods being in rotation is no release. The record cannot go
+// stale past its operation: the token lives on the Operation, which
+// every completion clears.
+func reportAdmission(_ context.Context, _ PassInput, row Row) (reading, error) {
 	if !types.OperationAdmissionHeld(row.Status.Operation) {
 		return reading{}, nil
-	}
-	serving, err := in.serving(ctx, row)
-	if err != nil {
-		return reading{}, err
-	}
-	if serving {
-		return reading{release: true}, nil
 	}
 	return reading{waiting: true, evidence: admissionEvidence(row.Status)}, nil
 }
