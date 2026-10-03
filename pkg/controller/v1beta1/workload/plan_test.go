@@ -542,13 +542,17 @@ func TestInstancePlanIndices_GangSurgePinsPair(t *testing.T) {
 	}
 }
 
-// A retired replacement gang is pinned by the same rule as a live one:
-// the marker stays in the plan for as long as a source references the
-// index, so the scale-down wave cannot take the retirement away from it
-// mid-teardown. An UNREFERENCED cleanup marker is a different shape and
-// is left for the scale-down pipeline to reap.
+// A replacement gang's marker is pinned by the same rule as a live one
+// while its source is still rolling: the marker stays in the plan for as
+// long as an in-flight source references the index, so the scale-down
+// wave cannot take the retirement away from it mid-teardown. A source
+// that has failed keeps no pin: the pair competes for the steady budget
+// behind the Ready rows, and when it loses, the source and its marker
+// leave the plan together, as one scale-down unit. A failed pair with
+// nothing better to keep stays. An UNREFERENCED cleanup marker is a
+// different shape and is left for the scale-down pipeline to reap.
 //
-// Cells: instance/Update/GangSurgeTargetCleanup/spec.replicasDown/before
+// Cells: instance/Update/GangSurgeTargetCleanup/spec.replicasDown/before, instance/Failed/spec.replicasDown/before
 func TestInstancePlanIndices_GangCleanupMarkerPinnedWhileReferenced(t *testing.T) {
 	k := int32(1)
 	referenced := []types.InstanceStatus{
@@ -565,6 +569,27 @@ func TestInstancePlanIndices_GangCleanupMarkerPinnedWhileReferenced(t *testing.T
 		t.Errorf("a referenced cleanup marker must stay pinned at replicas=1; got %v", instancePlanIndices(referenced, 1))
 	}
 
+	two := int32(2)
+	failedBehindReady := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseFailed, RunningRevision: "comp-rev-v1aaaaaa", TargetRevision: "comp-rev-v2bbbbbb",
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: "Surge", SurgeIndex: &two, TargetRevision: "comp-rev-v2bbbbbb"}},
+		{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: "comp-rev-v1aaaaaa"},
+		{Index: 2, Phase: types.InstancePhaseFailed,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTargetCleanup, TargetRevision: "comp-rev-v2bbbbbb"}},
+	}
+	if diff := cmp.Diff([]int32{1}, instancePlanIndices(failedBehindReady, 1)); diff != "" {
+		t.Errorf("a failed pair loses the one slot to the Ready sibling and leaves together (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]int32{0, 2}, ScaleDownExtras(failedBehindReady, types.ComponentPlan{Instances: []types.InstancePlan{{Index: 1}}})); diff != "" {
+		t.Errorf("the failed source and its marker are the scale-down's extras (-want +got):\n%s", diff)
+	}
+
+	failedAlone := failedBehindReady[:1:1]
+	failedAlone = append(failedAlone, failedBehindReady[2])
+	if diff := cmp.Diff([]int32{0, 2}, instancePlanIndices(failedAlone, 1)); diff != "" {
+		t.Errorf("a failed pair with no Ready row to prefer is kept whole (-want +got):\n%s", diff)
+	}
+
 	orphan := []types.InstanceStatus{
 		{Index: 0, Phase: types.InstancePhaseReady, RunningRevision: "comp-rev-v1aaaaaa"},
 		{Index: 1, Phase: types.InstancePhaseCreating,
@@ -572,6 +597,50 @@ func TestInstancePlanIndices_GangCleanupMarkerPinnedWhileReferenced(t *testing.T
 	}
 	if got := instancePlanIndices(orphan, 1); len(got) != 1 || got[0] != 0 {
 		t.Errorf("an unreferenced cleanup marker must fall out for the scale-down pipeline; got %v", got)
+	}
+}
+
+// A failed gang surge pair moves as one through the steady budget: the
+// source competes behind the Ready rows and is charged like any steady
+// row, its marker is never picked on its own and follows the source in
+// or out, whichever side of the source its index falls on. With budget
+// to spare the pair stays and the abandon finishes the retirement; the
+// budget past the pair is still filled with new indices.
+//
+// Cells: instance/Failed/spec.replicasDown/before, instance/Update/GangSurgeTarget/spec.replicasDown/before
+func TestInstancePlanIndices_FailedGangSurgePairFollowsItsSource(t *testing.T) {
+	const running, target = "comp-rev-v1aaaaaa", "comp-rev-v2bbbbbb"
+	source := func(index, surge int32) types.InstanceStatus {
+		return types.InstanceStatus{Index: index, Phase: types.InstancePhaseFailed, RunningRevision: running, TargetRevision: target,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: "Surge", SurgeIndex: &surge, TargetRevision: target}}
+	}
+	marker := func(index int32) types.InstanceStatus {
+		return types.InstanceStatus{Index: index, Phase: types.InstancePhaseFailed,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTarget, TargetRevision: target}}
+	}
+	ready := func(index int32) types.InstanceStatus {
+		return types.InstanceStatus{Index: index, Phase: types.InstancePhaseReady, RunningRevision: running}
+	}
+	markerAbove := []types.InstanceStatus{source(0, 2), ready(1), marker(2)}
+	markerBelow := []types.InstanceStatus{ready(0), marker(1), ready(2), source(3, 1)}
+	cases := []struct {
+		name      string
+		instances []types.InstanceStatus
+		replicas  int32
+		want      []int32
+	}{
+		{name: "one slot goes to the Ready sibling", instances: markerAbove, replicas: 1, want: []int32{1}},
+		{name: "two slots keep the pair whole behind the sibling", instances: markerAbove, replicas: 2, want: []int32{0, 1, 2}},
+		{name: "the slot past the pair is a new index", instances: markerAbove, replicas: 3, want: []int32{0, 1, 2, 3}},
+		{name: "a marker below its source is never picked on its own", instances: markerBelow, replicas: 2, want: []int32{0, 2}},
+		{name: "a marker below its source follows it in", instances: markerBelow, replicas: 3, want: []int32{0, 1, 2, 3}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if diff := cmp.Diff(tc.want, instancePlanIndices(tc.instances, tc.replicas)); diff != "" {
+				t.Errorf("instancePlanIndices (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 

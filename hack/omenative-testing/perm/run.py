@@ -177,6 +177,8 @@ RATIO_SUSTAIN_S = 5.0  # assert the worst ratio deviation that PERSISTED this lo
                        # on separate dispatchers, peer status lags a reconcile), so when both move
                        # opposite directions a bounded ~1-2s cross-dispatcher overshoot is by-design
                        # and self-corrects. Only an off-band deviation held >= this window is real.
+FIRST_PASS_POLL_S = 0.5    # InferenceReplica read cadence while a scale-down waits for the controller's first pass
+FIRST_PASS_WINDOW_S = 30.0  # how long that fast cadence may run before the watch cadence resumes
 FLOOR_SUSTAIN_S = 5.0  # capacity-floor debounce (mirrors RATIO_SUSTAIN_S): the hard floor check
                        # fails only on a below-floor dip that PERSISTED this long — a single-sample
                        # readiness flap at 1Hz must not red a case. floor_hard=1 skips the debounce.
@@ -18392,29 +18394,31 @@ def _retry_blocks(item):
 
 
 def _stuck_signal(by_comp, bumped, stuck):
-    """Why a bumped Component counts as stuck the way the header names, or
-    "" while none does. held: a retry block in state Held (or the hold the
-    status derives from it). failed: an Instance row reads Failed, or the
-    retry block for the pushed revision records a started attempt."""
+    """Why the bumped Components count as stuck the way the header names,
+    or "" while they do not. held: every bumped Component has a retry
+    block in state Held (or the hold the status derives from it), and the
+    signal names each; one Component held ahead of the others is not yet
+    the moment, since an operation landing then meets a push still rolling
+    on the rest. failed: a bumped Component has an Instance row that reads
+    Failed, or a retry block for the pushed revision that records a
+    started attempt."""
+    if stuck == "held":
+        held = []
+        for comp in sorted(bumped):
+            why = _held_signal(by_comp.get(comp), comp)
+            if not why:
+                return ""
+            held.append(why)
+        return "; ".join(held)
     for comp in sorted(bumped):
         item = by_comp.get(comp)
         if not item:
             continue
         status = item.get("status") or {}
-        blocks = _retry_blocks(item)
-        gate = (status.get("rolloutHold") or {}).get("gate")
-        if stuck == "held":
-            for b in blocks:
-                if b.get("state") == RETRY_BLOCK_HELD:
-                    return (f"{comp}: the retry block for {b.get('targetRevision', '?')} is Held after "
-                            f"{b.get('attemptsStarted', '?')} attempt(s)")
-            if gate == RETRY_BLOCK_HELD:
-                return f"{comp}: rolloutHold gate=Held ({(status.get('rolloutHold') or {}).get('reason', '')[:120]})"
-            continue
         for row in _instance_rows(status):
             if row.get("phase") == "Failed":
                 return f"{comp} Instance {row.get('index', '?')} reads Failed"
-        for b in blocks:
+        for b in _retry_blocks(item):
             try:
                 attempts = int(b.get("attemptsStarted") or 0)
             except (TypeError, ValueError):
@@ -18422,6 +18426,22 @@ def _stuck_signal(by_comp, bumped, stuck):
             if attempts >= 1:
                 return (f"{comp}: the retry block for {b.get('targetRevision', '?')} records "
                         f"{attempts} failed attempt(s) ({b.get('state', '?')})")
+    return ""
+
+
+def _held_signal(item, comp):
+    """How the Component's status says its push is held: a retry block in
+    state Held, else the hold the status derives from it; "" otherwise."""
+    if not item:
+        return ""
+    status = item.get("status") or {}
+    for b in _retry_blocks(item):
+        if b.get("state") == RETRY_BLOCK_HELD:
+            return (f"{comp}: the retry block for {b.get('targetRevision', '?')} is Held after "
+                    f"{b.get('attemptsStarted', '?')} attempt(s)")
+    hold = status.get("rolloutHold") or {}
+    if hold.get("gate") == RETRY_BLOCK_HELD:
+        return f"{comp}: rolloutHold gate=Held ({hold.get('reason', '')[:120]})"
     return ""
 
 
@@ -18451,42 +18471,116 @@ def _push_unlanded(by_comp, bumped):
     return out
 
 
+# SCALE_VICTIM_ORDER is the order a scale-down removes Instances in, as the
+# verdict words it (_scale_victims).
+SCALE_VICTIM_ORDER = "the Instances that serve nothing first, then a stuck one that still serves, then the highest index"
+
+
 def _scale_victims(rows, remove_count):
-    """The Instances a scale-down removes, in the engine's order: rows that
-    are not Ready first, highest index first within that tier, then Ready
-    rows highest index first. `rows` are (index, phase) pairs."""
+    """The Instances a scale-down removes, in the engine's order. `rows` are
+    (index, phase) or (index, phase, serving) tuples, serving being whether
+    the row's pods serve the running revision (_serving_indices); a pair
+    reads it off the phase, Ready serving. Rows that serve nothing go
+    first — an Instance drained for its attempt, a wedged replacement, a
+    gang surge's marker — then a row that still serves through its pods
+    but does not read Ready (the source of a failed gang surge: the pair
+    it heads is retired as one unit ahead of a healthy sibling), then the
+    Ready rows; highest index first within each tier."""
     def _idx(row):
         try:
             return int(row[0])
         except (TypeError, ValueError):
             return -1
-    broken = sorted((r for r in rows if r[1] != "Ready"), key=_idx, reverse=True)
-    healthy = sorted((r for r in rows if r[1] == "Ready"), key=_idx, reverse=True)
-    return [str(r[0]) for r in (broken + healthy)[:max(0, remove_count)]]
+
+    def _tier(row):
+        phase = row[1]
+        serving = row[2] if len(row) > 2 else phase == "Ready"
+        if not serving:
+            return 0
+        return 2 if phase == "Ready" else 1
+    ordered = sorted(rows, key=lambda r: (_tier(r), -_idx(r)))
+    return [str(r[0]) for r in ordered[:max(0, remove_count)]]
 
 
-def _removal_plans(snapshots, n, want):
+def _removal_plans(snapshots, want):
     """{label: expected victims} for each row snapshot of a Component (the
     rows at the scale and right after it: a row may change phase between
     the two reads, and the engine plans from whichever it saw), for a
-    scale from n to the accepted count `want`."""
-    return {label: _scale_victims(rows, n - want) for label, rows in snapshots.items() if rows is not None}
+    scale to the accepted count `want`. The victims are the rows present
+    minus `want`: a surge row on the snapshot is one over the replica
+    count and goes with the rest."""
+    return {label: _scale_victims(rows, len(rows) - want) for label, rows in snapshots.items() if rows is not None}
 
 
 def _removal_outcome(plans, pre_indices, rows_now, pod_indices_now):
-    """Which plan the engine followed: the pre-existing rows still present
-    are exactly that plan's kept set and no alive pod remains on a removed
-    index. Returns (label or None, extra rows): rows that did not exist at
-    the scale (a retry attempt's surge gang) are not the scale's doing and
-    are reported, not judged."""
+    """Which plan the engine followed, every plan read from the rows at the
+    scale. Returns (label or None, extra rows); see _removal_outcome_by_rows."""
+    label, extra, _left = _removal_outcome_by_rows(plans, {}, pre_indices, rows_now, pod_indices_now)
+    return label, extra
+
+
+def _removal_outcome_by_rows(plans, rows_by_label, pre_indices, rows_now, pod_indices_now):
+    """Which plan the engine followed, each judged against the rows it was
+    read from (`rows_by_label`, the rows at the scale for a label it does
+    not name): the plan's rows still present are exactly its kept set and
+    no alive pod remains on a removed index. Returns (label or None, extra
+    rows, rows left before the plan): rows that did not exist at the scale
+    (a retry attempt's surge gang) are not the scale's doing, and rows
+    present at the scale but gone from the followed plan's read (a
+    replacement the abandon finished first) were not the scale's to take;
+    both are reported, not judged."""
     pre = set(pre_indices)
-    survivors = set(rows_now) & pre
     extra = sorted(set(rows_now) - pre)
     for label, victims in plans.items():
-        kept = pre - set(victims)
-        if survivors == kept and not any(idx in pod_indices_now for idx in victims):
-            return label, extra
-    return None, extra
+        present = set(rows_by_label.get(label) or pre)
+        kept = present - set(victims)
+        if set(rows_now) & present == kept and not any(idx in pod_indices_now for idx in victims):
+            return label, extra, sorted(pre - present)
+    return None, extra, []
+
+
+def _ir_first_pass_generation(item, target):
+    """The InferenceReplica generation at which the controller first saw a
+    scale to `target`, or 0 while it has not: spec.replicas carries the
+    scaled count and status.observedGeneration has reached the generation
+    that carries it."""
+    item = item or {}
+    if ((item.get("spec") or {}).get("replicas")) != target:
+        return 0
+    try:
+        generation = int((item.get("metadata") or {}).get("generation") or 0)
+        observed = int((item.get("status") or {}).get("observedGeneration") or 0)
+    except (TypeError, ValueError):
+        return 0
+    if generation <= 0 or observed < generation:
+        return 0
+    return observed
+
+
+def _first_pass_rows(at_op, first):
+    """The rows at the controller's first pass after the scale, as the plan
+    read them. The pass's own write already stamps the wave's rows
+    Deleting, so a Deleting row that existed at the scale is judged as the
+    row the wave found there, phase and serving alike; every other row is
+    read as it is, and a row the abandon finished before the pass is
+    absent."""
+    at_scale = {row[0]: row for row in at_op}
+    return [at_scale[row[0]] if row[1] == "Deleting" and row[0] in at_scale else row for row in first]
+
+
+def _stuck_rows_fate(at_op, first):
+    """What became of the rows that were stuck at the scale (not Ready) by
+    the controller's first pass: "still stuck" while one of them is still
+    present and not Ready — a Deleting row is the wave's, found as it was —
+    "already reset" when every one of them left or reads Ready, "" when
+    nothing was stuck at the scale."""
+    stuck = {row[0] for row in at_op if row[1] != "Ready"}
+    if not stuck:
+        return ""
+    now = {row[0]: row[1] for row in first}
+    if any(idx in now and now[idx] != "Ready" for idx in stuck):
+        return "still stuck"
+    return "already reset"
 
 
 def _survivor_changes(pre, now, old_hashes):
@@ -18527,6 +18621,28 @@ def _ready_indices(ctx, comp):
             by_idx[str(p.get("inst", "0"))].append(p)
     return {idx for idx, pods in by_idx.items()
             if len(pods) >= ppi and sum(1 for q in pods if q["ready"]) >= ppi}
+
+
+def _serving_indices(ctx, comp, old_hashes):
+    """The indices of the Component's Instances that serve the running
+    revision through their pods: a full set of Ready pods carrying one of
+    the running revision's hashes. A row's phase is not that reading:
+    under SurgeThenDrain the source of a failed gang surge reads Failed
+    and still serves, and its replacement's marker serves nothing."""
+    ppi = max(1, ctx["pods_per_inst"].get(comp, 1))
+    by_idx = defaultdict(int)
+    for p in ctx["pod_state"].values():
+        if p and p["alive"] and p["comp"] == comp and p["ready"] and p.get("hash") in old_hashes:
+            by_idx[str(p.get("inst", "0"))] += 1
+    return {idx for idx, n in by_idx.items() if n >= ppi}
+
+
+def _scale_rows(ctx, comp, by_comp):
+    """The Component's rows as a scale-down's plan reads them: (index,
+    phase, serving) per row, serving read off the pods (_serving_indices)."""
+    serving = _serving_indices(ctx, comp, ctx.get("old_hashes") or set())
+    return [(str(r.get("index", "?")), str(r.get("phase") or ""), str(r.get("index", "?")) in serving)
+            for r in _instance_rows((by_comp.get(comp) or {}).get("status") or {})]
 
 
 def _pods_by_index(ctx, comp):
@@ -18851,11 +18967,18 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     the push broken by an image that cannot be pulled (img=) or by break=
     (crash-start, crash-load, configkey, stuck) on the member victimcomp=
     names. What the engine promises and the verdict reads:
-    a scale-down removes Instances that are not Ready first, highest index
-    first within each tier, and never rebuilds a survivor on the running
-    revision; a scale to one, the least count the API admits, takes every
-    Instance but one in that order and converges on the replica count the
-    controller accepted, read from the InferenceReplica, never assumed; a
+    a scale-down removes the Instances that serve nothing first, then a
+    stuck one that still serves through its pods with the surge row it
+    heads, then the highest index, and never rebuilds a survivor on the
+    running revision; a scale to one, the least count the API admits,
+    takes every row but one in that order — a surge row is one over the
+    replica count — and converges on the replica count the controller
+    accepted, read from the InferenceReplica, never assumed. The victims
+    are judged from the rows the controller first planned from after the
+    scale, read off the InferenceReplica once its observedGeneration
+    reaches the generation that carries the scaled count: a failed pair
+    the abandon finished before that pass yields the ordinary order, a
+    pair still present yields the pair, and the verdict says which; a
     scale-up while held starts nothing (the new index waits as an empty
     slot) and while failed starts the new Instance on the pushed
     revision when the retry window admits it, never on the running
@@ -18893,14 +19016,16 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
 
     # The fleet at the moment the operation lands.
     by_comp = _ir_by_component(case_id)
-    rows_at_op = {c: [(str(r.get("index", "?")), str(r.get("phase") or "")) for r in _instance_rows((by_comp.get(c) or {}).get("status") or {})]
-                  for c in configured}
+    rows_at_op = {c: _scale_rows(ctx, c, by_comp) for c in configured}
     pre_pods = {c: _pods_by_index(ctx, c) for c in configured}
     pre_ready = {c: ctx["agg"].get(c, (0, 0, 0))[1] for c in configured}
     ready_at_op = {c: _ready_indices(ctx, c) for c in configured}
     control_uids = {c: {u for pods in pre_pods[c].values() for u, _h in pods} for c in controls}
-    expected_victims = {c: _scale_victims(rows_at_op[c], N[c] - target[c]) for c in scaled if target[c] < N[c]}
+    expected_victims = {c: _scale_victims(rows_at_op[c], len(rows_at_op[c]) - target[c]) for c in scaled if target[c] < N[c]}
     rows_after_op = {c: None for c in configured}
+    # The rows at the controller's first pass after the scale, per scaled
+    # Component: (rows, IR generation observed, seconds after the patch).
+    first_pass = {c: None for c in scaled}
     print(f"  Phase 3: scale {' '.join(f'{c} {N[c]}→{target[c]}' for c in sorted(scaled))} while {stuck}"
           + (f" (the {', '.join(sorted(bumped))} push, which the scale leaves alone)" if sibling else "")
           + (f" (expected to go first: {expected_victims})" if expected_victims else ""))
@@ -18925,14 +19050,18 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     # so their count is exact; under failed a drain-first strategy may take
     # one more Instance into its next attempt. A victim is Ready by its
     # pods, not its row: a SurgeThenDrain row that reads Failed still serves
-    # through its source, and removing the Instance costs that pod.
+    # through its source, and removing the Instance costs that pod. The
+    # count scaled to bounds the floor: the survivors cannot hold more.
     floor = {}
     for c in configured:
         going_ready = sum(1 for idx in expected_victims.get(c, []) if idx in ready_at_op[c])
         drains_first = ctx["info"]["strat"].get(c) in {"RecreatePod"} | IN_PLACE_TYPES
         extra = (resolve_max_unavailable(ctx["info"]["max_unavail"].get(c, 0), N[c])
                  if stuck == "failed" and c in bumped and drains_first else 0)
-        floor[c] = max(0, pre_ready[c] - going_ready - extra)
+        kept = pre_ready[c] - going_ready
+        if c in scaled and target[c] < N[c]:
+            kept = min(kept, target[c])
+        floor[c] = max(0, kept - extra)
     state, stable, last_poll, ladder_done = "WATCHING", None, 0.0, ""
     new_index_seen = {}
     while time.time() - op_ts < budget and not ctx["closed"]:
@@ -18950,19 +19079,27 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
             for idx, pods in _pods_by_index(ctx, c).items():
                 if idx not in pre_pods[c] and idx not in new_index_seen.get(c, {}):
                     new_index_seen.setdefault(c, {})[idx] = sorted({h for _u, h in pods})
-        if now - last_poll >= 3.0:
+        # The InferenceReplica is read often until every scaled Component
+        # shows the controller's first pass after the scale, then settles
+        # to the watch cadence.
+        awaiting_first_pass = direction == "down" and now - op_ts < FIRST_PASS_WINDOW_S and any(first_pass[c] is None for c in scaled)
+        if now - last_poll >= (FIRST_PASS_POLL_S if awaiting_first_pass else 3.0):
             last_poll = now
             by_comp = _ir_by_component(case_id)
             for c in configured:
                 if rows_after_op[c] is None:
-                    rows_after_op[c] = [(str(r.get("index", "?")), str(r.get("phase") or ""))
-                                        for r in _instance_rows((by_comp.get(c) or {}).get("status") or {})]
+                    rows_after_op[c] = _scale_rows(ctx, c, by_comp)
             if direction == "down":
                 # The count converged on is the one the controller accepted,
                 # read off the InferenceReplica rather than assumed.
                 for c, r in _ir_spec_replicas(by_comp).items():
                     if c in scaled and r != N[c]:
                         want[c] = r
+                for c in scaled:
+                    if first_pass[c] is None:
+                        generation = _ir_first_pass_generation(by_comp.get(c), want[c])
+                        if generation:
+                            first_pass[c] = (_scale_rows(ctx, c, by_comp), generation, now - op_ts)
             if direction == "up" and stuck == "failed" and not ladder_done:
                 ladder_done = _stuck_signal(by_comp, bumped, "held")
                 if ladder_done:
@@ -19005,25 +19142,43 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     if direction == "down":
         for c in sorted(scaled):
             rows_now = {str(r.get("index", "?")) for r in _instance_rows((by_comp.get(c) or {}).get("status") or {})}
-            pre_indices = {idx for idx, _ph in rows_at_op[c]}
+            pre_indices = {row[0] for row in rows_at_op[c]}
             # The expected victims follow from the count the API accepted,
-            # planned from the rows as the engine may have seen them.
-            plans = _removal_plans({"at the scale": rows_at_op[c], "right after the scale": rows_after_op[c]}, N[c], want[c])
-            followed, extra_rows = _removal_outcome(plans, pre_indices, rows_now, set(now_pods[c]))
-            expected = set(plans.get(followed or "at the scale", []))
-            kept = pre_indices - expected
-            snapshot = dict(rows_at_op[c] if followed != "right after the scale" else rows_after_op[c])
+            # planned from the rows as the engine saw them: at the scale, and
+            # at its first pass after it, where a failed pair the abandon
+            # finished in between has already given way to the ordinary rows.
+            snapshots = {"at the scale": rows_at_op[c]}
+            if first_pass[c] is not None:
+                rows_fp, generation, after_s = first_pass[c]
+                snapshots["at the controller's first pass"] = _first_pass_rows(rows_at_op[c], rows_fp)
+                fate = _stuck_rows_fate(rows_at_op[c], rows_fp)
+                checks.append(f"  ⓘ {c}: when the controller first saw the scale ({after_s:.1f}s after it, IR generation {generation}) "
+                              f"the rows read [{', '.join(f'{row[0]}:{row[1]}' for row in rows_fp)}]"
+                              + (f"; the Instance(s) stuck at the scale were {fate}" if fate else ""))
+            else:
+                snapshots["right after the scale"] = rows_after_op[c]
+            plans = _removal_plans(snapshots, want[c])
+            rows_by_label = {label: {row[0] for row in rows} for label, rows in snapshots.items() if rows is not None}
+            followed, extra_rows, left_rows = _removal_outcome_by_rows(plans, rows_by_label, pre_indices, rows_now, set(now_pods[c]))
+            judged = followed or "at the scale"
+            expected = set(plans.get(judged, []))
+            kept = rows_by_label[judged] - expected
+            snapshot = {row[0]: row[1] for row in snapshots[judged]}
             stuck_gone = sorted(idx for idx in expected if snapshot.get(idx) != "Ready")
             if followed is None:
                 verdict = "FAIL"
                 notes.append(f"{c}: the scale removed the wrong Instances (rows now {sorted(rows_now)}, expected {sorted(kept)} to stay)")
-                checks.append(f"  ✗ {c}: expected Instances {sorted(expected)} to go (not Ready first, then the highest index) "
+                checks.append(f"  ✗ {c}: expected Instances {sorted(expected)} to go ({SCALE_VICTIM_ORDER}) "
                               f"and {sorted(kept)} to stay; rows now {sorted(rows_now)}, pods on removed indices "
-                              f"{sorted(idx for idx in expected if idx in now_pods[c])}")
+                              f"{sorted(idx for idx in expected if idx in now_pods[c])}; plans: "
+                              + "; ".join(f"{label}: {victims}" for label, victims in plans.items()))
             else:
-                checks.append(f"  ✓ {c}: Instances {sorted(expected)} went (not Ready first, then the highest index, "
+                checks.append(f"  ✓ {c}: Instances {sorted(expected)} went ({SCALE_VICTIM_ORDER}, "
                               f"as the rows read {followed}) and {sorted(kept)} stayed"
                               + (f"; the stuck Instance(s) {stuck_gone} were among them" if stuck_gone else ""))
+            if left_rows:
+                checks.append(f"  ⓘ {c}: row(s) {left_rows} left between the scale and the controller's first pass "
+                              f"(a replacement the abandon finished first) and were not the scale's to take")
             if extra_rows:
                 checks.append(f"  ⓘ {c}: row(s) {extra_rows} did not exist at the scale (a retry attempt's replacement) and are not judged")
             needless, rolled = _survivor_changes({i: v for i, v in pre_pods[c].items() if i in kept}, now_pods[c], ctx["old_hashes"])

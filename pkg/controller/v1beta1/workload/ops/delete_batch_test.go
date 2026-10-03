@@ -2154,9 +2154,12 @@ func TestDeleteBatchOverdueDrainAnnouncesDeferredRows(t *testing.T) {
 // attempt owes the ladder the failed wave when the attempt's own pods
 // already show a workload-caused failure, and nothing otherwise: an
 // attempt that showed no failure, a failure on the pod the attempt
-// replaces, a row with no attempt, a gang surge pair the abandon
-// records itself, and a crash loop, which is not the revision's alone.
-// A wave of two such rows is one record.
+// replaces, a row with no attempt, a bare surge target marker, and a
+// crash loop, which is not the revision's alone. A gang surge source the
+// wave retires is read through its replacement: the marker's pods in the
+// same wave, else the failure the escalation recorded on the source's
+// row, with the cause that record classifies to. A wave of two such rows
+// is one record.
 func TestRetiredAttemptFailure_RecordsOnlyAnAttemptFailingOnItsOwn(t *testing.T) {
 	const running, target = "model-engine-f94dbfff", "model-engine-cf0e7843"
 	parked := func(index int32, revision, reason string) *corev1.Pod {
@@ -2174,6 +2177,21 @@ func TestRetiredAttemptFailure_RecordsOnlyAnAttemptFailingOnItsOwn(t *testing.T)
 		}
 	}
 	surgeIdx := int32(2)
+	// gangSource is the source of a gang surge whose attempt failed: its
+	// own pods serve on the running revision and its row keeps the surge
+	// operation, with the failure the escalation recorded on it, if any.
+	gangSource := func(failure *workload.InstanceTermination) workload.InstanceStatus {
+		return workload.InstanceStatus{
+			Index: 0, Phase: workload.InstancePhaseFailed, RunningRevision: running, TargetRevision: target, LastFailure: failure,
+			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepSurge, TargetRevision: target, SurgeIndex: &surgeIdx},
+		}
+	}
+	gangMarker := func() workload.InstanceStatus {
+		return workload.InstanceStatus{
+			Index: surgeIdx, Phase: workload.InstancePhaseFailed,
+			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepGangSurgeTargetCleanup, TargetRevision: target},
+		}
+	}
 	cases := []struct {
 		name       string
 		candidates []deleteBatchCandidate
@@ -2200,14 +2218,42 @@ func TestRetiredAttemptFailure_RecordsOnlyAnAttemptFailingOnItsOwn(t *testing.T)
 			}},
 		},
 		{
-			name: "a gang surge source",
-			candidates: []deleteBatchCandidate{{
-				status: workload.InstanceStatus{
-					Index: 0, Phase: workload.InstancePhaseUpdating, RunningRevision: running,
-					Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepSurge, TargetRevision: target, SurgeIndex: &surgeIdx},
-				},
-				pods: []*corev1.Pod{parked(2, "cf0e7843", "ImagePullBackOff")},
-			}},
+			name: "a failed gang surge source with its marker's parked pods in the wave",
+			candidates: []deleteBatchCandidate{
+				{status: gangSource(nil), pods: []*corev1.Pod{deleteFailurePod(0, true, "f94dbfff")}},
+				{status: gangMarker(), pods: []*corev1.Pod{parked(2, "cf0e7843", "ErrImagePull")}},
+			},
+			want: &status.AttemptFailure{TargetRevision: target, Reason: "ErrImagePull", Cause: workload.CauseWorkload},
+		},
+		{
+			name: "a failed gang surge source behind its marker in the wave",
+			candidates: []deleteBatchCandidate{
+				{status: gangMarker(), pods: []*corev1.Pod{parked(2, "cf0e7843", "ImagePullBackOff")}},
+				{status: gangSource(nil), pods: []*corev1.Pod{deleteFailurePod(0, true, "f94dbfff")}},
+			},
+			want: &status.AttemptFailure{TargetRevision: target, Reason: "ImagePullBackOff", Cause: workload.CauseWorkload},
+		},
+		{
+			name: "a failed gang surge source whose marker's pods are gone records the failure on its row",
+			candidates: []deleteBatchCandidate{
+				{status: gangSource(&workload.InstanceTermination{PodName: "pod-2", Reason: "ImagePullBackOff"}), pods: []*corev1.Pod{deleteFailurePod(0, true, "f94dbfff")}},
+				{status: gangMarker()},
+			},
+			want: &status.AttemptFailure{TargetRevision: target, Reason: "ImagePullBackOff", Cause: workload.CauseWorkload},
+		},
+		{
+			name: "a failed gang surge source alone, with the crash its row recorded",
+			candidates: []deleteBatchCandidate{
+				{status: gangSource(&workload.InstanceTermination{PodName: "pod-2", Reason: "CrashLoopBackOff"}), pods: []*corev1.Pod{deleteFailurePod(0, true, "f94dbfff")}},
+			},
+			want: &status.AttemptFailure{TargetRevision: target, Reason: "CrashLoopBackOff", Cause: workload.CauseUnattributed},
+		},
+		{
+			name: "a failed gang surge source with no failure recorded anywhere",
+			candidates: []deleteBatchCandidate{
+				{status: gangSource(nil), pods: []*corev1.Pod{deleteFailurePod(0, true, "f94dbfff")}},
+				{status: gangMarker(), pods: []*corev1.Pod{deleteFailurePod(2, false, "cf0e7843")}},
+			},
 		},
 		{
 			name: "a gang surge target marker",

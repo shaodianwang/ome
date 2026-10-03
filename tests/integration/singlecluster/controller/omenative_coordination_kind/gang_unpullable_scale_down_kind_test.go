@@ -1,13 +1,17 @@
 package omenative_coordination_kind
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -525,5 +529,390 @@ var _ = ginkgo.Describe("behavior - a scale-down on a prefill-decode pair stuck 
 				}
 			}
 		}, afterScaleWindow, kindPollInterval).Should(Succeed())
+	})
+})
+
+// The SurgeThenDrain shape of the gang episode: two leader-plus-worker
+// gangs under maxSurge=1 and maxUnavailable=0, pushed onto the unpullable
+// image. The roll claims a third index for the first gang's replacement,
+// whose pods park in ImagePullBackOff; the stuck-pod grace ends the
+// attempt and leaves the gang's row Failed with its surge operation, its
+// own pods still serving, and the replacement's marker present. The
+// replacement's pods are held Terminating by a test finalizer, so the gang
+// abandon cannot finish before the scale lands. The scale to one keeps the
+// Ready gang the roll never reached and retires the failed pair, source
+// and marker, through the scale-down wave: the wave records the attempt
+// on the ladder, Held at its bound of one, the survivor keeps the very
+// pods it serves through, no further pod is made on the unpullable
+// revision, and the status says why the push has not landed.
+//
+// Cells: instance/Failed/spec.replicasDown/before, instance/Update/GangSurgeTargetCleanup/spec.replicasDown/before
+
+// gangSurgeUnpullableScaleDownLifecycleJSON bounds the ladder at one
+// attempt and ends the attempt within the suite budget: the stuck-pod
+// grace is what leaves the source Failed for the scale to find.
+const gangSurgeUnpullableScaleDownLifecycleJSON = `{"updateRetry":{"maxAttempts":1,"initialDelay":"5s","maxDelay":"20s","multiplier":2.0},"stuckPodGracePeriod":"10s"}`
+
+var _ = ginkgo.Describe("behavior - a scale-down on a gang whose surge push failed retires the failed pair and keeps the healthy gang (KIND)", ginkgo.Ordered, func() {
+	const (
+		isvcName        = "gang-surge-unpullable-scale"
+		goodImage       = "fake-serving:v1"
+		fixedImage      = "fake-serving:v2"
+		unpullableImage = "ghcr.io/ome-projects/this-image-does-not-exist:v0"
+		// stuckIndex is the gang the roll reaches first, whose replacement
+		// fails; healthyIndex is the gang the roll never reaches.
+		stuckIndex   = int32(0)
+		healthyIndex = int32(1)
+		// afterScaleWindow is how long the survivor is watched after the
+		// scale has settled: several times the ladder's delays, so an
+		// attempt reopened on it would surface as an Updating row or a
+		// pod on the unpullable image.
+		afterScaleWindow = 30 * time.Second
+	)
+
+	var (
+		ns *corev1.Namespace
+
+		v1Rev  string
+		badRev string
+		// healthyUIDs is the pod name -> UID set of the healthy gang at
+		// Ready; it must survive the whole episode untouched.
+		healthyUIDs map[string]types.UID
+		// surgeIndex is the index the roll claimed for the replacement
+		// gang; heldPods are its pods, which carry the hold finalizer
+		// until the spec releases them.
+		surgeIndex int32
+		heldPods   []string
+	)
+
+	// releaseHeldPods drops the hold finalizer from every replacement pod
+	// that still carries it, so the cluster can finish what the spec held.
+	releaseHeldPods := func() {
+		Eventually(func(g Gomega) {
+			for _, name := range heldPods {
+				pod := &corev1.Pod{}
+				err := k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: name}, pod)
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				g.Expect(err).NotTo(HaveOccurred())
+				if controllerutil.RemoveFinalizer(pod, holdTerminationFinalizer) {
+					g.Expect(k8sClient.Update(suiteCtx, pod)).To(Succeed())
+				}
+			}
+		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	}
+
+	ginkgo.BeforeAll(func() {
+		var err error
+		ns, err = util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "gang-surge-unpullable-scale-")
+		Expect(err).NotTo(HaveOccurred())
+		ginkgo.DeferCleanup(func() {
+			Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
+		})
+		configureLifecycleConfig(gangSurgeUnpullableScaleDownLifecycleJSON)
+
+		maxSurge, maxUnavailable := intstr.FromInt(1), intstr.FromInt(0)
+		fix := newCoordFixture(ns.Name, WithISVCName(isvcName),
+			WithoutDecoder(),
+			WithEngineReplicas(2),
+			WithEngineWorkerSize(1),
+			WithEngineImage(goodImage),
+			WithEngineUpdateStrategy(v1beta1.UpdateStrategySurgeThenDrain))
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
+			UpdateStrategy: &v1beta1.UpdateStrategy{
+				Type:          v1beta1.UpdateStrategySurgeThenDrain,
+				RollingUpdate: &v1beta1.RollingUpdate{MaxSurge: &maxSurge, MaxUnavailable: &maxUnavailable},
+			},
+		}
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+		// Released ahead of the fixture and namespace cleanup, so a spec
+		// that stops early leaves no pod the namespace cannot shed.
+		ginkgo.DeferCleanup(releaseHeldPods)
+
+		healthyUIDs = map[string]types.UID{}
+	})
+
+	onUnpullableImage := func(pod *corev1.Pod) bool {
+		return pod.Spec.Containers[0].Image == unpullableImage
+	}
+
+	// enginePods returns the engine pods, the terminating ones included
+	// when withTerminating is set.
+	enginePods := func(g Gomega, withTerminating bool) []*corev1.Pod {
+		var out []*corev1.Pod
+		for _, pod := range listOMENativePods(g, ns.Name, isvcName) {
+			if pod.DeletionTimestamp == nil || withTerminating {
+				out = append(out, &pod)
+			}
+		}
+		return out
+	}
+
+	podInstance := func(pod *corev1.Pod) string {
+		return pod.Labels[query.LabelInstanceIdx]
+	}
+
+	pullFailureShown := func(pod *corev1.Pod) bool {
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.State.Waiting != nil && (cs.State.Waiting.Reason == "ImagePullBackOff" || cs.State.Waiting.Reason == "ErrImagePull") {
+				return true
+			}
+		}
+		return false
+	}
+
+	rowAt := func(g Gomega, index int32) *v1beta1.OMENativeInstanceStatus {
+		for _, row := range instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent) {
+			if row.Index == index {
+				r := row
+				return &r
+			}
+		}
+		return nil
+	}
+
+	// healthyUntouched enforces the standing invariant on every poll that
+	// threads it: the healthy gang keeps its pods, stays in rotation, and
+	// its row stays Ready with nothing in flight.
+	healthyUntouched := func(g Gomega) {
+		pods := enginePods(g, true)
+		for podName, uid := range healthyUIDs {
+			var live *corev1.Pod
+			for _, pod := range pods {
+				if pod.Name == podName {
+					live = pod
+					break
+				}
+			}
+			g.Expect(live).NotTo(BeNil(), "healthy gang pod %s must survive the scale on the failed pair", podName)
+			g.Expect(live.UID).To(Equal(uid), "healthy gang pod %s must keep its UID", podName)
+			g.Expect(live.DeletionTimestamp).To(BeNil(), "healthy gang pod %s must not be deleted", podName)
+			g.Expect(podreadiness.IsServing(live)).To(BeTrue(), "healthy gang pod %s must stay in rotation", podName)
+		}
+		if len(healthyUIDs) > 0 {
+			row := rowAt(g, healthyIndex)
+			g.Expect(row).NotTo(BeNil(), "the healthy gang's row must stay")
+			g.Expect(row.Phase).To(Equal(v1beta1.OMENativeInstanceReady), "the healthy gang's row must stay Ready")
+			g.Expect(row.Operation).To(BeNil(), "nothing may open on the healthy gang")
+		}
+	}
+
+	ginkgo.It("converges both gangs on v1", func() {
+		Eventually(func(g Gomega) {
+			ir := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(ir.Status.CurrentRevision).NotTo(BeEmpty())
+			g.Expect(ir.Status.CurrentRevision).To(Equal(ir.Status.UpdateRevision))
+			rows := decodedInstanceStatuses(g, ir)
+			g.Expect(rows).To(HaveLen(2))
+			for _, row := range rows {
+				g.Expect(row.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			}
+			v1Rev = ir.Status.CurrentRevision
+			pods := enginePods(g, false)
+			g.Expect(pods).To(HaveLen(4), "two gangs of a leader and a worker")
+			healthyUIDs = map[string]types.UID{}
+			for _, pod := range pods {
+				g.Expect(podreadiness.IsServing(pod)).To(BeTrue())
+				if podInstance(pod) == "1" {
+					healthyUIDs[pod.Name] = pod.UID
+				}
+			}
+			g.Expect(healthyUIDs).To(HaveLen(2))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+
+	ginkgo.It("pushes an image the cluster cannot pull and holds the replacement gang's pods", func() {
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Spec.Engine.Leader.PodSpec.Containers[0].Image = unpullableImage
+			cur.Spec.Engine.Worker.PodSpec.Containers[0].Image = unpullableImage
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			ir := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(ir.Status.UpdateRevision).NotTo(BeEmpty())
+			g.Expect(ir.Status.UpdateRevision).NotTo(Equal(v1Rev))
+			badRev = ir.Status.UpdateRevision
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// The surge opens: the first gang's row names the index claimed
+		// for its replacement, and the replacement's pods exist on the
+		// unpullable image. Each gets the hold finalizer as soon as it is
+		// seen, well inside the stuck-pod grace, so the abandon that
+		// follows the escalation cannot clear them.
+		Eventually(func(g Gomega) {
+			healthyUntouched(g)
+			source := rowAt(g, stuckIndex)
+			g.Expect(source).NotTo(BeNil())
+			g.Expect(source.Operation).NotTo(BeNil(), "the roll must open the surge on the first gang")
+			g.Expect(source.Operation.Type).To(Equal(v1beta1.InstanceOperationUpdate))
+			g.Expect(source.Operation.TargetRevision).To(Equal(badRev))
+			g.Expect(source.Operation.SurgeIndex).NotTo(BeNil(), "a gang surge names the index it claimed for the replacement")
+			surgeIndex = *source.Operation.SurgeIndex
+			g.Expect(surgeIndex).NotTo(BeElementOf(stuckIndex, healthyIndex))
+			held := 0
+			for _, pod := range enginePods(g, true) {
+				if podInstance(pod) != strconv.Itoa(int(surgeIndex)) || !onUnpullableImage(pod) {
+					continue
+				}
+				if !controllerutil.ContainsFinalizer(pod, holdTerminationFinalizer) {
+					controllerutil.AddFinalizer(pod, holdTerminationFinalizer)
+					g.Expect(k8sClient.Update(suiteCtx, pod)).To(Succeed())
+					heldPods = append(heldPods, pod.Name)
+				}
+				held++
+			}
+			g.Expect(held).To(Equal(2), "the replacement is a gang of a leader and a worker, both held")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+
+	ginkgo.It("fails the attempt and leaves the source Failed beside its marker, still serving", func() {
+		Eventually(func(g Gomega) {
+			healthyUntouched(g)
+			source := rowAt(g, stuckIndex)
+			g.Expect(source).NotTo(BeNil())
+			g.Expect(source.Phase).To(Equal(v1beta1.OMENativeInstanceFailed), "the stuck-pod grace must end the attempt on the source's row")
+			g.Expect(source.Operation).NotTo(BeNil(), "a failed gang surge keeps its operation for the retirement")
+			g.Expect(source.Operation.SurgeIndex).NotTo(BeNil())
+			g.Expect(*source.Operation.SurgeIndex).To(Equal(surgeIndex))
+			g.Expect(source.RunningRevision).To(Equal(v1Rev), "the source still records the revision it serves")
+			marker := rowAt(g, surgeIndex)
+			g.Expect(marker).NotTo(BeNil(), "the replacement's marker must still be present")
+			g.Expect(marker.Operation).NotTo(BeNil())
+			g.Expect(marker.Operation.Type).To(Equal(v1beta1.InstanceOperationUpdate))
+			serving := 0
+			parked := 0
+			for _, pod := range enginePods(g, true) {
+				switch podInstance(pod) {
+				case strconv.Itoa(int(stuckIndex)):
+					if !onUnpullableImage(pod) && podreadiness.IsServing(pod) && pod.DeletionTimestamp == nil {
+						serving++
+					}
+				case strconv.Itoa(int(surgeIndex)):
+					if onUnpullableImage(pod) && pullFailureShown(pod) {
+						parked++
+					}
+				}
+			}
+			g.Expect(serving).To(Equal(2), "the failed source serves through its own gang while its replacement is parked")
+			g.Expect(parked).To(Equal(2), "the replacement's pods are parked in the pull failure the ladder records")
+			g.Expect(findRetryBlock(retryBlocks(g, ns.Name, isvcName, v1beta1.EngineComponent), badRev)).To(BeNil(),
+				"the abandon cannot finish while the replacement's pods are held; the scale is what ends the attempt")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+
+	ginkgo.It("scales to one and the wave claims the failed pair, not the healthy gang", func() {
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			one := 1
+			cur.Spec.Engine.MinReplicas = &one
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// The pair is the scale's: one of its rows is in a delete wave, the
+		// other is in the wave or waits for it as it was, and the source is
+		// neither reset nor re-rolled; the healthy gang is left alone.
+		Eventually(func(g Gomega) {
+			healthyUntouched(g)
+			deleting := 0
+			for _, index := range []int32{stuckIndex, surgeIndex} {
+				row := rowAt(g, index)
+				if row == nil {
+					deleting++
+					continue
+				}
+				if row.Phase == v1beta1.OMENativeInstanceDeleting {
+					g.Expect(row.Operation).NotTo(BeNil())
+					g.Expect(row.Operation.Type).To(Equal(v1beta1.InstanceOperationDelete))
+					deleting++
+					continue
+				}
+				if index == stuckIndex {
+					g.Expect(row.Phase).To(Equal(v1beta1.OMENativeInstanceFailed), "the source is the scale's to retire, not the roll's to reset")
+				} else {
+					g.Expect(row.Phase).NotTo(Equal(v1beta1.OMENativeInstanceReady), "the marker never promotes")
+				}
+				g.Expect(row.Operation).NotTo(BeNil())
+				g.Expect(row.Operation.Type).To(Equal(v1beta1.InstanceOperationUpdate), "a row waiting for the wave keeps the operation it had")
+			}
+			g.Expect(deleting).To(BeNumerically(">=", 1), "the scale-down wave must claim the failed pair")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+
+	ginkgo.It("releases the replacement's pods and the attempt ends on the ladder with the pair", func() {
+		releaseHeldPods()
+
+		Eventually(func(g Gomega) {
+			healthyUntouched(g)
+			b := findRetryBlock(retryBlocks(g, ns.Name, isvcName, v1beta1.EngineComponent), badRev)
+			g.Expect(b).NotTo(BeNil(), "the wave must record the attempt it ended on the ladder for %s", badRev)
+			g.Expect(b.State).To(Equal(v1beta1.RetryBlockHeld), "one attempt is the bound; the attempt the scale ended fills it")
+			g.Expect(b.AttemptsStarted).To(Equal(int32(1)))
+			g.Expect(b.NextRetryAt).To(BeNil(), "Held has no time bound")
+			g.Expect(b.Reason).To(BeElementOf("ImagePullBackOff", "ErrImagePull"))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			healthyUntouched(g)
+			ir := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			rows := decodedInstanceStatuses(g, ir)
+			g.Expect(rows).To(HaveLen(1), "the scale leaves the one gang that serves")
+			g.Expect(rows[0].Index).To(Equal(healthyIndex), "the gang the roll never reached is the survivor")
+			g.Expect(rows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(rows[0].Operation).To(BeNil(), "a held revision leaves no attempt open on the survivor")
+			g.Expect(rows[0].RunningRevision).To(Equal(v1Rev), "the survivor must still record the sound revision")
+			g.Expect(ir.Status.RolloutHold).NotTo(BeNil(), "status.rolloutHold must surface the Held denial")
+			g.Expect(ir.Status.RolloutHold.Gate).To(Equal(v1beta1.RolloutHoldGateHeld))
+			g.Expect(ir.Status.RolloutHold.Target).To(Equal(badRev))
+			pods := enginePods(g, true)
+			g.Expect(pods).To(HaveLen(2), "one gang of a leader and a worker")
+			for _, pod := range pods {
+				g.Expect(onUnpullableImage(pod)).To(BeFalse(), "no unpullable-image pod may remain: %s", pod.Name)
+				_, healthy := healthyUIDs[pod.Name]
+				g.Expect(healthy).To(BeTrue(), "the pods left are the healthy gang's: %s", pod.Name)
+			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+
+	ginkgo.It("opens no further attempt on the survivor while Held", func() {
+		Consistently(func(g Gomega) {
+			healthyUntouched(g)
+			for _, pod := range enginePods(g, true) {
+				g.Expect(onUnpullableImage(pod)).To(BeFalse(), "no pod may be created on the unpullable image after the scale: %s", pod.Name)
+			}
+			for _, row := range instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent) {
+				g.Expect(row.Operation).To(BeNil(), "no attempt may reopen on instance %d while the revision is Held", row.Index)
+			}
+		}, afterScaleWindow, kindPollInterval).Should(Succeed())
+	})
+
+	ginkgo.It("converges the survivor on a corrected revision", func() {
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Spec.Engine.Leader.PodSpec.Containers[0].Image = fixedImage
+			cur.Spec.Engine.Worker.PodSpec.Containers[0].Image = fixedImage
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			ir := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(ir.Status.UpdateRevision).NotTo(BeEmpty())
+			g.Expect(ir.Status.UpdateRevision).NotTo(Equal(badRev), "the corrected spec must produce a new revision")
+			g.Expect(ir.Status.CurrentRevision).To(Equal(ir.Status.UpdateRevision), "the engine must converge on the corrected revision")
+			rows := decodedInstanceStatuses(g, ir)
+			g.Expect(rows).To(HaveLen(1))
+			g.Expect(rows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(rows[0].RunningRevision).To(Equal(ir.Status.UpdateRevision))
+			g.Expect(ir.Status.RolloutHold).To(BeNil(), "status.rolloutHold must clear once the rollout converges")
+			pods := enginePods(g, false)
+			g.Expect(pods).To(HaveLen(2), "one gang of a leader and a worker on the corrected revision")
+			for _, pod := range pods {
+				g.Expect(onUnpullableImage(pod)).To(BeFalse(), "no unpullable-image pod may remain: %s", pod.Name)
+				g.Expect(podreadiness.IsServing(pod)).To(BeTrue(), "every member of the gang must serve: %s", pod.Name)
+			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

@@ -172,7 +172,7 @@ func MigrationModeOrDefault(p *types.MigrationPolicy) types.MigrationMode {
 }
 
 // instancePlanIndices computes the per-Instance index set the plan should
-// drive: active surge pairs (unbounded by replicas), then the existing
+// drive: live surge pairs (unbounded by replicas), then the existing
 // steady indices up to the replica cap — the Ready ones in rotation first,
 // oldest first within a tier — excluding sources whose replacements are
 // proven promoted, then new indices to round out scale-up.
@@ -180,6 +180,12 @@ func MigrationModeOrDefault(p *types.MigrationPolicy) types.MigrationMode {
 // The replica cap counts only non-migration indices. Counting the
 // surge against it would drop a healthy non-migrating sibling out of
 // the plan and into scale-down.
+//
+// A gang surge whose source has failed holds no pin: the pair competes
+// for the steady budget behind the Ready rows, the source charged like
+// any steady row and its marker following the source in or out, so the
+// two leave the plan together and the scale-down retires them as one
+// unit instead of taking a healthy sibling.
 func instancePlanIndices(instances []types.InstanceStatus, replicas int32) []int32 {
 	used := existingInstanceIndices(instances)
 	// "Protected" / "source" sets cover BOTH migration surge pairs and
@@ -195,8 +201,11 @@ func instancePlanIndices(instances []types.InstanceStatus, replicas int32) []int
 	for idx := range updateSurgeSourceIndices(instances) {
 		migrationSource[idx] = struct{}{}
 	}
+	unpinnedSources := failedGangSurgeSources(instances)
+	markerOf, sourceOf := failedGangSurgeFollowers(instances)
 	// Every claim reserves its target for uniqueness; the handoff predicates
-	// separately decide whether a source has enough proof to retire.
+	// separately decide whether a source has enough proof to retire. A
+	// failed source's claim reserves without pinning.
 	handoffTargetReferences := map[int32]int{}
 	for _, s := range instances {
 		if s.Operation == nil || s.Operation.SurgeIndex == nil {
@@ -206,7 +215,9 @@ func instancePlanIndices(instances []types.InstanceStatus, replicas int32) []int
 		switch s.Operation.Type {
 		case types.InstanceOperationMigrate, types.InstanceOperationUpdate:
 			handoffTargetReferences[targetIndex]++
-			migrationProtected[targetIndex] = struct{}{}
+			if _, unpinned := unpinnedSources[s.Index]; !unpinned {
+				migrationProtected[targetIndex] = struct{}{}
+			}
 		}
 	}
 
@@ -291,12 +302,22 @@ func instancePlanIndices(instances []types.InstanceStatus, replicas int32) []int
 			if _, retiring := retiringSources[idx]; retiring {
 				continue
 			}
+			// A failed gang surge's marker is its source's to bring along.
+			if _, follower := sourceOf[idx]; follower {
+				continue
+			}
 			if preferredByIndex[idx] != wantPreferred {
 				continue
 			}
 			indices = append(indices, idx)
 			picked[idx] = struct{}{}
 			steadyCount++
+			if marker, paired := markerOf[idx]; paired {
+				if _, already := picked[marker]; !already {
+					indices = append(indices, marker)
+					picked[marker] = struct{}{}
+				}
+			}
 		}
 	}
 	fill(true)
@@ -409,18 +430,24 @@ func migrationSourceIndices(instances []types.InstanceStatus) map[int32]struct{}
 // gang surge (new index) from a single-pod surge (ActiveOrdinal toggle,
 // SurgeIndex nil).
 //
-// A target is pinned only while a source references it. This includes an
-// occupied target discovered during recovery: the source and occupant remain
-// intact until gangSurgeUpdate can reset the claim. An unreferenced marker is
-// left for the scale-down pipeline to reap.
+// A target is pinned only while a live source references it. This includes
+// an occupied target discovered during recovery: the source and occupant
+// remain intact until gangSurgeUpdate can reset the claim. An unreferenced
+// marker is left for the scale-down pipeline to reap. A source that has
+// failed pins nothing, itself included: the failed pair competes for the
+// steady budget as one unit (instancePlanIndices).
 func updateSurgeInFlightIndices(instances []types.InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
 	referenced := map[int32]struct{}{}
+	unpinned := failedGangSurgeSources(instances)
 	for _, s := range instances {
 		if s.Operation == nil || s.Operation.Type != types.InstanceOperationUpdate {
 			continue
 		}
-		if s.Operation.SurgeIndex != nil { // source
+		if _, failed := unpinned[s.Index]; failed {
+			continue
+		}
+		if s.Operation.SurgeIndex != nil { // live source
 			out[s.Index] = struct{}{}
 			referenced[*s.Operation.SurgeIndex] = struct{}{}
 		}
@@ -433,18 +460,82 @@ func updateSurgeInFlightIndices(instances []types.InstanceStatus) map[int32]stru
 	return out
 }
 
-// updateSurgeSourceIndices returns the source-side indices of an
-// in-flight gang surge (Op.Type=Update with SurgeIndex set). These count
+// updateSurgeSourceIndices returns the source-side indices of a live gang
+// surge (Op.Type=Update with SurgeIndex set, not Failed). These count
 // toward the steady replica budget — the source IS the user-facing
 // replica being rolled; the surge target is the transient +1.
 func updateSurgeSourceIndices(instances []types.InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
+	unpinned := failedGangSurgeSources(instances)
 	for _, s := range instances {
+		if _, failed := unpinned[s.Index]; failed {
+			continue
+		}
 		if s.Operation != nil && s.Operation.Type == types.InstanceOperationUpdate && s.Operation.SurgeIndex != nil {
 			out[s.Index] = struct{}{}
 		}
 	}
 	return out
+}
+
+// failedGangSurgeSources is the set of gang surge sources whose attempt
+// has failed and whose claim pins nothing: Phase=Failed with the surge
+// operation preserved, the shape the escalation leaves for the gang
+// abandon, naming an index that holds the replacement's marker or
+// nothing at all. A failed source whose index is occupied by any other
+// row keeps its pin: source and occupant stay intact until
+// gangSurgeUpdate resets the claim.
+func failedGangSurgeSources(instances []types.InstanceStatus) map[int32]struct{} {
+	byIndex := make(map[int32]*types.InstanceStatus, len(instances))
+	for i := range instances {
+		byIndex[instances[i].Index] = &instances[i]
+	}
+	out := map[int32]struct{}{}
+	for i := range instances {
+		s := &instances[i]
+		if s.Phase != types.InstancePhaseFailed || s.Operation == nil ||
+			s.Operation.Type != types.InstanceOperationUpdate || s.Operation.SurgeIndex == nil {
+			continue
+		}
+		if occupant, found := byIndex[*s.Operation.SurgeIndex]; found && !gangSurgeTargetMarker(occupant) {
+			continue
+		}
+		out[s.Index] = struct{}{}
+	}
+	return out
+}
+
+// gangSurgeTargetMarker reports whether the row is the marker a gang
+// surge claims its replacement's index with, live or in cleanup.
+func gangSurgeTargetMarker(s *types.InstanceStatus) bool {
+	return s != nil && s.Operation != nil && s.Operation.Type == types.InstanceOperationUpdate &&
+		(s.Operation.Step == types.UpdateStepGangSurgeTarget || s.Operation.Step == types.UpdateStepGangSurgeTargetCleanup)
+}
+
+// failedGangSurgeFollowers pairs each unpinned failed gang surge source
+// with the marker it still references: markerOf by source index,
+// sourceOf by marker index. A source whose marker is already gone has no
+// follower; a marker claimed by two failed sources follows the first.
+func failedGangSurgeFollowers(instances []types.InstanceStatus) (markerOf, sourceOf map[int32]int32) {
+	markerOf, sourceOf = map[int32]int32{}, map[int32]int32{}
+	unpinned := failedGangSurgeSources(instances)
+	present := existingInstanceIndices(instances)
+	for i := range instances {
+		s := &instances[i]
+		if _, failed := unpinned[s.Index]; !failed {
+			continue
+		}
+		marker := *s.Operation.SurgeIndex
+		if _, found := present[marker]; !found {
+			continue
+		}
+		if _, taken := sourceOf[marker]; taken {
+			continue
+		}
+		markerOf[s.Index] = marker
+		sourceOf[marker] = s.Index
+	}
+	return markerOf, sourceOf
 }
 
 // existingInstanceIndices returns the set of recorded indices.

@@ -7502,6 +7502,156 @@ func TestScaleWhilePushFailed_ScaleUpStaysUnderTheCeiling(t *testing.T) {
 	}
 }
 
+// A scale-down lands on a gang Component whose SurgeThenDrain push has
+// failed: the first gang's replacement parked in ImagePullBackOff, the
+// escalation left the gang's row at Failed with its surge operation and
+// the replacement's marker still present, while the gang's own v1 pods
+// serve beside the other gang's. The scale to one keeps the Ready gang
+// the roll never reached and retires the failed pair, source and marker,
+// as one scale-down unit; the wave records the attempt on the revision's
+// ladder the way the abandon would have, so with a bound of one the
+// revision is Held and the survivor is left alone. The healthy gang's
+// pods are never touched, the Component never serves below the count it
+// was scaled to, no further pod is made on the unpullable revision, and
+// the status keeps reporting the push that has not landed.
+
+// newFailedGangSurgeHarness is two leader-plus-worker gangs serving v1
+// under SurgeThenDrain with maxSurge=1 and maxUnavailable=0 on a ladder
+// of one attempt, pushed onto the bad revision until the first gang's
+// attempt has failed: Instance 0 reads Failed with its surge operation,
+// the replacement's marker is present and the replacement's pods are
+// still parked, and all four v1 pods serve.
+func newFailedGangSurgeHarness(t *testing.T) *recoveryHarness {
+	t.Helper()
+	h := newRecoveryHarness(t, true)
+	h.atomicStatus = true
+	h.replicas = 2
+	maxSurge, maxUnavailable := intstr.FromInt(1), intstr.FromInt(0)
+	h.lifecycle.UpdateStrategy = &workloadtypes.UpdateStrategy{
+		Type:          workloadtypes.UpdateStrategySurgeThenDrain,
+		RollingUpdate: &workloadtypes.RollingUpdate{MaxSurge: &maxSurge, MaxUnavailable: &maxUnavailable},
+	}
+	h.retryPolicy = &workloadtypes.RetryPolicy{MaxAttempts: 1, InitialDelay: time.Minute, MaxDelay: 30 * time.Minute, Multiplier: 2}
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(40, func() bool { return h.settledOn(h.revV1, 2) }) {
+		h.dumpState("initial create")
+		t.Fatalf("two gangs never settled on v1")
+	}
+	h.setTarget(h.revBad, badImage)
+	if !h.run(60, h.gangMidWreckage) {
+		h.dumpState("push")
+		t.Fatalf("the push onto the unpullable revision never left Instance 0 Failed with its replacement's marker present")
+	}
+	if got := len(h.servingPods()); got != 4 {
+		h.dumpState("push")
+		t.Fatalf("serving pods after the failed attempt = %d, want the four v1 pods", got)
+	}
+	if h.findBlock(h.revBad.Name) != nil {
+		t.Fatalf("the failed attempt is not yet on the ladder; the story needs the wave to be its record")
+	}
+	return h
+}
+
+// TestScaleWhileGangSurgeFailed_ScaleDownRetiresTheFailedPairFirst: a
+// scale from two to one while Instance 0 is Failed with its replacement's
+// marker present retires Instance 0 and the marker together and keeps
+// Instance 1, the gang the roll never reached. Instance 1 serves through
+// the very pods it served through before the scale, the pair leaves in
+// the same wave, the wave's record Holds the revision at its bound of one
+// attempt with the pull failure as its reason, no pod is made on the
+// pushed revision after the scale, and no attempt reopens on the survivor.
+//
+// Cells: instance/Failed/spec.replicasDown/before, instance/Update/GangSurgeTarget/spec.replicasDown/before
+func TestScaleWhileGangSurgeFailed_ScaleDownRetiresTheFailedPairFirst(t *testing.T) {
+	h := newFailedGangSurgeHarness(t)
+	source := h.instance(0)
+	surgeIdx := *source.Operation.SurgeIndex
+	healthy := map[types.UID]struct{}{}
+	for _, pod := range h.podsOf(1) {
+		if pod.Spec.Containers[0].Image != goodImage || !podreadiness.IsServing(pod) {
+			t.Fatalf("instance 1 must serve on v1 before the scale, got pod %s", pod.Name)
+		}
+		healthy[pod.UID] = struct{}{}
+	}
+	if len(healthy) != 2 {
+		t.Fatalf("instance 1 serves through %d pods before the scale, want the gang's two", len(healthy))
+	}
+	badSeen := map[types.UID]struct{}{}
+	h.trackPodsOnImage(badImage, badSeen)()
+	badBefore := len(badSeen)
+
+	h.replicas = 1
+	h.setTarget(h.revBad, badImage)
+	atRest := func() bool {
+		rows := h.irStatuses()
+		return len(rows) == 1 && rows[0].Index == 1 && rows[0].Phase == workloadtypes.InstancePhaseReady && rows[0].Operation == nil &&
+			len(h.podsOf(0)) == 0 && len(h.podsOf(surgeIdx)) == 0 && len(h.badPods()) == 0
+	}
+	invariant := func() {
+		t.Helper()
+		h.trackPodsOnImage(badImage, badSeen)()
+		pods := h.podsOf(1)
+		if len(pods) != 2 {
+			h.dumpState("healthy gang")
+			t.Fatalf("instance 1 has %d pods, want the two it serves through", len(pods))
+		}
+		for _, pod := range pods {
+			if _, same := healthy[pod.UID]; !same || !podreadiness.IsServing(pod) || pod.DeletionTimestamp != nil {
+				h.dumpState("healthy gang")
+				t.Fatalf("instance 1's pod %s is not the serving v1 pod it was before the scale", pod.Name)
+			}
+		}
+		if row := h.instance(1); row == nil || row.Phase != workloadtypes.InstancePhaseReady || row.Operation != nil {
+			h.dumpState("healthy row")
+			t.Fatalf("instance 1 must stay Ready with no operation, got %+v", row)
+		}
+		// The pair leaves as one unit: a wave that holds one of them holds
+		// the other, or has already removed it.
+		deletingOrGone := func(idx int32) bool {
+			row := h.instance(idx)
+			return row == nil || row.Phase == workloadtypes.InstancePhaseDeleting
+		}
+		if deletingOrGone(0) != deletingOrGone(surgeIdx) {
+			h.dumpState("pair split")
+			t.Fatalf("the failed source and its marker must be retired together: source deleting-or-gone=%t, marker deleting-or-gone=%t",
+				deletingOrGone(0), deletingOrGone(surgeIdx))
+		}
+		if row := h.instance(0); row != nil && row.Phase != workloadtypes.InstancePhaseFailed && row.Phase != workloadtypes.InstancePhaseDeleting {
+			h.dumpState("source")
+			t.Fatalf("the failed source must go from Failed to Deleting, never be reset by the scale, got %+v", row)
+		}
+	}
+	if !h.runWithInvariant(60, atRest, invariant) {
+		h.dumpState("scale-down")
+		t.Fatalf("the component never came to rest at the one gang that serves")
+	}
+	for i := 0; i < 6; i++ {
+		h.step()
+		invariant()
+		if !atRest() {
+			h.dumpState("after the scale-down")
+			t.Fatalf("the component left its one-instance shape after the scale-down")
+		}
+	}
+	block := h.findBlock(h.revBad.Name)
+	if block == nil {
+		t.Fatalf("the status stopped reporting the push that has not landed: no retry block for %s", h.revBad.Name)
+	}
+	if block.State != workloadtypes.RetryBlockHeld || block.AttemptsStarted != 1 || block.Reason != "ImagePullBackOff" {
+		t.Fatalf("block after the scale = (state=%s attempts=%d reason=%q), want Held after the one attempt the scale ended, with its pull failure",
+			block.State, block.AttemptsStarted, block.Reason)
+	}
+	if len(h.heldWarnings) != 1 {
+		t.Fatalf("held warnings = %v, want the one the wave's record raised", h.heldWarnings)
+	}
+	if len(badSeen) != badBefore {
+		t.Fatalf("%d pods were made on the unpullable revision after the scale; a retired attempt is not retried on the survivor", len(badSeen)-badBefore)
+	}
+	if row := h.instance(1); row.RunningRevision != h.revV1.Name {
+		t.Fatalf("the survivor must still record the sound revision, got %+v", row)
+	}
+}
+
 // A two-pod gang (leader plus worker) is pushed onto a revision that
 // cannot be pulled under RecreatePod. The first gang is drained and its
 // replacement parks in ImagePullBackOff. The attempt must end the way a

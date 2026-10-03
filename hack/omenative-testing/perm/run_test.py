@@ -5689,6 +5689,27 @@ class StuckOperationTest(unittest.TestCase):
         self.assertEqual("", run._stuck_signal({"engine": fresh}, {"engine"}, "failed"))
         self.assertEqual("", run._stuck_signal({"decoder": held}, {"engine"}, "held"), "only the bumped members count")
 
+    def test_stuck_signal_held_waits_for_every_bumped_component(self):
+        """Under stuck=held the moment is when every bumped Component is
+        held: an operation landing while one of them still rolls meets a
+        push in flight, not the hold the case names. The signal names each
+        held Component; failed stays a first-match reading."""
+        held = self._ir("engine", rows=[(0, "Ready"), (1, "Failed")],
+                        blocks=[{"targetRevision": "rev-b", "state": "Held", "attemptsStarted": 3}])
+        rolling = self._ir("decoder", rows=[(0, "Updating"), (1, "Ready")],
+                           blocks=[{"targetRevision": "rev-d", "state": "RetryInProgress", "attemptsStarted": 1}])
+        held_too = self._ir("decoder", rows=[(0, "Ready"), (1, "Ready")], hold={"gate": "Held", "reason": "update held"})
+        both = {"engine", "decoder"}
+        self.assertEqual("", run._stuck_signal({"engine": held, "decoder": rolling}, both, "held"),
+                         "one Component held ahead of the other is not yet the moment")
+        self.assertEqual("", run._stuck_signal({"engine": held}, both, "held"), "a bumped Component with no status yet is not held")
+        signal = run._stuck_signal({"engine": held, "decoder": held_too}, both, "held")
+        self.assertIn("engine: the retry block for rev-b is Held after 3 attempt(s)", signal)
+        self.assertIn("decoder: rolloutHold gate=Held", signal)
+        self.assertIn("decoder: the retry block for rev-d records 1 failed attempt(s)",
+                      run._stuck_signal({"engine": held, "decoder": rolling}, both, "failed"),
+                      "failed reads the first bumped Component that shows it")
+
     def test_unlanded_push_needs_diverged_revisions_and_a_visible_reason(self):
         held = self._ir("engine", rows=[(0, "Ready")], blocks=[{"targetRevision": "rev-b", "state": "Held", "attemptsStarted": 3}],
                         hold={"gate": "Held"})
@@ -5729,6 +5750,105 @@ class StuckOperationTest(unittest.TestCase):
         self.assertEqual(["2", "0"], run._scale_victims([("0", "Updating"), ("1", "Ready"), ("2", "Creating")], 2))
         self.assertEqual([], run._scale_victims(rows, 0))
 
+    def test_scale_victims_keep_the_rows_that_serve_over_the_rows_that_do_not(self):
+        """Three rows scaled to one, read with what the pods serve. An
+        Instance drained for its attempt serves nothing and goes first,
+        single pod or gang; under SurgeThenDrain the source of a failed gang
+        surge still serves through its pods and goes with its marker, ahead
+        of the Ready sibling; a scale that takes only one takes the marker,
+        which serves nothing, and leaves the source that still serves."""
+        single = [("0", "Failed", False), ("1", "Ready", True), ("2", "Ready", True)]
+        self.assertEqual(["0", "2"], run._scale_victims(single, 2), "a single-pod Instance drained for its attempt serves nothing")
+        gang_recreate = [("0", "Failed", False), ("1", "Ready", True), ("2", "Ready", True)]
+        self.assertEqual(["0", "2"], run._scale_victims(gang_recreate, 2), "a gang drained for its attempt serves nothing")
+        gang_surge = [("0", "Failed", True), ("1", "Ready", True), ("2", "Failed", False)]
+        self.assertEqual(["2", "0"], run._scale_victims(gang_surge, 2), "the failed pair goes and the Ready sibling stays")
+        self.assertEqual(["2"], run._scale_victims(gang_surge, 1), "the marker serves nothing; the source still serves")
+        serving_stuck = [("0", "Ready", True), ("1", "Failed", False), ("2", "Failed", True)]
+        self.assertEqual(["1"], run._scale_victims(serving_stuck, 1), "a row that serves nothing goes before a higher index that serves")
+        self.assertEqual(["1", "2"], run._scale_victims(serving_stuck, 2))
+        self.assertEqual(["1"], run._scale_victims([("0", "Ready"), ("1", "Failed"), ("2", "Ready")], 1), "a pair reads serving from its phase")
+
+    def test_removal_plans_count_a_surge_row_over_the_replica_count(self):
+        """Two gangs under SurgeThenDrain carry a third row, the failed
+        replacement's marker, when a scale to one lands: the plan removes
+        the rows present minus one, the pair, and keeps the sibling; a
+        snapshot without the surge row removes one."""
+        with_marker = [("0", "Failed", True), ("1", "Ready", True), ("2", "Failed", False)]
+        without = [("0", "Failed", False), ("1", "Ready", True)]
+        plans = run._removal_plans({"at the scale": with_marker, "right after the scale": without}, 1)
+        self.assertEqual({"at the scale": ["2", "0"], "right after the scale": ["0"]}, plans)
+        self.assertEqual(("at the scale", []), run._removal_outcome(plans, {"0", "1", "2"}, {"1"}, {"1"}))
+        self.assertEqual((None, []), run._removal_outcome(plans, {"0", "1", "2"}, {"0"}, {"0"}), "the healthy sibling is never the victim")
+
+    def test_first_pass_rows_judge_a_claimed_row_as_the_row_the_wave_found(self):
+        """The rows at the controller's first pass after the scale already
+        carry the wave's Deleting stamps; a row the wave claimed is judged
+        as the row the wave found at the scale, and a row the abandon
+        finished before the pass is simply absent. An abandoned pair
+        yields the ordinary order; a pair still present yields the pair."""
+        at_op = [("0", "Failed", True), ("1", "Ready", True), ("2", "Failed", False)]
+        abandoned = run._first_pass_rows(at_op, [("0", "Ready", True), ("1", "Deleting", False)])
+        self.assertEqual([("0", "Ready", True), ("1", "Ready", True)], abandoned)
+        self.assertEqual(["1"], run._scale_victims(abandoned, len(abandoned) - 1), "the ordinary order: the highest Ready index goes")
+        present = run._first_pass_rows(at_op, [("0", "Deleting", False), ("1", "Ready", True), ("2", "Deleting", False)])
+        self.assertEqual(at_op, present)
+        self.assertEqual(["2", "0"], run._scale_victims(present, len(present) - 1), "the failed pair goes as one unit")
+        marker_gone = run._first_pass_rows(at_op, [("0", "Deleting", False), ("1", "Ready", True)])
+        self.assertEqual([("0", "Failed", True), ("1", "Ready", True)], marker_gone)
+        self.assertEqual(["0"], run._scale_victims(marker_gone, len(marker_gone) - 1))
+        fresh = run._first_pass_rows(at_op, [("1", "Ready", True), ("3", "Deleting", False)])
+        self.assertEqual([("1", "Ready", True), ("3", "Deleting", False)], fresh, "a row that did not exist at the scale is read as it is")
+        self.assertEqual("still stuck", run._stuck_rows_fate(at_op, [("0", "Deleting", False), ("1", "Ready", True)]))
+        self.assertEqual("already reset", run._stuck_rows_fate(at_op, [("0", "Ready", True), ("1", "Deleting", False)]))
+        self.assertEqual("", run._stuck_rows_fate([("0", "Ready", True), ("1", "Ready", True)], [("0", "Ready", True)]))
+
+    def test_removal_outcome_judges_each_plan_against_its_own_rows(self):
+        """A plan read at the controller's first pass may lack rows the
+        abandon finished between the scale and that pass; the plan is judged
+        against the rows it was read from, and the rows that left before it
+        are reported, not judged."""
+        plans = {"at the scale": ["2", "0"], "at the controller's first pass": ["1"]}
+        rows = {"at the scale": {"0", "1", "2"}, "at the controller's first pass": {"0", "1"}}
+        self.assertEqual(("at the controller's first pass", [], ["2"]),
+                         run._removal_outcome_by_rows(plans, rows, {"0", "1", "2"}, {"0"}, {"0"}))
+        self.assertEqual(("at the scale", [], []), run._removal_outcome_by_rows(plans, rows, {"0", "1", "2"}, {"1"}, {"1"}))
+        self.assertEqual((None, ["3"], []), run._removal_outcome_by_rows(plans, rows, {"0", "1", "2"}, {"2", "3"}, {"2", "3"}))
+        self.assertEqual((None, [], []), run._removal_outcome_by_rows(plans, rows, {"0", "1", "2"}, {"0", "1"}, {"0", "1"}),
+                         "nothing removed matches no plan")
+
+    def test_ir_first_pass_after_the_scale_reads_the_scaled_generation_observed(self):
+        """The controller's first pass after a scale is visible on the
+        InferenceReplica: spec.replicas carries the scaled count and
+        status.observedGeneration has reached the generation that carries
+        it."""
+        def ir(replicas, generation, observed):
+            return {"metadata": {"generation": generation}, "spec": {"component": "engine", "replicas": replicas},
+                    "status": {"observedGeneration": observed}}
+        self.assertEqual(0, run._ir_first_pass_generation(ir(2, 3, 3), 1), "the projector has not applied the scale")
+        self.assertEqual(0, run._ir_first_pass_generation(ir(1, 4, 3), 1), "the controller has not seen the scaled generation")
+        self.assertEqual(4, run._ir_first_pass_generation(ir(1, 4, 4), 1))
+        self.assertEqual(5, run._ir_first_pass_generation(ir(1, 4, 5), 1))
+        self.assertEqual(0, run._ir_first_pass_generation({"spec": {"replicas": 1}}, 1), "no generation published is not a pass observed")
+
+    def test_serving_indices_read_the_running_revision_pods(self):
+        """An Instance serves the running revision when a full set of its
+        pods is Ready on one of the running revision's hashes: a gang with
+        a member not Ready does not, and pods on the pushed revision never
+        count, whatever their readiness."""
+        def pod(inst, ready, h, comp="engine"):
+            return {"comp": comp, "inst": inst, "alive": True, "ready": ready, "hash": h, "uid": f"{comp}-{inst}-{h}-{ready}"}
+        gang = {"pods_per_inst": {"engine": 2}, "pod_state": {
+            "l0": pod("0", True, "old"), "w0": pod("0", True, "old"),
+            "l1": pod("1", True, "old"), "w1": pod("1", True, "old"),
+            "l2": pod("2", False, "new"), "w2": pod("2", False, "new"), "gone": None}}
+        self.assertEqual({"0", "1"}, run._serving_indices(gang, "engine", {"old"}))
+        half = dict(gang, pod_state=dict(gang["pod_state"], w0=pod("0", False, "old")))
+        self.assertEqual({"1"}, run._serving_indices(half, "engine", {"old"}), "a gang serves with every member Ready")
+        rolled = dict(gang, pod_state=dict(gang["pod_state"], l1=pod("1", True, "new"), w1=pod("1", True, "new")))
+        self.assertEqual({"0"}, run._serving_indices(rolled, "engine", {"old"}), "pods on the pushed revision are not the running revision's")
+        self.assertEqual(set(), run._serving_indices(gang, "decoder", {"old"}))
+
     def test_survivor_changes_tell_a_needless_rebuild_from_the_rolls_attempt(self):
         olds = {"old"}
         pre = {"0": [("u0", "old")], "1": [("u1", "old")], "2": [("u2", "old")], "3": [("u3", "new")]}
@@ -5754,7 +5874,7 @@ class StuckOperationTest(unittest.TestCase):
     def test_removal_is_judged_against_the_plan_the_engine_could_have_seen(self):
         at_op = [("0", "Ready"), ("1", "Failed"), ("2", "Ready")]
         after = [("0", "Ready"), ("1", "Ready"), ("2", "Ready")]
-        plans = run._removal_plans({"at the scale": at_op, "right after the scale": after}, 3, 2)
+        plans = run._removal_plans({"at the scale": at_op, "right after the scale": after}, 2)
         self.assertEqual({"at the scale": ["1"], "right after the scale": ["2"]}, plans)
         pre = {"0", "1", "2"}
         self.assertEqual(("at the scale", []), run._removal_outcome(plans, pre, {"0", "2"}, {"0", "2"}))
@@ -5763,7 +5883,7 @@ class StuckOperationTest(unittest.TestCase):
         self.assertEqual((None, []), run._removal_outcome(plans, pre, {"0", "2"}, {"0", "1", "2"}), "a pod left on a removed index is not a removal")
         self.assertEqual(("at the scale", ["3"]), run._removal_outcome(plans, pre, {"0", "2", "3"}, {"0", "2", "3"}),
                          "a row that did not exist at the scale is reported, not judged")
-        zero = run._removal_plans({"at the scale": at_op, "right after the scale": None}, 3, 1)
+        zero = run._removal_plans({"at the scale": at_op, "right after the scale": None}, 1)
         self.assertEqual({"at the scale": ["1", "2"]}, zero, "a request for zero plans from the accepted count")
         self.assertEqual(("at the scale", []), run._removal_outcome(zero, pre, {"0"}, {"0"}))
 
