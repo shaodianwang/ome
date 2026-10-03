@@ -4320,3 +4320,54 @@ func TestPlacementPauseMigrationSurge(t *testing.T) {
 		})
 	}
 }
+
+// A fresh record whose source index is still another row's pinned
+// replacement waits without taking ownership: the handoff that promoted
+// the row owns it until its own source is removed, so the record stays
+// Accepted with no surge and neither row is stamped. Once the pinning
+// source is gone the same record allocates its surge.
+func TestMigrate_FreshRecordWaitsWhileAHandoffStillPinsItsSource(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	const uuid = "mig-pinned-source"
+	f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+
+	ir := f.getIR(t)
+	replacement := int32(0)
+	ir.Status.InstanceStatuses = append(ir.Status.InstanceStatuses, v1beta1.OMENativeInstanceStatus{
+		Index: 1, Incarnation: 1, Phase: v1beta1.OMENativeInstanceUpdating,
+		RunningRevision: "llama-70b-engine-prior", TargetRevision: ir.Status.InstanceStatuses[0].RunningRevision,
+		Operation: legacyToV1beta1Op(&workload.InstanceOperation{
+			Type:           workload.InstanceOperationUpdate,
+			Step:           workload.UpdateStepSurgeDrain,
+			SurgeIndex:     &replacement,
+			TargetRevision: ir.Status.InstanceStatuses[0].RunningRevision,
+		}),
+	})
+	if err := f.c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("seed the pinning source: %v", err)
+	}
+
+	done, accepted := f.pass(t, uuid)
+	if done || accepted {
+		t.Fatalf("a source another handoff still pins must defer without ownership: done=%v accepted=%v", done, accepted)
+	}
+	rec := f.record(t, uuid)
+	if rec.Phase != workload.MigrationPhaseAccepted || rec.SurgeInstance != nil {
+		t.Fatalf("deferred record must stay Accepted with no surge; got %+v", *rec)
+	}
+	if row := findInstanceStatusOnIRForFixture(t, f, 0); row.Operation != nil || row.Phase != v1beta1.OMENativeInstanceReady {
+		t.Fatalf("the pinned row must not be stamped while the handoff owns it; got %+v", row)
+	}
+
+	ir = f.getIR(t)
+	ir.Status.InstanceStatuses = ir.Status.InstanceStatuses[:1]
+	if err := f.c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("remove the pinning source: %v", err)
+	}
+	if done, accepted := f.pass(t, uuid); done || !accepted {
+		t.Fatalf("once the pin is gone the record must allocate: done=%v accepted=%v", done, accepted)
+	}
+	if rec := f.record(t, uuid); !rec.SurgeAllocated() || rec.Phase != workload.MigrationPhaseSurgePending {
+		t.Fatalf("record must be SurgePending with a surge index; got %+v", *rec)
+	}
+}

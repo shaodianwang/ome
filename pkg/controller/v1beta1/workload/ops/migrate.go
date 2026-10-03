@@ -69,7 +69,10 @@ func ledgerOwnerGVK(input workload.ReconcileInput) schema.GroupVersionKind {
 //     resolveSourceNode, capacity over status.migrations, overlay
 //     pre-check); rejections mark the record Failed. The move binds to
 //     the Instance: a source rebuilt off the request's FromNode since
-//     the request leaves the node it runs on, and the record says so.
+//     the request leaves the node it runs on, and the record says so; a
+//     source a gang roll rebuilt under another index is followed there
+//     by the record (followHandoffForPendingMigrations) and waits while
+//     that index is still the roll's (handoffPinsIndex).
 //  2. Allocate surge index = lowest unused; write it back to the
 //     record (SurgeInstance + Phase=SurgePending) FIRST, then stamp
 //     source Phase=Migrating + surge Phase=Creating and update the
@@ -212,6 +215,12 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			// fall-through is safe so the in-flight op (Update/Restart/
 			// Create) can converge. accepted=false is load-bearing here;
 			// the record stays Accepted and retries next pass.
+			return false, false, nil
+		}
+		// A promoted replacement is still its handoff's until the source
+		// that pins it is removed: a move stamped on it now would leave
+		// that source pinned to a target it cannot recognize.
+		if handoffPinsIndex(input.ObservedState.InstanceStatuses, sourceIdx) {
 			return false, false, nil
 		}
 
@@ -915,6 +924,61 @@ func migrationPairStampable(
 func migrationSourceSteady(source *workload.InstanceStatus) bool {
 	return source != nil && source.Phase == workload.InstancePhaseReady &&
 		source.Operation == nil && source.RunningRevision != ""
+}
+
+// handoffPinsIndex reports whether another row's operation names idx as
+// its replacement. A gang surge keeps that pin on its source until the
+// source is finalized and removed, past the point where the replacement
+// row itself reads Ready with no operation.
+func handoffPinsIndex(statuses []workload.InstanceStatus, idx int32) bool {
+	for i := range statuses {
+		op := statuses[i].Operation
+		if statuses[i].Index != idx && op != nil && op.SurgeIndex != nil && *op.SurgeIndex == idx {
+			return true
+		}
+	}
+	return false
+}
+
+// followHandoffForPendingMigrations rebinds every pending move of the
+// Instance at sourceIdx to surgeIdx, the index a gang surge rebuilt the
+// Instance under. A move binds to the Instance, not to an index: a
+// Manual record still Accepted with no replacement of its own names the
+// Instance wherever the roll put it, and goes on from there. A record
+// already executing owns its source and is left alone, as is a terminal
+// one. Idempotent, so the caller runs it on every pass that reaches the
+// source's removal and a crash between the two writes loses nothing.
+func followHandoffForPendingMigrations(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, sourceIdx, surgeIdx int32) error {
+	if input.MutateMigration == nil {
+		return nil
+	}
+	for i := range input.ObservedState.Migrations {
+		record := &input.ObservedState.Migrations[i]
+		if record.Trigger != workload.MigrationTriggerManual || record.Phase.Terminal() ||
+			record.SurgeAllocated() || record.SourceInstance != sourceIdx {
+			continue
+		}
+		followed := false
+		if err := input.MutateMigration(ctx, record.RequestUUID, func(m *workload.MigrationRecord) bool {
+			if m.Phase.Terminal() || m.SurgeAllocated() || m.SourceInstance != sourceIdx {
+				return false
+			}
+			m.SourceInstance = surgeIdx
+			m.Message = fmt.Sprintf("following the Instance rebuilt as instance=%d", surgeIdx)
+			followed = true
+			return true
+		}); err != nil {
+			return fmt.Errorf("rebind migration uuid=%s to instance=%d: %w", record.RequestUUID, surgeIdx, err)
+		}
+		if !followed {
+			continue
+		}
+		record.SourceInstance = surgeIdx
+		workload.RecordNormal(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationSourceRebuilt,
+			"OMENative migration uuid=%s follows %s, rebuilt as instance=%d",
+			record.RequestUUID, workload.InstanceKey(input.Key.Component, sourceIdx), surgeIdx)
+	}
+	return nil
 }
 
 func confirmMigrationCompletionPair(

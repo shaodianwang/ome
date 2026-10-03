@@ -1299,6 +1299,16 @@ type recoveryHarness struct {
 	// removes them on the pass after, as a kubelet publishes a pod it
 	// stopped.
 	exitsCleanOnStop map[string]bool
+
+	// routed turns on the endpoint-controller model: the per-revision
+	// routed Services and the headless Service carry EndpointSlices that
+	// mirror the pods, so rotation and availability read as on a cluster.
+	routed bool
+	// migrations is the owner's status.migrations: the records the passes
+	// select work from and write back through the MutateMigration seam.
+	migrations []workloadtypes.MigrationRecord
+	// migrationAudit is the input's migration capacity policy.
+	migrationAudit *workloadtypes.MigrationAuditPolicy
 }
 
 func recoveryPodSpec(image string) *corev1.PodSpec {
@@ -1452,7 +1462,7 @@ func (h *recoveryHarness) kubelet() {
 				pod.CreationTimestamp = metav1.NewTime(h.clk.Now())
 			}
 			if unbound {
-				pod.Spec.NodeName = h.leastLoadedLiveNode(pods.Items)
+				pod.Spec.NodeName = h.leastLoadedLiveNode(pod, pods.Items)
 			}
 			if err := h.c.Update(h.ctx, pod); err != nil {
 				h.t.Fatalf("kubelet stamp creation %s: %v", pod.Name, err)
@@ -2122,11 +2132,12 @@ func (h *recoveryHarness) useNodes(names ...string) {
 	}
 }
 
-// leastLoadedLiveNode is the node model's placement: the node with the
-// fewest pods bound to it among those whose kubelet is alive, earliest
-// declared first on a tie. A node with a stopped kubelet is never chosen,
-// as a scheduler honoring its unreachable taint would not.
-func (h *recoveryHarness) leastLoadedLiveNode(pods []corev1.Pod) string {
+// leastLoadedLiveNode is the node model's placement for pod: the node
+// with the fewest pods bound to it among those whose kubelet is alive
+// and that the pod's required node affinity admits, earliest declared
+// first on a tie. A node with a stopped kubelet is never chosen, as a
+// scheduler honoring its unreachable taint would not.
+func (h *recoveryHarness) leastLoadedLiveNode(pod *corev1.Pod, pods []corev1.Pod) string {
 	h.t.Helper()
 	bound := map[string]int{}
 	for i := range pods {
@@ -2134,7 +2145,7 @@ func (h *recoveryHarness) leastLoadedLiveNode(pods []corev1.Pod) string {
 	}
 	chosen := ""
 	for _, name := range h.nodeNames {
-		if h.deadNodes[name] {
+		if h.deadNodes[name] || !nodeAffinityAdmits(pod, name) {
 			continue
 		}
 		if chosen == "" || bound[name] < bound[chosen] {
@@ -2142,9 +2153,50 @@ func (h *recoveryHarness) leastLoadedLiveNode(pods []corev1.Pod) string {
 		}
 	}
 	if chosen == "" {
-		h.t.Fatalf("no node with a live kubelet to place a pod on")
+		h.t.Fatalf("no node with a live kubelet to place pod %s on", pod.Name)
 	}
 	return chosen
+}
+
+// nodeAffinityAdmits is the scheduler model's required node-affinity
+// filter over the hostname label: the node is admitted when the pod
+// requires nothing, or when one of its required terms holds, a term
+// holding when every hostname expression in it does. Expressions on other
+// labels are not modelled and hold trivially.
+func nodeAffinityAdmits(pod *corev1.Pod, node string) bool {
+	if pod.Spec.Affinity == nil || pod.Spec.Affinity.NodeAffinity == nil ||
+		pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		return true
+	}
+	terms := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+	if len(terms) == 0 {
+		return true
+	}
+	for _, term := range terms {
+		holds := true
+		for _, expr := range term.MatchExpressions {
+			if expr.Key != corev1.LabelHostname {
+				continue
+			}
+			named := false
+			for _, value := range expr.Values {
+				if value == node {
+					named = true
+					break
+				}
+			}
+			switch expr.Operator {
+			case corev1.NodeSelectorOpIn:
+				holds = holds && named
+			case corev1.NodeSelectorOpNotIn:
+				holds = holds && !named
+			}
+		}
+		if holds {
+			return true
+		}
+	}
+	return false
 }
 
 // failNode stops the kubelet under name. The node model freezes every
@@ -2316,10 +2368,13 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 		ObservedState: workloadtypes.WorkloadObservedState{
 			InstanceStatuses: h.irStatuses(),
 			RetryBlocks:      append([]workloadtypes.RetryBlock(nil), h.blocks...),
+			Migrations:       append([]workloadtypes.MigrationRecord(nil), h.migrations...),
 			CurrentRevision:  h.currentRevision,
 			UpdateRevision:   h.target.Name,
 		},
 		MutateInstance:     h.mutateInstance(),
+		MutateMigration:    h.mutateMigration,
+		MigrationAudit:     h.migrationAudit,
 		RemoveInstance:     h.removeInstance(),
 		UpdateGate:         h.gate,
 		UpdateRetryPolicy:  h.retryPolicy,
@@ -2455,6 +2510,9 @@ func (h *recoveryHarness) stepResult() (ctrl.Result, error) {
 func (h *recoveryHarness) pass() (ctrl.Result, error) {
 	h.t.Helper()
 	h.kubelet()
+	if h.routed {
+		h.endpointController()
+	}
 	deps := workloadtypes.Deps{Client: h.c, APIReader: h.c, Expectations: workloadtypes.NewExpectations()}
 	if h.recorder != nil {
 		deps.Recorder = h.recorder
@@ -2598,7 +2656,7 @@ func (h *recoveryHarness) publish(plan workloadtypes.ComponentPlan) {
 	observation, err := workload.NewOwnedPublicationObservation(
 		v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses),
 		workload.NewCachedSelectorPodObservation(pods, query.BucketPodsByInstanceIdx(pods)),
-		map[string]struct{}{},
+		h.availableByPod(),
 		status.AvailabilityWindow{MinReadySeconds: plan.MinReadySeconds, Now: h.clk.Now()},
 	)
 	if err != nil {
@@ -5462,7 +5520,7 @@ func (h *recoveryHarness) publication() ([]workloadtypes.InstanceStatus, workloa
 	observation, err := workload.NewOwnedPublicationObservation(
 		h.irStatuses(),
 		workload.NewCachedSelectorPodObservation(pods, query.BucketPodsByInstanceIdx(pods)),
-		map[string]struct{}{},
+		h.availableByPod(),
 		status.AvailabilityWindow{MinReadySeconds: plan.MinReadySeconds, Now: h.clk.Now()},
 	)
 	if err != nil {
@@ -7504,6 +7562,327 @@ func TestGangPush_UnpullableRevisionIsHeldWithinTheLadder(t *testing.T) {
 			if !h.run(80, func() bool { return h.settledOn(h.revFixed, 2) && len(h.badPods()) == 0 }) {
 				h.dumpState("corrected push")
 				t.Fatalf("the corrected push did not land on both gangs after the unpullable revision was Held")
+			}
+		})
+	}
+}
+
+// endpointController is the EndpointSlice controller's model, run between
+// the kubelet and the pass once the routed model is on: one slice per
+// routed per-revision Service holding that revision's routable pods, and
+// one for the headless Service holding every pod. An endpoint is Ready
+// and Serving while its pod is PodReady, and Terminating while the pod is
+// being deleted; a Service with no pod left loses its slice.
+func (h *recoveryHarness) endpointController() {
+	h.t.Helper()
+	list := &corev1.PodList{}
+	if err := h.c.List(h.ctx, list, client.InNamespace(recoveryNS)); err != nil {
+		h.t.Fatalf("endpoint controller: list pods: %v", err)
+	}
+	headless := query.HeadlessServiceName(recoveryOwner, h.component)
+	byService := map[string][]*corev1.Pod{}
+	for i := range list.Items {
+		pod := &list.Items[i]
+		byService[headless] = append(byService[headless], pod)
+		if svc := query.RoutedServiceForPod(recoveryOwner, h.component, pod); svc != "" {
+			byService[svc] = append(byService[svc], pod)
+		}
+	}
+	slices := &discoveryv1.EndpointSliceList{}
+	if err := h.c.List(h.ctx, slices, client.InNamespace(recoveryNS)); err != nil {
+		h.t.Fatalf("endpoint controller: list slices: %v", err)
+	}
+	seen := map[string]bool{}
+	for svc, pods := range byService {
+		endpoints := make([]discoveryv1.Endpoint, 0, len(pods))
+		for _, pod := range pods {
+			ready := podConditionTrue(pod, corev1.PodReady)
+			serving := ready
+			terminating := pod.DeletionTimestamp != nil
+			endpoints = append(endpoints, discoveryv1.Endpoint{
+				Addresses:  []string{"10.0.0.1"},
+				Conditions: discoveryv1.EndpointConditions{Ready: &ready, Serving: &serving, Terminating: &terminating},
+				TargetRef:  &corev1.ObjectReference{Kind: "Pod", Namespace: pod.Namespace, Name: pod.Name, UID: pod.UID},
+			})
+		}
+		name := svc + "-endpoints"
+		seen[name] = true
+		existing := &discoveryv1.EndpointSlice{}
+		err := h.c.Get(h.ctx, types.NamespacedName{Namespace: recoveryNS, Name: name}, existing)
+		switch {
+		case err == nil:
+			existing.Endpoints = endpoints
+			if err := h.c.Update(h.ctx, existing); err != nil {
+				h.t.Fatalf("endpoint controller: update slice %s: %v", name, err)
+			}
+		case apierrors.IsNotFound(err):
+			slice := &discoveryv1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: name, Namespace: recoveryNS,
+					Labels: map[string]string{discoveryv1.LabelServiceName: svc},
+				},
+				AddressType: discoveryv1.AddressTypeIPv4,
+				Endpoints:   endpoints,
+			}
+			if err := h.c.Create(h.ctx, slice); err != nil {
+				h.t.Fatalf("endpoint controller: create slice %s: %v", name, err)
+			}
+		default:
+			h.t.Fatalf("endpoint controller: get slice %s: %v", name, err)
+		}
+	}
+	for i := range slices.Items {
+		if seen[slices.Items[i].Name] {
+			continue
+		}
+		if err := h.c.Delete(h.ctx, &slices.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+			h.t.Fatalf("endpoint controller: delete slice %s: %v", slices.Items[i].Name, err)
+		}
+	}
+}
+
+// availableByPod is the set of pods the headless Service publishes as
+// available, the set the adapter folds into the Available counters.
+// Empty without the routed model, where no slice exists.
+func (h *recoveryHarness) availableByPod() map[string]struct{} {
+	h.t.Helper()
+	if !h.routed {
+		return map[string]struct{}{}
+	}
+	available, err := status.AvailablePodSet(h.ctx, h.c, recoveryNS, query.HeadlessServiceName(recoveryOwner, h.component))
+	if err != nil {
+		h.t.Fatalf("available pod set: %v", err)
+	}
+	return available
+}
+
+// mutateMigration is the harness's status.migrations write seam: the
+// record for uuid is handed to mutate on a copy and kept when mutate
+// reports a change, as the adapter's round-trip does. A uuid with no
+// record is a no-op.
+func (h *recoveryHarness) mutateMigration(_ context.Context, uuid string, mutate func(*workloadtypes.MigrationRecord) bool) error {
+	for i := range h.migrations {
+		if h.migrations[i].RequestUUID != uuid {
+			continue
+		}
+		record := h.migrations[i]
+		if mutate(&record) {
+			record.RequestUUID = uuid
+			h.migrations[i] = record
+		}
+		return nil
+	}
+	return nil
+}
+
+// requestMove files an operator's move of Instance idx off the node its
+// routable pod runs on, as the accept pass records it: a Manual record,
+// Accepted, naming no replacement yet. Returns the node the request names.
+func (h *recoveryHarness) requestMove(uuid string, idx int32) string {
+	h.t.Helper()
+	fromNode := ""
+	for _, pod := range h.podsOf(idx) {
+		if query.RoutedRunner(pod) {
+			fromNode = pod.Spec.NodeName
+		}
+	}
+	if fromNode == "" {
+		h.t.Fatalf("instance %d has no placed routable pod to move off", idx)
+	}
+	h.migrations = append(h.migrations, workloadtypes.MigrationRecord{
+		RequestUUID:    uuid,
+		Trigger:        workloadtypes.MigrationTriggerManual,
+		Phase:          workloadtypes.MigrationPhaseAccepted,
+		SourceInstance: idx,
+		FromNode:       fromNode,
+		Reason:         "maintenance",
+		StartedAt:      metav1.NewTime(h.clk.Now()),
+		Deadline:       metav1.NewTime(h.clk.Now().Add(12 * time.Hour)),
+	})
+	return fromNode
+}
+
+// migration is the record for uuid, or nil.
+func (h *recoveryHarness) migration(uuid string) *workloadtypes.MigrationRecord {
+	for i := range h.migrations {
+		if h.migrations[i].RequestUUID == uuid {
+			return &h.migrations[i]
+		}
+	}
+	return nil
+}
+
+// instancesWithLivePods counts the Instances that have a live pod: the
+// Component's footprint, which a surge raises by one.
+func (h *recoveryHarness) instancesWithLivePods() int {
+	seen := map[int32]struct{}{}
+	for _, pod := range h.livePods() {
+		if idx, ok := query.InstanceIdxFromLabels(pod); ok {
+			seen[idx] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+// instancesFullyServing counts the Instances whose whole pod set is Ready
+// and in the serving gate: the capacity the Component serves with.
+func (h *recoveryHarness) instancesFullyServing() int {
+	byInstance := map[int32][]*corev1.Pod{}
+	for _, pod := range h.livePods() {
+		if idx, ok := query.InstanceIdxFromLabels(pod); ok {
+			byInstance[idx] = append(byInstance[idx], pod)
+		}
+	}
+	n := 0
+	for _, pods := range byInstance {
+		if len(pods) < len(h.desired.Runners) {
+			continue
+		}
+		serving := true
+		for _, pod := range pods {
+			if !podreadiness.ReadyAndServing(pod) {
+				serving = false
+				break
+			}
+		}
+		if serving {
+			n++
+		}
+	}
+	return n
+}
+
+// A move requested as a push lands on a gang Component, before any
+// Instance moved: the roll's SurgeThenDrain rebuilds the gang the move
+// names under another index, and the move follows the Instance there.
+// Both finish. The record names its replacement Instance and is Completed
+// once, in the status and in the ledger; every Instance ends on the
+// pushed revision, the moved one among them and off the node it left; no
+// Instance is left mid-operation; the Component never serves below its
+// replica count and never has more than one Instance over it. Three
+// orderings of the one story: the push seen a pass before the move, under
+// no rollout group and paced by a rolling group's gate, and the push and
+// the move seen in the same pass.
+//
+// Cells: instance/Update/Surge/spec.migrateRequest/before, instance/Migrate/CreateSurge/spec.revision/before
+func TestMoveRequestedAsAGangPushLands_FollowsTheInstanceAndCompletes(t *testing.T) {
+	const move = "move-under-push"
+	stories := []struct {
+		name          string
+		grouped       bool
+		pushSeenFirst bool
+	}{
+		{"the push is seen a pass before the move", false, true},
+		{"the push is seen a pass before the move, paced by a rolling group", true, true},
+		{"the push and the move are seen in one pass", false, false},
+	}
+	for _, story := range stories {
+		t.Run(story.name, func(t *testing.T) {
+			h := newRecoveryHarness(t, true)
+			h.recorder = record.NewFakeRecorder(256)
+			h.atomicStatus = true
+			h.routed = true
+			h.replicas = 2
+			h.useNodes("node-a", "node-b", "node-c")
+			h.migrationAudit = &workloadtypes.MigrationAuditPolicy{MaxInFlight: 1, MaxPerWindow: 10, Window: time.Hour}
+			h.useRollingBudget(workloadtypes.UpdateStrategySurgeThenDrain)
+			if story.grouped {
+				// A rolling group lets one surge of its Components be in
+				// flight at a time.
+				h.gate = func(_ workloadtypes.UpdateStrategyType, inFlightSurge, _ int32) (bool, workloadtypes.RolloutHoldGate, string) {
+					if inFlightSurge > 0 {
+						return false, workloadtypes.RolloutHoldGateBudget, "group surge budget 1 exhausted"
+					}
+					return true, "", ""
+				}
+			}
+			if !h.run(40, func() bool { return h.settledOn(h.revV1, 2) }) {
+				h.dumpState("initial create")
+				t.Fatalf("the Component never settled on v1")
+			}
+
+			h.setTarget(h.revFixed, fixedImage)
+			if story.pushSeenFirst {
+				h.step()
+				if s := h.instance(0); s == nil || s.Operation == nil || s.Operation.SurgeIndex == nil {
+					h.dumpState("after the push")
+					t.Fatalf("the roll did not open a gang surge on Instance 0 in the pass that saw the push: %+v", s)
+				}
+			}
+			requested := h.requestMove(move, 0)
+
+			invariant := func() {
+				if n := h.instancesWithLivePods(); n > 3 {
+					h.dumpState("over the surge budget")
+					t.Fatalf("%d Instances had pods alive, want at most the replica count plus one surge", n)
+				}
+				if n := h.instancesFullyServing(); n < 2 {
+					h.dumpState("below the floor")
+					t.Fatalf("%d Instances fully serving, want the replica count throughout", n)
+				}
+				if rec := h.migration(move); rec != nil && rec.Phase == workloadtypes.MigrationPhaseFailed {
+					h.dumpState("the move failed")
+					t.Fatalf("the move failed instead of following the Instance the roll rebuilt (replacement named: %v): %s",
+						rec.SurgeInstance != nil, rec.Message)
+				}
+			}
+			moveDone := func() bool {
+				rec := h.migration(move)
+				return rec != nil && rec.Phase.Terminal()
+			}
+			if !h.runWithInvariant(120, moveDone, invariant) {
+				h.dumpState("the move never finished")
+				t.Fatalf("the move did not finish; record=%+v", h.migration(move))
+			}
+			rec := *h.migration(move)
+			if rec.Phase != workloadtypes.MigrationPhaseCompleted || rec.SurgeInstance == nil || rec.CompletedAt == nil {
+				t.Fatalf("the record must be Completed naming its replacement Instance; got %+v", rec)
+			}
+			// The replacement as the move left it: the whole gang, Ready on a
+			// recorded revision, off the node the Instance left. The roll may
+			// rebuild it under yet another index afterwards.
+			if moved := h.instance(*rec.SurgeInstance); moved == nil || moved.Phase != workloadtypes.InstancePhaseReady ||
+				moved.Operation != nil || moved.RunningRevision == "" {
+				h.dumpState("after the move")
+				t.Fatalf("the replacement Instance %d must be Ready on a recorded revision with no operation; got %+v", *rec.SurgeInstance, moved)
+			}
+			replacement := h.podsOf(*rec.SurgeInstance)
+			if len(replacement) != len(h.desired.Runners) {
+				t.Fatalf("the replacement Instance has %d pods, want the whole gang of %d", len(replacement), len(h.desired.Runners))
+			}
+			t.Logf("the request named %s; the Instance left %s", requested, rec.FromNode)
+			for _, pod := range replacement {
+				if pod.Spec.NodeName == "" || pod.Spec.NodeName == rec.FromNode {
+					t.Fatalf("replacement pod %s sits on %q, the node the Instance left", pod.Name, pod.Spec.NodeName)
+				}
+			}
+
+			if !h.runWithInvariant(120, func() bool { return h.settledOn(h.revFixed, 2) }, invariant) {
+				h.dumpState("the roll never finished")
+				t.Fatalf("the push did not land on every Instance after the move")
+			}
+			if len(h.migrations) != 1 {
+				t.Fatalf("the move is recorded once; status carries %d records", len(h.migrations))
+			}
+			ledger, err := audit.LoadLedgerForOwner(h.ctx, h.c, h.isvc)
+			if err != nil {
+				t.Fatalf("load the audit ledger: %v", err)
+			}
+			rows := 0
+			for _, entry := range ledger.Entries {
+				if entry.RequestUUID != move {
+					continue
+				}
+				rows++
+				if entry.Phase != audit.PhaseCompleted || entry.SurgeInstance != *rec.SurgeInstance {
+					t.Fatalf("the ledger row must be Completed naming replacement %d; got %+v", *rec.SurgeInstance, entry)
+				}
+			}
+			if rows != 1 {
+				t.Fatalf("the ledger carries %d rows for the move, want one", rows)
+			}
+			if !h.sawEvent(workloadtypes.EventReasonMigrationCompleted) {
+				t.Fatalf("no MigrationCompleted event was recorded; events = %v", h.events)
 			}
 		})
 	}

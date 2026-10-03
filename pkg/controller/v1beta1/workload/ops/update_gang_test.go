@@ -3026,3 +3026,116 @@ func TestGangSurgeUpdate_DrainGateHoldsTheSourceGang(t *testing.T) {
 		t.Errorf("an admitted drain must take the source gang out of rotation (present=%d serving=%d)", present, serving)
 	}
 }
+
+// A gang surge that promotes its replacement rebinds every move still
+// pending on its source to the replacement's index before the source is
+// removed, and says so once per move. A move already executing, a
+// terminal one and a move of another Instance are left as they are.
+func TestGangSurge_PromotionRebindsPendingMovesToTheReplacement(t *testing.T) {
+	legacyResetExpectations(t)
+	const isvcName, ns = "gang-c", "test-ns"
+	surgeIdx := int32(2)
+	mkReadyPod := func(runner string) *corev1.Pod {
+		pod := gangSurgePod(isvcName, ns, surgeIdx, runner, "newrev")
+		pod.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.ContainersReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()},
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()},
+		}
+		return pod
+	}
+	c := legacyNewFakeClient(t, mkReadyPod("leader"), mkReadyPod("worker"))
+
+	src := &workload.InstanceStatus{
+		Index:           0,
+		Phase:           workload.InstancePhaseUpdating,
+		RunningRevision: "gang-c-engine-oldrev",
+		Operation: &workload.InstanceOperation{
+			Type:           workload.InstanceOperationUpdate,
+			Step:           workload.UpdateStepSurge,
+			SurgeIndex:     &surgeIdx,
+			TargetRevision: "gang-c-engine-newrev",
+		},
+	}
+	var removed []int32
+	input := gangAbandonInput(isvcName, ns, src, &removed)
+	input.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		*src,
+		{
+			Index:          surgeIdx,
+			Incarnation:    1,
+			Phase:          workload.InstancePhaseCreating,
+			TargetRevision: "gang-c-engine-newrev",
+			Operation: &workload.InstanceOperation{
+				Type:           workload.InstanceOperationUpdate,
+				Step:           workload.UpdateStepGangSurgeTarget,
+				TargetRevision: "gang-c-engine-newrev",
+			},
+		},
+	}
+	executingSurge := int32(1)
+	records := []workload.MigrationRecord{
+		{RequestUUID: "pending", Trigger: workload.MigrationTriggerManual, Phase: workload.MigrationPhaseAccepted, SourceInstance: 0, FromNode: "node-a"},
+		{RequestUUID: "executing", Trigger: workload.MigrationTriggerManual, Phase: workload.MigrationPhaseSurgePending, SourceInstance: 0, SurgeInstance: &executingSurge},
+		{RequestUUID: "done", Trigger: workload.MigrationTriggerManual, Phase: workload.MigrationPhaseCompleted, SourceInstance: 0},
+		{RequestUUID: "other", Trigger: workload.MigrationTriggerManual, Phase: workload.MigrationPhaseAccepted, SourceInstance: 1},
+	}
+	input.ObservedState.Migrations = append([]workload.MigrationRecord(nil), records...)
+	removedAtRebind := -1
+	input.MutateMigration = func(_ context.Context, uuid string, mutate func(*workload.MigrationRecord) bool) error {
+		for i := range records {
+			if records[i].RequestUUID != uuid {
+				continue
+			}
+			r := records[i]
+			if mutate(&r) {
+				records[i] = r
+				removedAtRebind = len(removed)
+			}
+			return nil
+		}
+		return nil
+	}
+	input.EventTarget = legacyMinimalISVC(isvcName, ns, 1)
+	rec := record.NewFakeRecorder(16)
+	deps := legacyTestDeps(c)
+	deps.Recorder = rec
+	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "gang-c-engine-newrev"}}
+
+	done, err := gangSurgeUpdate(context.Background(), deps, input, plan, plan.Instances[0], target)
+	if err != nil {
+		t.Fatalf("gangSurgeUpdate: %v", err)
+	}
+	if !done || len(removed) != 1 || removed[0] != 0 {
+		t.Fatalf("expected the promote pass to finish and remove the source: done=%v removed=%v", done, removed)
+	}
+	if removedAtRebind != 0 {
+		t.Fatalf("the pending move must be rebound before the source is removed; removed %d rows at the time", removedAtRebind)
+	}
+	byUUID := map[string]workload.MigrationRecord{}
+	for _, r := range records {
+		byUUID[r.RequestUUID] = r
+	}
+	if got := byUUID["pending"]; got.SourceInstance != surgeIdx || got.Phase != workload.MigrationPhaseAccepted || got.SurgeInstance != nil || got.FromNode != "node-a" {
+		t.Errorf("the pending move must follow the Instance to index %d, otherwise untouched; got %+v", surgeIdx, got)
+	}
+	if got := byUUID["executing"]; got.SourceInstance != 0 || got.SurgeInstance == nil || *got.SurgeInstance != executingSurge {
+		t.Errorf("a move already executing keeps its source; got %+v", got)
+	}
+	if got := byUUID["done"]; got.SourceInstance != 0 {
+		t.Errorf("a terminal record is left as it is; got %+v", got)
+	}
+	if got := byUUID["other"]; got.SourceInstance != 1 {
+		t.Errorf("a move of another Instance is left as it is; got %+v", got)
+	}
+	events := drainRecorderEvents(rec)
+	rebound := 0
+	for _, e := range events {
+		if strings.Contains(e, string(workload.EventReasonMigrationSourceRebuilt)) {
+			rebound++
+		}
+	}
+	if rebound != 1 {
+		t.Errorf("one event names the rebound move; got %d in %v", rebound, events)
+	}
+}

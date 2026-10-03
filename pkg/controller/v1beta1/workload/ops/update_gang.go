@@ -411,6 +411,12 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 	if !gangSurgeSourceOwnsRemoval(src, surgeIdx) {
 		return false, nil
 	}
+	// The Instance goes on under the replacement's index: a move still
+	// pending on the source's index follows it there before the index is
+	// released, so the record never names an Instance that is gone.
+	if err := followHandoffForPendingMigrations(ctx, deps, input, sourceIdx, surgeIdx); err != nil {
+		return false, fmt.Errorf("rebind pending migrations of the promoted gang (source=%d target=%d): %w", sourceIdx, surgeIdx, err)
+	}
 	removed, rerr := status.FinalizeAndRemove(ctx, deps, input, sourceIdx, src)
 	if rerr != nil {
 		return false, fmt.Errorf("finalize source Instance (instance=%d): %w", sourceIdx, rerr)

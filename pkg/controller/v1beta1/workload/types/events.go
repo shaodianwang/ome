@@ -289,6 +289,9 @@ const (
 	// rejected.
 	EventReasonMigrationFromNodeMismatch     EventReason = "MigrationFromNodeMismatch"
 	EventReasonMigrationNodeAffinityConflict EventReason = "MigrationNodeAffinityConflict"
+	// EventReasonMigrationSourceRebuilt is a Normal fired when a pending
+	// move follows its Instance to the index a gang roll rebuilt it under.
+	EventReasonMigrationSourceRebuilt EventReason = "MigrationSourceRebuilt"
 
 	// EventReasonPodGroupReset is a Warning fired when an Instance's
 	// PodGroup is deleted so a fresh one can be built, because the gang
