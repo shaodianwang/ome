@@ -137,7 +137,7 @@ runners (run.py + the KIND CI lane) already implement:
                           running revision, a scale and a canary ladder; the
                           router is never rolled by an engine push and stays
                           in rotation, and the gang rules hold throughout
-    gen-ops-held/  p6800+  a scale-down, a request for zero, a delete or a
+    gen-ops-held/  p6800+  a scale-down, a scale to one, a delete or a
                           scale-up lands on a Component stuck on a revision
                           that cannot be pulled (stuck=failed: the first
                           attempt has failed; stuck=held: the retry ladder
@@ -181,9 +181,9 @@ runners (run.py + the KIND CI lane) already implement:
     gen-preempt/   p7440+  a pod of a Ready Instance is preempted by a
                           higher-priority filler (via=preempt at steady state,
                           fault=preempt:rotating under a roll) with every
-                          node's spare CPU taken, so the Instance waits until
-                          the fillers are dropped (lift=after-settle) or to
-                          the end (lift=never)
+                          node's spare CPU taken and every node closed to the
+                          case, so the Instance waits until the lift
+                          (lift=after-settle) or to the end (lift=never)
     gen-pending/   p7500+  a new pod cannot be placed or admitted: a NoSchedule
                           taint on every node (fault=taint:all) or a quota
                           short of one pod (fault=quota:<n>; on a gang, room
@@ -334,9 +334,11 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
   - Cells already pinned by hand-written restart/ cases are excluded
     (HAND_PINNED_KILL) so the corpus grows coverage instead of echoing pins.
   - ops-held pushes a revision that cannot be pulled; a rolling group exists
-    only where a decoder does (pd), as in the crashloop family. A request
-    for zero is kept: the API runs one Instance for it, and the case reads
-    the count the controller accepted instead of assuming either answer.
+    only where a decoder does (pd), as in the crashloop family. The deepest
+    scale asks for one: the API admits no count below one for a Component
+    without KEDA autoscaling (minReplicas 0 is refused), and the case reads
+    the count the controller accepted instead of assuming it. On the gang
+    fleet of two, to one is down by one, so that cell is the scale-down row.
   - runtime-edit-repair lands an edit on an open repair only where a repair
     opens: a crash at start reaches the crash-loop repair under every restart
     policy, a crash after Ready reaches the runner-restart trigger only under
@@ -492,8 +494,8 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     restart-policy axis is collapsed to None; the other breaks run under
     both. A gang fleet of two runs down by one and up by one only: "to one"
     is "down by one" there, and "down by two" asks for zero, which the API
-    does not run as zero. A rolling group is crossed in where a decoder
-    exists, as in the crashloop family.
+    refuses (minReplicas 0 needs KEDA autoscaling). A rolling group is
+    crossed in where a decoder exists, as in the crashloop family.
   - fault-move runs one gang width (the move copies the whole gang) and no
     pd-mn shape (the gang axis is engine-mn's, the sibling axis pd's); the
     update strategy is dormant (no roll is in flight: a move surges whatever
@@ -845,10 +847,12 @@ RATIO_TOL_BY_N = {2: 50, 3: 50, 4: 25}
 # its hold do not depend on the fleet size), the strategy that surges and
 # the one that drains first, both stuck kinds, every operation, and a
 # rolling group where a decoder exists (a one-member group has nobody to
-# pace with, as in the crashloop family).
+# pace with, as in the crashloop family). The deepest scale asks for one,
+# the least count the API admits (minReplicas 0 needs KEDA autoscaling);
+# on the gang fleet of two that is down by one, the scale-down row.
 OPS_HELD_SHAPES = [("engine", 3, 0), ("pd", 3, 0), ("engine-mn", 2, 1)]
 OPS_HELD_STUCK = ["failed", "held"]
-OPS_HELD_OPS = ["scale-down", "scale-zero", "delete", "scale-up"]
+OPS_HELD_OPS = ["scale-down", "scale-one", "delete", "scale-up"]
 OPS_HELD_STRATS = {"SurgeThenDrain": (1, 0), "RecreatePod": (0, 1)}
 OPS_HELD_GROUPS = {"engine": ["none"], "pd": ["none", "rolling"], "engine-mn": ["none"]}
 
@@ -3331,7 +3335,7 @@ def emit_router_gang(add):
 # ── gen-ops-held: an operation lands on a stuck Component ───────────────────
 def _ops_held_target(op, n):
     """The replica count the operation asks for; None for a delete."""
-    return {"scale-down": n - 1, "scale-zero": 0, "scale-up": n + 1}.get(op)
+    return {"scale-down": n - 1, "scale-one": 1, "scale-up": n + 1}.get(op)
 
 
 def _ops_held_reason(stuck, op, strat, topo, co):
@@ -3348,10 +3352,10 @@ def _ops_held_reason(stuck, op, strat, topo, co):
         what = (f"then {members} scaled down by one: the Instances that are not Ready go first, then the highest "
                 f"index, so a stuck Instance is removed before a healthy one; the survivors keep their pods on the "
                 f"running revision")
-    elif op == "scale-zero":
-        what = (f"then {members} asked for zero: the API runs one Instance for that request, so the fleet "
-                f"converges on the count the controller accepted with the stuck Instances gone first and no pod left "
-                f"behind on a removed index")
+    elif op == "scale-one":
+        what = (f"then {members} asked for one, the least count the API admits (a Component without KEDA "
+                f"autoscaling may not ask for zero): the fleet converges on one Instance, the count the controller "
+                f"accepted, with the stuck Instances gone first and no pod left behind on a removed index")
     elif op == "delete":
         what = ("then the service is deleted: every pod goes, stuck ones included, no pod stays Terminating and no "
                 "finalizer wedges, and the same name comes back clean on fresh pods with nothing of the push left")
@@ -3381,6 +3385,8 @@ def emit_ops_held(add):
                 for stuck in OPS_HELD_STUCK:
                     for op in OPS_HELD_OPS:
                         target = _ops_held_target(op, n)
+                        if op == "scale-one" and target == n - 1:
+                            continue   # constraint ledger: to one is down by one on a fleet of two
                         bump = surge if strat == "SurgeThenDrain" else 0
                         reach = max(n, target or 0)
                         kv = dict(**counts(topo, n), ceil_e=reach + bump,
@@ -3765,8 +3771,9 @@ def emit_evict(add):
 
 # ── gen-preempt: a pod of a Ready Instance is preempted ─────────────────────
 def _preempt_reason(moment, topo, rp, lift, strat=None):
-    base = ("fillers take the spare CPU of every node and a higher-priority filler presses on the node of the aimed "
-            "pod, so the scheduler preempts one pod of the case there")
+    base = ("fillers take the spare CPU of every node, the pending taint closes every node to the case, and a "
+            "higher-priority filler presses on the node of the aimed pod, so the scheduler preempts one pod of the "
+            "case there")
     if moment == "steady":
         out = (f"{base}; {_recreate_scope(topo, rp)} under restart policy {RP_FULL[rp]} and its new pod waits with "
                f"reason Unschedulable while every other Instance keeps serving and nothing is taken down to make room")
@@ -3774,11 +3781,13 @@ def _preempt_reason(moment, topo, rp, lift, strat=None):
         out = (f"{base} while the roll is in flight under {strat}; the roll's next pod waits with reason Unschedulable, "
                f"nothing settled is taken down to make room and the capacity floor holds")
     if lift == "after-settle":
-        out += ("; once the fillers are dropped the Instance is placed again and serves, back at N" if moment == "steady"
-                else "; once the fillers are dropped the roll converges with every Instance on the new revision")
+        out += ("; once the lift opens the nodes and drops the fillers the Instance is placed again and serves, back at N"
+                if moment == "steady"
+                else "; once the lift opens the nodes and drops the fillers the roll converges with every Instance on "
+                     "the new revision")
     else:
-        out += ("; the fillers stay to the end, so the wait holds with its reason across the hold window and no "
-                "Instance reads Failed")
+        out += ("; the taint and the fillers stay to the end, so the wait holds with its reason across the hold window "
+                "and no Instance reads Failed")
     if is_pd(topo) and moment != "steady":
         out += "; decoder and router are negative controls (co=none)"
     if moment != "steady":
@@ -3938,7 +3947,8 @@ def _repeat_what(kind, member):
     pod = f"the {member} of one engine gang" if member else "one engine pod"
     return {"podkill": f"{pod} is deleted by hand",
             "evict": f"{pod} is evicted through the Eviction API, the way a drain removes it,",
-            "preempt": "one engine pod is preempted by a higher-priority filler (every node's spare CPU taken)"}[kind]
+            "preempt": ("one engine pod is preempted by a higher-priority filler (every node's spare CPU taken and "
+                        "every node closed to the case)")}[kind]
 
 
 REPEAT_WINDOW_CLAIMS = ("the status reports each loss and never counts the short Instance whole, every repair "
@@ -3965,7 +3975,8 @@ def _repeat_steady_reason(kind, shape, rp, member, n):
 def _repeat_preempt_reason(shape, rp, n):
     topo = shape[1]
     return (f"{_repeat_what('preempt', None)} again each time its Instance is placed and serving, {n} times, then left "
-            f"alone: each time the Instance waits with reason Unschedulable until the fillers are dropped, then "
+            f"alone: each time the Instance waits with reason Unschedulable until the lift opens the nodes and drops "
+            f"the fillers, then "
             f"{_recreate_scope(topo, rp)} under restart policy {RP_FULL[rp]}, nothing is taken down to make room and the "
             f"fleet is back at N; across the window " + REPEAT_WINDOW_CLAIMS.format(plus="") + "; " + REPEAT_END_CLAIM)
 
@@ -4486,8 +4497,9 @@ BROKEN_BUDGET = (1, 1)
 # is collapsed; every other break runs under both.
 BROKEN_RESTARTS = {"readiness": ["None"]}
 # The operations per fleet size: (label, target). On a fleet of two, "to
-# one" is "down by one" and "down by two" asks for zero, which the API does
-# not run as zero, so the gang runs down by one and up by one.
+# one" is "down by one" and "down by two" asks for zero, which the API
+# refuses (minReplicas 0 needs KEDA autoscaling), so the gang runs down by
+# one and up by one.
 BROKEN_OPS = {4: [("down1", 3), ("down2", 2), ("toone", 1), ("up1", 5)], 2: [("down1", 1), ("up1", 3)]}
 
 
@@ -5854,9 +5866,11 @@ def manifest(rows):
         " never bumped: every cell asserts it stays in rotation on the same pods.",
         "- ops-held pushes a revision that cannot be pulled and lands one"
         " operation on the stuck Component; a rolling group exists only where"
-        " a decoder does (pd). A request for zero is kept: the API runs one"
-        " Instance for it, and the verdict reads the count the controller"
-        " accepted rather than assuming either answer.",
+        " a decoder does (pd). The deepest scale asks for one, the least count"
+        " the API admits (minReplicas 0 needs KEDA autoscaling and is refused"
+        " otherwise), and the verdict reads the count the controller accepted"
+        " rather than assuming it; on the gang fleet of two, to one is down by"
+        " one, so that cell is the scale-down row.",
         "- runtime-edit-repair lands an edit on an open repair only where a"
         " repair opens: a crash after Ready opens one only under"
         " RecreateInstanceOnPodRestart, so the edit-during-repair order skips"
@@ -5964,7 +5978,8 @@ def manifest(rows):
         " what becomes of the broken Instance (expect=repaired|left) and why."
         " On the gang fleet of two only down by one and up by one are emitted:"
         " to one is down by one there, and down by two asks for zero, which the"
-        " API does not run as zero. A rolling group is crossed in where a"
+        " API refuses (minReplicas 0 needs KEDA autoscaling). A rolling group is"
+        " crossed in where a"
         " decoder exists; the delete family keeps the same axes.",
         "- gen-fault-move fires the fault at a moment of a move (at=accept, the"
         " request recorded; at=surge, the replacement pod up; at=drain, the"

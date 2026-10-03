@@ -1610,6 +1610,14 @@ class WindowFaultHeaderTest(unittest.TestCase):
             p.write_text(header + "\nmetadata: { name: p999 }\n")
             return run.validate_case_file(p)
 
+    def test_a_scale_target_of_zero_is_refused(self):
+        # minReplicas 0 needs KEDA autoscaling and is refused otherwise, so a
+        # header that asks for zero could never land its trigger.
+        self.assertTrue(run._int_ge1(1))
+        self.assertFalse(run._int_ge1(0))
+        self.assertEqual([], self._errs(self.SCALE.replace("to_e=3", "to_e=1")))
+        self.assertTrue(any("malformed header value to_e=0" in e for e in self._errs(self.SCALE.replace("to_e=3", "to_e=0"))))
+
     def test_fault_phases(self):
         self.assertTrue(run._fault_ok("webhook:idle"))
         self.assertTrue(run._fault_ok("webhook:settling"))
@@ -4978,7 +4986,10 @@ class StuckOperationTest(unittest.TestCase):
         self.assertEqual([], self._errs(self.SCALE + " stuck=held" + self.IMG))
         self.assertEqual([], self._errs(self.SCALE + " stuck=failed" + self.IMG))
         self.assertEqual([], self._errs(self.RECREATE + " stuck=held" + self.IMG))
-        self.assertEqual([], self._errs(self.SCALE.replace("to_e=2", "to_e=0") + " stuck=failed" + self.IMG))
+        self.assertEqual([], self._errs(self.SCALE.replace("to_e=2", "to_e=1") + " stuck=failed" + self.IMG))
+        # The API refuses minReplicas 0 without KEDA autoscaling: one is the deepest scale a case may state.
+        self.assertTrue(any("malformed header value to_e=0" in e
+                            for e in self._errs(self.SCALE.replace("to_e=2", "to_e=0") + " stuck=failed" + self.IMG)))
         self.assertTrue(any("needs img=" in e for e in self._errs(self.SCALE + " stuck=held")))
         self.assertTrue(any("needs stuck=" in e for e in self._errs(self.SCALE + self.IMG)))
         self.assertTrue(any("malformed header value stuck=" in e for e in self._errs(self.SCALE + " stuck=soon" + self.IMG)))
@@ -5059,11 +5070,12 @@ class StuckOperationTest(unittest.TestCase):
         gone = {k: v for k, v in pre.items() if k != "0"}
         self.assertEqual((["0"], []), run._survivor_changes(pre, gone, olds), "a survivor with no pod left was taken for nothing")
 
-    def test_replica_patch_keeps_max_at_the_least_the_api_admits(self):
+    def test_replica_patch_asks_min_and_max_for_the_target(self):
         self.assertEqual({"spec": {"engine": {"minReplicas": 2, "maxReplicas": 2}}}, run._replica_patch({"engine": 2}))
-        self.assertEqual({"spec": {"decoder": {"minReplicas": 0, "maxReplicas": 1},
-                                   "engine": {"minReplicas": 0, "maxReplicas": 1}}},
-                         run._replica_patch({"engine": 0, "decoder": 0}))
+        self.assertEqual({"spec": {"decoder": {"minReplicas": 1, "maxReplicas": 1},
+                                   "engine": {"minReplicas": 1, "maxReplicas": 1}}},
+                         run._replica_patch({"engine": 1, "decoder": 1}),
+                         "one is the deepest scale: the API refuses minReplicas 0 without KEDA autoscaling")
         self.assertEqual({"spec": {"engine": {"minReplicas": 4, "maxReplicas": 4}}}, run._replica_patch({"engine": 4}))
 
     def test_removal_is_judged_against_the_plan_the_engine_could_have_seen(self):
@@ -8992,6 +9004,28 @@ class GeneratedFaultFamiliesTest(unittest.TestCase):
     def _hdr(self, folder, name):
         return self.outputs[f"{folder}/{name}.yaml"].splitlines()[0]
 
+    def test_ops_held_deepest_scale_asks_for_one(self):
+        # The API admits no count below one for a Component without KEDA
+        # autoscaling, so the family's deepest scale is to one; on the gang
+        # fleet of two that is the scale-down row already.
+        rows = self.by_folder["gen-ops-held"]
+        self.assertEqual(60, len(rows))
+        self.assertEqual({"scale-down", "scale-one", "delete", "scale-up"}, {m["op"] for _n, _kv, m in rows})
+        for name, kv, meta in rows:
+            for key in ("to_e", "to_d", "to_r"):
+                self.assertNotEqual(0, kv.get(key), (name, key))
+            if meta["op"] == "scale-one":
+                text = self.outputs[f"gen-ops-held/{name}.yaml"]
+                self.assertEqual(1, kv["to_e"], name)
+                self.assertEqual(1 if kv["co"] != "none" else None, kv.get("to_d"), name)
+                self.assertNotEqual("engine-mn", kv["topo"], name)
+                self.assertIn("asked for one, the least count the API admits", text)
+                self.assertNotIn("asked for zero", text)
+        gang = [(kv, m) for _n, kv, m in rows if kv["topo"] == "engine-mn"]
+        self.assertEqual(12, len(gang))
+        self.assertEqual({"scale-down", "delete", "scale-up"}, {m["op"] for _kv, m in gang})
+        self.assertEqual({1}, {kv["to_e"] for kv, m in gang if m["op"] == "scale-down"})
+
     def test_family_sizes_and_id_blocks(self):
         self.assertEqual(30, len(self.by_folder["gen-readiness"]))
         self.assertEqual(72, len(self.by_folder["gen-gang-member"]))
@@ -9197,9 +9231,10 @@ class EvictFaultTest(unittest.TestCase):
 
 class PreemptFaultTest(unittest.TestCase):
     """preempt has the scheduler remove the pod: fillers take every node's
-    spare CPU and a higher-priority filler presses on the aimed pod's node;
-    the victim is read back from the scheduler's own record, and the fillers
-    are dropped at the lift or by the cleanup."""
+    spare CPU, the pending taint closes every node to the case and a
+    higher-priority filler presses on the aimed pod's node; the victim is
+    read back from the scheduler's own record by UID, and the taint and the
+    fillers go at the lift or by the cleanup."""
 
     BASE = "# p999: x Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
     KILL = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
@@ -9280,6 +9315,13 @@ class PreemptFaultTest(unittest.TestCase):
         self.assertEqual({run.FILLER_LABEL: "p999"}, pod["metadata"]["labels"])
         self.assertEqual("nginx:test", pod["spec"]["containers"][0]["image"])
         self.assertNotIn("priorityClassName", plain["spec"])
+        for m in (pod, plain):
+            self.assertEqual([{"key": run.TAINT_KEY, "operator": "Exists", "effect": "NoSchedule"}], m["spec"]["tolerations"],
+                             "a filler sits where the pending taint closes the node to the case")
+
+    def test_press_need_is_the_spare_plus_the_aimed_pods_own(self):
+        self.assertEqual(383300, run._press_need(383250, 50), "the node fits the press only once one pod of that size has gone")
+        self.assertEqual(50, run._press_need(-20, 50), "a node over its allocatable has no spare to add")
 
     def test_arm_registers_the_cleanup_then_creates_a_class_above_the_case(self):
         f = run._fault_new("p999", {"fault": "preempt:rotating", "lift": "after-settle"})
@@ -9313,11 +9355,14 @@ class PreemptFaultTest(unittest.TestCase):
         f = self._armed()
         pod_state = {"e0": {"alive": True, "comp": "engine", "inst": "0", "ready": True, "serving": True, "node": "kind-worker"},
                      "e1": {"alive": True, "comp": "engine", "inst": "1", "ready": True, "serving": True, "node": "kind-worker2"}}
-        manifests = []
+        manifests, order = [], []
 
         def kubectl(*a, **k):
             if a[0] == "apply":
                 manifests.append(json.loads(k["input"]))
+                order.append("apply " + manifests[-1]["metadata"]["name"])
+            if a[0] == "taint":
+                order.append(" ".join(a[1:4]))
             return subprocess.CompletedProcess(a, 0, "", "")
         free = {"kind-worker": 1000, "kind-worker2": 2000}
         target = {"spec": {"containers": [{"resources": {"requests": {"cpu": "50m"}}}]}}
@@ -9340,10 +9385,16 @@ class PreemptFaultTest(unittest.TestCase):
         self.assertEqual(("kind-worker", "1050m", "perm-p999-preempt"),
                          (press["spec"]["nodeSelector"]["kubernetes.io/hostname"],
                           press["spec"]["containers"][0]["resources"]["requests"]["cpu"], press["spec"]["priorityClassName"]))
-        self.assertEqual({"e0": {"comp": "engine", "inst": "0", "serving": True}, "e1": {"comp": "engine", "inst": "1", "serving": True}},
-                         f["pre_alive"])
+        self.assertEqual({"e0": {"comp": "engine", "inst": "0", "serving": True, "uid": ""},
+                          "e1": {"comp": "engine", "inst": "1", "serving": True, "uid": ""}}, f["pre_alive"])
         self.assertEqual(("e0", "kind-worker", 50), (f["aim_pod"], f["aim_node"], f["victim_cpu"]))
         self.assertTrue(any("must preempt one pod there" in n for n in f["notes"]))
+        self.assertEqual(["kind-worker", "kind-worker2"], f["tainted"])
+        self.assertEqual(["apply perm-p999-fill-kind-worker2", f"nodes kind-worker {run.TAINT_KEY}=p999:NoSchedule",
+                          f"nodes kind-worker2 {run.TAINT_KEY}=p999:NoSchedule", "apply perm-p999-press"], order,
+                         "the other nodes are filled, every node is closed to the case, then the press lands")
+        for m in manifests:
+            self.assertEqual([{"key": run.TAINT_KEY, "operator": "Exists", "effect": "NoSchedule"}], m["spec"]["tolerations"])
 
     def test_fill_refuses_a_cpu_less_target_or_an_ineligible_node(self):
         f = self._armed()
@@ -9375,13 +9426,28 @@ class PreemptFaultTest(unittest.TestCase):
                  aim_node="kind-worker", fire_ts=1.0, not_victim=set(), preempted=[])
         pod_state = {"e0": None, "d0": {"alive": False}, "e1": {"alive": True}}
         preempted = {"e0": True, "d0": False}
-        with mock.patch.object(run, "_pod_preempted", lambda n: preempted[n]):
+        with mock.patch.object(run, "_pod_preempted", lambda n, **_k: preempted[n]):
             self.assertEqual("e0", run._preempt_victim(f, pod_state))
         self.assertEqual(("e0", "engine", "0", True), (f["crash_pod"], f["crash_comp"], f["crash_inst"], f["victim_was_serving"]))
         self.assertEqual({"d0"}, f["not_victim"])
         self.assertEqual(["e0"], f["preempted"])
-        with mock.patch.object(run, "_pod_preempted", lambda n: self.fail("a recorded victim is not read again")):
+        with mock.patch.object(run, "_pod_preempted", lambda n, **_k: self.fail("a recorded victim is not read again")):
             self.assertEqual("e0", run._preempt_victim(f, pod_state))
+
+    def test_a_victim_back_under_its_name_is_read_by_uid(self):
+        # The controller re-creates the preempted pod under the same name
+        # within seconds: the name reads alive again, the UID does not.
+        f = self._armed()
+        f.update(pre_alive={"e0": {"comp": "engine", "inst": "0", "serving": True, "uid": "u-old"}},
+                 aim_node="kind-worker", fire_ts=1.0, not_victim=set(), preempted=[])
+        asked = []
+        with mock.patch.object(run, "_pod_preempted", lambda n, **k: asked.append((n, k.get("uid"))) or True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual("e0", run._preempt_victim(f, {"e0": {"alive": True, "uid": "u-new"}}))
+        self.assertEqual([("e0", "u-old")], asked, "the record is read for the UID that was alive at the fire")
+        f.update(preempted=[], crash_pod=None)
+        with mock.patch.object(run, "_pod_preempted", lambda n, **_k: self.fail("the same live pod is not read")):
+            self.assertIsNone(run._preempt_victim(f, {"e0": {"alive": True, "uid": "u-old"}}))
 
     def test_preemption_is_read_off_the_condition_or_the_event(self):
         marked = {"status": {"conditions": [{"type": "DisruptionTarget", "reason": "PreemptionByScheduler"}]},
@@ -9401,6 +9467,13 @@ class PreemptFaultTest(unittest.TestCase):
             self.assertTrue(run._pod_preempted("m0", ns="ome"))
         self.assertIn("involvedObject.kind=Pod,involvedObject.name=e0,reason=Preempted", calls[0])
         self.assertEqual(("-n", "ome"), calls[1][:2], "a control-plane pod's record is read in its own namespace")
+        replaced = {"status": {"conditions": []}, "metadata": {"uid": "u-new"}}
+        del calls[:]
+        with mock.patch.object(run, "_get_pod", lambda n, ns=run.NS: replaced), mock.patch.object(run, "kubectl", kubectl):
+            self.assertTrue(run._pod_preempted("e0", uid="u-old"), "a pod back under the name with another UID: the event decides")
+            self.assertFalse(run._pod_preempted("e0", uid="u-new"), "the same pod, live and unmarked, was not preempted")
+        self.assertEqual(1, len(calls))
+        self.assertIn("involvedObject.kind=Pod,involvedObject.name=e0,reason=Preempted,involvedObject.uid=u-old", calls[0])
 
     def test_lift_and_cleanup_drop_fillers_and_the_class_once(self):
         f = self._armed()
@@ -9418,6 +9491,16 @@ class PreemptFaultTest(unittest.TestCase):
         self.assertEqual([("-n", run.NS, "delete", "pod", "-l", f"{run.FILLER_LABEL}=p999", "--ignore-not-found=true", "--wait=false"),
                           ("delete", "priorityclass", "perm-p999-preempt", "--ignore-not-found=true")], calls)
         self.assertTrue(run._preempt_lift(self._armed()), "nothing to drop is already lifted")
+        f = self._armed()
+        f.update(fillers=["perm-p999-press"], tainted=["kind-worker", "kind-worker2"])
+        del calls[:]
+        with mock.patch.object(run, "kubectl", kubectl):
+            self.assertTrue(run._preempt_lift(f))
+        self.assertEqual([("taint", "nodes", "kind-worker", f"{run.TAINT_KEY}:NoSchedule-"),
+                          ("taint", "nodes", "kind-worker2", f"{run.TAINT_KEY}:NoSchedule-"),
+                          ("-n", run.NS, "delete", "pod", "-l", f"{run.FILLER_LABEL}=p999", "--ignore-not-found=true", "--wait=false")],
+                         calls, "the nodes are opened to the case, then the fillers go")
+        self.assertEqual([], f["tainted"])
 
     def test_kill_record_is_a_hookless_preempt_fault(self):
         f = run._preempt_record("p999", {"via": "preempt", "lift": "never"})
@@ -9771,7 +9854,8 @@ class GeneratedDisruptionFamiliesTest(unittest.TestCase):
         for name, _kv, m in fam:
             reason = outputs[f"gen-preempt/{name}.yaml"].splitlines()[1]
             self.assertIn("reason Unschedulable", reason)
-            self.assertIn("fillers are dropped" if m["lift"] == "after-settle" else "fillers stay to the end", reason)
+            self.assertIn("the lift opens the nodes and drops the fillers" if m["lift"] == "after-settle"
+                          else "the taint and the fillers stay to the end", reason)
         self._validates(outputs, "gen-preempt", fam)
 
     def test_pending_family_arms_the_quota_the_operation_needs(self):
@@ -12742,6 +12826,7 @@ class PressSparesTheControlPlaneTest(unittest.TestCase):
                 mock.patch.object(run, "_node_pods", lambda node: node_items + [case_pod]), \
                 mock.patch.object(run, "_node_cpu_free", lambda node, items=None: 200), \
                 mock.patch.object(run, "_control_plane_pods", lambda: cp_items), \
+                mock.patch.object(run, "_preempt_close_nodes", lambda f, nodes: (True, "the pending taint on every node")), \
                 mock.patch.object(run, "_filler_create",
                                   lambda f, name, node, cpu, pc="": created.append((name, node, cpu, pc)) or (True, "")), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -12766,7 +12851,7 @@ class PressSparesTheControlPlaneTest(unittest.TestCase):
 
     def _after_fire(self):
         return {"case_id": "p1", "notes": [], "infra_fail": None, "aim_node": "worker-1",
-                "cp_pods": {"ome-controller-manager-abc": "uid-1"}, "preempted": [], "not_victim": set(),
+                "cp_pods": {"ome-controller-manager-abc": "uid-ome-controller-manager-abc"}, "preempted": [], "not_victim": set(),
                 "pre_alive": {"p1-engine-0-default-0": {"comp": "engine", "inst": "0", "serving": True}}}
 
     def test_a_preempted_control_plane_pod_fails_the_case_as_apparatus(self):

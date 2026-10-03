@@ -980,12 +980,14 @@ Then the operation, judged on what the engine promises:
   and that the healthy survivors kept serving throughout (a floor of the
   Ready survivors, less the unavailability budget under `failed` on a
   drain-first strategy, debounced like the rollout floor).
-- **a request for zero** (`to_e=0`, patched as `minReplicas: 0` with
-  `maxReplicas` at one, the least the API admits) is kept as the API
-  answers it: a plain Component runs one Instance for zero, so the verdict converges on the
-  replica count the controller accepted (read from the InferenceReplica,
-  never assumed) with the same victim order, which leaves the healthy
-  Instance and takes the stuck ones.
+- **a scale to one** (`to_e=1`, with `to_d=1` when the decoder is a bumped
+  member) is the deepest scale the API admits: `minReplicas: 0` needs KEDA
+  autoscaling and is refused otherwise, so no case asks for zero (the
+  header check rejects a `to_*` of zero). Every Instance but one goes, in
+  the same victim order, which takes the stuck Instances and leaves a
+  healthy one; the verdict converges on the replica count the controller
+  accepted (read from the InferenceReplica, never assumed). On the gang
+  fleet of two, to one is down by one, so that cell is the scale-down row.
 - **a delete** (`mode=recreate`) is the recreate contract on a stuck fleet:
   every pod goes, stuck ones included, the teardown converges within its
   budget (no pod left Terminating, no finalizer wedge), and the same name
@@ -1793,15 +1795,23 @@ shapes.
   uncordoned, untainted), and one filler under that class, pinned to the
   node of the aimed pod (the kill target, or the podkill rule's victim at
   the hook), asks for that node's spare CPU plus the aimed pod's own — so
-  the scheduler must preempt one pod there (the latest-started pod of equal
-  priority; the runner reads the victim back off the scheduler's
-  `DisruptionTarget` condition or its `Preempted` event, never off a drain).
-  Nothing of the case can be placed anywhere until the fillers are dropped:
+  the scheduler must preempt one pod there (the pod it picks among those
+  below the press on that node; the runner reads the victim back off the
+  scheduler's `DisruptionTarget` condition or its `Preempted` event, by
+  UID, since the controller brings the victim back under the same name
+  within seconds — never off a drain). Before the press lands, the
+  harness's `perm.test/pending` NoSchedule taint goes on every one of
+  those nodes (the fillers tolerate it): the fillers hold the room there
+  was, and the taint keeps the case from the room its own pods free
+  afterwards — what the preemption vacates and, under a roll, what each
+  drain vacates, which a surge-then-drain roll would otherwise take one pod
+  at a time. Nothing of the case can be placed anywhere until the lift:
   the Instance waits with the product's own reason (`operation.waiting`
   `Unschedulable` on its InferenceReplica row), and `lift=after-settle`
-  drops the fillers once that wait has held `LIFT_SETTLE_S`, after which
-  the repair (or the roll) must complete; `lift=never` keeps them to the
-  end and judges the hold instead (below). The verb needs a cluster this
+  removes the taint and drops the fillers once that wait has held
+  `LIFT_SETTLE_S`, after which the repair (or the roll) must complete;
+  `lift=never` keeps both to the end and judges the hold instead (below).
+  The verb needs a cluster this
   harness owns, since it blocks every node (the same check as
   `node:notready`), the PriorityClass API, and an OME control plane that
   outranks the press: among the pods below the press on the pressed node
@@ -1816,8 +1826,8 @@ shapes.
   the pressed node sits below the press and requests CPU, and a
   control-plane pod the scheduler preempts anyway is `INFRA-FAIL`, never a
   product finding. Fillers carry `perm.test/filler=<case>` and the class
-  `perm.test/fault=<case>`; both go at the end of the case and in
-  `batch.py`'s sweep. `isvcs/gen-preempt/` crosses both moments with
+  `perm.test/fault=<case>`; both go at the end of the case, as does the
+  taint, and in `batch.py`'s sweep. `isvcs/gen-preempt/` crosses both moments with
   topology, restart policy, lift and (under the roll) strategy. A pending
   case that fails prints, before teardown, each pod of the case with its
   `PodScheduled` and `Ready` conditions, gates and pod group, the
@@ -1887,8 +1897,8 @@ shapes.
   roll has retired that Instance (a gang surge abandoned, a source drained)
   with its Component back at N; the manager restart once the manager pods
   are Ready under new names; the preemption once the Instance it took is
-  placed and serving again (the fillers are dropped after each wait, each
-  repetition's fillers named after it; the scheduler chooses the pod it
+  placed and serving again (the taint and the fillers are lifted after each
+  wait, each repetition's fillers named after it; the scheduler chooses the pod it
   takes on the pressed node, so the wait, the allowance, the scope and the
   record follow that pod's Component, a router or decoder beside the
   engine the press was aimed at). The watch budgets grow by

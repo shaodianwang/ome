@@ -2289,12 +2289,16 @@ NODE_NEEDS = {"relocated": NEEDS_FORCE_DELETE, "parked": NEEDS_NO_FORCE_DELETE}
 EVICTION_API = "/apis/policy/v1"
 # preempt:<phase> (via=preempt in mode=kill) has the scheduler remove the
 # pod: fillers take the spare CPU of every node a case pod could land on,
-# then one filler under a PriorityClass a notch above the case's pods asks
-# for the victim's node's spare CPU plus the victim's own, so the scheduler
-# must preempt a pod there. Nothing of the case can be placed again until
-# the fillers are dropped at lift=after-settle; lift=never keeps them to the
-# end. The verb needs a cluster this harness owns (it blocks every node) and
-# the PriorityClass API; elsewhere the case is skipped with the reason.
+# the pending taint closes those nodes to the case (the fillers tolerate
+# it), then one filler under a PriorityClass a notch above the case's pods
+# asks for the victim's node's spare CPU plus the victim's own, so the
+# scheduler must preempt a pod there. The taint is what holds: the fillers
+# only took the room there was, and the room the preemption frees, or each
+# drain of a roll frees, would seat the case's next pod at once. Nothing of
+# the case can be placed again until the lift opens the nodes and drops the
+# fillers at lift=after-settle; lift=never keeps the hold to the end. The
+# verb needs a cluster this harness owns (it blocks every node) and the
+# PriorityClass API; elsewhere the case is skipped with the reason.
 PRIORITY_CLASS_API = "/apis/scheduling.k8s.io/v1"
 FILLER_LABEL = "perm.test/filler"
 # The press runs one notch above the case's pods. Among the pods below it on
@@ -10018,9 +10022,11 @@ def _node_cpu_free(node, items=None):
 def _filler_manifest(name, case_id, node, cpu_m, priority_class=""):
     """A pod that holds `cpu_m` millicores of `node` and nothing else: pinned
     through the hostname label (a nodeName would skip the scheduler), the
-    fixture image kept idle by a shell loop, no memory request. Under a
-    priority class it is the pod the scheduler preempts for."""
+    fixture image kept idle by a shell loop, no memory request, tolerating
+    the pending taint that closes the node to the case. Under a priority
+    class it is the pod the scheduler preempts for."""
     spec = {"nodeSelector": {"kubernetes.io/hostname": node},
+            "tolerations": [{"key": TAINT_KEY, "operator": "Exists", "effect": "NoSchedule"}],
             "containers": [{"name": "filler", "image": _fixture_values()["OME_EVAL_NGINX_IMAGE"],
                             "command": ["sh", "-c", "trap 'exit 0' QUIT TERM INT; while :; do sleep 1; done"],
                             "resources": {"requests": {"cpu": _qty_str("cpu", cpu_m)}}}]}
@@ -10056,7 +10062,7 @@ def _preempt_cycle_reset(f, cycle):
         time.sleep(1.0)
     else:
         return False
-    f.update(fillers=[], fillers_dropped=False, cycle=cycle, pre_alive=None, crash_pod=None, crash_comp=None,
+    f.update(fillers=[], fillers_dropped=False, tainted=[], cycle=cycle, pre_alive=None, crash_pod=None, crash_comp=None,
              crash_inst=None, press_pod=None, fire_ts=None, preempted=[], not_victim=set(), fired=False,
              cp_pods=None, cp_polled=0.0)
     return True
@@ -10129,15 +10135,38 @@ def _preempt_block_node(f, node):
     return False, f"the filler on {node} never bound in 3 sizings"
 
 
+def _press_need(free, victim_cpu):
+    """The press's CPU request: the node's spare (none when the node is
+    already over its allocatable) plus the aimed pod's own, so the node fits
+    it only once one pod of the aimed pod's size has gone."""
+    return max(free, 0) + victim_cpu
+
+
+def _preempt_close_nodes(f, nodes):
+    """Put the pending taint on every node a case pod could be placed on:
+    the room the preemption frees, or a drain of the roll frees, stays out
+    of the case's reach until the lift; the fillers tolerate it. (ok, message)."""
+    f.setdefault("tainted", [])
+    for node in nodes:
+        r = kubectl("taint", "nodes", node, f"{TAINT_KEY}={f['case_id']}:NoSchedule", "--overwrite")
+        if r.returncode != 0:
+            return False, f"tainting {node} failed: {(r.stderr or '').strip()[:120]}"
+        if node not in f["tainted"]:
+            f["tainted"].append(node)
+    return True, f"{TAINT_KEY}=NoSchedule on {len(nodes)} node(s) ({', '.join(nodes)}), the fillers tolerating it"
+
+
 def _preempt_fill(f, target, node, pod_state):
-    """Take the spare CPU of every other eligible node, then press on the
-    target pod's node with a filler under the case's PriorityClass that needs
-    that node's spare CPU plus the target's: the scheduler has to preempt a
-    pod there (the latest-started one of equal priority — read back once it
-    is deleted), and nothing of the case can be placed anywhere until the
-    fillers are dropped."""
+    """Take the spare CPU of every other eligible node, close every eligible
+    node to the case with the pending taint, then press on the target pod's
+    node with a filler under the case's PriorityClass that needs that node's
+    spare CPU plus the target's: the scheduler has to preempt a pod there
+    (the one it picks among the pods below the press — read back by UID
+    once it is deleted, since its replacement comes back under the same
+    name), and nothing of the case can be placed anywhere until the lift."""
     f["fired"] = True
-    f["pre_alive"] = {n: {"comp": q["comp"], "inst": q["inst"], "serving": bool(q.get("ready") and q.get("serving"))}
+    f["pre_alive"] = {n: {"comp": q["comp"], "inst": q["inst"], "serving": bool(q.get("ready") and q.get("serving")),
+                          "uid": str(q.get("uid") or "")}
                       for n, q in pod_state.items() if q and q["alive"]}
     obj = _get_pod(target)
     victim_cpu = _pod_requests(obj).get("cpu", 0) if obj else 0
@@ -10150,7 +10179,8 @@ def _preempt_fill(f, target, node, pod_state):
                            f"({', '.join(nodes) or 'none'})")
         return
     f.update(aim_pod=target, aim_node=node, victim_cpu=victim_cpu, fire_ts=time.time(),
-             cause="the filler pods holding every node's spare CPU", not_victim=set(), preempted=[])
+             cause="the filler pods holding every node's spare CPU and the pending taint on every node",
+             not_victim=set(), preempted=[])
     for other in nodes:
         if other == node:
             continue
@@ -10172,15 +10202,21 @@ def _preempt_fill(f, target, node, pod_state):
         return
     f["cp_pods"] = {str((it.get("metadata") or {}).get("name") or ""): str((it.get("metadata") or {}).get("uid") or "")
                     for it in (_control_plane_pods() or [])}
+    ok, msg = _preempt_close_nodes(f, nodes)
+    if not ok:
+        f["infra_fail"] = f"preempt: {msg}"
+        return
+    f["notes"].append(f"fault armed: {msg}")
     press = _filler_name(f, "press")
-    need = max(free, 0) + victim_cpu
+    need = _press_need(free, victim_cpu)
     ok, msg = _filler_create(f, press, node, need, f["pc_name"])
     if not ok:
         f["infra_fail"] = f"preempt: {msg}"
         return
     f["press_pod"] = press
     f["notes"].append(f"fault fired: filler {press} under {f['pc_name']} needs {need}m on {node} "
-                      f"({max(free, 0)}m spare + {victim_cpu}m of {target}); the scheduler must preempt one pod there")
+                      f"({max(free, 0)}m spare + {victim_cpu}m of {target}); the scheduler must preempt one pod there, "
+                      f"and the taint keeps every node closed to the case until the lift")
     print(f"    ⚡ {f['notes'][-1]}")
 
 
@@ -10200,19 +10236,25 @@ def _fault_preempt_fire(f, pod_state, pods_per_inst, old_hashes):
     _preempt_fill(f, target, node, pod_state)
 
 
-def _pod_preempted(name, ns=NS):
+def _pod_preempted(name, ns=NS, uid=""):
     """True when the scheduler preempted this pod: the live pod carries the
-    DisruptionTarget condition from the scheduler, or (once it is gone) the
-    scheduler's Preempted event names it."""
+    DisruptionTarget condition from the scheduler, or (once it is gone, or
+    replaced under its name by a pod with another UID) the scheduler's
+    Preempted event names it — by UID when the caller knows it, so neither
+    a replacement back under the same name nor an earlier repetition's
+    victim is mistaken for this one."""
     obj = _get_pod(name, ns=ns)
-    if obj is not None:
+    same = obj is not None and (not uid or str((obj.get("metadata") or {}).get("uid") or "") == uid)
+    if same:
         for c in (obj.get("status") or {}).get("conditions") or []:
             if c.get("type") == "DisruptionTarget" and c.get("reason") == "PreemptionByScheduler":
                 return True
         if (obj.get("metadata") or {}).get("deletionTimestamp") is None:
             return False
-    r = kubectl("-n", ns, "get", "events", "--field-selector",
-                f"involvedObject.kind=Pod,involvedObject.name={name},reason=Preempted", "-o", "json")
+    selector = f"involvedObject.kind=Pod,involvedObject.name={name},reason=Preempted"
+    if uid:
+        selector += f",involvedObject.uid={uid}"
+    r = kubectl("-n", ns, "get", "events", "--field-selector", selector, "-o", "json")
     if r.returncode != 0:
         return False
     try:
@@ -10235,7 +10277,7 @@ def _preempt_apparatus_hit(f):
         return False
     f["cp_polled"] = now
     for name in sorted(f["cp_pods"]):
-        if not _pod_preempted(name, ns=CTRL_NS):
+        if not _pod_preempted(name, ns=CTRL_NS, uid=f["cp_pods"][name]):
             continue
         pc = _control_plane_class()
         f["cp_hit"] = name
@@ -10248,10 +10290,11 @@ def _preempt_apparatus_hit(f):
 
 
 def _preempt_victim(f, pod_state):
-    """The case pods the scheduler preempted: alive at the fire, gone or
-    deleting now, confirmed by the scheduler's own record (a pod the roll
-    drained has none). The first one is the fault's victim. None, with the
-    apparatus failure recorded, once a control-plane pod went instead."""
+    """The case pods the scheduler preempted: alive at the fire; gone,
+    deleting or back under the same name with another UID now, confirmed by
+    the scheduler's own record (a pod the roll drained has none). The first
+    one is the fault's victim. None, with the apparatus failure recorded,
+    once a control-plane pod went instead."""
     if _preempt_apparatus_hit(f):
         return None
     if not f.get("pre_alive"):
@@ -10260,9 +10303,10 @@ def _preempt_victim(f, pod_state):
         if name in f["preempted"] or name in f["not_victim"]:
             continue
         q = pod_state.get(name)
-        if q is not None and q["alive"]:
+        uid = was.get("uid") or ""
+        if q is not None and q["alive"] and (not uid or str(q.get("uid") or "") == uid):
             continue
-        if not _pod_preempted(name):
+        if not _pod_preempted(name, uid=uid):
             f["not_victim"].add(name)
             continue
         f["preempted"].append(name)
@@ -10276,13 +10320,15 @@ def _preempt_victim(f, pod_state):
 
 
 def _preempt_lift(f):
-    """Drop the fillers so the room is free again. Idempotent."""
+    """Open the nodes to the case again: the pending taint off every node it
+    went on, and the fillers dropped so the room is free. Idempotent."""
+    opened = _taint_lift(f)
     if f.get("fillers_dropped") or not f.get("fillers"):
-        return True
+        return opened
     r = kubectl("-n", NS, "delete", "pod", "-l", f"{FILLER_LABEL}={f['case_id']}", "--ignore-not-found=true", "--wait=false")
     if r.returncode == 0:
         f["fillers_dropped"] = True
-    return r.returncode == 0
+    return opened and r.returncode == 0
 
 
 def _preempt_cleanup(f):
@@ -11628,6 +11674,12 @@ def _int_ge0(v):
     return isinstance(v, int) and v >= 0
 
 
+def _int_ge1(v):
+    """A replica target: the API admits no count below one for a Component
+    without KEDA autoscaling (minReplicas 0 is refused)."""
+    return isinstance(v, int) and v >= 1
+
+
 def _int_list(v):
     try:
         return all(int(s) >= 0 for s in str(v).split(","))
@@ -11660,7 +11712,7 @@ HDR_VALIDATORS = {
     "mode": lambda v: v == "rollout" or v in MODE_HANDLERS,
     "Ne": _int_ge0, "Nd": _int_ge0, "Nr": _int_ge0,
     "ceil_e": _int_ge0, "ceil_d": _int_ge0, "ceil_r": _int_ge0,
-    "to_e": _int_ge0, "to_d": _int_ge0, "to_r": _int_ge0,
+    "to_e": _int_ge1, "to_d": _int_ge1, "to_r": _int_ge1,
     "partition": _int_ge0,
     "mig": lambda v: v in {"Auto", "Surge", "Never"},
     "restart": lambda v: v in {"None", "RecreateInstance"},
@@ -15460,10 +15512,11 @@ def _ir_spec_replicas(by_comp):
 
 
 def _replica_patch(targets):
-    """The merge patch for the operation's replica targets. minReplicas is
-    the request; maxReplicas follows it but never drops below one, the least
-    the API admits, so a request for zero is the operator's minReplicas: 0."""
-    return {"spec": {c: {"minReplicas": t, "maxReplicas": max(t, 1)} for c, t in sorted(targets.items())}}
+    """The merge patch for the operation's replica targets: minReplicas and
+    maxReplicas both at the request. The API admits no count below one for
+    a Component without KEDA autoscaling, so the deepest request a case
+    states is one (the header check refuses a target of zero)."""
+    return {"spec": {c: {"minReplicas": t, "maxReplicas": t} for c, t in sorted(targets.items())}}
 
 
 def _drive_stuck(ctx, hdr):
@@ -15524,10 +15577,11 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     retry ladder is spent). What the engine promises and the verdict reads:
     a scale-down removes Instances that are not Ready first, highest index
     first within each tier, and never rebuilds a survivor on the running
-    revision; a request for zero converges on the replica count the API
-    accepted for it (it runs one Instance for zero), the stuck Instances
-    going first; a scale-up while held starts nothing (the new index waits
-    as an empty slot) and while failed starts the new Instance on the pushed
+    revision; a scale to one, the least count the API admits, takes every
+    Instance but one in that order and converges on the replica count the
+    controller accepted, read from the InferenceReplica, never assumed; a
+    scale-up while held starts nothing (the new index waits as an empty
+    slot) and while failed starts the new Instance on the pushed
     revision when the retry window admits it, never on the running
     revision; the healthy survivors keep serving throughout; the sibling
     Components the push never touched stay as they were; and the status
@@ -15543,12 +15597,7 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     target = {c: int(hdr.get(TO_KEYS[c], N[c])) for c in configured}
     scaled = {c for c in configured if target[c] != N[c]}
     controls = configured - scaled - bumped
-    if any(target[c] > N[c] for c in scaled):
-        direction = "up"
-    elif any(target[c] == 0 for c in scaled):
-        direction = "zero"
-    else:
-        direction = "down"
+    direction = "up" if any(target[c] > N[c] for c in scaled) else "down"
     verdict, notes, checks = "PASS", [], []
     reached = _drive_stuck(ctx, hdr)
     if reached is None:
@@ -15621,7 +15670,9 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
                 if rows_after_op[c] is None:
                     rows_after_op[c] = [(str(r.get("index", "?")), str(r.get("phase") or ""))
                                         for r in _instance_rows((by_comp.get(c) or {}).get("status") or {})]
-            if direction == "zero":
+            if direction == "down":
+                # The count converged on is the one the controller accepted,
+                # read off the InferenceReplica rather than assumed.
                 for c, r in _ir_spec_replicas(by_comp).items():
                     if c in scaled and r != N[c]:
                         want[c] = r
@@ -15655,7 +15706,7 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✓ {c} peak {ctx['peaks'][c]} ≤ ceiling {ceil[c]}")
     by_comp = _ir_by_component(case_id)
     now_pods = {c: _pods_by_index(ctx, c) for c in configured}
-    if direction in ("down", "zero"):
+    if direction == "down":
         if state != "CONVERGED":
             verdict = "FAIL"
             got = " ".join(f"{c}={ctx.get('measures', {}).get(c, (0, 0, 0))[0]}/{want[c]}" for c in sorted(scaled))
@@ -15663,9 +15714,7 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✗ the scale did not converge within {budget}s (state={state}; Instances {got})")
         else:
             got = " ".join(f"{c} {ctx.get('measures', {}).get(c, (0, 0, 0))[0]}/{want[c]}" for c in sorted(scaled))
-            floor_note = (" — the API runs one Instance for a request of zero, so that is the count it converges on"
-                          if direction == "zero" and any(want[c] > 0 for c in scaled) else "")
-            checks.append(f"  ✓ converged on the accepted count at {ctx['converged_at']:.1f}s ({got}){floor_note}")
+            checks.append(f"  ✓ converged on the accepted count at {ctx['converged_at']:.1f}s ({got})")
         for c in sorted(scaled):
             rows_now = {str(r.get("index", "?")) for r in _instance_rows((by_comp.get(c) or {}).get("status") or {})}
             pre_indices = {idx for idx, _ph in rows_at_op[c]}
@@ -15758,10 +15807,6 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     # The push that has not landed is still reported.
     unlanded = _push_unlanded(by_comp, bumped)
     for c in sorted(bumped):
-        rows_now = _instance_rows((by_comp.get(c) or {}).get("status") or {})
-        if direction == "zero" and not rows_now:
-            checks.append(f"  ⓘ {c}: no Instance left; the unlanded push is reported as {unlanded[c] or 'nothing'}")
-            continue
         if not unlanded[c]:
             verdict = "FAIL"
             notes.append(f"{c}: the status stopped reporting the push that has not landed")
