@@ -69,6 +69,13 @@ type ReconcileInputs struct {
 	// dip, not a crash. The dispatcher reads it from the pods and the Instance
 	// rows; a live ladder parks on it.
 	Crash *CanaryCrash
+	// CanaryRestartedAt is the newest moment a canary pod of the unit died or
+	// came back, on any member; zero when none has. The dispatcher reads it
+	// from the pods and the Instance rows beside Crash. A timed soak measures
+	// from the later of the split first serving and this instant: a single
+	// restart keeps the step, and the step moves only once a full soak has
+	// passed since it.
+	CanaryRestartedAt time.Time
 	// SecondaryCapacityReady is true when every NON-primary component's canary
 	// Instances have reached that component's step newCount. The primary uses its
 	// exact complete-PodReady target Instance count. Single-component canaries
@@ -367,7 +374,8 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 	// so a Ready router can't advance the step while the engine/decoder canary
 	// pods behind it are still coming up). The wait is timed from when it
 	// began, never from the step's soak anchor, so a long bake cannot spend the
-	// budget and a dip cannot restart the soak; past the ready timeout the
+	// budget and a dip cannot restart the soak (a canary pod's restart does,
+	// through the soak's own reading of the pods); past the ready timeout the
 	// canary parks Failed with the stable revision still serving.
 	readyCanary := readyCanaryCapacity(in)
 	// A target with Ready pods is the member's latest ready revision whether

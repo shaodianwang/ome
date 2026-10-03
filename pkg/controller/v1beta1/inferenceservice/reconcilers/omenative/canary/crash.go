@@ -60,6 +60,30 @@ func crashAnchor(cs *v1beta1.CanaryStatus, now time.Time) time.Time {
 // after its grace or a clean exit, and a pod in a terminal phase is one the
 // workload reads as absent and recycles; neither pod's statuses are read.
 func crashedCanaryPod(component v1beta1.ComponentType, observed observedCanaryRevisions, pods []*corev1.Pod, since time.Time) *CanaryCrash {
+	for _, member := range canaryPodRows(observed, pods) {
+		anchor, ok := servingAnchor(member.row, member.pod, since)
+		if !ok {
+			continue
+		}
+		if detail, looping := runnerCrashLooping(member.pod, member.row, anchor, since); looping {
+			return &CanaryCrash{Component: component, PodName: member.pod.Name, Detail: detail}
+		}
+	}
+	return nil
+}
+
+// canaryPodRow is a live pod of a member's target revision with the Instance
+// row it belongs to; the row is nil when the observation carries none.
+type canaryPodRow struct {
+	pod *corev1.Pod
+	row *v1beta1.OMENativeInstanceStatus
+}
+
+// canaryPodRows pairs each live pod of the member's target revision with its
+// Instance row. A pod under deletion is stopped by the kubelet on its way
+// out, and a pod in a terminal phase is one the workload reads as absent and
+// recycles; both are a loss the capacity gate waits out, so neither is read.
+func canaryPodRows(observed observedCanaryRevisions, pods []*corev1.Pod) []canaryPodRow {
 	if observed.targetHash == "" {
 		return nil
 	}
@@ -67,6 +91,7 @@ func crashedCanaryPod(component v1beta1.ComponentType, observed observedCanaryRe
 	for i := range observed.rows {
 		rows[observed.rows[i].Index] = &observed.rows[i]
 	}
+	var members []canaryPodRow
 	for _, pod := range pods {
 		if pod == nil || pod.Labels[query.LabelRevisionHash] != observed.targetHash {
 			continue
@@ -78,27 +103,105 @@ func crashedCanaryPod(component v1beta1.ComponentType, observed observedCanaryRe
 		if !ok {
 			continue
 		}
-		anchor, ok := servingAnchor(rows[index], pod, since)
-		if !ok {
+		members = append(members, canaryPodRow{pod: pod, row: rows[index]})
+	}
+	return members
+}
+
+// latestCanaryRestart is the newest moment a canary pod of the member died
+// or came back: a termination its runner recorded, the start of the run the
+// kubelet began after one, the pod serving again after it, or the failure
+// that opened its Instance's last rebuild, which outlives the pod that
+// failed, and the rebuilt pod serving in its place. Zero when no canary pod
+// carries one. The timed soak measures from it, so a step moves only once
+// its canary pods have served a full soak since the newest of their
+// restarts; whether a restart is also a crash loop is the crash reading's
+// call, made on the same pods.
+func latestCanaryRestart(observed observedCanaryRevisions, pods []*corev1.Pod) time.Time {
+	var latest time.Time
+	for _, member := range canaryPodRows(observed, pods) {
+		latest = laterOf(latest, runnerRestartedAt(member.pod))
+		if member.row == nil || member.row.LastFailure == nil {
 			continue
 		}
-		if detail, looping := runnerCrashLooping(pod, rows[index], anchor, since); looping {
-			return &CanaryCrash{Component: component, PodName: pod.Name, Detail: detail}
+		failed := member.row.LastFailure.Time.Time
+		latest = laterOf(latest, failed)
+		// A pod created after the failure is the rebuild that answers it: its
+		// first readiness is the Instance serving again. A pod that predates
+		// the failure keeps its first readiness out, as any first run does.
+		if member.pod.CreationTimestamp.Time.After(failed) {
+			latest = laterOf(latest, readinessMovedAt(member.pod))
 		}
 	}
-	return nil
+	return latest
+}
+
+// runnerRestartedAt is the newest moment pod's runner died, was started
+// again, or served again: the finish of a recorded termination, the current
+// one or the one before the current run, the start of a run that follows a
+// restart, and the pod's readiness last moving after that. The kubelet
+// starts a restarted runner at once, but the runner serves only once its
+// startup is done and its readiness probe passes, so the moment the pod
+// turned Ready again is when it is serving again. Zero for a runner on its
+// first run with no death recorded, whose readiness is its first serve, not
+// a restart. Sidecars and init containers never count; the kubelet restarts
+// them in place without touching the serving process.
+func runnerRestartedAt(pod *corev1.Pod) time.Time {
+	var latest time.Time
+	for i := range pod.Status.ContainerStatuses {
+		status := &pod.Status.ContainerStatuses[i]
+		if status.Name != constants.MainContainerName {
+			continue
+		}
+		if died := status.State.Terminated; died != nil {
+			latest = laterOf(latest, died.FinishedAt.Time)
+		}
+		if died := status.LastTerminationState.Terminated; died != nil {
+			latest = laterOf(latest, died.FinishedAt.Time)
+		}
+		if running := status.State.Running; running != nil && status.RestartCount > 0 {
+			latest = laterOf(latest, running.StartedAt.Time)
+		}
+	}
+	if latest.IsZero() {
+		return latest
+	}
+	return laterOf(latest, readinessMovedAt(pod))
+}
+
+// readinessMovedAt is the moment pod's readiness last changed, zero when
+// the kubelet has not reported it: for a Ready pod, the moment it began
+// serving its current run.
+func readinessMovedAt(pod *corev1.Pod) time.Time {
+	for i := range pod.Status.Conditions {
+		if pod.Status.Conditions[i].Type == corev1.PodReady {
+			return pod.Status.Conditions[i].LastTransitionTime.Time
+		}
+	}
+	return time.Time{}
+}
+
+// laterOf is the later of two instants; a zero instant is earlier than any.
+func laterOf(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 // servingAnchor is the moment after which a death of pod's runner is a death
 // of a serving Instance: the later of the row's entry into Ready and since.
 // It is absent for a row that never served, and for a pod of a repair's
-// rebuilt set, whose boot restarts are the ordinary start of a fresh pod.
+// rebuilt set, whose boot restarts are the ordinary start of a fresh pod. A
+// row the workload escalated to Failed for its pod's crash loop still
+// speaks for that pod: the escalation is the workload's reading of the same
+// deaths, and the pod it left in place carries them.
 func servingAnchor(row *v1beta1.OMENativeInstanceStatus, pod *corev1.Pod, since time.Time) (time.Time, bool) {
 	if row == nil || row.ReadySince == nil || row.ReadySince.IsZero() {
 		return time.Time{}, false
 	}
 	switch row.Phase {
-	case v1beta1.OMENativeInstanceReady:
+	case v1beta1.OMENativeInstanceReady, v1beta1.OMENativeInstanceFailed:
 	case v1beta1.OMENativeInstanceRestarting:
 		if incarnation, ok := query.InstanceIncarnationFromLabels(pod); !ok || incarnation >= row.Incarnation {
 			return time.Time{}, false

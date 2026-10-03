@@ -10,6 +10,7 @@
 //	FAIL_AT=ready          listen on :8080 but return 503 to /healthz
 //	                       (kubelet sees liveness/readiness fail)
 //	FAIL_AT=after-Nm       run normally for N minutes, then exit 1
+//	FAIL_AT=after-Ns       run normally for N seconds, then exit 1
 //	                       (delayed crash, soak-test the recovery path)
 //	FAIL_ON_NODE=<node>    return 503 to /healthz only while running on
 //	                       <node> — a node-scoped fault: the identical
@@ -51,10 +52,10 @@ func main() {
 		time.Sleep(time.Duration(d) * time.Second)
 	}
 
-	if mins, ok := parseAfterMinutes(failAt); ok {
+	if life, ok := parseAfter(failAt); ok {
 		go func() {
-			time.Sleep(time.Duration(mins) * time.Minute)
-			fmt.Printf("FAIL_AT=after-%dm timer fired, exiting 1\n", mins)
+			time.Sleep(life)
+			fmt.Printf("FAIL_AT=%s timer fired, exiting 1\n", failAt)
 			os.Exit(1)
 		}()
 	}
@@ -93,15 +94,25 @@ func nodeScopedFault() bool {
 	return failPod == "" || failPod == os.Getenv("POD_NAME")
 }
 
-// parseAfterMinutes extracts N from a "after-Nm" FAIL_AT value.
-// Returns (0, false) when the value doesn't match the expected shape.
-func parseAfterMinutes(failAt string) (int, bool) {
-	if !strings.HasPrefix(failAt, "after-") || !strings.HasSuffix(failAt, "m") {
+// parseAfter extracts the run's life from an "after-Nm" (minutes) or
+// "after-Ns" (seconds) FAIL_AT value. Returns (0, false) when the value
+// matches neither shape.
+func parseAfter(failAt string) (time.Duration, bool) {
+	rest, ok := strings.CutPrefix(failAt, "after-")
+	if !ok || len(rest) < 2 {
 		return 0, false
 	}
-	mins, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(failAt, "after-"), "m"))
-	if err != nil || mins <= 0 {
+	unit := time.Minute
+	switch rest[len(rest)-1] {
+	case 'm':
+	case 's':
+		unit = time.Second
+	default:
 		return 0, false
 	}
-	return mins, true
+	n, err := strconv.Atoi(rest[:len(rest)-1])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return time.Duration(n) * unit, true
 }

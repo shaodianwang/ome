@@ -6,6 +6,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ktypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -28,9 +29,47 @@ import (
 // kubelet brings the container back, so the counts recover on their own, and
 // the ladder must still park where it stood with the step's traffic back on
 // the stable revision, until the operator's rollback lands.
+// Under a timed soak the same crash must not slip the ladder forward: the
+// first exit is a single restart that keeps the step, the soak measures from
+// that restart rather than from the moment the split first served, and the
+// second exit parks the ladder at the step that was soaking, never the next.
 // Requires a real kubelet: the reopened-gate window exists only while a
 // replacement pod is actually starting, and the crash is a container that
 // really exits under a running kubelet.
+
+// The timed soak outlasts the canary runner's life so its second exit lands
+// inside the soak its first restart began, while the soak measured from the
+// split first serving elapses between the two exits: a ladder that measured
+// from step entry would advance between them.
+const (
+	plSoakDuration = 90 * time.Second
+	plRunnerLife   = "after-1m"
+)
+
+// The short-lived runner: every start boots for a soak behind the fixture's
+// readiness probe, serves ten seconds, and exits. The kubelet starts a
+// restarted runner at once and a rebuilt pod is created at once, so a soak
+// measured from either is complete the moment the runner serves again,
+// while a soak measured from the moment it serves still has a full step to
+// go when the runner exits again.
+const (
+	plShortSoak       = 20 * time.Second
+	plShortRunnerLife = "after-10s"
+	plShortRunnerBoot = 20
+)
+
+// shortLivedRunnerLadder is the four-step timed ladder of the short-lived
+// runner's canary: a tenth, then more, each soaked for a step, then the rest.
+func shortLivedRunnerLadder() []v1beta1.RolloutGroupStep {
+	soak := &v1beta1.RolloutPause{Duration: &metav1.Duration{Duration: plShortSoak}}
+	return []v1beta1.RolloutGroupStep{
+		{Capacity: intstr.FromString("10%"), Traffic: 10, Pause: soak},
+		{Capacity: intstr.FromString("30%"), Traffic: 30, Pause: soak},
+		{Capacity: intstr.FromString("60%"), Traffic: 60, Pause: soak},
+		{Capacity: intstr.FromString("100%"), Traffic: 100},
+	}
+}
+
 var _ = ginkgo.Describe("behavior — canary capacity gate under pod loss", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -314,6 +353,318 @@ var _ = ginkgo.Describe("behavior — canary capacity gate under pod loss", gink
 				g.Expect(pod.Labels[query.LabelRevisionHash]).To(Equal(stableHash),
 					"pod %s must be back on the stable revision", pod.Name)
 			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+
+	ginkgo.It("holds a timed soak across a single restart and parks at the soaking step when the canary pod dies again", func() {
+		// Config: 2-replica engine under restart policy None, so the crashed
+		// container is restarted in place by the kubelet and the pod stays.
+		const isvcName = "canary-lc3"
+		fix := newCoordFixture(ns.Name, WithISVCName(isvcName),
+			WithoutDecoder(),
+			WithEngineReplicas(2),
+			WithEngineImage("fake-serving:v1"))
+		restartNone := v1beta1.InstanceRestartPolicyNone
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{RestartPolicy: &restartNone}
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+
+		var stableHash string
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			engCS := c.Status.Components[v1beta1.EngineComponent]
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			rev := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent).Status.CurrentRevision
+			g.Expect(rev).NotTo(BeEmpty())
+			stableHash = query.RevisionFromName(rev).Hash()
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Action: add a timed canary plan and push a revision whose container
+		// serves for a minute and then exits.
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				Canary: &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{
+					{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{Duration: &metav1.Duration{Duration: plSoakDuration}}},
+					{Capacity: intstr.FromString("100%"), Traffic: 100},
+				}},
+			}}}
+			engine := &cur.Spec.Engine.PodSpec.Containers[0]
+			engine.Image = "fake-serving:v2"
+			engine.Env = append(engine.Env, corev1.EnvVar{Name: "FAIL_AT", Value: plRunnerLife})
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// The split serves and soaks: one ready canary pod under half the traffic.
+		var canaryHash, canaryPodName string
+		pushedAt := time.Now()
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
+			canaryHash = c.Status.Canary.CanaryRevisionHash
+			g.Expect(canaryHash).NotTo(BeEmpty())
+			g.Expect(canaryHash).NotTo(Equal(stableHash))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
+				To(Equal(v1beta1.RolloutPhasePaused))
+			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(50)))
+			for _, pod := range listOMENativePods(g, ns.Name, isvcName) {
+				if pod.DeletionTimestamp == nil && podIsReady(&pod) && pod.Labels[query.LabelRevisionHash] == canaryHash {
+					canaryPodName = pod.Name
+				}
+			}
+			g.Expect(canaryPodName).NotTo(BeEmpty(), "the canary pod must be serving in the soak")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Invariant: the first exit is a single restart the kubelet answers in
+		// place. The ladder keeps soaking step 0 with its split programmed.
+		Eventually(func(g Gomega) {
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, ktypes.NamespacedName{Namespace: ns.Name, Name: canaryPodName}, pod)).To(Succeed())
+			restarted := false
+			for _, cs := range pod.Status.ContainerStatuses {
+				restarted = restarted || cs.RestartCount > 0
+			}
+			g.Expect(restarted).To(BeTrue(), "the canary runner must have exited once and been restarted in place")
+			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
+			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)), "a single restart keeps the step")
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
+				To(Equal(v1beta1.RolloutPhasePaused), "a single restart is a dip the soak waits out, not a park")
+			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(50)))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Invariant: the soak measured from the split first serving elapses
+		// while the restarted runner is up, and the second exit lands inside
+		// the soak the restart began: the ladder parks at step 0 with a
+		// reason, never having staged step 1; no traffic names the canary
+		// revision, the stable revision owns it all, and the event names the
+		// pod, which stays and carries its restarts.
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
+			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)), "the ladder must never leave the step that was soaking")
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
+				To(Equal(v1beta1.RolloutPhaseFailed), "a canary pod that dies again inside its soak must park the ladder")
+			g.Expect(c.Status.Canary.Failed).NotTo(BeNil(), "the park must say why the ladder stopped")
+			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(0)))
+			traffic := c.Status.Components[v1beta1.EngineComponent].Traffic
+			g.Expect(traffic).To(HaveLen(1), "the step's split must be back on the stable revision alone: %+v", traffic)
+			g.Expect(query.RevisionFromName(traffic[0].RevisionName).Hash()).To(Equal(stableHash))
+			g.Expect(traffic[0].Percent).To(Equal(int32(100)))
+			g.Expect(eventsRecorded(ns.Name, isvcName, "CanaryPodCrashed", pushedAt)).To(ContainElement(ContainSubstring(canaryPodName)),
+				"the park must name the pod that died")
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, ktypes.NamespacedName{Namespace: ns.Name, Name: canaryPodName}, pod)).To(Succeed())
+			g.Expect(pod.DeletionTimestamp).To(BeNil(), "under restart policy None the crashed pod stays")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+
+	ginkgo.It("keeps a four-step timed ladder at step 0 and parks there when the pushed runner exits ten seconds after it serves", func() {
+		// Config: 8-replica engine under restart policy None, every engine pod
+		// booting for a soak behind the readiness probe; the kubelet restarts
+		// the crashed container in place and the pod stays.
+		const isvcName = "canary-lc4"
+		fix := newCoordFixture(ns.Name, WithISVCName(isvcName),
+			WithoutDecoder(),
+			WithEngineReplicas(8),
+			WithEngineStartupDelay(plShortRunnerBoot),
+			WithEngineImage("fake-serving:v1"))
+		restartNone := v1beta1.InstanceRestartPolicyNone
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{RestartPolicy: &restartNone}
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+
+		var stableHash string
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			engCS := c.Status.Components[v1beta1.EngineComponent]
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(8)))
+			rev := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent).Status.CurrentRevision
+			g.Expect(rev).NotTo(BeEmpty())
+			stableHash = query.RevisionFromName(rev).Hash()
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Action: add the timed ladder and push a revision whose runner serves
+		// ten seconds after its boot, and exits, every time it starts.
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				Canary:     &v1beta1.GroupCanary{Steps: shortLivedRunnerLadder()},
+			}}}
+			engine := &cur.Spec.Engine.PodSpec.Containers[0]
+			engine.Image = "fake-serving:v2"
+			engine.Env = append(engine.Env, corev1.EnvVar{Name: "FAIL_AT", Value: plShortRunnerLife})
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// The split serves and soaks: one ready canary pod under a tenth of
+		// the traffic.
+		var canaryHash, canaryPodName string
+		pushedAt := time.Now()
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
+			canaryHash = c.Status.Canary.CanaryRevisionHash
+			g.Expect(canaryHash).NotTo(BeEmpty())
+			g.Expect(canaryHash).NotTo(Equal(stableHash))
+			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
+				To(Equal(v1beta1.RolloutPhasePaused))
+			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(10)))
+			for _, pod := range listOMENativePods(g, ns.Name, isvcName) {
+				if pod.DeletionTimestamp == nil && podIsReady(&pod) && pod.Labels[query.LabelRevisionHash] == canaryHash {
+					canaryPodName = pod.Name
+				}
+			}
+			g.Expect(canaryPodName).NotTo(BeEmpty(), "the canary pod must be serving in the soak")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Invariant: the first exit is a single restart the kubelet answers in
+		// place; the ladder keeps soaking step 0 with its split programmed.
+		Eventually(func(g Gomega) {
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, ktypes.NamespacedName{Namespace: ns.Name, Name: canaryPodName}, pod)).To(Succeed())
+			restarted := false
+			for _, cs := range pod.Status.ContainerStatuses {
+				restarted = restarted || cs.RestartCount > 0
+			}
+			g.Expect(restarted).To(BeTrue(), "the canary runner must have exited once and been restarted in place")
+			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
+			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)), "a single restart keeps the step")
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
+				To(Equal(v1beta1.RolloutPhasePaused), "a single restart is a dip the soak waits out, not a park")
+			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(10)))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Invariant: the restarted runner serves again a soak after its start
+		// and exits ten seconds later, inside the soak measured from the
+		// moment it served: the ladder never stages step 1, it parks at step 0
+		// with a reason, no traffic names the canary revision, the stable
+		// revision owns it all, the event names the pod, and the pod stays.
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
+			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)), "the ladder must never leave the step that was soaking")
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
+				To(Equal(v1beta1.RolloutPhaseFailed), "a canary pod that dies again inside its soak must park the ladder")
+			g.Expect(c.Status.Canary.Failed).NotTo(BeNil(), "the park must say why the ladder stopped")
+			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(0)))
+			traffic := c.Status.Components[v1beta1.EngineComponent].Traffic
+			g.Expect(traffic).To(HaveLen(1), "the step's split must be back on the stable revision alone: %+v", traffic)
+			g.Expect(query.RevisionFromName(traffic[0].RevisionName).Hash()).To(Equal(stableHash))
+			g.Expect(traffic[0].Percent).To(Equal(int32(100)))
+			g.Expect(eventsRecorded(ns.Name, isvcName, "CanaryPodCrashed", pushedAt)).To(ContainElement(ContainSubstring(canaryPodName)),
+				"the park must name the pod that died")
+			pod := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, ktypes.NamespacedName{Namespace: ns.Name, Name: canaryPodName}, pod)).To(Succeed())
+			g.Expect(pod.DeletionTimestamp).To(BeNil(), "under restart policy None the crashed pod stays")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+
+	ginkgo.It("keeps a four-step timed ladder at step 0 and parks there when the pushed runner exits ten seconds after it serves and the Instance is rebuilt for each death", func() {
+		// Config: the short-lived runner's shape under restart policy
+		// RecreateInstanceOnPodRestart: a death rebuilds the Instance, so the
+		// pod that died is gone and its replacement carries no restart.
+		const isvcName = "canary-lc5"
+		fix := newCoordFixture(ns.Name, WithISVCName(isvcName),
+			WithoutDecoder(),
+			WithEngineReplicas(8),
+			WithEngineStartupDelay(plShortRunnerBoot),
+			WithEngineImage("fake-serving:v1"))
+		recreate := v1beta1.InstanceRestartPolicyRecreateInstance
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{RestartPolicy: &recreate}
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+
+		var stableHash string
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			engCS := c.Status.Components[v1beta1.EngineComponent]
+			g.Expect(engCS.Lifecycle).NotTo(BeNil())
+			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(8)))
+			rev := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent).Status.CurrentRevision
+			g.Expect(rev).NotTo(BeEmpty())
+			stableHash = query.RevisionFromName(rev).Hash()
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				Canary:     &v1beta1.GroupCanary{Steps: shortLivedRunnerLadder()},
+			}}}
+			engine := &cur.Spec.Engine.PodSpec.Containers[0]
+			engine.Image = "fake-serving:v2"
+			engine.Env = append(engine.Env, corev1.EnvVar{Name: "FAIL_AT", Value: plShortRunnerLife})
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// The split serves and soaks: one ready canary pod under a tenth of
+		// the traffic. Its identity is what the rebuild changes.
+		var canaryHash, canaryPodName string
+		var firstUID ktypes.UID
+		pushedAt := time.Now()
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
+			canaryHash = c.Status.Canary.CanaryRevisionHash
+			g.Expect(canaryHash).NotTo(BeEmpty())
+			g.Expect(canaryHash).NotTo(Equal(stableHash))
+			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
+				To(Equal(v1beta1.RolloutPhasePaused))
+			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(10)))
+			for _, pod := range listOMENativePods(g, ns.Name, isvcName) {
+				if pod.DeletionTimestamp == nil && podIsReady(&pod) && pod.Labels[query.LabelRevisionHash] == canaryHash {
+					canaryPodName, firstUID = pod.Name, pod.UID
+				}
+			}
+			g.Expect(canaryPodName).NotTo(BeEmpty(), "the canary pod must be serving in the soak")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Invariant: the first exit is answered by a rebuild, a fresh canary
+		// pod with no restart; the ladder keeps soaking step 0 with its split
+		// programmed while the replacement boots and after it serves.
+		Eventually(func(g Gomega) {
+			rebuilt := false
+			for _, pod := range listOMENativePods(g, ns.Name, isvcName) {
+				if pod.DeletionTimestamp == nil && pod.Labels[query.LabelRevisionHash] == canaryHash && pod.UID != firstUID {
+					rebuilt = true
+				}
+			}
+			g.Expect(rebuilt).To(BeTrue(), "the first death must be answered by a rebuilt canary pod")
+			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
+			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)), "a single death keeps the step")
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
+				To(Equal(v1beta1.RolloutPhasePaused), "a single death is a dip the soak waits out, not a park")
+			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(10)))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Invariant: the replacement serves a soak after the death and exits
+		// ten seconds later, inside the soak measured from the moment it
+		// served: the ladder never stages step 1, it parks at step 0 with a
+		// reason, no traffic names the canary revision, the stable revision
+		// owns it all, and the event names the pod that died.
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
+			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)), "the ladder must never leave the step that was soaking")
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
+				To(Equal(v1beta1.RolloutPhaseFailed), "a canary Instance that dies again inside its soak must park the ladder")
+			g.Expect(c.Status.Canary.Failed).NotTo(BeNil(), "the park must say why the ladder stopped")
+			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(0)))
+			traffic := c.Status.Components[v1beta1.EngineComponent].Traffic
+			g.Expect(traffic).To(HaveLen(1), "the step's split must be back on the stable revision alone: %+v", traffic)
+			g.Expect(query.RevisionFromName(traffic[0].RevisionName).Hash()).To(Equal(stableHash))
+			g.Expect(traffic[0].Percent).To(Equal(int32(100)))
+			g.Expect(eventsRecorded(ns.Name, isvcName, "CanaryPodCrashed", pushedAt)).To(ContainElement(ContainSubstring(canaryPodName)),
+				"the park must name the pod that died")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

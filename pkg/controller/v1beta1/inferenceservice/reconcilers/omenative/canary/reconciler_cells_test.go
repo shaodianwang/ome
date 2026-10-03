@@ -315,6 +315,34 @@ func evReadyTimeout(_ *v1beta1.InferenceService, in *ReconcileInputs) {
 func evClockElapsed(_ *v1beta1.InferenceService, in *ReconcileInputs) {
 	in.Now = in.Now.Add(2 * time.Hour)
 }
+
+// evRestartInSoak: the soak since the split first served has elapsed, but a
+// canary pod died and came back half a soak ago.
+func evRestartInSoak(_ *v1beta1.InferenceService, in *ReconcileInputs) {
+	in.Now = in.Now.Add(2 * time.Hour)
+	in.CanaryRestartedAt = in.Now.Add(-30 * time.Minute)
+}
+
+// evRestartSoaked: a canary pod died and came back inside the step, and has
+// served a full soak since.
+func evRestartSoaked(_ *v1beta1.InferenceService, in *ReconcileInputs) {
+	in.Now = in.Now.Add(2 * time.Hour)
+	in.CanaryRestartedAt = in.Now.Add(-61 * time.Minute)
+}
+
+// evPromoteAfterRestartInSoak: the operator promotes while the restarted
+// canary pod is still inside its soak.
+func evPromoteAfterRestartInSoak(isvc *v1beta1.InferenceService, in *ReconcileInputs) {
+	evRestartInSoak(isvc, in)
+	evPromoteMatch(isvc, in)
+}
+
+// evCanaryRestarted: a canary pod died and came back a minute into the
+// step; the kubelet has it serving again.
+func evCanaryRestarted(_ *v1beta1.InferenceService, in *ReconcileInputs) {
+	in.CanaryRestartedAt = in.Now
+	in.Now = in.Now.Add(time.Minute)
+}
 func evRejectedPodsGone(_ *v1beta1.InferenceService, in *ReconcileInputs) {
 	in.PerRevisionPods = map[string]int32{"old": 4}
 }
@@ -492,6 +520,14 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/Staging/readyTimeout", fixtureStaging, evReadyTimeout, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
 		// pause elapsed
 		{"canary/Serving[T]/pauseElapsed", fixtureServingTimed, evClockElapsed, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, step: 1, active: true}},
+		// a canary pod died and came back: a timed soak measures from the newest restart, so the
+		// step moves only once the restarted pod has served a full soak; a manual hold is unmoved
+		// by it, and a promote is the operator's decision on any gate.
+		{"canary/Serving[T]/pauseElapsed[restartInSoak]", fixtureServingTimed, evRestartInSoak, cellWant{state: serving, phase: v1beta1.RolloutPhasePaused, active: true}},
+		{"canary/Serving[T]/pauseElapsed[restartSoaked]", fixtureServingTimed, evRestartSoaked, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, step: 1, active: true}},
+		{"canary/Serving[T]/promote[restartInSoak]", fixtureServingTimed, evPromoteAfterRestartInSoak, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, step: 1, active: true, consume: []string{constants.RolloutPromoteAnnotation}}},
+		{"canary/Serving/canaryRestarted", fixtureServingManual, evCanaryRestarted, cellWant{state: serving, phase: v1beta1.RolloutPhasePaused, active: true}},
+		{"canary/Staging/canaryRestarted", fixtureStaging, evCanaryRestarted, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		// a held final gate: the drain waits, the phase says so
 		{"canary/Draining[M]/gateHolds", fixtureDrainingHeld, evNothing, cellWant{state: draining, phase: v1beta1.RolloutPhasePaused, step: 1, active: true}},
 		{"canary/Draining[M]/promote", fixtureDrainingHeld, evPromoteMatch, cellWant{state: done, phase: v1beta1.RolloutPhasePromoting, step: 2, active: true, consume: []string{constants.RolloutPromoteAnnotation}}},

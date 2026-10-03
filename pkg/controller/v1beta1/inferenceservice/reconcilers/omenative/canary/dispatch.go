@@ -252,6 +252,7 @@ func Dispatch(ctx context.Context, d DispatchDeps) (Outcome, error) {
 		GroupStableRevisionHashes: groupStable,
 		GroupReadyPerRevisionPods: readyRev,
 		Crash:                     canaryCrash(d.ISVC, d.Group, primary, revisions, secondaryObserved, observedPods, now),
+		CanaryRestartedAt:         canaryRestartedAt(d.ISVC, d.Group, primary, revisions, secondaryObserved, observedPods),
 		SecondaryCapacityReady:    secondaryReady,
 		Secondaries:               secondaries,
 		Now:                       now,
@@ -775,26 +776,47 @@ func observeCanaryRevisions(ctx context.Context, reads client.Reader, isvc *v1be
 	return observedCanaryRevisions{}, nil
 }
 
-// canaryCrash reads the unit for a canary pod in a crash loop after it
-// served, the primary first and then each secondary the run retargeted,
-// against the primary's step anchor. The first one found is the unit's
-// verdict.
-func canaryCrash(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup, primary v1beta1.ComponentType, primaryObserved observedCanaryRevisions, secondaryObserved map[v1beta1.ComponentType]observedCanaryRevisions, pods map[v1beta1.ComponentType][]*corev1.Pod, now time.Time) *CanaryCrash {
-	since := crashAnchor(rollout.CanaryStatusFor(&isvc.Status, primary), now)
-	if memberRetargeted(isvc, primary) {
-		if crash := crashedCanaryPod(primary, primaryObserved, pods[primary], since); crash != nil {
-			return crash
-		}
+// canaryMembers visits the unit's members whose target pods are canary
+// pods, the primary first and then each secondary the run retargeted, until
+// visit returns false. A member the run left alone serves its stable
+// revision on its "target", so its pods are not read.
+func canaryMembers(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup, primary v1beta1.ComponentType, primaryObserved observedCanaryRevisions, secondaryObserved map[v1beta1.ComponentType]observedCanaryRevisions, pods map[v1beta1.ComponentType][]*corev1.Pod, visit func(v1beta1.ComponentType, observedCanaryRevisions, []*corev1.Pod) bool) {
+	if memberRetargeted(isvc, primary) && !visit(primary, primaryObserved, pods[primary]) {
+		return
 	}
 	for _, comp := range configuredComponents(g) {
 		if comp == primary || !memberRetargeted(isvc, comp) {
 			continue
 		}
-		if crash := crashedCanaryPod(comp, secondaryObserved[comp], pods[comp], since); crash != nil {
-			return crash
+		if !visit(comp, secondaryObserved[comp], pods[comp]) {
+			return
 		}
 	}
-	return nil
+}
+
+// canaryCrash reads the unit for a canary pod in a crash loop after it
+// served, against the primary's step anchor. The first one found is the
+// unit's verdict.
+func canaryCrash(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup, primary v1beta1.ComponentType, primaryObserved observedCanaryRevisions, secondaryObserved map[v1beta1.ComponentType]observedCanaryRevisions, pods map[v1beta1.ComponentType][]*corev1.Pod, now time.Time) *CanaryCrash {
+	since := crashAnchor(rollout.CanaryStatusFor(&isvc.Status, primary), now)
+	var crash *CanaryCrash
+	canaryMembers(isvc, g, primary, primaryObserved, secondaryObserved, pods, func(comp v1beta1.ComponentType, observed observedCanaryRevisions, pods []*corev1.Pod) bool {
+		crash = crashedCanaryPod(comp, observed, pods, since)
+		return crash == nil
+	})
+	return crash
+}
+
+// canaryRestartedAt reads the unit for the newest moment any canary pod
+// died or came back, across every member whose pods are canary pods; zero
+// when none has. The step machine measures a timed soak from it.
+func canaryRestartedAt(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup, primary v1beta1.ComponentType, primaryObserved observedCanaryRevisions, secondaryObserved map[v1beta1.ComponentType]observedCanaryRevisions, pods map[v1beta1.ComponentType][]*corev1.Pod) time.Time {
+	var latest time.Time
+	canaryMembers(isvc, g, primary, primaryObserved, secondaryObserved, pods, func(_ v1beta1.ComponentType, observed observedCanaryRevisions, pods []*corev1.Pod) bool {
+		latest = laterOf(latest, latestCanaryRestart(observed, pods))
+		return true
+	})
+	return latest
 }
 
 // primaryComponentOf is the externally-routed Component the canary group drives

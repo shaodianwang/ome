@@ -71,6 +71,17 @@ func rebuiltRow(index int32, failedAt, readyAt time.Time, incarnation int64) v1b
 	return row
 }
 
+// escalatedRow is the row of an Instance the workload escalated to Failed
+// for its pod's crash loop at failedAt, the pod kept in place: the row still
+// carries its entry into Ready and records the escalation as its last
+// failure.
+func escalatedRow(index int32, readyAt, failedAt time.Time) v1beta1.OMENativeInstanceStatus {
+	row := instanceRow(index, v1beta1.OMENativeInstanceFailed, "svc-decoder-new", &readyAt, 1)
+	row.LastFailure = &v1beta1.InstanceTermination{PodName: "svc-decoder-5-default-0", ContainerName: constants.MainContainerName,
+		Reason: constants.StateReasonCrashLoopBackOff, Time: metav1.NewTime(failedAt)}
+	return row
+}
+
 func TestCrashedCanaryPod_OneRestartIsNotACrashLoop(t *testing.T) {
 	ready := time.Unix(100000, 0)
 	since := ready.Add(time.Minute) // the step anchor
@@ -102,6 +113,12 @@ func TestCrashedCanaryPod_OneRestartIsNotACrashLoop(t *testing.T) {
 			[]*corev1.Pod{crashPod("new", 5, 2, runnerDied(death.Add(50*time.Second)))}, ""},
 		{"a rebuild for a death before the step does not count in this step",
 			observed(rebuiltRow(5, since.Add(-time.Hour), since.Add(-30*time.Minute), 2)), []*corev1.Pod{crashPod("new", 5, 2, runnerDied(death))}, ""},
+		{"a row the workload escalated to Failed for the loop still parks on the pod's second death",
+			observed(escalatedRow(5, ready, death.Add(45*time.Second))), []*corev1.Pod{readyAgain(crashPod("new", 5, 1, runnerDiedTwice(death, death.Add(40*time.Second))))}, "container ome-container Error (exit 1)"},
+		{"a row the workload escalated to Failed while the kubelet backs off parks",
+			observed(escalatedRow(5, ready, death.Add(12*time.Second))), []*corev1.Pod{notReady(crashPod("new", 5, 1, runnerInCrashLoopBackOff(death.Add(2*time.Second), death.Add(10*time.Second))))}, "container ome-container CrashLoopBackOff (exit 1)"},
+		{"a row the workload escalated to Failed does not make one restart a loop",
+			observed(escalatedRow(5, ready, death.Add(5*time.Second))), []*corev1.Pod{readyAgain(crashPod("new", 5, 1, runnerDied(death)))}, ""},
 		{"the death that opened a rebuild is not counted twice on the pod being drained",
 			observed(func() v1beta1.OMENativeInstanceStatus {
 				r := rebuiltRow(5, death, ready, 2)
