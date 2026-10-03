@@ -44,6 +44,12 @@ images_dir="${OME_KIND_IMAGES_DIR:-/images}"
 run_stamp="${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_ID:-$$}"
 results_root="hack/omenative-testing/perm/results/${run_stamp}"
 diagnostics_dir="${results_root}/diagnostics"
+# The lane's record in the job's result archive: the archive's name is the
+# job, this names what the job ran, and the round's verdict file
+# (.buildkite/eval_verdicts.py) attributes every case result to it.
+mkdir -p "$results_root"
+printf 'feature\ttopology\tscheduler\tforce_delete\n%s\t%s\t%s\t%s\n' \
+  "$feature" "$topology" "$scheduler" "$force_delete" >"${results_root}/lane.tsv"
 tmp_dir=$(mktemp -d)
 kubeconfig="${tmp_dir}/kubeconfig"
 # Exit-code contract for the pipeline's infra-retry preset, which reruns exit

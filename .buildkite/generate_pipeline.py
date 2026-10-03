@@ -51,6 +51,14 @@ Environment variables read at runtime:
                                 main runs targeted and every other branch nothing
     GKE_EVAL_MAX_CONCURRENCY  – eval lanes running at once across the organization,
                                 the cap of their one concurrency group (default: 120)
+    OME_EVAL_RESULTS_TOKEN    – read-only Buildkite API token (read_builds,
+                                read_artifacts) targeted mode reads the newest
+                                recorded full round with; unset, targeted runs
+                                smoke plus the trailer's selection
+    OME_EVAL_RESULTS_PIPELINE – the pipeline the full rounds run in, when it is
+                                not this one (default: BUILDKITE_PIPELINE_SLUG)
+    OME_EVAL_SAMPLE_PERCENT   – the share of the round's passing lanes a targeted
+                                build reruns, 0 to 100 (default: 5)
 """
 
 from __future__ import annotations
@@ -60,13 +68,20 @@ import base64
 import datetime
 import functools
 import hashlib
+import importlib.util
 import itertools
 import json
+import math
 import os
+import random
 import re
 import subprocess
 import sys
 import textwrap
+import urllib.error
+import urllib.parse
+import urllib.request
+from fractions import Fraction
 from pathlib import Path
 from typing import NamedTuple
 
@@ -129,6 +144,42 @@ UPLOAD_BATCH_DIR = ".buildkite/artifacts/pipeline-batches"
 # The image the pipeline entrypoint generates in; the upload step runs the
 # same generator, so it runs in the same image.
 PIPELINE_UPLOAD_IMAGE = f"{ECR_REGISTRY}/pt_dockerio/astral/uv:python3.12-bookworm"
+
+
+def _load_sibling(name: str):
+    """A script beside this one as a module, so the format it defines is
+    read from its one definition."""
+    path = Path(__file__).resolve().with_name(name + ".py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# The round's verdict file: eval_verdicts.py defines its columns, its name,
+# the lane record the runner writes and the meta-data that marks a recorded
+# round; the full round's recording step and the targeted lookup use these.
+eval_verdicts = _load_sibling("eval_verdicts")
+# The step of a full round that records its verdicts, the last top-level
+# step before the release marker.
+EVAL_VERDICTS_STEP_KEY = "eval-verdicts"
+# Targeted mode reads the newest recorded full round through the Buildkite
+# REST API with a read-only token (read_builds, read_artifacts) from
+# OME_EVAL_RESULTS_TOKEN; without one it runs smoke plus the trailer's
+# selection. The rounds are read from this pipeline unless
+# OME_EVAL_RESULTS_PIPELINE names the one they run in; the organization is
+# the build's own.
+EVAL_RESULTS_TOKEN_VAR = "OME_EVAL_RESULTS_TOKEN"
+EVAL_RESULTS_PIPELINE_VAR = "OME_EVAL_RESULTS_PIPELINE"
+EVAL_ROUND_API = "https://api.buildkite.com/v2"
+EVAL_ROUND_FETCH_TIMEOUT_SECONDS = 30
+# Recorded rounds are few among main builds and the query asks for marked
+# ones only, so the newest few are enough; each build comes with its jobs.
+EVAL_ROUND_PAGE = 10
+# The share of the round's passing lanes a targeted build reruns, rounded
+# up, drawn with the commit as seed; unset or empty means the default.
+EVAL_SAMPLE_PERCENT_VAR = "OME_EVAL_SAMPLE_PERCENT"
+EVAL_SAMPLE_PERCENT_DEFAULT = 5
 REPO_ROOT = Path(__file__).resolve().parents[1]
 KIND_SUITE_DIR = REPO_ROOT / "tests/integration/singlecluster/controller/omenative_coordination_kind"
 MC_KIND_SUITE_DIR = REPO_ROOT / "tests/integration/multicluster/scaleout_kind"
@@ -1721,6 +1772,185 @@ def _eval_lane_shards(
     return shards, pod_budget, workers, skipped
 
 
+class EvalRound(NamedTuple):
+    """The recorded full round a targeted build reads: its build number and
+    verdicts, or the reason there is none in the few words the label shows."""
+
+    build: str
+    rows: tuple
+    reason: str
+
+
+class _StopAtRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is returned to the caller instead of followed, so the
+    token sent to the API never travels to the storage it redirects to."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _http_get(url: str, headers: dict[str, str]) -> tuple[int, dict[str, str], bytes]:
+    """One GET with redirects not followed: (status, response headers,
+    body). The generator's only network access; the round lookup calls it
+    through EVAL_ROUND_FETCH, which tests replace with a fake."""
+    request = urllib.request.Request(url, headers=headers)
+    opener = urllib.request.build_opener(_StopAtRedirect)
+    try:
+        with opener.open(request, timeout=EVAL_ROUND_FETCH_TIMEOUT_SECONDS) as response:
+            return response.status, dict(response.headers.items()), response.read()
+    except urllib.error.HTTPError as error:
+        body = error.read() if error.fp is not None else b""
+        return error.code, dict(error.headers.items()), body
+
+
+EVAL_ROUND_FETCH = _http_get
+
+
+def _header(headers: dict[str, str], name: str) -> str:
+    return next((value for key, value in headers.items() if key.lower() == name.lower()), "")
+
+
+def _eval_api_json(fetch, url: str, headers: dict[str, str]):
+    status, _, body = fetch(url, headers)
+    if status != 200:
+        raise RuntimeError(f"HTTP {status} from {url.split('?')[0]}")
+    return json.loads(body.decode("utf-8"))
+
+
+def _eval_download(fetch, url: str, headers: dict[str, str]) -> bytes:
+    """The artifact behind an API download URL: the API answers with a
+    redirect to its storage, which is fetched without the token."""
+    for _ in range(4):
+        status, response_headers, body = fetch(url, headers)
+        if status in (301, 302, 303, 307, 308):
+            url, headers = _header(response_headers, "Location"), {}
+            if not url:
+                raise RuntimeError("the artifact download redirected without a location")
+            continue
+        if status == 200:
+            return body
+        raise RuntimeError(f"HTTP {status} from the artifact download")
+    raise RuntimeError("too many redirects on the artifact download")
+
+
+def _eval_round_lookup(fetch) -> EvalRound:
+    """The newest finished main build of the pipeline (passed or failed,
+    never canceled or running) whose meta-data marks it as a recorded round
+    and whose recording step attached the verdict file."""
+    token = os.environ.get(EVAL_RESULTS_TOKEN_VAR, "").strip()
+    if not token:
+        return EvalRound("", (), "no results token")
+    organization = os.environ.get("BUILDKITE_ORGANIZATION_SLUG", "").strip()
+    pipeline = (
+        os.environ.get(EVAL_RESULTS_PIPELINE_VAR, "").strip()
+        or os.environ.get("BUILDKITE_PIPELINE_SLUG", "").strip()
+    )
+    if not organization or not pipeline:
+        raise RuntimeError("BUILDKITE_ORGANIZATION_SLUG and BUILDKITE_PIPELINE_SLUG name the pipeline to read")
+    headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
+    quote = urllib.parse.quote
+    builds_url = f"{EVAL_ROUND_API}/organizations/{quote(organization)}/pipelines/{quote(pipeline)}/builds"
+    query = urllib.parse.urlencode([
+        ("branch", "main"),
+        ("state[]", "passed"),
+        ("state[]", "failed"),
+        (f"meta_data[{eval_verdicts.ROUND_META_KEY}]", eval_verdicts.ROUND_META_VALUE),
+        ("per_page", str(EVAL_ROUND_PAGE)),
+    ])
+    builds = _eval_api_json(fetch, builds_url + "?" + query, headers)
+    recorded = [
+        build for build in builds
+        if build.get("branch") == "main"
+        and build.get("state") in ("passed", "failed")
+        and (build.get("meta_data") or {}).get(eval_verdicts.ROUND_META_KEY) == eval_verdicts.ROUND_META_VALUE
+    ]
+    recorded.sort(key=lambda build: int(build["number"]), reverse=True)
+    for build in recorded:
+        number = str(build["number"])
+        for job in build.get("jobs") or []:
+            if job.get("step_key") != EVAL_VERDICTS_STEP_KEY:
+                continue
+            artifacts_url = f"{builds_url}/{number}/jobs/{quote(str(job['id']))}/artifacts"
+            for artifact in _eval_api_json(fetch, artifacts_url, headers):
+                if artifact.get("filename") == eval_verdicts.VERDICTS_FILE and artifact.get("download_url"):
+                    text = _eval_download(fetch, artifact["download_url"], headers).decode("utf-8")
+                    return EvalRound(number, tuple(eval_verdicts.read_verdicts(text)), "")
+    return EvalRound("", (), "no recorded round")
+
+
+@functools.lru_cache(maxsize=None)
+def _eval_round() -> EvalRound:
+    """The round targeted mode reads, looked up once per generation. A
+    lookup that fails for any reason leaves targeted on smoke plus the
+    trailer's selection and says why on stderr; it never fails generation."""
+    try:
+        found = _eval_round_lookup(EVAL_ROUND_FETCH)
+    except Exception as error:
+        sys.stderr.write(f"eval targeted: round lookup failed: {type(error).__name__}: {error}\n")
+        return EvalRound("", (), "round lookup failed")
+    if found.reason:
+        sys.stderr.write(f"eval targeted: {found.reason}; running smoke plus the trailer's selection\n")
+    else:
+        sys.stderr.write(f"eval targeted: reading round {found.build} ({len(found.rows)} verdicts)\n")
+    return found
+
+
+def _eval_sample_percent() -> Fraction:
+    """OME_EVAL_SAMPLE_PERCENT as an exact number from 0 to 100; unset or
+    empty means the default, anything else is refused."""
+    raw = os.environ.get(EVAL_SAMPLE_PERCENT_VAR, "")
+    if not raw.strip():
+        return Fraction(EVAL_SAMPLE_PERCENT_DEFAULT)
+    try:
+        percent = Fraction(raw.strip())
+    except (ValueError, ZeroDivisionError):
+        percent = None
+    if percent is None or percent < 0 or percent > 100:
+        raise RuntimeError(f"{EVAL_SAMPLE_PERCENT_VAR} must be a percentage from 0 to 100, not {raw!r}")
+    return percent
+
+
+def _eval_round_selection(
+    groups: list[tuple[str, str, list[str]]], found: EvalRound, percent: Fraction
+) -> dict[tuple[str, str, str], set[str]]:
+    """{(feature, topology, scheduler): cases} a targeted build runs from a
+    recorded round: every lane that failed, under the scheduler it ran in
+    (the default one when that twin is off); every corpus case the round
+    has no row for; every case the trailer names; and `percent` of the
+    passing lanes, rounded up, drawn with the commit as seed so a build is
+    reproducible. A lane the harness skipped or parked
+    (eval_verdicts.is_set_aside) is neither a failure nor a passing lane,
+    and a row naming a case absent from the corpus is ignored."""
+    homes = {case: (feature, topology) for feature, topology, cases in groups for case in cases}
+    chosen: dict[tuple[str, str, str], set[str]] = {}
+    seen: set[str] = set()
+    passing: set[tuple[str, str]] = set()
+    for row in found.rows:
+        if row.case not in homes:
+            continue
+        seen.add(row.case)
+        if eval_verdicts.is_set_aside(row.verdict):
+            continue
+        scheduler = row.scheduler if row.scheduler in EVAL_SCHEDULERS else ""
+        if row.verdict == eval_verdicts.PASS:
+            passing.add((row.case, scheduler))
+        else:
+            chosen.setdefault(homes[row.case] + (scheduler,), set()).add(row.case)
+    for case, home in homes.items():
+        if case not in seen:
+            chosen.setdefault(home + ("",), set()).add(case)
+    if EVAL_SELECTION is not None:
+        for home, cases in _eval_named_cases(groups).items():
+            chosen.setdefault(home + ("",), set()).update(cases)
+    candidates = sorted(
+        pair for pair in passing if pair[0] not in chosen.get(homes[pair[0]] + (pair[1],), ())
+    )
+    count = math.ceil(len(candidates) * percent / 100)
+    for case, scheduler in random.Random(COMMIT).sample(candidates, count):
+        chosen.setdefault(homes[case] + (scheduler,), set()).add(case)
+    return chosen
+
+
 def _eval_named_families(groups: list[tuple[str, str, list[str]]]) -> set[str]:
     """The corpus folders the trailer's families= names; an unknown or
     empty list is refused."""
@@ -1762,8 +1992,10 @@ def _eval_selection() -> list[tuple[str, str, list[str], str]]:
 
     full      every lane on every scheduler
     smoke     each lane's first shard of today's packing, default scheduler
-    targeted  smoke plus every case of the trailer's selection, default
-              scheduler, until a recorded full round can choose for it
+    targeted  from the newest recorded full round: every lane that failed
+              under its scheduler, every case the round never saw and a
+              sample of the passing lanes, plus the trailer's selection;
+              smoke plus the trailer's selection while no round can be read
     families  every lane of the named folders on every scheduler
     cases     exactly the named cases in their lanes, default scheduler
     """
@@ -1781,6 +2013,17 @@ def _eval_selection() -> list[tuple[str, str, list[str], str]]:
             for feature, topology, cases in groups
             if feature in features
         ]
+    if mode == "targeted":
+        percent = _eval_sample_percent()
+        found = _eval_round()
+        if not found.reason:
+            by_lane = _eval_round_selection(groups, found, percent)
+            return [
+                (feature, topology, [c for c in cases if c in by_lane[(feature, topology, scheduler)]], scheduler)
+                for scheduler in EVAL_SCHEDULERS
+                for feature, topology, cases in groups
+                if by_lane.get((feature, topology, scheduler))
+            ]
     chosen: dict[tuple[str, str], set[str]] = {}
     if mode in ("smoke", "targeted"):
         packing = _eval_packing()
@@ -1951,7 +2194,12 @@ def _eval_mode_label() -> str:
     if mode == "full":
         return ""
     if mode == "targeted":
-        label = " (targeted: smoke until a full round is recorded)"
+        found = _eval_round()
+        if found.reason:
+            label = " (targeted: smoke, " + found.reason + ")"
+        else:
+            runs = sum(len(cases) for _, _, cases, _ in _eval_selection())
+            label = f" (targeted from round {found.build}: {runs} cases)"
         if EVAL_SELECTION is not None:
             label += " (plus " + EVAL_SELECTION[0] + ": " + ", ".join(EVAL_SELECTION[1]) + ")"
         return label
@@ -2632,6 +2880,40 @@ def _upload_batches_step(uploads: int, jobs: int) -> str:
     )
 
 
+def _eval_verdicts_step(depends_on: list[str]) -> str:
+    """Record the full round once every eval group has finished, passed or
+    not: one verdict per (case, scheduler) lane from the lanes' result
+    archives, attached as the artifact targeted builds read, and the
+    meta-data that marks the build as a recorded round. Soft: a round that
+    cannot be recorded leaves the marker alone, and targeted builds keep
+    reading the newest round that was."""
+    if not depends_on:
+        raise RuntimeError("the verdict record needs the eval groups it reads")
+    deps = "\n".join(f'              - "{key}"' for key in depends_on)
+    return textwrap.dedent(
+        f"""\
+          - label: ":memo: Record the round's verdicts"
+            key: "{EVAL_VERDICTS_STEP_KEY}"
+{_gh_status(EVAL_VERDICTS_STEP_KEY)}
+            depends_on:
+{deps}
+            allow_dependency_failure: true
+            soft_fail: true
+            env:
+              OME_EVAL_RESULTS_DIR: "{eval_verdicts.RESULTS_DIR}"
+              OME_EVAL_VERDICTS_FILE: "{eval_verdicts.VERDICTS_FILE}"
+              OME_EVAL_ROUND_META_KEY: "{eval_verdicts.ROUND_META_KEY}"
+              OME_EVAL_ROUND_META_VALUE: "{eval_verdicts.ROUND_META_VALUE}"
+            command: |
+              sh .buildkite/record_eval_verdicts.sh
+            agents:
+              queue: "{BUILD_QUEUE}"
+            plugins:
+{_tw_docker_plugin(PIPELINE_UPLOAD_IMAGE, indent=14)}
+        """
+    )
+
+
 def _release_marker_step(depends_on: list[str]) -> str:
     """Publish the Kargo-facing marker once every gate it names has passed.
 
@@ -2712,10 +2994,10 @@ def generate_pipeline_batches() -> list[str]:
 
     The first document is the entrypoint's upload: every step that is not an
     eval lane and, when there are eval lanes, the step that uploads the rest.
-    Each eval group is a document of its own, and the release marker is the
-    last document, so every key it depends on exists in the build before it
-    is uploaded. A dependency may only name a key from the same or an earlier
-    document.
+    Each eval group is a document of its own, and the last document carries
+    a full round's verdict record and then the release marker, so every key
+    the marker depends on exists in the build before it is uploaded. A
+    dependency may only name a key from the same or an earlier document.
     """
     first = ci_steps()
     first += "\n" + cd_steps()
@@ -2725,17 +3007,20 @@ def generate_pipeline_batches() -> list[str]:
         first += "\n" + _gke_upgrade_identity_step()
     groups = _gke_eval_groups() if _eval_on() else []
     later = ["steps:\n" + _yaml_block([group], 2) for group in groups]
+    tail = ""
+    if groups and _eval_mode() == "full":
+        tail = textwrap.indent(_eval_verdicts_step([group["key"] for group in groups]), "  ")
     if later:
         # The upload step's label counts what follows it: the groups and the
-        # marker's own document.
-        jobs = sum(_job_count(document) for document in later) + 1
+        # last document, the verdict record if any and the marker.
+        jobs = sum(_job_count(document) for document in later) + _job_count(tail) + 1
         first += "\n" + textwrap.indent(_upload_batches_step(len(later) + 1, jobs), "  ")
-    gates = _top_level_keys(first) + [group["key"] for group in groups]
-    marker = textwrap.indent(_release_marker_step(gates), "  ")
+    gates = _top_level_keys(first) + [group["key"] for group in groups] + _top_level_keys(tail)
+    tail += textwrap.indent(_release_marker_step(gates), "  ")
     if later:
-        later.append("steps:\n" + marker)
+        later.append("steps:\n" + tail)
     else:
-        first += "\n" + marker
+        first += "\n" + tail
     batches = [first, *later]
     for index, document in enumerate(batches, start=1):
         count = _job_count(document)

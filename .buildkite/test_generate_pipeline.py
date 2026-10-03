@@ -17,6 +17,8 @@ from __future__ import annotations
 import base64
 import contextlib
 import datetime
+import ast
+import contextlib
 import importlib.util
 import io
 import itertools
@@ -26,8 +28,10 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest import mock
 
@@ -44,6 +48,13 @@ _cluster_name_spec = importlib.util.spec_from_file_location(
 )
 ecn = importlib.util.module_from_spec(_cluster_name_spec)
 _cluster_name_spec.loader.exec_module(ecn)
+
+# The round's verdict file: the recording script and the generator's targeted
+# lookup are tested against the same fixture through this module.
+_VERDICTS_PATH = Path(__file__).resolve().parent / "eval_verdicts.py"
+_verdicts_spec = importlib.util.spec_from_file_location("eval_verdicts_under_test", _VERDICTS_PATH)
+ev = importlib.util.module_from_spec(_verdicts_spec)
+_verdicts_spec.loader.exec_module(ev)
 
 # Minimal file bodies: discovery counts a file only if it declares a
 # ginkgo suite entry, so helpers sharing the suffix stay unowned.
@@ -1500,6 +1511,462 @@ class TestPipelineDependenciesResolve(PipelineTestCase):
                     )
 
 
+class TestEvalTargeted(PipelineTestCase):
+    """Targeted mode chooses from the newest recorded full round: the lanes
+    that were not PASS under their scheduler, the cases the round never saw,
+    the trailer's selection and a seeded sample of the passing lanes; with
+    no round to read it runs smoke plus the trailer and says why."""
+
+    ENV = {
+        "GKE_EVAL_CASE_CONCURRENCY": "4",
+        "GKE_EVAL_TARGET_WAVES": "4",
+        "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+        "OME_EVAL_RESULTS_TOKEN": "fake-token",
+        "BUILDKITE_ORGANIZATION_SLUG": "org-a",
+        "BUILDKITE_PIPELINE_SLUG": "pipeline-a",
+    }
+    ROUND = "4321"
+    RETIRED = "p9999999"
+    STORAGE = "https://storage.example.com/rounds/eval-verdicts.tsv?signature=1"
+    DOWNLOAD = "https://api.buildkite.com/v2/organizations/org-a/pipelines/pipeline-a/builds/4321/jobs/j-1/artifacts/a-1/download"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.gang = gp.EVAL_GANG_SCHEDULER
+        cls.groups = gp._eval_case_groups()
+        cases = [(feature, topology, case) for feature, topology, group in cls.groups for case in group]
+        assert cls.RETIRED not in {case for _, _, case in cases}
+        # The round ran everything but the last two cases under both
+        # schedulers: four lanes failed, one was skipped, one is parked, one
+        # case was skipped under both schedulers, and one row names a case
+        # absent from the corpus.
+        cls.new_cases = [case for _, _, case in cases[-2:]]
+        cls.failed = {
+            (cases[0][2], ""): "FAIL",
+            (cases[1][2], cls.gang): "INFRA-FAIL",
+            (cases[2][2], ""): "TRIGGER_FAIL",
+            (cases[3][2], cls.gang): "INIT_TIMEOUT",
+        }
+        cls.skipped_everywhere = cases[6][2]
+        cls.aside = {
+            (cases[4][2], ""): ev.SKIP,
+            (cases[5][2], cls.gang): ev.XFAIL + " (known bug: parked)",
+            (cls.skipped_everywhere, ""): ev.SKIP,
+            (cls.skipped_everywhere, cls.gang): ev.SKIP,
+        }
+        rows = [
+            ev.Verdict(
+                cls.ROUND, "c" * 40, feature, topology, scheduler, case,
+                cls.failed.get((case, scheduler)) or cls.aside.get((case, scheduler)) or ev.PASS,
+            )
+            for feature, topology, case in cases[:-2]
+            for scheduler in ("", cls.gang)
+        ]
+        rows.append(ev.Verdict(cls.ROUND, "c" * 40, "rollout", "eng", "", cls.RETIRED, "FAIL"))
+        cls.passing = {(row.case, row.scheduler) for row in rows if row.verdict == ev.PASS}
+        cls.verdicts_text = ev.write_verdicts(rows)
+        # What targeted falls back to, packed once.
+        with mock.patch.dict(os.environ, cls.ENV), mock.patch.object(gp, "BRANCH", "main"), mock.patch.object(
+            gp, "EVAL_SELECTION", None
+        ), mock.patch.object(gp, "EVAL_MODE", "smoke"):
+            cls.smoke = gp._eval_selection()
+
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, self.ENV)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for attr, value in (
+            ("BRANCH", "main"),
+            ("EVAL_MODE", "targeted"),
+            ("EVAL_SELECTION", None),
+            ("EVAL_SCHEDULERS", ["", self.gang]),
+            ("COMMIT", "a" * 40),
+        ):
+            self.patch_attr(attr, value)
+        gp._eval_round.cache_clear()
+        self.addCleanup(gp._eval_round.cache_clear)
+        self.calls: list[tuple[str, dict]] = []
+        self.err = io.StringIO()
+        self.patch_attr("EVAL_ROUND_FETCH", self.fake_fetch())
+
+    def build(self, number, state="passed", marked=True, job="j-1", branch="main"):
+        jobs = [{"id": job, "step_key": gp.EVAL_VERDICTS_STEP_KEY, "state": "passed"}] if job else []
+        jobs.append({"id": "j-lint", "step_key": "lint", "state": "passed"})
+        meta = {ev.ROUND_META_KEY: ev.ROUND_META_VALUE} if marked else {}
+        return {"number": number, "state": state, "branch": branch, "meta_data": meta, "jobs": jobs}
+
+    def builds(self):
+        """What the API answers: the round is 4321, among builds the lookup
+        must pass over (running, canceled, unmarked, marked without the
+        recording step) and an older recorded one."""
+        return [
+            self.build(4340, state="running"),
+            self.build(4330, state="canceled"),
+            self.build(4325, marked=False),
+            self.build(4323, state="failed", job=None),
+            self.build(4321, state="failed"),
+            self.build(4300, job="j-0"),
+        ]
+
+    def fake_fetch(self, builds=None, artifacts=None, text=None):
+        builds = self.builds() if builds is None else builds
+        artifacts = [{"filename": ev.VERDICTS_FILE, "state": "finished", "download_url": self.DOWNLOAD}] if artifacts is None else artifacts
+        text = self.verdicts_text if text is None else text
+
+        def fetch(url, headers):
+            self.calls.append((url, dict(headers)))
+            path, _, _ = url.partition("?")
+            if path.endswith("/builds"):
+                return 200, {}, json.dumps(builds).encode()
+            if path.endswith("/builds/4321/jobs/j-1/artifacts"):
+                return 200, {}, json.dumps(artifacts).encode()
+            if path.endswith("/builds/4300/jobs/j-0/artifacts"):
+                return 200, {}, json.dumps([{"filename": ev.VERDICTS_FILE, "download_url": self.DOWNLOAD}]).encode()
+            if url == self.DOWNLOAD:
+                return 302, {"Location": self.STORAGE}, b""
+            if url == self.STORAGE:
+                return 200, {}, text.encode()
+            return 404, {}, b"not found"
+
+        return fetch
+
+    def selection(self):
+        with contextlib.redirect_stderr(self.err):
+            return gp._eval_selection()
+
+    def label(self):
+        with contextlib.redirect_stderr(self.err):
+            return gp._eval_mode_label()
+
+    @staticmethod
+    def pairs(selection):
+        return {(case, scheduler) for _, _, cases, scheduler in selection for case in cases}
+
+    def smoke_selection(self):
+        return self.smoke
+
+    def test_failed_lanes_rerun_under_their_scheduler_and_unseen_cases_under_the_default(self):
+        with mock.patch.dict(os.environ, {"OME_EVAL_SAMPLE_PERCENT": "0"}):
+            selection = self.selection()
+        expected = set(self.failed) | {(case, "") for case in self.new_cases}
+        self.assertEqual(self.pairs(selection), expected)
+        # Emission order is scheduler-major, then the corpus order of lanes.
+        self.assertEqual([scheduler for _, _, _, scheduler in selection], sorted((s for _, _, _, s in selection), key=["", self.gang].index))
+        homes = {case: (feature, topology) for feature, topology, cases in self.groups for case in cases}
+        for feature, topology, cases, _ in selection:
+            self.assertEqual({homes[case] for case in cases}, {(feature, topology)})
+        self.assertIn(f"reading round {self.ROUND}", self.err.getvalue())
+
+    def test_skipped_and_parked_lanes_are_neither_rerun_nor_sampled(self):
+        fixed = set(self.failed) | {(case, "") for case in self.new_cases}
+        with mock.patch.dict(os.environ, {"OME_EVAL_SAMPLE_PERCENT": "0"}):
+            without_sample = self.pairs(self.selection())
+        gp._eval_round.cache_clear()
+        with mock.patch.dict(os.environ, {"OME_EVAL_SAMPLE_PERCENT": "100"}):
+            with_every_pass = self.pairs(self.selection())
+        self.assertEqual(without_sample, fixed)
+        self.assertEqual(with_every_pass, fixed | self.passing)
+        self.assertEqual(set(self.aside) & with_every_pass, set())
+        # A case the round only skipped is not new either.
+        self.assertNotIn(self.skipped_everywhere, {case for case, _ in with_every_pass})
+        for word in (ev.SKIP, ev.XFAIL, ev.XFAIL + " (known bug: parked)", " SKIP "):
+            self.assertTrue(ev.is_set_aside(word), word)
+        for word in (ev.PASS, "FAIL", "INFRA-FAIL", "TRIGGER_FAIL", "INIT_TIMEOUT", "", "skip"):
+            self.assertFalse(ev.is_set_aside(word), word)
+
+    def test_a_scheduler_the_build_does_not_run_folds_onto_the_default(self):
+        self.patch_attr("EVAL_SCHEDULERS", [""])
+        with mock.patch.dict(os.environ, {"OME_EVAL_SAMPLE_PERCENT": "0"}):
+            pairs = self.pairs(self.selection())
+        self.assertEqual(pairs, {(case, "") for case, _ in self.failed} | {(case, "") for case in self.new_cases})
+
+    def test_the_trailer_adds_its_cases_under_the_default_scheduler(self):
+        passing_case = next(case for case, scheduler in sorted(self.passing) if scheduler == "" and (case, self.gang) in self.passing)
+        self.patch_attr("EVAL_SELECTION", ("cases", [passing_case]))
+        with mock.patch.dict(os.environ, {"OME_EVAL_SAMPLE_PERCENT": "0"}):
+            pairs = self.pairs(self.selection())
+            label = self.label()
+        self.assertIn((passing_case, ""), pairs)
+        self.assertNotIn((passing_case, self.gang), pairs)
+        self.assertEqual(len(pairs), len(self.failed) + len(self.new_cases) + 1)
+        self.assertTrue(label.endswith(f" (plus cases: {passing_case})"), label)
+        family = self.groups[0][0]
+        self.patch_attr("EVAL_SELECTION", ("families", [family]))
+        with mock.patch.dict(os.environ, {"OME_EVAL_SAMPLE_PERCENT": "0"}):
+            pairs = self.pairs(self.selection())
+        for feature, _, cases in self.groups:
+            if feature == family:
+                self.assertTrue({(case, "") for case in cases} <= pairs)
+
+    def test_the_sample_is_sized_by_the_percent_rounded_up_and_seeded_by_the_commit(self):
+        fixed = set(self.failed) | {(case, "") for case in self.new_cases}
+        candidates = len(self.passing)
+        for raw, share in (("", "5"), ("2.5", "2.5"), ("0", "0"), (" 10 ", "10")):
+            with self.subTest(percent=raw):
+                gp._eval_round.cache_clear()
+                with mock.patch.dict(os.environ, {"OME_EVAL_SAMPLE_PERCENT": raw}):
+                    pairs = self.pairs(self.selection())
+                sampled = pairs - fixed
+                self.assertTrue(fixed <= pairs)
+                self.assertTrue(sampled <= self.passing)
+                self.assertEqual(len(sampled), -(-candidates * int(float(share) * 10) // 1000))
+        gp._eval_round.cache_clear()
+        again = self.pairs(self.selection())
+        gp._eval_round.cache_clear()
+        with mock.patch.object(gp, "COMMIT", "b" * 40):
+            other = self.pairs(self.selection())
+        self.assertEqual(again, self.pairs(self.selection()))
+        self.assertNotEqual(again, other)
+        self.assertEqual(len(again), len(other))
+
+    def test_a_bad_sample_percent_is_refused(self):
+        for raw in ("abc", "-1", "101", "1/0", "nan"):
+            with self.subTest(percent=raw), mock.patch.dict(os.environ, {"OME_EVAL_SAMPLE_PERCENT": raw}):
+                with self.assertRaisesRegex(RuntimeError, "OME_EVAL_SAMPLE_PERCENT"):
+                    self.selection()
+
+    def test_the_label_names_the_round_and_the_count(self):
+        selection = self.selection()
+        runs = sum(len(cases) for _, _, cases, _ in selection)
+        self.assertGreater(runs, len(self.failed) + len(self.new_cases))
+        self.assertEqual(self.label(), f" (targeted from round {self.ROUND}: {runs} cases)")
+
+    def test_the_lookup_reads_finished_main_builds_and_sends_the_token_to_the_api_only(self):
+        self.selection()
+        urls = [url for url, _ in self.calls]
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(urls[0]).query)
+        self.assertEqual(query["branch"], ["main"])
+        self.assertEqual(sorted(query["state[]"]), ["failed", "passed"])
+        self.assertEqual(query[f"meta_data[{ev.ROUND_META_KEY}]"], [ev.ROUND_META_VALUE])
+        self.assertEqual(query["per_page"], [str(gp.EVAL_ROUND_PAGE)])
+        prefix = f"{gp.EVAL_ROUND_API}/organizations/org-a/pipelines/pipeline-a/builds"
+        self.assertEqual(urls[1:], [f"{prefix}/4321/jobs/j-1/artifacts", self.DOWNLOAD, self.STORAGE])
+        for url, headers in self.calls:
+            if url.startswith(gp.EVAL_ROUND_API):
+                self.assertEqual(headers.get("Authorization"), "Bearer fake-token", url)
+            else:
+                self.assertNotIn("Authorization", headers, url)
+        # The rounds may run in a pipeline of their own.
+        gp._eval_round.cache_clear()
+        self.calls.clear()
+        with mock.patch.dict(os.environ, {"OME_EVAL_RESULTS_PIPELINE": "pipeline-b"}):
+            self.assertTrue(self.label().startswith(f" (targeted from round {self.ROUND}: "))
+        self.assertIn("/pipelines/pipeline-b/builds?", self.calls[0][0])
+
+    def test_without_a_token_targeted_runs_smoke_plus_the_trailer_and_says_so(self):
+        with mock.patch.dict(os.environ, {"OME_EVAL_RESULTS_TOKEN": ""}):
+            self.assertEqual(self.selection(), self.smoke_selection())
+            self.assertEqual(self.label(), " (targeted: smoke, no results token)")
+            self.assertEqual(self.calls, [])
+            self.assertIn("no results token", self.err.getvalue())
+            gp._eval_round.cache_clear()
+            case = self.groups[-1][2][-1]
+            self.patch_attr("EVAL_SELECTION", ("cases", [case]))
+            self.assertEqual(self.pairs(self.selection()), self.pairs(self.smoke_selection()) | {(case, "")})
+            self.assertEqual(self.label(), f" (targeted: smoke, no results token) (plus cases: {case})")
+
+    def test_without_a_recorded_round_or_with_a_failed_lookup_targeted_falls_back(self):
+        def raising(url, headers):
+            raise OSError("connection refused")
+
+        def failing(url, headers):
+            return 500, {}, b"internal error"
+
+        fallbacks = [
+            ("no builds", self.fake_fetch(builds=[]), "no recorded round"),
+            ("only unusable builds", self.fake_fetch(builds=self.builds()[:4]), "no recorded round"),
+            ("no verdict artifact", self.fake_fetch(builds=[self.build(4321)], artifacts=[]), "no recorded round"),
+            ("a branch build", self.fake_fetch(builds=[self.build(4321, branch="feature/x")]), "no recorded round"),
+            ("a connection error", raising, "round lookup failed"),
+            ("a server error", failing, "round lookup failed"),
+            ("a malformed verdict file", self.fake_fetch(text="not\ta\tverdict\tfile\n"), "round lookup failed"),
+        ]
+        for name, fetch, reason in fallbacks:
+            with self.subTest(name):
+                gp._eval_round.cache_clear()
+                self.err = io.StringIO()
+                self.patch_attr("EVAL_ROUND_FETCH", fetch)
+                self.assertEqual(self.selection(), self.smoke_selection())
+                self.assertEqual(self.label(), f" (targeted: smoke, {reason})")
+                self.assertIn(reason, self.err.getvalue())
+        gp._eval_round.cache_clear()
+        with mock.patch.dict(os.environ, {"BUILDKITE_PIPELINE_SLUG": ""}):
+            self.assertEqual(self.label(), " (targeted: smoke, round lookup failed)")
+        # No fallback reason ever reaches the token.
+        self.assertNotIn("fake-token", self.err.getvalue())
+
+    def test_a_targeted_build_from_a_round_uploads_within_the_limit_and_records_nothing(self):
+        with contextlib.redirect_stderr(self.err):
+            batches = gp.generate_pipeline_batches()
+        text = "".join(batches)
+        self.assertNotIn(f'key: "{gp.EVAL_VERDICTS_STEP_KEY}"', text)
+        self.assertIn(f"(targeted from round {self.ROUND}: ", text)
+        for document in batches:
+            self.assertLessEqual(gp._job_count(document), gp.UPLOAD_JOB_LIMIT)
+        self.assertEqual(gp._top_level_keys(batches[-1]), ["chart-ome-release"])
+        # The fixture round, 5% sampled under the pinned commit: the pin
+        # moves with the corpus like the full and smoke totals.
+        self.assertEqual(sum(gp._job_count(document) for document in batches), 339)
+
+
+class TestEvalVerdicts(unittest.TestCase):
+    """eval_verdicts.py records a round from the lanes' result archives: one
+    row per (case, scheduler) the round ran, in the format the generator's
+    targeted lookup reads back."""
+
+    BUILD = "4321"
+    COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+    @classmethod
+    def setUpClass(cls):
+        # The harness's own result header, so the fixture rows are shaped
+        # exactly as run.py writes them.
+        text = (gp.REPO_ROOT / "hack/omenative-testing/perm/run.py").read_text()
+        match = re.search(r"^TSV_HEADER = \((.*?)\)\n", text, re.M | re.S)
+        cls.header = ast.literal_eval("(" + match.group(1) + ")")
+        cls.columns = cls.header.rstrip("\n").split("\t")
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.archives = self.root / "results"
+        self.archives.mkdir()
+        self.warnings: list[str] = []
+
+    def result_text(self, case, verdict, columns=None):
+        """One case result file as run.py writes it: the header, one row."""
+        columns = columns or self.columns
+        row = {name: "0" for name in columns}
+        row.update(id=case, desc="fixture", policy="none", verdict=verdict, note="")
+        return "\t".join(columns) + "\n" + "\t".join(row[name] for name in columns) + "\n"
+
+    def make_archive(self, job, feature, topology, scheduler, results, lane_record=True, force_delete=""):
+        """One lane job's archive: results is {member name: text} under the
+        job's directory, as the harness lays them out."""
+        stamp = f"{self.BUILD}-{job}"
+        job_dir = self.root / stamp
+        if lane_record:
+            job_dir.mkdir(parents=True, exist_ok=True)
+            (job_dir / ev.LANE_FILE).write_text(
+                "\t".join(ev.LANE_COLUMNS) + "\n" + "\t".join((feature, topology, scheduler, force_delete)) + "\n"
+            )
+        for name, text in results.items():
+            path = job_dir / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        archive = self.archives / f"{stamp}.tgz"
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(job_dir, arcname=stamp)
+        return archive
+
+    def lane(self, job, feature, topology, scheduler, verdicts, **kwargs):
+        """A lane job whose cases ended in the given verdicts."""
+        results = {
+            f"{feature}/{topology}/{case}-100.tsv": self.result_text(case, verdict)
+            for case, verdict in verdicts.items()
+        }
+        results[f"junit-{feature}-{topology}.xml"] = "<testsuite/>"
+        return self.make_archive(job, feature, topology, scheduler, results, **kwargs)
+
+    def collect(self):
+        return ev.collect(sorted(self.archives.glob("*.tgz")), self.BUILD, self.COMMIT, self.warnings.append)
+
+    def test_a_round_is_recorded_one_row_per_lane_the_round_ran(self):
+        self.lane("a", "rollout", "eng", "", {"p1": "PASS", "p2": "FAIL"})
+        self.lane("b", "rollout", "eng", gp.EVAL_GANG_SCHEDULER, {"p1": "PASS", "p2": "INFRA-FAIL"})
+        self.lane("c", "canary", "eng-mn", "", {"p3": "TRIGGER_FAIL", "p4": "INIT_TIMEOUT"})
+        # The lane migration/eng ran too, but its archive never arrived.
+        rows = self.collect()
+        expected = [
+            ev.Verdict(self.BUILD, self.COMMIT, "canary", "eng-mn", "", "p3", "TRIGGER_FAIL"),
+            ev.Verdict(self.BUILD, self.COMMIT, "canary", "eng-mn", "", "p4", "INIT_TIMEOUT"),
+            ev.Verdict(self.BUILD, self.COMMIT, "rollout", "eng", "", "p1", "PASS"),
+            ev.Verdict(self.BUILD, self.COMMIT, "rollout", "eng", "", "p2", "FAIL"),
+            ev.Verdict(self.BUILD, self.COMMIT, "rollout", "eng", gp.EVAL_GANG_SCHEDULER, "p1", "PASS"),
+            ev.Verdict(self.BUILD, self.COMMIT, "rollout", "eng", gp.EVAL_GANG_SCHEDULER, "p2", "INFRA-FAIL"),
+        ]
+        self.assertEqual(rows, expected)
+        self.assertEqual(self.warnings, [])
+        # The file round-trips through the one format definition.
+        text = ev.write_verdicts(rows)
+        self.assertEqual(text.splitlines()[0], "\t".join(ev.COLUMNS))
+        self.assertEqual(ev.read_verdicts(text), expected)
+
+    def test_a_malformed_result_is_skipped_with_a_warning(self):
+        short = "\t".join(self.columns) + "\n" + "\t".join(["p2"] + ["0"] * 9) + "\n"
+        self.lane("a", "rollout", "eng", "", {"p1": "PASS"})
+        self.make_archive("b", "rollout", "eng", gp.EVAL_GANG_SCHEDULER, {
+            "rollout/eng/p1-100.tsv": self.result_text("p1", "PASS"),
+            "rollout/eng/p2-100.tsv": short,
+            "rollout/eng/p3-100.tsv": self.result_text("p9", "PASS"),
+            "rollout/eng/p4-100.tsv": "",
+            "rollout/eng/p5-100.tsv": self.result_text("p5", ""),
+            "rollout/eng/p6-100.tsv": self.result_text("p6", "PASS", columns=["id", "desc"]),
+        })
+        rows = self.collect()
+        self.assertEqual([(row.scheduler, row.case, row.verdict) for row in rows],
+                         [("", "p1", "PASS"), (gp.EVAL_GANG_SCHEDULER, "p1", "PASS")])
+        named = sorted(re.search(r"/(p[0-9]+)-100\.tsv", warning).group(1) for warning in self.warnings)
+        self.assertEqual(named, ["p2", "p3", "p4", "p5", "p6"])
+
+    def test_the_newest_result_of_a_case_wins_within_an_archive(self):
+        self.make_archive("a", "rollout", "eng", "", {
+            "rollout/eng/p1-100.tsv": self.result_text("p1", "FAIL"),
+            "rollout/eng/p1-200.tsv": self.result_text("p1", "PASS"),
+            "rollout/eng/p2-300.tsv": self.result_text("p2", "FAIL"),
+            "rollout/eng/p2-250.tsv": self.result_text("p2", "PASS"),
+        })
+        rows = self.collect()
+        self.assertEqual([(row.case, row.verdict) for row in rows], [("p1", "PASS"), ("p2", "FAIL")])
+        self.assertEqual(self.warnings, [])
+
+    def test_an_archive_that_cannot_be_read_yields_nothing(self):
+        self.lane("a", "rollout", "eng", "", {"p1": "PASS"})
+        self.lane("b", "rollout", "eng", "", {"p2": "PASS"}, lane_record=False)
+        (self.archives / f"{self.BUILD}-c.tgz").write_bytes(b"not an archive")
+        rows = self.collect()
+        self.assertEqual([row.case for row in rows], ["p1"])
+        self.assertEqual(len(self.warnings), 2)
+        self.assertIn(f"{self.BUILD}-b.tgz", self.warnings[0])
+        self.assertIn(ev.LANE_FILE, self.warnings[0])
+        self.assertIn(f"{self.BUILD}-c.tgz", self.warnings[1])
+
+    def test_the_verdict_file_refuses_a_header_or_row_it_cannot_read(self):
+        with self.assertRaisesRegex(ValueError, "header lacks"):
+            ev.read_verdicts("build\tcase\n1\tp1\n")
+        with self.assertRaisesRegex(ValueError, "line 2"):
+            ev.read_verdicts("\t".join(ev.COLUMNS) + "\n1\tabc\trollout\n")
+        with self.assertRaisesRegex(ValueError, "tab"):
+            ev.write_verdicts([ev.Verdict("1", "a", "rollout", "eng", "", "p1", "FAIL\tnote")])
+
+    def test_the_command_line_writes_the_file_and_refuses_an_empty_round(self):
+        out = self.root / ev.VERDICTS_FILE
+        err, log = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(log):
+            status = ev.main(["--archives", str(self.archives), "--out", str(out), "--build", self.BUILD, "--commit", self.COMMIT])
+        self.assertEqual(status, 1)
+        self.assertFalse(out.exists())
+        self.assertIn("nothing to record", err.getvalue())
+        self.lane("a", "rollout", "eng", "", {"p1": "PASS", "p2": "FAIL"})
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(log):
+            status = ev.main(["--archives", str(self.archives), "--out", str(out), "--build", self.BUILD, "--commit", self.COMMIT])
+        self.assertEqual(status, 0)
+        self.assertEqual([(row.case, row.verdict) for row in ev.read_verdicts(out.read_text())], [("p1", "PASS"), ("p2", "FAIL")])
+        self.assertIn("2 verdicts from 1 archives, 1 PASS, 0 skipped or parked, 1 other", log.getvalue())
+
+    def test_the_runner_and_the_recording_step_agree_with_the_script(self):
+        runner = (Path(__file__).resolve().parent / "run_omenative_eval_gke.sh").read_text()
+        self.assertIn("/" + ev.LANE_FILE + '"', runner)
+        self.assertIn("'" + "\\t".join(ev.LANE_COLUMNS) + "\\n", runner)
+        self.assertIn(f'results_root="{ev.RESULTS_DIR}/', runner)
+        recorder = (Path(__file__).resolve().parent / "record_eval_verdicts.sh").read_text()
+        self.assertIn("python3 .buildkite/eval_verdicts.py", recorder)
+        for name in ("OME_EVAL_RESULTS_DIR", "OME_EVAL_VERDICTS_FILE", "OME_EVAL_ROUND_META_KEY", "OME_EVAL_ROUND_META_VALUE"):
+            self.assertIn("${" + name + ":?", recorder)
+        self.assertLess(recorder.index("artifact upload"), recorder.index("meta-data set"))
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1888,14 +2355,24 @@ class TestEvalMode(PipelineTestCase):
         )
         self.assertEqual({(f, t): cases for f, t, cases, _ in selection}, first_shards)
 
-    def test_targeted_is_smoke_plus_the_trailer_selection_and_the_label_says_so(self):
+    def test_targeted_without_a_round_is_smoke_plus_the_trailer_selection_and_the_label_says_so(self):
+        # No results token, so no round to read: targeted is smoke plus the
+        # trailer; TestEvalTargeted covers the selection from a round.
         self.patch_attr("EVAL_MODE", "targeted")
+        patcher = mock.patch.dict(os.environ, {gp.EVAL_RESULTS_TOKEN_VAR: ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        gp._eval_round.cache_clear()
+        self.addCleanup(gp._eval_round.cache_clear)
+        quiet = contextlib.redirect_stderr(io.StringIO())
+        quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
         plain = gp._eval_children()
         self.assertEqual([c["key"] for _, _, c in plain], [c["key"] for _, _, c in self.smoke])
         self.assertEqual([c["command"] for _, _, c in plain], [c["command"] for _, _, c in self.smoke])
         self.assertEqual(
             self.group_labels(plain),
-            [":test_tube: OMENative YAML E2E (KIND on GKE) (targeted: smoke until a full round is recorded)"],
+            [":test_tube: OMENative YAML E2E (KIND on GKE) (targeted: smoke, no results token)"],
         )
         self.patch_attr("EVAL_SELECTION", ("families", ["gen-switch"]))
         with_family = gp._eval_children()
@@ -1907,7 +2384,7 @@ class TestEvalMode(PipelineTestCase):
         self.assertEqual(len(emitted), len(set(emitted)))
         self.assertEqual({scheduler for scheduler, _, _ in with_family}, {""})
         self.assertIn(
-            "(targeted: smoke until a full round is recorded) (plus families: gen-switch)",
+            "(targeted: smoke, no results token) (plus families: gen-switch)",
             self.group_labels(with_family)[0],
         )
 
@@ -1976,6 +2453,8 @@ class TestEvalMode(PipelineTestCase):
         self.assertEqual(len(self.smoke), 185)
         self.assertEqual(len(self.smoke_batches), 3)
         self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 294)
+        # Only a full round records its verdicts.
+        self.assertNotIn(f'key: "{gp.EVAL_VERDICTS_STEP_KEY}"', "".join(self.smoke_batches))
 
 
 class TestEvalConcurrencyCap(PipelineTestCase):
@@ -2087,9 +2566,10 @@ class TestPipelineUploads(PipelineTestCase):
         self.assertEqual(len(seen), len(set(seen)))
         self.assertEqual(self.LANE_KEY.findall(batches[0]), [])
         # The marker is the last step of the last upload and depends on every
-        # other top-level step and group, the eval groups among them.
+        # other top-level step and group, the eval groups and the full
+        # round's verdict record among them.
         self.assertEqual(sum(d.count('key: "chart-ome-release"') for d in batches), 1)
-        self.assertEqual(gp._top_level_keys(batches[-1]), ["chart-ome-release"])
+        self.assertEqual(gp._top_level_keys(batches[-1]), [gp.EVAL_VERDICTS_STEP_KEY, "chart-ome-release"])
         gates = self.marker_dependencies(batches[-1])
         every = [key for document in batches for key in gp._top_level_keys(document)]
         self.assertEqual(gates, every[:-1])
@@ -2138,7 +2618,31 @@ class TestPipelineUploads(PipelineTestCase):
     def test_todays_corpus_uploads_within_the_limit_and_the_total_is_pinned(self):
         self.assert_uploads_are_well_formed(self.batches, self.children)
         self.assertGreater(len(self.batches), 2)
-        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 1633)
+        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 1634)
+
+    def test_the_full_round_records_its_verdicts_after_every_eval_group(self):
+        last = self.batches[-1]
+        step = last[last.index(f'key: "{gp.EVAL_VERDICTS_STEP_KEY}"'):last.index('key: "chart-ome-release"')]
+        groups = [key for document in self.batches[1:-1] for key in gp._top_level_keys(document)]
+        self.assertEqual(re.findall(r'^      - "([^"]+)"$', step.split("allow_dependency_failure")[0], re.M), groups)
+        # Failed lanes are what the record is for, and a record that cannot
+        # be written never blocks the marker.
+        self.assertIn("allow_dependency_failure: true", step)
+        self.assertIn("soft_fail: true", step)
+        self.assertIn("sh .buildkite/record_eval_verdicts.sh", step)
+        self.assertIn(f'queue: "{gp.BUILD_QUEUE}"', step)
+        self.assertIn(f'image: "{gp.PIPELINE_UPLOAD_IMAGE}"', step)
+        self.assertIn("mount-buildkite-agent: true", step)
+        # The script reads the format's names from the step, defined once.
+        for name, value in (
+            ("OME_EVAL_RESULTS_DIR", ev.RESULTS_DIR),
+            ("OME_EVAL_VERDICTS_FILE", ev.VERDICTS_FILE),
+            ("OME_EVAL_ROUND_META_KEY", ev.ROUND_META_KEY),
+            ("OME_EVAL_ROUND_META_VALUE", ev.ROUND_META_VALUE),
+        ):
+            self.assertIn(f'{name}: "{value}"', step)
+        self.assertIn(gp.EVAL_VERDICTS_STEP_KEY, self.marker_dependencies(last))
+        self.assertEqual(gp._job_count(last), 2)
 
     def test_a_corpus_three_times_larger_still_uploads_within_the_limit(self):
         tripled = [

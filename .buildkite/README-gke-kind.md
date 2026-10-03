@@ -204,7 +204,7 @@ unset, the newest `Eval: <value>` line of the commit message
 |---|---|
 | `off` | nothing: neither the image step nor the group |
 | `smoke` | the first shard of every feature/topology lane, default scheduler only |
-| `targeted` | smoke, plus every case the trailer's `families=` or `cases=` name, default scheduler; the group label says `(targeted: smoke until a full round is recorded)` while the mode has no recorded round to choose from |
+| `targeted` | from the newest recorded full round: every (case, scheduler) that failed (any verdict but `PASS`, `SKIP` or an `XFAIL` form: a skipped lane recurs every build for the same reason, a parked case is debt the ledger already carries, and neither is rerun nor sampled), under the scheduler it ran in; every corpus case the round has no row for; every case the trailer's `families=` or `cases=` name, default scheduler; and a sample of the round's passing lanes. The group label reads `(targeted from round <build>: <n> cases)`. With no round to read it runs smoke plus the trailer, and the label says why: `(targeted: smoke, no results token)`, `no recorded round` or `round lookup failed` |
 | `full` | every case on every scheduler |
 | `families=<a,b>` | every case of those folders under `hack/omenative-testing/perm/isvcs/`, every scheduler |
 | `cases=<p1,p2>` | exactly those cases in their lanes, default scheduler; a case needing the force-delete policy runs in its lane's policy-on twin |
@@ -217,6 +217,29 @@ The group label names the mode unless it is `full`, and the upload plan in the
 entrypoint's log ends with it. `_eval_selection()` in `generate_pipeline.py`
 is the one place a mode chooses cases; the emission packs and shards whatever
 it returns, so `targeted` can read a recorded round without touching the lanes.
+
+A `full` round records itself: the soft-failing step `eval-verdicts`, after
+every eval group, downloads the lanes' result archives
+(`hack/omenative-testing/perm/results/<build>-<job>.tgz`, each carrying the
+job's `lane.tsv` and the harness's per-case result files), writes
+`eval-verdicts.tsv` with the columns build, commit, feature, topology,
+scheduler, case, verdict (one row per case and scheduler the round ran; a
+lane whose archive is missing yields no row), attaches it to the build and
+sets the build meta-data `ome:eval-round=full`. `.buildkite/eval_verdicts.py`
+defines the format; `record_eval_verdicts.sh` is the step's command.
+
+A `targeted` build reads that record through the Buildkite REST API when
+`OME_EVAL_RESULTS_TOKEN` holds a read-only API token (`read_builds`,
+`read_artifacts`), stored as a pipeline secret: the newest `main` build of the
+pipeline in state passed or failed (never canceled or running) whose meta-data
+carries the mark and whose `eval-verdicts` job attached the file.
+`OME_EVAL_RESULTS_PIPELINE` names the pipeline the rounds run in when it is
+not this one. The sample is `OME_EVAL_SAMPLE_PERCENT` of the round's passing
+lanes, rounded up (default 5; 0 runs no sample; a value outside 0 to 100 or
+not a number fails generation), drawn with the commit as seed so a build is
+reproducible. Without the token, a recorded round or a working lookup the
+build falls back as the table says, logs the reason to the generator's stderr
+and never fails for it.
 
 Every lane carries `concurrency_group: "ome/gke-evals"` with
 `concurrency: <GKE_EVAL_MAX_CONCURRENCY>` (default 120), so across every build
