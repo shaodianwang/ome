@@ -647,8 +647,13 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 				"component", plan.Component, "instance", inst.Index, "target", target.Name)
 			continue
 		}
-		if workloadops.RolledInstanceNotServing(input.ObservedState.Instance(inst.Index), target.Name, updateByInstance[inst.Index], inst.TotalPods()) {
+		if notServing, wait := workloadops.RolledInstanceNotServing(input.ObservedState.Instance(inst.Index), target.Name, updateByInstance[inst.Index], inst.TotalPods(), plan.MinReadySeconds, input.Now()); notServing {
 			selection.RolledNotServing = append(selection.RolledNotServing, inst.Index)
+			// A pod Ready again inside its window raises no watch event
+			// when the window elapses; the pass comes back for it.
+			if wait > 0 {
+				input.PassWake.Observe(wait)
+			}
 		}
 		decision := workloadops.EvaluateUpdateTrigger(input, inst, target, updateByInstance[inst.Index])
 		if decision.AdoptRevision {

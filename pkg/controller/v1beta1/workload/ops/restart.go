@@ -684,6 +684,30 @@ func RunnerRestartedSinceReady(pod *corev1.Pod, readySince *metav1.Time) (string
 	return "", false
 }
 
+// RunnerRestartedAgainSinceReady reports whether pod's runner container
+// has restarted more than once since readySince: the run its last
+// termination records had itself begun after the Instance entered Ready,
+// so it was already a restart's run, and it ended too. The kubelet keeps
+// only the latest termination, and that run's start is what dates the
+// restart before it. A container that keeps dying under load reads this
+// way from its second crash on; one the kubelet restarted once never
+// does, because the run that crashed is the run that was promoted. The
+// nil and zero readySince rules of RunnerRestartedSinceReady apply.
+func RunnerRestartedAgainSinceReady(pod *corev1.Pod, readySince *metav1.Time) bool {
+	if pod == nil || readySince == nil || readySince.IsZero() || pod.DeletionTimestamp != nil {
+		return false
+	}
+	for i := range pod.Status.ContainerStatuses {
+		cs := &pod.Status.ContainerStatuses[i]
+		if cs.Name != constants.MainContainerName {
+			continue
+		}
+		t := cs.LastTerminationState.Terminated
+		return t != nil && t.StartedAt.After(readySince.Time)
+	}
+	return false
+}
+
 // Crash-loop repair: a wedge no other pass owns.
 //
 // No pass owns an operation-free Ready row, so this trigger does: the

@@ -1126,6 +1126,10 @@ const (
 	// promoted pod that keeps dying under load and coming back between
 	// the kubelet's restarts.
 	flapAfterServingImage = "registry.test/serving:flap-after-serving"
+	// crashOnceAfterServingImage serves the same way, dies once, and
+	// stays up after the kubelet's one restart: the shape of a promoted
+	// pod whose process was killed once.
+	crashOnceAfterServingImage = "registry.test/serving:crash-once-after-serving"
 
 	// terminationFinalizer is the harness's stand-in for a kubelet that
 	// has not finished terminating a deleted pod: the fake client keeps a
@@ -1204,9 +1208,12 @@ type recoveryHarness struct {
 	repairBatchSize *int32
 	// crashes counts, per pod identity (wedgeKey), the kubelet steps a
 	// crash image has been observed on it; lastCrash is the instant of its
-	// latest crash. A rebuilt pod of the same name starts from zero.
-	crashes   map[string]int
-	lastCrash map[string]time.Time
+	// latest crash and lastRunStart when the run that crashed had started,
+	// the two instants the kubelet reports on the container's last
+	// termination. A rebuilt pod of the same name starts from zero.
+	crashes      map[string]int
+	lastCrash    map[string]time.Time
+	lastRunStart map[string]metav1.Time
 	// servedPasses counts, per pod identity, the kubelet passes it ended
 	// PodReady; crashAfterServingImage and flapAfterServingImage crash once
 	// it has served for crashAfterServed.
@@ -1267,6 +1274,10 @@ type recoveryHarness struct {
 	// serves before it dies: two, unless a story needs the roll to reach
 	// the next Instance before the promoted one crashes.
 	crashAfterServed int
+	// minReadySeconds is the Component's minReadySeconds: how long a pod
+	// must hold Ready before it is Available. Zero, as the default
+	// configuration leaves it, makes Available the same as Ready.
+	minReadySeconds int32
 	// holds records every rollout hold the update pass reported, in
 	// order; a pass that reported none appends nothing.
 	holds []workloadtypes.RolloutHold
@@ -1338,6 +1349,7 @@ func newComponentRecoveryHarness(t *testing.T, multiPod bool, container string, 
 		component:        component,
 		crashes:          map[string]int{},
 		lastCrash:        map[string]time.Time{},
+		lastRunStart:     map[string]metav1.Time{},
 		servedPasses:     map[string]int{},
 		retryPolicy:      &workloadtypes.RetryPolicy{MaxAttempts: 2, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2},
 		readinessFails:   map[string]bool{},
@@ -1389,9 +1401,10 @@ func (h *recoveryHarness) setTarget(cr *appsv1.ControllerRevision, image string)
 	h.target = cr
 	spec := h.podSpec(image)
 	h.desired = workloadtypes.WorkloadDesiredSpec{
-		Replicas:  h.replicas,
-		PodSpec:   spec,
-		Lifecycle: h.lifecycle,
+		Replicas:        h.replicas,
+		MinReadySeconds: h.minReadySeconds,
+		PodSpec:         spec,
+		Lifecycle:       h.lifecycle,
 	}
 	if h.multiPod {
 		h.desired.MultiPod = true
@@ -1492,11 +1505,39 @@ func (h *recoveryHarness) kubelet() {
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
+		case image == crashOnceAfterServingImage && h.crashes[wedgeKey(pod)] == 0 && h.servedPasses[wedgeKey(pod)] >= h.crashAfterServed && h.promotedOn(pod):
+			// The container died once, after its Instance was promoted on it:
+			// the kubelet starts it again at once, as it does before a first
+			// restart, and the new run has not passed readiness yet. The
+			// termination names when the run that died had started, as the
+			// kubelet reports it.
+			h.crashes[wedgeKey(pod)]++
+			h.lastCrash[wedgeKey(pod)] = h.clk.Now()
+			h.lastRunStart[wedgeKey(pod)] = priorRunStart(pod)
+			pod.Status.Phase = corev1.PodRunning
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name:         pod.Spec.Containers[0].Name,
+				Image:        image,
+				Ready:        false,
+				RestartCount: 1,
+				State:        corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(h.clk.Now())}},
+				LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					ExitCode:   1,
+					Reason:     "Error",
+					StartedAt:  h.lastRunStart[wedgeKey(pod)],
+					FinishedAt: metav1.NewTime(h.clk.Now()),
+				}},
+			}}
+			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
+			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
 		case image == crashStartImage || h.crashesAfterRunning(pod) || (image == crashLoadImage && h.crashes[wedgeKey(pod)]%2 == 0):
 			// The container died again: a run that ended after the pod
 			// became Ready, and a kubelet back-off before the next start.
+			// The termination names when the run that died had started,
+			// as the kubelet reports it.
 			h.crashes[wedgeKey(pod)]++
 			h.lastCrash[wedgeKey(pod)] = h.clk.Now()
+			h.lastRunStart[wedgeKey(pod)] = priorRunStart(pod)
 			pod.Status.Phase = corev1.PodRunning
 			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 				Name:         pod.Spec.Containers[0].Name,
@@ -1509,6 +1550,7 @@ func (h *recoveryHarness) kubelet() {
 				LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
 					ExitCode:   1,
 					Reason:     "Error",
+					StartedAt:  h.lastRunStart[wedgeKey(pod)],
 					FinishedAt: metav1.NewTime(h.clk.Now()),
 				}},
 			}}
@@ -1528,6 +1570,7 @@ func (h *recoveryHarness) kubelet() {
 				LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
 					ExitCode:   1,
 					Reason:     "Error",
+					StartedAt:  h.lastRunStart[wedgeKey(pod)],
 					FinishedAt: metav1.NewTime(h.lastCrash[wedgeKey(pod)]),
 				}},
 			}}
@@ -1577,6 +1620,32 @@ func (h *recoveryHarness) kubelet() {
 			h.t.Fatalf("kubelet update %s: %v", pod.Name, err)
 		}
 	}
+}
+
+// promotedOn reports whether the row of the pod's Instance is Ready on the
+// revision the pod carries: the pod was promoted, so a crash from here on
+// is a crash after the Instance entered Ready.
+func (h *recoveryHarness) promotedOn(pod *corev1.Pod) bool {
+	idx, ok := query.InstanceIdxFromLabels(pod)
+	if !ok {
+		return false
+	}
+	for _, s := range h.irStatuses() {
+		if s.Index == idx {
+			return s.Phase == workloadtypes.InstancePhaseReady && query.RevisionFromName(s.RunningRevision).Hash() == pod.Labels[query.LabelRevisionHash]
+		}
+	}
+	return false
+}
+
+// priorRunStart is when the run the kubelet model last reported for the
+// pod's container started, zero when it reported none or the run's start
+// is unknown.
+func priorRunStart(pod *corev1.Pod) metav1.Time {
+	if prior := priorContainerStatus(pod); prior != nil && prior.State.Running != nil {
+		return prior.State.Running.StartedAt
+	}
+	return metav1.Time{}
 }
 
 // priorContainerStatus is the status the kubelet model reported for the
@@ -1636,14 +1705,18 @@ func (h *recoveryHarness) restartContainerInPlace(pod *corev1.Pod) {
 	setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
 }
 
-// carryRestartEvidence keeps the restart count and the last termination the
-// kubelet reported before, as the kubelet does until the next restart.
+// carryRestartEvidence keeps the restart count, the last termination and
+// the running run's start the kubelet reported before, as the kubelet
+// does until the next restart.
 func carryRestartEvidence(status, prior *corev1.ContainerStatus) {
 	if prior == nil {
 		return
 	}
 	status.RestartCount = prior.RestartCount
 	status.LastTerminationState = prior.LastTerminationState
+	if prior.State.Running != nil && status.State.Running != nil {
+		status.State.Running.StartedAt = prior.State.Running.StartedAt
+	}
 }
 
 // crashesAfterRunning reports whether the kubelet model crashes pod on
@@ -1841,9 +1914,15 @@ func (h *recoveryHarness) wedgeReasonFor(pod *corev1.Pod) string {
 	return h.wedge
 }
 
+// setPodCondition writes a pod condition the way the kubelet does: the
+// transition time moves only when the status changes, so a condition
+// that holds its value keeps the instant it last flipped.
 func setPodCondition(pod *corev1.Pod, condType corev1.PodConditionType, status corev1.ConditionStatus, now time.Time) {
 	for i := range pod.Status.Conditions {
 		if pod.Status.Conditions[i].Type == condType {
+			if pod.Status.Conditions[i].Status != status {
+				pod.Status.Conditions[i].LastTransitionTime = metav1.NewTime(now)
+			}
 			pod.Status.Conditions[i].Status = status
 			return
 		}
@@ -5952,12 +6031,16 @@ type rollBudgetCase struct {
 	// while the promoted Instance still serves, before its crash can be
 	// seen.
 	offAllowed int
+	// minReadySeconds is the Component's window: a pod that comes back
+	// between crashes holds the slot while it is up because it never
+	// holds Ready for the window.
+	minReadySeconds int32
 }
 
 func rollBudgetCases() []rollBudgetCase {
 	return []rollBudgetCase{
 		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1", replicas: 4, strategy: workloadtypes.UpdateStrategySurgeThenDrain, image: crashAfterServingImage, offAllowed: 1},
-		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1, the pod comes back between crashes", replicas: 4, strategy: workloadtypes.UpdateStrategySurgeThenDrain, image: flapAfterServingImage, offAllowed: 1},
+		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1, the pod comes back between crashes but never holds Ready for the window", replicas: 4, strategy: workloadtypes.UpdateStrategySurgeThenDrain, image: flapAfterServingImage, offAllowed: 1, minReadySeconds: 60},
 		{name: "four single-pod Instances under RecreatePod maxUnavailable 1", replicas: 4, strategy: workloadtypes.UpdateStrategyRecreatePod, image: crashAfterServingImage, offAllowed: 2},
 		{name: "two gangs under SurgeThenDrain maxSurge 1", multiPod: true, replicas: 2, strategy: workloadtypes.UpdateStrategySurgeThenDrain, image: crashAfterServingImage, offAllowed: 1},
 		{name: "three gangs under RecreatePod maxUnavailable 1", multiPod: true, replicas: 3, strategy: workloadtypes.UpdateStrategyRecreatePod, image: crashAfterServingImage, offAllowed: 2},
@@ -6056,6 +6139,7 @@ func TestCrashAfterPromotion_RollHoldsAtTheBudget(t *testing.T) {
 			// next Instance before it dies, so the hold has to act on a
 			// start already in flight as well as on the next one.
 			h.crashAfterServed = 4
+			h.minReadySeconds = tc.minReadySeconds
 			h.useRollingBudget(tc.strategy)
 			if !h.run(60, func() bool { return h.settledOn(h.revV1, tc.replicas) }) {
 				h.dumpState("initial create")
@@ -6112,6 +6196,238 @@ func TestCrashAfterPromotion_RollHoldsAtTheBudget(t *testing.T) {
 			if !h.run(120, func() bool { return h.settledOn(h.revFixed, tc.replicas) }) {
 				h.dumpState("corrected revision")
 				t.Fatalf("the corrected revision did not land on every Instance")
+			}
+		})
+	}
+}
+
+// promotedPodCrashedAgain reports whether a pod of an Instance promoted
+// onto rev has crashed, come back, and crashed a second time.
+func (h *recoveryHarness) promotedPodCrashedAgain(rev *appsv1.ControllerRevision) bool {
+	for _, s := range h.irStatuses() {
+		if s.RunningRevision != rev.Name {
+			continue
+		}
+		for _, pod := range h.podsOf(s.Index) {
+			if h.crashes[wedgeKey(pod)] >= 3 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestCrashLoopAfterPromotionWithNoWindow_SecondCrashPinsTheInstance pins
+// the push whose promoted pod keeps dying under load when the Component
+// has no minReadySeconds window. Under no window Ready is Available, so
+// the first comeback reads as a container restarted once and releases
+// the slot: the roll may admit one further start then, the start a
+// Deployment admits too. The second crash proves the container keeps
+// restarting, and from then on the Instance holds its slot through every
+// comeback: no further Instance leaves the running revision, at most the
+// budget plus that one start is off it, the Component reports the Budget
+// hold naming the Instance, and a corrected revision lands everywhere.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Budget]/before
+func TestCrashLoopAfterPromotionWithNoWindow_SecondCrashPinsTheInstance(t *testing.T) {
+	const replicas = int32(4)
+	// The budget plus the one start the first comeback admits.
+	const offAllowed = 2
+	h := newRecoveryHarnessFor(t, false, constants.MainContainerName)
+	h.replicas = replicas
+	noRepair := workloadtypes.RestartPolicyNone
+	h.lifecycle.RestartPolicy = &noRepair
+	h.crashAfterServed = 4
+	h.useRollingBudget(workloadtypes.UpdateStrategyRecreatePod)
+	if !h.run(60, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+	}
+
+	revCrash := h.crashRevision(flapAfterServingImage)
+	pinned, offAtPin := false, 0
+	h.runWithInvariant(40, func() bool { return false }, func() {
+		off := int(replicas) - h.instancesServingOn(goodImage)
+		if off > offAllowed {
+			h.dumpState("roll past the allowance")
+			t.Fatalf("%d Instances are off the running revision, allowance %d: the roll kept replacing Instances with a revision that keeps crashing", off, offAllowed)
+		}
+		if pinned && off > offAtPin {
+			h.dumpState("roll continued after the second crash")
+			t.Fatalf("a further Instance left the running revision after a promoted pod crashed a second time: %d off now, %d then", off, offAtPin)
+		}
+		if !pinned && h.promotedPodCrashedAgain(revCrash) {
+			pinned, offAtPin = true, off
+		}
+	})
+	if !pinned {
+		h.dumpState("no second crash")
+		t.Fatalf("no promoted pod crashed a second time; the story did not run")
+	}
+	hold := h.lastHold()
+	if hold == nil || hold.Gate != workloadtypes.RolloutHoldGateBudget || hold.Target != revCrash.Name || !strings.Contains(hold.Reason, "not serving") {
+		h.dumpState("hold")
+		t.Fatalf("the Component must report a Budget hold on %s naming the Instances not serving, got %+v", revCrash.Name, hold)
+	}
+	if floor := int(replicas) - offAllowed; h.instancesServingOn(goodImage) < floor {
+		h.dumpState("floor")
+		t.Fatalf("the running revision serves on %d Instances, floor %d", h.instancesServingOn(goodImage), floor)
+	}
+
+	h.setTarget(h.revFixed, fixedImage)
+	if !h.run(120, func() bool { return h.settledOn(h.revFixed, replicas) }) {
+		h.dumpState("corrected revision")
+		t.Fatalf("the corrected revision did not land on every Instance")
+	}
+}
+
+// notServingHolds counts the rollout holds the update pass has reported
+// that name an Instance on the target revision as not serving.
+func (h *recoveryHarness) notServingHolds() int {
+	n := 0
+	for _, hold := range h.holds {
+		if strings.Contains(hold.Reason, "not serving") {
+			n++
+		}
+	}
+	return n
+}
+
+// podReadyTransition is when the pod's Ready condition last changed, as
+// the kubelet stamped it; zero when the pod carries no Ready condition.
+func podReadyTransition(pod *corev1.Pod) time.Time {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodReady {
+			return cond.LastTransitionTime.Time
+		}
+	}
+	return time.Time{}
+}
+
+// TestCrashOnceAfterPromotion_RollResumesWhenTheInstanceServesAgain pins
+// the rule for a push whose promoted pod dies once and comes back: the
+// Instance holds its slot in the roll's budget only while it does not
+// serve. A pass that reads the pod Ready again for less than the
+// Component's minReadySeconds window still holds the slot, names the
+// Instance in a Budget hold and opens no start; the first pass that
+// reads it Ready for the whole window releases the slot and the roll
+// goes on. Under no window Ready is Available, so the comeback itself
+// releases the slot. Either way the revision lands on every Instance
+// with one pod per Instance, the pod that was restarted keeps its
+// identity with the one restart on its record, no row reads Failed, and
+// restart policy None opens no repair for a container the kubelet
+// restarted.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Budget]/before
+func TestCrashOnceAfterPromotion_RollResumesWhenTheInstanceServesAgain(t *testing.T) {
+	cases := []struct {
+		name            string
+		strategy        workloadtypes.UpdateStrategyType
+		minReadySeconds int32
+	}{
+		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1, no window", strategy: workloadtypes.UpdateStrategySurgeThenDrain},
+		{name: "four single-pod Instances under RecreatePod maxUnavailable 1, no window", strategy: workloadtypes.UpdateStrategyRecreatePod},
+		{name: "four single-pod Instances under SurgeThenDrain maxSurge 1, the comeback must hold Ready for the window", strategy: workloadtypes.UpdateStrategySurgeThenDrain, minReadySeconds: 90},
+		{name: "four single-pod Instances under RecreatePod maxUnavailable 1, the comeback must hold Ready for the window", strategy: workloadtypes.UpdateStrategyRecreatePod, minReadySeconds: 90},
+	}
+	const replicas = int32(4)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The runner is rendered under its production name: a restart
+			// after Ready is read off that container alone.
+			h := newRecoveryHarnessFor(t, false, constants.MainContainerName)
+			h.replicas = replicas
+			noRepair := workloadtypes.RestartPolicyNone
+			h.lifecycle.RestartPolicy = &noRepair
+			// The promoted pod serves long enough for the roll to reach the
+			// next Instance before it dies.
+			h.crashAfterServed = 4
+			h.minReadySeconds = tc.minReadySeconds
+			h.useRollingBudget(tc.strategy)
+			if !h.run(80, func() bool { return h.settledOn(h.revV1, replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+			}
+
+			revOnce := h.crashRevision(crashOnceAfterServingImage)
+			window := time.Duration(tc.minReadySeconds) * time.Second
+			seen := map[types.UID]struct{}{}
+			var restartedUID types.UID
+			var restartedIndex int32
+			// passStart is the clock the pass under inspection ran at: the
+			// invariant runs after the step moved the clock on.
+			passStart := h.clk.Now()
+			holds, pods, cameBack := h.notServingHolds(), 0, false
+			h.runWithInvariant(100, func() bool { return h.settledOn(revOnce, replicas) }, func() {
+				h.trackPodsOnImage(crashOnceAfterServingImage, seen)()
+				if h.repairInFlight() {
+					h.dumpState("repair")
+					t.Fatalf("restart policy None must open no repair for a container the kubelet restarted")
+				}
+				for _, s := range h.irStatuses() {
+					if s.Phase == workloadtypes.InstancePhaseFailed {
+						h.dumpState("failed row")
+						t.Fatalf("Instance %d reads Failed for a container the kubelet restarted", s.Index)
+					}
+				}
+				var restarted *corev1.Pod
+				for _, pod := range h.livePods() {
+					if h.crashes[wedgeKey(pod)] > 0 {
+						restarted = pod
+					}
+				}
+				if restarted != nil && restartedUID == "" {
+					restartedUID = restarted.UID
+					restartedIndex, _ = query.InstanceIdxFromLabels(restarted)
+				}
+				if restarted != nil && podConditionTrue(restarted, corev1.PodReady) {
+					cameBack = true
+					// The slot is held exactly while the pass reads the pod
+					// Ready again for less than the window.
+					availableAt := podReadyTransition(restarted).Add(window)
+					if held := h.notServingHolds() > holds; held && !passStart.Before(availableAt) {
+						h.dumpState("held while serving")
+						t.Fatalf("the roll was held on Instance %d, Ready again since %s, at %s: a pod Ready for the window serves and releases its slot: %q",
+							restartedIndex, podReadyTransition(restarted).Format(time.RFC3339), passStart.Format(time.RFC3339), h.lastHold().Reason)
+					} else if held {
+						if hold := h.lastHold(); hold.Gate != workloadtypes.RolloutHoldGateBudget || hold.Target != revOnce.Name || !strings.Contains(hold.Reason, strconv.Itoa(int(restartedIndex))) {
+							t.Fatalf("a pass inside the window must report a Budget hold on %s naming Instance %d, got %+v", revOnce.Name, restartedIndex, hold)
+						}
+						if len(seen) > pods {
+							h.dumpState("start inside the window")
+							t.Fatalf("a start opened while Instance %d was held inside its window", restartedIndex)
+						}
+					} else if passStart.Before(availableAt) && window > 0 && len(seen) > pods {
+						h.dumpState("start inside the window")
+						t.Fatalf("a start opened at %s while Instance %d had been Ready again only since %s, window %s",
+							passStart.Format(time.RFC3339), restartedIndex, podReadyTransition(restarted).Format(time.RFC3339), window)
+					}
+				}
+				holds, pods = h.notServingHolds(), len(seen)
+				passStart = h.clk.Now()
+			})
+			if !cameBack {
+				h.dumpState("no comeback")
+				t.Fatalf("the promoted pod never crashed and came back; the story did not run")
+			}
+			if !h.settledOn(revOnce, replicas) {
+				h.dumpState("roll stalled")
+				t.Fatalf("the roll did not land %s on every Instance after Instance %d came back; last hold %+v", revOnce.Name, restartedIndex, h.lastHold())
+			}
+			if len(seen) != int(replicas) {
+				t.Fatalf("the roll created %d pods of %s for %d Instances; one per Instance is the whole roll", len(seen), revOnce.Name, replicas)
+			}
+			var restarted *corev1.Pod
+			for _, pod := range h.livePods() {
+				if pod.UID == restartedUID {
+					restarted = pod
+				}
+			}
+			if restarted == nil {
+				t.Fatalf("the pod the kubelet restarted once must keep its identity; %s is gone", restartedUID)
+			}
+			if status := priorContainerStatus(restarted); status == nil || status.RestartCount != 1 {
+				t.Fatalf("the pod the kubelet restarted once must carry that one restart, got %+v", status)
 			}
 		})
 	}

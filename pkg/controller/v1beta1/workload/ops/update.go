@@ -717,27 +717,39 @@ func anyInFlightUpdateAt(statuses []workload.InstanceStatus, rev string) bool {
 
 // RolledInstanceNotServing reports whether row is an Instance the roll
 // already moved onto target that does not serve it: its pod set on that
-// revision is short of fully serving, or its runner container has
-// restarted since the row entered Ready. Nothing is left to retry for
-// such an Instance and nothing but a repair or a corrected revision
-// changes it, so it is the roll's open work: the update pass counts it
-// against the budget of the strategy's arm ahead of any fresh start, and
-// under SurgeThenDrain keeps every further source in rotation while the
-// count exceeds the unavailability budget. The restart is read even
-// while the container is Ready again, because a pod that keeps dying
-// under load is up between its crashes and the roll must not creep
-// forward in those windows. A row with an attempt in flight is anchored
-// by the in-flight counts instead, and a row a migration owns is the
-// record's.
-func RolledInstanceNotServing(row *workload.InstanceStatus, target string, pods []*corev1.Pod, desired int32) bool {
+// revision is short of fully serving, or its runner container restarted
+// since the row entered Ready and has not served since. Nothing is left
+// to retry for such an Instance and nothing but a repair or a corrected
+// revision changes it, so it is the roll's open work: the update pass
+// counts it against the budget of the strategy's arm ahead of any fresh
+// start, and under SurgeThenDrain keeps every further source in
+// rotation while the count exceeds the unavailability budget. A row with
+// an attempt in flight is anchored by the in-flight counts instead, and
+// a row a migration owns is the record's.
+//
+// A restart after Ready holds the slot while the container is down, and
+// while it is Ready again but has not held Ready for minReadySeconds:
+// that window is the bar every promotion applies before an Instance
+// enters Ready, and the kubelet moves the Ready condition's transition
+// time when a pod leaves and re-enters Ready across a restart, so
+// Available on the pod (podreadiness.IsPodAvailable) reads "Ready again
+// and held it for the window" off the clock the promote reads. The
+// duration is how long until a pod Ready again clears the window, zero
+// when only a watch event changes the verdict. A container that has
+// restarted more than once since Ready (RunnerRestartedAgainSinceReady)
+// keeps restarting: it is up only between its crashes, so it keeps the
+// slot through those windows whatever their length, and the roll never
+// creeps forward on them.
+func RolledInstanceNotServing(row *workload.InstanceStatus, target string, pods []*corev1.Pod, desired, minReadySeconds int32, now time.Time) (bool, time.Duration) {
 	if row == nil || target == "" || row.RunningRevision != target {
-		return false
+		return false, 0
 	}
 	if workload.UpdateContinuation(row) || isMigrateOwnedStatus(row) {
-		return false
+		return false, 0
 	}
 	targetRev := query.RevisionFromName(target)
 	own := make([]*corev1.Pod, 0, len(pods))
+	held, wait := false, time.Duration(0)
 	for _, pod := range pods {
 		if pod == nil || pod.DeletionTimestamp != nil {
 			continue
@@ -746,11 +758,20 @@ func RolledInstanceNotServing(row *workload.InstanceStatus, target string, pods 
 			continue
 		}
 		if _, restarted := RunnerRestartedSinceReady(pod, row.ReadySince); restarted {
-			return true
+			if RunnerRestartedAgainSinceReady(pod, row.ReadySince) {
+				return true, 0
+			}
+			if available, remaining := podreadiness.IsPodAvailable(pod, minReadySeconds, now); !available {
+				held = true
+				wait = max(wait, remaining)
+			}
 		}
 		own = append(own, pod)
 	}
-	return !query.PodSetFullyServing(own, desired)
+	if held {
+		return true, wait
+	}
+	return !query.PodSetFullyServing(own, desired), 0
 }
 
 // Wreckage is per-instance rollout debris keyed to a SUPERSEDED
