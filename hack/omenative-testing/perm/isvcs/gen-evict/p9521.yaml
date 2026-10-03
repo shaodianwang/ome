@@ -1,0 +1,23 @@
+# p9521: [gen] evict delete pd N=4  mode=recreate Ne=4 Nd=4 Nr=2 ceil_e=4 ceil_d=4 ceil_r=2 fault=evict:settling co=none topo=pd
+# reason: the service is deleted on prefill/decode, single-pod, and as the delete lands one of its pods is evicted through the Eviction API, as a node drain would, asked again while the disruption budget refuses it; the eviction is one more pod on its way out: every pod goes within the teardown budget, the delete completes with nothing of the service left, and the same manifest re-applied under the same name comes up whole on fresh pods; decoder and router are negative controls (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9521 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

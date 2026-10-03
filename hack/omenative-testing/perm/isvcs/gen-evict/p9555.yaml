@@ -1,0 +1,27 @@
+# p9555: [gen] evict edit pd-mn W1 N=2 SurgeThenDrain s1 x2  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=2 ceil_r=2 fault=evict:settling order_soft=1 co=none topo=pd-mn during=rotating victim=stable victimcomp=engine edit=strategy:RecreatePod floor_slack=1 repeat=2
+# reason: the engine is bumped under SurgeThenDrain and its strategy edited to RecreatePod at the first pod of the new revision on prefill/decode as gangs of 1 leader + 1 worker, and as the edit lands a settled pod of the starting revision is evicted through the Eviction API, as a node drain would, asked again while the disruption budget refuses it, and again once what it took has come back, 2 times in all; while an Instance is short the status says so and never counts it whole, every repair is for an Instance the eviction took, and the controller creates no more pods than the operation and the repairs explain; the controller replaces what it took, the floor lowered by that one Instance holds, and the roll completes under the edited strategy with every Instance on the new revision and the edit on the live spec, with every row settled and no hold left behind; each Instance is a gang, rebuilt whole; decoder and router are negative controls (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9555 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

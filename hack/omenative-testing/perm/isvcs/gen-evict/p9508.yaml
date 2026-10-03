@@ -1,0 +1,13 @@
+# p9508: [gen] evict scaledown engine N=4  mode=scaledown Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 fault=evict:settling co=none topo=engine to_e=3 floor_slack=1
+# reason: the engine is scaled from N to N-1 on engine alone, single-pod, and as the scale lands a settled engine pod is evicted through the Eviction API, as a node drain would, asked again while the disruption budget refuses it; the controller replaces what it took, the floor lowered by that one Instance holds, and the scale completes with the engine at N-1 and the survivors on their own pods, with every row settled and no hold left behind
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9508 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

@@ -1,0 +1,18 @@
+# p9533: [gen] evict rollback engine+router N=4 SurgeThenDrain s1 x2  Ne=4 Nd=0 Nr=2 ceil_e=5 ceil_d=0 ceil_r=2 fault=evict:settling order_soft=1 co=none topo=engine during=rotating victim=stable rollback=1 floor_slack=1 repeat=2
+# reason: the engine is bumped and the starting revision re-applied at the first pod of the new revision on engine behind a router, single-pod, and as the rollback lands a settled pod of the starting revision is evicted through the Eviction API, as a node drain would, asked again while the disruption budget refuses it, and again once what it took has come back, 2 times in all; while an Instance is short the status says so and never counts it whole, every repair is for an Instance the eviction took, and the controller creates no more pods than the operation and the repairs explain; the controller replaces what it took, the floor lowered by that one Instance holds, and the rollback completes with every Instance back on the starting revision and serving, no pod of the new revision left, with every row settled and no hold left behind; the router is a negative control (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9533 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

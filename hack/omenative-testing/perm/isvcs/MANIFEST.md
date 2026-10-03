@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **5087**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -38,9 +38,9 @@ Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) 
 | gen-readiness | 60 | p7000..p7059 |
 | gen-gang-member | 72 | p7100..p7171 |
 | gen-tight | 28 | p7300..p7327 |
-| gen-evict | 42 | p7400..p9501 |
-| gen-preempt | 72 | p7440..p9611 |
-| gen-pending | 138 | p7500..p9737 |
+| gen-evict | 102 | p7400..p9561 |
+| gen-preempt | 102 | p7440..p9641 |
+| gen-pending | 210 | p7500..p10709 |
 | gen-budget | 114 | p8200..p8313 |
 | gen-inplaceonly | 45 | p8330..p8374 |
 | gen-fault-scale | 292 | p7600..p10191 |
@@ -58,20 +58,20 @@ Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| engine | 1412 |
-| engine-mn | 1263 |
-| pd | 1260 |
-| pd-mn | 990 |
+| engine | 1466 |
+| engine-mn | 1317 |
+| pd | 1287 |
+| pd-mn | 1017 |
 
 ### By update strategy
 
 | value | cases |
 |---|---|
-| (dormant: nothing rolls) | 714 |
+| (dormant: nothing rolls) | 750 |
 | InPlaceIfPossible | 458 |
 | InPlaceOnly | 281 |
-| RecreatePod | 997 |
-| SurgeThenDrain | 2475 |
+| RecreatePod | 1021 |
+| SurgeThenDrain | 2577 |
 
 ### By failure verb / phase
 
@@ -191,7 +191,13 @@ Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) 
 | edit:settling | 84 |
 | env@held | 4 |
 | env@recreate | 2 |
+| evict:delete | 6 |
+| evict:edit | 12 |
+| evict:rollback | 12 |
 | evict:rotating | 24 |
+| evict:runtime | 12 |
+| evict:scaledown | 12 |
+| evict:scaleup | 6 |
 | evict:steady | 18 |
 | image | 6 |
 | imagepull:decoder:once@idle | 1 |
@@ -259,12 +265,18 @@ Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) 
 | packed:new:load | 32 |
 | packed:new:start | 32 |
 | pending:quota-kept@down1 | 6 |
+| pending:quota:edit | 12 |
 | pending:quota:roll | 42 |
+| pending:quota:rollback | 12 |
+| pending:quota:runtime | 12 |
 | pending:quota:steady | 24 |
 | pending:quota@delete | 6 |
 | pending:quota@down1 | 6 |
 | pending:quota@up1 | 6 |
+| pending:taint:edit | 12 |
 | pending:taint:roll | 48 |
+| pending:taint:rollback | 12 |
+| pending:taint:runtime | 12 |
 | pending:taint:steady | 24 |
 | pending:taint@delete | 12 |
 | pending:taint@down1 | 12 |
@@ -281,7 +293,12 @@ Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) 
 | podkill@held | 4 |
 | podkill@heldpaused | 4 |
 | podkill@paused | 4 |
+| preempt:edit | 6 |
+| preempt:rollback | 6 |
 | preempt:rotating | 48 |
+| preempt:runtime | 6 |
+| preempt:scaledown | 6 |
+| preempt:scaleup | 6 |
 | preempt:steady | 24 |
 | probe@held | 4 |
 | probe@recreate | 2 |
@@ -343,7 +360,7 @@ Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (unset — baseline) | 1296 |
+| (unset — baseline) | 1458 |
 | None | 2041 |
 | RecreateInstance | 1588 |
 
@@ -352,14 +369,14 @@ Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 4631 |
+| off | 4793 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 4745 |
+| (no pause around a repair) | 4907 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -368,7 +385,7 @@ Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 4745 |
+| (no pause around a repair) | 4907 |
 | fix | 90 |
 | none | 90 |
 
@@ -378,7 +395,7 @@ Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 54 |
 | canary | 30 |
-| none | 4163 |
+| none | 4325 |
 | ratio | 16 |
 | rolling | 628 |
 | seq | 34 |
@@ -422,7 +439,7 @@ Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 3510 |
+| (no break) | 3672 |
 | decoder | 106 |
 | engine | 1243 |
 | router | 66 |
@@ -462,19 +479,20 @@ Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| delete | 186 |
+| delete | 192 |
 | down1 | 124 |
 | down2 | 28 |
-| edit | 36 |
+| edit | 78 |
 | move | 36 |
 | push | 144 |
-| rollback | 36 |
-| runtime | 36 |
+| rollback | 78 |
+| runtime | 78 |
 | scale | 36 |
 | scale-down | 32 |
 | scale-one | 16 |
 | scale-up | 32 |
-| scaledown | 36 |
+| scaledown | 54 |
+| scaleup | 12 |
 | steady | 36 |
 | toone | 28 |
 | up1 | 112 |
@@ -498,9 +516,9 @@ Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | after-hold | 84 |
-| after-settle | 150 |
+| after-settle | 216 |
 | after-window | 84 |
-| never | 126 |
+| never | 162 |
 
 ### By window operation (webhook and conflict families)
 
@@ -528,6 +546,25 @@ Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) 
 | webhook scale | 12 |
 | webhook scaledown | 12 |
 | webhook steady | 12 |
+
+### By operation under a pre-armed cause or a hook fault (pending, evict and preempt families)
+
+| value | cases |
+|---|---|
+| evict delete | 6 |
+| evict edit | 12 |
+| evict rollback | 12 |
+| evict runtime | 12 |
+| evict scaledown | 12 |
+| evict scaleup | 6 |
+| pending edit | 24 |
+| pending rollback | 24 |
+| pending runtime | 24 |
+| preempt edit | 6 |
+| preempt rollback | 6 |
+| preempt runtime | 6 |
+| preempt scaledown | 6 |
+| preempt scaleup | 6 |
 
 ### By competing-writer form (conflict)
 
@@ -558,19 +595,20 @@ Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| delete | 186 |
+| delete | 192 |
 | down1 | 124 |
 | down2 | 28 |
-| edit | 36 |
+| edit | 78 |
 | move | 36 |
 | push | 144 |
-| rollback | 36 |
-| runtime | 36 |
+| rollback | 78 |
+| runtime | 78 |
 | scale | 36 |
 | scale-down | 32 |
 | scale-one | 16 |
 | scale-up | 32 |
-| scaledown | 36 |
+| scaledown | 54 |
+| scaleup | 12 |
 | steady | 36 |
 | toone | 28 |
 | up1 | 112 |
@@ -717,6 +755,7 @@ Total generated cases: **4925**. The whole-corpus per-PR cap (hand + generated) 
 - evict has no lift: the Eviction API is a one-shot removal, so the family crosses topology x restartPolicy (x strategy under the roll) only. Its steady-state cells are the kill verdict with the removal done by the Eviction API; the product's disruption budget (`podDisruptionBudget.omeNative` in the chart) may refuse it while a pod is already down, the runner asks again as a drain does, and a budget that never admits one eviction fails the case.
 - preempt and pending cross `lift=after-settle|never` (the cause removed once the wait has held, or kept to the end so the hold is judged), run on one gang width, with `co=none` (a group changes nothing about where a pod can be placed) and under the two strategies a roll waits under (in-place strategies create no pod to place). Both verbs need a cluster the harness owns (every node is blocked); elsewhere the case is SKIP with the reason. The preempt roll cells waive the floor and the order (the preemption takes a pod the budget cannot absorb); the pending verdict keeps its own floor.
 - a pending cell's quota admits one pod fewer than the operation needs: `quota:0` for a single-pod surge, `quota:<members-1>` for a surge gang (room for all but one member), and `quota:-1` (one pod fewer than run) under a repair or a drain-first roll, which create after a pod is gone; on a gang under RecreateInstance that leaves the whole gang short of one member. A gang surge roll held to the end by that quota is the tight-cluster family's cell, so the pending family leaves its `quota:<members-1> lift=never` cell out.
+- under a rollback, a strategy edit, a runtime edit, a scale and a delete the three families run one case per ledger cell under restart policy None: a taint or a quota armed before a rollback (drain-first, the rollback at its draining hook: the roll's first replacement is what waits, and a roll that cannot place its first pod reaches no later hook; the surge roll under the same cause never drains, so it offers no rollback moment), before a strategy edit landed as the push lands and before a runtime edit; an eviction as each operation lands, once and, where what it took comes back, again (a delete brings nothing back, so its cell is one-shot; a scale-up's persistent form is the repeating family's); a preemption as each operation that places a pod lands, the nodes opened again once the wait has held (a delete places nothing until its recreate, so it meets the eviction alone).
 - gen-budget drives the percent budgets the engine resolves: maxSurge under SurgeThenDrain and maxUnavailable under RecreatePod at 10%, 25%, 50% on fleets of 4 and 8 Instances, for a plain push, a push with one engine Instance crash-looping on the running revision (form=start, restart policy None: the roll owns the broken Instance under either policy) and the story families' four-step auto canary. The engine resolves a percent budget as N x percent rounded up and clamped to N, for both budgets alike (the Deployment convention of rounding maxUnavailable down is not its rule), and every case states the rule with its own numbers: at 10 percent both fleets round up to 1, where rounding down would leave 0 and no roll could start, so the roll converging is the proof; at 25 and 50 percent the ceiling or floor scales with N. Left out, with the reason: the in-place strategies, whose maxUnavailable the drain-first cells already read and whose own family is gen-inplaceonly; the prefill/decode gang at 8 Instances, a 34-pod fleet that would cost a lane shard per case while the rounding is a function of N and the percent, which the single-pod cells at 8 carry; the crash form load and the restart policy under the crash loop (gen-crashloop crosses both at 25 percent); and the gangs under the canary beyond the engine gang at 4 (the pod budget of a canary lane). The capacity floor is waived on the crash-loop cells as on every crash-loop case; the ceiling stays hard.
 - gen-inplaceonly drives InPlaceOnly on what sets it apart. An image change is the one diff it patches onto the live pod: on a single-pod Instance the roll lands in place with UIDs stable; a gang runs every in-place strategy as a whole-gang recreate (eligibility reads the leader's spec alone), so it is rebuilt whole and never refused. An env, a resources or a probe change exceeds container images: on a single-pod Instance the push is refused (`expect=held`: nothing is recreated, patched or surged for the hold window, an InPlaceUpdateNotPossible event says why, then the corrective push drops the override and lands in place); on a gang it is a whole-gang recreate. A crash loop at idle is repaired by a rebuild, since a repair is not an update (form=load under restart policy None is left out, as in every idle family: no repair is promised there). A crash loop under a push belongs to the roll: an image push patches the crashing pod itself and it serves again; an env push is refused, the repair yields to the roll, and the Instance waits broken for the corrective push, which patches it in place. One fleet size (4), both restart policies everywhere (live under the crash loops, a negative control under the pushes), the canonical budget maxUnavailable 1.
 - gen-fault-scale and gen-fault-delete break Instance 0 of the settled service, the lowest index, so a scale-down's natural victim (the highest index) and the broken Instance differ and the order of removal can be told apart. The engine runs under SurgeThenDrain with maxSurge 1 and maxUnavailable 1 in both families: nothing rolls, so the strategy is dormant, and the unavailability budget of one admits the repair that takes the broken Instance offline (the canonical budget of zero holds it). Readiness loss is repaired under neither restart policy, so its policy axis is collapsed to None; a crash at start, a crash after Ready and a pull failure run under both, and each scale-up cell states on line two what becomes of the broken Instance (expect=repaired|left) and why. On the gang fleet of two only down by one and up by one are emitted: to one is down by one there, and down by two asks for zero, which the API refuses (minReplicas 0 needs KEDA autoscaling). A rolling group is crossed in where a decoder exists; the delete family keeps the same axes.

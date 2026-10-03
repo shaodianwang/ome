@@ -1,0 +1,23 @@
+# p9514: [gen] evict edit pd N=4 SurgeThenDrain s1  Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 fault=evict:settling order_soft=1 co=none topo=pd during=rotating victim=stable victimcomp=engine edit=strategy:RecreatePod floor_slack=1
+# reason: the engine is bumped under SurgeThenDrain and its strategy edited to RecreatePod at the first pod of the new revision on prefill/decode, single-pod, and as the edit lands a settled pod of the starting revision is evicted through the Eviction API, as a node drain would, asked again while the disruption budget refuses it; the controller replaces what it took, the floor lowered by that one Instance holds, and the roll completes under the edited strategy with every Instance on the new revision and the edit on the live spec, with every row settled and no hold left behind; decoder and router are negative controls (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9514 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

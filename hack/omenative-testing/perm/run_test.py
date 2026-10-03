@@ -10579,9 +10579,17 @@ class GeneratedDisruptionFamiliesTest(unittest.TestCase):
                 path.write_text(outputs[f"{folder}/{name}.yaml"])
                 self.assertEqual([], run.validate_case_file(path), name)
 
+    def _passes(self, fam):
+        """The first pass (steady state and the push) and the pass under the
+        remaining operations."""
+        return ([(n, kv, m) for n, kv, m in fam if "faultop" not in m], [(n, kv, m) for n, kv, m in fam if "faultop" in m])
+
     def test_evict_family_crosses_shape_policy_and_strategy(self):
-        outputs, fam = self._rows("gen-evict")
-        self.assertEqual(42, len(fam))
+        outputs, whole = self._rows("gen-evict")
+        self.assertEqual(102, len(whole))
+        fam, ops = self._passes(whole)
+        self.assertEqual((42, 60), (len(fam), len(ops)))
+        self.assertEqual([n for n, _kv, _m in fam], [f"p{i}" for i in range(7400, 7440)] + ["p9500", "p9501"], "the first pass keeps its ids")
         self.assertEqual(self.SHAPES, {(kv["topo"], 1 if kv["topo"].endswith("-mn") else 0, kv["Nr"]) for _n, kv, _m in fam})
         steady = [(n, kv, m) for n, kv, m in fam if kv.get("mode") == "kill"]
         rolling = [(n, kv, m) for n, kv, m in fam if kv.get("mode") != "kill"]
@@ -10604,10 +10612,49 @@ class GeneratedDisruptionFamiliesTest(unittest.TestCase):
         self.assertEqual({("engine-mn", 1)}, {(kv["topo"], kv.get("floor_soft")) for _n, kv, _m in rolling if "floor_soft" in kv},
                          "only the gang's settled-leader victim waives the floor, as the podkill rule does")
         self._validates(outputs, "gen-evict", fam)
+        self._evict_ops(outputs, ops)
+
+    def _evict_ops(self, outputs, ops):
+        """An eviction as a rollback, an edit, a runtime edit, a scale and a
+        delete land: once everywhere, again where what it took comes back."""
+        self.assertEqual(self.SHAPES, {(kv["topo"], 1 if kv["topo"].endswith("-mn") else 0, kv["Nr"]) for _n, kv, _m in ops})
+        self.assertEqual({"rollback": 12, "edit": 12, "runtime": 12, "scaledown": 12, "scaleup": 6, "delete": 6},
+                         {op: sum(1 for _n, _kv, m in ops if m["op"] == op) for op in generate_cases.HOOK_OPS})
+        self.assertEqual(60, len({(kv["topo"], kv["Nr"], m["op"], m["form"]) for _n, kv, m in ops}), "one case per cell")
+        for name, kv, m in ops:
+            op, text = m["op"], outputs[f"gen-evict/{name}.yaml"]
+            reason = text.splitlines()[1]
+            self.assertEqual(("evict:settling", "none"), (kv["fault"], kv["co"]), name)
+            self.assertEqual(m["form"] == "persistent", "repeat" in kv, name)
+            self.assertIn(op, generate_cases.HOOK_EVICT_REPEATS if m["form"] == "persistent" else generate_cases.HOOK_OPS)
+            self.assertEqual(op in ("rollback", "edit"), kv.get("victim") == "stable", "the rollback and the edit take a settled pod")
+            self.assertEqual(op != "delete", kv.get("floor_slack") == 1, "the eviction lowers the floor by one Instance")
+            self.assertEqual(kv["Nd"] > 0 and op != "delete", kv.get("victimcomp") == "engine")
+            if op == "rollback":
+                self.assertEqual((1, "rotating", kv["Ne"] + 1), (kv["rollback"], kv["during"], kv["ceil_e"]))
+            elif op == "edit":
+                self.assertEqual(("strategy:RecreatePod", "rotating", kv["Ne"] + 1), (kv["edit"], kv["during"], kv["ceil_e"]))
+            elif op == "runtime":
+                self.assertEqual(("runtimerev", "env", "roll", f"ome-coordtest-rt-{name}"), (kv["mode"], kv["edit"], kv["expect"], kv["rt"]))
+                self.assertEqual((kv["Ne"] + 1, kv["Nd"] + 1 if kv["Nd"] else 0, kv["Nr"] + 1 if kv["Nr"] else 0),
+                                 (kv["ceil_e"], kv["ceil_d"], kv["ceil_r"]))
+            elif op == "scaledown":
+                self.assertEqual(("scaledown", kv["Ne"] - 1, kv["Ne"]), (kv["mode"], kv["to_e"], kv["ceil_e"]))
+            elif op == "scaleup":
+                self.assertEqual(("scaledown", kv["Ne"] + 1, kv["Ne"] + 1), (kv["mode"], kv["to_e"], kv["ceil_e"]))
+            else:
+                self.assertEqual(("recreate", kv["Ne"]), (kv["mode"], kv["ceil_e"]))
+            self.assertIn("Eviction API", reason)
+            self.assertEqual(m["form"] == "persistent", "times in all" in reason)
+            self.assertIn("comes up whole on fresh pods" if op == "delete" else "every row settled and no hold left behind", reason)
+        self._validates(outputs, "gen-evict", ops)
 
     def test_preempt_family_crosses_lift_at_both_moments(self):
-        outputs, fam = self._rows("gen-preempt")
-        self.assertEqual(72, len(fam))
+        outputs, whole = self._rows("gen-preempt")
+        self.assertEqual(102, len(whole))
+        fam, ops = self._passes(whole)
+        self.assertEqual((72, 30), (len(fam), len(ops)))
+        self.assertEqual([n for n, _kv, _m in fam], [f"p{i}" for i in range(7440, 7500)] + [f"p{i}" for i in range(9600, 9612)])
         self.assertEqual({"after-settle", "never"}, {m["lift"] for _n, _kv, m in fam})
         steady = [(n, kv, m) for n, kv, m in fam if kv.get("mode") == "kill"]
         rolling = [(n, kv, m) for n, kv, m in fam if kv.get("mode") != "kill"]
@@ -10628,10 +10675,23 @@ class GeneratedDisruptionFamiliesTest(unittest.TestCase):
             self.assertIn("the lift opens the nodes and drops the fillers" if m["lift"] == "after-settle"
                           else "the taint and the fillers stay to the end", reason)
         self._validates(outputs, "gen-preempt", fam)
+        self.assertEqual({"rollback": 6, "edit": 6, "runtime": 6, "scaledown": 6, "scaleup": 6},
+                         {op: sum(1 for _n, _kv, m in ops if m["op"] == op) for op in generate_cases.HOOK_PREEMPT_OPS})
+        for name, kv, m in ops:
+            reason = outputs[f"gen-preempt/{name}.yaml"].splitlines()[1]
+            self.assertEqual(("preempt:settling", "after-settle", 1, 1), (kv["fault"], kv["lift"], kv["floor_soft"], kv["order_soft"]), name)
+            self.assertEqual(kv["Nd"] > 0, kv.get("victimcomp") == "engine")
+            self.assertEqual(m["op"] in ("rollback", "edit", "runtime"), kv["ceil_e"] == kv["Ne"] + 1 and m["op"] != "scaleup")
+            self.assertIn("reason Unschedulable", reason)
+            self.assertIn("once the lift opens the nodes and drops the fillers", reason)
+        self._validates(outputs, "gen-preempt", ops)
 
     def test_pending_family_arms_the_quota_the_operation_needs(self):
-        outputs, fam = self._rows("gen-pending")
-        self.assertEqual(138, len(fam), "the tight-cluster family owns the gang surge roll held to the end by a quota")
+        outputs, whole = self._rows("gen-pending")
+        self.assertEqual(210, len(whole))
+        fam, ops = self._passes(whole)
+        self.assertEqual((138, 72), (len(fam), len(ops)), "the tight-cluster family owns the gang surge roll held to the end by a quota")
+        self.assertEqual([n for n, _kv, _m in fam], [f"p{i}" for i in range(7500, 7600)] + [f"p{i}" for i in range(9700, 9738)])
         self.assertEqual({"pending:taint:steady", "pending:taint:roll", "pending:quota:steady", "pending:quota:roll"},
                          {m["verb"] for _n, _kv, m in fam})
         steady = [(n, kv, m) for n, kv, m in fam if kv.get("mode") == "kill"]
@@ -10668,6 +10728,40 @@ class GeneratedDisruptionFamiliesTest(unittest.TestCase):
             else:
                 self.assertIn("the gang cannot form", reason)
         self._validates(outputs, "gen-pending", fam)
+        self._pending_ops(outputs, ops)
+
+    def _pending_ops(self, outputs, ops):
+        """A taint or a quota armed before a rollback, a strategy edit and a
+        runtime edit, lifted or never."""
+        self.assertEqual(72, len({(kv["topo"], kv["Nr"], m["op"], m["verb"], kv["lift"]) for _n, kv, m in ops}), "one case per cell")
+        self.assertEqual({"pending:taint:rollback", "pending:quota:rollback", "pending:taint:edit", "pending:quota:edit",
+                          "pending:taint:runtime", "pending:quota:runtime"}, {m["verb"] for _n, _kv, m in ops})
+        for name, kv, m in ops:
+            op, reason = m["op"], outputs[f"gen-pending/{name}.yaml"].splitlines()[1]
+            gang = kv["topo"].endswith("-mn")
+            self.assertIn(kv["lift"], ("after-settle", "never"))
+            if kv["fault"].startswith("quota:"):
+                n = int(kv["fault"].partition(":")[2])
+                self.assertEqual((1 if gang else 0) if op == "runtime" else -1, n,
+                                 "the runtime edit surges; the drain-first roll and the switched roll create after a pod is gone")
+            else:
+                self.assertEqual("taint:all", kv["fault"])
+            if op == "rollback":
+                self.assertEqual((1, "draining", kv["Ne"], "RecreatePod"), (kv["rollback"], kv["during"], kv["ceil_e"], m["strat"]))
+            elif op == "edit":
+                self.assertEqual(("strategy:RecreatePod", "settling", kv["Ne"] + 1, "SurgeThenDrain"),
+                                 (kv["edit"], kv["during"], kv["ceil_e"], m["strat"]))
+                self.assertIn('maxUnavailable: 1', outputs[f"gen-pending/{name}.yaml"], "the budget valid under both strategies")
+            else:
+                self.assertEqual(("runtimerev", "env", "roll", f"ome-coordtest-rt-{name}", kv["Ne"] + 1),
+                                 (kv["mode"], kv["edit"], kv["expect"], kv["rt"], kv["ceil_e"]))
+                self.assertEqual((kv["Nd"] + 1 if kv["Nd"] else 0, kv["Nr"] + 1 if kv["Nr"] else 0), (kv["ceil_d"], kv["ceil_r"]))
+            self.assertIn("is armed on the settled service", reason)
+            self.assertIn("inside its unschedulable grace", reason)
+            self.assertIn("once the cause is lifted" if kv["lift"] == "after-settle" else "holds with its reason across the hold window", reason)
+            if op == "rollback":
+                self.assertIn("back on the starting revision" if kv["lift"] == "after-settle" else "the rollback waits with the same reason", reason)
+        self._validates(outputs, "gen-pending", ops)
 
     def test_ids_stay_inside_the_reserved_block(self):
         for folder in ("gen-evict", "gen-preempt", "gen-pending"):
@@ -14383,3 +14477,237 @@ class LiftPushedPullTest(unittest.TestCase):
         for case in cases:
             self.assertEqual(("image pull", "one-shot", "new"), case.fault_rows()[0], case.id)
             self.assertEqual("push", case.operation, case.id)
+
+
+class HookOperationTest(unittest.TestCase):
+    """A pending cause armed before a rollback, a strategy edit or a runtime
+    edit, and an eviction or a preemption at a hook of those, of a scale and
+    of a delete: the header forms, the launch of each operation, the hook
+    tick that lands a rollback or an edit under a pending watch, the fault
+    tick that leaves the first firing to the handler, the completion watch,
+    the pods an operation explains, and the mode dispatch."""
+
+    ROLL = "# p999: x Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine"
+    DOWN = "# p999: x mode=scaledown Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 to_e=3 topo=engine"
+    UP = "# p999: x mode=scaledown Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 to_e=5 topo=engine"
+    DELETE = "# p999: x mode=recreate Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 topo=engine"
+    RUNTIME = "# p999: x mode=runtimerev Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine rt=ome-coordtest-rt-p999 edit=env expect=roll"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_pending_cause_before_a_rollback_an_edit_and_a_runtime_edit(self):
+        for form in (" rollback=1 during=draining fault=taint:all lift=after-settle",
+                     " rollback=1 during=draining fault=quota:-1 lift=never",
+                     " edit=strategy:RecreatePod during=settling fault=taint:all lift=never",
+                     " edit=strategy:RecreatePod during=settling fault=quota:-1 lift=after-settle"):
+            self.assertEqual([], self._errs(self.ROLL + form), form)
+        self.assertEqual([], self._errs(self.RUNTIME + " fault=taint:all lift=after-settle"))
+        self.assertEqual([], self._errs(self.RUNTIME + " fault=quota:0 lift=never"))
+        self.assertTrue(any("needs lift=" in e for e in self._errs(self.RUNTIME + " fault=taint:all")),
+                        "a cause armed before a runtime edit names its lift")
+        self.assertTrue(any("needs lift=" in e for e in self._errs(self.ROLL + " rollback=1 during=draining fault=taint:all")))
+
+    def test_eviction_and_preemption_at_a_hook_of_each_operation(self):
+        for form in (" rollback=1 during=rotating fault=evict:settling victim=stable floor_slack=1",
+                     " rollback=1 during=rotating fault=evict:settling victim=stable repeat=2 floor_slack=1",
+                     " edit=strategy:RecreatePod during=rotating fault=evict:settling victim=stable order_soft=1",
+                     " edit=strategy:RecreatePod during=rotating fault=evict:settling repeat=2",
+                     " rollback=1 during=rotating fault=preempt:settling lift=after-settle floor_soft=1 order_soft=1",
+                     " edit=strategy:RecreatePod during=rotating fault=preempt:settling lift=never"):
+            self.assertEqual([], self._errs(self.ROLL + form), form)
+        self.assertEqual([], self._errs(self.RUNTIME + " fault=evict:settling floor_slack=1"))
+        self.assertEqual([], self._errs(self.RUNTIME + " fault=evict:rotating repeat=2 floor_slack=1"))
+        self.assertEqual([], self._errs(self.RUNTIME + " fault=preempt:settling lift=after-settle victimcomp=engine"))
+        self.assertEqual([], self._errs(self.DOWN + " fault=preempt:settling lift=after-settle floor_soft=1"))
+        self.assertEqual([], self._errs(self.UP + " fault=preempt:settling lift=after-settle"))
+        self.assertEqual([], self._errs(self.DOWN + " fault=evict:settling repeat=2 floor_slack=1"), "the scale driver's own form")
+        self.assertEqual([], self._errs(self.DELETE + " fault=evict:settling"))
+
+    def test_hook_forms_rejected(self):
+        self.assertTrue(any("fires at fault=evict:settling" in e
+                            for e in self._errs(self.ROLL + " rollback=1 during=rotating fault=evict:rotating victim=stable")),
+                        "a hook fault over a rollback fires as the rollback lands")
+        self.assertTrue(any("fires at fault=evict:settling" in e for e in self._errs(self.DELETE + " fault=evict:draining")))
+        self.assertTrue(any("has fired at" in e for e in self._errs(
+            self.ROLL + " rollback=1 during=held break=stuck fault=evict:settling victim=stable")))
+        self.assertTrue(any("needs lift=" in e for e in self._errs(self.DOWN + " fault=preempt:settling")))
+        self.assertTrue(any("places nothing until its recreate" in e
+                            for e in self._errs(self.DELETE + " fault=preempt:settling lift=after-settle")))
+        self.assertTrue(any("do not combine" in e for e in self._errs(
+            self.ROLL + " rollback=1 during=rotating fault=podkill:settling repeat=2")),
+            "a repeating podkill still rides a plain push")
+        self.assertTrue(any("persistent form" in e for e in self._errs(self.DELETE + " fault=evict:settling repeat=2")),
+                        "a delete brings nothing back the eviction could take again")
+
+    def test_fault_tick_leaves_the_first_firing_to_the_handler(self):
+        f = run._fault_new("p999", {"fault": "evict:settling", "Ne": 4})
+        f["hook_op"] = True
+        ctx = {"fault": f, "trigger_ts": time.time() - 5, "old_hashes": set(), "pod_state": {},
+               "pods_per_inst": {"engine": 1, "decoder": 1, "router": 1}, "inv": None}
+        fired = []
+        with mock.patch.object(run, "_fault_fire", lambda f_, *a, **k: fired.append(f_["param"])):
+            run._fault_tick(ctx)
+            self.assertEqual([], fired, "the handler fires it at the operation's hook")
+            f["hook_op_fired"] = True
+            run._fault_tick(ctx)
+            self.assertEqual(["settling"], fired, "once the handler has fired, the tick owns the retries")
+            f["fired"], f["repeat"] = True, 2
+            with mock.patch.object(run, "_repeat_tick", lambda f_, c: fired.append("repeat")):
+                run._fault_tick(ctx)
+            self.assertEqual(["settling", "repeat"], fired, "and the repetitions")
+
+    def _ctx(self, hdr, n=4):
+        pods = {}
+        for i in range(n):
+            pods[f"p999-engine-{i}"] = {"alive": True, "uid": f"u{i}", "comp": "engine", "inst": str(i),
+                                        "hash": "old", "ready": True, "runner": "default", "node": "w1"}
+        return {"case_id": "p999", "N": {"engine": n, "decoder": 0, "router": 0}, "configured": {"engine"},
+                "pods_per_inst": {"engine": 1, "decoder": 1, "router": 1}, "hdr": hdr,
+                "info": {"members": [], "workers": {}, "max_unavail": {}, "strat": {}},
+                "modes": {"engine": "surge"}, "pod_state": pods, "old_hashes": {"old"}, "agg": {},
+                "peaks": {"engine": n, "decoder": 0, "router": 0}, "closed": False, "trigger_ts": None,
+                "fault": run._fault_new("p999", hdr)}
+
+    def test_op_launch_lands_each_operation(self):
+        ok = lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")
+        calls = []
+        with mock.patch.object(run, "kubectl", lambda *a, **k: calls.append(a) or ok(*a)), \
+                mock.patch.object(run, "_scale_patch", lambda cid, t: calls.append(("scale", t)) or (True, "")), \
+                mock.patch.object(run, "_bump_rev", lambda ctx, acting, **k: calls.append(("bump", sorted(acting))) or True), \
+                mock.patch.object(run, "_bump_runtime", lambda ctx, csr, comps, material, **k: calls.append(("rt", csr)) or True), \
+                mock.patch.object(run, "_isvc_spec", lambda cid: {"engine": {"runner": {"image": "x"}}}):
+            hdr = {"Ne": 4, "fault": "evict:settling", "rollback": 1, "during": "rotating", "mode": "rollout"}
+            ctx = self._ctx(hdr)
+            st = run._op_launch(ctx, hdr, "rollback", "the fault")
+            self.assertIsNone(st["error"])
+            self.assertEqual(({"engine"}, set(), 8), (st["acting"], st["controls"], st["expected_created"]["engine"]))
+            self.assertEqual({"engine": {"runner": {"image": "x"}}}, st["rb"]["snapshot"])
+            self.assertEqual(("bump", ["engine"]), calls[-1])
+            ctx["agg"] = {"engine": (4, 4, 0)}
+            self.assertTrue(st["done"](), "every Instance back on the starting revision")
+            ctx["pod_state"]["p999-engine-0"]["hash"] = "new"
+            self.assertFalse(st["done"](), "a pod of the new revision is still alive")
+            hdr = {"Ne": 4, "fault": "evict:settling", "edit": "strategy:RecreatePod", "during": "rotating", "mode": "rollout"}
+            st = run._op_launch(self._ctx(hdr), hdr, "edit", "the fault")
+            self.assertEqual(("strategy", "RecreatePod", "rotating"), (st["medit"]["kind"], st["medit"]["value"], st["medit"]["hook"]))
+            self.assertEqual(4, st["expected_created"]["engine"])
+            hdr = {"Ne": 4, "fault": "evict:settling", "mode": "scaledown", "to_e": 3}
+            ctx = self._ctx(hdr)
+            st = run._op_launch(ctx, hdr, "scale", "the fault")
+            self.assertEqual(("scale", {"engine": 3}), calls[-1])
+            self.assertEqual(({"engine"}, True, {"u3"}, 3), (st["acting"], st["scale_down"], st["owned_uids"], ctx["N"]["engine"]))
+            self.assertEqual(0, st["expected_created"]["engine"])
+            hdr = {"Ne": 4, "fault": "preempt:settling", "mode": "scaledown", "to_e": 5, "lift": "after-settle"}
+            ctx = self._ctx(hdr)
+            st = run._op_launch(ctx, hdr, "scale", "the fault")
+            self.assertEqual((False, 1, 4), (st["scale_down"], st["expected_created"]["engine"], ctx["N"]["engine"]))
+            ctx["agg"], ctx["measures"] = {"engine": (5, 5, 0)}, {}
+            self.assertTrue(st["done"]())
+            hdr = {"Ne": 4, "fault": "evict:settling", "mode": "runtimerev", "rt": "ome-coordtest-rt-p999", "edit": "env", "expect": "roll"}
+            st = run._op_launch(self._ctx(hdr), hdr, "runtime", "the fault")
+            self.assertEqual(("rt", "ome-coordtest-rt-p999"), calls[-1])
+            self.assertEqual({"engine"}, st["acting"])
+            hdr = {"Ne": 4, "fault": "evict:settling", "mode": "recreate"}
+            ctx = self._ctx(hdr)
+            st = run._op_launch(ctx, hdr, "delete", "the fault")
+            self.assertIn("delete", calls[-1])
+            self.assertEqual(({"engine"}, 0), (st["acting"], st["expected_created"]["engine"]))
+            self.assertFalse(st["done"](), "pods are still alive")
+            self.assertGreater(st["budget"], 0)
+
+    def test_op_launch_reports_a_trigger_that_failed(self):
+        hdr = {"Ne": 4, "fault": "taint:all", "rollback": 1, "during": "draining", "mode": "rollout", "lift": "never"}
+        with mock.patch.object(run, "_isvc_spec", lambda cid: {}):
+            st = run._op_launch(self._ctx(hdr), hdr, "rollback", "the cause")
+        self.assertIn("no live spec to snapshot", st["error"])
+        with mock.patch.object(run, "_scale_patch", lambda cid, t: (False, "denied")):
+            hdr = {"Ne": 4, "fault": "preempt:settling", "mode": "scaledown", "to_e": 5, "lift": "after-settle"}
+            st = run._op_launch(self._ctx(hdr), hdr, "scale", "the fault")
+        self.assertEqual("denied", st["error"])
+
+    def test_pending_op_tick_lands_the_rollback_and_the_edit_at_their_hooks(self):
+        hdr = {"Ne": 4, "fault": "taint:all", "rollback": 1, "during": "draining", "mode": "rollout", "lift": "never"}
+        ctx = self._ctx(hdr)
+        ctx["trigger_ts"] = time.time() - 10
+        rb = run._rollback_new(hdr)
+        seen = []
+        with mock.patch.object(run, "_rollback_tick", lambda rb_, *a: seen.append(rb_["first_drain_at"])):
+            run._pending_op_tick(ctx, rb, None, {"engine"})
+            self.assertEqual([None], seen, "no pod of the starting revision has gone yet")
+            ctx["pod_state"]["p999-engine-0"]["alive"] = False
+            run._pending_op_tick(ctx, rb, None, {"engine"})
+        self.assertIsNotNone(seen[-1], "the draining hook is latched before the rollback tick reads it")
+        medit = run._midroll_new({"edit": "strategy:RecreatePod", "during": "settling"})
+        with mock.patch.object(run, "_midroll_tick", lambda e, *a: seen.append(e["hook"])):
+            run._pending_op_tick(ctx, None, medit, {"engine"})
+        self.assertEqual("settling", seen[-1])
+
+    def test_hook_op_pods_per_operation(self):
+        ppi = {"engine": 2, "decoder": 2, "router": 1}
+        base = dict(acting={"engine"}, N0={"engine": 2, "decoder": 0, "router": 0}, target={"engine": 2, "decoder": 0, "router": 0})
+        self.assertEqual(8, run._hook_op_pods(dict(base, op="rollback"), ppi), "at most once in each direction")
+        self.assertEqual(4, run._hook_op_pods(dict(base, op="edit"), ppi))
+        self.assertEqual(4, run._hook_op_pods(dict(base, op="runtime"), ppi))
+        self.assertEqual(2, run._hook_op_pods(dict(base, op="scale", target={"engine": 3, "decoder": 0, "router": 0}), ppi))
+        self.assertEqual(0, run._hook_op_pods(dict(base, op="scale", target={"engine": 1, "decoder": 0, "router": 0}), ppi))
+        self.assertEqual(0, run._hook_op_pods(dict(base, op="delete"), ppi))
+
+    def test_hook_op_watch_converges_or_times_out(self):
+        ctx = {"trigger_ts": time.time(), "closed": False}
+        f = {"repeat": 0}
+        with mock.patch.object(run, "_read_one", lambda c: None), mock.patch.object(run, "STABILITY_S", 0):
+            self.assertEqual("CONVERGED", run._hook_op_watch(ctx, f, lambda: True, 30))
+            self.assertIn("converged_at", ctx)
+            self.assertEqual("ROTATE_TIMEOUT", run._hook_op_watch({"trigger_ts": time.time() - 5, "closed": False}, f, lambda: False, 1))
+            f = {"repeat": 2, "fired_count": 1, "refused_since": time.time()}
+            ticks = []
+
+            def read(c):
+                ticks.append(1)
+                if len(ticks) > 3:
+                    f["refused_since"] = None
+            with mock.patch.object(run, "_read_one", read):
+                self.assertEqual("CONVERGED", run._hook_op_watch({"trigger_ts": time.time() - 5, "closed": False}, f, lambda: True, 1))
+            self.assertGreater(len(ticks), 3, "the window stays open while a repetition waits out a refusal")
+            self.assertEqual("INFRA-FAIL", run._hook_op_watch({"trigger_ts": time.time(), "closed": False},
+                                                              {"repeat": 0, "infra_fail": "x"}, lambda: True, 30))
+
+    def test_mode_dispatch_routes_the_hook_and_pending_operations(self):
+        routed = []
+        with mock.patch.object(run, "_hook_op", lambda *a: routed.append(("hook", a[3].get("mode")))), \
+                mock.patch.object(run, "_pending_roll", lambda *a: routed.append(("pending", a[3].get("mode")))), \
+                mock.patch.object(run, "_window_op", lambda *a: routed.append(("window", a[3].get("mode")))), \
+                mock.patch.object(run, "_recreate", lambda *a: routed.append(("recreate", None))), \
+                mock.patch.object(run, "_runtimerev", lambda *a: routed.append(("runtimerev", None))):
+            for hdr in ({"mode": "recreate", "Ne": 4, "fault": "evict:settling"},
+                        {"mode": "runtimerev", "Ne": 4, "fault": "preempt:settling", "lift": "after-settle"},
+                        {"mode": "runtimerev", "Ne": 4, "fault": "taint:all", "lift": "never"},
+                        {"mode": "runtimerev", "Ne": 4, "fault": "quota:0", "lift": "after-settle"},
+                        {"mode": "recreate", "Ne": 4, "fault": "webhook:settling", "lift": "after-hold"},
+                        {"mode": "recreate", "Ne": 4},
+                        {"mode": "runtimerev", "Ne": 4, "fault": "crashloop:old", "form": "start"}):
+                run.run_mode_case("p999", "x.yaml", "d", hdr, hdr["mode"])
+        self.assertEqual([("hook", "recreate"), ("hook", "runtimerev"), ("pending", "runtimerev"), ("pending", "runtimerev"),
+                          ("window", "recreate"), ("recreate", None), ("runtimerev", None)], routed)
+        with mock.patch.object(run, "_hook_op", lambda *a: routed.append(("hook", a[3].get("to_e")))), \
+                mock.patch.object(run, "_pending_scale", lambda *a: routed.append(("pscale", None))), \
+                mock.patch.object(run, "_fault_new", lambda *a: None), mock.patch.object(run, "apply_runtime_fixtures", lambda: None), \
+                mock.patch.object(run, "apply_case", lambda y: subprocess.CompletedProcess((), 1, "", "stop here")), \
+                mock.patch.object(run, "write_result", lambda *a, **k: None):
+            routed.clear()
+            run.run_mode_case("p999", "x.yaml", "d", {"Ne": 4, "fault": "preempt:settling", "lift": "after-settle", "to_e": 5}, "scaledown")
+            run.run_mode_case("p999", "x.yaml", "d", {"Ne": 4, "fault": "taint:all", "lift": "never", "to_e": 5, "during": "idle"}, "scaledown")
+            run.run_mode_case("p999", "x.yaml", "d", {"Ne": 4, "fault": "evict:settling", "to_e": 5}, "scaledown")
+        self.assertEqual([("hook", 5), ("pscale", None)], routed, "an eviction under a scale stays with the scale driver")
+
+    def test_window_operation_names_the_hook_operations(self):
+        self.assertEqual("rollback", run._window_operation({"rollback": 1, "during": "rotating", "fault": "evict:settling"}))
+        self.assertEqual("edit", run._window_operation({"edit": "strategy:RecreatePod", "during": "settling", "fault": "taint:all"}))
+        self.assertEqual("runtime", run._window_operation({"mode": "runtimerev", "fault": "quota:0"}))
+        self.assertEqual("scale", run._window_operation({"mode": "scaledown", "fault": "preempt:settling"}))
+        self.assertEqual("delete", run._window_operation({"mode": "recreate", "fault": "evict:settling"}))
+        self.assertEqual("push", run._window_operation({"fault": "preempt:rotating", "lift": "never"}))

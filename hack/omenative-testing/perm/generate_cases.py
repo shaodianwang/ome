@@ -484,6 +484,18 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     surge roll held to the end by that quota is the tight-cluster family's
     cell, so the pending family leaves its quota:<members-1> lift=never cell
     out.
+  - Under the remaining operations the pending causes and the pod faults run
+    one case per ledger cell, under restart policy None. A cause armed before
+    a rollback runs drain-first with the rollback at its draining hook: the
+    roll's first replacement is what waits, and a roll that cannot place its
+    first pod reaches no later hook, while the surge roll under the same
+    cause never drains and so offers no rollback moment the cause can hold.
+    The strategy edit lands as the push does, switching the surge strategy to
+    the drain-first one. The eviction's persistent form (repeat=) needs a pod
+    that comes back: a delete brings none back, so its cell has the one-shot
+    form only, and a scale-up's persistent form is the repeating family's
+    cell. A preemption holds a pod the operation places, and a delete places
+    nothing until its recreate, so the delete meets the eviction alone.
   - The broken-Instance families aim the break at Instance 0, the lowest
     index, so a scale-down's natural victim (the highest index) and the
     broken Instance differ and the order of removal can be told apart. The
@@ -637,7 +649,7 @@ GEN_CONTINUATIONS = {
     "gen-fault-delete": (10200, 10300),
     "gen-evict": (9500, 9600),
     "gen-preempt": (9600, 9700),
-    "gen-pending": (9700, 9800),
+    "gen-pending": [(9700, 9800), (10700, 10800)],
     "gen-fault-move": (9800, 9900),
     "gen-fault-edit": (9900, 10000),
     "gen-ops-held": (10000, 10100),
@@ -3941,6 +3953,7 @@ def emit_evict(add):
                 add("gen-evict", desc, kv, comps(topo, n, w, roll_life, d_life=d_life, nr=nr),
                     _evict_roll_reason(topo, strat, waivers, nr), meta,
                     cell=("evict", DISRUPT_PHASE, topo, w, strat, rp, nr))
+    _emit_evict_ops(add)
 
 
 # ── gen-preempt: a pod of a Ready Instance is preempted ─────────────────────
@@ -3993,6 +4006,7 @@ def emit_preempt(add):
                     add("gen-preempt", desc, kv, comps(topo, n, w, roll_life, d_life=d_life, nr=nr),
                         _preempt_reason(DISRUPT_PHASE, topo, rp, lift, strat, nr), meta,
                         cell=("preempt", DISRUPT_PHASE, topo, w, strat, rp, lift, nr))
+    _emit_preempt_ops(add)
 
 
 # ── gen-packed-pool: the only room is what a broken pod vacates ─────────────
@@ -4391,6 +4405,254 @@ def emit_pending(add):
                         add("gen-pending", desc, kv, comps(topo, n, w, roll_life, d_life=d_life, nr=nr),
                             _pending_reason(cause, "roll", topo, rp, lift, strat, w, nr), meta,
                             cell=("pending", cause, "roll", topo, w, strat, rp, lift, nr))
+    _emit_pending_ops(add)
+
+
+# ── The pending causes and the pod faults under the remaining operations ────
+# A pending cause armed before a rollback, a strategy edit and a runtime
+# edit, and an eviction or a preemption at a hook of those and of a scale and
+# a delete, one case per ledger cell on the six shape families. The rollback
+# under a pre-armed cause runs drain-first and fires at its draining hook:
+# the roll's first replacement is what waits, and a roll that cannot place
+# its first pod reaches no later hook; the surge roll under the same cause
+# never drains, so it has no rollback moment the cause can hold. The edit
+# lands as the push does and switches the surge strategy to the drain-first
+# one under the budget valid for both. The drain-first replacement is
+# created after a pod is gone, so quota:-1 refuses it; the runtime edit
+# surges, so its quota is the surge's. The hook faults land as the operation
+# lands, the rollback and the edit having fired at the first new pod.
+PENDING_OPS = ["rollback", "edit", "runtime"]
+PENDING_ROLLBACK = ("RecreatePod", "draining")
+PENDING_EDIT = ("SurgeThenDrain", "RecreatePod", "settling")
+HOOK_OPS = ["rollback", "edit", "runtime", "scaledown", "scaleup", "delete"]
+HOOK_PHASE = "settling"
+HOOK_ROLLBACK = ("SurgeThenDrain", "rotating")
+HOOK_EDIT = ("SurgeThenDrain", "RecreatePod", "rotating")
+HOOK_STRAT = ("SurgeThenDrain", 1, 0)
+# The persistent form of the eviction: applied again once what it took has
+# come back. A scale-up's cell exists in the repeating family; a delete
+# brings nothing back the eviction could take again.
+HOOK_REPEAT_N = 2
+HOOK_EVICT_REPEATS = ["rollback", "edit", "runtime", "scaledown"]
+# The preemption lands at the hooks of the operations that place a pod the
+# press can hold; a delete places nothing until its recreate.
+HOOK_PREEMPT_OPS = ["rollback", "edit", "runtime", "scaledown", "scaleup"]
+OP_WORDS = {"rollback": "the rollback", "edit": "the roll under its edit", "runtime": "the runtime edit",
+            "scaledown": "the scale-down", "scaleup": "the scale-up", "delete": "the delete"}
+
+
+def _op_strategy(op, pending):
+    """(strategy, maxSurge, maxUnavailable) of the roll an operation runs, or
+    the dormant canonical budget where nothing rolls."""
+    if op == "rollback":
+        return (PENDING_ROLLBACK[0], 0, 1) if pending else HOOK_STRAT
+    if op == "edit":
+        start, end = (PENDING_EDIT if pending else HOOK_EDIT)[:2]
+        return (start,) + switch_budget(start, end)
+    return HOOK_STRAT
+
+
+def _op_kv(op, topo, n, nr, pending):
+    """The header of an operation case on a disruption shape: its mode and
+    knobs, counts and ceilings (every Component rolls on a runtime edit,
+    the decoder and the router under their default surge of one)."""
+    strat, surge, unavail = _op_strategy(op, pending)
+    routers = router_count(topo, nr)
+    kv = dict(**counts(topo, n, nr), **ceilings(topo, n, strat, surge, nr))
+    if op == "rollback":
+        kv.update(rollback=1, during=(PENDING_ROLLBACK if pending else HOOK_ROLLBACK)[1])
+    elif op == "edit":
+        edit = PENDING_EDIT if pending else HOOK_EDIT
+        kv.update(edit=f"strategy:{edit[1]}", during=edit[2])
+    elif op == "runtime":
+        kv.update(mode="runtimerev", edit="env", expect="roll",
+                  ceil_d=(n + 1 if is_pd(topo) else 0), ceil_r=(routers + 1 if routers else 0))
+    elif op == "scaledown":
+        kv.update(mode="scaledown", to_e=n - 1, ceil_e=n)
+    elif op == "scaleup":
+        kv.update(mode="scaledown", to_e=n + 1, ceil_e=n + 1)
+    elif op == "delete":
+        kv.update(mode="recreate", ceil_e=n)
+    return kv
+
+
+def _op_comps(op, topo, n, w, nr, pending):
+    strat, surge, unavail = _op_strategy(op, pending)
+    return comps(topo, n, w, lib.lifecycle(strat=strat, surge=surge, unavail=unavail), nr=nr)
+
+
+def _op_does(op, pending, topo):
+    """What the operator does, in the reason's words."""
+    if op == "rollback":
+        if pending:
+            return ("the engine is bumped under the drain-first strategy and the starting revision re-applied as its "
+                    "first pod goes")
+        return "the engine is bumped and the starting revision re-applied at the first pod of the new revision"
+    if op == "edit":
+        when = "as the push lands" if pending else "at the first pod of the new revision"
+        return f"the engine is bumped under SurgeThenDrain and its strategy edited to RecreatePod {when}"
+    if op == "runtime":
+        return ("the dedicated runtime every Component inherits gets a new runner env, so every Component rolls onto "
+                "its own new revision")
+    return {"scaledown": "the engine is scaled from N to N-1", "scaleup": "the engine is scaled from N to N+1",
+            "delete": "the service is deleted"}[op]
+
+
+def _op_end(op):
+    """What the operation owes once it is free to complete."""
+    return {"rollback": ("the rollback completes with every Instance back on the starting revision and serving, no pod "
+                         "of the new revision left"),
+            "edit": "the roll completes under the edited strategy with every Instance on the new revision and the edit on the live spec",
+            "runtime": "the edit lands on every Instance of every Component, each on its own new revision and serving",
+            "scaledown": "the scale completes with the engine at N-1 and the survivors on their own pods",
+            "scaleup": "the scale completes with the new Instance whole and serving and the survivors on their own pods",
+            "delete": ("the delete completes with nothing of the service left, and the same manifest re-applied under "
+                       "the same name comes up whole on fresh pods")}[op]
+
+
+def _op_controls(topo, nr, op):
+    if op == "runtime":
+        return ""
+    if is_pd(topo):
+        return "; decoder and router are negative controls (co=none)"
+    if nr:
+        return "; the router is a negative control (co=none)"
+    return ""
+
+
+def _pending_op_cause(cause, op, topo):
+    if cause == "taint":
+        return "a NoSchedule taint on every schedulable node"
+    if op == "runtime":
+        return ("a quota with room for all but one member of a surge gang (no gang can form)" if is_mn(topo)
+                else "a quota with no room for a single surge pod")
+    return ("a quota one pod short of the recreated gang (all members but one admitted, the gang cannot form)"
+            if is_mn(topo) else "a quota with no room for the one replacement pod")
+
+
+def _pending_op_reason(op, cause, lift, topo, w, nr):
+    token, how = PENDING_TOKEN[cause], ("placed" if cause == "taint" else "admitted")
+    waits = {"rollback": ("the drained Instance's replacement cannot be {how}, so the roll waits with reason {token}; "
+                          "the rollback then owes that Instance on the starting revision and its pod cannot be {how} "
+                          "either, so the rollback waits with the same reason"),
+             "edit": ("the surge cannot be {how}, and once the edit switches the roll to the drain-first strategy the "
+                      "drained Instance's replacement cannot be {how} either, so the roll waits with reason {token} "
+                      "under the edited strategy"),
+             "runtime": "the first pod of each Component's roll cannot be {how}, so the roll waits with reason {token}"}
+    floor = "N" if op == "runtime" else "N minus the drained Instance"
+    out = (f"{_pending_op_cause(cause, op, topo)} is armed on the settled service ({shape_words(topo, w, nr)}), then "
+           f"{_op_does(op, True, topo)}: {waits[op].format(how=how, token=token)} inside its unschedulable grace, the "
+           f"capacity floor ({floor}) holds, nothing settled is taken down to make room and no row reads Failed")
+    if lift == "after-settle":
+        out += f"; once the cause is lifted {_op_end(op)}"
+    else:
+        out += "; the cause stays to the end, so the wait holds with its reason across the hold window"
+    if is_mn(topo):
+        out += "; each Instance is a gang, placed whole"
+    return out + _op_controls(topo, nr, op)
+
+
+def _evict_op_reason(op, form, topo, w, nr):
+    victim = ("a settled pod of the starting revision" if op in ("rollback", "edit") else
+              "a settled engine pod" if op in ("scaledown", "scaleup", "runtime") else "one of its pods")
+    at = {"rollback": "as the rollback lands", "edit": "as the edit lands", "runtime": "as the edit lands",
+          "scaledown": "as the scale lands", "scaleup": "as the scale lands", "delete": "as the delete lands"}[op]
+    out = (f"{_op_does(op, False, topo)} on {shape_words(topo, w, nr)}, and {at} {victim} is evicted through the "
+           f"Eviction API, as a node drain would, asked again while the disruption budget refuses it")
+    if form == "persistent":
+        out += (f", and again once what it took has come back, {HOOK_REPEAT_N} times in all; while an Instance is short "
+                f"the status says so and never counts it whole, every repair is for an Instance the eviction took, and "
+                f"the controller creates no more pods than the operation and the repairs explain")
+    if op == "delete":
+        out += "; the eviction is one more pod on its way out: every pod goes within the teardown budget, " + _op_end(op)
+    else:
+        out += (f"; the controller replaces what it took, the floor lowered by that one Instance holds, and "
+                f"{_op_end(op)}, with every row settled and no hold left behind")
+    if is_mn(topo):
+        out += "; each Instance is a gang, rebuilt whole"
+    return out + _op_controls(topo, nr, op)
+
+
+def _preempt_op_reason(op, topo, w, nr):
+    at = {"rollback": "as the rollback lands", "edit": "as the edit lands", "runtime": "as the edit lands",
+          "scaledown": "as the scale lands", "scaleup": "as the scale lands"}[op]
+    out = (f"{_op_does(op, False, topo)} on {shape_words(topo, w, nr)}, and {at} fillers take the spare CPU of every "
+           f"node, the pending taint closes every node to the case, and a higher-priority filler presses on the node "
+           f"of the aimed pod, so the scheduler preempts one pod of the case there; the Instance waits with reason "
+           f"Unschedulable, nothing settled is taken down to make room and no row reads Failed; once the lift opens the "
+           f"nodes and drops the fillers {_op_end(op)}; floor and order waived, since the preemption itself takes a pod "
+           f"the budget cannot absorb")
+    if is_mn(topo):
+        out += "; each Instance is a gang, placed whole"
+    return out + _op_controls(topo, nr, op)
+
+
+def _emit_pending_ops(add):
+    """A pending cause armed before a rollback, a strategy edit and a runtime
+    edit; appended after the first pass so the committed ids keep their
+    places."""
+    for topo, n, w, nr in DISRUPT_SHAPES:
+        for op in PENDING_OPS:
+            strat, surge, unavail = _op_strategy(op, True)
+            for cause in PENDING_CAUSES:
+                for lift in PENDING_LIFTS:
+                    if cause == "taint":
+                        fault = "taint:all"
+                    else:
+                        fault = f"quota:{_pending_quota('roll', strat, w) if op == 'runtime' else -1}"
+                    kv = dict(_op_kv(op, topo, n, nr, True), fault=fault, co="none", topo=topo, lift=lift)
+                    desc = (f"{GEN_MARK} pending {cause} {op} {shape_tag(topo, w, nr)} N={n} {strat} "
+                            f"{budget_tag(strat, surge, unavail)} lift {lift}")
+                    add("gen-pending", desc, kv, _op_comps(op, topo, n, w, nr, True),
+                        _pending_op_reason(op, cause, lift, topo, w, nr),
+                        dict(strat=strat, verb=f"pending:{cause}:{op}", lift=lift, faultop=f"pending {op}", op=op),
+                        cell=("pending", cause, op, topo, w, nr, lift), dedicated=(op == "runtime"))
+
+
+def _emit_evict_ops(add):
+    """An eviction as a rollback, an edit, a runtime edit, a scale or a
+    delete lands, once and (where what it took comes back) again."""
+    for topo, n, w, nr in DISRUPT_SHAPES:
+        for op in HOOK_OPS:
+            strat, surge, unavail = _op_strategy(op, False)
+            for form in (["one-shot", "persistent"] if op in HOOK_EVICT_REPEATS else ["one-shot"]):
+                kv = dict(_op_kv(op, topo, n, nr, False), fault=f"evict:{HOOK_PHASE}", co="none", topo=topo)
+                if op in ("rollback", "edit"):
+                    kv["victim"] = "stable"
+                if is_pd(topo) and op != "delete":
+                    kv["victimcomp"] = "engine"
+                if op != "delete":
+                    kv["floor_slack"] = 1
+                if op in ("rollback", "edit", "runtime"):
+                    kv["order_soft"] = 1
+                if form == "persistent":
+                    kv["repeat"] = HOOK_REPEAT_N
+                desc = (f"{GEN_MARK} evict {op} {shape_tag(topo, w, nr)} N={n}"
+                        + (f" {strat} {budget_tag(strat, surge, unavail)}" if op in ("rollback", "edit", "runtime") else "")
+                        + (f" x{HOOK_REPEAT_N}" if form == "persistent" else ""))
+                add("gen-evict", desc, kv, _op_comps(op, topo, n, w, nr, False), _evict_op_reason(op, form, topo, w, nr),
+                    dict(strat=strat if op in ("rollback", "edit", "runtime") else "(dormant: nothing rolls)",
+                         verb=f"evict:{op}", faultop=f"evict {op}", op=op, form=form),
+                    cell=("evict", op, form, topo, w, nr), dedicated=(op == "runtime"))
+
+
+def _emit_preempt_ops(add):
+    """A preemption as a rollback, an edit, a runtime edit or a scale lands,
+    the nodes opened again once the wait has held."""
+    for topo, n, w, nr in DISRUPT_SHAPES:
+        for op in HOOK_PREEMPT_OPS:
+            strat, surge, unavail = _op_strategy(op, False)
+            kv = dict(_op_kv(op, topo, n, nr, False), fault=f"preempt:{HOOK_PHASE}", floor_soft=1, order_soft=1,
+                      co="none", topo=topo, lift="after-settle")
+            if is_pd(topo):
+                kv["victimcomp"] = "engine"
+            desc = (f"{GEN_MARK} preempt {op} {shape_tag(topo, w, nr)} N={n}"
+                    + (f" {strat} {budget_tag(strat, surge, unavail)}" if op in ("rollback", "edit", "runtime") else "")
+                    + " lift after-settle")
+            add("gen-preempt", desc, kv, _op_comps(op, topo, n, w, nr, False), _preempt_op_reason(op, topo, w, nr),
+                dict(strat=strat if op in ("rollback", "edit", "runtime") else "(dormant: nothing rolls)",
+                     verb=f"preempt:{op}", faultop=f"preempt {op}", op=op, lift="after-settle"),
+                cell=("preempt", op, topo, w, nr), dedicated=(op == "runtime"))
 
 
 # ── gen-budget: percent budgets as the engine resolves them ─────────────────
@@ -6249,6 +6511,7 @@ def manifest(rows):
     lines += table("By lift (preempt, pending and webhook families)",
                    tally(lambda kv, m: m["lift"], where=lambda kv, m: "lift" in m))
     lines += table_if("By window operation (webhook and conflict families)", "winop")
+    lines += table_if("By operation under a pre-armed cause or a hook fault (pending, evict and preempt families)", "faultop")
     lines += table_if("By competing-writer form (conflict)", "cform")
     lines += table_if("By competing-writer target (conflict)", "target")
     lines += table("By percent budget (gen-budget)",
@@ -6605,6 +6868,19 @@ def manifest(rows):
         " the whole gang short of one member. A gang surge roll held to the"
         " end by that quota is the tight-cluster family's cell, so the pending"
         " family leaves its `quota:<members-1> lift=never` cell out.",
+        "- under a rollback, a strategy edit, a runtime edit, a scale and a delete"
+        " the three families run one case per ledger cell under restart policy"
+        " None: a taint or a quota armed before a rollback (drain-first, the"
+        " rollback at its draining hook: the roll's first replacement is what"
+        " waits, and a roll that cannot place its first pod reaches no later"
+        " hook; the surge roll under the same cause never drains, so it offers no"
+        " rollback moment), before a strategy edit landed as the push lands and"
+        " before a runtime edit; an eviction as each operation lands, once and,"
+        " where what it took comes back, again (a delete brings nothing back, so"
+        " its cell is one-shot; a scale-up's persistent form is the repeating"
+        " family's); a preemption as each operation that places a pod lands,"
+        " the nodes opened again once the wait has held (a delete places nothing"
+        " until its recreate, so it meets the eviction alone).",
         "- gen-budget drives the percent budgets the engine resolves: maxSurge under"
         " SurgeThenDrain and maxUnavailable under RecreatePod at"
         f" {', '.join(BUDGET_PERCENTS)} on fleets of 4 and 8 Instances, for a plain"

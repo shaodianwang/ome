@@ -1885,7 +1885,19 @@ shapes.
   product finding. Fillers carry `perm.test/filler=<case>` and the class
   `perm.test/fault=<case>`; both go at the end of the case, as does the
   taint, and in `batch.py`'s sweep. `isvcs/gen-preempt/` crosses both moments with
-  topology, restart policy, lift and (under the roll) strategy. A pending
+  topology, restart policy, lift and (under the roll) strategy. Both verbs
+  also fire at a hook of the remaining operations (`fault=evict:settling` |
+  `fault=preempt:settling lift=…` beside `rollback=1 during=<hook>`, a
+  mid-roll `edit=`, `mode=runtimerev` — there at any roll hook —
+  `mode=scaledown` for the preemption, the eviction under a scale being the
+  scale driver's own, and `mode=recreate` for the eviction): the fault
+  lands once the operation has (the rollback or the edit fired at its own
+  hook first), the operation must still complete with every row settled
+  and no hold left, the eviction's `repeat=` form applies it again each
+  time what it took has come back, and the preemption's Instance waits
+  with reason `Unschedulable` until the lift opens the nodes.
+  `isvcs/gen-evict/` and `isvcs/gen-preempt/` run one case per ledger cell
+  of those operations. A pending
   case that fails prints, before teardown, each pod of the case with its
   `PodScheduled` and `Ready` conditions, gates and pod group, the
   PodGroups, the pod events since the trigger with their reporter, and the
@@ -2011,7 +2023,17 @@ shapes.
   cluster this harness owns (`SKIP` elsewhere); the quota runs anywhere.
   `isvcs/gen-pending/` crosses both causes with both moments, topology,
   restart policy, lift and (under the roll) strategy, with the quota sized
-  per cell as above.
+  per cell as above. The same causes armed before a rollback (`rollback=1
+  during=draining`, the roll drain-first: its first replacement is what
+  waits, and the rollback then owes that Instance on the starting revision
+  under the same cause), before a strategy edit landed as the push lands
+  (`edit=strategy:<type> during=settling`) and before a runtime edit
+  (`mode=runtimerev`, every Component rolling) are read with the same
+  verdict: the operation's pod waits with its reason, the floor holds,
+  nothing settled is taken down, and after the lift the operation completes
+  (a rollback with every Instance back on the starting revision, an edit
+  with the edit on the live spec); the family runs one case per ledger cell
+  of those operations on the six shape families.
 
 - **`fault=webhook:idle|settling` with `lift=after-hold|after-window`**
   (rollout mode with `during=idle`, rollout mode as a push lands, or
@@ -2297,7 +2319,8 @@ Four generators write into `isvcs/`; re-run one after editing it:
   once or for good on the running or the new side), the small fleets and the engine gang behind a router
   (`p8000`–`p8199`) → `isvcs/gen-size/` and `isvcs/gen-router-gang/`, the fault
   families (`p7000`–`p7399`) → `isvcs/gen-readiness/`, `isvcs/gen-gang-member/`,
-  `isvcs/gen-tight/`, `isvcs/gen-evict/`, `isvcs/gen-preempt/` and `isvcs/gen-pending/`, the packed pool
+  `isvcs/gen-tight/`, `isvcs/gen-evict/`, `isvcs/gen-preempt/` and `isvcs/gen-pending/` (continued at
+  `p9500`–`p9799` and `p10700`–`p10799`), the packed pool
   (`p8600`–`p8699`) → `isvcs/gen-packed-pool/` (every node's spare CPU taken
   once the service has settled; a push whose revision crashes stops at one
   Instance down and the good push lands on that Instance first, in room the
