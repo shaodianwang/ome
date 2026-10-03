@@ -342,8 +342,9 @@ func evMemberStableUnknown(isvc *v1beta1.InferenceService, in *ReconcileInputs) 
 	in.GroupStableRevisionHashes[v1beta1.DecoderComponent] = ""
 }
 
-// evCanaryCrashed: a canary pod died after its Instance was serving. The
-// kubelet has it back up, so the capacity counts are unchanged.
+// evCanaryCrashed: a canary pod is in a crash loop after its Instance was
+// serving. The kubelet has it back up for the moment, so the capacity counts
+// are unchanged.
 func evCanaryCrashed(_ *v1beta1.InferenceService, in *ReconcileInputs) {
 	in.Crash = &CanaryCrash{Component: v1beta1.EngineComponent, PodName: "svc-engine-3-default-0", Detail: "Error (exit 1)"}
 }
@@ -460,7 +461,7 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/Draining/capacityDropped", fixtureDraining, evDrainingCapacityDropped, cellWant{state: draining, phase: v1beta1.RolloutPhasePromoting, step: 1, active: true}},
 		// a canary pod lost after the cutover completed is the workload's repair, not a canary state
 		{"canary/Done/capacityDropped", fixtureDone, evCanaryPodLost, cellWant{state: done, phase: v1beta1.RolloutPhaseStable, step: 2}},
-		// canary crashed: a pod that served and then died parks a live ladder at its step, whatever
+		// canary crashed: a pod that served and keeps dying parks a live ladder at its step, whatever
 		// the counts say now; a hold, a revert and a finished cutover are not moved by it.
 		{"canary/Idle/canaryCrashed", fixtureIdle, evCanaryCrashed, cellWant{state: idle, phase: v1beta1.RolloutPhaseStable}},
 		{"canary/Staging/canaryCrashed", fixtureStaging, evCanaryCrashed, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},

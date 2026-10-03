@@ -196,7 +196,7 @@ var _ = ginkgo.Describe("behavior — canary capacity gate under pod loss", gink
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("parks the ladder when the canary pod dies after it served, with the step's traffic back on stable, and the rollback lands", func() {
+	ginkgo.It("parks the ladder when the canary pod keeps dying after it served, with the step's traffic back on stable, and the rollback lands", func() {
 		// Config: 2-replica engine under restart policy None, so the crashed
 		// container is restarted in place by the kubelet and the pod stays.
 		const isvcName = "canary-lc2"
@@ -258,16 +258,17 @@ var _ = ginkgo.Describe("behavior — canary capacity gate under pod loss", gink
 			g.Expect(canaryPodName).NotTo(BeEmpty(), "the canary pod must be serving at the hold")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// Invariant: the container exits after its minute and the kubelet
-		// restarts it in place; the ladder parks at step 0 with a reason, no
-		// traffic names the canary revision, the stable revision owns it all,
-		// and the event names the pod. The pod itself stays and carries the
-		// restart.
+		// Invariant: the container exits after each minute it runs. The first
+		// exit is a single restart the kubelet answers in place and the step
+		// keeps its state; the second parks the ladder at step 0 with a
+		// reason, no traffic names the canary revision, the stable revision
+		// owns it all, and the event names the pod. The pod itself stays and
+		// carries the restarts.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, isvcName)
 			g.Expect(c.Status.Canary).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
-				To(Equal(v1beta1.RolloutPhaseFailed), "a canary pod that died after serving must park the ladder")
+				To(Equal(v1beta1.RolloutPhaseFailed), "a canary pod that keeps dying after serving must park the ladder")
 			g.Expect(c.Status.Canary.Failed).NotTo(BeNil(), "the park must say why the ladder stopped")
 			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)), "the park must hold the step where the canary broke")
 			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(0)))

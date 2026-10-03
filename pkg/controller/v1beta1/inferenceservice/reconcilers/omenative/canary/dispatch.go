@@ -774,9 +774,10 @@ func observeCanaryRevisions(ctx context.Context, reads client.Reader, isvc *v1be
 	return observedCanaryRevisions{}, nil
 }
 
-// canaryCrash reads the unit for a canary pod that died after it served,
-// the primary first and then each secondary the run retargeted, against the
-// primary's step anchor. The first one found is the unit's verdict.
+// canaryCrash reads the unit for a canary pod in a crash loop after it
+// served, the primary first and then each secondary the run retargeted,
+// against the primary's step anchor. The first one found is the unit's
+// verdict.
 func canaryCrash(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup, primary v1beta1.ComponentType, primaryObserved observedCanaryRevisions, secondaryObserved map[v1beta1.ComponentType]observedCanaryRevisions, pods map[v1beta1.ComponentType][]*corev1.Pod, now time.Time) *CanaryCrash {
 	since := crashAnchor(rollout.CanaryStatusFor(&isvc.Status, primary), now)
 	if memberRetargeted(isvc, primary) {

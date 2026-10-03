@@ -22,11 +22,12 @@ import (
 	"github.com/ome-projects/ome/pkg/rollout"
 )
 
-// A canary that serves and then dies is the canary's verdict, not a
+// A canary that serves and then keeps dying is the canary's verdict, not a
 // capacity dip: the ladder parks at the step where it happened, nothing
 // routes to the broken revision, and the operator's rollback or next push
-// lands. The stories below drive an eight-Instance engine through a timed
-// ladder and break the canary inside the soak and after it.
+// lands. A single restart is the dip the pod-loss cells cover. The stories
+// below drive an eight-Instance engine through a timed ladder and break the
+// canary inside the soak and after it.
 
 // soakedLadder is the ladder the stories walk: one Instance soaks under a
 // tenth of the traffic, then the rest follows.
@@ -38,7 +39,7 @@ func soakedLadder(soak time.Duration) []v1beta1.RolloutGroupStep {
 }
 
 // engineCrash is the observation the dispatcher hands the step machine when
-// the canary pod of Instance 7 died after it served.
+// the canary pod of Instance 7 is in a crash loop after it served.
 func engineCrash() *CanaryCrash {
 	return &CanaryCrash{Component: v1beta1.EngineComponent, PodName: "svc-engine-7-default-0", Detail: "Error (exit 1)"}
 }
@@ -61,7 +62,7 @@ func expectParkedOnCrash(t *testing.T, isvc *v1beta1.InferenceService, in Reconc
 	t.Helper()
 	cs := rollout.CanaryStatusFor(&isvc.Status, in.Component)
 	if got := rollout.StateOf(cs, phaseOf(isvc), len(isvc.Spec.Rollout.Groups[0].Canary.Steps)); got != rollout.CanaryStateFailed {
-		t.Fatalf("a canary that died after serving must park Failed, got state %q phase %q status %+v", got, phaseOf(isvc), cs)
+		t.Fatalf("a canary that keeps dying after serving must park Failed, got state %q phase %q status %+v", got, phaseOf(isvc), cs)
 	}
 	if cs.CurrentStep != step {
 		t.Fatalf("the park must hold the step where the canary broke: step %d, want %d", cs.CurrentStep, step)
@@ -99,8 +100,8 @@ func TestReconcile_CanaryCrashInSoakParksTheStep(t *testing.T) {
 		t.Fatalf("the first step must serve its split before the story starts, got phase %q traffic %+v", phaseOf(isvc), isvc.Status.Components[in.Component].Traffic)
 	}
 
-	// Eight seconds into the soak the canary pod dies and the kubelet
-	// restarts it; this pass sees it down.
+	// Eight seconds into the soak the canary pod is caught in a crash loop,
+	// down again after the kubelet restarted it; this pass sees it down.
 	in.Crash = engineCrash()
 	in.PerRevisionPods = map[string]int32{"new": 0, "old": 7}
 	in.Now = t0.Add(8 * time.Second)
@@ -159,7 +160,7 @@ func TestReconcile_CanaryCrashAfterSoakParksTheNextStep(t *testing.T) {
 			cs.CurrentStep, phaseOf(isvc), isvc.Status.Components[in.Component].Traffic)
 	}
 
-	// The canary pod from the first step dies while the next step stages.
+	// The canary pod from the first step crash-loops while the next step stages.
 	in.Crash = engineCrash()
 	in.PerRevisionPods = map[string]int32{"new": 2, "old": 5}
 	in.Now = t0.Add(40 * time.Second)
@@ -187,7 +188,7 @@ func TestReconcile_CanaryCrashIsNotAPodLoss(t *testing.T) {
 		want  rollout.CanaryState
 	}{
 		{"pod gone", nil, rollout.CanaryStateServing},
-		{"pod died after serving", engineCrash(), rollout.CanaryStateFailed},
+		{"pod crash-looping after serving", engineCrash(), rollout.CanaryStateFailed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isvc := pinActiveRun(canaryISVC(soakedLadder(20*time.Second), nil))
@@ -336,6 +337,19 @@ func runnerDied(finishedAt time.Time) corev1.ContainerStatus {
 	}
 }
 
+// runnerDeadAgain is the runner's status when the run its first restart
+// began has died too and the kubelet has not restarted it yet.
+func runnerDeadAgain(first time.Time) corev1.ContainerStatus {
+	return corev1.ContainerStatus{
+		Name:         constants.MainContainerName,
+		RestartCount: 1,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 137, Reason: "OOMKilled", StartedAt: metav1.NewTime(first.Add(2 * time.Second)), FinishedAt: metav1.NewTime(first.Add(30 * time.Second)),
+		}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error", FinishedAt: metav1.NewTime(first)}},
+	}
+}
+
 // runnerStillDead is the runner's status between its death and the restart.
 func runnerStillDead(finishedAt time.Time) corev1.ContainerStatus {
 	return corev1.ContainerStatus{
@@ -374,9 +388,11 @@ func TestCrashedCanaryPod(t *testing.T) {
 		wantPod  string
 		detail   string
 	}{
-		{"runner died after serving", observed(readyRow), []*corev1.Pod{crashPod("new", 3, 1, runnerDied(after))}, "svc-engine-3", "container ome-container Error (exit 1)"},
-		{"runner restarted without a recorded termination", observed(readyRow), []*corev1.Pod{crashPod("new", 3, 1, runnerRunningSince(after))}, "svc-engine-3", "container ome-container restarted"},
-		{"runner dead and not restarted yet", observed(readyRow), []*corev1.Pod{crashPod("new", 3, 1, runnerStillDead(after))}, "svc-engine-3", "container ome-container OOMKilled (exit 137)"},
+		{"a runner that died once after serving is a single restart, not a crash", observed(readyRow), []*corev1.Pod{crashPod("new", 3, 1, runnerDied(after))}, "", ""},
+		{"a runner that died twice after serving", observed(readyRow), []*corev1.Pod{crashPod("new", 3, 1, runnerDiedTwice(after, after.Add(30*time.Second)))}, "svc-engine-3", "container ome-container Error (exit 1)"},
+		{"a run with no recorded termination is a start, not a death", observed(readyRow), []*corev1.Pod{crashPod("new", 3, 1, runnerRunningSince(after))}, "", ""},
+		{"a runner dead once and not restarted yet is a single death", observed(readyRow), []*corev1.Pod{crashPod("new", 3, 1, runnerStillDead(after))}, "", ""},
+		{"a runner dead again before the kubelet restarts it", observed(readyRow), []*corev1.Pod{crashPod("new", 3, 1, runnerDeadAgain(after))}, "svc-engine-3", "container ome-container OOMKilled (exit 137)"},
 		{"a pod under deletion is never read, whatever it carries", observed(readyRow), []*corev1.Pod{deleting(crashPod("new", 3, 1, runnerDied(after)))}, "", ""},
 		{"a pod deleted by hand stops its runner cleanly", observed(readyRow), []*corev1.Pod{deleting(stoppedPod("new", 3, 1, 0, "Completed", after, corev1.PodSucceeded))}, "", ""},
 		{"a pod deleted by hand is stopped by the kubelet's term signal", observed(readyRow), []*corev1.Pod{deleting(stoppedPod("new", 3, 1, 143, "Error", after, corev1.PodRunning))}, "", ""},
@@ -384,13 +400,18 @@ func TestCrashedCanaryPod(t *testing.T) {
 		{"a terminal pod is a loss the workload recycles", observed(readyRow), []*corev1.Pod{stoppedPod("new", 3, 1, 137, "Error", after, corev1.PodFailed)}, "", ""},
 		{"a boot crash before Ready is not a death after serving", observed(readyRow), []*corev1.Pod{crashPod("new", 3, 1, runnerDied(ready.Add(-time.Second)))}, "", ""},
 		{"a death before the step anchor was answered already", observed(readyRow), []*corev1.Pod{crashPod("new", 3, 1, runnerDied(since.Add(-time.Second)))}, "", ""},
-		{"the stable revision's death is not the canary's", observed(readyRow, instanceRow(1, v1beta1.OMENativeInstanceReady, "svc-engine-old", &ready, 1)), []*corev1.Pod{crashPod("old", 1, 1, runnerDied(after))}, "", ""},
-		{"a row that never served has no serving run to lose", observed(instanceRow(3, v1beta1.OMENativeInstanceReady, "svc-engine-new", nil, 1)), []*corev1.Pod{crashPod("new", 3, 1, runnerDied(after))}, "", ""},
-		{"a rolling row's restart is the roll", observed(instanceRow(3, v1beta1.OMENativeInstanceUpdating, "svc-engine-old", &ready, 1)), []*corev1.Pod{crashPod("new", 3, 1, runnerDied(after))}, "", ""},
-		{"a repair drains the pod set that died", observed(instanceRow(3, v1beta1.OMENativeInstanceRestarting, "svc-engine-new", &ready, 2)), []*corev1.Pod{crashPod("new", 3, 1, runnerDied(after))}, "svc-engine-3", "container ome-container Error (exit 1)"},
-		{"a repair's rebuilt pod boots like any fresh pod", observed(instanceRow(3, v1beta1.OMENativeInstanceRestarting, "svc-engine-new", &ready, 2)), []*corev1.Pod{crashPod("new", 3, 2, runnerDied(after))}, "", ""},
-		{"a sidecar restart leaves the serving process alone", observed(readyRow), []*corev1.Pod{crashPod("new", 3, 1, func() corev1.ContainerStatus { s := runnerDied(after); s.Name = "sidecar"; return s }())}, "", ""},
-		{"a pod with no row has no anchor", observed(), []*corev1.Pod{crashPod("new", 3, 1, runnerDied(after))}, "", ""},
+		{"the stable revision's crash loop is not the canary's", observed(readyRow, instanceRow(1, v1beta1.OMENativeInstanceReady, "svc-engine-old", &ready, 1)), []*corev1.Pod{crashPod("old", 1, 1, runnerDiedTwice(after, after.Add(30*time.Second)))}, "", ""},
+		{"a row that never served has no serving run to lose", observed(instanceRow(3, v1beta1.OMENativeInstanceReady, "svc-engine-new", nil, 1)), []*corev1.Pod{crashPod("new", 3, 1, runnerDiedTwice(after, after.Add(30*time.Second)))}, "", ""},
+		{"a rolling row's restarts are the roll", observed(instanceRow(3, v1beta1.OMENativeInstanceUpdating, "svc-engine-old", &ready, 1)), []*corev1.Pod{crashPod("new", 3, 1, runnerDiedTwice(after, after.Add(30*time.Second)))}, "", ""},
+		{"a repair drains the pod set that crash-looped", observed(instanceRow(3, v1beta1.OMENativeInstanceRestarting, "svc-engine-new", &ready, 2)), []*corev1.Pod{crashPod("new", 3, 1, runnerDiedTwice(after, after.Add(30*time.Second)))}, "svc-engine-3", "container ome-container Error (exit 1)"},
+		{"a repair drains a pod set that died once: a single death", observed(instanceRow(3, v1beta1.OMENativeInstanceRestarting, "svc-engine-new", &ready, 2)), []*corev1.Pod{crashPod("new", 3, 1, runnerDied(after))}, "", ""},
+		{"a repair's rebuilt pod boots like any fresh pod", observed(instanceRow(3, v1beta1.OMENativeInstanceRestarting, "svc-engine-new", &ready, 2)), []*corev1.Pod{crashPod("new", 3, 2, runnerDiedTwice(after, after.Add(30*time.Second)))}, "", ""},
+		{"a sidecar's crash loop leaves the serving process alone", observed(readyRow), []*corev1.Pod{crashPod("new", 3, 1, func() corev1.ContainerStatus {
+			s := runnerDiedTwice(after, after.Add(30*time.Second))
+			s.Name = "sidecar"
+			return s
+		}())}, "", ""},
+		{"a pod with no row has no anchor", observed(), []*corev1.Pod{crashPod("new", 3, 1, runnerDiedTwice(after, after.Add(30*time.Second)))}, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := crashedCanaryPod(v1beta1.EngineComponent, tc.observed, tc.pods, since)
@@ -458,19 +479,30 @@ func TestMemberRetargeted(t *testing.T) {
 }
 
 // TestDispatch_CanaryPodDeathParksFromPodsAndRows drives the wiring: the
-// dispatcher reads the death from the live pods against the IR's rows and
-// the step machine parks with the pod named, while the same death on a
-// stable pod leaves the ladder where it is.
+// dispatcher reads the deaths from the live pods against the IR's rows and
+// the step machine parks on a crash loop with the pod named, while a single
+// restart, the same loop on a stable pod, a deletion seen on its way out
+// and a deletion seen only through its fresh replacement leave the ladder
+// where it is.
 func TestDispatch_CanaryPodDeathParksFromPodsAndRows(t *testing.T) {
+	type fault int
+	const (
+		restartedOnce fault = iota
+		crashLooping
+		deletedByHand
+		replacedByFreshPod
+	)
 	for _, tc := range []struct {
 		name      string
 		victim    string
-		deleted   bool
+		fault     fault
 		wantPhase v1beta1.RolloutPhase
 	}{
-		{"canary pod", "target-3", false, v1beta1.RolloutPhaseFailed},
-		{"stable pod", "stable-1", false, v1beta1.RolloutPhasePaused},
-		{"canary pod deleted by hand", "target-3", true, v1beta1.RolloutPhasePaused},
+		{"canary pod restarted once", "target-3", restartedOnce, v1beta1.RolloutPhasePaused},
+		{"canary pod in a crash loop", "target-3", crashLooping, v1beta1.RolloutPhaseFailed},
+		{"stable pod in a crash loop", "stable-1", crashLooping, v1beta1.RolloutPhasePaused},
+		{"canary pod deleted by hand", "target-3", deletedByHand, v1beta1.RolloutPhasePaused},
+		{"canary pod deleted and replaced by a fresh pod with no restart", "target-3", replacedByFreshPod, v1beta1.RolloutPhasePaused},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ns := "default"
@@ -518,14 +550,31 @@ func TestDispatch_CanaryPodDeathParksFromPodsAndRows(t *testing.T) {
 				t.Fatalf("the split must serve before the story starts, got %q", got)
 			}
 
-			// Twenty seconds into the hold the victim's runner dies and the
-			// kubelet brings it back, or the pod is deleted by hand and the
-			// kubelet stops its runner while the pod is on its way out.
+			// Twenty seconds into the hold the victim's runner dies once and
+			// the kubelet brings it back, or dies again after that; or the pod
+			// is deleted by hand, seen on its way out with its runner stopped,
+			// or seen only as a fresh replacement that is still coming up.
 			pod := &corev1.Pod{}
 			if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: tc.victim}, pod); err != nil {
 				t.Fatal(err)
 			}
-			if tc.deleted {
+			died := t0.Add(20 * time.Second)
+			switch tc.fault {
+			case replacedByFreshPod:
+				if err := c.Delete(ctx, pod); err != nil {
+					t.Fatal(err)
+				}
+				pod = canaryPod(ns, isvc.Name, "engine", "target", tc.victim)
+				pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
+				pod.Status.ContainerStatuses = []corev1.ContainerStatus{runnerRunningSince(died.Add(5 * time.Second))}
+				if err := c.Create(ctx, pod); err != nil {
+					t.Fatal(err)
+				}
+			case restartedOnce:
+				pod.Status.ContainerStatuses = []corev1.ContainerStatus{runnerDied(died)}
+			case crashLooping:
+				pod.Status.ContainerStatuses = []corev1.ContainerStatus{runnerDiedTwice(died, died.Add(5*time.Second))}
+			case deletedByHand:
 				pod.Finalizers = []string{"test.ome.io/hold"}
 				if err := c.Update(ctx, pod); err != nil {
 					t.Fatal(err)
@@ -538,11 +587,9 @@ func TestDispatch_CanaryPodDeathParksFromPodsAndRows(t *testing.T) {
 				}
 				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 					Name:  constants.MainContainerName,
-					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 143, Reason: "Error", FinishedAt: metav1.NewTime(t0.Add(20 * time.Second))}},
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 143, Reason: "Error", FinishedAt: metav1.NewTime(died)}},
 				}}
 				pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
-			} else {
-				pod.Status.ContainerStatuses = []corev1.ContainerStatus{runnerDied(t0.Add(20 * time.Second))}
 			}
 			if err := c.Status().Update(ctx, pod); err != nil {
 				t.Fatal(err)

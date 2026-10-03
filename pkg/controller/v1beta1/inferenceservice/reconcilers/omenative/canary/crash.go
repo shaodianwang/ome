@@ -11,11 +11,12 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
-// CanaryCrash is a canary-revision pod whose runner died after its Instance
+// CanaryCrash is a canary-revision pod in a crash loop after its Instance
 // was serving, the first one a pass observed across the unit's members. It
 // is the one capacity change the step machine does not wait out: a pod that
-// is gone is the workload's repair and the step keeps its split, a pod that
-// served and then died is the canary's verdict and the ladder parks.
+// is gone, or that died once and is coming back, is the workload's repair
+// and the step keeps its split; a pod that keeps dying after it served is
+// the canary's verdict and the ladder parks.
 type CanaryCrash struct {
 	Component v1beta1.ComponentType
 	PodName   string
@@ -40,17 +41,24 @@ func crashAnchor(cs *v1beta1.CanaryStatus, now time.Time) time.Time {
 }
 
 // crashedCanaryPod finds a pod of the member's target revision whose runner
-// died after its Instance was serving: the container restarted or finished
-// after the Instance entered Ready and after since. The Instance row anchors
-// the reading, as the workload's own restart trigger does: a Ready row speaks
-// for its pods, a Restarting row only for the pod set it is draining, and a
-// row that is forming, rolling or migrating has no serving run to lose.
+// is in a crash loop after its Instance was serving: the pod died a second
+// time since the step began, the kubelet is backing off its restarts, or
+// the Instance was already rebuilt for a death inside the step and the
+// rebuilt pod died again. A single death is a capacity dip the capacity
+// gate waits out: the kubelet restarts the runner in place or the restart
+// policy rebuilds the Instance, and the step keeps its state meanwhile.
+// The Instance row anchors the reading, as the workload's own restart
+// trigger does: a Ready row speaks for its pods, a Restarting row only for
+// the pod set it is draining, and a row that is forming, rolling or
+// migrating has no serving run to lose.
 //
-// Only a death the kubelet restarts in place is a death. A pod under
-// deletion is stopped by the kubelet on its way out, with the term signal,
-// the kill after its grace or a clean exit, and a pod in a terminal phase is
-// one the workload reads as absent and recycles; both are a loss, which the
-// capacity gate waits out, so neither pod's statuses are read at all.
+// A death is evidenced by the pod itself, a recorded termination or its
+// restart count, never by the Instance's readiness: a fresh pod with no
+// restart is never a crash, so a pod replaced after a deletion reads as
+// the dip it is while the replacement comes up. A pod under deletion is
+// stopped by the kubelet on its way out, with the term signal, the kill
+// after its grace or a clean exit, and a pod in a terminal phase is one the
+// workload reads as absent and recycles; neither pod's statuses are read.
 func crashedCanaryPod(component v1beta1.ComponentType, observed observedCanaryRevisions, pods []*corev1.Pod, since time.Time) *CanaryCrash {
 	if observed.targetHash == "" {
 		return nil
@@ -74,14 +82,14 @@ func crashedCanaryPod(component v1beta1.ComponentType, observed observedCanaryRe
 		if !ok {
 			continue
 		}
-		if detail, died := runnerDiedAfter(pod, anchor); died {
+		if detail, looping := runnerCrashLooping(pod, rows[index], anchor, since); looping {
 			return &CanaryCrash{Component: component, PodName: pod.Name, Detail: detail}
 		}
 	}
 	return nil
 }
 
-// servingAnchor is the moment after which a death of pod's runner is a crash
+// servingAnchor is the moment after which a death of pod's runner is a death
 // of a serving Instance: the later of the row's entry into Ready and since.
 // It is absent for a row that never served, and for a pod of a repair's
 // rebuilt set, whose boot restarts are the ordinary start of a fresh pod.
@@ -105,37 +113,74 @@ func servingAnchor(row *v1beta1.OMENativeInstanceStatus, pod *corev1.Pod, since 
 	return anchor, true
 }
 
-// runnerDiedAfter reports whether pod's runner container carries a death
-// dated after anchor. A recorded termination, the current one or the one
-// before the current run, dates the death exactly and decides on its own;
-// only when the kubelet recorded none does a current run that began after
-// the anchor stand in for it. Sidecars and init containers never count; the
-// kubelet restarts them in place without touching the serving process.
-func runnerDiedAfter(pod *corev1.Pod, anchor time.Time) (string, bool) {
+// runnerCrashLooping reports whether pod's runner container is in a crash
+// loop dated after anchor, and names the death. The latest recorded
+// termination, the current one or the one before the current run, dates
+// the death; a run with no termination recorded is a start, not a death.
+// Three faces read as the loop: the kubelet backing off the next restart,
+// a death of a run that a restart inside the window began, so the pod has
+// died twice since the step began, and a death of the rebuilt pod of an
+// Instance the workload already rebuilt for a death inside the step, the
+// Instance's second death under one restart policy's repair. Sidecars and
+// init containers never count; the kubelet restarts them in place without
+// touching the serving process.
+func runnerCrashLooping(pod *corev1.Pod, row *v1beta1.OMENativeInstanceStatus, anchor, since time.Time) (string, bool) {
 	for i := range pod.Status.ContainerStatuses {
 		status := &pod.Status.ContainerStatuses[i]
 		if status.Name != constants.MainContainerName {
 			continue
 		}
-		terminated := status.State.Terminated
-		if terminated == nil {
-			terminated = status.LastTerminationState.Terminated
-		}
-		if terminated != nil {
-			if !terminated.FinishedAt.Time.After(anchor) {
-				return "", false
+		// priorRuns is the index of the run the recorded termination
+		// belongs to: the restart count while that run is the current or
+		// the awaited one, one less once the kubelet has started the next.
+		died := status.State.Terminated
+		priorRuns := status.RestartCount
+		if died == nil {
+			died = status.LastTerminationState.Terminated
+			if status.State.Running != nil {
+				priorRuns--
 			}
-			reason := terminated.Reason
-			if reason == "" {
-				reason = "Error"
+		}
+		if waiting := status.State.Waiting; waiting != nil && waiting.Reason == constants.StateReasonCrashLoopBackOff {
+			if died == nil || died.FinishedAt.Time.After(anchor) {
+				return crashDetail(status.Name, waiting.Reason, died), true
 			}
-			return fmt.Sprintf("container %s %s (exit %d)", status.Name, reason, terminated.ExitCode), true
+			return "", false
 		}
-		if running := status.State.Running; running != nil && running.StartedAt.Time.After(anchor) {
-			return fmt.Sprintf("container %s restarted", status.Name), true
+		if died == nil || !died.FinishedAt.Time.After(anchor) {
+			return "", false
 		}
+		if priorRuns >= 1 && died.StartedAt.Time.After(anchor) {
+			return crashDetail(status.Name, died.Reason, died), true
+		}
+		if rebuiltForDeathAfter(row, since) && died.FinishedAt.Time.After(row.LastFailure.Time.Time) {
+			return crashDetail(status.Name, died.Reason, died), true
+		}
+		return "", false
 	}
 	return "", false
+}
+
+// rebuiltForDeathAfter reports whether the workload rebuilt row's Instance
+// for a pod failure dated after since: the row keeps the termination that
+// opened its last failure-driven rebuild, and a rebuild for a pod that
+// merely vanished records none. Without a step anchor nothing is dated.
+func rebuiltForDeathAfter(row *v1beta1.OMENativeInstanceStatus, since time.Time) bool {
+	if row == nil || row.LastFailure == nil || since.IsZero() {
+		return false
+	}
+	return row.LastFailure.Time.Time.After(since)
+}
+
+// crashDetail names the death for the park's event and record.
+func crashDetail(container, reason string, died *corev1.ContainerStateTerminated) string {
+	if reason == "" {
+		reason = constants.StateReasonError
+	}
+	if died == nil {
+		return fmt.Sprintf("container %s %s", container, reason)
+	}
+	return fmt.Sprintf("container %s %s (exit %d)", container, reason, died.ExitCode)
 }
 
 // memberRetargeted reports whether the pinned run moves comp to a revision
