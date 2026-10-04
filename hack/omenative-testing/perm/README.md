@@ -224,7 +224,7 @@ description, replica counts (`Ne/Nd/Nr`), peak ceilings (`ceil_e/ceil_d/ceil_r`)
 (requires `issue=<github issue number>` — an XFAIL with no tracked issue is
 invisible debt; validate-only rejects both omissions). A notimpl case whose
 tracked bug is itself a continuous-invariant violation adds
-`inv_xfail=A|B|C|D|F|G|H|all` (requires the line-2 `# reason:` too): exactly that
+`inv_xfail=A|B|C|D|F|G|H|I|all` (requires the line-2 `# reason:` too): exactly that
 invariant's violations record as the case's `XFAIL (known bug: #N)` instead of
 hardening the verdict — the invariant is still evaluated and printed (nothing
 is blinded, unlike `inv_off`), and any other invariant still fails hard, so
@@ -2392,7 +2392,7 @@ cell on the six shape families (the surge strategy, the env edit):
   Component, none elsewhere). The manager loop additionally requires that on
   the idle service no pod is created or deleted at all and every Instance
   stays Ready. After the lift: every row Ready with no operation open and no
-  `rolloutHold` left on any Component, and the continuous invariants A to H
+  `rolloutHold` left on any Component, and the continuous invariants A to I
   as on every case. The generated `isvcs/gen-repeat/` family drives the four
   rows on the six shape families at steady state, under a push and under a
   scale-up, the manager restart under the remaining operations and the
@@ -2601,7 +2601,8 @@ unless the case parks exactly that class with `inv_xfail=` (or waives it with
 Instance and the two values that disagree. The classes: **A status-truth**
 and **B endpoints-membership** (the parking paragraph above), **C pair-alive**
 (*Pairing protocol*), **D gang-scheduling** (*Scheduler dimension*), **E
-cohort ratio** (the informational PD observer under *PD knobs*), and:
+cohort ratio** (the informational PD observer under *PD knobs*), and the
+four below (F, G, H, I):
 
 **F label-truth** — every live pod runs the template its
 `ome.io/revision-hash` label names. The reading is the ControllerRevision of
@@ -2670,12 +2671,59 @@ itself waits for; a revision the IR calls `updateRevision` while the ISVC
 spec already moved on is caught only once the next run opens and closes.
 The settle window absorbs the run close and the next render.
 
+**I operation-progress** — every operation a status row holds has an owner
+making progress. Four readings, each on every tick. (1) *A pod set behind
+the operation*: a row that holds an operation (`Create`, `Update`,
+`Restart`, `Migrate`, `Delete`) has a live pod of its Instance, or one
+Pending, or one on its way out; a pod in a terminal phase (`Failed`,
+`Succeeded`) is none of those. Sustained past `INV_I_NO_POD_S` (a minute,
+scaled: a drain's replacement is one reconcile plus admission away) it
+reads `invariant I violated (operation-without-pods): operation without a
+pod set: engine/2 holds Restart with no live pod for 65s`. (2) *A pod
+change inside the window*: an operation older than the Component's
+`lifecycle.instanceReadyTimeout` — its own, else the deployed controller's
+(`inferenceservice-config` lifecycle block, read once per case), else
+`INV_I_WINDOW_DEFAULT_S` when neither names one — during which no pod of
+the Instance (or of the surge replacement its operation names) was
+created, deleted, changed phase, readiness, label or image, reads
+`(operation-without-progress): operation without progress: engine/1 Update
+open 70s with no pod change (window 60s)`; a deadline the engine restarted
+from admission extends the window to it. Container restarts, the serving
+gate and the engine's own clocks are not pod changes. (3) *The sweep on a
+stopped node*: a Terminating pod on the node a node fault stopped, once the
+force-delete policy is on and the pod is `overdueSlack` past its
+deletionTimestamp and the node `nodeUnreachableThreshold` past reading
+NotReady, is gone within `INV_I_SWEEP_S`; else `(terminating-outlives-
+policy): terminating pod outlives the policy: engine-1 on worker-2 65s past
+the boundary`. (4) *A hold names Instances that exist*: a persisted
+`rolloutHold` whose reason names an Instance (`Instance 3 on revision …
+not serving`) with no row and no pod, sustained past the settle window,
+reads `(hold-names-gone-instance): hold names a gone Instance: engine hold
+Held names 3`. Exempt, each because the case's own fault or operation
+produces the shape: a row whose operation waits on an external authority
+(`waiting` set: quota refused the create, nothing places the pod — on the
+row or on its surge replacement's), a paused InferenceReplica (either pause
+mode) and a settle after the pause lifts, a Component whose `rolloutPhase`
+is `Paused` (a gate the operator or the ladder holds; reading 2 only), the
+window in which the case's own fault has the manager down (a controller
+restart until it is Ready again, bounded by its Ready budget, or a webhook
+outage until lifted) plus a settle, and an Instance with a pod on the
+stopped node while its kubelet is down (the node loss owns that wait;
+reading 3 judges its Terminating pod). Reading 3 is also silent without
+the policy (`needs=no-forcedelete`: the park is the fate) and once the
+kubelet runs again. Limits: a foreign finalizer on a Terminating pod is
+invisible to reading 3 (the policy cannot remove it either); a rollout
+hold that names no Instance makes no claim; and the window of reading 2
+is whatever the lane configures, so on a lane whose controller default is
+long only Components that set their own `instanceReadyTimeout` are judged
+inside a case. Waived and parked like the others (`inv_off=I`,
+`inv_xfail=I`).
+
 Two classes are opt-in, selected per case with `inv_on=J,K` (both, or one),
 because their claim is a story's, not every case's: a node loss expects the
 very record J forbids. They fire on a single tick (what they read is durable,
 not a transition) and park and waive like the others (`inv_xfail=J`,
-`inv_off=K`). The letter I is skipped: it reads as the digit one and as the
-ⓘ marker of the verdict lines.
+`inv_off=K`).
 
 **J no-auto-recovery** — the service's audit ledger ConfigMap
 (`<isvc>-ome-migration-audit`, key `history.json`) holds no entry whose

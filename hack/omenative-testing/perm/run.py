@@ -230,10 +230,10 @@ SERVING_COND = "ome.io/serving"   # controller-managed pod readiness gate (query
 # a class here. J (no auto-recovery record) and K (no node exclusion) are
 # opt-in: a header selects them with inv_on=J,K.
 INV_OPT_IN = {"J", "K"}
-INV_CLASSES = {"A", "B", "C", "D", "F", "G", "H"} | INV_OPT_IN
+INV_CLASSES = {"A", "B", "C", "D", "F", "G", "H", "I"} | INV_OPT_IN
 INV_NAMES = {"A": "status-truth", "B": "endpoints-membership", "C": "pair-alive", "D": "gang-scheduling",
              "F": "label-truth", "G": "ready-serving", "H": "superseded-revision",
-             "J": "no-auto-recovery", "K": "no-node-exclusion"}
+             "I": "operation-progress", "J": "no-auto-recovery", "K": "no-node-exclusion"}
 # The audit ledger ConfigMap the engine keeps per service, and the record it
 # writes when it gives up on an Instance's node and steers the rebuild
 # elsewhere. Invariant J reads it.
@@ -277,6 +277,36 @@ KILL_PAUSE_HOLD_S = int(60 * TIMEOUT_MULT)
 # at least INV_SETTLE_S, which scales with the cluster budget like every wait.
 INV_SETTLE_S = 15.0 * TIMEOUT_MULT
 INV_SUSTAIN_SETTLE = 1 + math.ceil(INV_SETTLE_S / INV_TICK_S)
+# Invariant I (every operation has an owner making progress). The shapes it
+# reads never exit on their own, so each window is reasoned from the clock
+# the engine runs, not from a sample count.
+#   I1 operation without a pod set: once a drain removes the last pod of an
+#     Instance, the owner's next pass creates the replacement (one reconcile
+#     plus admission). INV_I_NO_POD_S, scaled like every wait, is far past
+#     that and far short of a row that never gets one.
+INV_I_NO_POD_S = 60.0 * TIMEOUT_MULT
+INV_SUSTAIN_I_NO_POD = 1 + math.ceil(INV_I_NO_POD_S / INV_TICK_S)
+#   I2 operation without progress: the Component's instanceReadyTimeout (its
+#     own lifecycle value, else the deployed controller default) is the
+#     window the engine gives an operation before it must act on it.
+#     INV_I_WINDOW_DEFAULT_S stands in when neither level names one and the
+#     operation opens with no clock at all: one Instance's longest budgeted
+#     wait is its pod set coming up (ROTATE_BASE_S); three of those is
+#     generous and still elapses inside the longest case budget.
+INV_I_WINDOW_DEFAULT_S = 3.0 * ROTATE_BASE_S
+#     I2 and I3 read durable clocks, so they fire on 2 observations like A:
+#     one stale InferenceReplica list or pod sample cannot fire them.
+INV_SUSTAIN_I_CLOCK = 2
+#   I3 terminating pod outlives the policy: the force-delete policy acts once
+#     a pod is overdueSlack past its deletionTimestamp and the node's
+#     unreachable evidence is nodeUnreachableThreshold old; INV_I_SWEEP_S past
+#     the later of the two covers the sweep's requeue and the apiserver's own
+#     removal of the object.
+INV_I_SWEEP_S = 60.0 * TIMEOUT_MULT
+#   I4 hold names a gone Instance: a hold is rewritten on every pass that
+#     still denies, so INV_SUSTAIN_SETTLE covers the pass after a row leaves.
+# Pod phases a pod does not come back from: a pod in one is not a live pod.
+INV_TERMINAL_POD_PHASES = {"Succeeded", "Failed"}
 # Post-Completed source-drain grace. A source can't drain until its surge
 # replacement is Ready (~one pod-init cycle), and multi-instance migrations
 # SERIALIZE on a surge budget of 1 (reusing freed indices), so the drain is
@@ -961,6 +991,12 @@ def teardown_check(case_id, total_pods, verdict, notes, checks):
 #                         updateRevision), every Instance row and every live pod
 #                         is on that revision. Not evaluated under mode=partition,
 #                         whose verdict owns the staged split.
+#   I operation-progress — every operation a status row holds has an owner
+#                         making progress: a pod set behind it (live, Pending
+#                         or leaving), a pod change inside the Component's
+#                         readiness window, a Terminating pod on a stopped
+#                         node swept at the force-delete boundary, and a
+#                         persisted hold naming only Instances that exist.
 # A violation must hold for its sustain count of CONSECUTIVE ticks to fire
 # (see the INV_* constants for the carve-out arithmetic); fired violations
 # dedup per (invariant, kind, subject) with first/last timestamps and an
@@ -1030,6 +1066,16 @@ def _hostname_exclusions(spec):
             if expr.get("key") == HOSTNAME_LABEL and expr.get("operator") == "NotIn":
                 out.update(str(v) for v in expr.get("values") or [])
     return sorted(out)
+
+
+def _pod_lifecycle(obj):
+    """Lifecycle fields every watcher record carries, whichever loop builds
+    it: the kubelet's pod phase and the deletion timestamp once a delete was
+    issued. Invariant I reads them to tell a live pod from a terminal or a
+    leaving one and to age a Terminating pod; a record without them is read
+    on `alive` alone."""
+    return {"phase": str((obj.get("status") or {}).get("phase") or ""),
+            "deleted_at": str((obj.get("metadata") or {}).get("deletionTimestamp") or "")}
 
 
 def _pod_template(obj):
@@ -1150,6 +1196,17 @@ def _inv_new(case_id, hdr):
         "j_seen": False,          # the audit ledger was read at least once
         "k_on": "K" in opted and off not in ("K", "all"),
         "k_seen": False,          # ≥1 live pod's node affinity was read
+        # Invariant I (every operation has an owner making progress).
+        "i_on": off not in ("I", "all"),
+        "i_seen": False,          # ≥1 operation, hold or Terminating pod on a stopped node was evaluated
+        "i_pods": {},             # (comp, index) → {"fp": pod-set fingerprint, "since": tick it last changed}
+        "i_since": {},            # I1 streak key → tick the Instance was first seen without a pod set
+        "i_op_seen": {},          # (comp, index, operation id) → tick first seen, for a record without startedAt
+        "i_term": {},             # pod uid → tick first seen Terminating, for a record without deletionTimestamp
+        "i_pause_until": {},      # comp → epoch until which a pause, lifted or not, still quiets the Component
+        "fault": None,            # the case's fault record, bound as it fires (_inv_bind_fault)
+        "lifecycle": None,        # the deployed controller's lifecycle block, read once (_inv_lifecycle)
+        "lifecycle_tries": 0,
         # Invariant D (gang scheduling) exists only when the fixtures name a
         # scheduler (OME_EVAL_SCHEDULER): every pod must run under it and every
         # gang must bind as one PodGroup.
@@ -1864,8 +1921,265 @@ def _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now):
                      f"{comp}/{inst}: PodGroup {name!r} minMember={pgs[name]}, expected {want}")
 
 
+def _inv_bind_fault(inv, f):
+    """Give the invariant poller the case's fault record, which the fault
+    keeps current as it fires, bites and lifts: invariant I reads the node a
+    node fault stopped and the window a manager restart or a webhook outage
+    has the controller unable to act. A case without a fault binds nothing."""
+    if inv is not None and f:
+        inv["fault"] = f
+
+
+def _inv_lifecycle(inv):
+    """The deployed controller's lifecycle block for invariant I, read once
+    per case and kept; re-read a bounded number of times while it cannot be
+    read, None until it can."""
+    if inv.get("lifecycle") is None and inv.get("lifecycle_tries", 0) < INV_SUSTAIN_SETTLE:
+        inv["lifecycle_tries"] = inv.get("lifecycle_tries", 0) + 1
+        inv["lifecycle"], _err = _controller_lifecycle_config()
+    return inv.get("lifecycle")
+
+
+def _inv_quiet_until(inv, now):
+    """The epoch before which invariant I claims nothing about progress: the
+    case's own fault has the manager down (a controller restart that has
+    fired and is not Ready again, bounded by the manager's Ready budget) or
+    the admission webhook cut (every write the engine makes may be refused),
+    and a settle after either, in which the manager re-reads what it owns.
+    0 when nothing quiets it."""
+    f = inv.get("fault")
+    if not f or not f.get("fired") or f.get("infra_fail"):
+        return 0.0
+    if f.get("kind") == "ctrlrestart":
+        cycles = f.get("cycles") or []
+        fired_at = (cycles[-1].get("fired_at") if cycles else None) or f.get("fired_ts") or now
+        back_at = (cycles[-1].get("back_at") if cycles else None) or f.get("ctrl_back_at")
+        if back_at is None:
+            return fired_at + CTRL_READY_S
+        return max(fired_at, back_at) + INV_SETTLE_S
+    if f.get("kind") == WEBHOOK_FAULT:
+        if not f.get("webhook_restored"):
+            return math.inf
+        return (f.get("lift_ts") or now) + INV_SETTLE_S
+    return 0.0
+
+
+def _inv_stopped_node(inv):
+    """The node whose kubelet the case's node fault has stopped, while it is
+    down; '' otherwise (no node fault, not fired, or the kubelet started
+    again)."""
+    f = inv.get("fault")
+    if not f or f.get("kind") != "node" or not f.get("fired") or f.get("infra_fail") or not f.get("node"):
+        return ""
+    if f.get("kubelet_restored") or f.get("lifted_at"):
+        return ""
+    return str(f["node"])
+
+
+def _inv_force_delete_policy(lifecycle):
+    """(overdueSlack, nodeUnreachableThreshold) in seconds of the deployed
+    force-delete policy; None when the block is absent, unread or malformed:
+    the policy then does not exist and the park is the fate."""
+    policy = (lifecycle or {}).get(FORCE_DELETE_KEY)
+    if not isinstance(policy, dict) or not policy:
+        return None
+    slack = _duration_s(policy.get(FORCE_DELETE_SLACK_KEY))
+    threshold = _duration_s(policy.get(FORCE_DELETE_THRESHOLD_KEY))
+    if slack is None or threshold is None:
+        return None
+    return slack, threshold
+
+
+def _inv_operation_window_s(ir_spec, lifecycle):
+    """The window invariant I gives a Component's operation before a pod of
+    the Instance must have changed: the Component's own
+    lifecycle.instanceReadyTimeout, else the deployed controller's, else
+    INV_I_WINDOW_DEFAULT_S when neither names one. None while the controller
+    config is unread and the Component names none: no window to judge by."""
+    own = parse_duration(((ir_spec or {}).get("lifecycle") or {}).get("instanceReadyTimeout"))
+    if own > 0:
+        return float(own)
+    if lifecycle is None:
+        return None
+    configured = parse_duration(lifecycle.get("instanceReadyTimeout"))
+    return float(configured) if configured > 0 else INV_I_WINDOW_DEFAULT_S
+
+
+def _inv_instance_fingerprint(records):
+    """What invariant I counts as the pod set of an Instance changing: a pod
+    created or gone, its deletion issued, its phase, its Ready condition or
+    main-container readiness, the revision it is labelled with and the
+    images it runs (an in-place update). Container restarts, the serving
+    gate and the engine's own clocks are not pod changes."""
+    return tuple(sorted((str(p.get("uid") or ""), bool(p.get("alive")), str(p.get("phase") or ""),
+                         bool(p.get("ready")), bool(p.get("ctn_ready")), str(p.get("hash") or ""),
+                         tuple(sorted(((p.get("tmpl") or {}).get("images") or {}).items())))
+                        for p in records))
+
+
+def _inv_note_pod_sets(inv, by_inst, now):
+    """Keep inv["i_pods"] current: per Instance the fingerprint of its pod
+    set and the tick it last changed; an Instance whose last pod left
+    changed too."""
+    for key, records in by_inst.items():
+        fp = _inv_instance_fingerprint(records)
+        st = inv["i_pods"].get(key)
+        if st is None or st["fp"] != fp:
+            inv["i_pods"][key] = {"fp": fp, "since": now}
+    for key, st in inv["i_pods"].items():
+        if key not in by_inst and st["fp"] != ():
+            inv["i_pods"][key] = {"fp": (), "since": now}
+
+
+_HOLD_INSTANCES_RE = re.compile(r"\bInstances?\s+(\d+(?:\s*,\s*\d+)*)")
+
+
+def _hold_named_instances(reason):
+    """The Instance indices a rollout hold's reason names ("Instance 3 on
+    revision … not serving", "Instances 2, 5 …"), in order of appearance."""
+    out = []
+    for m in _HOLD_INSTANCES_RE.finditer(str(reason or "")):
+        out.extend(x.strip() for x in m.group(1).split(","))
+    return out
+
+
+def _inv_check_operation_progress(inv, pod_state, ir_items, isvc_status, lifecycle, hits, now):
+    """Invariant I, one tick, over the status rows and the watcher's pods.
+    I1: a row holding an operation has a pod set behind it — a live pod,
+    one Pending, or one on its way out. I2: an operation does not outlive
+    the Component's readiness window with no pod of the Instance (or of the
+    surge replacement it names) changing. I4: a persisted rollout hold names
+    only Instances that still exist. I3, the Terminating pod on a stopped
+    node, is _inv_check_terminating_sweep. A None snapshot makes no
+    observation. The exemptions, each with its reason inline: a row waiting
+    on an external authority, a paused InferenceReplica, a rollout phase
+    held at a gate, a manager the case's own fault has down, and an Instance
+    with a pod on the node the case stopped."""
+    if ir_items is None:
+        return
+    by_inst = defaultdict(list)
+    for p in pod_state.values():
+        if p:
+            by_inst[(p["comp"], str(p.get("inst", "0")))].append(p)
+    _inv_note_pod_sets(inv, by_inst, now)
+    quiet = _inv_quiet_until(inv, now)
+    stopped_node = _inv_stopped_node(inv)
+    phases = (isvc_status or {}).get("components") or {}
+    live_keys = set()
+    for it in ir_items:
+        spec = it.get("spec") or {}
+        comp = spec.get("component", "?")
+        st = it.get("status") or {}
+        try:
+            rows = irstatus.instance_statuses(st) or []
+        except irstatus.DecodeError:
+            continue   # invariant A reports an undecodable status
+        if spec.get("paused"):
+            # A paused InferenceReplica neither starts nor advances its fleet
+            # changes (a Freeze suspends repair too): nothing is owed while it
+            # is paused, nor for a settle after the pause lifts.
+            inv["i_pause_until"][comp] = now + INV_SETTLE_S
+        comp_quiet = max(quiet, inv["i_pause_until"].get(comp, 0.0))
+        # A rollout phase held at a gate: the operator or the ladder owns the wait.
+        gate_held = (phases.get(comp) or {}).get("rolloutPhase") == "Paused"
+        window = _inv_operation_window_s(spec, lifecycle)
+        by_index = {str(r.get("index")): r for r in rows}
+        for row in rows:
+            op = row.get("operation")
+            if not isinstance(op, dict) or not op:
+                continue
+            inv["i_seen"] = True
+            if now < comp_quiet:
+                continue
+            idx = str(row.get("index", "?"))
+            kind = str(op.get("type") or "operation")
+            partner = op.get("surgeIndex")
+            keys = [(comp, idx)] + ([(comp, str(partner))] if partner is not None else [])
+            records = [p for k in keys for p in by_inst.get(k, [])]
+            if any(((by_index.get(k[1]) or {}).get("operation") or {}).get("waiting") for k in keys):
+                continue   # an external authority holds the pod set (quota refused the create, nothing places the pod) and the row says so
+            live = [p for p in records if p.get("alive") and p.get("phase") not in INV_TERMINAL_POD_PHASES]
+            leaving = [p for p in records if not p.get("alive")]
+            if not live and not leaving:
+                key = ("I", "operation-without-pods", comp, idx)
+                live_keys.add(key)
+                since = inv["i_since"].setdefault(key, now)
+                _inv_hit(inv, hits, key, key, INV_SUSTAIN_I_NO_POD, now,
+                         f"operation without a pod set: {comp}/{idx} holds {kind} with no live pod for {now - since:.0f}s")
+            if gate_held or window is None:
+                continue
+            if stopped_node and any(p.get("node") == stopped_node for p in records):
+                continue   # the case's node loss owns this Instance's wait; I3 reads its Terminating pod against the policy
+            op_since = _event_epoch(op.get("startedAt"))
+            if op_since is None:
+                op_since = inv["i_op_seen"].setdefault((comp, idx, str(op.get("id") or kind)), now)
+            changed = [inv["i_pods"][k]["since"] for k in keys if k in inv["i_pods"]]
+            anchor = max([op_since, comp_quiet] + changed)
+            boundary = max(anchor + window, _event_epoch(op.get("deadline")) or 0.0)
+            if now > boundary:
+                key = ("I", "operation-without-progress", comp, idx)
+                _inv_hit(inv, hits, key, key, INV_SUSTAIN_I_CLOCK, now,
+                         f"operation without progress: {comp}/{idx} {kind} open {now - anchor:.0f}s with no pod change "
+                         f"(window {window:.0f}s)")
+        if now >= comp_quiet:
+            _inv_check_hold_names(inv, comp, st, rows, by_inst, hits, now)
+    for key in [k for k in inv["i_since"] if k not in live_keys]:
+        del inv["i_since"][key]
+
+
+def _inv_check_hold_names(inv, comp, ir_status, rows, by_inst, hits, now):
+    """Invariant I4, one tick: the Instances a Component's persisted rollout
+    hold names in its reason still exist — a status row, or a pod of the
+    index alive or on its way out."""
+    hold = ir_status.get("rolloutHold")
+    if not isinstance(hold, dict) or not hold:
+        return
+    inv["i_seen"] = True
+    present = {str(r.get("index")) for r in rows} | {idx for (c, idx) in by_inst if c == comp}
+    since = _event_epoch(hold.get("since"))
+    for idx in _hold_named_instances(hold.get("reason")):
+        if idx in present:
+            continue
+        key = ("I", "hold-names-gone-instance", comp, idx)
+        age = f" for {now - since:.0f}s" if since is not None else ""
+        _inv_hit(inv, hits, key, key, INV_SUSTAIN_SETTLE, now,
+                 f"hold names a gone Instance: {comp} hold {hold.get('gate')} names {idx}, which has no row and no pod, "
+                 f"held{age}: {str(hold.get('reason') or '')[:120]}")
+
+
+def _inv_check_terminating_sweep(inv, pod_state, lifecycle, hits, now):
+    """Invariant I3, one tick: a Terminating pod on the node the case's fault
+    stopped is gone once the force-delete policy's boundary has passed —
+    overdueSlack past the pod's deletionTimestamp and nodeUnreachableThreshold
+    past the node reading NotReady, plus INV_I_SWEEP_S for the sweep. Nothing
+    is read while no node is stopped, once its kubelet runs again (the
+    kubelet finishes the termination itself), or without the policy (the
+    park is the fate without it)."""
+    node = _inv_stopped_node(inv)
+    policy = _inv_force_delete_policy(lifecycle)
+    if not node or policy is None:
+        return
+    slack, threshold = policy
+    f = inv["fault"]
+    dead_at = f.get("bite_ts") or f.get("fired_ts") or now
+    for name, p in sorted(pod_state.items()):
+        if not p or p.get("alive") or p.get("node") != node:
+            continue
+        inv["i_seen"] = True
+        deleted_at = _event_epoch(p.get("deleted_at")) if p.get("deleted_at") else None
+        if deleted_at is None:
+            deleted_at = inv["i_term"].setdefault(p.get("uid") or name, now)
+        boundary = max(deleted_at + slack, dead_at + threshold)
+        if now > boundary + INV_I_SWEEP_S:
+            key = ("I", "terminating-outlives-policy", p.get("comp", "?"), name)
+            _inv_hit(inv, hits, key, key, INV_SUSTAIN_I_CLOCK, now,
+                     f"terminating pod outlives the policy: {name} on {node} {now - boundary:.0f}s past the boundary "
+                     f"(deleting for {now - deleted_at:.0f}s, node down for {now - dead_at:.0f}s; "
+                     f"overdueSlack {slack:.0f}s, nodeUnreachableThreshold {threshold:.0f}s)")
+
+
 def _inv_any_on(inv):
-    return any(inv.get(k) for k in ("a_on", "b_on", "c_on", "d_on", "f_on", "g_on", "h_on", "j_on", "k_on", "ratio"))
+    return any(inv.get(k) for k in ("a_on", "b_on", "c_on", "d_on", "f_on", "g_on", "h_on", "i_on", "j_on", "k_on", "ratio"))
 
 
 def _inv_tick(inv, pod_state, pods_per_inst):
@@ -1880,18 +2194,19 @@ def _inv_tick(inv, pod_state, pods_per_inst):
         return
     inv["last"] = now
     case_id = inv["case_id"]
-    ir_items = _inv_fetch_ir_items(case_id) if (inv["a_on"] or inv["g_on"] or inv["h_on"]) else None
+    ir_items = _inv_fetch_ir_items(case_id) if (inv["a_on"] or inv["g_on"] or inv["h_on"] or inv.get("i_on")) else None
     routing = _inv_fetch_routing(case_id) if (inv["b_on"] or inv["g_on"]) else None
-    isvc_status = fetch_status(case_id) if inv["h_on"] else None
+    isvc_status = fetch_status(case_id) if (inv["h_on"] or inv.get("i_on")) else None
     revisions = (_inv_fetch_revisions(case_id)
                  if inv["f_on"] and _inv_revisions_wanted(inv, pod_state) else None)
     ledger = _inv_fetch_ledger(case_id) if inv.get("j_on") else None
+    lifecycle = _inv_lifecycle(inv) if inv.get("i_on") else None
     _inv_observe(inv, pod_state, pods_per_inst, now, ir_items=ir_items, routing=routing,
-                 isvc_status=isvc_status, revisions=revisions, ledger=ledger)
+                 isvc_status=isvc_status, revisions=revisions, ledger=ledger, lifecycle=lifecycle)
 
 
 def _inv_observe(inv, pod_state, pods_per_inst, now, ir_items=None, routing=None,
-                 isvc_status=None, revisions=None, ledger=None):
+                 isvc_status=None, revisions=None, ledger=None, lifecycle=None):
     """One observation over already-fetched snapshots: every enabled check
     runs, then streaks reset for keys not observed this tick (the
     CONSECUTIVE-tick sustain rule). Pure, so tests drive ticks with synthetic
@@ -1920,6 +2235,9 @@ def _inv_observe(inv, pod_state, pods_per_inst, now, ir_items=None, routing=None
         _inv_check_auto_recover(inv, ledger, hits, now)
     if inv.get("k_on"):
         _inv_check_node_exclusion(inv, pod_state, hits, now)
+    if inv.get("i_on"):
+        _inv_check_operation_progress(inv, pod_state, ir_items, isvc_status, lifecycle, hits, now)
+        _inv_check_terminating_sweep(inv, pod_state, lifecycle, hits, now)
     for k in [k for k in inv["streaks"] if k not in hits]:
         del inv["streaks"][k]
 
@@ -1964,6 +2282,10 @@ def invariant_checks(inv, verdict, notes, checks):
         checks.append("  ⓘ invariant J (no-auto-recovery) never read the audit ledger — vacuous (no assertion made)")
     if inv.get("k_on") and not inv.get("k_seen"):
         checks.append("  ⓘ invariant K (no-node-exclusion) never saw a live pod's node affinity — vacuous (no assertion made)")
+    if inv.get("i_on") and not inv.get("i_seen"):
+        checks.append("  ⓘ invariant I (operation-progress) never saw an operation, a hold or a Terminating pod on a stopped node — vacuous (no assertion made)")
+    if inv.get("i_on") and inv.get("i_seen") and inv.get("lifecycle") is None and inv.get("lifecycle_tries"):
+        checks.append("  ⓘ invariant I: the controller lifecycle config could not be read — the window of a Component that names none and the force-delete boundary were not asserted")
     ratio = inv.get("ratio")
     if ratio:
         tol_pct = int(round(ratio["tol"] * 100))
@@ -1981,6 +2303,7 @@ def invariant_checks(inv, verdict, notes, checks):
                                   ("F", inv.get("f_on", False) and inv.get("f_seen", False)),
                                   ("G", inv.get("g_on", False) and inv.get("g_seen", False)),
                                   ("H", inv.get("h_on", False) and inv.get("h_seen", False)),
+                                  ("I", inv.get("i_on", False) and inv.get("i_seen", False)),
                                   ("J", inv.get("j_on", False) and inv.get("j_seen", False)),
                                   ("K", inv.get("k_on", False) and inv.get("k_seen", False))) if on]
         if active:
@@ -5190,6 +5513,7 @@ CTRL_CONFIGMAP = os.environ.get("OME_TEST_CTRL_CONFIGMAP", "inferenceservice-con
 LIFECYCLE_CONFIG_KEY = "lifecycle"
 FORCE_DELETE_KEY = "forceDelete"
 FORCE_DELETE_THRESHOLD_KEY = "nodeUnreachableThreshold"
+FORCE_DELETE_SLACK_KEY = "overdueSlack"
 # How long a restarted manager is given to report Ready before a case that
 # depends on it going first is an apparatus failure.
 CTRL_READY_S = int(180 * TIMEOUT_MULT)
@@ -5912,6 +6236,7 @@ def _fault_fire(f, pod_state, pods_per_inst, old_hashes, inv=None):
     """Fire the fault once (the caller's fired check latches it; a repeating
     fault is fired again by _repeat_tick). inv is the watcher's invariant
     state: a fault that changes a live pod's spec records the pod there."""
+    _inv_bind_fault(inv, f)
     _fault_fire_once(f, pod_state, pods_per_inst, old_hashes, inv)
     if f["fired"] and not f.get("infra_fail"):
         _repeat_record_fire(f)
@@ -8797,6 +9122,7 @@ def _fault_tick(ctx):
       draining  → first old-revision pod observed on its way out;
       migrating → migration accept observed (_migrate sets ctx['fault_migrating'])."""
     f = ctx.get("fault")
+    _inv_bind_fault(ctx.get("inv"), f)
     if not f or (f["kind"] not in HOOK_FAULTS and not _canary_stable_hook_fault(f) and not _node_hook_fault(f)
                  and not _canary_window_fault(f)):
         return
@@ -14924,9 +15250,9 @@ HDR_VALIDATORS = {
     #                                   preceding surge; informational, not a FAIL)
     # Opt out of the continuous invariants (A=status-truth, B=endpoints-
     # membership, C=pair-alive, D=gang-scheduling, F=label-truth,
-    # G=ready-serving, H=superseded-revision). REQUIRES an adjacent
-    # '# reason: <why>' comment on line 2 of the case file — validate-only
-    # rejects an inv_off without one.
+    # G=ready-serving, H=superseded-revision, I=operation-progress).
+    # REQUIRES an adjacent '# reason: <why>' comment on line 2 of the case
+    # file — validate-only rejects an inv_off without one.
     "inv_off": lambda v: v in INV_CLASSES | {"all"},
     # Scope a notimpl parking to a continuous invariant: a sustained violation
     # of the NAMED invariant is the tracked bug itself, so it records as the
@@ -16284,6 +16610,7 @@ def _apply_event(ctx, ev):
             "ready_since": _pod_ready_since(obj),
             **_pod_placement(obj, labels),
             **_pod_template(obj),
+            **_pod_lifecycle(obj),
         }
         if rev:
             ctx.setdefault("seen_hashes", set()).add(rev)   # every revision-hash ever observed
@@ -24262,7 +24589,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                                    "created": meta.get("creationTimestamp", ""),
                                    "ready_since": _pod_ready_since(obj),
                                    **_pod_placement(obj, labels),
-                                   **_pod_template(obj)}
+                                   **_pod_template(obj),
+                                   **_pod_lifecycle(obj)}
             agg = aggregate(pod_state, None, surge_modes, pods_per_inst)
             for c in COMPS:
                 if agg.get(c, (0, 0, 0))[0] > peaks[c]:
@@ -24901,7 +25229,8 @@ def run_case(case_id):
                                    "created": meta.get("creationTimestamp", ""),
                                    "ready_since": _pod_ready_since(obj),
                                    **_pod_placement(obj, labels),
-                                   **_pod_template(obj)}
+                                   **_pod_template(obj),
+                                   **_pod_lifecycle(obj)}
 
             meas = {}
             agg = aggregate(pod_state, old_hashes, modes, pods_per_inst, measures=meas)

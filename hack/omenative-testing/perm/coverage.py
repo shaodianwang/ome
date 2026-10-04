@@ -236,8 +236,8 @@ HEADER_VALUES = {
     # what a competing writer patches: the ISVC, or every InferenceReplica of the case
     "target": {"isvc", "ir"},
     "nophase": {"Pending", "Canarying", "Paused", "Promoting", "RollingBack", "RolledBack", "Failed"},
-    "inv_off": {"A", "B", "C", "D", "F", "G", "H", "J", "K", "all"},
-    "inv_xfail": {"A", "B", "C", "D", "F", "G", "H", "J", "K", "all"},
+    "inv_off": {"A", "B", "C", "D", "F", "G", "H", "I", "J", "K", "all"},
+    "inv_xfail": {"A", "B", "C", "D", "F", "G", "H", "I", "J", "K", "all"},
     # fillers take every node's spare CPU once the service has settled
     "pool": {"packed"},
     "xcheck": {"sectraffic"},

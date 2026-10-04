@@ -734,24 +734,29 @@ class PodRecordBuilders(unittest.TestCase):
 
 
 def pod_object(name, component, index, revision, image, anno, *, runner="default",
-               test_rev="v1", cpu="50m", ready=True, serving=True, container_ready=None):
+               test_rev="v1", cpu="50m", ready=True, serving=True, container_ready=None,
+               phase="Running", deletion=None, node=""):
     """A pod as kubectl -w hands it to the watcher: the labels, annotation,
     container spec and conditions the record builders and invariants read.
     `ready` is the pod's Ready condition; the main container's own status
-    follows it unless `container_ready` says otherwise."""
+    follows it unless `container_ready` says otherwise. `phase` is the
+    kubelet's, `deletion` a deletionTimestamp once a delete was issued,
+    `node` the binding."""
     return {
         "metadata": {"name": name, "uid": f"uid-{name}",
                      "labels": {"component": component, "ome.io/instance-index": str(index),
                                 "ome.io/runner": runner, "ome.io/pod-ordinal": "0",
                                 run.REV_LABEL: revision},
-                     "annotations": {run.TRIGGER_ANNO: anno} if anno else {}},
-        "spec": {"containers": [{
+                     "annotations": {run.TRIGGER_ANNO: anno} if anno else {},
+                     **({"deletionTimestamp": deletion} if deletion else {})},
+        "spec": {**({"nodeName": node} if node else {}), "containers": [{
             "name": run.MAIN_CONTAINER, "image": image,
             "env": [{"name": "TEST_REV", "value": test_rev},
                     {"name": "OME_INSTANCE_INDEX", "value": str(index)},
                     {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}],
             "resources": {"requests": {"cpu": cpu, "memory": "64Mi"}}}]},
-        "status": {"containerStatuses": [{"name": run.MAIN_CONTAINER,
+        "status": {"phase": phase,
+                   "containerStatuses": [{"name": run.MAIN_CONTAINER,
                                           "ready": ready if container_ready is None else container_ready}],
                    "conditions": [{"type": run.SERVING_COND, "status": "True" if serving else "False"},
                                   {"type": "Ready", "status": "True" if ready else "False"}]},
@@ -1254,6 +1259,368 @@ class SupersededRevisionInvariantTest(unittest.TestCase):
             self.assertTrue(run.HDR_VALIDATORS[knob]("H"))
 
 
+class OperationProgressInvariantTest(unittest.TestCase):
+    """Invariant I: every operation a status row holds has an owner making
+    progress — a pod set behind it, a pod change inside the Component's
+    readiness window, a Terminating pod on a stopped node swept at the
+    force-delete boundary, and a persisted hold naming only Instances that
+    exist."""
+
+    REV, NEW = "a1b2c3d4", "e5f6a7b8"
+    T0 = 1_700_000_000.0
+    POLICY = {"forceDelete": {"overdueSlack": "30s", "nodeUnreachableThreshold": "90s"}}
+
+    @staticmethod
+    def _iso(epoch):
+        return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _op(self, kind, started, **extra):
+        op = {"id": f"{kind.lower()}-1", "type": kind, "step": "WaitReady",
+              "startedAt": self._iso(started), "lastProgressAt": self._iso(started)}
+        op.update(extra)
+        return op
+
+    def _ir(self, rows, *, ops=None, timeout=None, paused=False, hold=None):
+        """An engine InferenceReplica: rows (index, phase, running revision),
+        operation records by index, the Component's own readiness window,
+        the pause flag and a persisted rollout hold."""
+        item = ir_item("p1", "engine", rows, current=self.REV)
+        for row in item["status"]["instanceStatuses"]:
+            if ops and row["index"] in ops:
+                row["operation"] = ops[row["index"]]
+        if timeout:
+            item["spec"]["lifecycle"] = {"instanceReadyTimeout": timeout}
+        if paused:
+            item["spec"]["paused"] = True
+        if hold:
+            item["status"]["rolloutHold"] = hold
+        return [item]
+
+    def _pods(self, *specs):
+        """Engine pods as (name, index[, pod_object keyword overrides])."""
+        out = {}
+        for spec in specs:
+            name, index = spec[0], spec[1]
+            kw = dict(spec[2]) if len(spec) > 2 else {}
+            out[name] = watcher_record(pod_object(name, "engine", index, kw.pop("rev", self.REV), "img:1", "v1", **kw))
+        return out
+
+    def _snap(self, ir, **over):
+        snap = dict(ir_items=ir, isvc_status={}, lifecycle={})
+        snap.update(over)
+        return snap
+
+    def _node_fault(self, **over):
+        f = {"kind": "node", "fired": True, "node": "worker-2", "fired_ts": self.T0, "bite_ts": self.T0 + 40,
+             "kubelet_restored": False, "infra_fail": None}
+        f.update(over)
+        return f
+
+    def test_failed_row_with_a_restart_operation_and_no_pod_trips(self):
+        """A post-Ready crash under a short stuck-pod grace: the row reads
+        Failed with its Restart operation kept and zero pods behind it."""
+        inv = run._inv_new("p1", {})
+        ir = self._ir([(0, "Ready", self.REV), (1, "Failed", self.REV)], ops={1: self._op("Restart", self.T0 - 30)})
+        pods = self._pods(("engine-0", 0))
+        t = observe_ticks(inv, pods, run.INV_SUSTAIN_I_NO_POD - 1, start=self.T0, **self._snap(ir))
+        self.assertEqual({}, inv["viol"], "the no-pod window has not elapsed")
+        observe_ticks(inv, pods, 1, start=t, **self._snap(ir))
+        key = ("I", "operation-without-pods", "engine", "1")
+        self.assertEqual({key}, set(inv["viol"]))
+        self.assertIn("operation without a pod set: engine/1 holds Restart with no live pod for", inv["viol"][key]["detail"])
+        checks, notes = [], []
+        self.assertEqual("FAIL", run.invariant_checks(inv, "PASS", notes, checks))
+        self.assertTrue(any("invariant I violated (operation-without-pods)" in c for c in checks), checks)
+
+    def test_a_pod_in_a_terminal_phase_is_not_a_pod_set(self):
+        """A spent repair whose only pod sits in a terminal phase has nothing
+        behind its operation."""
+        for phase in ("Failed", "Succeeded"):
+            inv = run._inv_new("p1", {})
+            ir = self._ir([(0, "Ready", self.REV), (1, "Failed", self.REV)], ops={1: self._op("Restart", self.T0)})
+            pods = self._pods(("engine-0", 0), ("engine-1", 1, {"ready": False, "serving": False, "phase": phase}))
+            observe_ticks(inv, pods, run.INV_SUSTAIN_I_NO_POD, start=self.T0, **self._snap(ir))
+            self.assertIn(("I", "operation-without-pods", "engine", "1"), inv["viol"], phase)
+
+    def test_a_pending_or_a_leaving_pod_is_a_pod_set(self):
+        for kw in ({"phase": "Pending", "ready": False, "serving": False},
+                   {"deletion": self._iso(self.T0), "ready": False, "serving": False}):
+            inv = run._inv_new("p1", {})
+            ir = self._ir([(0, "Ready", self.REV), (1, "Restarting", self.REV)], ops={1: self._op("Restart", self.T0)})
+            pods = self._pods(("engine-0", 0), ("engine-1", 1, kw))
+            observe_ticks(inv, pods, run.INV_SUSTAIN_I_NO_POD + 1, start=self.T0, **self._snap(ir))
+            self.assertEqual({}, inv["viol"], kw)
+
+    def test_a_drain_that_never_finishes_is_a_stall_not_a_missing_pod_set(self):
+        inv = run._inv_new("p1", {})
+        ir = self._ir([(0, "Ready", self.REV), (1, "Restarting", self.REV)], timeout="60s",
+                      ops={1: self._op("Restart", self.T0)})
+        pods = self._pods(("engine-0", 0), ("engine-1", 1, {"deletion": self._iso(self.T0), "ready": False, "serving": False}))
+        observe_ticks(inv, pods, 16, start=self.T0, **self._snap(ir))
+        self.assertEqual({("I", "operation-without-progress", "engine", "1")}, set(inv["viol"]))
+
+    def test_update_open_on_the_running_revision_with_no_surge_pod_trips_past_the_window(self):
+        """An abandoned single-pod surge after a rollback and a manager
+        restart: the Update operation stays open while every pod is back on
+        the starting revision and nothing surges."""
+        inv = run._inv_new("p1", {})
+        ir = self._ir([(0, "Ready", self.REV), (1, "Ready", self.REV)], timeout="60s",
+                      ops={1: self._op("Update", self.T0, targetRevision=f"p1-engine-{self.REV}", strategy="SurgeThenDrain")})
+        pods = self._pods(("engine-0", 0), ("engine-1", 1))
+        # The window elapses at T0+60: the first observation past it is the
+        # tick at T0+65, the second at T0+70.
+        t = observe_ticks(inv, pods, 14, start=self.T0, **self._snap(ir))
+        self.assertEqual({}, inv["viol"], "one observation past the window is not a violation")
+        observe_ticks(inv, pods, 1, start=t, **self._snap(ir))
+        key = ("I", "operation-without-progress", "engine", "1")
+        self.assertEqual({key}, set(inv["viol"]))
+        self.assertIn("operation without progress: engine/1 Update open", inv["viol"][key]["detail"])
+        self.assertIn("with no pod change (window 60s)", inv["viol"][key]["detail"])
+
+    def test_a_progressing_operation_resets_the_stall_clock_and_holds(self):
+        """A long-running Update whose Instance pods keep changing (a
+        replacement every 40 s, readiness flipping) is never a stall, and
+        the verdict lists I among the invariants that held."""
+        inv = run._inv_new("p1", {})
+        ir = self._ir([(0, "Ready", self.REV), (1, "Updating", self.REV)], timeout="60s",
+                      ops={1: self._op("Update", self.T0, targetRevision=f"p1-engine-{self.NEW}")})
+        t = self.T0
+        for i in range(60):   # 300 s: five windows
+            pods = self._pods(("engine-0", 0), (f"engine-1-{i // 8}", 1, {"ready": i % 16 >= 8, "serving": False}))
+            t = observe_ticks(inv, pods, 1, start=t, **self._snap(ir))
+        self.assertEqual({}, inv["viol"])
+        self.assertTrue(inv["i_seen"])
+        checks = []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("continuous invariants held" in c and "operation-progress" in c for c in checks), checks)
+
+    def test_the_window_is_the_components_else_the_controllers_else_the_default(self):
+        own = {"lifecycle": {"instanceReadyTimeout": "90s"}}
+        self.assertEqual(90.0, run._inv_operation_window_s(own, {"instanceReadyTimeout": "2m"}))
+        self.assertEqual(90.0, run._inv_operation_window_s(own, None))
+        self.assertEqual(120.0, run._inv_operation_window_s({}, {"instanceReadyTimeout": "2m"}))
+        self.assertEqual(run.INV_I_WINDOW_DEFAULT_S, run._inv_operation_window_s({}, {}))
+        self.assertIsNone(run._inv_operation_window_s({}, None), "the controller config is unread: no window")
+        # The controller default governs a Component that names none.
+        ir = self._ir([(0, "Ready", self.REV), (1, "Ready", self.REV)], ops={1: self._op("Update", self.T0)})
+        pods = self._pods(("engine-0", 0), ("engine-1", 1))
+        inv = run._inv_new("p1", {})
+        snap = self._snap(ir, lifecycle={"instanceReadyTimeout": "2m"})
+        t = observe_ticks(inv, pods, 26, start=self.T0, **snap)
+        self.assertEqual({}, inv["viol"])
+        observe_ticks(inv, pods, 1, start=t, **snap)
+        self.assertIn(("I", "operation-without-progress", "engine", "1"), inv["viol"])
+        # Unread, the stall rule makes no observation on such a Component.
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, pods, 200, start=self.T0, **self._snap(ir, lifecycle=None))
+        self.assertEqual({}, inv["viol"])
+
+    def test_the_engines_own_restarted_deadline_extends_the_window(self):
+        """A deadline the engine restarted from admission after an external
+        hold is honored over the window counted from the operation's start."""
+        inv = run._inv_new("p1", {})
+        ir = self._ir([(0, "Ready", self.REV), (1, "Ready", self.REV)], timeout="60s",
+                      ops={1: self._op("Update", self.T0, deadline=self._iso(self.T0 + 200))})
+        pods = self._pods(("engine-0", 0), ("engine-1", 1))
+        t = observe_ticks(inv, pods, 40, start=self.T0, **self._snap(ir))
+        self.assertEqual({}, inv["viol"], "inside the engine's own deadline")
+        observe_ticks(inv, pods, 3, start=t, **self._snap(ir))
+        self.assertIn(("I", "operation-without-progress", "engine", "1"), inv["viol"])
+
+    def test_an_operation_waiting_on_an_external_authority_is_exempt(self):
+        # The create refused for quota: no pod, and the row says why.
+        inv = run._inv_new("p1", {})
+        ir = self._ir([(0, "Ready", self.REV), (1, "Creating", self.REV)], timeout="60s",
+                      ops={1: self._op("Create", self.T0, waiting="QuotaExceeded")})
+        pods = self._pods(("engine-0", 0))
+        observe_ticks(inv, pods, 60, start=self.T0, **self._snap(ir))
+        self.assertEqual({}, inv["viol"])
+        self.assertTrue(inv["i_seen"])
+        # A source whose surge replacement nothing places: the token sits on
+        # the replacement's row and holds the source's operation too.
+        inv = run._inv_new("p1", {})
+        ir = self._ir([(0, "Ready", self.REV), (1, "Updating", self.REV), (2, "Creating", self.REV)], timeout="60s",
+                      ops={1: self._op("Update", self.T0, surgeIndex=2),
+                           2: self._op("Create", self.T0, waiting="Unschedulable")})
+        pods = self._pods(("engine-0", 0), ("engine-1", 1),
+                          ("engine-2", 2, {"phase": "Pending", "ready": False, "serving": False}))
+        observe_ticks(inv, pods, 60, start=self.T0, **self._snap(ir))
+        self.assertEqual({}, inv["viol"])
+
+    def test_a_paused_component_is_exempt_until_a_settle_after_the_pause_lifts(self):
+        rows = [(0, "Ready", self.REV), (1, "Restarting", self.REV)]
+        ops = {1: self._op("Restart", self.T0)}
+        pods = self._pods(("engine-0", 0))
+        inv = run._inv_new("p1", {})
+        t = observe_ticks(inv, pods, 3 * run.INV_SUSTAIN_I_NO_POD, start=self.T0,
+                          **self._snap(self._ir(rows, ops=ops, paused=True)))
+        self.assertEqual({}, inv["viol"], "paused: nothing is owed")
+        t = observe_ticks(inv, pods, run.INV_SUSTAIN_I_NO_POD, start=t, **self._snap(self._ir(rows, ops=ops)))
+        self.assertEqual({}, inv["viol"], "the settle after the pause lifted is quiet too")
+        observe_ticks(inv, pods, run.INV_SUSTAIN_SETTLE + 1, start=t, **self._snap(self._ir(rows, ops=ops)))
+        self.assertIn(("I", "operation-without-pods", "engine", "1"), inv["viol"])
+
+    def test_a_rollout_phase_held_at_a_gate_is_exempt_from_the_stall_rule(self):
+        ir = self._ir([(0, "Ready", self.REV), (1, "Ready", self.REV)], timeout="60s",
+                      ops={1: self._op("Update", self.T0)})
+        pods = self._pods(("engine-0", 0), ("engine-1", 1))
+        for phase, hits in (("Paused", set()), ("Canarying", {("I", "operation-without-progress", "engine", "1")})):
+            inv = run._inv_new("p1", {})
+            observe_ticks(inv, pods, 30, start=self.T0,
+                          **self._snap(ir, isvc_status={"components": {"engine": {"rolloutPhase": phase}}}))
+            self.assertEqual(hits, set(inv["viol"]), phase)
+
+    def test_a_manager_the_case_restarted_quiets_the_claim_until_it_is_back(self):
+        fault = {"kind": "ctrlrestart", "fired": True, "fired_ts": self.T0, "cycles": [], "infra_fail": None}
+        inv = run._inv_new("p1", {})
+        run._inv_bind_fault(inv, fault)
+        self.assertEqual(self.T0 + run.CTRL_READY_S, run._inv_quiet_until(inv, self.T0 + 1))
+        ir = self._ir([(0, "Ready", self.REV), (1, "Failed", self.REV)], ops={1: self._op("Restart", self.T0)})
+        pods = self._pods(("engine-0", 0))
+        t = observe_ticks(inv, pods, 2 * run.INV_SUSTAIN_I_NO_POD, start=self.T0, **self._snap(ir))
+        self.assertEqual({}, inv["viol"], "the manager is down: nothing is owed")
+        fault["ctrl_back_at"] = t
+        self.assertEqual(t + run.INV_SETTLE_S, run._inv_quiet_until(inv, t))
+        t = observe_ticks(inv, pods, run.INV_SUSTAIN_I_NO_POD, start=t, **self._snap(ir))
+        self.assertEqual({}, inv["viol"], "the settle after the manager is back is quiet too")
+        observe_ticks(inv, pods, run.INV_SUSTAIN_SETTLE + 1, start=t, **self._snap(ir))
+        self.assertIn(("I", "operation-without-pods", "engine", "1"), inv["viol"])
+        # A webhook outage quiets the claim until it is lifted; a fault that
+        # has not fired, is apparatus, or is of another kind quiets nothing.
+        inv = run._inv_new("p1", {})
+        run._inv_bind_fault(inv, {"kind": run.WEBHOOK_FAULT, "fired": True, "infra_fail": None})
+        self.assertEqual(float("inf"), run._inv_quiet_until(inv, self.T0))
+        run._inv_bind_fault(inv, {"kind": run.WEBHOOK_FAULT, "fired": True, "infra_fail": None,
+                                  "webhook_restored": True, "lift_ts": self.T0})
+        self.assertEqual(self.T0 + run.INV_SETTLE_S, run._inv_quiet_until(inv, self.T0))
+        for f in ({"kind": "ctrlrestart", "fired": False}, {"kind": "ctrlrestart", "fired": True, "infra_fail": "x"},
+                  {"kind": "podkill", "fired": True}):
+            inv = run._inv_new("p1", {})
+            run._inv_bind_fault(inv, f)
+            self.assertEqual(0.0, run._inv_quiet_until(inv, self.T0), f)
+        self.assertIsNone(run._inv_new("p1", {})["fault"])
+
+    def test_an_instance_with_a_pod_on_the_stopped_node_is_the_node_losss_wait(self):
+        inv = run._inv_new("p1", {})
+        run._inv_bind_fault(inv, self._node_fault())
+        ir = self._ir([(0, "Ready", self.REV), (1, "Restarting", self.REV)], timeout="60s",
+                      ops={1: self._op("Restart", self.T0)})
+        pods = self._pods(("engine-0", 0, {"node": "worker-1"}),
+                          ("engine-1", 1, {"node": "worker-2", "ready": False, "serving": False}))
+        observe_ticks(inv, pods, 40, start=self.T0, **self._snap(ir))
+        self.assertEqual({}, inv["viol"])
+
+    def test_terminating_pod_on_a_stopped_node_past_the_boundary_trips(self):
+        """A drained pod left on an unreachable node after its roll
+        converged: Terminating past the policy's boundary and never swept."""
+        inv = run._inv_new("p1", {})
+        run._inv_bind_fault(inv, self._node_fault())
+        ir = self._ir([(0, "Ready", self.REV), (1, "Ready", self.REV)])
+        pods = self._pods(("engine-0", 0, {"node": "worker-1"}),
+                          ("engine-1", 1, {"node": "worker-2", "deletion": self._iso(self.T0 + 20),
+                                           "ready": False, "serving": False}),
+                          ("engine-1-new", 1, {"node": "worker-1"}))
+        snap = self._snap(ir, lifecycle=self.POLICY)
+        # The boundary is the later of deletion+overdueSlack (T0+50) and the
+        # node reading NotReady+nodeUnreachableThreshold (T0+130); the sweep
+        # allowance puts the first observation at T0+195, the second at T0+200.
+        t = observe_ticks(inv, pods, 40, start=self.T0, **snap)
+        self.assertEqual({}, inv["viol"])
+        observe_ticks(inv, pods, 1, start=t, **snap)
+        key = ("I", "terminating-outlives-policy", "engine", "engine-1")
+        self.assertEqual({key}, set(inv["viol"]))
+        self.assertIn("terminating pod outlives the policy: engine-1 on worker-2", inv["viol"][key]["detail"])
+        self.assertIn("past the boundary", inv["viol"][key]["detail"])
+        checks = []
+        self.assertEqual("FAIL", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("invariant I violated (terminating-outlives-policy)" in c for c in checks), checks)
+
+    def test_terminating_pod_inside_the_boundary_without_the_policy_or_with_the_kubelet_back_holds(self):
+        ir = self._ir([(0, "Ready", self.REV), (1, "Ready", self.REV)])
+        leaving = {"node": "worker-2", "deletion": self._iso(self.T0 + 20), "ready": False, "serving": False}
+        pods = self._pods(("engine-0", 0, {"node": "worker-1"}), ("engine-1", 1, leaving),
+                          ("engine-1-new", 1, {"node": "worker-1"}))
+        for label, f, lifecycle, ticks in (("inside the boundary", self._node_fault(), self.POLICY, 38),
+                                           ("policy off", self._node_fault(), {}, 80),
+                                           ("kubelet back", self._node_fault(kubelet_restored=True), self.POLICY, 80),
+                                           ("lifted", self._node_fault(lifted_at=self.T0 + 100), self.POLICY, 80),
+                                           ("another node", self._node_fault(node="worker-3"), self.POLICY, 80),
+                                           ("not fired", self._node_fault(fired=False), self.POLICY, 80),
+                                           ("config unread", self._node_fault(), None, 80)):
+            inv = run._inv_new("p1", {})
+            run._inv_bind_fault(inv, f)
+            observe_ticks(inv, pods, ticks, start=self.T0, **self._snap(ir, lifecycle=lifecycle))
+            self.assertEqual({}, inv["viol"], label)
+        self.assertEqual((30.0, 90.0), run._inv_force_delete_policy(self.POLICY))
+        self.assertIsNone(run._inv_force_delete_policy({"forceDelete": {"overdueSlack": "soon"}}))
+        self.assertIsNone(run._inv_force_delete_policy({}))
+        self.assertIsNone(run._inv_force_delete_policy(None))
+
+    def test_a_hold_naming_a_gone_instance_trips_and_a_present_one_holds(self):
+        target = f"p1-engine-{self.NEW}"
+        hold = {"gate": "Held", "target": target, "since": self._iso(self.T0 - 100),
+                "reason": f"update to {target} held after 3 failed attempt(s): crash; Instance 3 on revision {target} not serving"}
+        rows = [(0, "Ready", self.REV), (1, "Ready", self.REV), (2, "Ready", self.REV)]
+        pods = self._pods(("engine-0", 0), ("engine-1", 1), ("engine-2", 2))
+        inv = run._inv_new("p1", {})
+        snap = self._snap(self._ir(rows, hold=hold))
+        t = observe_ticks(inv, pods, run.INV_SUSTAIN_SETTLE - 1, start=self.T0, **snap)
+        self.assertEqual({}, inv["viol"], "the settle window has not elapsed")
+        observe_ticks(inv, pods, 1, start=t, **snap)
+        key = ("I", "hold-names-gone-instance", "engine", "3")
+        self.assertEqual({key}, set(inv["viol"]))
+        self.assertIn("hold names a gone Instance: engine hold Held names 3", inv["viol"][key]["detail"])
+        self.assertIn("held for", inv["viol"][key]["detail"])
+        # A row for the named Instance, or a pod of it still leaving, is an
+        # Instance that exists.
+        gone_pod = watcher_record(pod_object("engine-3", "engine", 3, self.REV, "img:1", "v1",
+                                             deletion=self._iso(self.T0), ready=False, serving=False))
+        for ir, more in ((self._ir(rows + [(3, "Failed", self.REV)], hold=hold), {}),
+                         (self._ir(rows, hold=hold), {"engine-3": gone_pod})):
+            inv = run._inv_new("p1", {})
+            observe_ticks(inv, dict(pods, **more), run.INV_SUSTAIN_SETTLE + 1, start=self.T0, **self._snap(ir))
+            self.assertNotIn(key, inv["viol"])
+        self.assertEqual(["2", "5"], run._hold_named_instances(f"held; Instances 2, 5 on revision {target} not serving"))
+        self.assertEqual([], run._hold_named_instances("Sequential waiting on decoder"))
+
+    def test_waived_parked_and_validated_like_the_other_classes(self):
+        ir = self._ir([(0, "Ready", self.REV), (1, "Failed", self.REV)], ops={1: self._op("Restart", self.T0)})
+        pods = self._pods(("engine-0", 0))
+        inv = run._inv_new("p1", {"inv_off": "I"})
+        self.assertFalse(inv["i_on"])
+        observe_ticks(inv, pods, run.INV_SUSTAIN_I_NO_POD + 1, start=self.T0, **self._snap(ir))
+        self.assertEqual({}, inv["viol"])
+        hdr = {"notimpl": 1, "issue": 4242, "inv_xfail": "I"}
+        inv = run._inv_new("p1", hdr)
+        observe_ticks(inv, pods, run.INV_SUSTAIN_I_NO_POD, start=self.T0, **self._snap(ir))
+        checks = []
+        verdict = run.invariant_checks(inv, run.soften_expected_fail(hdr, "PASS", checks), [], checks)
+        self.assertEqual("XFAIL (known bug: #4242)", verdict)
+        self.assertTrue(batch.is_green(verdict))
+        for knob in ("inv_off", "inv_xfail"):
+            self.assertTrue(run.HDR_VALIDATORS[knob]("I"))
+            self.assertIn("I", coverage.HEADER_VALUES[knob])
+        self.assertIn("I", run.INV_CLASSES)
+        self.assertEqual("operation-progress", run.INV_NAMES["I"])
+
+    def test_vacuous_when_no_operation_hold_or_terminating_pod_was_seen(self):
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, self._pods(("engine-0", 0)), 3, start=self.T0, **self._snap(self._ir([(0, "Ready", self.REV)])))
+        self.assertFalse(inv["i_seen"])
+        checks = []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("invariant I (operation-progress) never saw" in c for c in checks), checks)
+        self.assertFalse(any("continuous invariants held" in c and "operation-progress" in c for c in checks), checks)
+
+    def test_watcher_records_carry_the_pod_phase_deletion_and_node(self):
+        rec = watcher_record(pod_object("engine-0", "engine", 0, self.REV, "img:1", "v1", phase="Pending",
+                                        deletion="2026-01-01T00:00:00Z", node="worker-1", ready=False))
+        self.assertEqual(("Pending", "2026-01-01T00:00:00Z", "worker-1", False),
+                         (rec["phase"], rec["deleted_at"], rec["node"], rec["alive"]))
+        rec = watcher_record(pod_object("engine-0", "engine", 0, self.REV, "img:1", "v1"))
+        self.assertEqual(("Running", "", True), (rec["phase"], rec["deleted_at"], rec["alive"]))
+
+
 class GangSchedulingInvariantTest(unittest.TestCase):
     """Invariant D's gang half: a forming gang must bind as a unit, while a
     gang that served whole and lost a member is a repair the scheduler holds
@@ -1330,6 +1697,7 @@ class InvariantTickTest(unittest.TestCase):
             "endpointslices": routing_of(routed_service(case, "engine", self.REV, "uid-engine-0"))[1],
             "controllerrevisions": [{"metadata": {"name": f"{case}-engine-{self.REV}"},
                                      "data": revision_payload("img:1", "v1")}],
+            "configmap": {"data": {run.LIFECYCLE_CONFIG_KEY: json.dumps({"instanceReadyTimeout": "30m"})}},
         }
 
         def kubectl(*args, **_kw):
@@ -1337,6 +1705,8 @@ class InvariantTickTest(unittest.TestCase):
             kind = args[args.index("get") + 1]
             if kind == "isvc":
                 body = {"status": isvc_rollout_status("engine", self.REV)}
+            elif kind == "configmap":
+                body = objects[kind]
             else:
                 body = {"items": objects[kind]}
             return subprocess.CompletedProcess(args, 0, stdout=json.dumps(body), stderr="")
@@ -1353,8 +1723,11 @@ class InvariantTickTest(unittest.TestCase):
             run._inv_tick(inv, pods, {"engine": 1})      # inside INV_TICK_S: no reads
             self.assertEqual(len(first), len(calls))
             run._inv_tick(inv, pods, {"engine": 1})      # the ledger is read: no revision list
-        self.assertEqual(["inferencereplicas", "svc", "endpointslices", "isvc", "controllerrevisions"], first)
-        self.assertNotIn("controllerrevisions", [c[c.index("get") + 1] for c in calls[len(first):]])
+        self.assertEqual(["inferencereplicas", "svc", "endpointslices", "isvc", "controllerrevisions", "configmap"], first)
+        later = [c[c.index("get") + 1] for c in calls[len(first):]]
+        self.assertNotIn("controllerrevisions", later)
+        self.assertNotIn("configmap", later, "the lifecycle block is read once per case")
+        self.assertEqual({"instanceReadyTimeout": "30m"}, inv["lifecycle"])
         self.assertEqual("revision", inv["revisions"][(self.REV, "pod")]["src"])
         self.assertEqual({}, inv["viol"])
         self.assertTrue(inv["ir_seen"] and inv["b_seen"] and inv["g_seen"] and inv["h_seen"])
