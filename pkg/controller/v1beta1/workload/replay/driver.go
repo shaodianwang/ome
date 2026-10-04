@@ -781,6 +781,7 @@ func (d *driver) buildInput(desired types.WorkloadDesiredSpec, observed types.Wo
 		AbandonedReplacementGrace: abandonedReplacementGrace,
 		Requeue:                   types.RequeueIntervals{Operation: requeueOperation, Gate: requeueGate},
 		Gangs:                     types.NewGangObservations(),
+		DrainHolds:                &types.DrainHolds{},
 		Teardown:                  d.teardown,
 		Clock:                     d.clock,
 		Disposition: types.DispositionDeps{

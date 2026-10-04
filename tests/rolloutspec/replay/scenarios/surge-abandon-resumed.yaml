@@ -1,0 +1,53 @@
+# The starting revision is re-applied while one Instance of two has a
+# surge replacement on the new revision, and the manager restarts as the
+# rollback lands: the replacement was deleted by the manager that died.
+# A resumed manager reads the row from status alone and closes the
+# abandoned surge the moment the replacement is gone, so every row is
+# Ready on the starting revision with no operation left open.
+scenario: surge-abandon-resumed
+arrows:
+  - T-ready-surge
+  - T-surge-abandon-superseded
+cells:
+  - instance/Update/Surge/spec.revision/before
+  - instance/Update/Surge/ctrl.crash/boundary@T-surge-abandon-superseded
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    maxSurge: "1"
+    maxUnavailable: "0"
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    abandonedReplacementGrace: 30s
+timeline:
+  - tick: 1
+    note: cold start materializes both Instances on the starting revision
+  - tick: 2
+    note: both sources become Ready and enter rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+      - pod.ready[source]: {pod: {index: 1, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 1, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the first Instance surges a replacement and the second waits on the surge budget
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the starting revision is re-applied while the replacement is not yet runtime-ready, so the surge is abandoned and the replacement deleted
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v1}
+  - tick: 5
+    note: the manager restarts with the replacement still terminating; the resumed manager finds the row mid-surge toward a revision nobody asks for and waits for the replacement to go
+    events:
+      - ctrl.crash: {}
+  - tick: 6
+    note: the abandoned replacement is gone, so the resumed manager closes the surge and the row is Ready on the revision it never stopped running
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 7
+    note: every row runs the roll target with no operation open, so the pass has nothing to do

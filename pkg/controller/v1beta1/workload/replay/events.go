@@ -56,6 +56,7 @@ func init() {
 		"spec.teardown":           applyTeardown,
 		"spec.gangWidth":          applyGangWidth,
 		"spec.rollbackTarget":     applyRollbackTarget,
+		"spec.policyTuning":       applyPolicyTuning,
 		"spec.migrateRequest":     applyMigrateRequest,
 		"gang.podGroup":           applyPodGroup,
 		"timer.operationDeadline": applyOperationDeadline,
@@ -64,6 +65,7 @@ func init() {
 		"timer.repairRetry":       applyRepairRetry,
 		"timer.migrationDeadline": applyMigrationDeadline,
 		"timer.forceDelete":       applyForceDelete,
+		"ctrl.crash":              applyCtrlCrash,
 	}
 }
 
@@ -536,6 +538,42 @@ func applyRollbackTarget(ctx context.Context, d *driver, ev TimelineEvent) (stri
 		return "", err
 	}
 	return fmt.Sprintf("rollbackTo=%s generation=%d", orNil(d.rollbackImage), d.owner.Generation), nil
+}
+
+// applyPolicyTuning rewrites one lifecycle knob outside the pod template.
+// Only the restart policy is modelled: it is the knob whose edit changes
+// which pass owns a row that already has pods, so a scenario can land it
+// against a roll in flight. The edit retargets nothing, as no lifecycle
+// knob feeds the revision payload.
+func applyPolicyTuning(ctx context.Context, d *driver, ev TimelineEvent) (string, error) {
+	switch ev.Variant {
+	case "restartPolicy":
+		if ev.Args.Value == "" {
+			return "", fmt.Errorf("replay: spec.policyTuning[restartPolicy] needs the new policy as value")
+		}
+		d.spec.RestartPolicy = ev.Args.Value
+	case "":
+		return "", fmt.Errorf("replay: spec.policyTuning needs a variant naming the knob")
+	default:
+		return "", fmt.Errorf("replay: spec.policyTuning[%s] is not modelled; the driver rewrites restartPolicy", ev.Variant)
+	}
+	if err := d.bumpGeneration(ctx); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("restartPolicy=%s generation=%d", d.spec.RestartPolicy, d.owner.Generation), nil
+}
+
+// applyCtrlCrash is the controller process restarting. The cluster and the
+// owner status are durable and stay as they are; what the restarted engine
+// loses is the expectations cache, the one thing it keeps in memory between
+// passes, so its first pass reads every pending create and delete as
+// satisfied and re-derives the row's step from status and the pods alone.
+func applyCtrlCrash(_ context.Context, d *driver, ev TimelineEvent) (string, error) {
+	if ev.Variant != "" {
+		return "", fmt.Errorf("replay: ctrl.crash takes no variant")
+	}
+	d.expectations = types.NewExpectationsWithClock(d.clock)
+	return "expectations=dropped", nil
 }
 
 // applyMigrateRequest is the operator's migration mailbox, consumed: the

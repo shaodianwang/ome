@@ -9921,3 +9921,249 @@ func TestCrashLoopAfterPromotion_HeldRowFollowsItsServingPod(t *testing.T) {
 		t.Fatalf("the corrected revision did not land on every Instance")
 	}
 }
+
+// componentCounters is the Component publication the adapter writes from
+// the rows and the pods as they stand: the counters the status surface
+// reports beside the rows.
+func (h *recoveryHarness) componentCounters() workload.ComponentCounters {
+	h.t.Helper()
+	ir := &v1beta1.InferenceReplica{}
+	if err := h.c.Get(h.ctx, h.irKey(), ir); err != nil {
+		h.t.Fatalf("counters: get IR: %v", err)
+	}
+	list := &corev1.PodList{}
+	if err := h.c.List(h.ctx, list, client.InNamespace(recoveryNS)); err != nil {
+		h.t.Fatalf("counters: list pods: %v", err)
+	}
+	pods := make([]*corev1.Pod, 0, len(list.Items))
+	for i := range list.Items {
+		pods = append(pods, &list.Items[i])
+	}
+	observation, err := workload.NewOwnedPublicationObservation(
+		v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses),
+		workload.NewCachedSelectorPodObservation(pods, query.BucketPodsByInstanceIdx(pods)),
+		h.availableByPod(),
+		status.AvailabilityWindow{MinReadySeconds: h.minReadySeconds, Now: h.clk.Now()},
+	)
+	if err != nil {
+		h.t.Fatalf("counters: build observation: %v", err)
+	}
+	plan, err := workload.BuildPlan(h.component, h.desired, h.buildInput().ObservedState)
+	if err != nil {
+		h.t.Fatalf("counters: build plan: %v", err)
+	}
+	_, counters, err := observation.TakeInlineV1Publication(status.DesiredPodCountByInstance(plan), h.target.Name)
+	if err != nil {
+		h.t.Fatalf("counters: consume observation: %v", err)
+	}
+	return counters
+}
+
+// terminatingPodsOf is the pods of Instance idx the apiserver still holds
+// under a deletion timestamp.
+func (h *recoveryHarness) terminatingPodsOf(idx int32) []*corev1.Pod {
+	h.t.Helper()
+	list := &corev1.PodList{}
+	if err := h.c.List(h.ctx, list, client.InNamespace(recoveryNS)); err != nil {
+		h.t.Fatalf("list pods: %v", err)
+	}
+	var out []*corev1.Pod
+	for i := range list.Items {
+		pod := &list.Items[i]
+		if i, ok := query.InstanceIdxFromLabels(pod); ok && i == idx && pod.DeletionTimestamp != nil {
+			out = append(out, pod)
+		}
+	}
+	return out
+}
+
+// TestRollbackOverSurge_ResumedManagerClosesTheAbandonedSurge pins the end
+// state of a rollback that lands over a single-pod surge whose replacement
+// is not yet runtime-ready while the manager restarts: the manager that
+// applied the rollback deleted the replacement and died with that delete
+// in flight, and a manager that resumes with nothing in memory reads the
+// row from status alone and closes the abandoned surge the moment the
+// replacement is gone. Every row ends Ready on the starting revision with
+// no operation open, and the Component counts every Instance as updated.
+// Every pass here runs with a fresh expectations cache, which is all a
+// restarted manager loses between passes.
+//
+// Cells: instance/Update/Surge/spec.revision/before, instance/Update/Surge/ctrl.crash/boundary@T-surge-abandon-superseded
+func TestRollbackOverSurge_ResumedManagerClosesTheAbandonedSurge(t *testing.T) {
+	const replicas = int32(2)
+	h := newRecoveryHarness(t, false)
+	h.replicas = replicas
+	// Deletes linger as Terminating until their grace elapses, as on a
+	// cluster; the abandoned replacement goes on the bounded grace.
+	h.podGrace = 10 * time.Minute
+	h.abandonGrace = 30 * time.Second
+	h.useRollingBudget(workloadtypes.UpdateStrategySurgeThenDrain)
+	if !h.run(30, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+	}
+
+	// A replacement that never passes readiness keeps the surge uncommitted
+	// for as long as the story needs.
+	revNew := h.ensureRevision(h.podSpec(stuckImage))
+	h.setTarget(revNew, stuckImage)
+	if !h.run(10, func() bool { return h.surgeOpen(0) && h.livePodOnImage(stuckImage) }) {
+		h.dumpState("surge toward the new revision")
+		t.Fatalf("the surge toward the new revision never opened")
+	}
+	if h.surgeOpen(1) {
+		t.Fatalf("the second Instance surged beside the first under a surge budget of one")
+	}
+
+	// The starting revision is re-applied while the replacement is not yet
+	// runtime-ready: the pass abandons the surge and deletes the
+	// replacement, and the manager dies with that delete in flight.
+	h.setTarget(h.revV1, goodImage)
+	h.step()
+	if got := h.terminatingPodsOf(0); len(got) != 1 || got[0].Spec.Containers[0].Image != stuckImage {
+		h.dumpState("rollback over the surge")
+		t.Fatalf("the rollback must leave the abandoned replacement terminating; terminating pods of Instance 0: %d", len(got))
+	}
+	if row := h.instance(0); row == nil || row.Phase != workloadtypes.InstancePhaseUpdating || row.Operation == nil || row.Operation.TargetRevision != revNew.Name {
+		t.Fatalf("the row must still carry the surge pinned to %s while its replacement terminates, got %+v", revNew.Name, row)
+	}
+	if got := h.componentCounters().UpdatedReplicas; got != replicas-1 {
+		t.Fatalf("a row mid-surge toward a superseded revision is not updated: UpdatedReplicas = %d, want %d", got, replicas-1)
+	}
+
+	// The resumed manager closes the surge once the replacement is gone and
+	// has nothing else to do.
+	if !h.run(10, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("resumed manager")
+		t.Fatalf("a row was left mid-operation after the rollback: %+v", h.irStatuses())
+	}
+	for _, row := range h.irStatuses() {
+		if row.Operation != nil {
+			t.Fatalf("Instance %d keeps an operation open after the rollback settled: %+v", row.Index, row.Operation)
+		}
+	}
+	if got := h.componentCounters().UpdatedReplicas; got != replicas {
+		t.Fatalf("UpdatedReplicas = %d after the rollback settled, want %d", got, replicas)
+	}
+	if h.livePodOnImage(stuckImage) {
+		t.Fatalf("a pod of the superseded revision is still live after the rollback settled")
+	}
+}
+
+// TestPolicyFlipMidHold_FixLandsWithoutRebuildingTheBrokenRevision pins a
+// roll held because the Instance already on the pushed revision crashed
+// under load, with the restart policy edited from None to
+// RecreateInstanceOnPodRestart while the roll is held: the newly enabled
+// policy rebuilds the crashed set on the revision the Component still
+// wants, and once the fix is pushed no pod of the broken revision is
+// created again and no repair opens on a bumped Instance. A rebuild that
+// has created no pod yet renders the fix; a rebuilt set that exists
+// finishes on the revision it carries and the roll replaces it at the fix.
+//
+// Cells: instance/Ready/spec.policyTuning[restartPolicy]/before, instance/Ready/pod.containerRestart/boundary@T-ready-surge, instance/Restart/Drain/spec.revision/before
+func TestPolicyFlipMidHold_FixLandsWithoutRebuildingTheBrokenRevision(t *testing.T) {
+	cases := []struct {
+		name string
+		// rebuiltBeforeFix pushes the fix after the repair's rebuilt set
+		// exists; otherwise the fix lands while the crashed pod is still
+		// terminating and the rebuild has created nothing yet.
+		rebuiltBeforeFix bool
+	}{
+		{name: "the fix is pushed after the rebuilt set exists", rebuiltBeforeFix: true},
+		{name: "the fix is pushed while the crashed pod is still terminating"},
+	}
+	const replicas = int32(2)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryHarnessFor(t, false, constants.MainContainerName)
+			h.recorder = record.NewFakeRecorder(256)
+			h.replicas = replicas
+			none := workloadtypes.RestartPolicyNone
+			h.lifecycle.RestartPolicy = &none
+			// Deletes linger as Terminating until their grace elapses; the
+			// promoted pod serves long enough for the roll to reach the
+			// next Instance before it dies.
+			h.podGrace = time.Minute
+			h.crashAfterServed = 4
+			h.stuckGrace = 90 * time.Second
+			h.useRollingBudget(workloadtypes.UpdateStrategySurgeThenDrain)
+			if !h.run(40, func() bool { return h.settledOn(h.revV1, replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+			}
+
+			revBroken := h.crashRevision(crashOnceAfterServingImage)
+			if !h.run(60, func() bool { return h.notServingHolds() > 0 }) {
+				h.dumpState("held")
+				t.Fatalf("the roll was never held on the crashed Instance")
+			}
+			if hold := h.lastHold(); hold.Gate != workloadtypes.RolloutHoldGateBudget || !holdNamesInstance(hold, 0) {
+				t.Fatalf("the hold must be the budget's and name Instance 0, got %+v", hold)
+			}
+			if h.repairInFlight() || h.eventCount(workloadtypes.EventReasonRestartTriggered) != 0 {
+				t.Fatalf("restart policy None must open no repair for a runner the kubelet restarted")
+			}
+
+			// The policy flips while the roll is held: the restarted runner's
+			// Instance is rebuilt on the revision the Component still wants.
+			recreate := workloadtypes.RestartPolicyRecreateInstance
+			h.lifecycle.RestartPolicy = &recreate
+			h.setTarget(h.target, crashOnceAfterServingImage)
+			if !h.run(10, func() bool { return h.repairInFlight() }) {
+				h.dumpState("policy flip")
+				t.Fatalf("the policy flip opened no repair on the crashed Instance")
+			}
+			if got := h.eventCount(workloadtypes.EventReasonRestartTriggered); got != 1 {
+				t.Fatalf("RestartTriggered events after the flip = %d, want 1", got)
+			}
+			if tc.rebuiltBeforeFix {
+				if !h.run(10, func() bool { return h.instance(0).Incarnation == 2 && len(h.podsOf(0)) == 1 }) {
+					h.dumpState("rebuild")
+					t.Fatalf("the repair never rebuilt the crashed set")
+				}
+				if pod := h.podsOf(0)[0]; pod.Spec.Containers[0].Image != crashOnceAfterServingImage {
+					t.Fatalf("before the fix the rebuild renders the revision the Component wants, got %s", pod.Spec.Containers[0].Image)
+				}
+			} else if len(h.terminatingPodsOf(0)) != 1 || len(h.podsOf(0)) != 0 {
+				h.dumpState("repair drain")
+				t.Fatalf("the repair must have the crashed pod terminating and nothing rebuilt yet")
+			}
+
+			// The fix is pushed. From here no pod of the broken revision may
+			// be created and no repair may open on a bumped Instance.
+			before := map[types.UID]struct{}{}
+			for _, pod := range h.livePods() {
+				if pod.Spec.Containers[0].Image == crashOnceAfterServingImage {
+					before[pod.UID] = struct{}{}
+				}
+			}
+			restartsBefore := h.eventCount(workloadtypes.EventReasonRestartTriggered)
+			h.setTarget(h.revFixed, fixedImage)
+			late := map[types.UID]string{}
+			brokenPromotedAfterFix := false
+			landed := h.runWithInvariant(120, func() bool { return h.settledOn(h.revFixed, replicas) }, func() {
+				for _, pod := range h.livePods() {
+					if _, seen := before[pod.UID]; !seen && pod.Spec.Containers[0].Image == crashOnceAfterServingImage {
+						late[pod.UID] = pod.Name
+					}
+				}
+				if row := h.instance(0); !tc.rebuiltBeforeFix && row != nil && row.Phase == workloadtypes.InstancePhaseReady && row.RunningRevision == revBroken.Name {
+					brokenPromotedAfterFix = true
+				}
+			})
+			if !landed {
+				h.dumpState("fix")
+				t.Fatalf("the fix did not land on every Instance; last hold %+v", h.lastHold())
+			}
+			if len(late) > 0 {
+				t.Fatalf("pod(s) of the broken revision created after the fix push: %v", late)
+			}
+			if got := h.eventCount(workloadtypes.EventReasonRestartTriggered); got != restartsBefore {
+				t.Fatalf("a repair opened after the fix push: RestartTriggered events %d, want %d", got, restartsBefore)
+			}
+			if brokenPromotedAfterFix {
+				t.Fatalf("a rebuild that had created no pod when the fix landed must come back on the fix, not on the broken revision")
+			}
+		})
+	}
+}

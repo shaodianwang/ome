@@ -208,6 +208,11 @@ from what it says.
 - `spec.gangWidth[grow|shrink]` rewrites `to:` as the per-Instance worker
   count. The width is outside the revision payload, so the expected pod
   set moves at an unchanged target hash.
+- `spec.policyTuning[restartPolicy]` rewrites the restart policy to
+  `value:`. It is the one lifecycle knob the driver edits: no knob feeds
+  the revision payload, so the edit retargets nothing, and this one
+  changes which pass owns a row that already has pods, which is what a
+  scenario lands against a roll in flight.
 
 `initial.spec.workers` makes the Component multi-pod: one `leader` Runner
 and a `worker` Runner of that size, which is the unit a gang is scheduled
@@ -215,6 +220,16 @@ in. Most multi-pod scenarios also set `topologyKey` and `schedulerName`,
 which keeps the two advisory gang Warnings out of their traces so each
 scenario records only what it is about. `gang-advisory-warnings` is the
 one that declares neither, and it is where those two Warnings are locked.
+
+## Controller events
+
+`ctrl.crash` is the controller process restarting. The cluster and the
+owner status are durable and stay as they are; what the restarted engine
+loses is the expectations cache, the one thing it keeps in memory between
+passes. The driver drops it, so the next pass reads every pending create
+and delete as satisfied and re-derives each row's step from status and
+the pods alone. A scenario places it between a pass that issued a write
+and the observation that would confirm it (`surge-abandon-resumed`).
 
 ## Gangs
 
@@ -353,7 +368,11 @@ different routed Service.
 This is why a drain is a real gate in a replay: a source is deleted only
 once the scenario has taken it out of the routed Service, and a source
 dropped from that Service while its surge replacement is still coming up
-produces the `SourceUnrouted` hold (`source-unrouted-midsurge`). The
+produces the `SourceUnrouted` hold (`source-unrouted-midsurge`). A drain
+the per-Component budget withholds is reported the way the adapter
+reports it: the driver hands the engine the drain-hold sink, so the
+`hold` line names the Instance the roll waits on
+(`held-crash-policy-flip-fix-after-rebuild`). The
 driver creates no Service object for a revision, only the slice, so a
 revision no pod was ever routed on reads as "nothing routes here" and
 drains trivially — the same answer the engine gives for a Service that

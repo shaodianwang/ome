@@ -282,6 +282,9 @@ type EventArgs struct {
 	UUID string `json:"uuid,omitempty"`
 	// Reason is the requester-supplied reason on a migration request.
 	Reason string `json:"reason,omitempty"`
+	// Value is the new setting of the lifecycle knob a spec.policyTuning
+	// edit rewrites, spelled as the owner spec spells it.
+	Value string `json:"value,omitempty"`
 }
 
 // PodRef addresses one pod by the coordinates its stable name is built
@@ -376,6 +379,7 @@ var eventArgKeys = map[string][]string{
 	"spec.replicasDown":       {"to"},
 	"spec.gangWidth":          {"to"},
 	"spec.rollbackTarget":     {"image"},
+	"spec.policyTuning":       {"value"},
 	"spec.migrateRequest":     {"instance", "fromNode", "uuid", "reason"},
 	"gang.podGroup":           {"instance"},
 	"timer.operationDeadline": {"slack"},

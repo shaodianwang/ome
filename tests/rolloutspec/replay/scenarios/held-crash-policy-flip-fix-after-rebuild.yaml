@@ -1,0 +1,124 @@
+# A roll of two Instances is held because the first Instance, already on
+# the pushed revision, crashes under load: its runner restarts after the
+# Instance entered Ready, so it is not serving for the window, no further
+# source may leave rotation, and the second Instance's surge waits with
+# its replacement up beside the source. The restart policy is edited from
+# None to RecreateInstanceOnPodRestart while the roll is held, so the
+# policy rebuilds the crashed set on the revision the Component still
+# wants.
+# The fix is pushed after the rebuilt set exists: the repair finishes on
+# the revision its pod carries and the roll replaces that set at the fix,
+# the second Instance's committed surge promotes on the revision it was
+# pinned to and rolls to the fix from there, and no pod of the broken
+# revision is created after the push.
+scenario: held-crash-policy-flip-fix-after-rebuild
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+  - T-ready-restart-crash
+cells:
+  - instance/Ready/spec.policyTuning[restartPolicy]/before
+  - instance/Ready/pod.containerRestart/boundary@T-ready-surge
+  - instance/Update/Surge/spec.revision/boundary@T-surge-target-ready
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    maxSurge: "1"
+    maxUnavailable: "0"
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start materializes both Instances on the starting revision
+  - tick: 2
+    note: both sources become Ready and enter rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+      - pod.ready[source]: {pod: {index: 1, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 1, ordinal: 0}}
+  - tick: 3
+    note: a broken revision is pushed, so the first Instance surges a replacement and the second waits on the surge budget
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the first replacement is serving and in rotation beside its source, so the source leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the first source leaves rotation, so the drain has converged and the source is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 6
+    note: the first source is gone, so the first Instance promotes onto the pushed revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the surge budget frees, so the second Instance surges its replacement
+  - tick: 8
+    note: half a minute later the promoted runner crashes under load and leaves rotation while the second replacement comes up; the first Instance is not serving for the window, so no source leaves rotation and the roll is held
+    events:
+      - clock.advance: 30s
+      - pod.containerRestart: {pod: {index: 0, ordinal: 1}, message: Error}
+      - endpoint.rotationOut[target]: {pod: {index: 0, ordinal: 1}}
+      - pod.ready[target]: {pod: {index: 1, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, ordinal: 1}}
+  - tick: 9
+    note: the restart policy is edited to RecreateInstanceOnPodRestart while the roll is held, so the restarted runner's Instance is rebuilt and its crashed pod, already out of rotation, is deleted
+    events:
+      - spec.policyTuning[restartPolicy]: {value: RecreateInstanceOnPodRestart}
+  - tick: 10
+    note: the crashed pod is gone, so the repair rebuilds the set at the bumped incarnation on the pushed revision, which is still the roll target
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 11
+    note: the fix is pushed while the rebuilt set is still coming up; the repair finishes on the revision its pod carries and nothing of the broken revision is created from here on
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 12
+    note: the rebuilt pod reports Ready, so the repair completes on the broken revision; the second Instance's replacement is already serving, so its committed cycle drains the source toward the revision it was pinned to while the first Instance waits on the surge budget
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 13
+    note: the second source leaves rotation, so it is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1, ordinal: 0}}
+  - tick: 14
+    note: the second source is gone, so the second Instance promotes onto the pinned revision; both Instances now owe a roll to the fix and the surge budget admits one at a time
+    events:
+      - pod.deleted[source]: {pod: {index: 1, ordinal: 0}}
+  - tick: 15
+    note: the surge budget is free, so the first Instance surges toward the fix and the second waits
+  - tick: 16
+    note: the fixed replacement is serving and in rotation; its crash-prone source is already out of rotation, so it is deleted at once
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 0}}
+  - tick: 17
+    note: the crash-prone source is gone, so the first Instance promotes onto the fix
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 1}}
+  - tick: 18
+    note: the surge budget frees, so the second Instance surges toward the fix
+  - tick: 19
+    note: the second replacement is serving and in rotation beside its source on the broken revision
+    events:
+      - pod.ready[target]: {pod: {index: 1, ordinal: 0}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, ordinal: 0}}
+  - tick: 20
+    note: the second source leaves rotation, so it is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1, ordinal: 1}}
+  - tick: 21
+    note: the second source is gone and the fix has landed on every Instance
+    events:
+      - pod.deleted[source]: {pod: {index: 1, ordinal: 1}}
