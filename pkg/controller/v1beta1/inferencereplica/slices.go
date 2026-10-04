@@ -156,9 +156,9 @@ func (s *slicePass) sweep(ctx context.Context, input workloadtypes.ReconcileInpu
 	return s.p.Sweep(ctx, nil, s.pinned)
 }
 
-// recoverLostSlices deletes ir's pods that run on a slice deleted from
-// outside, so that their Instance is rebuilt on a new slice. A cached read
-// of the pods finds them and a live read confirms them before any is
+// recoverLostSlices deletes ir's pods that run on a slice deleted, or moved
+// off their nodes, from outside, so that their Instance is rebuilt. A cached
+// read of the pods finds them and a live read confirms them before any is
 // deleted. A nil pass recovers nothing.
 func (r *Reconciler) recoverLostSlices(ctx context.Context, ir *v1beta1.InferenceReplica, input workloadtypes.ReconcileInput, s *slicePass) error {
 	if s == nil {
@@ -191,8 +191,8 @@ func (r *Reconciler) recoverLostSlices(ctx context.Context, ir *v1beta1.Inferenc
 		}
 		s.p.Recovered(l)
 		workloadtypes.RecordWarning(r.Recorder, workloadtypes.EventTarget(input), sliceprovision.EventReasonSliceLost,
-			"TPU slice %s was deleted under pods %s; they are deleted so that their Instance is rebuilt on a new slice",
-			l.Name, strings.Join(names, ", "))
+			"TPU slice %s %s while pods %s ran on it; they are deleted so that their Instance is rebuilt",
+			l.Name, l.Why, strings.Join(names, ", "))
 	}
 	return nil
 }

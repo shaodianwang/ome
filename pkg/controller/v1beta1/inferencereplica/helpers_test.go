@@ -1056,6 +1056,22 @@ func setSliceState(t *testing.T, c client.Client, name, state string) {
 	}
 }
 
+// setSlicePartitions assigns the slice the partitions ids, as the provider's
+// scheduler does.
+func setSlicePartitions(t *testing.T, c client.Client, name string, ids ...string) {
+	t.Helper()
+	u := getSlice(t, c, name)
+	if u == nil {
+		t.Fatalf("slice %s not found", name)
+	}
+	if err := unstructured.SetNestedStringSlice(u.Object, ids, "spec", "partitionIds"); err != nil {
+		t.Fatalf("set the partitions of slice %s: %v", name, err)
+	}
+	if err := c.Update(context.Background(), u); err != nil {
+		t.Fatalf("update slice %s: %v", name, err)
+	}
+}
+
 // getSlice returns the named slice, or nil when there is none.
 func getSlice(t *testing.T, c client.Client, name string) *unstructured.Unstructured {
 	t.Helper()

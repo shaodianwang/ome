@@ -243,9 +243,14 @@ Common to both options (under Option 1 all of this lives in `ome-controller`):
 - **Lost slice.** A slice deleted from outside while pods run on it (gone,
   being deleted, or replaced by a newer slice of the same name) has its pods
   deleted with a `SliceLost` warning, counted by `ome_tpu_slice_lost_total`.
-  Their Instance is rebuilt on a new slice of the same name. *Failure mode if
-  skipped:* the pods stay bound and `Ready` on chips that are no longer
-  theirs, and nothing reacts.
+  Their Instance is rebuilt on a new slice of the same name. A slice moved
+  off the nodes its pods are bound to is lost the same way: it has no
+  partitions, as `slice-scheduler` leaves a slice it unbinds after a failure
+  or a preemption without waiting for pods it did not bind, or a bound pod's
+  node no longer carries its label. That Instance is rebuilt on the same
+  slice once it is ready on its new hosts. *Failure mode if skipped:* the
+  pods stay bound and `Ready` on chips that are no longer theirs, and nothing
+  reacts.
 
 Deferred deliberately: retry/backoff policy on a failed create, and behavior when
 the cube has free chips but no free *partition* of the requested shape. Both need

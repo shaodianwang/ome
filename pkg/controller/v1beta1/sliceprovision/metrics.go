@@ -59,7 +59,7 @@ var (
 
 	slicesLost = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "ome_tpu_slice_lost_total",
-		Help: "TPU slices the controller provisioned that were deleted from outside while its pods ran on them, by slice type and topology. Counted once the controller deletes the pods so that their Instance is rebuilt on a new slice.",
+		Help: "TPU slices the controller provisioned that were deleted, or moved off the nodes its pods are bound to, from outside while its pods ran on them, by slice type and topology. Counted once the controller deletes the pods so that their Instance is rebuilt.",
 	}, sliceLabels)
 	sliceProvisionSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "ome_tpu_slice_provision_duration_seconds",

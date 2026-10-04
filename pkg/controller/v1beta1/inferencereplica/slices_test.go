@@ -641,9 +641,10 @@ func TestSliceReleaseDeferredIsReported(t *testing.T) {
 	}
 }
 
-// TestRecoverLostSlices pins the recovery of pods on a slice deleted from
-// outside: they are deleted and reported once a live read confirms the
-// cached one, a pod already gone is not an error, and a failed delete is.
+// TestRecoverLostSlices pins the recovery of pods on a slice deleted, or
+// moved off their node, from outside: they are deleted and reported once a
+// live read confirms the cached one, a pod already gone is not an error, and
+// a failed delete is.
 func TestRecoverLostSlices(t *testing.T) {
 	ctx := context.Background()
 	if err := (&Reconciler{}).recoverLostSlices(ctx, nil, workloadtypes.ReconcileInput{}, nil); err != nil {
@@ -666,14 +667,28 @@ func TestRecoverLostSlices(t *testing.T) {
 		name string
 		// lose deletes the slice from outside.
 		lose bool
+		// bound binds the pod to node host-a, which carries the slice's
+		// label when holds is set; partitioned gives the slice partitions.
+		bound, holds, partitioned bool
 		// wire adapts the reconciler, whose reads and writes all serve c.
 		wire      func(*Reconciler, client.WithWatch)
 		wantErr   string
 		wantGone  bool
 		wantEvent bool
+		// wantWhy is how the event says the slice was lost.
+		wantWhy string
 	}{
 		{name: "slice intact"},
-		{name: "slice lost", lose: true, wantGone: true, wantEvent: true},
+		{name: "slice lost", lose: true, wantGone: true, wantEvent: true, wantWhy: "was deleted"},
+		{name: "slice holds the bound pod's node", bound: true, holds: true, partitioned: true},
+		{
+			name: "slice without partitions under a bound pod", bound: true, holds: true,
+			wantGone: true, wantEvent: true, wantWhy: "lost its partitions",
+		},
+		{
+			name: "slice moved off the bound pod's node", bound: true, partitioned: true,
+			wantGone: true, wantEvent: true, wantWhy: "moved off node host-a",
+		},
 		{
 			name: "cache lags the live slice",
 			wire: func(r *Reconciler, _ client.WithWatch) { r.sliceReader = fake.NewClientBuilder().Build() },
@@ -718,6 +733,19 @@ func TestRecoverLostSlices(t *testing.T) {
 			name := seedSlice(t, r, c, ir, sliceprovision.Slot{Instance: 0}, sliceStateReady)
 			pod := podForIR(ir, 0, "default", 0, true, true)
 			pod.Spec.NodeSelector = map[string]string{sliceKeyAccelerator: "tpu-a", sliceKeyTopology: "2x2x1", sliceKeySlice: name}
+			if tc.bound {
+				pod.Spec.NodeName = "host-a"
+				host := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "host-a", Labels: map[string]string{}}}
+				if tc.holds {
+					host.Labels[sliceKeySlice] = name
+				}
+				if err := c.Create(ctx, host); err != nil {
+					t.Fatalf("create host: %v", err)
+				}
+			}
+			if tc.partitioned {
+				setSlicePartitions(t, c, name, "partition-a")
+			}
 			if err := c.Create(ctx, pod); err != nil {
 				t.Fatalf("create pod: %v", err)
 			}
@@ -748,9 +776,10 @@ func TestRecoverLostSlices(t *testing.T) {
 				wantCount = 1
 				if len(rec.events) != 1 || rec.events[0].reason != string(sliceprovision.EventReasonSliceLost) ||
 					rec.events[0].kind != corev1.EventTypeWarning || rec.events[0].object != ir ||
-					!strings.Contains(rec.events[0].message, name) || !strings.Contains(rec.events[0].message, pod.Name) {
-					t.Fatalf("events = %+v, want one %s warning on the InferenceReplica naming %s and %s",
-						rec.events, sliceprovision.EventReasonSliceLost, name, pod.Name)
+					!strings.Contains(rec.events[0].message, name) || !strings.Contains(rec.events[0].message, pod.Name) ||
+					!strings.Contains(rec.events[0].message, tc.wantWhy) {
+					t.Fatalf("events = %+v, want one %s warning on the InferenceReplica naming %s and %s, saying it %s",
+						rec.events, sliceprovision.EventReasonSliceLost, name, pod.Name, tc.wantWhy)
 				}
 			} else if len(rec.events) != 0 {
 				t.Fatalf("events = %+v, want none", rec.events)

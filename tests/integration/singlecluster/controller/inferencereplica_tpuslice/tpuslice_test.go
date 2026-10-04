@@ -219,6 +219,78 @@ func exposeSliceHosts(name string) {
 	}
 }
 
+// labelHost labels node as a ready host of slice, or of no slice when slice
+// is empty, as the provider does as it activates and deactivates slices.
+func labelHost(node, slice string) {
+	Eventually(func(g Gomega) {
+		n := &corev1.Node{}
+		err := k8sClient.Get(suiteCtx, client.ObjectKey{Name: node}, n)
+		if apierrors.IsNotFound(err) {
+			n = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: node, Labels: map[string]string{
+				sliceConfig.NodeLabels.Accelerator: onDemandAccelerator,
+				sliceConfig.NodeLabels.Topology:    "2x2x1",
+			}}}
+			g.Expect(k8sClient.Create(suiteCtx, n)).To(Succeed())
+		} else {
+			g.Expect(err).NotTo(HaveOccurred())
+		}
+		if slice == "" {
+			delete(n.Labels, sliceConfig.NodeLabels.Slice)
+		} else {
+			n.Labels[sliceConfig.NodeLabels.Slice] = slice
+		}
+		g.Expect(k8sClient.Update(suiteCtx, n)).To(Succeed())
+		n.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}
+		g.Expect(k8sClient.Status().Update(suiteCtx, n)).To(Succeed())
+	}).WithTimeout(waitTimeout).WithPolling(pollInterval).Should(Succeed())
+}
+
+// setPartitions assigns the slice partitions ids, none to unbind it, as the
+// provider's scheduler does.
+func setPartitions(name string, ids ...string) {
+	Eventually(func(g Gomega) {
+		slice := getSlice(g, name)
+		g.Expect(unstructured.SetNestedStringSlice(slice.Object, ids, "spec", "partitionIds")).To(Succeed())
+		g.Expect(k8sClient.Update(suiteCtx, slice)).To(Succeed())
+	}).WithTimeout(waitTimeout).WithPolling(pollInterval).Should(Succeed())
+}
+
+// bindPod binds pod to node, as the scheduler does.
+func bindPod(pod *corev1.Pod, node string) {
+	Expect(k8sClient.SubResource("binding").Create(suiteCtx, pod, &corev1.Binding{
+		ObjectMeta: metav1.ObjectMeta{Name: pod.Name, Namespace: pod.Namespace},
+		Target:     corev1.ObjectReference{Kind: "Node", Name: node},
+	})).To(Succeed())
+}
+
+// awaitSliceLost waits until the bound pod is deleted with a SliceLost
+// warning naming slice and saying why it was lost, then removes the pod as
+// its kubelet would. Until then it keeps reporting on the slice, as the
+// provider does while it moves the slice: the controller watches slices, not
+// nodes.
+func awaitSliceLost(pod corev1.Pod, slice, why string) {
+	Eventually(func(g Gomega) {
+		current := getSlice(g, slice)
+		annotations := current.GetAnnotations()
+		annotations["example.com/progress"] = time.Now().Format(time.RFC3339Nano)
+		current.SetAnnotations(annotations)
+		g.Expect(k8sClient.Update(suiteCtx, current)).To(Succeed())
+
+		fresh := &corev1.Pod{}
+		err := k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(&pod), fresh)
+		g.Expect(apierrors.IsNotFound(err) || err == nil && fresh.DeletionTimestamp != nil).To(BeTrue(),
+			"the pod on the lost slice must be deleted, got %v", err)
+		events := &corev1.EventList{}
+		g.Expect(k8sClient.List(suiteCtx, events, client.InNamespace(pod.Namespace))).To(Succeed())
+		g.Expect(slices.ContainsFunc(events.Items, func(e corev1.Event) bool {
+			return e.Reason == string(sliceprovision.EventReasonSliceLost) &&
+				strings.Contains(e.Message, slice) && strings.Contains(e.Message, why)
+		})).To(BeTrue(), "the lost slice must be reported as one that %s", why)
+	}).WithTimeout(waitTimeout).WithPolling(pollInterval).Should(Succeed())
+	err := k8sClient.Delete(suiteCtx, &pod, client.GracePeriodSeconds(0))
+	Expect(client.IgnoreNotFound(err)).To(Succeed())
+}
+
 // setFinalizer adds finalizer to, or with present false removes it from,
 // the object at key; obj is the empty object to read it into.
 func setFinalizer(obj client.Object, key client.ObjectKey, finalizer string, present bool) {
@@ -487,6 +559,63 @@ var _ = ginkgo.Describe("InferenceReplica TPU slice provisioning", func() {
 		rebuilt := awaitPods(ns, 1)[0]
 		Expect(rebuilt.UID).NotTo(Equal(pod.UID))
 		expectConfinedTo(rebuilt, name, "2x2x1")
+	})
+
+	ginkgo.It("rebuilds an Instance when its slice is unbound from its pod's partition", func() {
+		ns := createNamespace("tpuslice-unbound")
+		ir := sliceIR("falcon", ns, onDemandAccelerator, "2x2x1", 4, 0)
+		Expect(k8sClient.Create(suiteCtx, ir)).To(Succeed())
+		name := awaitOwnedSlices(ir, 1)[0]
+		setPartitions(name, "partition-a")
+		reportSliceState(name, stateActive, "")
+		pod := awaitPods(ns, 1)[0]
+		expectConfinedTo(pod, name, "2x2x1")
+		bindPod(&pod, name+"-host-0")
+		sliceUID := getSlice(Default, name).GetUID()
+
+		ginkgo.By("unbinding the slice from its partition while the pod runs on it")
+		setPartitions(name)
+		reportSliceState(name, stateCreating, "deactivating the partition")
+		awaitSliceLost(pod, name, "lost its partitions")
+
+		ginkgo.By("rebuilding the Instance on the same slice once it is bound and ready again")
+		awaitWithheld(ir, name, stateCreating)
+		Expect(listPods(Default, ns)).To(BeEmpty())
+		setPartitions(name, "partition-b")
+		reportSliceState(name, stateActive, "")
+		rebuilt := awaitPods(ns, 1)[0]
+		Expect(rebuilt.UID).NotTo(Equal(pod.UID))
+		expectConfinedTo(rebuilt, name, "2x2x1")
+		Expect(getSlice(Default, name).GetUID()).To(Equal(sliceUID), "the slice must be kept")
+	})
+
+	ginkgo.It("rebuilds an Instance on its slice's new host when the slice moves off its pod's node", func() {
+		ns := createNamespace("tpuslice-moved")
+		ir := sliceIR("orca", ns, onDemandAccelerator, "2x2x1", 4, 0)
+		Expect(k8sClient.Create(suiteCtx, ir)).To(Succeed())
+		name := awaitOwnedSlices(ir, 1)[0]
+		setPartitions(name, "partition-a")
+		reportSliceState(name, stateActive, "")
+		pod := awaitPods(ns, 1)[0]
+		expectConfinedTo(pod, name, "2x2x1")
+		oldHost := name + "-host-0"
+		bindPod(&pod, oldHost)
+		sliceUID := getSlice(Default, name).GetUID()
+
+		ginkgo.By("moving the slice to a partition whose host is not visible yet")
+		labelHost(oldHost, "")
+		setPartitions(name, "partition-b")
+		awaitSliceLost(pod, name, "moved off node "+oldHost)
+
+		ginkgo.By("withholding the new pod until the slice's new host is visible")
+		awaitWithheld(ir, name, "hosts are visible")
+		Expect(listPods(Default, ns)).To(BeEmpty())
+		labelHost(name+"-host-b", name)
+		reportSliceState(name, stateActive, "")
+		rebuilt := awaitPods(ns, 1)[0]
+		Expect(rebuilt.UID).NotTo(Equal(pod.UID))
+		expectConfinedTo(rebuilt, name, "2x2x1")
+		Expect(getSlice(Default, name).GetUID()).To(Equal(sliceUID), "the slice must be kept")
 	})
 
 	ginkgo.It("provisions no slice for pods on a static pool", func() {

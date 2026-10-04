@@ -3758,6 +3758,137 @@ func TestReconcile_TPUSlices_RebuildsAnInstanceWhoseSliceIsLost(t *testing.T) {
 	}
 }
 
+// TestReconcile_TPUSlices_RebuildsAnInstanceWhoseSliceMoved pins the
+// recovery from a slice moved off its running pod's node: the pod is deleted
+// and reported, and its Instance is rebuilt on the same slice once the
+// slice's new host is visible.
+func TestReconcile_TPUSlices_RebuildsAnInstanceWhoseSliceMoved(t *testing.T) {
+	ctx := context.Background()
+	ir := optedInIR("llama-engine", "prod", 1)
+	r, c := newSliceReconciler(t, ir)
+	rec := &capturingRecorder{}
+	r.Recorder = rec
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+	reconcile := func(stage string, passes int) {
+		t.Helper()
+		for pass := 0; pass < passes; pass++ {
+			// The pod watch observes every create and delete.
+			r.Expectations = workloadtypes.NewExpectations()
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Fatalf("%s pass %d: %v", stage, pass, err)
+			}
+		}
+	}
+	p, err := r.sliceProvisioner(ir)
+	if err != nil {
+		t.Fatalf("sliceProvisioner: %v", err)
+	}
+	name := p.Name(sliceprovision.Slot{Instance: 0})
+	// host labels a ready node as a host of slice, or of none when slice is
+	// empty, as the provider does as it activates and deactivates slices.
+	host := func(node, slice string) {
+		t.Helper()
+		labels := map[string]string{}
+		if slice != "" {
+			labels[sliceKeySlice] = slice
+		}
+		n := &corev1.Node{}
+		err := c.Get(ctx, client.ObjectKey{Name: node}, n)
+		switch {
+		case apierrors.IsNotFound(err):
+			n = &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: node, Labels: labels},
+				Status:     corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}},
+			}
+			err = c.Create(ctx, n)
+		case err == nil:
+			n.Labels = labels
+			err = c.Update(ctx, n)
+		}
+		if err != nil {
+			t.Fatalf("label node %s: %v", node, err)
+		}
+	}
+	// podOnSlice returns the pod confined to the slice, or nil when there is
+	// none.
+	podOnSlice := func() *corev1.Pod {
+		t.Helper()
+		for _, pod := range listPods(t, c, ir.Namespace) {
+			if pod.Spec.NodeSelector[sliceKeySlice] == name {
+				return pod.DeepCopy()
+			}
+		}
+		return nil
+	}
+
+	reconcile("provision", 2)
+	setSlicePartitions(t, c, name, "partition-a")
+	host("slice-host-a", name)
+	setSliceState(t, c, name, sliceStateReady)
+	reconcile("ready", 2)
+	pod := podOnSlice()
+	if pod == nil {
+		t.Fatalf("pods = %v, want one on slice %s", podNames(listPods(t, c, ir.Namespace)), name)
+	}
+	// The scheduler binds the pod to the slice's host, where it runs.
+	pod.Spec.NodeName = "slice-host-a"
+	if err := c.Update(ctx, pod); err != nil {
+		t.Fatalf("bind pod: %v", err)
+	}
+	now := metav1.Now()
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
+		{Type: query.ServingConditionType, Status: corev1.ConditionTrue, LastTransitionTime: now},
+		{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
+	}
+	if err := c.Status().Update(ctx, pod); err != nil {
+		t.Fatalf("report pod running: %v", err)
+	}
+	reconcile("running", 2)
+	if got := podOnSlice(); got == nil || got.UID != pod.UID {
+		t.Fatalf("pod on a slice that holds its node = %+v, want %s kept", got, pod.Name)
+	}
+	moved := getSlice(t, c, name)
+
+	// The slice moves to a new partition: its old host leaves it, and its
+	// new host is not visible yet.
+	setSlicePartitions(t, c, name, "partition-b")
+	host("slice-host-a", "")
+	reconcile("moved", 1)
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("get the pod the slice moved off: %v; want it deleted", err)
+	}
+	var reported []capturedEvent
+	for _, e := range rec.events {
+		if e.reason == string(sliceprovision.EventReasonSliceLost) {
+			reported = append(reported, e)
+		}
+	}
+	if len(reported) != 1 || reported[0].kind != corev1.EventTypeWarning ||
+		!strings.Contains(reported[0].message, name) || !strings.Contains(reported[0].message, "moved off node slice-host-a") ||
+		!strings.Contains(reported[0].message, pod.Name) {
+		t.Fatalf("%s events = %+v, want one warning saying %s moved off node slice-host-a under %s",
+			sliceprovision.EventReasonSliceLost, reported, name, pod.Name)
+	}
+	reconcile("rebuild", 2)
+	if got := podOnSlice(); got != nil {
+		t.Fatalf("pod %s must wait until the slice's new host is visible", got.Name)
+	}
+
+	host("slice-host-b", name)
+	reconcile("rebuilt", 2)
+	if got := podOnSlice(); got == nil || got.UID == pod.UID {
+		t.Fatalf("pods = %v, want a new pod on slice %s", podNames(listPods(t, c, ir.Namespace)), name)
+	}
+	if got := getSlice(t, c, name); got == nil || got.GetUID() != moved.GetUID() {
+		t.Fatalf("slices = %v, want slice %s kept", sliceNames(t, c), name)
+	}
+	if len(reported) != 1 {
+		t.Fatalf("the move must be reported once; events %+v", rec.events)
+	}
+}
+
 // TestReconcile_TPUSlices_FailedRecoveryFailsThePass pins that a pod on a
 // lost slice that cannot be deleted fails the pass.
 func TestReconcile_TPUSlices_FailedRecoveryFailsThePass(t *testing.T) {

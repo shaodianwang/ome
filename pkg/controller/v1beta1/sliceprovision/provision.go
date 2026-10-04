@@ -21,11 +21,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -55,9 +57,9 @@ const hashLength = 8
 // pods of another workload hold chips on its hosts.
 const EventReasonSliceReleaseDeferred workload.EventReason = "SliceReleaseDeferred"
 
-// EventReasonSliceLost is recorded when a slice is deleted from outside
-// while pods run on it, and the pods are deleted so their Instance is
-// rebuilt on a new slice.
+// EventReasonSliceLost is recorded when a slice is deleted, or moved off the
+// nodes its pods are bound to, from outside while pods run on it, and the
+// pods are deleted so their Instance is rebuilt.
 const EventReasonSliceLost workload.EventReason = "SliceLost"
 
 // podNodeNameField selects pods by the node they are bound to.
@@ -125,9 +127,12 @@ type Provisioner struct {
 	cached *gke.Client
 	live   *gke.Client
 	// hosts serves the live node and pod reads that decide whether a
-	// release would cut another workload off from its chips.
-	hosts client.Reader
-	owner Owner
+	// release would cut another workload off from its chips, or whether a
+	// slice still holds its pods' nodes; cachedHosts serves the node reads
+	// a live one confirms.
+	hosts       client.Reader
+	cachedHosts client.Reader
+	owner       Owner
 	// ownerLabels are the labels that make a slice owner's.
 	ownerLabels map[string]string
 	hash        string
@@ -163,6 +168,7 @@ func New(cfg *controllerconfig.TPUSliceProvisioningConfig, cached, live client.R
 		cached:      gke.NewClient(cached, w),
 		live:        gke.NewClient(live, w),
 		hosts:       live,
+		cachedHosts: cached,
 		owner:       owner,
 		ownerLabels: map[string]string{LabelOwnerUID: string(owner.UID)},
 		hash:        hex.EncodeToString(sum[:])[:hashLength],
@@ -338,20 +344,29 @@ func (p *Provisioner) Held(pods []*corev1.Pod) map[string]struct{} {
 	return held
 }
 
-// LostSlice is one of the owner's slices deleted under its pods.
+// LostSlice is one of the owner's slices lost under its pods.
 type LostSlice struct {
 	Name string
-	// Pods are the pods, not being deleted, that ran on the deleted slice.
+	// Why is how the slice was lost, worded to follow its name.
+	Why string
+	// Pods are the pods, not being deleted, that ran on the lost slice.
 	Pods []*corev1.Pod
 }
 
-// Lost returns, sorted by name, the owner's slices that were deleted under
-// pods not being deleted: the slice is gone, is being deleted, or was
-// created after the pod. The owner releases a slice only once no pod holds
-// it and creates a pod only once its slice is ready, so each case is a
-// deletion from outside. Pods confined to a name the owner does not give its
-// slices are ignored. A cached read that finds a pod's slice intact is
-// trusted; any other is confirmed live, since the cache may lag.
+// Lost returns, sorted by name, the owner's slices lost under pods not being
+// deleted, each with the pods it was lost under:
+//   - a slice that is gone or being deleted, under every such pod;
+//   - a slice created after a pod, under that pod;
+//   - a slice that no longer holds the nodes its pods are bound to, under
+//     every pod bound to a node: the slice has no partitions, or one of those
+//     nodes no longer carries its label. A pod not yet bound follows the
+//     label to the slice's new hosts.
+//
+// The owner releases a slice only once no pod holds it and creates a pod only
+// once its slice is ready, so each case is a change from outside. Pods
+// confined to a name the owner does not give its slices are ignored. A cached
+// read that finds a pod's slice intact is trusted; any other is confirmed
+// live, since the cache may lag.
 func (p *Provisioner) Lost(ctx context.Context, pods []*corev1.Pod) ([]LostSlice, error) {
 	held := map[string][]*corev1.Pod{}
 	for _, pod := range pods {
@@ -369,44 +384,92 @@ func (p *Provisioner) Lost(ctx context.Context, pods []*corev1.Pod) ([]LostSlice
 	sort.Strings(names)
 	var lost []LostSlice
 	for _, name := range names {
-		stale, err := p.deletedUnder(ctx, p.cached, name, held[name])
+		l, err := p.lostUnder(ctx, p.cached, p.cachedHosts, name, held[name])
 		if err != nil {
 			return nil, err
 		}
-		if len(stale) == 0 {
+		if len(l.Pods) == 0 {
 			continue
 		}
-		if stale, err = p.deletedUnder(ctx, p.live, name, held[name]); err != nil {
+		if l, err = p.lostUnder(ctx, p.live, p.hosts, name, held[name]); err != nil {
 			return nil, err
 		}
-		if len(stale) > 0 {
-			lost = append(lost, LostSlice{Name: name, Pods: stale})
+		if len(l.Pods) > 0 {
+			lost = append(lost, l)
 		}
 	}
 	return lost, nil
 }
 
-// deletedUnder returns the pods, all confined to the slice name, whose slice
-// c finds deleted under them. A slice at the name the owner does not hold is
-// left alone.
-func (p *Provisioner) deletedUnder(ctx context.Context, c *gke.Client, name string, pods []*corev1.Pod) ([]*corev1.Pod, error) {
+// lostUnder is how c and nodes find the slice name lost under pods, all
+// confined to it; a slice found intact is lost under no pod. A slice at the
+// name the owner does not hold is left alone.
+func (p *Provisioner) lostUnder(ctx context.Context, c *gke.Client, nodes client.Reader, name string, pods []*corev1.Pod) (LostSlice, error) {
+	l := LostSlice{Name: name}
 	s, found, err := c.Get(ctx, name)
 	if err != nil {
-		return nil, err
+		return l, err
 	}
 	if !found || s.Terminating {
-		return pods, nil
+		l.Why, l.Pods = "was deleted", pods
+		return l, nil
 	}
 	if !s.OwnedBy(p.ownerLabels) {
-		return nil, nil
+		return l, nil
 	}
-	var stale []*corev1.Pod
 	for _, pod := range pods {
 		if s.Created.After(pod.CreationTimestamp.Time) {
-			stale = append(stale, pod)
+			l.Pods = append(l.Pods, pod)
 		}
 	}
-	return stale, nil
+	if len(l.Pods) > 0 {
+		l.Why = "was deleted"
+		return l, nil
+	}
+	return p.movedUnder(ctx, nodes, s, pods)
+}
+
+// movedUnder is how nodes find s moved off the nodes pods are bound to: s
+// lost its partitions, or a node no longer carries its label. Every pod bound
+// to a node is lost then, those on a node s still holds too: they started
+// with the hosts s had before, and an Instance's pods run together.
+func (p *Provisioner) movedUnder(ctx context.Context, nodes client.Reader, s gke.Slice, pods []*corev1.Pod) (LostSlice, error) {
+	l := LostSlice{Name: s.Name}
+	var bound []*corev1.Pod
+	for _, pod := range pods {
+		if pod.Spec.NodeName != "" {
+			bound = append(bound, pod)
+		}
+	}
+	if len(bound) == 0 {
+		return l, nil
+	}
+	if len(s.PartitionIDs) == 0 {
+		l.Why, l.Pods = "lost its partitions", bound
+		return l, nil
+	}
+	var left []string
+	for _, pod := range bound {
+		node := &corev1.Node{}
+		err := nodes.Get(ctx, client.ObjectKey{Name: pod.Spec.NodeName}, node)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return l, fmt.Errorf("read node %s of slice %s: %w", pod.Spec.NodeName, s.Name, err)
+		}
+		if err != nil || node.Labels[p.cfg.NodeLabels.Slice] != s.Name {
+			left = append(left, pod.Spec.NodeName)
+		}
+	}
+	if len(left) == 0 {
+		return l, nil
+	}
+	sort.Strings(left)
+	left = slices.Compact(left)
+	noun := "node"
+	if len(left) > 1 {
+		noun = "nodes"
+	}
+	l.Why, l.Pods = fmt.Sprintf("moved off %s %s", noun, strings.Join(left, ", ")), bound
+	return l, nil
 }
 
 // names reports whether name is the name of one of the owner's slots.

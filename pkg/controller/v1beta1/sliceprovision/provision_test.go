@@ -703,6 +703,12 @@ func withCreated(at time.Time) func(*unstructured.Unstructured) {
 	return func(u *unstructured.Unstructured) { u.SetCreationTimestamp(metav1.NewTime(at)) }
 }
 
+// boundTo binds pod to node, as the scheduler does.
+func boundTo(pod *corev1.Pod, node string) *corev1.Pod {
+	pod.Spec.NodeName = node
+	return pod
+}
+
 // lostPods lists the lost slices, in order, each with its pods' names.
 func lostPods(lost []LostSlice) [][]string {
 	got := [][]string{}
@@ -731,8 +737,11 @@ func TestLost(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		slices []*unstructured.Unstructured
+		nodes  []client.Object
 		pods   []*corev1.Pod
 		want   [][]string
+		// wantWhy is how each lost slice was lost, checked when set.
+		wantWhy []string
 	}{
 		{
 			name:   "slice intact",
@@ -741,9 +750,10 @@ func TestLost(t *testing.T) {
 			want:   [][]string{},
 		},
 		{
-			name: "slice gone",
-			pods: []*corev1.Pod{confined("leader", a, created), confined("worker", a, created)},
-			want: [][]string{{a, "leader", "worker"}},
+			name:    "slice gone",
+			pods:    []*corev1.Pod{confined("leader", a, created), confined("worker", a, created)},
+			want:    [][]string{{a, "leader", "worker"}},
+			wantWhy: []string{"was deleted"},
 		},
 		{
 			name:   "slice being deleted",
@@ -752,10 +762,11 @@ func TestLost(t *testing.T) {
 			want:   [][]string{{a, "p"}},
 		},
 		{
-			name:   "slice newer than a pod",
-			slices: []*unstructured.Unstructured{stored(t, build, d, Slot{}, withCreated(created))},
-			pods:   []*corev1.Pod{confined("old", a, earlier), confined("same-second", a, created), confined("new", a, later)},
-			want:   [][]string{{a, "old"}},
+			name:    "slice newer than a pod",
+			slices:  []*unstructured.Unstructured{stored(t, build, d, Slot{}, withCreated(created))},
+			pods:    []*corev1.Pod{confined("old", a, earlier), confined("same-second", a, created), confined("new", a, later)},
+			want:    [][]string{{a, "old"}},
+			wantWhy: []string{"was deleted"},
 		},
 		{
 			name: "pods being deleted or done",
@@ -770,7 +781,7 @@ func TestLost(t *testing.T) {
 		{
 			name:   "another owner's slice at the owner's name",
 			slices: []*unstructured.Unstructured{stored(t, other, d, Slot{}, withName(a), withCreated(later))},
-			pods:   []*corev1.Pod{confined("p", a, created)},
+			pods:   []*corev1.Pod{boundTo(confined("p", a, created), "host-a")},
 			want:   [][]string{},
 		},
 		{
@@ -781,9 +792,47 @@ func TestLost(t *testing.T) {
 			},
 			want: [][]string{{a, "on-a"}, {b, "on-b"}},
 		},
+		{
+			name:   "slice holds the nodes of its pods",
+			slices: []*unstructured.Unstructured{stored(t, build, d, Slot{}, withCreated(earlier), withPartitions("p-1"))},
+			nodes:  []client.Object{node("host-a", map[string]string{keySlice: a}), node("host-b", map[string]string{keySlice: a})},
+			pods:   []*corev1.Pod{boundTo(confined("leader", a, created), "host-a"), boundTo(confined("worker", a, created), "host-b")},
+			want:   [][]string{},
+		},
+		{
+			name:   "pods not yet bound follow the slice",
+			slices: []*unstructured.Unstructured{stored(t, build, d, Slot{}, withCreated(earlier))},
+			pods:   []*corev1.Pod{confined("pending", a, created)},
+			want:   [][]string{},
+		},
+		{
+			name:    "slice without partitions",
+			slices:  []*unstructured.Unstructured{stored(t, build, d, Slot{}, withCreated(earlier))},
+			pods:    []*corev1.Pod{boundTo(confined("leader", a, created), "host-a"), confined("pending", a, created)},
+			want:    [][]string{{a, "leader"}},
+			wantWhy: []string{"lost its partitions"},
+		},
+		{
+			name:   "slice moved off one of its pods' nodes",
+			slices: []*unstructured.Unstructured{stored(t, build, d, Slot{}, withCreated(earlier), withPartitions("p-2"))},
+			nodes:  []client.Object{node("host-a", map[string]string{keySlice: a}), node("host-b", map[string]string{keySlice: b})},
+			pods: []*corev1.Pod{
+				boundTo(confined("leader", a, created), "host-a"), boundTo(confined("worker", a, created), "host-b"), confined("pending", a, created),
+			},
+			want:    [][]string{{a, "leader", "worker"}},
+			wantWhy: []string{"moved off node host-b"},
+		},
+		{
+			name:    "slice moved off an unlabeled node and a node that is gone",
+			slices:  []*unstructured.Unstructured{stored(t, build, d, Slot{}, withCreated(earlier), withPartitions("p-2"))},
+			nodes:   []client.Object{node("host-a", nil)},
+			pods:    []*corev1.Pod{boundTo(confined("worker", a, created), "host-b"), boundTo(confined("leader", a, created), "host-a")},
+			want:    [][]string{{a, "worker", "leader"}},
+			wantWhy: []string{"moved off nodes host-a, host-b"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			objs := make([]client.Object, 0, len(tc.slices))
+			objs := append([]client.Object(nil), tc.nodes...)
 			for _, s := range tc.slices {
 				objs = append(objs, s)
 			}
@@ -794,6 +843,16 @@ func TestLost(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.want, lostPods(lost)); diff != "" {
 				t.Fatalf("lost slices (-want +got):\n%s", diff)
+			}
+			if tc.wantWhy == nil {
+				return
+			}
+			whys := make([]string, 0, len(lost))
+			for _, l := range lost {
+				whys = append(whys, l.Why)
+			}
+			if diff := cmp.Diff(tc.wantWhy, whys); diff != "" {
+				t.Fatalf("how the slices were lost (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -825,6 +884,66 @@ func TestLostConfirmsLive(t *testing.T) {
 		{name: "intact in the cache", cached: newFakeClient(intact()), live: failing},
 		{name: "cached read fails", cached: failing, live: newFakeClient(), wantErr: boom},
 		{name: "live read fails", cached: newFakeClient(), live: failing, wantErr: boom},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := New(testConfig(), tc.cached, tc.live, tc.live, testOwner)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			lost, err := p.Lost(context.Background(), pods)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Lost error = %v, want %v", err, tc.wantErr)
+			}
+			if got := len(lost) > 0; got != tc.wantLost {
+				t.Fatalf("Lost = %v, want lost: %v", lostPods(lost), tc.wantLost)
+			}
+		})
+	}
+}
+
+// TestLostConfirmsAMoveLive pins the reads behind a slice moved off its pods'
+// nodes: a cached read that finds the slice holding them is trusted, and any
+// other is confirmed live.
+func TestLostConfirmsAMoveLive(t *testing.T) {
+	d := demand(t, "2x2x1")
+	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	build := newProvisioner(t, newFakeClient(), testOwner)
+	name := build.Name(Slot{})
+	pods := []*corev1.Pod{boundTo(confined("p", name, created), "host-a")}
+	slice := func(partitions ...interface{}) client.Object {
+		mutate := []func(*unstructured.Unstructured){withCreated(created.Add(-time.Minute))}
+		if len(partitions) > 0 {
+			mutate = append(mutate, withPartitions(partitions...))
+		}
+		return stored(t, build, d, Slot{}, mutate...)
+	}
+	held := func() client.Object { return node("host-a", map[string]string{keySlice: name}) }
+	moved := func() client.Object { return node("host-a", map[string]string{keySlice: "elsewhere"}) }
+	boom := errors.New("boom")
+	failingNodes := func(objs ...client.Object) client.WithWatch {
+		return interceptor.NewClient(newFakeClient(objs...), interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Node); ok {
+					return boom
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+	}
+
+	for _, tc := range []struct {
+		name         string
+		cached, live client.WithWatch
+		wantLost     bool
+		wantErr      error
+	}{
+		{name: "cache lags the live partitions", cached: newFakeClient(slice(), held()), live: newFakeClient(slice("p-1"), held())},
+		{name: "no partitions in both", cached: newFakeClient(slice(), held()), live: newFakeClient(slice(), held()), wantLost: true},
+		{name: "cache lags the live node", cached: newFakeClient(slice("p-1"), moved()), live: newFakeClient(slice("p-1"), held())},
+		{name: "moved in both", cached: newFakeClient(slice("p-1"), moved()), live: newFakeClient(slice("p-1"), moved()), wantLost: true},
+		{name: "node held in the cache", cached: newFakeClient(slice("p-1"), held()), live: failingNodes(slice("p-1"))},
+		{name: "cached node read fails", cached: failingNodes(slice("p-1")), live: newFakeClient(slice("p-1"), held()), wantErr: boom},
+		{name: "live node read fails", cached: newFakeClient(slice("p-1"), moved()), live: failingNodes(slice("p-1")), wantErr: boom},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, err := New(testConfig(), tc.cached, tc.live, tc.live, testOwner)
