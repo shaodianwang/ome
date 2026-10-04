@@ -110,6 +110,11 @@ func describeRollHoldsWhileUnproven(name, isvcName string, strategy v1beta1.Upda
 			// pod off it, which bounds the starts the roll ever opened.
 			peakOff int
 			everOff map[int32]struct{}
+			// correctedPeak is the most engine pods the API listed inside
+			// their deletion grace at once while the corrected revision
+			// rolled: the surge ceiling counts a draining pod until its
+			// grace elapses.
+			correctedPeak int
 		)
 
 		ginkgo.BeforeAll(func() {
@@ -147,6 +152,22 @@ func describeRollHoldsWhileUnproven(name, isvcName string, strategy v1beta1.Upda
 				}
 			}
 			return live
+		}
+
+		// listedWithinGrace counts the engine pods the API lists that are
+		// not past their own deletion deadline, which the API stamps at the
+		// request time plus the pod's grace.
+		listedWithinGrace := func(g Gomega) int {
+			snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, isvcName)
+			g.Expect(err).NotTo(HaveOccurred())
+			now := time.Now()
+			n := 0
+			for _, pod := range snap.ByComponent[v1beta1.EngineComponent] {
+				if pod.DeletionTimestamp == nil || now.Before(pod.DeletionTimestamp.Time) {
+					n++
+				}
+			}
+			return n
 		}
 
 		// podsByInstance buckets live pods by Instance index.
@@ -304,6 +325,20 @@ func describeRollHoldsWhileUnproven(name, isvcName string, strategy v1beta1.Upda
 		})
 
 		ginkgo.It("converges on a corrected revision", func() {
+			// Under SurgeThenDrain the corrected push lands over whatever a
+			// superseded attempt left draining, and a draining pod still
+			// holds a surge slot until its grace elapses: the Component may
+			// list at most replicas plus maxSurge pods inside their grace.
+			if strategy == v1beta1.UpdateStrategySurgeThenDrain {
+				ceiling := rollHoldReplicas + maxSurge.IntValue()
+				stop := util.StartSampler(suiteCtx, kindPollInterval, func(g Gomega) {
+					n := listedWithinGrace(g)
+					correctedPeak = max(correctedPeak, n)
+					g.Expect(n).To(BeNumerically("<=", ceiling),
+						"%d engine pods listed inside their deletion grace at once during the corrected push, ceiling %d: a surge opened beside a pod still draining", n, ceiling)
+				})
+				defer stop()
+			}
 			Eventually(func(g Gomega) {
 				cur := freshISVC(g, ns.Name, isvcName)
 				engine := &cur.Spec.Engine.PodSpec.Containers[0]
@@ -331,5 +366,15 @@ func describeRollHoldsWhileUnproven(name, isvcName string, strategy v1beta1.Upda
 				g.Expect(ir.Status.RolloutHold).To(BeNil(), "status.rolloutHold must clear once the rollout converges")
 			}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 		})
+
+		if strategy == v1beta1.UpdateStrategySurgeThenDrain {
+			ginkgo.It("kept the corrected push within the surge ceiling, draining pods included", func() {
+				ceiling := rollHoldReplicas + maxSurge.IntValue()
+				Expect(correctedPeak).To(BeNumerically(">=", rollHoldReplicas),
+					"the corrected push must have been sampled; peak %d", correctedPeak)
+				Expect(correctedPeak).To(BeNumerically("<=", ceiling),
+					"%d engine pods listed inside their deletion grace at once during the corrected push, ceiling %d", correctedPeak, ceiling)
+			})
+		}
 	})
 }

@@ -167,6 +167,10 @@ type UpdateSelection struct {
 	// the same Instance.
 	PriorSurgeInFlight   int32
 	PriorUnavailInFlight int32
+	// TerminatingSurge is what the Component's Terminating pods still hold
+	// against the surge budget, computed for a capped SurgeThenDrain budget
+	// (escalation.TerminatingSurgeInFlight).
+	TerminatingSurge escalation.TerminatingSurge
 	// RolledNotServing lists, in plan order, the Instances already on the
 	// target revision that do not serve it (ops.RolledInstanceNotServing).
 	// They are the roll's open work: each holds a slot in the budget of
@@ -780,6 +784,16 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 	sort.SliceStable(selection.Items, func(i, j int) bool {
 		return selection.Items[i].ReplacesDarkPodSet && !selection.Items[j].ReplacesDarkPodSet
 	})
+	// A Terminating pod the API still lists holds its surge slot until it
+	// exits or passes its deletion deadline; the deadline raises no watch
+	// event, so a pass with a fresh start to admit wakes for it.
+	if selection.Strategy == types.UpdateStrategySurgeThenDrain && selection.SurgeBudget != escalation.BudgetNoLimit {
+		now := input.Now()
+		selection.TerminatingSurge = escalation.TerminatingSurgeInFlight(plan, input.ObservedState.InstanceStatuses, updateByInstance, selection.RolledNotServing, now)
+		if selection.TerminatingSurge.Slots > 0 && anyFreshStart(selection.Items) {
+			input.PassWake.Observe(selection.TerminatingSurge.NextRelease.Sub(now))
+		}
+	}
 	// Budgets are decided here but spent in Execute, so record them with the
 	// selection they apply to: a selection that is non-empty yet starts
 	// nothing is a budget or gate outcome, not a selection one.
@@ -790,10 +804,23 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		"unavailBudget", selection.UnavailBudget,
 		"priorSurgeInFlight", selection.PriorSurgeInFlight,
 		"priorUnavailInFlight", selection.PriorUnavailInFlight,
+		"terminatingSurge", selection.TerminatingSurge.Slots,
+		"terminatingPods", selection.TerminatingSurge.Pods,
 		"rolledNotServing", selection.RolledNotServing,
 		"retryBlockDenied", selection.RetryBlockDenied)
 	selection.LadderHold = ladderHold(input, target, selection.RolledNotServing)
 	return selection, retryBlockWait, nil
+}
+
+// anyFreshStart reports whether the selection carries a start the pass
+// would admit against the budget.
+func anyFreshStart(items []UpdateItem) bool {
+	for _, item := range items {
+		if item.StartingFresh {
+			return true
+		}
+	}
+	return false
 }
 
 // replacesDarkPodSet reports whether a fresh start on row replaces an

@@ -34,6 +34,9 @@ package escalation
 
 import (
 	"sort"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -271,4 +274,91 @@ func BudgetDenies(budget, prior, inFlight int32) (int32, bool) {
 	}
 	projected := prior + inFlight + 1
 	return projected, projected > budget
+}
+
+// TerminatingSurge is what a Component's Terminating pods still hold
+// against its surge budget: the slots, the pods behind them in name
+// order, and the first instant one of those pods stops counting.
+type TerminatingSurge struct {
+	Slots int32
+	Pods  []string
+	// NextRelease is the earliest deletion deadline among the counted
+	// pods; zero when nothing counts.
+	NextRelease time.Time
+}
+
+// TerminatingSurgeInFlight counts, in surge slots, the Terminating pods
+// beyond an Instance's own pod count that the API still lists before
+// their DeletionTimestamp (the request time plus the pod's grace); a pod
+// past it stops counting. Buckets another anchor charges — a surge step,
+// the index it pins, a rolled-not-serving row — are never charged again.
+func TerminatingSurgeInFlight(plan types.ComponentPlan, statuses []types.InstanceStatus, byInstance map[int32][]*corev1.Pod, rolled []int32, now time.Time) TerminatingSurge {
+	charged := make(map[int32]struct{}, len(statuses))
+	for i := range statuses {
+		op := statuses[i].Operation
+		if op == nil {
+			continue
+		}
+		switch op.Step {
+		case types.UpdateStepSurge, types.UpdateStepSurgeDrain, types.UpdateStepSurgeDrainSettle:
+			charged[statuses[i].Index] = struct{}{}
+			if op.SurgeIndex != nil {
+				charged[*op.SurgeIndex] = struct{}{}
+			}
+		}
+	}
+	for _, idx := range rolled {
+		charged[idx] = struct{}{}
+	}
+	share := make(map[int32]int32, len(plan.Instances))
+	podsPerInstance := int32(1)
+	for _, inst := range plan.Instances {
+		share[inst.Index] = inst.TotalPods()
+		if inst.TotalPods() > podsPerInstance {
+			podsPerInstance = inst.TotalPods()
+		}
+	}
+	indices := make([]int32, 0, len(byInstance))
+	for idx := range byInstance {
+		indices = append(indices, idx)
+	}
+	sort.Slice(indices, func(i, j int) bool { return indices[i] < indices[j] })
+
+	var out TerminatingSurge
+	for _, idx := range indices {
+		if _, skip := charged[idx]; skip {
+			continue
+		}
+		var listed, terminating int32
+		var names []string
+		var release time.Time
+		for _, pod := range byInstance[idx] {
+			if pod == nil {
+				continue
+			}
+			if pod.DeletionTimestamp != nil {
+				deadline := pod.DeletionTimestamp.Time
+				if now.After(deadline) {
+					continue
+				}
+				terminating++
+				names = append(names, pod.Name)
+				if release.IsZero() || deadline.Before(release) {
+					release = deadline
+				}
+			}
+			listed++
+		}
+		extra := min(listed-share[idx], terminating)
+		if extra <= 0 {
+			continue
+		}
+		out.Slots += (extra + podsPerInstance - 1) / podsPerInstance
+		sort.Strings(names)
+		out.Pods = append(out.Pods, names...)
+		if out.NextRelease.IsZero() || release.Before(out.NextRelease) {
+			out.NextRelease = release
+		}
+	}
+	return out
 }

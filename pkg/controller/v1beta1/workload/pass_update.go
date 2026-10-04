@@ -208,10 +208,13 @@ func (a *updateAdmission) surge() bool {
 func (a *updateAdmission) admit(ctx context.Context, plan types.ComponentPlan, item UpdateItem) (bool, *types.RolloutHold) {
 	rolled := int32(len(a.selection.RolledNotServing))
 	if a.surge() {
-		if projected, denied := escalation.BudgetDenies(a.selection.SurgeBudget, a.selection.PriorSurgeInFlight+rolled, a.inFlightSurge); denied {
+		// A Terminating pod still listed inside its grace holds the slot
+		// its surge took; the hold names it so the wait reads as the pod's.
+		prior := a.selection.PriorSurgeInFlight + rolled + a.selection.TerminatingSurge.Slots
+		if projected, denied := escalation.BudgetDenies(a.selection.SurgeBudget, prior, a.inFlightSurge); denied {
 			return false, &types.RolloutHold{
 				Gate:   types.RolloutHoldGateBudget,
-				Reason: fmt.Sprintf("per-Component surge budget %d exhausted (would become %d)%s", a.selection.SurgeBudget, projected, rolledNotServingClause(a.selection.RolledNotServing, a.target.Name)),
+				Reason: fmt.Sprintf("per-Component surge budget %d exhausted (would become %d)%s%s", a.selection.SurgeBudget, projected, rolledNotServingClause(a.selection.RolledNotServing, a.target.Name), a.terminatingClause()),
 				Target: a.target.Name,
 			}
 		}
@@ -316,6 +319,19 @@ func rolledNotServingClause(rolled []int32, target string) string {
 		noun = "Instances"
 	}
 	return fmt.Sprintf("; %s %s on revision %s not serving", noun, strings.Join(indices, ", "), target)
+}
+
+// terminatingClause names, for a surge denial, the Terminating pods
+// still counted against the budget; empty when none are.
+func (a *updateAdmission) terminatingClause() string {
+	pods := a.selection.TerminatingSurge.Pods
+	switch len(pods) {
+	case 0:
+		return ""
+	case 1:
+		return fmt.Sprintf("; Terminating pod %s still counts against the surge budget until its deletion grace elapses", pods[0])
+	}
+	return fmt.Sprintf("; Terminating pods %s still count against the surge budget until their deletion grace elapses", strings.Join(pods, ", "))
 }
 
 // charge counts a fresh start the pass opened, so every later consult
