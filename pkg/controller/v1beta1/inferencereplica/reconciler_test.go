@@ -4082,3 +4082,215 @@ func TestReconcile_LongOwnerNameGangReachesReadyLikeAShortOne(t *testing.T) {
 		})
 	}
 }
+
+// TestReconcile_GangServingCountFollowsALeavingMember drives a whole
+// leader+worker gang through losing a member, under
+// RecreateInstanceOnPodRestart, and reads the published serving count on
+// every pass: two while both members serve, one on the pass that sees the
+// worker deleted (it keeps its conditions while it terminates, but it is
+// already out of rotation), and none once the row is Restarting and the
+// survivor is drained for the rebuild.
+func TestReconcile_GangServingCountFollowsALeavingMember(t *testing.T) {
+	ir := gangLossIR("llama-engine", "prod")
+	target := targetRevisionNameFor(t, ir)
+	ir.Status.CurrentRevision = target
+	ir.Status.UpdateRevision = target
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+		RunningRevision: target, PodCount: 2, ServingPodCount: 2,
+	}}
+	leader := podForIR(ir, 0, string(v1beta1.RunnerNameLeader), 0, true, true)
+	worker := podForIR(ir, 0, string(v1beta1.RunnerNameWorker), 0, true, true)
+	// The hold keeps the deleted worker visible as Terminating, the way a
+	// pod stays listed until its containers stop.
+	worker.Finalizers = []string{"example.com/hold"}
+	r, c := newReconciler(t, ir, leader, worker)
+	r.Recorder = record.NewFakeRecorder(32)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}}
+
+	published := func(pass string) (v1beta1.OMENativeInstanceStatus, int32) {
+		t.Helper()
+		if _, err := r.Reconcile(context.Background(), request); err != nil {
+			t.Fatalf("%s: %v", pass, err)
+		}
+		fresh := &v1beta1.InferenceReplica{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), fresh); err != nil {
+			t.Fatalf("%s: get IR: %v", pass, err)
+		}
+		if len(fresh.Status.InstanceStatuses) != 1 {
+			t.Fatalf("%s: instance statuses: %+v", pass, fresh.Status.InstanceStatuses)
+		}
+		return fresh.Status.InstanceStatuses[0], fresh.Status.ServingReplicas
+	}
+
+	row, servingReplicas := published("whole gang")
+	if row.Phase != v1beta1.OMENativeInstanceReady || row.PodCount != 2 || row.ServingPodCount != 2 || servingReplicas != 1 {
+		t.Fatalf("whole gang: phase=%s pods=%d serving=%d servingReplicas=%d, want Ready 2 2 1",
+			row.Phase, row.PodCount, row.ServingPodCount, servingReplicas)
+	}
+
+	if err := c.Delete(context.Background(), worker); err != nil {
+		t.Fatalf("delete the worker: %v", err)
+	}
+	r.Expectations = workloadtypes.NewExpectations()
+	row, servingReplicas = published("worker leaving")
+	if row.PodCount != 2 {
+		t.Fatalf("worker leaving: pods=%d, want 2 while the worker terminates", row.PodCount)
+	}
+	if row.ServingPodCount != 1 || servingReplicas != 0 {
+		t.Fatalf("worker leaving: serving=%d servingReplicas=%d, want 1 and 0: a member out of rotation is not serving",
+			row.ServingPodCount, servingReplicas)
+	}
+
+	// The worker's containers stop: the hold lifts and the pod is gone.
+	gone := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(worker), gone); err != nil {
+		t.Fatalf("get the terminating worker: %v", err)
+	}
+	gone.Finalizers = nil
+	if err := c.Update(context.Background(), gone); err != nil {
+		t.Fatalf("release the worker: %v", err)
+	}
+	r.Expectations = workloadtypes.NewExpectations()
+	row, servingReplicas = published("worker gone")
+	if row.Phase != v1beta1.OMENativeInstanceRestarting || row.Operation == nil || row.Operation.Type != v1beta1.InstanceOperationRestart {
+		t.Fatalf("worker gone: the gang must be rebuilt as a whole, got phase=%s op=%+v", row.Phase, row.Operation)
+	}
+	if row.ServingPodCount != 0 || servingReplicas != 0 {
+		t.Fatalf("worker gone: serving=%d servingReplicas=%d, want 0 and 0 while the survivor drains for the rebuild",
+			row.ServingPodCount, servingReplicas)
+	}
+}
+
+// rollingSingletonIR is one single-pod Instance Ready on the revision of
+// its stored spec, with the spec then edited to a second image so the next
+// pass opens a SurgeThenDrain roll onto a new revision. Returns the IR, the
+// objects backing its Instance, and the prior and next revision names.
+func rollingSingletonIR(t *testing.T) (*v1beta1.InferenceReplica, []client.Object, string, string) {
+	t.Helper()
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Spec.Lifecycle = &v1beta1.LifecycleSpec{UpdateStrategy: &v1beta1.UpdateStrategy{
+		Type:          v1beta1.UpdateStrategySurgeThenDrain,
+		RollingUpdate: &v1beta1.RollingUpdate{MaxSurge: ptr.To(intstr.FromInt32(1))},
+	}}
+	prior := targetRevisionNameFor(t, ir)
+	ir.Spec.Runners[0].Template.Spec.Containers[0].Image = "sgl:2.0"
+	ir.Generation = 2
+	next := targetRevisionNameFor(t, ir)
+	if next == prior {
+		t.Fatalf("the image edit must cut a new revision; both resolve to %s", prior)
+	}
+	ir.Status.CurrentRevision = prior
+	ir.Status.UpdateRevision = prior
+	ir.Status.ObservedGeneration = 1
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+		RunningRevision: prior, PodCount: 1, ServingPodCount: 1,
+	}}
+	pod := podForIR(ir, 0, "default", 0, true, true)
+	pod.Labels[query.LabelRevisionHash] = query.RevisionFromName(prior).Hash()
+	return ir, []client.Object{pod, sliceForIRPod(ir, pod, true)}, prior, next
+}
+
+// podsOnRevision counts the stored pods carrying the revision's hash label.
+func podsOnRevision(t *testing.T, c client.Client, namespace, revisionName string) int {
+	t.Helper()
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace(namespace)); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	want := query.RevisionFromName(revisionName).Hash()
+	n := 0
+	for i := range pods.Items {
+		if pods.Items[i].Labels[query.LabelRevisionHash] == want {
+			n++
+		}
+	}
+	return n
+}
+
+// TestReconcile_TargetRevisionIsRecordedBeforeItsFirstPod pins the order of
+// the two writes a roll begins with: the status names the new target before
+// any pod renders it. A pass cut between creating a pod and publishing the
+// status, as a manager stop mid-pass cuts it, then leaves pods of the new
+// revision beside a status that already names it, never beside one that
+// still reports the previous revision as current and done.
+func TestReconcile_TargetRevisionIsRecordedBeforeItsFirstPod(t *testing.T) {
+	ir, objs, prior, next := rollingSingletonIR(t)
+	r, base := newReconciler(t, append([]client.Object{ir}, objs...)...)
+	r.Recorder = record.NewFakeRecorder(64)
+	var recordedAtCreate []string
+	r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, isPod := obj.(*corev1.Pod); isPod {
+				stored := &v1beta1.InferenceReplica{}
+				if err := base.Get(ctx, client.ObjectKeyFromObject(ir), stored); err != nil {
+					return err
+				}
+				recordedAtCreate = append(recordedAtCreate, stored.Status.UpdateRevision)
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	})
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+	for pass := 0; pass < 6 && len(recordedAtCreate) == 0; pass++ {
+		if _, err := r.Reconcile(context.Background(), request); err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+	}
+	if len(recordedAtCreate) == 0 {
+		t.Fatalf("the spec edit never opened a roll: no pod was created")
+	}
+	if recordedAtCreate[0] != next {
+		t.Fatalf("the first pod of revision %s was created while status.updateRevision named %q (prior %s); the target must be recorded before any pod renders it",
+			next, recordedAtCreate[0], prior)
+	}
+}
+
+// TestReconcile_TargetRevisionFollowsTheSpecBackToThePriorRevision is the
+// exit of the early record: it is not a ratchet. Once a roll onto a new
+// revision is open, a spec that returns to the prior template moves the
+// recorded target back with it on the next pass.
+func TestReconcile_TargetRevisionFollowsTheSpecBackToThePriorRevision(t *testing.T) {
+	ir, objs, prior, next := rollingSingletonIR(t)
+	r, c := newReconciler(t, append([]client.Object{ir}, objs...)...)
+	r.Recorder = record.NewFakeRecorder(64)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+	for pass := 0; pass < 6 && podsOnRevision(t, c, ir.Namespace, next) == 0; pass++ {
+		if _, err := r.Reconcile(context.Background(), request); err != nil {
+			t.Fatalf("roll pass %d: %v", pass, err)
+		}
+	}
+	if podsOnRevision(t, c, ir.Namespace, next) == 0 {
+		t.Fatalf("the spec edit never opened a roll: no pod of %s exists", next)
+	}
+	rolling := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), rolling); err != nil {
+		t.Fatalf("get IR: %v", err)
+	}
+	if rolling.Status.UpdateRevision != next {
+		t.Fatalf("an open roll must record its target: updateRevision=%q want %s", rolling.Status.UpdateRevision, next)
+	}
+
+	rolling.Spec.Runners[0].Template.Spec.Containers[0].Image = "sgl:1.0"
+	rolling.Generation = 3
+	if err := c.Update(context.Background(), rolling); err != nil {
+		t.Fatalf("roll the spec back: %v", err)
+	}
+	r.Expectations = workloadtypes.NewExpectations()
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("rollback pass: %v", err)
+	}
+	after := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), after); err != nil {
+		t.Fatalf("get IR after the rollback: %v", err)
+	}
+	if after.Status.UpdateRevision != prior {
+		t.Fatalf("a spec back on the prior template must move the target back with it: updateRevision=%q want %s", after.Status.UpdateRevision, prior)
+	}
+	if after.Status.CurrentRevision != prior {
+		t.Fatalf("currentRevision=%q want %s: the prior revision is what the Instance runs", after.Status.CurrentRevision, prior)
+	}
+}

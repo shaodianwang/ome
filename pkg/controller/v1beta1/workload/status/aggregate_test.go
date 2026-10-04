@@ -296,3 +296,52 @@ func TestCountServingPods_RequiresThePodReadyCondition(t *testing.T) {
 		t.Fatalf("counters under a revoked Ready: pods=%d serving=%d, want pods=1 serving=0", counters.PodCount, counters.ServingPodCount)
 	}
 }
+
+// A deleted pod keeps its Ready condition and its serving gate until its
+// containers stop, but the EndpointSlice controller has already taken it out
+// of every Service's ready endpoints, so it serves nothing new. The serving
+// count follows the rotation: a gang that is losing a member stops counting
+// as whole on the pass that sees the deletion, not on the one that sees the
+// pod gone.
+func TestCountServingPods_ExcludesAMemberLeavingTheGang(t *testing.T) {
+	servingPod := func(name string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Status: corev1.PodStatus{Conditions: []corev1.PodCondition{
+				{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				{Type: podreadiness.ConditionType, Status: corev1.ConditionTrue},
+			}},
+		}
+	}
+	leader := servingPod("engine-0-leader-0")
+	worker := servingPod("engine-0-worker-0")
+	gang := []*corev1.Pod{leader, worker}
+	desired := map[int32]int32{0: 2}
+
+	whole := status.CountersForInstance(gang, map[string]struct{}{leader.Name: {}, worker.Name: {}}, status.AvailabilityWindow{})
+	if whole.PodCount != 2 || whole.ServingPodCount != 2 || whole.AvailablePodCount != 2 {
+		t.Fatalf("whole gang: %s, want pods=2 serving=2 available=2", whole)
+	}
+	if got := status.CountServingInstances([]types.InstanceStatus{{Index: 0, PodCount: whole.PodCount, ServingPodCount: whole.ServingPodCount}}, desired); got != 1 {
+		t.Fatalf("serving Instances with the whole gang = %d, want 1", got)
+	}
+
+	// The worker is deleted: still Ready, still gated on, already out of
+	// the endpoints. Its conditions do not change until its containers stop.
+	now := metav1.Now()
+	worker.DeletionTimestamp = &now
+	leaving := status.CountersForInstance(gang, map[string]struct{}{leader.Name: {}}, status.AvailabilityWindow{})
+	if leaving.PodCount != 2 {
+		t.Fatalf("PodCount = %d, want 2: the leaving member is still a pod of the Instance", leaving.PodCount)
+	}
+	if leaving.ServingPodCount != 1 {
+		t.Fatalf("ServingPodCount = %d, want 1: a member leaving the gang is out of rotation", leaving.ServingPodCount)
+	}
+	if leaving.AvailablePodCount != 1 {
+		t.Fatalf("AvailablePodCount = %d, want 1", leaving.AvailablePodCount)
+	}
+	if got := status.CountServingInstances([]types.InstanceStatus{{Index: 0, PodCount: leaving.PodCount, ServingPodCount: leaving.ServingPodCount}}, desired); got != 0 {
+		t.Fatalf("serving Instances with a member leaving = %d, want 0", got)
+	}
+}

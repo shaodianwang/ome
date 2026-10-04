@@ -1100,6 +1100,56 @@ func buildPromoteCurrentRevision(writer statusWriter, reads client.Reader, ir *v
 	}
 }
 
+// buildRecordUpdateRevision writes status.updateRevision ahead of the pass
+// that first renders a revision: re-read under retry.RetryOnConflict,
+// refuse a generation the pass did not plan against, write, and mirror the
+// committed name onto the caller's in-memory IR. The publication at the end
+// of the pass restates the same name beside the counters.
+func buildRecordUpdateRevision(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, targetName string) error {
+	key := client.ObjectKeyFromObject(ir)
+	ownerUID := ir.UID
+	ownerGeneration := ir.Generation
+	return func(ctx context.Context, targetName string) error {
+		if targetName == "" {
+			return nil
+		}
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			fresh := &v1beta1.InferenceReplica{}
+			source, err := irstatus.GetDecoded(ctx, reads, key, fresh)
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					return workloadtypes.ErrStatusOwnerGone
+				}
+				return fmt.Errorf("re-read IR: %w", err)
+			}
+			if ownerUID == "" || fresh.UID != ownerUID {
+				return workloadtypes.ErrStatusOwnerGone
+			}
+			if fresh.Generation != ownerGeneration {
+				return workloadtypes.ErrStatusMutationPrecondition
+			}
+			if fresh.Status.UpdateRevision == targetName {
+				return nil
+			}
+			fresh.Status.UpdateRevision = targetName
+			if err := updateInferenceReplicaStatus(ctx, writer, fresh, source); err != nil {
+				if apierrors.IsNotFound(err) {
+					return workloadtypes.ErrStatusOwnerGone
+				}
+				return fmt.Errorf("update IR status: %w", err)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if ir != nil {
+			ir.Status.UpdateRevision = targetName
+		}
+		return nil
+	}
+}
+
 // buildMutateRetryBlock wraps the workload-typed RetryBlock mutate
 // callback with an IR-typed apiserver round-trip — the
 // ReconcileInput.MutateRetryBlock capability. Same shape as

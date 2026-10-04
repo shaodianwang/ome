@@ -473,8 +473,8 @@ func TestInferenceReplicaStatusUpdatesUseWriterBoundary(t *testing.T) {
 		}
 	}
 
-	if len(writerCalls) != 12 {
-		t.Fatalf("production status writes through %s = %d, want 12: %v", writer, len(writerCalls), writerCalls)
+	if len(writerCalls) != 13 {
+		t.Fatalf("production status writes through %s = %d, want 13: %v", writer, len(writerCalls), writerCalls)
 	}
 	if len(conversionCalls) != 1 || !strings.Contains(conversionCalls[0], "status_transition.go") {
 		t.Fatalf("conversion writes through %s must come from the transition gate alone: %v", conversion, conversionCalls)

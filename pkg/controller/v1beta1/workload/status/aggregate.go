@@ -61,15 +61,21 @@ func CountReadyPods(pods []*corev1.Pod) int32 {
 }
 
 // CountServingPods counts pods in their Service's rotation: Ready by the
-// control plane and carrying the controller's serving gate
-// (podreadiness.ReadyAndServing). This is the count MaxUnavailable budgets
-// in coordination/ratio.go gate against; it drops when the controller takes
-// a pod out of rotation (in-place update drain, recreate Phase A) and when
-// the node under a pod stops reporting, whatever the stale container
-// statuses say.
+// control plane, carrying the controller's serving gate
+// (podreadiness.ReadyAndServing), and not terminating. This is the count
+// MaxUnavailable budgets in coordination/ratio.go gate against; it drops
+// when the controller takes a pod out of rotation (in-place update drain,
+// recreate Phase A), when the node under a pod stops reporting, whatever
+// the stale container statuses say, and when a pod is deleted: a
+// terminating pod keeps its conditions until its containers stop, but the
+// EndpointSlice controller has already taken it out of every Service's
+// ready endpoints, so it serves nothing new.
 func CountServingPods(pods []*corev1.Pod) int32 {
 	var n int32
 	for _, p := range pods {
+		if p == nil || p.DeletionTimestamp != nil {
+			continue
+		}
 		if podreadiness.ReadyAndServing(p) {
 			n++
 		}

@@ -1186,10 +1186,10 @@ func TestAggregateAndWriteStatus_GenerationChangeAborts(t *testing.T) {
 
 // liveReadsThroughPromotion is how many InferenceReplica reads reach the
 // authoritative reader up to and including the CurrentRevision promotion:
-// the migration-entry sync, the aggregate-condition write, then promotion.
-// Every conflict-retry closure re-reads its base live, so promotion is not
-// the first live read.
-const liveReadsThroughPromotion = 3
+// the migration-entry sync, the aggregate-condition write, the update
+// revision record, then promotion. Every conflict-retry closure re-reads
+// its base live, so promotion is not the first live read.
+const liveReadsThroughPromotion = 4
 
 type firstIRGenerationReader struct {
 	client.Reader

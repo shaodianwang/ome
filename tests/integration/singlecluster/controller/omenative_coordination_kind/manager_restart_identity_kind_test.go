@@ -5,8 +5,11 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
@@ -198,5 +201,161 @@ var _ = ginkgo.Describe("OMENative manager-restart identity stability (KIND)", g
 			g.Expect(snapshotControllerRevisions(g, ns.Name)).To(Equal(crsBefore),
 				"the restart must mint zero new ControllerRevisions and must not delete/recreate an existing one")
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+})
+
+// restartRollComponents are the Components the shared runtime below
+// supplies the image for, so one runtime edit rolls both at once.
+var restartRollComponents = []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}
+
+// updateRuntimeRunnerImages edits the shared runtime's engine and decoder
+// runner images in one write — the rollout lever of the spec below.
+func updateRuntimeRunnerImages(g Gomega, csrName, image string) {
+	csr := &v1beta1.ClusterServingRuntime{}
+	g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Name: csrName}, csr)).To(Succeed())
+	csr.Spec.EngineConfig.Runner.Container.Image = image
+	csr.Spec.DecoderConfig.Runner.Container.Image = image
+	g.Expect(k8sClient.Update(suiteCtx, csr)).To(Succeed())
+}
+
+// livePodsOfComponent returns the non-terminating OMENative pods of one
+// Component of isvcName.
+func livePodsOfComponent(g Gomega, namespace, isvcName string, component v1beta1.ComponentType) []corev1.Pod {
+	var out []corev1.Pod
+	for _, pod := range listOMENativePods(g, namespace, isvcName) {
+		if pod.DeletionTimestamp != nil || pod.Labels[constants.OMEComponentLabel] != string(component) {
+			continue
+		}
+		out = append(out, pod)
+	}
+	return out
+}
+
+// expectNoRolloutDoneOnASupersededRevision asserts, for every rolling
+// Component, that whenever the InferenceReplica reports its rollout done
+// (currentRevision equal to updateRevision) no live pod of the Component
+// carries a revision hash other than that revision's. A Component mid-roll
+// (the two revisions differ) is not judged: its newer pods are the roll.
+func expectNoRolloutDoneOnASupersededRevision(g Gomega, namespace, isvcName string) {
+	for _, component := range restartRollComponents {
+		ir := freshInferenceReplica(g, namespace, isvcName, component)
+		if ir.Status.UpdateRevision == "" || ir.Status.CurrentRevision != ir.Status.UpdateRevision {
+			continue
+		}
+		want := query.RevisionFromName(ir.Status.UpdateRevision).Hash()
+		for _, pod := range livePodsOfComponent(g, namespace, isvcName, component) {
+			g.ExpectWithOffset(1, pod.Labels[query.LabelRevisionHash]).To(Equal(want),
+				"%s reports its rollout done on %s while live pod %s carries revision hash %s",
+				component, ir.Status.UpdateRevision, pod.Name, pod.Labels[query.LabelRevisionHash])
+		}
+	}
+}
+
+// Pins the revision-truth contract of a manager restart mid-roll: a shared
+// runtime edit rolls two Components, the controller manager is torn down
+// and restarted as soon as the first pod of a new revision exists, and at
+// no point before or after the restart may an InferenceReplica report its
+// rollout done on a revision older than one a live pod of that Component
+// already carries. The status names a new target before any pod renders
+// it, so a pass cut by the stop leaves no pod ahead of the status, and the
+// restarted manager finishes the roll from the recorded target.
+var _ = ginkgo.Describe("OMENative manager-restart revision truth (KIND)", ginkgo.Ordered, func() {
+	var ns *corev1.Namespace
+
+	ginkgo.BeforeEach(func() {
+		var err error
+		ns, err = util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "restart-revision-")
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	ginkgo.AfterEach(func() {
+		if ns != nil {
+			Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
+		}
+	})
+
+	ginkgo.It("never reports a runtime-edit rollout done on a revision older than a live pod's across a manager restart", func() {
+		const (
+			name    = "restart-runtime-roll"
+			v1Image = "fake-serving:v1"
+			v2Image = "fake-serving:v2"
+		)
+
+		// Shared-runtime shape: the runtime supplies both images and the
+		// ISVC omits them, so one runtime edit rolls engine and decoder.
+		fix := newCoordFixture(ns.Name, WithISVCName(name))
+		fix.CSR.Spec.EngineConfig = &v1beta1.EngineSpec{
+			Runner: &v1beta1.RunnerSpec{Container: corev1.Container{Name: "ome-container", Image: v1Image}},
+		}
+		fix.CSR.Spec.DecoderConfig = &v1beta1.DecoderSpec{
+			Runner: &v1beta1.RunnerSpec{Container: corev1.Container{Name: "ome-container", Image: v1Image}},
+		}
+		fix.ISVC.Spec.Engine.PodSpec.Containers[0].Image = ""
+		fix.ISVC.Spec.Decoder.PodSpec.Containers[0].Image = ""
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+
+		ginkgo.By("waiting for both Components to settle on the runtime-supplied revision")
+		priorRevision := map[v1beta1.ComponentType]string{}
+		priorHashes := map[string]struct{}{}
+		Eventually(func(g Gomega) {
+			for _, component := range restartRollComponents {
+				ir := freshInferenceReplica(g, ns.Name, name, component)
+				g.Expect(ir.Status.CurrentRevision).NotTo(BeEmpty())
+				g.Expect(ir.Status.CurrentRevision).To(Equal(ir.Status.UpdateRevision),
+					"%s must be settled, not mid-rollout, before the runtime edit", component)
+				rows := decodedInstanceStatuses(g, ir)
+				g.Expect(rows).To(HaveLen(1))
+				g.Expect(rows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				priorRevision[component] = ir.Status.CurrentRevision
+				priorHashes[query.RevisionFromName(ir.Status.CurrentRevision).Hash()] = struct{}{}
+			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("editing the shared runtime so both Components roll")
+		Eventually(func(g Gomega) {
+			updateRuntimeRunnerImages(g, fix.CSR.Name, v2Image)
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("restarting the controller manager as soon as the first pod of a new revision exists")
+		Eventually(func(g Gomega) {
+			expectNoRolloutDoneOnASupersededRevision(g, ns.Name, name)
+			newPods := 0
+			for _, pod := range listOMENativePods(g, ns.Name, name) {
+				if hash := pod.Labels[query.LabelRevisionHash]; hash != "" {
+					if _, prior := priorHashes[hash]; !prior && pod.DeletionTimestamp == nil {
+						newPods++
+					}
+				}
+			}
+			g.Expect(newPods).NotTo(BeZero(), "the runtime edit must put a pod of a new revision on the cluster")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		mgrBefore := kindutil.Suite().Manager
+		Expect(mgrBefore).NotTo(BeNil())
+		Expect(kindutil.Suite().RestartManager()).To(Succeed())
+		Expect(kindutil.Suite().Manager == mgrBefore).To(BeFalse(),
+			"the post-restart manager must be a new instance; an identical one would mean the restart never happened")
+
+		ginkgo.By("holding the revision-truth contract through the restart window")
+		Consistently(func(g Gomega) {
+			expectNoRolloutDoneOnASupersededRevision(g, ns.Name, name)
+		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("finishing the roll on the new revision under the restarted manager")
+		Eventually(func(g Gomega) {
+			expectNoRolloutDoneOnASupersededRevision(g, ns.Name, name)
+			for _, component := range restartRollComponents {
+				ir := freshInferenceReplica(g, ns.Name, name, component)
+				g.Expect(ir.Status.UpdateRevision).NotTo(Equal(priorRevision[component]),
+					"%s must target a revision the runtime edit cut", component)
+				g.Expect(ir.Status.CurrentRevision).To(Equal(ir.Status.UpdateRevision),
+					"%s must converge on the edited revision", component)
+				want := query.RevisionFromName(ir.Status.UpdateRevision).Hash()
+				pods := livePodsOfComponent(g, ns.Name, name, component)
+				g.Expect(pods).To(HaveLen(1))
+				g.Expect(pods[0].Labels[query.LabelRevisionHash]).To(Equal(want))
+				g.Expect(pods[0].Spec.Containers[0].Image).To(Equal(v2Image))
+			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

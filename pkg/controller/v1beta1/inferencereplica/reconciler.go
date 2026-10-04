@@ -666,6 +666,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// nothing at all: report whether this Component has a readiness window.
 	r.reportInstanceReadyTimeout(ctx, log, ir, input, plan.InstanceReadyTimeout)
 
+	// The spec target is recorded in status before any pod renders it. A
+	// pass that ends between creating a pod and the deferred publication
+	// then leaves pods of the new revision beside a status that already
+	// names it, never beside one still reporting the previous revision as
+	// current and done.
+	if specTarget != nil && ir.Status.UpdateRevision != specTarget.Name {
+		if rerr := buildRecordUpdateRevision(r.statusWriter(), r.liveReader(), ir)(ctx, specTarget.Name); rerr != nil {
+			if errors.Is(rerr, workloadtypes.ErrStatusOwnerGone) {
+				return ctrl.Result{}, nil
+			}
+			if errors.Is(rerr, workloadtypes.ErrStatusMutationPrecondition) || apierrors.IsConflict(rerr) {
+				return ctrl.Result{Requeue: true}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: record update revision (ir=%s/%s): %w",
+				ir.Namespace, ir.Name, rerr)
+		}
+		input.ObservedState.UpdateRevision = ir.Status.UpdateRevision
+	}
+
 	// Peer revision pairing for every pod rendered this pass: resolve each
 	// serving peer's roll-target revision and create that revision's
 	// per-revision Services before any pod that names them exists. While a
