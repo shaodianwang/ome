@@ -1,7 +1,9 @@
 tick=1 note the Instance is parked at Failed with its pod still present
+tick=1 hold cleared
 tick=1 pass result=after:5s
 tick=2 note the surviving pod dies in a terminal phase, so the dead occupant is recycled
 tick=2 apply pod.phaseTerminal[Failed] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 hold cleared
 tick=2 row=0 write incarnation=1 phase=Creating runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
 tick=2 row=0 write incarnation=1 phase=Creating runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb retryCount=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=Failed container=main exitCode=1} precondition=ok
 tick=2 pod delete name=svc-a-engine-0-default-0 grace=default
@@ -9,6 +11,7 @@ tick=2 event Warning TerminalPodRecycled OMENative component=engine instance=0 d
 tick=2 pass result=after:5s
 tick=3 note the recycle delete is observed, freeing the target name
 tick=3 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=3 hold cleared
 tick=3 row=0 write no-op precondition=no-change
 tick=3 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
 tick=3 pass result=after:5s

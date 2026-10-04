@@ -20,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
@@ -296,6 +297,202 @@ func TestReconcile_TerminatingPodGroupHoldsWithoutPods(t *testing.T) {
 	op := got.Status.InstanceStatuses[0].Operation
 	if op == nil || op.Waiting != workloadtypes.WaitingReasonPodGroupTerminating {
 		t.Fatalf("Operation.Waiting: got %+v want %q", op, workloadtypes.WaitingReasonPodGroupTerminating)
+	}
+}
+
+// heldRollIR is the Component the hold stories roll: two single-pod
+// Instances under SurgeThenDrain with maxSurge 1. Instance 0 already runs
+// the target revision, in the phase the story names, on a pod that is not
+// Ready, so it holds the one surge slot; Instance 1 runs the prior
+// revision on a Ready pod, in rotation or not as the story names, and its
+// start is denied at the budget. The returned target is the revision name
+// the reconciler derives for the spec.
+func heldRollIR(t *testing.T, rolledPhase v1beta1.OMENativeInstancePhase, priorInRotation bool) (*v1beta1.InferenceReplica, []client.Object, string) {
+	t.Helper()
+	ir := baselineIR("llama-engine", "prod", 2)
+	ir.Spec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type:          v1beta1.UpdateStrategySurgeThenDrain,
+			RollingUpdate: &v1beta1.RollingUpdate{MaxSurge: ptr.To(intstr.FromInt32(1))},
+		},
+	}
+	target := targetRevisionNameFor(t, ir)
+	ir.Status.CurrentRevision = "llama-engine-prior"
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: rolledPhase, RunningRevision: target},
+		{Index: 1, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "llama-engine-prior"},
+	}
+	dark := podForIR(ir, 0, "default", 0, false, false)
+	prior := podForIR(ir, 1, "default", 0, true, priorInRotation)
+	objs := []client.Object{dark, prior}
+	if priorInRotation {
+		objs = append(objs, sliceForIRPod(ir, prior, true))
+	}
+	return ir, objs, target
+}
+
+// reconcileIR runs one pass and reads the InferenceReplica back.
+func reconcileIR(t *testing.T, r *Reconciler, c client.Client, key client.ObjectKey, pass string) *v1beta1.InferenceReplica {
+	t.Helper()
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("%s: %v", pass, err)
+	}
+	got := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), key, got); err != nil {
+		t.Fatalf("%s: get InferenceReplica: %v", pass, err)
+	}
+	return got
+}
+
+// editIRSpec applies edit to the live spec, the way the operator's write
+// lands between two passes.
+func editIRSpec(t *testing.T, c client.Client, key client.ObjectKey, edit func(*v1beta1.InferenceReplicaSpec)) {
+	t.Helper()
+	live := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), key, live); err != nil {
+		t.Fatalf("get InferenceReplica to edit its spec: %v", err)
+	}
+	edit(&live.Spec)
+	if err := c.Update(context.Background(), live); err != nil {
+		t.Fatalf("update InferenceReplica spec: %v", err)
+	}
+}
+
+// sameRolloutHold reports whether got is want as written: Gate, Reason,
+// Target and Since.
+func sameRolloutHold(got, want *v1beta1.RolloutHold) bool {
+	return got != nil && want != nil && got.Gate == want.Gate && got.Reason == want.Reason && got.Target == want.Target && got.Since.Equal(&want.Since)
+}
+
+// requireBudgetHoldNaming asserts the recorded hold is the Budget hold on
+// target that names the Instance on the target revision that is not
+// serving, and returns it.
+func requireBudgetHoldNaming(t *testing.T, ir *v1beta1.InferenceReplica, target string, instance string) *v1beta1.RolloutHold {
+	t.Helper()
+	held := ir.Status.RolloutHold
+	if held == nil || held.Gate != v1beta1.RolloutHoldGateBudget || held.Target != target {
+		t.Fatalf("the Update pass must record a Budget hold on %s, got %+v", target, held)
+	}
+	if !strings.Contains(held.Reason, instance) || !strings.Contains(held.Reason, "not serving") {
+		t.Fatalf("the Budget hold must name the Instance on the target revision that is not serving, got %q", held.Reason)
+	}
+	if held.Since.IsZero() {
+		t.Fatal("the recorded hold must carry Since")
+	}
+	return held
+}
+
+// TestReconcile_HeldRollKeepsItsHoldAcrossAPassWithoutTheUpdatePass: the
+// held roll of heldRollIR records a Budget hold naming Instance 0 and the
+// revision. The reconciles that follow never reach the Update pass: the
+// Component is paused, and Plan selects no update while a pause stands
+// with nothing in flight. The hold must stand through them as written,
+// Since included, the way it stands through any pass that ends before the
+// Update pass. Unpausing runs the Update pass again, and the same denial
+// keeps the same Since.
+//
+// Cells: instance/Ready/gate.deny[Budget]/before
+func TestReconcile_HeldRollKeepsItsHoldAcrossAPassWithoutTheUpdatePass(t *testing.T) {
+	ir, objs, target := heldRollIR(t, v1beta1.OMENativeInstanceReady, true)
+	r, c := newReconciler(t, append([]client.Object{ir}, objs...)...)
+	key := client.ObjectKeyFromObject(ir)
+
+	held := requireBudgetHoldNaming(t, reconcileIR(t, r, c, key, "the pass that denies the start"), target, "Instance 0")
+
+	editIRSpec(t, c, key, func(spec *v1beta1.InferenceReplicaSpec) { spec.Paused = true })
+	for _, pass := range []string{"the first paused pass", "the second paused pass"} {
+		got := reconcileIR(t, r, c, key, pass).Status.RolloutHold
+		if got == nil {
+			t.Fatalf("%s ran no Update pass and cleared the Budget hold; the hold must stand until the Update pass replaces or clears it", pass)
+		}
+		if !sameRolloutHold(got, held) {
+			t.Fatalf("%s changed the hold: got %+v want %+v", pass, got, held)
+		}
+	}
+
+	editIRSpec(t, c, key, func(spec *v1beta1.InferenceReplicaSpec) { spec.Paused = false })
+	if got := reconcileIR(t, r, c, key, "the pass after the unpause").Status.RolloutHold; !sameRolloutHold(got, held) {
+		t.Fatalf("the Update pass reporting the same denial must keep the hold and its Since: got %+v want %+v", got, held)
+	}
+}
+
+// TestReconcile_HoldClearsWhenTheRollHasNothingLeftToDo: the held roll of
+// heldRollIR with Instance 0 parked Failed on the target revision, which
+// holds the surge slot the same way, so the Budget hold names it, and
+// Instance 1's pod out of rotation, so neither row is a replica the plan
+// prefers to keep and a scale-down retires the higher index. The
+// Component is then scaled to one replica. Instance 1 leaves through the
+// scale-down wave, whose every pass ends before the Update pass, so the
+// hold stands through the wave. Once the row is gone every remaining
+// Instance runs the target with nothing in flight and nothing the ladder
+// denies: the roll has nothing left to do, and the next pass clears the
+// hold rather than leave a denial standing that names an Instance the
+// scale-down removed.
+//
+// Cells: instance/Ready/gate.deny[Budget]/before
+func TestReconcile_HoldClearsWhenTheRollHasNothingLeftToDo(t *testing.T) {
+	ir, objs, target := heldRollIR(t, v1beta1.OMENativeInstanceFailed, false)
+	r, c := newReconciler(t, append([]client.Object{ir}, objs...)...)
+	key := client.ObjectKeyFromObject(ir)
+
+	held := requireBudgetHoldNaming(t, reconcileIR(t, r, c, key, "the pass that denies the start"), target, "Instance 0")
+
+	editIRSpec(t, c, key, func(spec *v1beta1.InferenceReplicaSpec) { spec.Replicas = ptr.To(int32(1)) })
+	removed := false
+	for pass := 0; pass < 12 && !removed; pass++ {
+		got := reconcileIR(t, r, c, key, "a pass of the scale-down wave")
+		if statusByIndex(got.Status.InstanceStatuses, 1) == nil {
+			removed = true
+			break
+		}
+		if !sameRolloutHold(got.Status.RolloutHold, held) {
+			t.Fatalf("a pass of the scale-down wave ends before the Update pass and must leave the hold standing: got %+v want %+v", got.Status.RolloutHold, held)
+		}
+	}
+	if !removed {
+		t.Fatal("Instance 1 never left through the scale-down wave")
+	}
+
+	if got := reconcileIR(t, r, c, key, "the pass after the scale-down").Status.RolloutHold; got != nil {
+		t.Fatalf("every remaining Instance runs the target with nothing in flight, so the roll has nothing left to do; the hold must clear, got %+v", got)
+	}
+}
+
+// TestReconcile_PartitionHeldRollReportsTheLadder: two single-pod
+// Instances Ready on the prior revision, held there by a partition equal
+// to the replica count, under a same-target RetryBlock the ladder holds.
+// No candidate reaches the trigger, so the update selection is empty and
+// the pass plans no update; the roll is still not idle, because the
+// ladder gave up on the revision and the rollout hold is where an
+// operator reads that. The pass must report the Held hold on the target,
+// never no hold beside a status.retryBlocks entry that says Held.
+//
+// Cells: instance/Ready/gate.deny[Held]/before
+func TestReconcile_PartitionHeldRollReportsTheLadder(t *testing.T) {
+	ir := baselineIR("llama-engine", "prod", 2)
+	ir.Spec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{
+			Type:          v1beta1.UpdateStrategySurgeThenDrain,
+			RollingUpdate: &v1beta1.RollingUpdate{Partition: ptr.To(int32(2))},
+		},
+	}
+	target := targetRevisionNameFor(t, ir)
+	ir.Status.CurrentRevision = "llama-engine-prior"
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "llama-engine-prior"},
+		{Index: 1, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "llama-engine-prior"},
+	}
+	ir.Status.RetryBlocks = []v1beta1.RetryBlock{
+		{TargetRevision: target, State: v1beta1.RetryBlockHeld, AttemptsStarted: 2, Reason: "ImagePullBackOff"},
+	}
+	pod0 := podForIR(ir, 0, "default", 0, true, true)
+	pod1 := podForIR(ir, 1, "default", 0, true, true)
+	r, c := newReconciler(t, ir, pod0, pod1, sliceForIRPod(ir, pod0, true), sliceForIRPod(ir, pod1, true))
+	key := client.ObjectKeyFromObject(ir)
+
+	got := reconcileIR(t, r, c, key, "the pass under the partition and the Held block")
+	if hold := got.Status.RolloutHold; hold == nil || hold.Gate != v1beta1.RolloutHoldGateHeld || hold.Target != target {
+		t.Fatalf("a roll the ladder holds must report the Held hold on %s even when a partition keeps every candidate from the trigger, got %+v", target, hold)
 	}
 }
 

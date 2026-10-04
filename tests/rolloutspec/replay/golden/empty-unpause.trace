@@ -2,6 +2,7 @@ tick=1 note the index is planned but pause holds the Create pass, so nothing is 
 tick=1 pass result=none
 tick=2 note pause is cleared and the Create pass opens the attempt
 tick=2 apply spec.unpause paused=false freeze=false generation=1 now=t+0s
+tick=2 hold cleared
 tick=2 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
 tick=2 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
 tick=2 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0

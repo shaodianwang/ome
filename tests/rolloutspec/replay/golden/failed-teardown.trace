@@ -1,4 +1,5 @@
 tick=1 note the Instance is parked at Failed with its pod still present
+tick=1 hold cleared
 tick=1 pass result=after:5s
 tick=2 note the owner is deleted, so the Failed Instance is drained like any other
 tick=2 apply spec.teardown[deleted] teardown=true now=t+0s

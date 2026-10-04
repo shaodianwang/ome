@@ -1,4 +1,5 @@
 tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
 tick=1 row=0 write no-op precondition=no-change
 tick=1 pass result=none
 tick=2 note the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
@@ -16,6 +17,7 @@ tick=3 warn instanceFailed index=0 pod=svc-a-engine-0-default-0 reason=CrashLoop
 tick=3 pass result=after:5s
 tick=4 note the ladder's first delay has not elapsed since the recorded failure, so the row stays parked and the pass asks to be woken when it has
 tick=4 apply clock.advance by=1m0s now=t+3m0s
+tick=4 hold cleared
 tick=4 pass result=after:5s
 tick=5 note the delay elapses, so the parked repair re-arms as a fresh Restart at the next incarnation that counts the re-arm, and the wedged pod is drained
 tick=5 apply timer.repairRetry to=t+7m1s now=t+7m1s
@@ -37,8 +39,10 @@ tick=7 warn instanceFailed index=0 pod=svc-a-engine-0-default-0 reason=CrashLoop
 tick=7 pass result=after:5s
 tick=8 note the ladder is spent, so however long the wait nothing re-arms, and the escalation pass says so once
 tick=8 apply clock.advance by=1h0m0s now=t+1h9m1s
+tick=8 hold cleared
 tick=8 row=0 write incarnation=3 phase=Failed runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#2{type=Restart step=Drain reason=repair re-armed (attempt 1) after pod svc-a-engine-0-default-0 container main stuck (CrashLoopBackOff) retryCount=1 started=t+7m1s lastProgressAt=t+7m1s deadline=t+37m1s} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} announced=[RepairRetriesExhausted@op#2] precondition=ok
 tick=8 event Warning RepairRetriesExhausted OMENative component=engine instance=0 repair parked at Failed after 1 re-arm(s): pod svc-a-engine-0-default-0 container main stuck (CrashLoopBackOff); reset the Instance or publish a corrected revision
 tick=8 pass result=after:5s
 tick=9 note a further tick re-arms nothing and announces nothing more
+tick=9 hold cleared
 tick=9 pass result=after:5s

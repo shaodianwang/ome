@@ -1,18 +1,22 @@
 tick=1 note the Create pass materializes the pod
+tick=1 hold cleared
 tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
 tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
 tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
 tick=1 pass result=after:5s
 tick=2 note the pod is bound to a node the cluster no longer has
 tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-default-0 node=node-0 now=t+0s
+tick=2 hold cleared
 tick=2 pass result=after:5s
 tick=3 note the kubelet stops reporting; node death is proven on the spot, so the sweep force-deletes the pod and no wait is recorded
 tick=3 apply pod.phaseTerminal[Unknown] pod=svc-a-engine-0-default-0 now=t+0s
+tick=3 hold cleared
 tick=3 pod delete name=svc-a-engine-0-default-0 grace=0 uidPrecondition=set
 tick=3 event Warning PodForceDeleted OMENative component=engine instance=0: force-deleted pod svc-a-engine-0-default-0 on node node-0, which its kubelet stopped reporting (evidence=node-gone)
 tick=3 pass result=after:5s
 tick=4 note the force-deleted object is collected, and the same attempt rebuilds the pod under its original deadline
 tick=4 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 hold cleared
 tick=4 row=0 write no-op precondition=no-change
 tick=4 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
 tick=4 pass result=after:5s

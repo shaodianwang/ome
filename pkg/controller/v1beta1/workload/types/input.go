@@ -241,10 +241,12 @@ type ReconcileInput struct {
 	// — by the per-Component budget or UpdateGate at admission, or by the
 	// target's RetryBlock at the trigger stage — and nothing else
 	// progressed this pass, nil when the pass observed no denial or an
-	// Update was admitted (forward progress clears any prior hold). When
-	// the Update pass does not run at all, the adapter's status writer
-	// reads the same-target RetryBlock/Held state from persisted status
-	// instead.
+	// Update was admitted (forward progress clears any prior hold). A
+	// roll with nothing left to do plans no Update pass and reports nil at
+	// the pass's position instead. When the pass is not reached at all,
+	// the adapter's status writer reads the same-target RetryBlock/Held
+	// state from persisted status and otherwise keeps the hold it last
+	// persisted.
 	RecordRolloutHold func(hold *RolloutHold)
 
 	// MutateRetryBlock reads-modifies-writes the owner's persisted

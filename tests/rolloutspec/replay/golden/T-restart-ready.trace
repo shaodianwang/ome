@@ -1,4 +1,5 @@
 tick=1 note cold start
+tick=1 hold cleared
 tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
 tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
 tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
@@ -6,6 +7,7 @@ tick=1 pass result=after:5s
 tick=2 note the pod becomes Ready and enters rotation
 tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
 tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 hold cleared
 tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
 tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
 tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
@@ -29,6 +31,7 @@ tick=5 row=0 write no-op precondition=no-change
 tick=5 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
 tick=5 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=Failed container=main exitCode=1} precondition=ok
 tick=5 event Normal RestartCompleted OMENative component=engine instance=0 restart complete (incarnation=2)
+tick=5 hold cleared
 tick=5 row=0 write no-op precondition=no-change
 tick=5 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
 tick=5 pass result=none

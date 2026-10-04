@@ -1,4 +1,5 @@
 tick=1 note the gang is parked at Failed with both members present
+tick=1 hold cleared
 tick=1 pass result=after:5s
 tick=2 note the worker is lost, leaving one survivor below the desired count, so the gang re-arms as a whole
 tick=2 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+0s

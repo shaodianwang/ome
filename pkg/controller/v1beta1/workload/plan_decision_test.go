@@ -772,6 +772,104 @@ func TestPlan_Update_RetryBlockWait(t *testing.T) {
 	}
 }
 
+// TestPlan_Update_IdleRollReportsNoHold pins when Plan marks the update
+// stage idle (Decision.UpdateIdle), which is what clears a recorded hold
+// once the roll has nothing left to do: every planned Instance runs the
+// target with nothing in flight, a parked Instance included, or a
+// partition holds every candidate. A fresh start plans the pass instead;
+// a same-target block the ladder still holds, whether a candidate reaches
+// the trigger or a partition holds every one back, leaves the ladder's
+// hold to the status writer; a pause and a nil target leave the hold
+// standing. None of those is idle.
+func TestPlan_Update_IdleRollReportsNoHold(t *testing.T) {
+	target := updateTarget()
+	plan := minimalPlan()
+	rows := func(phase types.InstancePhase, revision string) types.ReconcileInput {
+		in := minimalInput(t)
+		forbidMutations(t, &in)
+		in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+			{Index: 0, Incarnation: 1, Phase: phase, RunningRevision: revision},
+		}
+		return in
+	}
+
+	in := rows(types.InstancePhaseReady, target.Name)
+	d := planTargetOrFail(t, in, plan, target, planSnapshot(in, nil))
+	if !d.UpdateIdle || findAction(d, workload.ActionUpdate) != nil {
+		t.Errorf("every Instance on the target with nothing in flight must be idle with no update pass: idle=%t actions=%v", d.UpdateIdle, actionKinds(d))
+	}
+
+	in = rows(types.InstancePhaseFailed, target.Name)
+	d = planTargetOrFail(t, in, plan, target, planSnapshot(in, nil))
+	if !d.UpdateIdle || findAction(d, workload.ActionUpdate) != nil {
+		t.Errorf("an Instance parked on the target leaves the roll idle: idle=%t actions=%v", d.UpdateIdle, actionKinds(d))
+	}
+
+	partition := int32(1)
+	staged := minimalPlan()
+	staged.UpdateStrategy = types.UpdateStrategy{
+		Type:          types.UpdateStrategySurgeThenDrain,
+		RollingUpdate: &types.RollingUpdate{Partition: &partition},
+	}
+	in = rows(types.InstancePhaseReady, "prior-rev")
+	d = planTargetOrFail(t, in, staged, target, planSnapshot(in, nil))
+	if !d.UpdateIdle || findAction(d, workload.ActionUpdate) != nil {
+		t.Errorf("a partition holding every candidate leaves the roll idle: idle=%t actions=%v", d.UpdateIdle, actionKinds(d))
+	}
+
+	// The same partition under a same-target block the ladder still
+	// holds: no candidate reaches the trigger, but the ladder gave up on
+	// the revision and the hold must keep saying so. Not idle for a Held
+	// block or a Backoff not yet due; idle once the Backoff is due, since
+	// the ladder then admits a start and holds nothing.
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	in = rows(types.InstancePhaseReady, "prior-rev")
+	in.Clock = clocktesting.NewFakeClock(now)
+	in.ObservedState.RetryBlocks = []types.RetryBlock{{TargetRevision: target.Name, State: types.RetryBlockHeld}}
+	d = planTargetOrFail(t, in, staged, target, planSnapshot(in, nil))
+	if d.UpdateIdle || findAction(d, workload.ActionUpdate) != nil {
+		t.Errorf("a partition holding every candidate under a same-target Held block is the ladder's to report, not idle: idle=%t actions=%v", d.UpdateIdle, actionKinds(d))
+	}
+	notDue := metav1.NewTime(now.Add(time.Minute))
+	in.ObservedState.RetryBlocks = []types.RetryBlock{{TargetRevision: target.Name, State: types.RetryBlockBackoff, NextRetryAt: &notDue}}
+	d = planTargetOrFail(t, in, staged, target, planSnapshot(in, nil))
+	if d.UpdateIdle || findAction(d, workload.ActionUpdate) != nil {
+		t.Errorf("a partition holding every candidate under a Backoff not yet due is the ladder's to report, not idle: idle=%t actions=%v", d.UpdateIdle, actionKinds(d))
+	}
+	due := metav1.NewTime(now.Add(-time.Second))
+	in.ObservedState.RetryBlocks = []types.RetryBlock{{TargetRevision: target.Name, State: types.RetryBlockBackoff, NextRetryAt: &due}}
+	d = planTargetOrFail(t, in, staged, target, planSnapshot(in, nil))
+	if !d.UpdateIdle || findAction(d, workload.ActionUpdate) != nil {
+		t.Errorf("a partition holding every candidate under a due Backoff leaves the roll idle: idle=%t actions=%v", d.UpdateIdle, actionKinds(d))
+	}
+
+	in = rows(types.InstancePhaseReady, "prior-rev")
+	d = planTargetOrFail(t, in, plan, target, planSnapshot(in, nil))
+	if d.UpdateIdle || findAction(d, workload.ActionUpdate) == nil {
+		t.Errorf("a fresh start plans the update pass and is not idle: idle=%t actions=%v", d.UpdateIdle, actionKinds(d))
+	}
+
+	in.ObservedState.RetryBlocks = []types.RetryBlock{{TargetRevision: target.Name, State: types.RetryBlockHeld}}
+	d = planTargetOrFail(t, in, plan, target, planSnapshot(in, nil))
+	if d.UpdateIdle || findAction(d, workload.ActionUpdate) != nil {
+		t.Errorf("a start the target's Held block denies is the ladder's to report, not idle: idle=%t actions=%v", d.UpdateIdle, actionKinds(d))
+	}
+
+	paused := minimalPlan()
+	paused.Paused = true
+	in = rows(types.InstancePhaseReady, target.Name)
+	d = planTargetOrFail(t, in, paused, target, planSnapshot(in, nil))
+	if d.UpdateIdle {
+		t.Errorf("a paused Component plans no update pass and is not idle: actions=%v", actionKinds(d))
+	}
+
+	in = rows(types.InstancePhaseReady, target.Name)
+	d = planOrFail(t, in, plan, planSnapshot(in, nil))
+	if d.UpdateIdle {
+		t.Errorf("a nil target plans no update pass and is not idle: actions=%v", actionKinds(d))
+	}
+}
+
 // TestPlan_Update_HeldByPartition asserts the canary hold: an Instance
 // below the partition is not selected, unless it is already mid-surge
 // (it must finish, not strand its surge pod).

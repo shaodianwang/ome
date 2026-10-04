@@ -1,4 +1,5 @@
 tick=1 note the Instance is still forming and holds no operation
+tick=1 hold cleared
 tick=1 pass result=after:5s
 tick=2 note the owner is deleted, so the forming Instance is drained
 tick=2 apply spec.teardown[deleted] teardown=true now=t+0s

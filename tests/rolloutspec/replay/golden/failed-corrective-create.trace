@@ -1,13 +1,16 @@
 tick=1 note the index is planned and no row exists, so the Create pass opens the attempt
+tick=1 hold cleared
 tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
 tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
 tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
 tick=1 pass result=after:5s
 tick=2 note the pull wedges immediately, but the pod is younger than the grace, so the attempt keeps polling
 tick=2 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-default-0 reason=ImagePullBackOff now=t+0s
+tick=2 hold cleared
 tick=2 pass result=after:5s
 tick=3 note the grace elapses and the revision goes into Backoff
 tick=3 apply timer.stuckPodGrace to=t+5m1s now=t+5m1s
+tick=3 hold cleared
 tick=3 retryblock target=svc-a-engine-882059bb persist nil→{state=Backoff attempts=1 nextRetryAt=t+7m1s reason=ImagePullBackOff}
 tick=3 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
 tick=3 warn instanceFailed index=0 pod=svc-a-engine-0-default-0 reason=ImagePullBackOff: workload-caused failure; revision svc-a-engine-882059bb held for retry — fix the image/config and publish a corrected revision
@@ -17,6 +20,7 @@ tick=4 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+5m1s
 tick=4 pass result=after:2m0s
 tick=5 note the operator corrects the image, and the Create pass claims the empty row at the revision no block denies
 tick=5 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+5m1s
+tick=5 hold cleared
 tick=5 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#2{type=Create step=CreatePods target=svc-a-engine-6f8b1e6c started=t+5m1s lastProgressAt=t+5m1s deadline=t+35m1s} lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
 tick=5 pod create name=svc-a-engine-0-default-0 revision=6f8b1e6c incarnation=1 ordinal=0
 tick=5 pass result=after:5s

@@ -1,4 +1,5 @@
 tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
 tick=1 row=0 write no-op precondition=no-change
 tick=1 pass result=none
 tick=2 note the pod is deleted out from under the Instance

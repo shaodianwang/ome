@@ -180,6 +180,13 @@ type UpdateSelection struct {
 	// They never reach the pass's admission, so the block is the denial
 	// the pass reports when nothing else progressed.
 	RetryBlockDenied []int32
+	// LadderHold is the hold the target's RetryBlock stands for when it
+	// denies a fresh start this pass, nil when it denies none. One reading
+	// serves the update pass, which reports it for the starts in
+	// RetryBlockDenied, and the idle verdict, which yields to it: a ladder
+	// that gave up on the revision is reported even when no candidate
+	// reaches the trigger.
+	LadderHold *types.RolloutHold
 }
 
 // PlannedAction is one pass-level action selected for this reconcile.
@@ -235,6 +242,14 @@ type Decision struct {
 	// (foldRetryAfter) so the gate is re-evaluated on time; it only
 	// ever ADDS a wake-up, never delays one an op scheduled.
 	RequeueAfter time.Duration
+
+	// UpdateIdle reports that the update selection ran for an unpaused
+	// Component and found nothing: no Instance to drive and no
+	// same-target RetryBlock that still denies a start. Execute reports a
+	// nil rollout hold at the update pass's position, so a hold a prior
+	// pass recorded does not outlive the roll it paced, while a ladder
+	// that gave up on the revision stays reported.
+	UpdateIdle bool
 
 	// Owned is the pass's rows grouped by the owner that may advance
 	// them. Built once here, from the ownership table; Execute hands it
@@ -384,6 +399,10 @@ func Plan(ctx context.Context, input types.ReconcileInput, plan types.ComponentP
 			selection.Items = pausedUpdateContinuations(input, selection.Items)
 		} else {
 			decision.RequeueAfter = retryBlockWait
+			// A roll with nothing left to do holds nothing: no Instance to
+			// drive, and no ladder that still holds the target, whether a
+			// candidate reached its gate or a partition kept every one back.
+			decision.UpdateIdle = len(selection.Items) == 0 && len(selection.RetryBlockDenied) == 0 && selection.LadderHold == nil
 		}
 		if len(selection.Items) > 0 {
 			decision.Actions = append(decision.Actions, PlannedAction{Kind: ActionUpdate, Update: &selection})
@@ -773,6 +792,7 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		"priorUnavailInFlight", selection.PriorUnavailInFlight,
 		"rolledNotServing", selection.RolledNotServing,
 		"retryBlockDenied", selection.RetryBlockDenied)
+	selection.LadderHold = ladderHold(input, target, selection.RolledNotServing)
 	return selection, retryBlockWait, nil
 }
 

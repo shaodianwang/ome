@@ -1,4 +1,5 @@
 tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
 tick=1 row=0 write no-op precondition=no-change
 tick=1 pass result=none
 tick=2 note the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
@@ -24,6 +25,7 @@ tick=5 note the kubelet folds the gate into PodReady and the repair finishes wit
 tick=5 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+2m0s
 tick=5 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+2m0s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=CreateContainerConfigError container=main message=couldn't find key mode in ConfigMap; waiting for the configuration or image the pod needs; the kubelet retries in place} announced=[RepairWaitingOnWorkload@op#1] precondition=ok
 tick=5 event Normal RestartCompleted OMENative component=engine instance=0 restart complete (incarnation=2)
+tick=5 hold cleared
 tick=5 row=0 write no-op precondition=no-change
 tick=5 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
 tick=5 pass result=none

@@ -295,8 +295,11 @@ func executeActions(ctx context.Context, deps types.Deps, input types.ReconcileI
 
 		// 7. Create pass, always last: nothing after it reads the
 		// observation it changes. The decision's RetryBlock wake-up merges
-		// into its result.
+		// into its result. A roll with nothing left to do planned no update
+		// pass; its verdict is reported here, at the position that pass
+		// would have held.
 		case ActionCreate:
+			reportIdleUpdate(input, decision)
 			res, err := createPass(ctx, deps, input, plan, target, createScopeFull)
 			if err != nil {
 				return res, false, err
@@ -308,6 +311,19 @@ func executeActions(ctx context.Context, deps types.Deps, input types.ReconcileI
 	// Only a paused Decision with no committed create ends without a
 	// Create action: scale-down (if any) has run, nothing else may.
 	return ctrl.Result{}, false, nil
+}
+
+// reportIdleUpdate stands in for the update pass on a Decision that
+// planned none because the roll has nothing left to do (Decision.UpdateIdle):
+// it reports a nil hold where the update pass would have, so a hold a
+// prior pass recorded clears. A pass that ends before the update position,
+// on a scale wave or a repair, never reaches it and leaves the hold
+// standing.
+func reportIdleUpdate(input types.ReconcileInput, decision Decision) {
+	if !decision.UpdateIdle || input.RecordRolloutHold == nil {
+		return
+	}
+	input.RecordRolloutHold(nil)
 }
 
 // demoteUnbackedInstances applies the truth pass: the status-only

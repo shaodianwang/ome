@@ -105,7 +105,7 @@ func executeUpdatePass(ctx context.Context, deps types.Deps, input types.Reconci
 	// reached the admission above; the block is the denial it stands on,
 	// superseded by progress on the same terms as any other.
 	if firstDenial == nil && len(selection.RetryBlockDenied) > 0 {
-		firstDenial = admission.retryBlockHold(input)
+		firstDenial = selection.LadderHold
 	}
 	if anyUpdateRan && len(selection.RolledNotServing) == 0 {
 		// Forward progress this pass: whatever was gated for a DIFFERENT
@@ -211,14 +211,14 @@ func (a *updateAdmission) admit(ctx context.Context, plan types.ComponentPlan, i
 		if projected, denied := escalation.BudgetDenies(a.selection.SurgeBudget, a.selection.PriorSurgeInFlight+rolled, a.inFlightSurge); denied {
 			return false, &types.RolloutHold{
 				Gate:   types.RolloutHoldGateBudget,
-				Reason: fmt.Sprintf("per-Component surge budget %d exhausted (would become %d)%s", a.selection.SurgeBudget, projected, a.rolledNotServingClause()),
+				Reason: fmt.Sprintf("per-Component surge budget %d exhausted (would become %d)%s", a.selection.SurgeBudget, projected, rolledNotServingClause(a.selection.RolledNotServing, a.target.Name)),
 				Target: a.target.Name,
 			}
 		}
 	} else if projected, denied := escalation.BudgetDenies(a.selection.UnavailBudget, a.selection.PriorUnavailInFlight+rolled, a.inFlightUnavail); denied {
 		return false, &types.RolloutHold{
 			Gate:   types.RolloutHoldGateBudget,
-			Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted (would become %d)%s", a.selection.UnavailBudget, projected, a.rolledNotServingClause()),
+			Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted (would become %d)%s", a.selection.UnavailBudget, projected, rolledNotServingClause(a.selection.RolledNotServing, a.target.Name)),
 			Target: a.target.Name,
 		}
 	}
@@ -263,20 +263,23 @@ func (a *updateAdmission) drainWithheld() *types.RolloutHold {
 	}
 	return &types.RolloutHold{
 		Gate:   types.RolloutHoldGateBudget,
-		Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted%s; no source leaves rotation", a.selection.UnavailBudget, a.rolledNotServingClause()),
+		Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted%s; no source leaves rotation", a.selection.UnavailBudget, rolledNotServingClause(a.selection.RolledNotServing, a.target.Name)),
 		Target: a.target.Name,
 	}
 }
 
-// retryBlockHold is the hold the target's RetryBlock stands for when it
-// denied a fresh start at the trigger stage: the Held gate for a held
-// ladder, the RetryBlock gate for an attempt already in flight (the
-// ladder admits one at a time) or a Backoff not yet due. Nil when the
-// target carries no block in a denying state. The wording is the status
-// layer's own reading of the block, with the Instances the roll waits
-// on named, so the operator reads one story whichever layer reports it.
-func (a *updateAdmission) retryBlockHold(input types.ReconcileInput) *types.RolloutHold {
-	b := types.FindRetryBlock(input.ObservedState.RetryBlocks, a.target.Name)
+// ladderHold is the hold the target's RetryBlock stands for when it
+// denies a fresh start this pass: the Held gate for a held ladder, the
+// RetryBlock gate for an attempt already in flight (the ladder admits
+// one at a time) or a Backoff not yet due. Nil when the target carries
+// no block in a denying state, by the trigger gate's own reading
+// (workloadops.RetryBlockDenyingFreshStart). Plan computes it once per
+// pass: the update pass reports it for a start the trigger denied, and
+// the idle verdict yields to it. The wording is the status layer's own
+// reading of the block, with the Instances the roll waits on named, so
+// the operator reads one story whichever layer reports it.
+func ladderHold(input types.ReconcileInput, target *appsv1.ControllerRevision, rolledNotServing []int32) *types.RolloutHold {
+	b := workloadops.RetryBlockDenyingFreshStart(input, target)
 	if b == nil {
 		return nil
 	}
@@ -293,15 +296,14 @@ func (a *updateAdmission) retryBlockHold(input types.ReconcileInput) *types.Roll
 	}
 	return &types.RolloutHold{
 		Gate:   gate,
-		Reason: fmt.Sprintf("update to %s %s after %d failed attempt(s): %s%s", b.TargetRevision, state, b.AttemptsStarted, b.Reason, a.rolledNotServingClause()),
-		Target: a.target.Name,
+		Reason: fmt.Sprintf("update to %s %s after %d failed attempt(s): %s%s", b.TargetRevision, state, b.AttemptsStarted, b.Reason, rolledNotServingClause(rolledNotServing, target.Name)),
+		Target: target.Name,
 	}
 }
 
 // rolledNotServingClause names, for a denial, the Instances already on
 // the target revision that do not serve it; empty when there are none.
-func (a *updateAdmission) rolledNotServingClause() string {
-	rolled := a.selection.RolledNotServing
+func rolledNotServingClause(rolled []int32, target string) string {
 	if len(rolled) == 0 {
 		return ""
 	}
@@ -313,7 +315,7 @@ func (a *updateAdmission) rolledNotServingClause() string {
 	if len(rolled) > 1 {
 		noun = "Instances"
 	}
-	return fmt.Sprintf("; %s %s on revision %s not serving", noun, strings.Join(indices, ", "), a.target.Name)
+	return fmt.Sprintf("; %s %s on revision %s not serving", noun, strings.Join(indices, ", "), target)
 }
 
 // charge counts a fresh start the pass opened, so every later consult

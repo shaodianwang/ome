@@ -736,6 +736,27 @@ func isGangSurgeTargetMarker(s *workload.InstanceStatus) bool {
 			s.Operation.Step == workload.UpdateStepGangSurgeTargetCleanup)
 }
 
+// RetryBlockDenyingFreshStart returns the target's RetryBlock when it
+// denies a fresh start this pass — a Held ladder, an attempt already in
+// flight under RetryInProgress, or a Backoff not yet due — and nil when
+// the target carries no block or one that admits a start. It is the
+// trigger gate's own reading (evaluateRetryBlockGate), so a caller that
+// asks about the Component as a whole, rather than one Instance that
+// reached the trigger, agrees with the trigger's per-Instance verdict.
+func RetryBlockDenyingFreshStart(input workload.ReconcileInput, target *appsv1.ControllerRevision) *workload.RetryBlock {
+	if target == nil {
+		return nil
+	}
+	b := workload.FindRetryBlock(input.ObservedState.RetryBlocks, target.Name)
+	if b == nil {
+		return nil
+	}
+	if denied, _ := evaluateRetryBlockGate(b, input.Now(), anyInFlightUpdateAt(input.ObservedState.InstanceStatuses, target.Name)); !denied {
+		return nil
+	}
+	return b
+}
+
 // anyInFlightUpdateAt reports whether any Instance carries an in-flight
 // Update Operation targeting rev. Used by the retry gate to distinguish
 // a live RetryInProgress authorization from one leaked by a superseded

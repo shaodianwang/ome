@@ -1,13 +1,16 @@
 tick=1 note the Create pass opens the attempt and materializes the pod
+tick=1 hold cleared
 tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+2m0s} precondition=ok
 tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
 tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
 tick=1 pass result=after:5s
 tick=2 note the pod is running but has not become Ready
 tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-default-0 node=node-0 now=t+0s
+tick=2 hold cleared
 tick=2 pass result=after:5s
 tick=3 note the operation deadline elapses with the pod still not Ready
 tick=3 apply timer.operationDeadline to=t+2m1s now=t+2m1s
+tick=3 hold cleared
 tick=3 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=nil lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Create/CreatePods exceeded InstanceReadyTimeout} precondition=ok
 tick=3 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Create/CreatePods exceeded InstanceReadyTimeout: attempt disposed terminal (no workload-caused evidence, relocation unavailable); operation-specific recovery decides whether another attempt is safe
 tick=3 pass result=after:5s

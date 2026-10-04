@@ -1,10 +1,13 @@
 tick=1 note the row is forming on a pod the Component's current revision no longer claims
+tick=1 hold cleared
 tick=1 pass result=after:5s
 tick=2 note the pull wedges immediately, but the pod is younger than the grace, so nothing escalates
 tick=2 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-default-0 reason=ImagePullBackOff now=t+0s
+tick=2 hold cleared
 tick=2 pass result=after:5s
 tick=3 note the grace elapses on the leftover pod and the row is stamped Failed
 tick=3 apply timer.stuckPodGrace to=t+5m1s now=t+5m1s
+tick=3 hold cleared
 tick=3 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-6f8b1e6c readySince=nil op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
 tick=3 warn instanceFailed index=0 pod=svc-a-engine-0-default-0 reason=ImagePullBackOff
 tick=3 pass result=after:5s
