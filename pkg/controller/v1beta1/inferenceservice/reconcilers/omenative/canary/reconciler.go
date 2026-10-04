@@ -387,6 +387,12 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 	if capacityShort && cs.CapacityWaitSince == nil {
 		cs.CapacityWaitSince = &metav1.Time{Time: in.Now}
 	}
+	if capacityShort && state != rollout.CanaryStateDraining {
+		// The held split names the canary revision only while a pod of it
+		// serves; its share rests on the stable revision otherwise and
+		// returns on the pass that sees a canary pod serve again.
+		holdGroupTraffic(in)
+	}
 	if capacityShort && capacityGateExpired(cs, resolveReadyTimeout(in, plan), in.Now) {
 		// A drain's split names the canary revision alone, so its park hands
 		// the traffic back to the held stable instance, as a crash park does.
@@ -401,18 +407,9 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 		// traffic write is the workload engine's repair, and the drain's own
 		// release waits on it below, inside the same timeout.
 		if state == rollout.CanaryStateServing || state == rollout.CanaryStatePreHold {
-			// A split that was serving keeps its phase and its programmed
+			// A split that was serving keeps its phase and its recorded
 			// weight through a dip; the gate only keeps the step from moving.
 			return (&Result{Active: true, Partition: partition}).wake(in.Requeue), nil
-		}
-		// A traffic target names a revision only while that revision has a
-		// serving pod. A ladder that has not shifted traffic yet owns no
-		// split, so the targets a superseded ladder left behind return to the
-		// stable revision, on the capacity that serves, until this step's
-		// gate passes and writes its own; between steps the previous step's
-		// weight stands and is not touched here.
-		if cs.ObservedTrafficWeight == 0 {
-			returnTrafficToStable(in)
 		}
 		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhasePending)
 		return (&Result{Active: true, Partition: partition}).wake(in.Requeue), nil
@@ -436,6 +433,9 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 			cs.PromotedThrough = cs.CanaryRevisionHash
 			take(constants.RolloutPromoteAnnotation)
 		} else {
+			// The held split follows the pods like any held split: its
+			// share is back on the canary revision as soon as one serves.
+			holdGroupTraffic(in)
 			setPhase(in.ISVC, in.Component, v1beta1.RolloutPhasePaused)
 			return (&Result{Active: true, Partition: partition}).wake(in.Requeue), nil
 		}
@@ -503,11 +503,11 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 			// Mark done (sentinel), don't clear: EffectivePartition reads the
 			// sentinel as partition 0, which releases the held stable instance
 			// now that traffic has left it and drained, instead of re-holding
-			// it under a step-0 partition. ObservedTrafficWeight stays 100
-			// (all on canary). The release is projected on the next pass, so
-			// the roll it starts is finished by finishCutover from here on.
+			// it under a step-0 partition. The release is projected on the next
+			// pass, so the roll it starts is finished by finishCutover from
+			// here on; the cutover names the target alone, whatever serves.
 			cs.CurrentStep = int32(len(plan.Steps))
-			cs.ObservedTrafficWeight = 100
+			applyCutoverTraffic(in)
 			return finishCutover(in, cs), nil
 		}
 		return (&Result{Active: true, Partition: partition}).wake(in.Requeue), nil

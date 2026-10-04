@@ -89,26 +89,25 @@ func expectHeldAtFinalStep(t *testing.T, isvc *v1beta1.InferenceService, res *Re
 }
 
 // Promote consumed while the canary's only serving pod is gone: the step
-// holds on capacity, traffic stays at the split, and the ladder resumes once
-// capacity is back. The resume moves traffic to 100% on the capacity the
-// pass counted and leaves the release to a later pass with its own count.
+// holds on capacity, the split it inherited rests on the stable instance
+// while no canary pod serves, and the ladder resumes once capacity is back.
+// The resume moves traffic to 100% on the capacity the pass counted and
+// leaves the release to a later pass with its own count.
 func TestReconcile_PromoteConsumedWhileTheOnlyCanaryPodIsGone(t *testing.T) {
 	isvc, in := twoInstanceManualLadder(t)
 	promoteToFinalStep(t, isvc, in)
 
 	// The only canary pod is gone when the final step first runs: the step
-	// holds on capacity with the split it inherited, nothing moves.
+	// holds on capacity with the weight it inherited, and the split rests
+	// on the stable instance until a canary pod serves.
 	in.PerRevisionPods = map[string]int32{"old": 1}
 	in.Now = in.Now.Add(time.Second)
 	expectHeldAtFinalStep(t, isvc, mustReconcile(t, isvc, in), v1beta1.RolloutPhasePending)
 	cs := rollout.CanaryStatusFor(&isvc.Status, v1beta1.EngineComponent)
 	if cs.ObservedTrafficWeight != 50 || cs.CapacityWaitSince == nil {
-		t.Fatalf("the hold keeps the split and records the capacity wait, got weight %d wait %v", cs.ObservedTrafficWeight, cs.CapacityWaitSince)
+		t.Fatalf("the hold keeps the recorded weight and records the capacity wait, got weight %d wait %v", cs.ObservedTrafficWeight, cs.CapacityWaitSince)
 	}
-	expectTargets(t, isvc, v1beta1.EngineComponent, map[string]trafficWant{
-		"new": {percent: 50, latest: true},
-		"old": {percent: 50},
-	})
+	expectTargets(t, isvc, v1beta1.EngineComponent, map[string]trafficWant{"old": {percent: 100}})
 
 	// Capacity is back: the step's traffic moves onto it. The pass that
 	// moved it does not also release the stable instance.
@@ -176,8 +175,9 @@ func TestReconcile_CutoverReReadsCapacityBeforeReleasingTheStableInstance(t *tes
 
 // A deleted pod still in the cache is not capacity: a canary pod the pass
 // reads Running and Ready but under deletion counts for nothing in the
-// capacity gate, so the final step holds its split rather than moving
-// traffic onto it.
+// capacity gate, so the final step holds rather than moving traffic onto
+// it, and the split it inherited rests on the stable instance, the pod on
+// its way out serving nothing.
 func TestDispatch_ADeletedPodStillInTheCacheIsNotCapacity(t *testing.T) {
 	ns := "default"
 	n2 := 2
@@ -229,12 +229,9 @@ func TestDispatch_ADeletedPodStillInTheCacheIsNotCapacity(t *testing.T) {
 	}
 	cs := rollout.CanaryStatusFor(&isvc.Status, v1beta1.EngineComponent)
 	if cs.CurrentStep != 1 || cs.ObservedTrafficWeight != 50 || cs.CapacityWaitSince == nil {
-		t.Fatalf("the hold keeps the step and its split and records the wait, got %+v", cs)
+		t.Fatalf("the hold keeps the step and its recorded weight and records the wait, got %+v", cs)
 	}
-	expectTargets(t, isvc, v1beta1.EngineComponent, map[string]trafficWant{
-		"new": {percent: 50, latest: true},
-		"old": {percent: 50},
-	})
+	expectTargets(t, isvc, v1beta1.EngineComponent, map[string]trafficWant{"old": {percent: 100}})
 	ext := &isvc.Spec.Engine.ComponentExtensionSpec
 	if p := StepPartition(isvc, v1beta1.EngineComponent, ext); p == nil || *p != 1 {
 		t.Fatalf("the stable instance stays held, got partition %v", fmtPartition(p))
