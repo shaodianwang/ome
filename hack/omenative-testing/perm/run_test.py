@@ -8118,7 +8118,7 @@ class CanaryStepBreakTest(unittest.TestCase):
         self.assertIn("never crashed at start", f["infra_fail"])
         for over, words in (
                 (dict(park=None), "never parked"),
-                (dict(park={"step": 1}), "moved from step 0 to step 1"),
+                (dict(park={"step": 2}), "moved from step 0 to step 2 after the canary broke, more than the one step"),
                 (dict(park={"reason": ""}), "carries no reason"),
                 (dict(park={"canary_traffic": 10}), "10% of traffic named the broken revision"),
                 (dict(park={"stable_serving": 6}), "served 6/8 engine Instances at the park"),
@@ -8132,6 +8132,90 @@ class CanaryStepBreakTest(unittest.TestCase):
         run._new_break_checks(ctx, f, self._track(park={"crash_instances": 3, "stable_serving": 5}), set(), "PASS", [], checks)
         self.assertTrue(any("could not be pulled" in c for c in checks))
         self.assertTrue(any("5/8 serving, 3 on the broken revision" in c for c in checks))
+        # A break that bites at staging keeps the strict reading: the park is at the step where it bit.
+        notes = []
+        f = {"kind": "crashloop", "form": "start", "crash_comp": "engine", "infra_fail": None}
+        self.assertEqual("FAIL", run._new_break_checks(ctx, f, self._track(park={"step": 1}), {"Pending"}, "PASS", notes, []))
+        self.assertTrue(any("moved from step 0 to step 1 after the canary broke" in n for n in notes), notes)
+
+    def _deaths(self, *steps_at):
+        return [{"pod": pod, "at": at, "step": step, "hook": "canary-serving"} for pod, step, at in steps_at]
+
+    def test_a_crash_past_the_soak_parks_at_the_pods_second_death_a_step_later(self):
+        # The pushed pod serves, dies once inside the first soak and comes
+        # back; the restarted soak elapses and the ladder advances; the pod
+        # dies again while the next step stages, and the ladder parks there.
+        pods = {f"e{i}": {"alive": True, "comp": "engine", "inst": str(i), "hash": "old", "uid": f"o{i}", "ready": True, "serving": True}
+                for i in range(7)}
+        pods["e7"] = {"alive": True, "comp": "engine", "inst": "7", "hash": "new", "uid": "n7", "ready": True, "serving": True}
+        ctx = {"N": {"engine": 8}, "pods_per_inst": {"engine": 1}, "old_hashes": {"old"}, "pod_state": pods, "canary_hook": "canary-serving"}
+        f = {"kind": "crashloop", "form": "load", "crash_comp": "engine", "infra_fail": None}
+        track = {"bite": None, "park": None, "ready_seen": set(), "uids": {}, "peak_crash": 0, "phases_before_exit": set(),
+                 "deaths": [], "ready_prev": set()}
+        timeline = [("canary-serving", 0, True, 10.0), ("canary-serving", 0, False, 30.0), ("canary-serving", 0, True, 45.0),
+                    ("canary-staging", 1, True, 70.0), ("canary-staging", 1, False, 90.0), ("canary-failed", 1, False, 92.0)]
+        with contextlib.redirect_stdout(io.StringIO()):
+            for hook, step, ready, at in timeline:
+                ctx["canary_hook"] = hook
+                pods["e7"]["ready"] = pods["e7"]["serving"] = ready
+                can = {"failed": {"reason": "CapacityTimeout"}} if hook == "canary-failed" else {}
+                phase = {"canary-serving": "Paused", "canary-staging": "Pending", "canary-failed": "Failed"}[hook]
+                traffic = [{"percent": 100, "tag": "stable"}] if hook == "canary-failed" else [{"percent": 10, "latestRevision": True}]
+                run._new_break_track(ctx, f, track, can, {"rolloutPhase": phase, "traffic": traffic}, step, at, False)
+        self.assertEqual((0, 30.0), (track["bite"]["step"], track["bite"]["at"]))
+        self.assertEqual([("e7", 0, 30.0), ("e7", 1, 90.0)], [(d["pod"], d["step"], d["at"]) for d in track["deaths"]])
+        self.assertEqual(1, track["park"]["step"])
+        notes, checks = [], []
+        self.assertEqual("PASS", run._new_break_checks(ctx, f, track, {"Paused", "Pending", "Failed"}, "PASS", notes, checks), notes)
+        self.assertTrue(any("died again at step 1, 60s after its first death, one step past it" in c for c in checks), checks)
+        self.assertTrue(any("stopped at the step where the canary died again (step 1)" in c for c in checks), checks)
+        self.assertTrue(any("2 death(s) after serving seen" in c for c in checks), checks)
+        # A crash inside the soak dies again at the same step.
+        notes, checks = [], []
+        same = self._track(bite={"at": 30.0}, park={"step": 0}, deaths=self._deaths(("e7", 0, 30.0), ("e7", 0, 55.0)))
+        self.assertEqual("PASS", run._new_break_checks(ctx, f, same, {"Paused", "Failed"}, "PASS", notes, checks), notes)
+        self.assertTrue(any("died again at step 0, 25s after its first death at the same step" in c for c in checks), checks)
+        self.assertTrue(any("stopped at the step where the canary died again (step 0)" in c for c in checks), checks)
+
+    def test_a_park_two_steps_past_the_first_death_fails(self):
+        ctx = {"N": {"engine": 8}}
+        f = {"kind": "crashloop", "form": "load", "crash_comp": "engine", "infra_fail": None}
+        # The second death fell between polls: the park alone is read, one step past the bite at most.
+        notes = []
+        self.assertEqual("FAIL", run._new_break_checks(ctx, f, self._track(park={"step": 2}), {"Pending"}, "PASS", notes, []))
+        self.assertTrue(any("moved from step 0 to step 2 after the canary broke, more than the one step a restarted soak allows" in n
+                            for n in notes), notes)
+        # The second death itself landed two steps past the first.
+        notes = []
+        two = self._track(park={"step": 2}, deaths=self._deaths(("e7", 0, 30.0), ("e7", 2, 120.0)))
+        self.assertEqual("FAIL", run._new_break_checks(ctx, f, two, {"Pending"}, "PASS", notes, []))
+        self.assertTrue(any("moved from step 0 to step 2 between the canary's first and second death" in n for n in notes), notes)
+        # One step past the first death passes, whether or not a poll saw the second.
+        for deaths in ([], self._deaths(("e7", 0, 30.0), ("e7", 1, 90.0))):
+            notes, checks = [], []
+            one = self._track(park={"step": 1}, deaths=deaths)
+            self.assertEqual("PASS", run._new_break_checks(ctx, f, one, {"Pending"}, "PASS", notes, checks), notes)
+            if not deaths:
+                self.assertTrue(any("parked one step past the step where the canary broke (step 0 to 1), its second death "
+                                    "unseen between polls" in c for c in checks), checks)
+
+    def test_a_ladder_that_keeps_moving_after_the_second_death_fails(self):
+        ctx = {"N": {"engine": 8}}
+        f = {"kind": "crashloop", "form": "load", "crash_comp": "engine", "infra_fail": None}
+        notes = []
+        moved = self._track(park={"step": 2}, deaths=self._deaths(("e7", 0, 30.0), ("e7", 1, 90.0)))
+        self.assertEqual("FAIL", run._new_break_checks(ctx, f, moved, {"Pending"}, "PASS", notes, []))
+        self.assertTrue(any("moved from step 1 to step 2 after the canary's second death" in n for n in notes), notes)
+        # Another pod's first death is not the second death: the first pod
+        # to die twice is where the ladder parks, whatever died in between.
+        deaths = self._deaths(("e7", 0, 30.0), ("e6", 1, 75.0), ("e7", 1, 96.0))
+        self.assertEqual(("e7", 96.0), (run._second_death(deaths)["pod"], run._second_death(deaths)["at"]))
+        self.assertIsNone(run._second_death(self._deaths(("e7", 0, 30.0), ("e6", 1, 75.0))))
+        self.assertIsNone(run._second_death(None))
+        notes, checks = [], []
+        parked = self._track(bite={"at": 30.0}, park={"step": 1}, deaths=deaths)
+        self.assertEqual("PASS", run._new_break_checks(ctx, f, parked, {"Paused"}, "PASS", notes, checks), notes)
+        self.assertTrue(any("died again at step 1, 66s after its first death, one step past it" in c for c in checks), checks)
 
 
 class RetargetVerbTest(unittest.TestCase):
@@ -8654,7 +8738,9 @@ class GeneratedCanaryFaultFamiliesTest(unittest.TestCase):
         for name, kv, m in fam:
             text = self.outputs[f"gen-canary-fault-new/{name}.yaml"]
             self.assertIn(f'readyTimeout: "{generate_cases.HELD_READY_TIMEOUT}"', text, f"{name}: the park must land inside the budget")
-            self.assertIn("stops at the step where the break bites", self._line2("gen-canary-fault-new", name))
+            stop = ("the second parks the ladder at the step it lands on, the step where the break bit or the next one"
+                    if m["verb"].rpartition(":")[2] == "crashAfterSoak" else "stops at the step where the break bites")
+            self.assertIn(stop, self._line2("gen-canary-fault-new", name))
             self.assertIn("nothing promotes the broken revision", self._line2("gen-canary-fault-new", name))
         self.assertLess(generate_cases.CRASH_EXIT_IN_SOAK_S, generate_cases.STORY_SOAK_S)
         self.assertGreater(generate_cases.CRASH_EXIT_AFTER_SOAK_S, generate_cases.STORY_SOAK_S)

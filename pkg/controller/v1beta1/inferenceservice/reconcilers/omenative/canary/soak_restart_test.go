@@ -164,13 +164,22 @@ type timedCanaryWire struct {
 
 func armTimedCanaryWire(t *testing.T, soak time.Duration, t0 time.Time) *timedCanaryWire {
 	t.Helper()
+	return armLadderCanaryWire(t, twoStepTimed(soak), t0)
+}
+
+// armLadderCanaryWire arms the wire under the given ladder. The run opened
+// before the target pods served, as a push does: the pods roll under the
+// pinned run and serve from then on.
+func armLadderCanaryWire(t *testing.T, steps []v1beta1.RolloutGroupStep, t0 time.Time) *timedCanaryWire {
+	t.Helper()
 	ns := "default"
 	n4 := 4
-	isvc := canaryISVC(twoStepTimed(soak), nil)
+	isvc := canaryISVC(steps, nil)
 	isvc.Namespace = ns
 	isvc.Name = "soak-wire"
 	isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
 	pinActiveRun(isvc)
+	isvc.Status.Rollout.ActiveRun.OpenedAt = metav1.NewTime(t0.Add(-5 * time.Minute))
 	readyAt := t0.Add(-2 * time.Minute)
 
 	engineIR := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "soak-wire-engine", UID: canaryIRUID("soak-wire-engine"), Generation: 2}}

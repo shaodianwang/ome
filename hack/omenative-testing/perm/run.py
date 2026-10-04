@@ -8269,6 +8269,16 @@ def _new_break_track(ctx, f, track, can, comp_status, step, now_rel, exit_fired)
             track["uids"].setdefault(pod["uid"], now_rel)
         if pod.get("ready"):
             track["ready_seen"].add(name)
+    if f["kind"] == "crashloop" and f.get("form") == "load" and track["park"] is None:
+        # Each death after serving: a pod of the pushed revision Ready at the
+        # previous poll and down or gone at this one. A pod's first restarts
+        # the soak; its second is where the ladder must park.
+        ready_now = {n for n, p in canary_pods if p.get("ready")}
+        for name in sorted(track.setdefault("ready_prev", set()) - ready_now):
+            track.setdefault("deaths", []).append({"pod": name, "at": now_rel, "step": step, "hook": ctx["canary_hook"]})
+            print(f"    death {len(track['deaths'])}: {name} on the pushed revision was Ready and then was not "
+                  f"({now_rel:.0f}s, step={step})")
+        track["ready_prev"] = ready_now
     crash_instances = {str(p.get("inst", "0")) for _n, p in canary_pods}
     # An Instance the broken revision reached that has no pod of either
     # revision is mid-repair on it (its pod deleted for the rebuild), not a
@@ -8295,15 +8305,30 @@ def _new_break_track(ctx, f, track, can, comp_status, step, now_rel, exit_fired)
               f"stable serving {track['park']['stable_serving']}/{ctx['N'][comp]}")
 
 
+def _second_death(deaths):
+    """The first death that is a pod's second after serving, in the order
+    the polls saw them; None until a pod has died twice. A pod's deaths are
+    the canary's across steps: its first restarts the soak, its second
+    parks the ladder where it stands. Another pod's first death is not it."""
+    seen = set()
+    for death in deaths or []:
+        if death["pod"] in seen:
+            return death
+        seen.add(death["pod"])
+    return None
+
+
 def _new_break_checks(ctx, f, track, phases, verdict, notes, checks):
     """The operator's end state for a canary whose revision is broken: the
     break bit (else the arm failed and the case is INFRA-FAIL), the ladder
     stopped at the step where it bit and says why, no traffic named the
     broken revision at the park while the stable side kept every Instance
     the broken revision had not replaced serving, and nothing promoted the
-    broken revision before the exit verb landed. The exit's own terminal
-    checks (drained back, or the fix on every Instance with nothing left on
-    the broken revision) follow."""
+    broken revision before the exit verb landed. A crash after Ready parks
+    at the step of the pod's second death, the step where it bit or the
+    next one: the restarted soak may elapse once between the two deaths,
+    never twice. The exit's own terminal checks (drained back, or the fix
+    on every Instance with nothing left on the broken revision) follow."""
     kind, form, comp = f["kind"], f.get("form") or "start", f["crash_comp"]
     label = {"imagepull": "could not be pulled", "configkey": "waited on a missing ConfigMap key",
              READINESS_FAULT: "never passed readiness", "start": "crashed at start",
@@ -8326,9 +8351,29 @@ def _new_break_checks(ctx, f, track, phases, verdict, notes, checks):
     if park is None:
         ok(False, "", f"{name}: the ladder never parked after the {comp} canary {label} (phases {sorted(phases)})")
         return verdict
-    ok(park["step"] == bite["step"],
-       f"{name}: the ladder stopped at the step where the canary broke (step {bite['step']})",
-       f"{name}: the ladder moved from step {bite['step']} to step {park['step']} after the canary broke")
+    second = _second_death(track.get("deaths")) if kind == "crashloop" and form == "load" else None
+    if second is not None:
+        ok(bite["step"] <= second["step"] <= bite["step"] + 1,
+           f"{name}: the canary died again at step {second['step']}, {second['at'] - bite['at']:.0f}s after its first death"
+           + (" at the same step" if second["step"] == bite["step"] else ", one step past it"),
+           f"{name}: the ladder moved from step {bite['step']} to step {second['step']} between the canary's first and "
+           f"second death, more than the one step a restarted soak allows")
+        ok(park["step"] == second["step"],
+           f"{name}: the ladder stopped at the step where the canary died again (step {second['step']})",
+           f"{name}: the ladder moved from step {second['step']} to step {park['step']} after the canary's second death")
+    elif kind == "crashloop" and form == "load":
+        # The second death fell between polls: the park alone is read, at the
+        # step where the canary broke or the next one.
+        ok(bite["step"] <= park["step"] <= bite["step"] + 1,
+           f"{name}: the ladder stopped at the step where the canary broke (step {bite['step']})" if park["step"] == bite["step"]
+           else f"{name}: the ladder parked one step past the step where the canary broke (step {bite['step']} to "
+                f"{park['step']}), its second death unseen between polls",
+           f"{name}: the ladder moved from step {bite['step']} to step {park['step']} after the canary broke, more than "
+           f"the one step a restarted soak allows")
+    else:
+        ok(park["step"] == bite["step"],
+           f"{name}: the ladder stopped at the step where the canary broke (step {bite['step']})",
+           f"{name}: the ladder moved from step {bite['step']} to step {park['step']} after the canary broke")
     ok(bool(park["reason"]),
        f"{name}: status says why the ladder stopped (failed.reason={park['reason']}, {park['at']:.0f}s after the push)",
        f"{name}: the park carries no reason (the unit's canary.failed.reason is empty)")
@@ -8345,6 +8390,9 @@ def _new_break_checks(ctx, f, track, phases, verdict, notes, checks):
        f"{name}: nothing promoted the broken revision before the exit landed",
        f"{name}: the broken revision was promoted before the exit landed (phases {sorted(track['phases_before_exit'])})")
     checks.append(f"  ⓘ {name}: {len(track['uids'])} distinct {comp} pod(s) carried the broken revision over the case")
+    if kind == "crashloop" and form == "load":
+        checks.append(f"  ⓘ {name}: {len(track.get('deaths') or [])} death(s) after serving seen on the pushed revision "
+                      f"before the park")
     return verdict
 
 
@@ -22976,7 +23024,7 @@ def _canary(case_id, yaml_file, desc, hdr):
     win = _canary_window_new(ctx, fault, hdr, group) if window else None
     lift = str(hdr.get("lift") or "")
     newbreak = {"bite": None, "park": None, "ready_seen": set(), "uids": {}, "peak_crash": 0,
-                "phases_before_exit": set()}
+                "phases_before_exit": set(), "deaths": [], "ready_prev": set()}
     gate = _gate_track_new()
     gate_threshold = _gate_threshold(cinfo.get("steps") or [])
     sibpark = {}

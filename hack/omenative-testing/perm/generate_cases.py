@@ -3222,7 +3222,11 @@ def _emit_canary_kept_key(add, family, topo, n, w, nr, shape, group):
 # be pulled bite at staging (the capacity gate never fills); a crash after
 # Ready bites inside the first step's soak (the runner exits before the soak
 # ends) or past it (it outlives the soak and dies while the next step's
-# capacity builds). The exit at the park is a rollback or a fix push that
+# capacity builds). A pod's deaths after it served are the canary's across
+# steps: the first restarts the soak and the second parks the ladder where it
+# stands, so a crash past the soak parks at the step of the pod's second
+# death, the step of its first death or the next one when the restarted soak
+# elapsed between them. The exit at the park is a rollback or a fix push that
 # drops the broken runner. (name, kind, form, exitafter)
 STORY_SOAK_S = int(lib.CANARY_PAUSE["auto"]["duration"].rstrip("s"))
 CRASH_EXIT_IN_SOAK_S, CRASH_EXIT_AFTER_SOAK_S = 10, 40
@@ -3241,6 +3245,9 @@ NEW_BREAK_EXITS = [("rollback", "RolledBack"), ("rebump-fix", "Stable")]
 # the gated ladder.
 NEW_BREAK_SURGES = {"crashStart": [1], "imagePull": [1], "crashInSoak": [1, 2], "crashAfterSoak": [1, 2]}
 NEW_BREAK_GATES = {"crashStart": [None], "imagePull": [None, "pass"], "crashInSoak": [None], "crashAfterSoak": [None]}
+# The state the break bites in, the cell's row. A crash past the soak bites
+# while the next step stages and parks at the step of the pod's second death,
+# that step or the one after it.
 NEW_BREAK_STATE = {"crashStart": "Staging", "imagePull": "Staging", "crashInSoak": "Serving", "crashAfterSoak": "Staging[next]"}
 NEW_BREAK_EXIT_CELL = {"rollback": "canary/Failed/rollback", "rebump-fix": "canary/Failed/newTarget"}
 
@@ -3256,9 +3263,12 @@ def _new_break_reason(name, exit_verb, rp, gate):
     then = {"rollback": "a rollback drains the broken revision and holds at RolledBack with the rejected revision recorded",
             "rebump-fix": ("a fix push that drops the broken runner lands on every Instance, serving, with nothing left "
                            "on the broken revision")}[exit_verb]
-    out = (f"{how}, under restart policy {RP_FULL[rp]}; the ladder stops at the step where the break bites and parks "
-           f"with a reason, no traffic names the broken revision at the park while the stable side keeps serving every "
-           f"Instance the broken revision had not replaced, nothing promotes the broken revision, and then {then}")
+    stop = ("the first death restarts the soak and the second parks the ladder at the step it lands on, the step where "
+            "the break bit or the next one, with a reason" if name == "crashAfterSoak"
+            else "the ladder stops at the step where the break bites and parks with a reason")
+    out = (f"{how}, under restart policy {RP_FULL[rp]}; {stop}, no traffic names the broken revision at the park while "
+           f"the stable side keeps serving every Instance the broken revision had not replaced, nothing promotes the "
+           f"broken revision, and then {then}")
     if gate:
         out += "; the steps before the cutover are gated on a passing analysis, which the park precedes and the fix walks"
     return out
@@ -3769,9 +3779,11 @@ def _sibling_new_reason(name, exit_verb, family, n, w):
            "crashAfterSoak": f"passes readiness and exits {CRASH_EXIT_AFTER_SOAK_S}s later, past the first soak"}[name]
     then = {"rollback": "a rollback drains both sides back and holds at RolledBack with the rejected revision recorded",
             "rebump-fix": "a fix push that drops the broken runner lands on engine and decoder alike, with nothing left on the broken revision"}[exit_verb]
+    park = ("parks at the step of the decoder pod's second death after serving, the step where it bit or the next one, "
+            "with a reason naming the gate" if name == "crashAfterSoak" else "parks where it bit with a reason naming the gate")
     return (f"the pushed decoder revision {how} while the engine's canary is up on {shape}; the unit's step waits on "
-            f"the decoder's capacity and parks where it bit with a reason naming the gate, no traffic names the broken "
-            f"revision at the park while the stable side keeps serving, nothing promotes it, and then {then}")
+            f"the decoder's capacity and {park}, no traffic names the broken revision at the park while the stable "
+            f"side keeps serving, nothing promotes it, and then {then}")
 
 
 def _sibling_park_reason(family, n, w):

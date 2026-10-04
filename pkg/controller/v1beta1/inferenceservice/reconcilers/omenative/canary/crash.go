@@ -25,26 +25,21 @@ type CanaryCrash struct {
 	Detail string
 }
 
-// crashAnchor is the moment before which a death is not this ladder's
-// business: the current step's anchor, so a resume and an advance answer
-// every crash before them, and now for a unit that is not armed yet. A
-// crash is read before the pass moves the anchor, so a death inside a step
-// is seen by the first pass after it at the latest.
-func crashAnchor(cs *v1beta1.CanaryStatus, now time.Time) time.Time {
-	if cs == nil {
+// crashAnchor is the open of the pinned run the canary is bound to: a canary
+// pod's deaths after serving count across steps while that run is open. A
+// resume keeps the run; a rollback or a new push opens a fresh one.
+func crashAnchor(isvc *v1beta1.InferenceService, cs *v1beta1.CanaryStatus, now time.Time) time.Time {
+	if cs == nil || isvc == nil || isvc.Status.Rollout == nil || isvc.Status.Rollout.ActiveRun == nil {
 		return now
 	}
-	if cs.StepEnteredTime == nil {
-		return time.Time{}
-	}
-	return cs.StepEnteredTime.Time
+	return isvc.Status.Rollout.ActiveRun.OpenedAt.Time
 }
 
 // crashedCanaryPod finds a pod of the member's target revision whose runner
 // is in a crash loop after its Instance was serving: the pod died a second
-// time since the step began, the kubelet is backing off its restarts, or
-// the Instance was already rebuilt for a death inside the step and the
-// rebuilt pod died again. A single death is a capacity dip the capacity
+// time since the canary began, the kubelet is backing off its restarts, or
+// the Instance was already rebuilt for a death inside the canary's life and
+// the rebuilt pod died again. A single death is a capacity dip the capacity
 // gate waits out: the kubelet restarts the runner in place or the restart
 // policy rebuilds the Instance, and the step keeps its state meanwhile.
 // The Instance row anchors the reading, as the workload's own restart
@@ -224,8 +219,8 @@ func servingAnchor(row *v1beta1.OMENativeInstanceStatus, pod *corev1.Pod, since 
 // window began, so the pod has died twice since the Instance served,
 // whether the kubelet has restarted it again or is backing off; and a
 // death of the rebuilt pod of an Instance the workload already rebuilt for
-// a death inside the step, the Instance's second death under one restart
-// policy's repair. The kubelet's back-off alone names no loop: it
+// a death inside the canary's life, the Instance's second death under one
+// restart policy's repair. The kubelet's back-off alone names no loop: it
 // remembers a crash from before the anchor as well, a boot crash or an
 // exit in the second the Instance entered Ready, which neither the
 // workload nor this reading dates after the Instance served, so the death
@@ -270,7 +265,7 @@ func runnerCrashLooping(pod *corev1.Pod, row *v1beta1.OMENativeInstanceStatus, a
 // rebuiltForDeathAfter reports whether the workload rebuilt row's Instance
 // for a pod failure dated after since: the row keeps the termination that
 // opened its last failure-driven rebuild, and a rebuild for a pod that
-// merely vanished records none. Without a step anchor nothing is dated.
+// merely vanished records none. Without an anchor nothing is dated.
 func rebuiltForDeathAfter(row *v1beta1.OMENativeInstanceStatus, since time.Time) bool {
 	if row == nil || row.LastFailure == nil || since.IsZero() {
 		return false

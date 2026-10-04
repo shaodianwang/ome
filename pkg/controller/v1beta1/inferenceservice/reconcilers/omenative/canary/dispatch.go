@@ -795,10 +795,10 @@ func canaryMembers(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup, prim
 }
 
 // canaryCrash reads the unit for a canary pod in a crash loop after it
-// served, against the primary's step anchor. The first one found is the
-// unit's verdict.
+// served, against the open of the run the canary is bound to. The first one
+// found is the unit's verdict.
 func canaryCrash(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup, primary v1beta1.ComponentType, primaryObserved observedCanaryRevisions, secondaryObserved map[v1beta1.ComponentType]observedCanaryRevisions, pods map[v1beta1.ComponentType][]*corev1.Pod, now time.Time) *CanaryCrash {
-	since := crashAnchor(rollout.CanaryStatusFor(&isvc.Status, primary), now)
+	since := crashAnchor(isvc, rollout.CanaryStatusFor(&isvc.Status, primary), now)
 	var crash *CanaryCrash
 	canaryMembers(isvc, g, primary, primaryObserved, secondaryObserved, pods, func(comp v1beta1.ComponentType, observed observedCanaryRevisions, pods []*corev1.Pod) bool {
 		crash = crashedCanaryPod(comp, observed, pods, since)

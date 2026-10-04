@@ -13,10 +13,10 @@ import (
 )
 
 // A crash loop parks the canary; a single restart does not. The readings
-// below are one canary Instance of a decoder, Ready since before the step
-// began, whose pod the kubelet restarts in place or the restart policy
-// rebuilds. A death is evidenced by a recorded termination or a restart
-// count on the pod itself, never by the Instance's readiness.
+// below are one canary Instance of a decoder, Ready since before the
+// canary's anchor, whose pod the kubelet restarts in place or the restart
+// policy rebuilds. A death is evidenced by a recorded termination or a
+// restart count on the pod itself, never by the Instance's readiness.
 
 // runnerDiedTwice is the runner's status after two deaths: the run the
 // first restart began died at second, and the kubelet restarted it again.
@@ -84,7 +84,7 @@ func escalatedRow(index int32, readyAt, failedAt time.Time) v1beta1.OMENativeIns
 
 func TestCrashedCanaryPod_OneRestartIsNotACrashLoop(t *testing.T) {
 	ready := time.Unix(100000, 0)
-	since := ready.Add(time.Minute) // the step anchor
+	since := ready.Add(time.Minute) // the canary's anchor
 	death := since.Add(30 * time.Second)
 	observed := func(rows ...v1beta1.OMENativeInstanceStatus) observedCanaryRevisions {
 		return observedCanaryRevisions{targetHash: "new", rows: rows, fromIR: true, statusFresh: true}
@@ -100,22 +100,22 @@ func TestCrashedCanaryPod_OneRestartIsNotACrashLoop(t *testing.T) {
 			observed(servingRow), []*corev1.Pod{readyAgain(crashPod("new", 5, 1, runnerDied(death)))}, ""},
 		{"one restart whose pod is still coming back keeps the step",
 			observed(servingRow), []*corev1.Pod{notReady(crashPod("new", 5, 1, runnerDied(death)))}, ""},
-		{"a second restart within the step parks",
+		{"a second restart after the anchor parks",
 			observed(servingRow), []*corev1.Pod{readyAgain(crashPod("new", 5, 1, runnerDiedTwice(death, death.Add(40*time.Second))))}, "container ome-container Error (exit 1)"},
 		{"CrashLoopBackOff parks",
 			observed(servingRow), []*corev1.Pod{notReady(crashPod("new", 5, 1, runnerInCrashLoopBackOff(death.Add(2*time.Second), death.Add(10*time.Second))))}, "container ome-container CrashLoopBackOff (exit 1)"},
-		{"a back-off whose earlier crash came before the Instance served is one death in this step",
+		{"a back-off whose earlier crash came before the Instance served is one death",
 			observed(instanceRow(5, v1beta1.OMENativeInstanceReady, "svc-decoder-new", &since, 1)), []*corev1.Pod{notReady(crashPod("new", 5, 1, runnerInCrashLoopBackOff(since, since.Add(31*time.Second))))}, ""},
-		{"a back-off whose earlier crash came before the step is one death in this step",
+		{"a back-off whose earlier crash came before the anchor is one death",
 			observed(servingRow), []*corev1.Pod{notReady(crashPod("new", 5, 1, runnerInCrashLoopBackOff(since.Add(-time.Second), death)))}, ""},
-		{"a second death whose first was before the step was a single restart in this step",
+		{"a second death whose first was before the anchor is a single death",
 			observed(servingRow), []*corev1.Pod{readyAgain(crashPod("new", 5, 1, runnerDiedTwice(since.Add(-time.Minute), death)))}, ""},
 		{"a rebuilt Instance whose rebuilt pod dies after serving parks",
 			observed(rebuiltRow(5, death, death.Add(20*time.Second), 2)), []*corev1.Pod{crashPod("new", 5, 2, runnerDied(death.Add(50*time.Second)))}, "container ome-container Error (exit 1)"},
 		{"a rebuilt Instance whose rebuild was a deletion, not a death, is a dip",
 			observed(instanceRow(5, v1beta1.OMENativeInstanceReady, "svc-decoder-new", func() *time.Time { t := death.Add(20 * time.Second); return &t }(), 2)),
 			[]*corev1.Pod{crashPod("new", 5, 2, runnerDied(death.Add(50*time.Second)))}, ""},
-		{"a rebuild for a death before the step does not count in this step",
+		{"a rebuild for a death before the anchor is not counted",
 			observed(rebuiltRow(5, since.Add(-time.Hour), since.Add(-30*time.Minute), 2)), []*corev1.Pod{crashPod("new", 5, 2, runnerDied(death))}, ""},
 		{"a row the workload escalated to Failed for the loop still parks on the pod's second death",
 			observed(escalatedRow(5, ready, death.Add(45*time.Second))), []*corev1.Pod{readyAgain(crashPod("new", 5, 1, runnerDiedTwice(death, death.Add(40*time.Second))))}, "container ome-container Error (exit 1)"},

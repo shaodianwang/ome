@@ -226,7 +226,7 @@ func deletedCanaryPodReading(isvc *v1beta1.InferenceService, now time.Time) *Can
 	observed := observedCanaryRevisions{targetHash: "new", fromIR: true, statusFresh: true,
 		rows: []v1beta1.OMENativeInstanceStatus{instanceRow(1, v1beta1.OMENativeInstanceReady, "svc-engine-new", &ready, 1)}}
 	pods := []*corev1.Pod{deleting(stoppedPod("new", 1, 1, 143, "Error", now.Add(-time.Second), corev1.PodRunning))}
-	return crashedCanaryPod(v1beta1.EngineComponent, observed, pods, crashAnchor(rollout.CanaryStatusFor(&isvc.Status, v1beta1.EngineComponent), now))
+	return crashedCanaryPod(v1beta1.EngineComponent, observed, pods, crashAnchor(isvc, rollout.CanaryStatusFor(&isvc.Status, v1beta1.EngineComponent), now))
 }
 
 // TestReconcile_CanaryPodDeletedAtAHoldSurvivesTheResumeAndTheRelease walks
@@ -375,7 +375,7 @@ func instanceRow(index int32, phase v1beta1.OMENativeInstancePhase, revision str
 
 func TestCrashedCanaryPod(t *testing.T) {
 	ready := time.Unix(100000, 0)
-	since := ready.Add(time.Minute) // the step anchor, after the Instance entered Ready
+	since := ready.Add(time.Minute) // the canary's anchor, after the Instance entered Ready
 	after := since.Add(30 * time.Second)
 	observed := func(rows ...v1beta1.OMENativeInstanceStatus) observedCanaryRevisions {
 		return observedCanaryRevisions{targetHash: "new", rows: rows, fromIR: true, statusFresh: true}
@@ -399,7 +399,7 @@ func TestCrashedCanaryPod(t *testing.T) {
 		{"a pod deleted by hand is killed after its grace", observed(readyRow), []*corev1.Pod{deleting(stoppedPod("new", 3, 1, 137, "Error", after, corev1.PodFailed))}, "", ""},
 		{"a terminal pod is a loss the workload recycles", observed(readyRow), []*corev1.Pod{stoppedPod("new", 3, 1, 137, "Error", after, corev1.PodFailed)}, "", ""},
 		{"a boot crash before Ready is not a death after serving", observed(readyRow), []*corev1.Pod{crashPod("new", 3, 1, runnerDied(ready.Add(-time.Second)))}, "", ""},
-		{"a death before the step anchor was answered already", observed(readyRow), []*corev1.Pod{crashPod("new", 3, 1, runnerDied(since.Add(-time.Second)))}, "", ""},
+		{"a death before the canary began is not the canary's", observed(readyRow), []*corev1.Pod{crashPod("new", 3, 1, runnerDied(since.Add(-time.Second)))}, "", ""},
 		{"the stable revision's crash loop is not the canary's", observed(readyRow, instanceRow(1, v1beta1.OMENativeInstanceReady, "svc-engine-old", &ready, 1)), []*corev1.Pod{crashPod("old", 1, 1, runnerDiedTwice(after, after.Add(30*time.Second)))}, "", ""},
 		{"a row that never served has no serving run to lose", observed(instanceRow(3, v1beta1.OMENativeInstanceReady, "svc-engine-new", nil, 1)), []*corev1.Pod{crashPod("new", 3, 1, runnerDiedTwice(after, after.Add(30*time.Second)))}, "", ""},
 		{"a rolling row's restarts are the roll", observed(instanceRow(3, v1beta1.OMENativeInstanceUpdating, "svc-engine-old", &ready, 1)), []*corev1.Pod{crashPod("new", 3, 1, runnerDiedTwice(after, after.Add(30*time.Second)))}, "", ""},
@@ -447,17 +447,28 @@ func deleting(pod *corev1.Pod) *corev1.Pod {
 	return pod
 }
 
+// TestCrashAnchor pins where the death count begins: the open of the run
+// the canary is bound to, the same at every step, and nowhere for a unit
+// that is not armed or has no run.
 func TestCrashAnchor(t *testing.T) {
 	now := time.Unix(100000, 0)
-	entered := now.Add(-time.Minute)
-	if got := crashAnchor(nil, now); !got.Equal(now) {
+	opened := now.Add(-time.Hour)
+	isvc := pinActiveRun(canaryISVC(twoStep(), nil))
+	isvc.Status.Rollout.ActiveRun.OpenedAt = metav1.NewTime(opened)
+	if got := crashAnchor(isvc, nil, now); !got.Equal(now) {
 		t.Fatalf("an unarmed unit anchors at now, got %v", got)
 	}
-	if got := crashAnchor(&v1beta1.CanaryStatus{}, now); !got.IsZero() {
-		t.Fatalf("a record without a step anchor reads from the Instance's own, got %v", got)
+	for _, cs := range []*v1beta1.CanaryStatus{
+		{StepEnteredTime: &metav1.Time{Time: opened}},
+		{CurrentStep: 2, StepEnteredTime: &metav1.Time{Time: now.Add(-time.Minute)}},
+		{},
+	} {
+		if got := crashAnchor(isvc, cs, now); !got.Equal(opened) {
+			t.Fatalf("an armed unit anchors at the open of its run at every step, got %v for %+v", got, cs)
+		}
 	}
-	if got := crashAnchor(&v1beta1.CanaryStatus{StepEnteredTime: &metav1.Time{Time: entered}}, now); !got.Equal(entered) {
-		t.Fatalf("an armed unit anchors at its step, got %v", got)
+	if got := crashAnchor(canaryISVC(twoStep(), nil), &v1beta1.CanaryStatus{CurrentStep: 1}, now); !got.Equal(now) {
+		t.Fatalf("a unit with no pinned run reads no death, got %v", got)
 	}
 }
 
@@ -513,6 +524,8 @@ func TestDispatch_CanaryPodDeathParksFromPodsAndRows(t *testing.T) {
 			isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
 			pinActiveRun(isvc)
 			t0 := time.Unix(100000, 0)
+			// The run opened before the target pods served, as a push does.
+			isvc.Status.Rollout.ActiveRun.OpenedAt = metav1.NewTime(t0.Add(-5 * time.Minute))
 			readyAt := t0.Add(-2 * time.Minute)
 
 			engineIR := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "crash-wire-engine", UID: canaryIRUID("crash-wire-engine"), Generation: 2}}
