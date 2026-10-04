@@ -78,6 +78,8 @@ func validTPUSliceConfig() *TPUSliceProvisioningConfig {
 func TestParseTPUSliceProvisioningConfig(t *testing.T) {
 	noAnnotations := validTPUSliceConfig()
 	noAnnotations.Slice.Annotations = map[string]string{}
+	withPodAnnotations := validTPUSliceConfig()
+	withPodAnnotations.Slice.PodAnnotations = []string{"example.com/priority", "example.com/tolerance"}
 
 	tests := []struct {
 		name string
@@ -105,6 +107,13 @@ func TestParseTPUSliceProvisioningConfig(t *testing.T) {
 				field(b, "slice")["annotations"] = map[string]any{}
 			})),
 			want: noAnnotations,
+		},
+		{
+			name: "pod annotations",
+			raw: ptr.To(tpuSliceBlock(t, func(b map[string]any) {
+				field(b, "slice")["podAnnotations"] = []any{"example.com/priority", "example.com/tolerance"}
+			})),
+			want: withPodAnnotations,
 		},
 		{
 			name:    "empty object names every required field",
@@ -255,6 +264,23 @@ func TestParseTPUSliceProvisioningConfig(t *testing.T) {
 			name:    "annotation key is not a qualified name",
 			raw:     ptr.To(tpuSliceBlock(t, func(b map[string]any) { field(b, "slice", "annotations")["managed by"] = "scheduler" })),
 			wantErr: []string{`slice.annotations: "managed by" is not a qualified name`},
+		},
+		{
+			name:    "pod annotation key is not a qualified name",
+			raw:     ptr.To(tpuSliceBlock(t, func(b map[string]any) { field(b, "slice")["podAnnotations"] = []any{"example.com/priority", ""} })),
+			wantErr: []string{"slice.podAnnotations[1]: required"},
+		},
+		{
+			name: "pod annotation listed twice",
+			raw: ptr.To(tpuSliceBlock(t, func(b map[string]any) {
+				field(b, "slice")["podAnnotations"] = []any{"example.com/priority", "example.com/priority"}
+			})),
+			wantErr: []string{`slice.podAnnotations[1]: "example.com/priority" is listed twice`},
+		},
+		{
+			name:    "pod annotation the configured annotations set",
+			raw:     ptr.To(tpuSliceBlock(t, func(b map[string]any) { field(b, "slice")["podAnnotations"] = []any{"example.com/managed-by"} })),
+			wantErr: []string{`slice.podAnnotations[0]: "example.com/managed-by" is already set by slice.annotations`},
 		},
 		{
 			name:    "no ready states",

@@ -177,6 +177,9 @@ func TestCheckConfigRejectsReservedKeys(t *testing.T) {
 		{name: "owner kind label", mutate: func(c *controllerconfig.TPUSliceProvisioningConfig) { c.Slice.OwnerKindLabel = LabelOwnerUID }, want: LabelOwnerUID},
 		{name: "owner name label", mutate: func(c *controllerconfig.TPUSliceProvisioningConfig) { c.Slice.OwnerNameLabel = query.LabelInstanceIdx }, want: query.LabelInstanceIdx},
 		{name: "annotation", mutate: func(c *controllerconfig.TPUSliceProvisioningConfig) { c.Slice.Annotations[AnnotationOwner] = "x" }, want: AnnotationOwner},
+		{name: "pod annotation", mutate: func(c *controllerconfig.TPUSliceProvisioningConfig) {
+			c.Slice.PodAnnotations = []string{AnnotationOwner}
+		}, want: AnnotationOwner},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -320,6 +323,37 @@ func TestEnsureCreatesSlice(t *testing.T) {
 	}
 	if diff := cmp.Diff(testConfig().Slice.Annotations, cfg.Slice.Annotations); diff != "" {
 		t.Fatalf("Ensure mutated the configured annotations (-want +got):\n%s", diff)
+	}
+}
+
+// TestEnsureCopiesPodAnnotations pins that a created slice carries the pod
+// template annotations whose keys the configuration lists, and only those.
+func TestEnsureCopiesPodAnnotations(t *testing.T) {
+	c := newFakeClient()
+	cfg := testConfig()
+	cfg.Slice.PodAnnotations = []string{"example.com/priority", "example.com/tolerance"}
+	p, err := New(cfg, c, c, c, testOwner)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pod := map[string]string{"example.com/priority": "7", "example.com/unlisted": "x", AnnotationOwner: "other/owner"}
+	p.SetPodAnnotations(pod)
+	if _, err := p.Ensure(context.Background(), demand(t, "2x2x1"), Slot{}); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	u, found := getSlice(t, c, p.Name(Slot{}))
+	if !found {
+		t.Fatalf("Ensure did not create slice %s", p.Name(Slot{}))
+	}
+	want := map[string]string{"example.com/managed-by": "scheduler", "example.com/priority": "7", AnnotationOwner: "ns/svc-engine"}
+	if diff := cmp.Diff(want, u.GetAnnotations()); diff != "" {
+		t.Fatalf("slice annotations mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(testConfig().Slice.Annotations, cfg.Slice.Annotations); diff != "" {
+		t.Fatalf("Ensure mutated the configured annotations (-want +got):\n%s", diff)
+	}
+	if pod["example.com/priority"] != "7" || len(pod) != 3 {
+		t.Fatalf("SetPodAnnotations mutated the pod annotations: %v", pod)
 	}
 }
 

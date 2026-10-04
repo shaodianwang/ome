@@ -112,7 +112,7 @@ func CheckConfig(cfg *controllerconfig.TPUSliceProvisioningConfig) error {
 			}
 		}
 	}
-	if _, ok := cfg.Slice.Annotations[AnnotationOwner]; ok {
+	if _, ok := cfg.Slice.Annotations[AnnotationOwner]; ok || slices.Contains(cfg.Slice.PodAnnotations, AnnotationOwner) {
 		errs = append(errs, fmt.Errorf("slice annotation %s is set by the controller", AnnotationOwner))
 	}
 	return errors.Join(errs...)
@@ -139,6 +139,9 @@ type Provisioner struct {
 	// onDeferred, when set, is told about each release kept back by other
 	// workloads' pods.
 	onDeferred func(s gke.Slice, holders []string)
+	// podAnnotations are the owner's pod template annotations that each
+	// slice it creates carries.
+	podAnnotations map[string]string
 }
 
 // New returns a Provisioner for owner's slices. It reads through cached,
@@ -175,6 +178,17 @@ func New(cfg *controllerconfig.TPUSliceProvisioningConfig, cached, live client.R
 	}, nil
 }
 
+// SetPodAnnotations records the owner's pod template annotations: each slice
+// the provisioner creates carries those whose keys slice.podAnnotations lists.
+func (p *Provisioner) SetPodAnnotations(annotations map[string]string) {
+	p.podAnnotations = map[string]string{}
+	for _, key := range p.cfg.Slice.PodAnnotations {
+		if value, ok := annotations[key]; ok {
+			p.podAnnotations[key] = value
+		}
+	}
+}
+
 // OnReleaseDeferred sets fn to be told about each release kept back because
 // pods of another workload hold chips on the slice's hosts.
 func (p *Provisioner) OnReleaseDeferred(fn func(s gke.Slice, holders []string)) {
@@ -198,6 +212,7 @@ func (p *Provisioner) spec(d Demand, slot Slot) gke.Spec {
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
+	maps.Copy(annotations, p.podAnnotations)
 	annotations[AnnotationOwner] = p.owner.Namespace + "/" + p.owner.Name
 	return gke.Spec{
 		Name:     p.Name(slot),

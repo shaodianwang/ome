@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache/informertest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -597,6 +598,41 @@ func TestReportSliceStates_InformerFails(t *testing.T) {
 	awaitReturn(t, startReportSliceStates(ctx, r, informers, c))
 	if got := reportedSliceStates(t); len(got) != 0 {
 		t.Fatalf("reported %v without synced informers, want nothing", got)
+	}
+}
+
+// TestSlicesCarryPodAnnotations pins that the slices provisioned for an
+// InferenceReplica carry the annotations of its own pod template whose keys
+// the configuration lists, and no others.
+func TestSlicesCarryPodAnnotations(t *testing.T) {
+	ctx := context.Background()
+	ir := optedInIR("llama-engine", "prod", 1)
+	ir.Spec.Runners[0].Template.Annotations["example.com/priority"] = "7"
+	ir.Spec.Runners[0].Template.Annotations["example.com/unlisted"] = "x"
+	r, c := newSliceReconciler(t, ir)
+	r.TPUSliceProvisioning.Slice.PodAnnotations = []string{"example.com/priority", "example.com/absent"}
+	for pass := 0; pass < 2; pass++ {
+		r.Expectations = workloadtypes.NewExpectations()
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}); err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+	}
+	p, err := r.sliceProvisioner(ir)
+	if err != nil {
+		t.Fatalf("sliceProvisioner: %v", err)
+	}
+	slice := getSlice(t, c, p.Name(sliceprovision.Slot{Instance: 0}))
+	if slice == nil {
+		t.Fatalf("slices = %v, want the Instance's slice provisioned", sliceNames(t, c))
+	}
+	got := slice.GetAnnotations()
+	if got["example.com/priority"] != "7" {
+		t.Fatalf("slice annotations = %v, want example.com/priority=7 from the pod template", got)
+	}
+	for _, key := range []string{"example.com/unlisted", "example.com/absent"} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("slice annotations = %v, want no %s", got, key)
+		}
 	}
 }
 

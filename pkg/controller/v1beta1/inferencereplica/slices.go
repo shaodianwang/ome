@@ -36,6 +36,7 @@ func (r *Reconciler) sliceProvisioner(ir *v1beta1.InferenceReplica) (*sliceprovi
 	if err != nil {
 		return nil, err
 	}
+	p.SetPodAnnotations(podTemplateAnnotations(ir))
 	p.OnReleaseDeferred(func(s gke.Slice, holders []string) {
 		if r.Recorder == nil {
 			return
@@ -47,17 +48,22 @@ func (r *Reconciler) sliceProvisioner(ir *v1beta1.InferenceReplica) (*sliceprovi
 	return p, nil
 }
 
-// slicesOptedIn reports whether ir's pods run on provisioned slices. It reads
-// ir's own pod template: a rollback renders pods from a stored template that
-// lacks the annotations ir inherits from its parent.
+// slicesOptedIn reports whether ir's pods run on provisioned slices.
 func slicesOptedIn(ir *v1beta1.InferenceReplica) bool {
+	return podTemplateAnnotations(ir)[constants.TPUSliceProvisioningAnnotationKey] == "true"
+}
+
+// podTemplateAnnotations returns the annotations of ir's own default or
+// leader pod template: a rollback renders pods from a stored template that
+// lacks the annotations ir inherits from its parent.
+func podTemplateAnnotations(ir *v1beta1.InferenceReplica) map[string]string {
 	for i := range ir.Spec.Runners {
 		runner := &ir.Spec.Runners[i]
 		if runner.Name == v1beta1.RunnerNameDefault || runner.Name == v1beta1.RunnerNameLeader {
-			return runner.Template.Annotations[constants.TPUSliceProvisioningAnnotationKey] == "true"
+			return runner.Template.Annotations
 		}
 	}
-	return false
+	return nil
 }
 
 // slicesInUse reports whether ir's slices must be provisioned or released:
