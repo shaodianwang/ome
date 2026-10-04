@@ -1252,6 +1252,10 @@ type recoveryHarness struct {
 	wedgeSince  time.Time
 	wedgeSticky bool
 	wedgedPods  map[string]string
+	// evicted names, by wedgeKey, the pods the kubelet evicted: each is
+	// reported phase Failed with its container terminated and stays so,
+	// holding its name, until a pass deletes the object.
+	evicted map[string]bool
 
 	// admissionDown is the apiserver unable to reach its pod admission
 	// webhook: every pod create fails closed with the dispatcher's own
@@ -1529,6 +1533,10 @@ func (h *recoveryHarness) kubelet() {
 				continue
 			}
 			h.finishTermination(pod)
+			continue
+		}
+		if h.evicted[wedgeKey(pod)] {
+			h.reportEvicted(pod)
 			continue
 		}
 		unbound := len(h.nodeNames) > 0 && pod.Spec.NodeName == "" && !h.placementHeld
@@ -2204,6 +2212,55 @@ func (h *recoveryHarness) reportStoppedClean(pod *corev1.Pod) {
 	h.terminatingUntil[pod.Name] = now
 	if err := h.c.Status().Update(h.ctx, pod); err != nil {
 		h.t.Fatalf("kubelet report stopped %s: %v", pod.Name, err)
+	}
+}
+
+// evictPods is the kubelet evicting every live pod of the Instances at
+// indices under node pressure: each is reported phase Failed where it
+// stands and keeps its name until a pass deletes the object.
+func (h *recoveryHarness) evictPods(indices ...int32) {
+	h.t.Helper()
+	evict := map[int32]bool{}
+	for _, idx := range indices {
+		evict[idx] = true
+	}
+	if h.evicted == nil {
+		h.evicted = map[string]bool{}
+	}
+	for _, pod := range h.livePods() {
+		if idx, ok := query.InstanceIdxFromLabels(pod); !ok || !evict[idx] {
+			continue
+		}
+		h.evicted[wedgeKey(pod)] = true
+		h.reportEvicted(pod)
+	}
+}
+
+// reportEvicted is the kubelet publishing a pod it evicted: phase Failed
+// with the eviction on the pod-level reason, the container terminated,
+// readiness withdrawn. A pod already reported keeps its record.
+func (h *recoveryHarness) reportEvicted(pod *corev1.Pod) {
+	h.t.Helper()
+	if pod.Status.Phase == corev1.PodFailed {
+		return
+	}
+	now := h.clk.Now()
+	pod.Status.Phase = corev1.PodFailed
+	pod.Status.Reason = "Evicted"
+	pod.Status.Message = "The node was low on resource: memory."
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  pod.Spec.Containers[0].Name,
+		Image: pod.Spec.Containers[0].Image,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode:   137,
+			Reason:     "Error",
+			FinishedAt: metav1.NewTime(now),
+		}},
+	}}
+	setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, now)
+	setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, now)
+	if err := h.c.Status().Update(h.ctx, pod); err != nil {
+		h.t.Fatalf("kubelet report evicted %s: %v", pod.Name, err)
 	}
 }
 

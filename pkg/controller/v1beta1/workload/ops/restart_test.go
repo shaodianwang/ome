@@ -1148,6 +1148,25 @@ func wedgedRebuiltPod(isvc *v1beta1.InferenceService, incarnation int64, reason 
 	return pod
 }
 
+// evictedRebuiltPod is a rebuilt pod at incarnation the kubelet evicted
+// after it parked: phase Failed with the eviction on the pod-level
+// reason, its container terminated, readiness withdrawn. It holds the
+// row's stable name and will never run again.
+func evictedRebuiltPod(isvc *v1beta1.InferenceService, incarnation int64, now time.Time) *corev1.Pod {
+	pod := podAtIncarnation(isvc, 0, incarnation, false, false)
+	pod.CreationTimestamp = metav1.NewTime(now.Add(-time.Hour))
+	pod.Status.Phase = corev1.PodFailed
+	pod.Status.Reason = "Evicted"
+	pod.Status.Message = "The node was low on resource: memory."
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "main",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 137, Reason: "Error", FinishedAt: metav1.NewTime(now.Add(-time.Minute)),
+		}},
+	}}
+	return pod
+}
+
 // retryLadder is a lifecycle.updateRetry ladder for the trigger tests.
 func retryLadder(maxAttempts int32, initial time.Duration) *workload.RetryPolicy {
 	return &workload.RetryPolicy{MaxAttempts: maxAttempts, InitialDelay: initial, MaxDelay: 10 * time.Minute, Multiplier: 2}
@@ -1333,20 +1352,136 @@ func TestDetectRestartTrigger_SpentRepairOldIncarnationSetReArms(t *testing.T) {
 	}
 }
 
-// A parked repair with no pod left is not this trigger's: the Create
-// pass's fresh start owns total loss, so nothing is decided or woken here.
-//
-// Cells: instance/Failed/timer.repairRetry/before
-func TestDetectRestartTrigger_SpentRepairWithNoPodsIsNotDecidedHere(t *testing.T) {
-	now := time.Now()
-	input, plan, _, _, _ := spentRepairFixture(t, now, 0, time.Hour, retryLadder(3, time.Minute))
+// spentRepairCloseCases are the parks a close is owed to once no live
+// pod is left: whatever cause parked the repair, whether or not a ladder
+// is configured, and however many re-arms the ladder has spent.
+var spentRepairCloseCases = []struct {
+	name    string
+	reason  string
+	retries int32
+	ladder  *workload.RetryPolicy
+}{
+	{"crash loop/ladder configured", "CrashLoopBackOff", 0, retryLadder(3, time.Minute)},
+	{"crash loop/no ladder", "CrashLoopBackOff", 0, nil},
+	{"crash loop/ladder spent", "CrashLoopBackOff", 3, retryLadder(3, time.Minute)},
+	{"kubelet-retried cause/ladder configured", "ImagePullBackOff", 0, retryLadder(3, time.Minute)},
+	{"kubelet-retried cause/no ladder", "CreateContainerConfigError", 0, nil},
+}
 
-	if needs, reason := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], nil); needs {
-		t.Fatalf("restart trigger: got true (%q) want false with no pod to judge", reason)
+// assertSpentRepairClosed drives the close of a spent repair whose set
+// is gone: the trigger fires with the close and wakes nothing, the
+// Restart pass clears the spent operation and asks for the pass after,
+// the row keeps its phase, incarnation and failure record, and the
+// restart pass has nothing further to decide on the fresh start.
+func assertSpentRepairClosed(t *testing.T, input workload.ReconcileInput, plan workload.ComponentPlan, c client.Client, isvc *v1beta1.InferenceService, pods []*corev1.Pod, failureReason string, ladder *workload.RetryPolicy) {
+	t.Helper()
+	needs, reason := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], pods)
+	if !needs || !strings.Contains(reason, "closed") {
+		t.Fatalf("restart trigger: got (%v, %q) want the close of a repair with no live pod left", needs, reason)
 	}
 	if got := input.PassWake.Pending(); got != 0 {
-		t.Errorf("wake-up = %v, want none", got)
+		t.Errorf("wake-up = %v, want none: the close is owed now", got)
 	}
+	done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, reason)
+	if err != nil || done {
+		t.Fatalf("Restart on the parked row: done=%v err=%v, want (false, nil): the Create pass rebuilds the row on the pass after", done, err)
+	}
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+	if s == nil || s.Phase != v1beta1.OMENativeInstanceFailed || s.Operation != nil || s.Incarnation != 2 {
+		t.Fatalf("row = %+v, want Failed with the spent operation cleared and the incarnation kept", s)
+	}
+	if s.LastFailure == nil || s.LastFailure.Reason != failureReason {
+		t.Errorf("lastFailure = %+v, want the reason %s kept on the row", s.LastFailure, failureReason)
+	}
+	after := buildTestInput(isvc, c, workload.ComponentEngine)
+	after.UpdateRetryPolicy = ladder
+	after.PassWake = &workload.PassWake{}
+	if needs, reason := ops.DetectRestartTriggerWithPods(after, plan, plan.Instances[0], pods); needs {
+		t.Fatalf("restart trigger after the close: got true (%q) want false: the fresh start is the Create pass's", reason)
+	}
+}
+
+// A parked repair with no pod left has nothing to resume or re-arm, so
+// the trigger closes it: the spent operation is cleared and the row is
+// the fresh start the Create pass rebuilds, whatever parked the repair
+// and whether or not a ladder is configured.
+//
+// Cells: instance/Failed/timer.repairRetry/before, instance/Failed/pod.deleted[source]/before
+func TestDetectRestartTrigger_SpentRepairWithNoPodsCloses(t *testing.T) {
+	for _, tc := range spentRepairCloseCases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			input, plan, wedged, c, isvc := spentRepairFixtureOn(t, now, tc.retries, time.Hour, tc.ladder, tc.reason)
+			if err := c.Delete(context.Background(), wedged); err != nil {
+				t.Fatalf("delete the parked pod: %v", err)
+			}
+			assertSpentRepairClosed(t, input, plan, c, isvc, nil, tc.reason, tc.ladder)
+		})
+	}
+}
+
+// A parked repair whose only pod is in a terminal phase — evicted after
+// the park — has no live pod to resume or re-arm either: the trigger
+// closes it, and the dead occupant is left where it is for the Create
+// pass's recycle, which frees the name before the rebuild.
+//
+// Cells: instance/Failed/pod.phaseTerminal[Failed]/before
+func TestDetectRestartTrigger_SpentRepairWithOnlyATerminalPodCloses(t *testing.T) {
+	for _, tc := range spentRepairCloseCases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			input, plan, wedged, c, isvc := spentRepairFixtureOn(t, now, tc.retries, time.Hour, tc.ladder, tc.reason)
+			if err := c.Delete(context.Background(), wedged); err != nil {
+				t.Fatalf("delete the parked pod: %v", err)
+			}
+			evicted := evictedRebuiltPod(isvc, 2, now)
+			if err := c.Create(context.Background(), evicted); err != nil {
+				t.Fatalf("create the evicted pod: %v", err)
+			}
+			assertSpentRepairClosed(t, input, plan, c, isvc, []*corev1.Pod{evicted}, tc.reason, tc.ladder)
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(evicted), &corev1.Pod{}); err != nil {
+				t.Errorf("the evicted pod must stay for the Create pass's recycle: %v", err)
+			}
+		})
+	}
+}
+
+// A parked repair whose pod is still live keeps its exits exactly: a set
+// that came up resumes, a wedged set re-arms on the ladder, and a pod
+// still terminating holds its name until it is gone, so neither the
+// close nor a re-arm is decided on it.
+//
+// Cells: instance/Failed/timer.repairRetry/before, instance/Failed/pod.containersReady[source]/before
+func TestDetectRestartTrigger_SpentRepairWithALivePodIsNotClosed(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	t.Run("a set that came up resumes", func(t *testing.T) {
+		input, plan, wedged, c, isvc := spentRepairFixture(t, now, 0, time.Hour, retryLadder(3, time.Minute))
+		if err := c.Delete(context.Background(), wedged); err != nil {
+			t.Fatalf("delete the parked pod: %v", err)
+		}
+		up := promotableRebuiltPod(isvc, 2, now)
+		if needs, reason := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], []*corev1.Pod{up}); !needs || reason != "" {
+			t.Fatalf("restart trigger: got (%v, %q) want the resume, which carries no reason", needs, reason)
+		}
+	})
+	t.Run("a wedged set re-arms on the ladder", func(t *testing.T) {
+		input, plan, pod, _, _ := spentRepairFixture(t, now, 0, 2*time.Minute, retryLadder(3, time.Minute))
+		if needs, reason := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], []*corev1.Pod{pod}); !needs || !strings.Contains(reason, "repair re-armed") {
+			t.Fatalf("restart trigger: got (%v, %q) want the ladder's re-arm", needs, reason)
+		}
+	})
+	t.Run("a terminating pod holds its name", func(t *testing.T) {
+		input, plan, pod, _, _ := spentRepairFixture(t, now, 0, time.Hour, retryLadder(3, time.Minute))
+		terminating := pod.DeepCopy()
+		terminating.DeletionTimestamp = &metav1.Time{Time: now}
+		terminating.Finalizers = []string{"example.com/termination"}
+		if needs, reason := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], []*corev1.Pod{terminating}); needs {
+			t.Fatalf("restart trigger: got true (%q) want false while the pod still terminates", reason)
+		}
+		if got := input.PassWake.Pending(); got != 0 {
+			t.Errorf("wake-up = %v, want none: the pod leaving is the next event", got)
+		}
+	})
 }
 
 // kubeletRetriedReasons are the waiting reasons the kubelet retries in

@@ -5,10 +5,10 @@
 # recreate or in-place Update attempt, single-pod or gang; both shapes are
 # live here, so the operation-bearing events are real rather than n/a. A kept
 # Restart operation is a record of a spent attempt rather than a claim: the
-# gang-member-loss trigger re-arms over it, and the operator reset mailbox
-# clears it outright. The escalation pass skips an already-Failed row, so
-# failure evidence arriving in this state is an ignore, not a second
-# escalation.
+# gang-member-loss trigger re-arms over it, the restart pass closes it once
+# no live pod is left, and the operator reset mailbox clears it outright. The
+# escalation pass skips an already-Failed row, so failure evidence arriving
+# in this state is an ignore, not a second escalation.
 #
 # Three exits are easy to miss. The update trigger's AdoptRevision backfill
 # stamps Ready-on-target from ContainersReady alone when RunningRevision is
@@ -20,8 +20,8 @@
 # and a row whose remaining pods are all in a terminal phase has them
 # recycled and is rebuilt by the Create pass (T-failed-recycle-rebuild).
 #
-# A parked repair - a kept Restart operation - has two exits of its own,
-# both decided in the restart pass: its rebuilt set coming up resumes the
+# A parked repair - a kept Restart operation - has exits of its own, all
+# decided in the restart pass: its rebuilt set coming up resumes the
 # promote at the incarnation the pods carry (T-failed-repair-resume), and a
 # set that stays wedged is rebuilt again on the operator's retry ladder,
 # lifecycle.updateRetry (T-failed-repair-rearm), whose delay runs from the
@@ -31,7 +31,13 @@
 # pod set would wedge on identically - is owed no re-arm: it stays Failed
 # with its reason, says once what it waits for, and leaves through the
 # resume when the configuration or image is fixed. No ladder configured
-# leaves the row parked for the reset mailbox or a new revision.
+# leaves the row parked for the reset mailbox or a new revision. A park
+# whose pod set is entirely gone or terminal has nothing left to resume or
+# rebuild under the spent operation, whatever the cause or the ladder: the
+# restart pass closes the operation (ops/restart.go spentRepairPodSetGone,
+# RepairClosed event) and the row takes the Create pass's fresh start as
+# every total loss does - the dead occupants recycled, the set rebuilt
+# under the row's incarnation, gated like any fresh start.
 #
 # GAP: no event models the unconditioned re-create. A Failed row with no
 # pods and no RetryBlock at all is re-materialized by the Create pass on
@@ -66,7 +72,7 @@ cells:
     placement: unit
     coverage:
       perm: []
-      unit: [TestRestart_CrashLoopParkReturnsToReadyWhileItsSetServes, TestUnparkServing_ReturnsAParkToReadyKeepingItsAnchor, TestCrashLoopAfterPromotion_HeldRowFollowsItsServingPod, TestDetectUpdate_BackfillAdoptsRuntimeReadyPods, TestDetectUpdate_BackfillAdoptsEngineRenderedPods, TestDetectUpdate_BackfillRefusesWedgedPods, TestDetectUpdate_BackfillRollsPodSetWithAForeignRevision, TestDetectUpdate_WedgedPodsReachHeld, TestDetectUpdate_StuckPodOnTargetRelocates, TestPatchReadyOnRevision_PrunesBlock, TestPlan_Update_AdoptRevision, TestSpentRepair_RebuiltSetComesUp_ResumesThePromote, TestRestart_DeadlineFailedRowResumesItsPromote, TestSpentRepair_KubeletRetriedCause_WaitsForTheFixWithoutReArm, TestRestart_KubeletRetriedCauseClearedResumesThePromote]
+      unit: [TestRestart_CrashLoopParkReturnsToReadyWhileItsSetServes, TestUnparkServing_ReturnsAParkToReadyKeepingItsAnchor, TestCrashLoopAfterPromotion_HeldRowFollowsItsServingPod, TestDetectUpdate_BackfillAdoptsRuntimeReadyPods, TestDetectUpdate_BackfillAdoptsEngineRenderedPods, TestDetectUpdate_BackfillRefusesWedgedPods, TestDetectUpdate_BackfillRollsPodSetWithAForeignRevision, TestDetectUpdate_WedgedPodsReachHeld, TestDetectUpdate_StuckPodOnTargetRelocates, TestPatchReadyOnRevision_PrunesBlock, TestPlan_Update_AdoptRevision, TestSpentRepair_RebuiltSetComesUp_ResumesThePromote, TestRestart_DeadlineFailedRowResumesItsPromote, TestSpentRepair_KubeletRetriedCause_WaitsForTheFixWithoutReArm, TestRestart_KubeletRetriedCauseClearedResumesThePromote, TestDetectRestartTrigger_SpentRepairWithALivePodIsNotClosed, TestSpentRepair_LiveSetIsNeverClosed]
       kind: [failed_repair_heal]
       replay: [failed-runtime-ready-adopt, failed-repair-resume, failed-repair-waits-on-workload]
     status: decided
@@ -144,12 +150,12 @@ cells:
     outcome: transition
     to: Restart/Drain
     guard: RecreateInstanceOnPodRestart, a multi-pod Instance with at least one survivor once terminal-phase pods are excluded from the live count, no preserved Update or Migrate operation, no RetryBlock denying the rebuild, and the revision the rebuild would land on still the roll target
-    note: partial gang loss is repaired from Failed because the recovery cannot be gated on a Ready the gang cannot reach; total loss instead falls to the Create pass's fresh start. A Failed row off the target is never repaired - the restart pass yields it and its corrective roll (spec.revision) replaces the gang at the target. A Restart parked at Failed is read as a spent attempt rather than an owner, so it re-arms the whole gang - only another Restart can rebuild it as one, with the incarnation bumped, the survivors drained and the fresh operation's RetryCount continuing the spent one's - and each cycle is bounded by the attempt deadline; an Update or Migrate continuation still blocks the trigger because its own pass owns the row (ops/restart.go)
+    note: partial gang loss is repaired from Failed because the recovery cannot be gated on a Ready the gang cannot reach; total loss instead falls to the Create pass's fresh start - a parked repair's included, once the restart pass has closed the spent operation for having no live pod left (ops/restart.go spentRepairPodSetGone). A Failed row off the target is never repaired - the restart pass yields it and its corrective roll (spec.revision) replaces the gang at the target. A Restart parked at Failed is read as a spent attempt rather than an owner, so it re-arms the whole gang - only another Restart can rebuild it as one, with the incarnation bumped, the survivors drained and the fresh operation's RetryCount continuing the spent one's - and each cycle is bounded by the attempt deadline; an Update or Migrate continuation still blocks the trigger because its own pass owns the row (ops/restart.go)
     invariants: [one.operation.per.instance]
     placement: unit
     coverage:
       perm: []
-      unit: [TestDetectRestartTrigger_GangMemberLossBelowReady, TestRepairYieldsToTarget]
+      unit: [TestDetectRestartTrigger_GangMemberLossBelowReady, TestRepairYieldsToTarget, TestDetectRestartTrigger_SpentRepairWithNoPodsCloses, TestSpentRepair_NoPodsLeft_ClosesAndRebuildsAsAFreshStart]
       kind: []
       replay: [failed-restart]
     status: decided
@@ -512,12 +518,12 @@ cells:
     outcome: transition
     to: Restart/Drain
     guard: a Restart parked at Failed whose live set is complete and wedged, its recorded failure not workload-caused (a cause the kubelet retries in place owes no re-arm), lifecycle.updateRetry configured, its delay for the next attempt elapsed since the recorded failure, attempts not spent, and no RetryBlock denying the running revision
-    note: the ladder is lifecycle.updateRetry, the one retry ladder, but the clock is the Instance's own, distinct from a revision's RetryBlock. It runs from LastFailure.Time (the Failed stamps write it with the phase) and is indexed by the operation's RetryCount, which the re-armed Restart carries forward, so no per-Instance timestamp is added to the row. The re-arm is not a fresh open - the pods are not serving - so it is neither budget-charged nor gated, and it holds under the plain pause like every repair; a frozen pause suspends the pass. Not yet due, the pass deposits the remaining wait as its wake-up. With the attempts spent the row parks for good and the escalation pass announces RepairRetriesExhausted once; with no ladder configured nothing runs and the row waits for the reset mailbox or a new revision. A park whose recorded failure is workload-caused (CreateContainerConfigError, ErrImagePull, ImagePullBackOff, InvalidImageName) is owed no re-arm by the ladder at all and is never read as exhausted - the kubelet retries the cause in place and a fresh set would wedge on it identically, so the row stays Failed with its reason, the escalation pass announces RepairWaitingOnWorkload once and notes on the failure message that the park waits for the configuration or image, and the resume exit takes the row the moment the pods it already has come up. A gang short of a member does not wait for this clock - the lost-member trigger re-arms it at once, and a row with no pod left is the Create pass's fresh start (ops/restart.go)
+    note: the ladder is lifecycle.updateRetry, the one retry ladder, but the clock is the Instance's own, distinct from a revision's RetryBlock. It runs from LastFailure.Time (the Failed stamps write it with the phase) and is indexed by the operation's RetryCount, which the re-armed Restart carries forward, so no per-Instance timestamp is added to the row. The re-arm is not a fresh open - the pods are not serving - so it is neither budget-charged nor gated, and it holds under the plain pause like every repair; a frozen pause suspends the pass. Not yet due, the pass deposits the remaining wait as its wake-up. With the attempts spent the row parks for good and the escalation pass announces RepairRetriesExhausted once; with no ladder configured nothing runs and the row waits for the reset mailbox or a new revision. A park whose recorded failure is workload-caused (CreateContainerConfigError, ErrImagePull, ImagePullBackOff, InvalidImageName) is owed no re-arm by the ladder at all and is never read as exhausted - the kubelet retries the cause in place and a fresh set would wedge on it identically, so the row stays Failed with its reason, the escalation pass announces RepairWaitingOnWorkload once and notes on the failure message that the park waits for the configuration or image, and the resume exit takes the row the moment the pods it already has come up. A gang short of a member does not wait for this clock - the lost-member trigger re-arms it at once - and neither does a row with no live pod left - the restart pass closes the spent operation at once, and the row is the Create pass's fresh start (ops/restart.go spentRepairPodSetGone)
     invariants: [one.operation.per.instance]
     placement: unit
     coverage:
       perm: []
-      unit: [TestSpentRepair_CrashLoopSet_ReArmsOnTheLadderAndHeals, TestSpentRepair_Gang_AllMembersWedged_ReArmsOnTheLadder, TestSpentRepair_CrashLoopRepairUnderPolicyNone_ReArmsOnTheLadder, TestSpentRepair_NeverHeals_ParksAfterTheLadderIsSpent, TestSpentRepair_NoLadder_StaysParked, TestSpentRepair_KubeletRetriedCause_WaitsForTheFixWithoutReArm, TestDetectRestartTrigger_SpentRepairReArmsWhenTheLadderIsDue, TestDetectRestartTrigger_SpentRepairWaitsForTheLadder, TestDetectRestartTrigger_SpentRepairLadderGrows, TestDetectRestartTrigger_SpentRepairWithoutALadderStaysParked, TestDetectRestartTrigger_SpentRepairStopsAtMaxAttempts, TestDetectRestartTrigger_SpentRepairOldIncarnationSetReArms, TestDetectRestartTrigger_SpentRepairWithNoPodsIsNotDecidedHere, TestDetectRestartTrigger_SpentRepairOnAKubeletRetriedCauseOwesNoReArm, TestRepairRetryAt_OwesNoReArmToAKubeletRetriedCause, TestRepairRetriesExhausted_SkipsAKubeletRetriedCause, TestEscalation_ExhaustedRepairIsAnnouncedOnce, TestEscalation_RepairWaitingOnWorkloadIsAnnouncedOnce, TestAnnounceRepairWaiting_RecordsOncePerParkedAttempt, TestDeadlineElapsesOnAWedgedRebuild_RepairParksWithItsPodSet]
+      unit: [TestSpentRepair_CrashLoopSet_ReArmsOnTheLadderAndHeals, TestSpentRepair_Gang_AllMembersWedged_ReArmsOnTheLadder, TestSpentRepair_CrashLoopRepairUnderPolicyNone_ReArmsOnTheLadder, TestSpentRepair_NeverHeals_ParksAfterTheLadderIsSpent, TestSpentRepair_NoLadder_StaysParked, TestSpentRepair_KubeletRetriedCause_WaitsForTheFixWithoutReArm, TestDetectRestartTrigger_SpentRepairReArmsWhenTheLadderIsDue, TestDetectRestartTrigger_SpentRepairWaitsForTheLadder, TestDetectRestartTrigger_SpentRepairLadderGrows, TestDetectRestartTrigger_SpentRepairWithoutALadderStaysParked, TestDetectRestartTrigger_SpentRepairStopsAtMaxAttempts, TestDetectRestartTrigger_SpentRepairOldIncarnationSetReArms, TestDetectRestartTrigger_SpentRepairOnAKubeletRetriedCauseOwesNoReArm, TestRepairRetryAt_OwesNoReArmToAKubeletRetriedCause, TestRepairRetriesExhausted_SkipsAKubeletRetriedCause, TestEscalation_ExhaustedRepairIsAnnouncedOnce, TestEscalation_RepairWaitingOnWorkloadIsAnnouncedOnce, TestAnnounceRepairWaiting_RecordsOncePerParkedAttempt, TestDeadlineElapsesOnAWedgedRebuild_RepairParksWithItsPodSet, TestDetectRestartTrigger_SpentRepairWithNoPodsCloses, TestDetectRestartTrigger_SpentRepairWithALivePodIsNotClosed, TestSpentRepair_NoPodsLeft_ClosesAndRebuildsAsAFreshStart, TestSpentRepair_LiveSetIsNeverClosed]
       kind: [failed_repair_heal]
       replay: [failed-repair-rearm, failed-repair-waits-on-workload]
     status: decided
@@ -660,12 +666,12 @@ cells:
     windows: [before]
     outcome: transition
     to: Create/CreatePods
-    guard: no operation is preserved, so the Create pass reads the row as a fresh start, and the dead pods hold the index's target names
-    note: query.IsTerminalPod makes a dead pod absent for the missing-pod diff, so the names read as missing and ops/terminal_recycle.go deletes the occupants with expectations recorded first and a TerminalPodRecycled warning; the index is re-materialized under a fresh Create CreatePods operation once those deletes are observed, which is what clears the no-pods retry guard and lets the Create backfill proceed. A row with a preserved operation is still parked until the reset mailbox or a corrective revision clears it
+    guard: no operation is preserved - a Restart the restart pass closed on the pass before for having no live pod left included - so the Create pass reads the row as a fresh start, and the dead pods hold the index's target names
+    note: query.IsTerminalPod makes a dead pod absent for the missing-pod diff, so the names read as missing and ops/terminal_recycle.go deletes the occupants with expectations recorded first and a TerminalPodRecycled warning; the index is re-materialized under a fresh Create CreatePods operation once those deletes are observed, which is what clears the no-pods retry guard and lets the Create backfill proceed. A row with a preserved Update operation is still parked until the reset mailbox or a corrective revision clears it; a preserved Restart whose pods are all terminal is a spent repair with no live pod left, which the restart pass closes (ops/restart.go spentRepairPodSetGone) so this exit takes the row on the pass after
     placement: unit
     coverage:
       perm: []
-      unit: [TestCreate_FreshStartRecyclesTerminalPodOnFailedRow, TestDetectRestartTrigger_RichReasonForFailedPod]
+      unit: [TestCreate_FreshStartRecyclesTerminalPodOnFailedRow, TestDetectRestartTrigger_RichReasonForFailedPod, TestDetectRestartTrigger_SpentRepairWithOnlyATerminalPodCloses, TestSpentRepair_PodsEvicted_ClosesAndRebuildsAsAFreshStart]
       kind: []
       replay: [failed-recycle-rebuild]
     status: decided

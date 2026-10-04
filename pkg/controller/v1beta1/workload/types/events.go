@@ -288,7 +288,12 @@ const (
 	// owes the park no re-arm; the row stays Failed with its reason until
 	// the configuration or image is fixed and resumes on its own once the
 	// kubelet starts the pod.
-	EventReasonRepairWaitingOnWorkload     EventReason = "RepairWaitingOnWorkload"
+	EventReasonRepairWaitingOnWorkload EventReason = "RepairWaitingOnWorkload"
+	// EventReasonRepairClosed is a Normal fired when a repair parked at
+	// Failed has no live pod left to resume or rebuild: every pod of its
+	// set is gone or in a terminal phase. The spent operation is cleared
+	// and the Create pass rebuilds the row as a fresh start.
+	EventReasonRepairClosed                EventReason = "RepairClosed"
 	EventReasonMigrationSurgeCreateBlocked EventReason = "MigrationSurgeCreateBlocked"
 	// EventReasonMigrationFromNodeMismatch fires when a request's
 	// FromNode is not where the source runs. Normal when the move binds

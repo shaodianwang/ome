@@ -1639,6 +1639,229 @@ func TestSpentRepair_KubeletRetriedCause_WaitsForTheFixWithoutReArm(t *testing.T
 	}
 }
 
+// A parked repair whose pod set is entirely gone or terminal has nothing
+// left to resume or re-arm. The stories below drive its one exit end to
+// end through Reconcile: the restart pass closes the spent operation and
+// the Create pass rebuilds the row as the fresh start it now is, while a
+// set that is still live keeps the park's own exits.
+
+// spentRepairLossCases are the parks whose set may be lost: a crash loop
+// with and without a ladder, and a cause the kubelet retries in place,
+// which with no pod left has nothing to retry; each as a single pod and
+// as a gang.
+var spentRepairLossCases = []struct {
+	name   string
+	reason string
+	ladder *workloadtypes.RetryPolicy
+	gang   bool
+}{
+	{"single pod/crash loop/ladder configured", "CrashLoopBackOff", retryLadder(3, 2*time.Minute), false},
+	{"single pod/crash loop/ladder unconfigured", "CrashLoopBackOff", nil, false},
+	{"single pod/kubelet-retried cause/ladder configured", "ImagePullBackOff", retryLadder(3, 2*time.Minute), false},
+	{"gang/crash loop/ladder configured", "CrashLoopBackOff", retryLadder(3, 2*time.Minute), true},
+	{"gang/kubelet-retried cause/ladder configured", "ImagePullBackOff", retryLadder(3, 2*time.Minute), true},
+}
+
+// spentRepairExitPasses bounds the passes a closed park may take to serve
+// again: the close, the recycle of a dead occupant, the create, the
+// serving gate and the promote, with room for the pacing between them.
+const spentRepairExitPasses = 12
+
+// parkedRepairHarness is a converged Instance, single pod or gang, with
+// its repair parked on reason: the shape every loss story starts from.
+func parkedRepairHarness(t *testing.T, gang bool, reason string, ladder *workloadtypes.RetryPolicy, grace time.Duration) *recoveryHarness {
+	t.Helper()
+	var h *recoveryHarness
+	if gang {
+		h = newRecoveryHarness(t, true)
+		h.retryPolicy = ladder
+		h.recorder = record.NewFakeRecorder(256)
+		h.podGrace = grace
+		h.driveToReadyOnV1()
+	} else {
+		h = newRestartHarness(t, 1)
+		h.retryPolicy = ladder
+		h.recorder = record.NewFakeRecorder(256)
+		h.podGrace = grace
+	}
+	parkRepair(t, h, reason, true)
+	return h
+}
+
+// stillTerminating reports whether a pod of the Instance is still on its
+// way out: deleted, with the object not yet gone.
+func stillTerminating(h *recoveryHarness, idx int32) bool {
+	for _, pod := range podObjectsOf(h, idx) {
+		if pod.DeletionTimestamp != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// assertFreshStartServes runs the passes a closed park takes to serve
+// again and checks the exit's shape: no re-arm along the way, the row
+// Ready on the running revision under its incarnation, a new set in
+// place of the parked one, the close said once.
+func assertFreshStartServes(t *testing.T, h *recoveryHarness, parked *workloadtypes.InstanceStatus, parkedKeys string, pods int, restarts int) {
+	t.Helper()
+	checks := 0
+	served := h.runWithInvariant(spentRepairExitPasses, func() bool { return servingReady(h, 0, pods) }, func() {
+		checks++
+		if s := h.instance(0); s != nil && s.Phase == workloadtypes.InstancePhaseRestarting {
+			h.dumpState("re-arm")
+			t.Fatalf("the park re-armed instead of closing: %+v", s)
+		}
+	})
+	if !served {
+		h.dumpState("fresh start")
+		t.Fatalf("the closed park never served again within %d passes", spentRepairExitPasses)
+	}
+	t.Logf("served again after %d passes", checks-1)
+	got := h.instance(0)
+	if got.Incarnation != parked.Incarnation {
+		t.Errorf("incarnation = %d, want %d: the fresh start rebuilds under the row's incarnation, there was nothing to drain", got.Incarnation, parked.Incarnation)
+	}
+	if got.RunningRevision != h.revV1.Name {
+		t.Errorf("running revision = %q, want %q", got.RunningRevision, h.revV1.Name)
+	}
+	if keys := podKeys(h.podsOf(0)); keys == parkedKeys {
+		t.Errorf("the set serving is the parked one %s, want a rebuilt set", keys)
+	}
+	if n := eventCount(h, string(workloadtypes.EventReasonRepairClosed)); n != 1 {
+		t.Errorf("RepairClosed events = %d, want exactly 1", n)
+	}
+	if n := eventCount(h, string(workloadtypes.EventReasonRestartTriggered)); n != restarts {
+		t.Errorf("RestartTriggered events = %d, want %d: the exit is the fresh start, not a re-arm", n, restarts)
+	}
+}
+
+// A parked repair whose pods the kubelet evicts after the park has no
+// live pod left to resume or re-arm. The restart pass closes the spent
+// operation on its next pass and the Create pass takes the row as the
+// fresh start it now is: the dead occupants are recycled and a new set is
+// built, which serves at the running revision under the row's
+// incarnation. No re-arm opens, whatever parked the repair and whether
+// or not a ladder is configured.
+//
+// Cells: instance/Failed/pod.phaseTerminal[Failed]/before
+func TestSpentRepair_PodsEvicted_ClosesAndRebuildsAsAFreshStart(t *testing.T) {
+	for _, tc := range spentRepairLossCases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := parkedRepairHarness(t, tc.gang, tc.reason, tc.ladder, 0)
+			parked := h.instance(0)
+			parkedKeys := podKeys(h.podsOf(0))
+			pods := len(h.podsOf(0))
+			restarts := eventCount(h, string(workloadtypes.EventReasonRestartTriggered))
+
+			// The cause is gone for any pod built from now on; the parked
+			// set is evicted where it stands.
+			h.clearWedge()
+			h.evictPods(0)
+			assertFreshStartServes(t, h, parked, parkedKeys, pods, restarts)
+			if n := eventCount(h, string(workloadtypes.EventReasonTerminalPodRecycled)); n != 1 {
+				t.Errorf("TerminalPodRecycled events = %d, want exactly 1: the Create pass recycles the evicted set", n)
+			}
+		})
+	}
+}
+
+// A parked repair whose pods are all gone — deleted under it after the
+// park — has nothing left to resume or re-arm, so the restart pass closes
+// it on its next pass and the Create pass rebuilds the row as a fresh
+// start, whatever parked it and whether or not a ladder is configured. A
+// pod still terminating keeps the park: the name is held until the pod
+// is gone, and the close follows the pod out.
+//
+// Cells: instance/Failed/pod.deleted[source]/before, instance/Failed/timer.repairRetry/before
+func TestSpentRepair_NoPodsLeft_ClosesAndRebuildsAsAFreshStart(t *testing.T) {
+	for _, tc := range spentRepairLossCases {
+		for _, grace := range []time.Duration{0, 2 * time.Minute} {
+			t.Run(fmt.Sprintf("%s/grace=%s", tc.name, grace), func(t *testing.T) {
+				h := parkedRepairHarness(t, tc.gang, tc.reason, tc.ladder, grace)
+				parked := h.instance(0)
+				parkedKeys := podKeys(h.podsOf(0))
+				pods := len(h.podsOf(0))
+				restarts := eventCount(h, string(workloadtypes.EventReasonRestartTriggered))
+
+				h.clearWedge()
+				h.losePods(0)
+				if grace > 0 {
+					// The deleted pods terminate under their grace; the park
+					// holds until the objects are gone.
+					gone := h.runWithInvariant(10, func() bool { return !stillTerminating(h, 0) }, func() {
+						if stillTerminating(h, 0) && !parkedRepair(h, 0) {
+							h.dumpState("terminating")
+							t.Fatalf("the park left at %v while its pods were still terminating: %+v", h.clk.Now(), h.instance(0))
+						}
+					})
+					if !gone {
+						t.Fatalf("the terminating pods never left")
+					}
+				}
+				assertFreshStartServes(t, h, parked, parkedKeys, pods, restarts)
+			})
+		}
+	}
+}
+
+// A parked repair whose set is still live is never closed: a wedged set
+// waits for the ladder and is rebuilt by its re-arm, and a set that comes
+// up on its own resumes the promote. Along either exit the row never
+// reads as a fresh start and the close is never said.
+//
+// Cells: instance/Failed/timer.repairRetry/before, instance/Failed/pod.containersReady[source]/before
+func TestSpentRepair_LiveSetIsNeverClosed(t *testing.T) {
+	neverClosed := func(t *testing.T, h *recoveryHarness) func() {
+		return func() {
+			if s := h.instance(0); s != nil && s.Phase == workloadtypes.InstancePhaseFailed && s.Operation == nil {
+				h.dumpState("closed")
+				t.Fatalf("the park was closed under a live set: %+v", s)
+			}
+		}
+	}
+	t.Run("wedged set re-arms on the ladder", func(t *testing.T) {
+		h := parkedRepairHarness(t, false, "CrashLoopBackOff", retryLadder(3, 2*time.Minute), 0)
+		parked := h.instance(0)
+
+		h.clearWedge()
+		if !h.runWithInvariant(40, func() bool { return servingReady(h, 0, 1) }, neverClosed(t, h)) {
+			h.dumpState("re-arm")
+			t.Fatalf("the re-armed repair never healed")
+		}
+		if got := h.instance(0); got.Incarnation != parked.Incarnation+1 {
+			t.Errorf("incarnation = %d, want %d: the ladder's re-arm rebuilt the set", got.Incarnation, parked.Incarnation+1)
+		}
+		if n := eventCount(h, string(workloadtypes.EventReasonRepairClosed)); n != 0 {
+			t.Errorf("RepairClosed events = %d, want none under a live set", n)
+		}
+	})
+	t.Run("set that comes up resumes", func(t *testing.T) {
+		h := newRestartHarness(t, 1)
+		h.retryPolicy = retryLadder(3, 2*time.Minute)
+		h.recorder = record.NewFakeRecorder(256)
+		parkRepair(t, h, "CreateContainerConfigError", false)
+		parked := h.instance(0)
+		parkedKeys := podKeys(h.podsOf(0))
+
+		h.clearWedge()
+		if !h.runWithInvariant(20, func() bool { return servingReady(h, 0, 1) }, neverClosed(t, h)) {
+			h.dumpState("resume")
+			t.Fatalf("the healed set was never promoted")
+		}
+		got := h.instance(0)
+		if got.Incarnation != parked.Incarnation {
+			t.Errorf("incarnation = %d, want %d: a set that came up is promoted, not rebuilt", got.Incarnation, parked.Incarnation)
+		}
+		if keys := podKeys(h.podsOf(0)); keys != parkedKeys {
+			t.Errorf("set after the heal = %s, want the parked set %s", keys, parkedKeys)
+		}
+		if n := eventCount(h, string(workloadtypes.EventReasonRepairClosed)); n != 0 {
+			t.Errorf("RepairClosed events = %d, want none under a live set", n)
+		}
+	})
+}
+
 // podKeys names a pod set by identity — name and creation instant, sorted
 // — so a rebuilt pod of the same name reads as a different pod.
 func podKeys(pods []*corev1.Pod) string {

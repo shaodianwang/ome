@@ -101,9 +101,15 @@ func DetectRestartTriggerWithPods(input workload.ReconcileInput, plan workload.C
 		return true, ""
 	}
 	expected := inst.TotalPods()
-	// A repair parked at Failed has its own two exits, whatever the policy
+	// A repair parked at Failed has its own exits, whatever the policy
 	// says: the policy governs whether a repair STARTS, and this one did.
+	// With no live pod left there is nothing to resume or rebuild under
+	// the spent operation, so it closes and the row is the Create pass's
+	// fresh start, as every total loss is.
 	if SpentRepair(s) {
+		if spentRepairPodSetGone(s, instancePods) {
+			return true, repairCloseReason(s)
+		}
 		if reason, fires := spentRepairTrigger(input, s, expected, instancePods); fires {
 			return true, reason
 		}
@@ -316,6 +322,21 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	wasNotRestarting := observed == nil || observed.Phase != workload.InstancePhaseRestarting
 	var newInc int64
 	switch {
+	case spentRepairPodSetGone(observed, pods):
+		// Nothing is left to resume or rebuild under the spent operation:
+		// it closes, and the row is the fresh start the Create pass owns,
+		// which recycles any dead occupant and rebuilds under the row's
+		// incarnation. The pass after reads the closed row.
+		closed, err := status.CloseSpentRepair(ctx, input, inst.Index, observed.Operation.ID)
+		if err != nil {
+			return false, fmt.Errorf("Restart: close spent repair (instance=%d): %w", inst.Index, err)
+		}
+		if closed {
+			workload.RecordNormal(deps.Recorder, workload.EventTarget(input), workload.EventReasonRepairClosed,
+				"OMENative %s %s; the Create pass rebuilds the Instance as a fresh start",
+				workload.InstanceKey(input.Key.Component, inst.Index), repairCloseReason(observed))
+		}
+		return false, nil
 	case RepairResumes(observed, inst.TotalPods(), pods):
 		// The rebuilt set of a spent repair came up on its own. No new
 		// attempt opens: the pods already carry the row's incarnation, and
@@ -1410,7 +1431,7 @@ func podSetProven(input workload.ReconcileInput, pods []*corev1.Pod) bool {
 }
 
 // A spent repair: a Restart parked at Failed by the deadline or a wedged
-// pod. No pass drives the row, but the repair it records keeps two exits
+// pod. No pass drives the row, but the repair it records keeps its exits
 // here. A rebuilt set that comes up on its own — the kubelet's retry
 // succeeded once a missing image tag or ConfigMap key was back — resumes
 // the promote at the incarnation the pods already carry, so the Instance
@@ -1426,7 +1447,11 @@ func podSetProven(input workload.ReconcileInput, pods []*corev1.Pod) bool {
 // would wedge on it identically, so the row stays Failed with its reason
 // until the configuration or image is fixed and takes the first exit
 // when the pods come up. No ladder configured means no re-arm either:
-// the row waits for the reset mailbox or a new revision.
+// the row waits for the reset mailbox or a new revision. A set that is
+// entirely gone or terminal leaves nothing to resume or rebuild under the
+// spent operation, whatever the cause or the ladder: the operation closes
+// (spentRepairPodSetGone) and the row is the fresh start the Create pass
+// rebuilds, as every total loss is.
 
 // SpentRepair reports whether the row is a Restart parked at Failed.
 func SpentRepair(s *workload.InstanceStatus) bool {
@@ -1446,6 +1471,20 @@ func repairPodSet(pods []*corev1.Pod) []*corev1.Pod {
 		set = append(set, pod)
 	}
 	return set
+}
+
+// spentRepairPodSetGone reports whether a spent repair has no live pod
+// left to judge: every pod of its set is gone or in a terminal phase. A
+// pod still terminating is live until it is gone, so the name it holds
+// is not rebuilt under it.
+func spentRepairPodSetGone(s *workload.InstanceStatus, pods []*corev1.Pod) bool {
+	return SpentRepair(s) && len(query.ExcludeTerminalPods(pods)) == 0
+}
+
+// repairCloseReason names the close of a spent repair: the failure that
+// parked it and the loss that ends it.
+func repairCloseReason(s *workload.InstanceStatus) string {
+	return fmt.Sprintf("repair parked after %s closed: no live pod left to resume or rebuild", RepairFailureSummary(s))
 }
 
 // RepairResumes reports whether a spent repair's rebuilt set is one
@@ -1513,8 +1552,9 @@ const RepairWaitingNote = "waiting for the configuration or image the pod needs;
 
 // spentRepairTrigger decides the exits of a spent repair whose pod set is
 // complete. An incomplete set is not decided here: a gang short of a
-// member re-arms through the lost-member trigger, and a row with no pod
-// left is the Create pass's fresh start.
+// member re-arms through the lost-member trigger, and a row with no live
+// pod left closes its repair first (spentRepairPodSetGone) and is then
+// the Create pass's fresh start.
 //
 // A resume stamps no operation, so it carries no reason. A re-arm that is
 // owed but not yet due deposits its wake-up on the pass: the ladder

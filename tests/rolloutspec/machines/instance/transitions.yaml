@@ -391,7 +391,7 @@ transitions:
   - id: T-failed-recycle-rebuild
     from: Failed
     event: pod.phaseTerminal
-    guard: no operation is preserved and the Instance's remaining pods are in a terminal phase, so the missing-pod diff reads their names as free and the Create pass claims the row as a fresh start
+    guard: no operation is preserved - a Restart the restart pass closed for having no live pod left included - and the Instance's remaining pods are in a terminal phase, so the missing-pod diff reads their names as free and the Create pass claims the row as a fresh start
     to: Create/CreatePods
     effects: [the dead occupants deleted with expectations recorded first and a TerminalPodRecycled warning, the targets recreated on a later pass under a fresh Create CreatePods operation]
     decided_in: pkg/controller/v1beta1/workload/ops/terminal_recycle.go
