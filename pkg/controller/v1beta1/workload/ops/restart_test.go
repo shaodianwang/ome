@@ -2635,3 +2635,290 @@ func TestRestart_HoldsWhenTheStampedRevisionIsGone(t *testing.T) {
 		t.Fatalf("event %q must be a Warning naming the revision %s", warnings[0], gone)
 	}
 }
+
+// A crash loop the running revision's ladder holds, on a single-pod
+// Instance whose runner keeps dying after serving and coming back: the
+// hold parks the row while the pod is down and names the loop while it serves.
+
+// crashLoopWindow is the proven window of these stories: the stuck-pod
+// grace with no minReadySeconds configured.
+const crashLoopWindow = 90 * time.Second
+
+// heldCrashLoop is such an Instance: an operation-free row on
+// crashLoopRevision remembering its set's crash, and that set's pod, back
+// up (Ready for readyFor) when serving, else parked in CrashLoopBackOff.
+type heldCrashLoop struct {
+	t          *testing.T
+	isvc       *v1beta1.InferenceService
+	c          client.Client
+	clk        *clocktesting.FakeClock
+	pod        *corev1.Pod
+	plan       workload.ComponentPlan
+	readySince metav1.Time
+	crashedAt  metav1.Time
+	warnings   []string
+}
+
+func newHeldCrashLoop(t *testing.T, phase v1beta1.OMENativeInstancePhase, serving bool, readyFor time.Duration) *heldCrashLoop {
+	t.Helper()
+	resetExpectations(t)
+	now := time.Now().Truncate(time.Second)
+	readySince := metav1.NewTime(now.Add(-time.Hour))
+	crashedAt := metav1.NewTime(readySince.Add(20 * time.Minute))
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	pod := podAtIncarnation(isvc, 0, 1, serving, true /* serving gate */)
+	pod.Spec.Containers[0].Name = constants.MainContainerName
+	pod.CreationTimestamp = metav1.NewTime(readySince.Add(-5 * time.Minute))
+	pod.Status.Phase = corev1.PodRunning
+	exit := int32(1)
+	crashed := &corev1.ContainerStateTerminated{
+		Reason: "Error", ExitCode: exit,
+		StartedAt:  metav1.NewTime(readySince.Add(5 * time.Minute)),
+		FinishedAt: crashedAt,
+	}
+	if serving {
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{runnerStatus(constants.MainContainerName, crashedAt.Add(time.Minute), crashed)}
+		pod.Status.ContainerStatuses[0].Ready = true
+		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+			Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(now.Add(-readyFor)),
+		})
+	} else {
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:                 constants.MainContainerName,
+			RestartCount:         2,
+			State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff", Message: "back-off restarting failed container"}},
+			LastTerminationState: corev1.ContainerState{Terminated: crashed},
+		}}
+		down := metav1.NewTime(now.Add(-time.Minute))
+		pod.Status.Conditions = append(pod.Status.Conditions,
+			corev1.PodCondition{Type: corev1.ContainersReady, Status: corev1.ConditionFalse, LastTransitionTime: down},
+			corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionFalse, LastTransitionTime: down})
+	}
+	row := &ir.Status.InstanceStatuses[0]
+	row.Phase = phase
+	row.ReadySince = &readySince
+	row.RunningRevision = crashLoopRevision
+	row.LastFailure = &v1beta1.InstanceTermination{
+		PodName: pod.Name, ContainerName: constants.MainContainerName, Reason: "Error", ExitCode: &exit,
+		Message: "back-off restarting failed container",
+		Time:    crashedAt,
+	}
+	c := newFakeClient(t, isvc, ir, pod)
+	h := &heldCrashLoop{t: t, isvc: isvc, c: c, clk: clocktesting.NewFakeClock(now), pod: pod, readySince: readySince, crashedAt: crashedAt}
+	h.plan = buildPlanSinglePodEngineForRestart(c, isvc)
+	return h
+}
+
+// input is a pass's view of the row as persisted. held puts the running
+// revision's ladder in Held, with the row's crash counted on it.
+func (h *heldCrashLoop) input(held bool) workload.ReconcileInput {
+	h.t.Helper()
+	in := buildTestInput(h.isvc, h.c, workload.ComponentEngine)
+	in.Clock = h.clk
+	in.StuckPodGrace = crashLoopWindow
+	in.ObservedState.UpdateRevision = crashLoopRevision
+	in.ObservedState.CurrentRevision = crashLoopRevision
+	in.DesiredSpec.PodSpec = &corev1.PodSpec{Containers: []corev1.Container{{Name: constants.MainContainerName, Image: "test:v1"}}}
+	if held {
+		first := metav1.NewTime(h.readySince.Add(10 * time.Minute))
+		last := h.crashedAt
+		in.ObservedState.RetryBlocks = []workload.RetryBlock{{
+			TargetRevision: crashLoopRevision, State: workload.RetryBlockHeld, AttemptsStarted: 3,
+			FirstFailureAt: &first, LastFailureAt: &last, Reason: "Error",
+		}}
+	}
+	in.WarnInstanceFailed = func(idx int32, podName, reason string) {
+		h.warnings = append(h.warnings, fmt.Sprintf("instance=%d pod=%s %s", idx, podName, reason))
+	}
+	return in
+}
+
+// pass runs the restart pass's selection and, when it selects the row,
+// its Restart, returning whether the row was selected and whether the
+// Restart reported done.
+func (h *heldCrashLoop) pass(in workload.ReconcileInput) (selected, done bool) {
+	h.t.Helper()
+	needs, reason := ops.DetectRestartTriggerWithPods(in, h.plan, h.plan.Instances[0], []*corev1.Pod{h.pod})
+	if !needs {
+		return false, false
+	}
+	done, err := ops.Restart(context.Background(), workload.Deps{Client: h.c}, in, h.plan, h.plan.Instances[0], nil, reason)
+	if err != nil {
+		h.t.Fatalf("Restart: %v", err)
+	}
+	return true, done
+}
+
+func (h *heldCrashLoop) row() v1beta1.OMENativeInstanceStatus {
+	h.t.Helper()
+	rows := instanceStatusesOnIR(h.c, h.isvc, workload.ComponentEngine)
+	if len(rows) != 1 {
+		h.t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	return rows[0]
+}
+
+// namesCrashLoop reports whether the row's failure record names the
+// crash loop beside the kubelet's own message.
+func namesCrashLoop(row v1beta1.OMENativeInstanceStatus) bool {
+	return row.LastFailure != nil && strings.Contains(row.LastFailure.Message, "crash loop")
+}
+
+// A held ladder parks nothing a serving set sits on: the row stays Ready
+// naming the crash loop, no warning fires, and it is not selected again.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Held]/before
+func TestRestart_HeldLadderKeepsAServingSetReadyAndNamesTheLoop(t *testing.T) {
+	h := newHeldCrashLoop(t, v1beta1.OMENativeInstanceReady, true /* serving */, 30*time.Second)
+
+	selected, done := h.pass(h.input(true))
+	if !selected {
+		t.Fatalf("the hold must take the row once, to name the crash loop on it")
+	}
+	row := h.row()
+	if row.Phase != v1beta1.OMENativeInstanceReady {
+		t.Fatalf("row reads %s while its only pod is Ready and serving; an Instance whose only pod serves is not Failed (warnings=%v)", row.Phase, h.warnings)
+	}
+	if !done {
+		t.Fatalf("naming the loop leaves nothing in flight; got done=false")
+	}
+	if !namesCrashLoop(row) {
+		t.Fatalf("the row must name the crash loop on its failure record; got %+v", row.LastFailure)
+	}
+	if row.ReadySince == nil || !row.ReadySince.Time.Equal(h.readySince.Time) {
+		t.Fatalf("ReadySince must stay at the promotion the crash is measured from; got %v want %v", row.ReadySince, h.readySince)
+	}
+	if len(h.warnings) != 0 {
+		t.Fatalf("no InstanceFailed warning while the set serves; got %v", h.warnings)
+	}
+	if selected, _ := h.pass(h.input(true)); selected {
+		t.Fatalf("a named serving set must not be selected on every pass")
+	}
+}
+
+// Once the set is out of serving the hold parks the row as it always has:
+// Failed, no operation, the crash recorded, one warning naming the hold.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Held]/before
+func TestRestart_HeldLadderParksTheSetOnceItLeavesServing(t *testing.T) {
+	h := newHeldCrashLoop(t, v1beta1.OMENativeInstanceReady, false /* down */, 0)
+
+	selected, done := h.pass(h.input(true))
+	if !selected {
+		t.Fatalf("a held ladder must park a set that is down")
+	}
+	if done {
+		t.Fatalf("a park is not a repair that finished; got done=true")
+	}
+	row := h.row()
+	if row.Phase != v1beta1.OMENativeInstanceFailed || row.Operation != nil {
+		t.Fatalf("row = %s with operation %+v, want Failed with none", row.Phase, row.Operation)
+	}
+	if row.LastFailure == nil || row.LastFailure.PodName != h.pod.Name {
+		t.Fatalf("the park must record the crashed pod; got %+v", row.LastFailure)
+	}
+	if len(h.warnings) != 1 || !strings.Contains(h.warnings[0], "held after 3 failed attempts") {
+		t.Fatalf("one InstanceFailed warning naming the hold; got %v", h.warnings)
+	}
+}
+
+// A park whose only pod is Ready and serving returns to Ready, named under
+// the hold and plain after a release, anchors kept; a down pod stays parked.
+//
+// Cells: instance/Failed/pod.containersReady[source]/before, instance/Ready/gate.deny[Held]/before
+func TestRestart_CrashLoopParkReturnsToReadyWhileItsSetServes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		held  bool
+		named bool
+	}{
+		{name: "under the held ladder, naming the loop", held: true, named: true},
+		{name: "after the hold is released, as plain Ready", held: false, named: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHeldCrashLoop(t, v1beta1.OMENativeInstanceFailed, true /* serving */, 30*time.Second)
+
+			selected, done := h.pass(h.input(tc.held))
+			if !selected {
+				t.Fatalf("a crash-loop park whose only pod is Ready and serving must return to Ready; the restart pass left it Failed")
+			}
+			row := h.row()
+			if row.Phase != v1beta1.OMENativeInstanceReady || row.Operation != nil {
+				t.Fatalf("row = %s with operation %+v, want Ready with none", row.Phase, row.Operation)
+			}
+			if !done {
+				t.Fatalf("the unpark leaves nothing in flight; got done=false")
+			}
+			if named := namesCrashLoop(row); named != tc.named {
+				t.Fatalf("names the crash loop = %v, want %v; record %+v", named, tc.named, row.LastFailure)
+			}
+			if row.ReadySince == nil || !row.ReadySince.Time.Equal(h.readySince.Time) {
+				t.Fatalf("ReadySince must stay at the promotion; got %v want %v", row.ReadySince, h.readySince)
+			}
+			if row.LastFailure == nil || !row.LastFailure.Time.Equal(&h.crashedAt) {
+				t.Fatalf("the failure record keeps its time; got %+v", row.LastFailure)
+			}
+			if len(h.warnings) != 0 {
+				t.Fatalf("no InstanceFailed warning on the unpark; got %v", h.warnings)
+			}
+		})
+	}
+	t.Run("while the pod is down it stays parked", func(t *testing.T) {
+		h := newHeldCrashLoop(t, v1beta1.OMENativeInstanceFailed, false /* down */, 0)
+		if selected, _ := h.pass(h.input(true)); selected {
+			t.Fatalf("a park whose pod is down is not selected")
+		}
+		if row := h.row(); row.Phase != v1beta1.OMENativeInstanceFailed {
+			t.Fatalf("row = %s, want Failed", row.Phase)
+		}
+	})
+}
+
+// The naming leaves on its own: a set that holds Ready for the proven
+// window, or a released hold, clears the note and leaves plain Ready.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/timer.minReady/before, instance/Ready/gate.deny[Held]/before
+func TestRestart_ProvenSetClearsTheCrashLoopNote(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		held    bool
+		advance time.Duration
+	}{
+		{name: "the set holds Ready for the window", held: true, advance: crashLoopWindow},
+		{name: "the hold is released", held: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHeldCrashLoop(t, v1beta1.OMENativeInstanceReady, true /* serving */, 30*time.Second)
+			if selected, _ := h.pass(h.input(true)); !selected {
+				t.Fatalf("the hold must take the row once, to name the crash loop on it")
+			}
+			if row := h.row(); row.Phase != v1beta1.OMENativeInstanceReady || !namesCrashLoop(row) {
+				t.Fatalf("row = %s record %+v, want Ready naming the crash loop", row.Phase, row.LastFailure)
+			}
+
+			h.clk.Step(tc.advance)
+			selected, done := h.pass(h.input(tc.held))
+			if !selected || !done {
+				t.Fatalf("the stale note must be cleared in one pass; selected=%v done=%v", selected, done)
+			}
+			row := h.row()
+			if row.Phase != v1beta1.OMENativeInstanceReady || namesCrashLoop(row) {
+				t.Fatalf("row = %s record %+v, want plain Ready with the note cleared", row.Phase, row.LastFailure)
+			}
+			if row.LastFailure == nil || row.LastFailure.Message != "back-off restarting failed container" {
+				t.Fatalf("the kubelet's own message stays as history; got %+v", row.LastFailure)
+			}
+			if len(h.warnings) != 0 {
+				t.Fatalf("no InstanceFailed warning; got %v", h.warnings)
+			}
+			if tc.held {
+				// Proven under the hold, the row is left alone; after a
+				// release the running revision's ladder reads the row
+				// afresh, which is its own story.
+				if selected, _ := h.pass(h.input(true)); selected {
+					t.Fatalf("a plain Ready row under the hold is not selected")
+				}
+			}
+		})
+	}
+}

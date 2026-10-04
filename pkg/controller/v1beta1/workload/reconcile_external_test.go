@@ -1315,6 +1315,10 @@ type recoveryHarness struct {
 	// on its next pass: the container restarts at once with its restart
 	// count raised and the termination dated now, and runs on.
 	killOnce map[string]bool
+	// staysDown names the pods whose flapAfterServingImage runner stops
+	// coming back: the kubelet model reports it crashed on every later
+	// pass, the shape of a runner that dies and stays down.
+	staysDown map[string]bool
 	// crashAfterServed is how many passes a crashAfterServingImage pod
 	// serves before it dies: two, unless a story needs the roll to reach
 	// the next Instance before the promoted one crashes.
@@ -1828,7 +1832,7 @@ func (h *recoveryHarness) crashesAfterRunning(pod *corev1.Pod) bool {
 	case flapAfterServingImage:
 		// Every other pass once it has served: the kubelet's back-off,
 		// then a run that comes up Ready again.
-		return h.servedPasses[wedgeKey(pod)] >= h.crashAfterServed && h.crashes[wedgeKey(pod)]%2 == 0
+		return h.servedPasses[wedgeKey(pod)] >= h.crashAfterServed && (h.crashes[wedgeKey(pod)]%2 == 0 || h.staysDown[pod.Name])
 	}
 	return false
 }
@@ -2038,6 +2042,16 @@ func (h *recoveryHarness) killRunnerOnce(pod *corev1.Pod) {
 		h.killOnce = map[string]bool{}
 	}
 	h.killOnce[pod.Name] = true
+}
+
+// keepRunnerDown has the kubelet model report pod's flapping runner
+// crashed on every later pass instead of bringing it back: a runner that
+// dies and stays down.
+func (h *recoveryHarness) keepRunnerDown(pod *corev1.Pod) {
+	if h.staysDown == nil {
+		h.staysDown = map[string]bool{}
+	}
+	h.staysDown[pod.Name] = true
 }
 
 func wedgeKey(pod *corev1.Pod) string {
@@ -9648,5 +9662,202 @@ func TestCrashAfterPromotion_EverySetDiesOnceAfterReady_LadderSaysWhy(t *testing
 				t.Fatalf("a row on the held revision must read Failed with an InstanceFailed warning (failed warnings=%v)", h.failedWarnings)
 			}
 		})
+	}
+}
+
+// A promoted pod that dies under load and comes back between restarts:
+// once the ladder holds, the row reads Failed while the pod is down and
+// Ready naming the loop while it serves, and leaves that state on its own.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Held]/before, instance/Failed/pod.containersReady[source]/before
+func TestCrashLoopAfterPromotion_HeldRowFollowsItsServingPod(t *testing.T) {
+	const (
+		replicas = 4
+		// offAllowed leaves one Instance on the running revision: the
+		// budget's arm, the start admitted while the promoted pod still
+		// served, and the one start the first comeback admits.
+		offAllowed = 3
+		window     = 10 * time.Minute
+	)
+	h := newRecoveryHarnessFor(t, false, constants.MainContainerName)
+	h.replicas = replicas
+	repair := workloadtypes.RestartPolicyRecreateInstance
+	h.lifecycle.RestartPolicy = &repair
+	h.crashAfterServed = 4
+	// The proven window is the stuck-pod grace, which outlives every pod's
+	// age for the whole story, so no crash is read as a wedge and the loop
+	// is the ladder's story alone; an up-window is one pass, inside it.
+	h.stuckGrace = window
+	h.stepCap = recoveryStepFloor
+	h.useRollingBudget(workloadtypes.UpdateStrategyRecreatePod)
+	if !h.run(60, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+	}
+
+	revCrash := h.crashRevision(flapAfterServingImage)
+	namesLoop := func(s workloadtypes.InstanceStatus) bool {
+		return s.LastFailure != nil && strings.Contains(s.LastFailure.Message, "crash loop")
+	}
+	// remembersCrash reports whether the row's failure record is of its
+	// current set: dated after the row entered Ready. A rebuilt set that
+	// has not crashed yet is plain Ready until it does.
+	remembersCrash := func(s workloadtypes.InstanceStatus) bool {
+		return s.LastFailure != nil && s.ReadySince != nil && s.LastFailure.Time.After(s.ReadySince.Time)
+	}
+	// crashRows are the settled rows on the crashing revision, each with
+	// the one live pod of its set.
+	type crashRow struct {
+		row workloadtypes.InstanceStatus
+		pod *corev1.Pod
+	}
+	crashRows := func() []crashRow {
+		var out []crashRow
+		for _, s := range h.irStatuses() {
+			if s.RunningRevision != revCrash.Name || s.Operation != nil {
+				continue
+			}
+			if pods := h.podsOf(s.Index); len(pods) == 1 {
+				out = append(out, crashRow{row: s, pod: pods[0]})
+			}
+		}
+		return out
+	}
+	serves := func(pod *corev1.Pod) bool {
+		return podreadiness.IsContainersReady(pod) && podreadiness.IsServing(pod)
+	}
+	proven := func(pod *corev1.Pod) bool {
+		available, _ := podreadiness.IsPodAvailable(pod, int32(window/time.Second), h.clk.Now())
+		return available
+	}
+	seen := map[types.UID]struct{}{}
+	servingReadyAfterHold, downFailedAfterHold := false, false
+	uidsAtHeld := -1
+	// observe enforces the rule on every pass: a serving pod's row is never
+	// Failed, and under the hold it names the loop until proven and reads
+	// Failed while down; the roll's bound and the no-rebuild promise hold.
+	observe := func() {
+		h.trackPodsOnImage(flapAfterServingImage, seen)()
+		held := h.heldOn(revCrash.Name)
+		if held && uidsAtHeld < 0 {
+			uidsAtHeld = len(seen)
+		}
+		if uidsAtHeld >= 0 && len(seen) != uidsAtHeld {
+			h.dumpState("attempt after the hold")
+			t.Fatalf("a crash-revision pod was created after the ladder held: %d at the hold, %d after", uidsAtHeld, len(seen))
+		}
+		if off := replicas - h.instancesServingOn(goodImage); off > offAllowed {
+			h.dumpState("roll past the budget")
+			t.Fatalf("%d Instances are off the running revision, allowance %d", off, offAllowed)
+		}
+		for _, cr := range crashRows() {
+			switch {
+			case serves(cr.pod):
+				if cr.row.Phase == workloadtypes.InstancePhaseFailed {
+					h.dumpState("failed while serving")
+					t.Fatalf("Instance %d reads Failed while its only pod is Ready and serving (ladder held=%v, record %+v)", cr.row.Index, held, cr.row.LastFailure)
+				}
+				if held && cr.row.Phase == workloadtypes.InstancePhaseReady && remembersCrash(cr.row) {
+					if !proven(cr.pod) && !namesLoop(cr.row) {
+						h.dumpState("silent while serving")
+						t.Fatalf("Instance %d serves between crashes under the held ladder without naming the crash loop: %+v", cr.row.Index, cr.row.LastFailure)
+					}
+					servingReadyAfterHold = true
+				}
+			case held && !podreadiness.IsContainersReady(cr.pod):
+				if cr.row.Phase != workloadtypes.InstancePhaseFailed {
+					h.dumpState("down but not Failed")
+					t.Fatalf("Instance %d reads %s while its pod is down under the held ladder, want Failed", cr.row.Index, cr.row.Phase)
+				}
+				downFailedAfterHold = true
+			}
+		}
+	}
+	h.runWithInvariant(120, func() bool { return servingReadyAfterHold && downFailedAfterHold }, observe)
+	if !h.heldOn(revCrash.Name) {
+		h.dumpState("ladder never held")
+		t.Fatalf("the retry ladder never held %s (held warnings=%v, failed warnings=%v)", revCrash.Name, h.heldWarnings, h.failedWarnings)
+	}
+	if !servingReadyAfterHold || !downFailedAfterHold {
+		h.dumpState("states")
+		t.Fatalf("under the held ladder the row must read Ready naming the loop while the pod serves (seen=%v) and Failed while it is down (seen=%v)", servingReadyAfterHold, downFailedAfterHold)
+	}
+	if len(h.failedWarnings) == 0 {
+		t.Fatalf("an InstanceFailed warning must name the parked Instance; got none")
+	}
+	// The roll holds as it does for any crashing revision: a hold on the
+	// revision, and the running revision serving on the floor.
+	h.runWithInvariant(20, func() bool { return h.lastHold() != nil }, observe)
+	if hold := h.lastHold(); hold == nil || hold.Target != revCrash.Name ||
+		(hold.Gate != workloadtypes.RolloutHoldGateBudget && hold.Gate != workloadtypes.RolloutHoldGateRetryBlock && hold.Gate != workloadtypes.RolloutHoldGateHeld) {
+		h.dumpState("hold")
+		t.Fatalf("the Component must report a Budget, RetryBlock or Held hold on %s, got %+v", revCrash.Name, hold)
+	}
+	if floor := replicas - offAllowed; h.instancesServingOn(goodImage) < floor {
+		h.dumpState("floor")
+		t.Fatalf("the running revision serves on %d Instances, floor %d", h.instancesServingOn(goodImage), floor)
+	}
+
+	// The loop stops: the pods hold Ready past the proven window and every
+	// row returns to plain Ready with the note cleared, and stays there.
+	h.crashAfterServed = 1 << 20
+	plainReady := func() bool {
+		rows := crashRows()
+		if len(rows) == 0 {
+			return false
+		}
+		for _, cr := range rows {
+			if cr.row.Phase != workloadtypes.InstancePhaseReady || namesLoop(cr.row) || !proven(cr.pod) {
+				return false
+			}
+		}
+		return true
+	}
+	if !h.runWithInvariant(40, plainReady, observe) {
+		h.dumpState("loop stopped")
+		t.Fatalf("the rows did not return to plain Ready once their pods held Ready for the window: %+v", crashRows())
+	}
+	h.runWithInvariant(5, func() bool { return false }, func() {
+		observe()
+		if !plainReady() {
+			h.dumpState("plain Ready")
+			t.Fatalf("a row left plain Ready while its pod kept serving: %+v", crashRows())
+		}
+	})
+
+	// The pods die and stay down: every row parks Failed and stays there,
+	// and the held ladder rebuilds nothing.
+	h.crashAfterServed = 4
+	for _, cr := range crashRows() {
+		h.keepRunnerDown(cr.pod)
+	}
+	allFailed := func() bool {
+		rows := crashRows()
+		if len(rows) == 0 {
+			return false
+		}
+		for _, cr := range rows {
+			if cr.row.Phase != workloadtypes.InstancePhaseFailed {
+				return false
+			}
+		}
+		return true
+	}
+	if !h.runWithInvariant(10, allFailed, observe) {
+		h.dumpState("stays down")
+		t.Fatalf("the rows did not park Failed once their pods died and stayed down: %+v", crashRows())
+	}
+	h.runWithInvariant(5, func() bool { return false }, func() {
+		observe()
+		if !allFailed() {
+			h.dumpState("stays Failed")
+			t.Fatalf("a park whose pod stays down must stay Failed: %+v", crashRows())
+		}
+	})
+
+	h.setTarget(h.revFixed, fixedImage)
+	if !h.run(120, func() bool { return h.settledOn(h.revFixed, replicas) }) {
+		h.dumpState("corrected revision")
+		t.Fatalf("the corrected revision did not land on every Instance")
 	}
 }

@@ -108,6 +108,12 @@ func DetectRestartTriggerWithPods(input workload.ReconcileInput, plan workload.C
 			return true, reason
 		}
 	}
+	// A crash-loop park follows its pod set, and a Ready row the hold parks
+	// nothing on names the loop it serves through, whatever the policy says
+	// (readCrashLoopEpisode).
+	if episode := readCrashLoopEpisode(input, s, expected, instancePods); episode.step != crashLoopNothing {
+		return true, episode.reason
+	}
 	// A pod wedged in a terminal kubelet waiting reason cannot recover on
 	// its own and no other pass owns an operation-free Ready row, so the
 	// repair starts regardless of the restart policy.
@@ -298,6 +304,15 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	// Use the post-patch Incarnation, not inst.Incarnation — BuildPlan
 	// ran against an earlier read.
 	observed := input.ObservedState.Instance(inst.Index)
+	// A crash-loop park follows its pod set and a Ready row the hold parks
+	// nothing on names the loop; neither opens a repair or leaves one in
+	// flight.
+	if episode := readCrashLoopEpisode(input, observed, inst.TotalPods(), pods); episode.step != crashLoopNothing {
+		if err := settleCrashLoopEpisode(ctx, input, inst.Index, episode); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	wasNotRestarting := observed == nil || observed.Phase != workload.InstancePhaseRestarting
 	var newInc int64
 	switch {
@@ -746,8 +761,9 @@ func RunnerRestartedAgainSinceReady(pod *corev1.Pod, readySince *metav1.Time) bo
 // bounds the rebuilds: a crash of the runner after the row entered Ready
 // is a failed attempt at that revision, the rebuild waits for the
 // ladder's backoff and is its next attempt, and once the ladder holds
-// the row parks Failed naming the crash, so a revision that keeps
-// crash-looping is held and said so rather than recycled forever. A
+// the row parks Failed naming the crash while its set is out of serving
+// (a serving set keeps it Ready naming the loop), so a revision that
+// keeps crash-looping is held and said so rather than recycled forever. A
 // wedge with no such restart answers to the RetryBlock as a repair of a
 // never-Ready Instance does.
 
@@ -1035,6 +1051,9 @@ type crashLoopLadder struct {
 	record bool
 	// held marks a ladder that holds once the crash is counted.
 	held bool
+	// parks marks a held ladder whose park lands this pass: the set is out
+	// of serving. A held ladder parks nothing a serving set sits on.
+	parks bool
 	// open marks a ladder that admits the rebuild this pass; wait is how
 	// long until it would, when the backoff is not due.
 	open     bool
@@ -1059,7 +1078,7 @@ func readCrashLoopRepair(input workload.ReconcileInput, s *workload.InstanceStat
 	if ladder := readCrashLadder(input, s, expected, pods); ladder != nil {
 		r.ladder = ladder
 		r.opens = ladder.open
-		r.fires = ladder.open || ladder.record || ladder.held || ladder.remember
+		r.fires = ladder.open || ladder.record || ladder.parks || ladder.remember
 		return r
 	}
 	if rebuildRetryBlockDenies(input, s) {
@@ -1084,7 +1103,7 @@ func runnerRestartTrigger(input workload.ReconcileInput, s *workload.InstanceSta
 	if !restarted {
 		return "", false
 	}
-	if ladder := readCrashLadder(input, s, expected, pods); ladder != nil && !(ladder.open || ladder.record || ladder.held || ladder.remember) {
+	if ladder := readCrashLadder(input, s, expected, pods); ladder != nil && !(ladder.open || ladder.record || ladder.parks || ladder.remember) {
 		return "", false
 	}
 	return reason, true
@@ -1109,7 +1128,8 @@ func readCrashLadder(input workload.ReconcileInput, s *workload.InstanceStatus, 
 	now := input.Now()
 	cur := workload.FindRetryBlock(input.ObservedState.RetryBlocks, rev)
 	// A revision whose ladder holds admits no rebuild of its sets, inside
-	// the window or after it: a restart on it is the hold's to park.
+	// the window or after it: a restart on it is the hold's to park once
+	// the set is out of serving.
 	heldRevision := cur != nil && cur.State == workload.RetryBlockHeld
 	remembered := crashRemembered(s)
 	if !remembered && !heldRevision && !firstRestartInsideWindow(input, s, crash.pod) {
@@ -1134,6 +1154,7 @@ func readCrashLadder(input workload.ReconcileInput, s *workload.InstanceStatus, 
 	switch block.State {
 	case workload.RetryBlockHeld:
 		l.held = true
+		l.parks = !query.PodSetFullyServing(pods, expected)
 	case "":
 		return nil
 	default:
@@ -1171,7 +1192,8 @@ func anyInFlightAttemptAt(input workload.ReconcileInput, rev string) bool {
 // failure, and the ladder's backoff is what the roll waits on and
 // announces. Where the wedge or the policy's trigger would rebuild the
 // set, a ladder that holds parks the row Failed naming the crash, with
-// an InstanceFailed warning, and a ladder whose backoff is not due leaves
+// an InstanceFailed warning once per pod set, only while the set is out
+// of serving, and a ladder whose backoff is not due leaves
 // the row until it is. parked is true when no rebuild opens this pass.
 // rev names the revision whose ladder attempt the rebuild is, "" when
 // the ladder does not read the row.
@@ -1199,10 +1221,22 @@ func countCrashOnLadder(ctx context.Context, input workload.ReconcileInput, plan
 		return true, "", nil
 	}
 	if l.held {
+		if !l.parks {
+			if err := status.RecordCrashLoopNote(ctx, input, inst.Index, CrashLoopServingNote); err != nil {
+				return false, "", fmt.Errorf("name the crash loop on the row (instance=%d): %w", inst.Index, err)
+			}
+			return true, "", nil
+		}
 		if err := status.StampFailed(ctx, input, inst.Index, termination); err != nil {
 			return false, "", fmt.Errorf("stamp Failed under held retry ladder (instance=%d): %w", inst.Index, err)
 		}
-		if input.WarnInstanceFailed != nil {
+		// The park lands again on every crash of a set that serves between
+		// them; the warning is owed once per pod set.
+		announced, err := status.Announce(ctx, input, inst.Index, workload.EventReasonInstanceFailed)
+		if err != nil {
+			return false, "", fmt.Errorf("announce the park under held retry ladder (instance=%d): %w", inst.Index, err)
+		}
+		if announced && input.WarnInstanceFailed != nil {
 			input.WarnInstanceFailed(inst.Index, l.crash.pod.Name,
 				fmt.Sprintf("%s: crash after promotion; revision %s held after %d failed attempts", l.crash.reason, l.rev, l.attempts))
 		}
@@ -1246,6 +1280,133 @@ func RestartOpensLadderAttempt(input workload.ReconcileInput, plan workload.Comp
 // admitted nor charged.
 func RestartOpensUnavailability(input workload.ReconcileInput, inst workload.InstancePlan, instancePods []*corev1.Pod) bool {
 	return RestartOpensRepair(input, inst, instancePods) && !evidence.PodSetServesNothing(instancePods)
+}
+
+// A crash-loop park follows its pod set: Failed while the set is out of
+// serving, Ready naming the loop while it serves between crashes, with
+// ReadySince and the failure record kept so the ladder and roll read on.
+
+// CrashLoopServingNote is what a Ready row names on its failure message
+// while the running revision's ladder holds and its set serves between
+// crashes; it clears once the set holds Ready for the proven window.
+const CrashLoopServingNote = "crash loop on a held revision: the pod set serves between crashes, and the Instance reads Failed while it is down"
+
+// crashLoopStep is what the restart pass owes an operation-free row for
+// its crash-loop episode this pass.
+type crashLoopStep int
+
+const (
+	crashLoopNothing crashLoopStep = iota
+	// crashLoopUnpark returns a park whose set serves to Ready.
+	crashLoopUnpark
+	// crashLoopName names the loop on a Ready row the hold parks nothing on.
+	crashLoopName
+	// crashLoopClear drops a note that is stale: the set proved itself or
+	// the hold is gone.
+	crashLoopClear
+)
+
+// crashLoopEpisode is the step owed to a row this pass, the reason the
+// selection carries, and the note the unpark writes: the loop's naming
+// when the ladder holds and the set has not proven itself, else none.
+type crashLoopEpisode struct {
+	step   crashLoopStep
+	reason string
+	note   string
+}
+
+// readCrashLoopEpisode reads the step owed to an operation-free row that
+// remembers a crash of its promoted set: unpark a park whose set serves,
+// name the loop on a held serving row, clear a note that has gone stale.
+func readCrashLoopEpisode(input workload.ReconcileInput, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) crashLoopEpisode {
+	if s == nil || s.Operation != nil || s.RunningRevision == "" || !crashRemembered(s) {
+		return crashLoopEpisode{}
+	}
+	held := revisionHeld(input, s.RunningRevision)
+	switch s.Phase {
+	case workload.InstancePhaseFailed:
+		if !crashLoopParkServes(s, expected, pods) {
+			return crashLoopEpisode{}
+		}
+		note := ""
+		if held && !podSetProven(input, pods) {
+			note = CrashLoopServingNote
+		}
+		return crashLoopEpisode{step: crashLoopUnpark, note: note,
+			reason: fmt.Sprintf("crash-loop park on revision %s serves again", s.RunningRevision)}
+	case workload.InstancePhaseReady:
+		noted := status.FailureNoted(s, CrashLoopServingNote)
+		switch {
+		case !noted && held && query.PodSetFullyServing(pods, expected) && !podSetProven(input, pods):
+			return crashLoopEpisode{step: crashLoopName,
+				reason: fmt.Sprintf("crash loop on held revision %s serves between crashes", s.RunningRevision)}
+		case noted && (!held || podSetProven(input, pods)):
+			return crashLoopEpisode{step: crashLoopClear,
+				reason: fmt.Sprintf("crash loop on revision %s is over", s.RunningRevision)}
+		}
+	}
+	return crashLoopEpisode{}
+}
+
+// settleCrashLoopEpisode writes the owed step. Nothing opens and nothing
+// is left in flight.
+func settleCrashLoopEpisode(ctx context.Context, input workload.ReconcileInput, idx int32, episode crashLoopEpisode) error {
+	var err error
+	switch episode.step {
+	case crashLoopUnpark:
+		err = status.UnparkServing(ctx, input, idx, episode.note)
+	case crashLoopName:
+		err = status.RecordCrashLoopNote(ctx, input, idx, CrashLoopServingNote)
+	case crashLoopClear:
+		err = status.ClearCrashLoopNote(ctx, input, idx, CrashLoopServingNote)
+	}
+	if err != nil {
+		return fmt.Errorf("settle crash-loop episode (instance=%d): %w", idx, err)
+	}
+	return nil
+}
+
+// crashLoopParkServes reports whether a park's set is back: complete,
+// every pod at the row's incarnation on the running revision, and fully
+// serving; a set of another incarnation or revision is another pass's.
+func crashLoopParkServes(s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) bool {
+	if expected <= 0 {
+		return false
+	}
+	set := repairPodSet(pods)
+	if int32(len(set)) < expected {
+		return false
+	}
+	running := query.RevisionFromName(s.RunningRevision)
+	for _, pod := range set {
+		if inc, ok := query.InstanceIncarnationFromLabels(pod); !ok || inc != s.Incarnation {
+			return false
+		}
+		if podRev := query.RevisionFromPod(pod); !podRev.IsZero() && !running.IsZero() && !podRev.Same(running) {
+			return false
+		}
+	}
+	return query.PodSetFullyServing(set, expected)
+}
+
+// revisionHeld reports whether rev's retry ladder holds.
+func revisionHeld(input workload.ReconcileInput, rev string) bool {
+	block := workload.FindRetryBlock(input.ObservedState.RetryBlocks, rev)
+	return block != nil && block.State == workload.RetryBlockHeld
+}
+
+// podSetProven reports whether every live pod of the set has held Ready
+// for the proven window (ProvenWindowSeconds), the roll's bar for a set
+// that restarted since Ready; an empty set proves nothing.
+func podSetProven(input workload.ReconcileInput, pods []*corev1.Pod) bool {
+	window := ProvenWindowSeconds(input.DesiredSpec.MinReadySeconds, input.StuckPodGrace)
+	set := repairPodSet(pods)
+	for _, pod := range set {
+		if available, _ := podreadiness.IsPodAvailable(pod, window, input.Now()); !available {
+			return false
+		}
+	}
+	return len(set) > 0
 }
 
 // A spent repair: a Restart parked at Failed by the deadline or a wedged

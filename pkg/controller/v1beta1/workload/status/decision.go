@@ -134,6 +134,22 @@ func DemoteUnbacked(ctx context.Context, input types.ReconcileInput, idx int32) 
 	return demoted, err
 }
 
+// UnparkServing returns a crash-loop park, a Failed row with no operation
+// whose promoted set serves again, to Ready. ReadySince and the failure
+// record keep their times; note, when given, is appended to the message.
+func UnparkServing(ctx context.Context, input types.ReconcileInput, idx int32, note string) error {
+	return input.MutateInstance(ctx, idx, func(s *types.InstanceStatus) bool {
+		if s.Phase != types.InstancePhaseFailed || s.Operation != nil || s.LastFailure == nil {
+			return false
+		}
+		s.Phase = types.InstancePhaseReady
+		if note != "" {
+			noteFailure(s, note)
+		}
+		return true
+	})
+}
+
 // StampDeadline writes Operation.Deadline and nothing else. A zero
 // deadline is the "never expires" sentinel the deadline backstop
 // honors, so parking and restarting the clock are the same stamp. No-op

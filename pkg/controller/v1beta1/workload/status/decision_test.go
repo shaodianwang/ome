@@ -241,3 +241,60 @@ func TestStampRestartRevision_OnlyAnOpenRepairRecordsIt(t *testing.T) {
 		t.Errorf("writes = %d after stamping the revision the row already carries, want 1", writes)
 	}
 }
+
+// The unpark write: a Failed, operation-free row returns to Ready with
+// its anchor and record time kept and the note appended once; other rows stay.
+//
+// Cells: instance/Failed/pod.containersReady[source]/before
+func TestUnparkServing_ReturnsAParkToReadyKeepingItsAnchor(t *testing.T) {
+	readySince := metav1.NewTime(time.Date(2026, time.August, 15, 12, 0, 0, 0, time.UTC))
+	crashedAt := metav1.NewTime(readySince.Add(10 * time.Minute))
+	record := func() *types.InstanceTermination {
+		return &types.InstanceTermination{PodName: "p-0", ContainerName: "runner", Reason: "Error", Message: "back-off", Time: crashedAt}
+	}
+	rows := map[int32]*types.InstanceStatus{
+		0: {Index: 0, Incarnation: 3, Phase: types.InstancePhaseFailed, RunningRevision: "rev-a", ReadySince: &readySince, LastFailure: record()},
+		1: {Index: 1, Incarnation: 2, Phase: types.InstancePhaseFailed, RunningRevision: "rev-a", ReadySince: &readySince, LastFailure: record(),
+			Operation: &types.InstanceOperation{ID: "r-1", Type: types.InstanceOperationRestart}},
+		2: {Index: 2, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "rev-a", ReadySince: &readySince, LastFailure: record()},
+		3: {Index: 3, Incarnation: 1, Phase: types.InstancePhaseFailed, RunningRevision: "rev-a", ReadySince: &readySince},
+		4: {Index: 4, Incarnation: 1, Phase: types.InstancePhaseFailed, RunningRevision: "rev-a", ReadySince: &readySince, LastFailure: record()},
+	}
+	writes := 0
+	input := types.ReconcileInput{
+		MutateInstance: func(_ context.Context, idx int32, mutate func(*types.InstanceStatus) bool) error {
+			if mutate(rows[idx]) {
+				writes++
+			}
+			return nil
+		},
+	}
+	const note = "crash loop on a held revision"
+	for idx := int32(0); idx < 4; idx++ {
+		if err := UnparkServing(context.Background(), input, idx, note); err != nil {
+			t.Fatalf("UnparkServing(%d): %v", idx, err)
+		}
+	}
+	if writes != 1 {
+		t.Fatalf("writes = %d, want the one park", writes)
+	}
+	got := rows[0]
+	if got.Phase != types.InstancePhaseReady || got.Operation != nil || got.Incarnation != 3 || got.RunningRevision != "rev-a" {
+		t.Fatalf("park after unpark = %+v, want Ready with everything else kept", got)
+	}
+	if got.ReadySince == nil || !got.ReadySince.Equal(&readySince) {
+		t.Fatalf("ReadySince = %v, want the promotion %v kept", got.ReadySince, readySince)
+	}
+	if got.LastFailure == nil || !got.LastFailure.Time.Equal(&crashedAt) || got.LastFailure.Message != "back-off; "+note {
+		t.Fatalf("record = %+v, want its time kept and the note appended", got.LastFailure)
+	}
+	if rows[1].Phase != types.InstancePhaseFailed || rows[2].Phase != types.InstancePhaseReady || rows[3].Phase != types.InstancePhaseFailed {
+		t.Fatalf("rows an operation claims, already Ready, or without a record must be untouched: %+v %+v %+v", rows[1], rows[2], rows[3])
+	}
+	if err := UnparkServing(context.Background(), input, 4, ""); err != nil {
+		t.Fatalf("UnparkServing(4): %v", err)
+	}
+	if rows[4].Phase != types.InstancePhaseReady || rows[4].LastFailure.Message != "back-off" {
+		t.Fatalf("an unpark with no note = %+v, want Ready with the message as it was", rows[4])
+	}
+}

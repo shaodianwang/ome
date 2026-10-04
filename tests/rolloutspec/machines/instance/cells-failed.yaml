@@ -60,13 +60,13 @@ cells:
     variants: [source]
     outcome: transition
     to: Ready
-    guard: either RunningRevision is empty, every pod carries the target revision's hash AND is ContainersReady, and no RetryBlock denies that target (the AdoptRevision backfill), or the row is a Restart parked at Failed whose live set is complete, at the row's incarnation and ContainersReady (the repair resume)
-    note: two routes. A parked repair whose rebuilt set came up on its own - the kubelet's retry succeeded once a missing image tag or ConfigMap key was back - is resumed by the restart pass at the incarnation the pods carry - serving gate, then Ready on the running revision with the spent operation cleared, with no operator action and whether or not a retry ladder is configured (ops/restart.go). Otherwise a pod's revision is its revision-hash label, which is what the renderer stamps and what every other pass reads, so the pods the engine already wrote at the target are recognised as being on it; the adoption path then stamps Ready-on-target from ContainersReady alone and prunes that revision's RetryBlock. Adoption is that one shape and nothing wider - a pod carrying another hash or no hash at all is not on the target, an on-target pod set that is not runtime-ready is a row to recover, and both take the ordinary roll, which is the retry, recreate or relocation the row's strategy and disposition resolve; a Failed row with a recorded RunningRevision is never adopted
+    guard: either RunningRevision is empty, every pod carries the target revision's hash AND is ContainersReady, and no RetryBlock denies that target (the AdoptRevision backfill), or the row is a Restart parked at Failed whose live set is complete, at the row's incarnation and ContainersReady (the repair resume), or the row is a crash-loop park - Failed with no operation, remembering a crash of its promoted set - whose live set is complete at the row's incarnation on the running revision and fully serving (the park follows its pod set)
+    note: three routes. A crash-loop park whose set serves again returns to Ready with ReadySince and the failure record's time kept, so the ladder and the roll keep reading the set as the one that crashed, naming the crash loop on the record while the ladder holds (ops/restart.go readCrashLoopEpisode); it parks again when the set leaves serving. A parked repair whose rebuilt set came up on its own - the kubelet's retry succeeded once a missing image tag or ConfigMap key was back - is resumed by the restart pass at the incarnation the pods carry - serving gate, then Ready on the running revision with the spent operation cleared, with no operator action and whether or not a retry ladder is configured (ops/restart.go). Otherwise a pod's revision is its revision-hash label, which is what the renderer stamps and what every other pass reads, so the pods the engine already wrote at the target are recognised as being on it; the adoption path then stamps Ready-on-target from ContainersReady alone and prunes that revision's RetryBlock. Adoption is that one shape and nothing wider - a pod carrying another hash or no hash at all is not on the target, an on-target pod set that is not runtime-ready is a row to recover, and both take the ordinary roll, which is the retry, recreate or relocation the row's strategy and disposition resolve; a Failed row with a recorded RunningRevision is never adopted and returns only through the park's own route
     invariants: [ready.requires.proof]
     placement: unit
     coverage:
       perm: []
-      unit: [TestDetectUpdate_BackfillAdoptsRuntimeReadyPods, TestDetectUpdate_BackfillAdoptsEngineRenderedPods, TestDetectUpdate_BackfillRefusesWedgedPods, TestDetectUpdate_BackfillRollsPodSetWithAForeignRevision, TestDetectUpdate_WedgedPodsReachHeld, TestDetectUpdate_StuckPodOnTargetRelocates, TestPatchReadyOnRevision_PrunesBlock, TestPlan_Update_AdoptRevision, TestSpentRepair_RebuiltSetComesUp_ResumesThePromote, TestRestart_DeadlineFailedRowResumesItsPromote, TestSpentRepair_KubeletRetriedCause_WaitsForTheFixWithoutReArm, TestRestart_KubeletRetriedCauseClearedResumesThePromote]
+      unit: [TestRestart_CrashLoopParkReturnsToReadyWhileItsSetServes, TestUnparkServing_ReturnsAParkToReadyKeepingItsAnchor, TestCrashLoopAfterPromotion_HeldRowFollowsItsServingPod, TestDetectUpdate_BackfillAdoptsRuntimeReadyPods, TestDetectUpdate_BackfillAdoptsEngineRenderedPods, TestDetectUpdate_BackfillRefusesWedgedPods, TestDetectUpdate_BackfillRollsPodSetWithAForeignRevision, TestDetectUpdate_WedgedPodsReachHeld, TestDetectUpdate_StuckPodOnTargetRelocates, TestPatchReadyOnRevision_PrunesBlock, TestPlan_Update_AdoptRevision, TestSpentRepair_RebuiltSetComesUp_ResumesThePromote, TestRestart_DeadlineFailedRowResumesItsPromote, TestSpentRepair_KubeletRetriedCause_WaitsForTheFixWithoutReArm, TestRestart_KubeletRetriedCauseClearedResumesThePromote]
       kind: [failed_repair_heal]
       replay: [failed-runtime-ready-adopt, failed-repair-resume, failed-repair-waits-on-workload]
     status: decided
@@ -100,12 +100,16 @@ cells:
   - state: Failed
     event: pod.servingOn
     variants: [source]
-    outcome: ignore
-    note: rejoining the rotation raises ServingPodCount once the kubelet folds the gate into the pod's Ready condition, and nothing else; the escalation pass never un-stamps Failed, and recovery is by promotion rather than by un-stamping - a parked repair whose set is complete and ContainersReady re-enters through T-failed-repair-resume on that readiness, not on the gate
-    invariants: [failed.is.sticky]
-    placement: perm
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    outcome: transition
+    to: Ready
+    guard: the row is a crash-loop park - Failed with no operation, remembering a crash of its promoted set - and the gate rejoining the rotation completes a live set that is complete at the row's incarnation on the running revision and fully serving
+    note: a Failed row whose current set is fully serving returns to Ready - the restart pass returns the park with ReadySince and the failure record's time kept, naming the crash loop on the record while the ladder holds (ops/restart.go readCrashLoopEpisode), and parks it again when the set leaves serving. The escalation pass still never un-stamps a row whose set is down, and a parked repair whose set is complete and ContainersReady re-enters through T-failed-repair-resume on that readiness, not on the gate; for every other Failed row rejoining the rotation only raises ServingPodCount once the kubelet folds the gate into the pod's Ready condition
+    placement: unit
+    coverage:
+      perm: []
+      unit: [TestRestart_CrashLoopParkReturnsToReadyWhileItsSetServes, TestUnparkServing_ReturnsAParkToReadyKeepingItsAnchor, TestCrashLoopAfterPromotion_HeldRowFollowsItsServingPod]
+      kind: []
+    status: decided
   - state: Failed
     event: pod.servingOn
     variants: [target]

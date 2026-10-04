@@ -1,0 +1,22 @@
+# Provenance for the instance-machine cells decided in the owner review
+# of 2026-10-04, which settled the phase of an Instance whose promoted
+# pod set crash-loops on a revision the retry ladder holds. A crash-loop
+# park follows its pod set: the row reads Failed while the set is out of
+# serving, and Ready, naming the crash loop on its failure record, while
+# the set serves between crashes, with ReadySince and the record's time
+# kept so the ladder and the roll keep reading the set as the one that
+# crashed. The naming clears once the set has held Ready for the proven
+# window or the hold is gone. The ladder's own bookkeeping is unchanged
+# and the hold rebuilds nothing. The same reading returns a Failed row
+# the escalation parked on a wedged pod once that pod serves again.
+#
+# Selectors match the cells files exactly: an empty variants, windows or
+# transition matches all of them.
+history:
+  # --- cells-noop.yaml ---
+  - {state: Ready, event: pod.containerRestart, variants: [], windows: [], transition: "", decision: owner-review-2026-10-04}
+  - {state: Ready, event: gate.deny, variants: [Held], windows: [], transition: "", decision: owner-review-2026-10-04}
+
+  # --- cells-failed.yaml ---
+  - {state: Failed, event: pod.containersReady, variants: [source], windows: [], transition: "", decision: owner-review-2026-10-04}
+  - {state: Failed, event: pod.servingOn, variants: [source], windows: [], transition: "", decision: owner-review-2026-10-04}
