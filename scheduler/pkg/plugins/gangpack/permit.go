@@ -73,7 +73,19 @@ const (
 	// drained or was released. The pods it kept out of the domain, ordinary or
 	// gang members, would otherwise wait for the periodic unschedulable flush.
 	activationTriggerReservationReleased = "reservation_released"
+	// activationTriggerPodGroupChange: the plugin's own PodGroup informer stored
+	// a new or edited PodGroup. The scheduler requeues members on a separate
+	// PodGroup watch that can run ahead of this informer; a member retried
+	// against the older PodGroup parks again with no later event to wake it.
+	activationTriggerPodGroupChange = "podgroup_change"
 )
+
+// podGroupChanged wakes a gang's live members once the plugin's PodGroup
+// informer holds a new or edited PodGroup. PreFilter reads this informer, so a
+// retry it triggers sees the change whichever PodGroup watch delivered first.
+func (g *GangPack) podGroupChanged(namespace, name string) {
+	g.activateGangMembers(gangInfo{key: namespace + "/" + name}, activationTriggerPodGroupChange, nil)
+}
 
 // activateGangMembers force-activates every live member of the gang. Gang
 // progress is plugin-internal state with no cluster event behind it, so each

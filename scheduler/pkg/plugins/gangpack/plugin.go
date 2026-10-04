@@ -88,7 +88,8 @@ var (
 
 // New is the plugin factory registered via app.WithPlugin. It stands up the
 // PodGroup informer from the scheduler's shared kubeconfig (so PreFilter can
-// resolve gang facts), wires a gang-pod lister from the scheduler's shared
+// resolve gang facts, and so a PodGroup change wakes the gang's members once
+// that informer holds it), wires a gang-pod lister from the scheduler's shared
 // informer, and starts the pin garbage collector.
 func New(ctx context.Context, obj runtime.Object, h framework.Handle) (framework.Plugin, error) {
 	args, err := decodeArgs(obj)
@@ -114,6 +115,9 @@ func New(ctx context.Context, obj runtime.Object, h framework.Handle) (framework
 		pins:                           placement.New(),
 		pgReader:                       reader,
 		podLister:                      podLister,
+	}
+	if err := reader.onChange(g.podGroupChanged); err != nil {
+		return nil, err
 	}
 	go g.runPinGC(ctx)
 	return g, nil
