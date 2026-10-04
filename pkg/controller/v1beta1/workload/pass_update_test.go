@@ -20,6 +20,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ktypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -1402,6 +1403,21 @@ func (f *terminatingSurgeFixture) surgePods() []string {
 	return names
 }
 
+// listedPods is every pod the API lists for the Component, in name order.
+func (f *terminatingSurgeFixture) listedPods() []string {
+	f.t.Helper()
+	list := &corev1.PodList{}
+	if err := f.c.List(context.Background(), list, client.InNamespace("prod")); err != nil {
+		f.t.Fatalf("list pods: %v", err)
+	}
+	var names []string
+	for i := range list.Items {
+		names = append(names, list.Items[i].Name)
+	}
+	slices.Sort(names)
+	return names
+}
+
 // removePod lets the pod's kubelet finish: the object leaves the API.
 func (f *terminatingSurgeFixture) removePod(pod *corev1.Pod) {
 	f.t.Helper()
@@ -1431,6 +1447,145 @@ func terminatingEnginePod(isvc, ns string, idx, ordinal int32, rev string, deadl
 	pod.DeletionGracePeriodSeconds = &seconds
 	pod.Finalizers = []string{"test.example.com/kubelet"}
 	return pod
+}
+
+// liveEnginePod is a pod of Instance idx at ordinal on revision rev,
+// alive and serving nothing: the shape a replacement a disposed attempt
+// left behind has, and the shape a rebuilt pod has while it waits on an
+// image.
+func liveEnginePod(isvc, ns string, idx, ordinal int32, rev string, created time.Time) *corev1.Pod {
+	pod := enginePod(isvc, ns, idx)
+	pod.Name = query.PodName(isvc, types.ComponentEngine, idx, "default", ordinal)
+	pod.UID = ktypes.UID(pod.Name + "-uid")
+	pod.CreationTimestamp = metav1.NewTime(created)
+	pod.Labels[query.LabelPodOrdinal] = fmt.Sprintf("%d", ordinal)
+	pod.Labels[query.LabelRevisionHash] = rev
+	pod.Status.Phase = corev1.PodPending
+	return pod
+}
+
+// wreckedPushRows are the rows a corrected push finds after a strategy
+// edit from RecreatePod to SurgeThenDrain landed while Instance 0 was
+// rebuilding at a crashing revision: Instance 0 Failed with its rebuilt
+// pod alive and serving nothing, and Instance 1 Failed with its source
+// still serving beside the replacement the surge admitted after the edit
+// left behind. Both attempts were disposed, so neither row carries an
+// operation and nothing is Terminating.
+func wreckedPushRows(now time.Time) []types.InstanceStatus {
+	failure := &types.InstanceTermination{Reason: "ImagePullBackOff", Message: "manifest unknown", Time: metav1.NewTime(now.Add(-time.Minute))}
+	return []types.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: types.InstancePhaseFailed, RunningRevision: "llama-70b-engine-priorrev", TargetRevision: "llama-70b-engine-crashrev",
+			PodCount: 1, ServingPodCount: 0, LastFailure: failure},
+		{Index: 1, Incarnation: 1, Phase: types.InstancePhaseFailed, RunningRevision: "llama-70b-engine-priorrev", TargetRevision: "llama-70b-engine-crashrev",
+			PodCount: 2, ServingPodCount: 1, LastFailure: failure},
+	}
+}
+
+// TestReconcile_CorrectedPushKeepsTheCeilingOverALiveExtraPod pins the
+// surge ceiling over a replacement left alive: the Component already
+// carries replicas plus maxSurge pods, so the dark Instance's start,
+// first in line because it restores capacity, is denied while the extra
+// pod holds the slot, and the Instance holding it starts instead by
+// evicting it. The first pass creates nothing; the pass after the
+// eviction opens exactly that Instance's surge, and the dark Instance
+// still waits.
+//
+// Cells: instance/Failed/spec.revision/before, instance/Failed/gate.deny[Budget]/before
+func TestReconcile_CorrectedPushKeepsTheCeilingOverALiveExtraPod(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rebuilt := liveEnginePod("llama-70b", "prod", 0, 0, "crashrev", now)
+	wreckage := liveEnginePod("llama-70b", "prod", 1, 1, "crashrev", now)
+	f := newTerminatingSurgeFixture(t, wreckedPushRows(now), []int32{0, 1}, []int32{1}, rebuilt, wreckage)
+
+	f.pass()
+
+	if got := f.surgePods(); len(got) != 0 {
+		t.Fatalf("a surge opened beside the extra pod: %v", got)
+	}
+	if listed := f.listedPods(); len(listed) > 3 {
+		t.Fatalf("the Component must never carry more than replicas plus maxSurge pods, lists %v", listed)
+	}
+	if err := f.c.Get(context.Background(), client.ObjectKeyFromObject(wreckage), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("the extra pod must be evicted by a start on its own Instance, got %v", err)
+	}
+	if row := f.in.ObservedState.Instance(1); row == nil || row.Phase != types.InstancePhaseUpdating || row.Operation == nil || row.Operation.Step != types.UpdateStepSurge {
+		t.Fatalf("the Instance holding the extra pod must start the surge that replaces it, got %+v", row)
+	}
+	if row := f.in.ObservedState.Instance(0); row == nil || row.Phase != types.InstancePhaseFailed || row.Operation != nil {
+		t.Fatalf("the dark Instance's start must wait for the slot, got %+v", row)
+	}
+
+	// The informer observes the eviction, so the surge may create into
+	// the freed name.
+	f.deps.ExpectationsCache().ObservedDelete("prod", "llama-70b", types.ComponentEngine, 1)
+	f.clk.Step(time.Second)
+	f.pass()
+
+	if got := f.surgePods(); !slices.Equal(got, []string{"llama-70b-engine-1-default-1"}) {
+		t.Fatalf("the pass after the eviction must open exactly the holding Instance's surge, got %v", got)
+	}
+	if listed := f.listedPods(); len(listed) > 3 {
+		t.Fatalf("the Component must never carry more than replicas plus maxSurge pods, lists %v", listed)
+	}
+	if row := f.in.ObservedState.Instance(0); row == nil || row.Phase != types.InstancePhaseFailed || row.Operation != nil {
+		t.Fatalf("the dark Instance's start must wait while the surge it was denied for is in flight, got %+v", row)
+	}
+}
+
+// TestReconcile_SurgeHoldNamesTheLiveExtraPod pins the hold over a live
+// extra pod: when no start is admitted, the Component reports the Budget
+// hold naming the Terminating pod it waits on and the extra pod a start
+// on its Instance will replace, and the pass asks to come back when the
+// Terminating pod's grace elapses. Once it has, the Instance holding the
+// extra pod starts, taking over the slot its own pod held.
+//
+// Cells: instance/Ready/gate.deny[Budget]/before
+func TestReconcile_SurgeHoldNamesTheLiveExtraPod(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rows := []types.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "llama-70b-engine-priorrev", PodCount: 1, ServingPodCount: 1},
+		{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "llama-70b-engine-priorrev", PodCount: 2, ServingPodCount: 1},
+	}
+	wreckage := liveEnginePod("llama-70b", "prod", 1, 1, "crashrev", now)
+	retired := terminatingEnginePod("llama-70b", "prod", 5, 0, "priorrev", now.Add(terminatingSurgeGrace), terminatingSurgeGrace)
+	f := newTerminatingSurgeFixture(t, rows, []int32{0, 1}, []int32{0, 1}, wreckage, retired)
+
+	res := f.pass()
+
+	if got := f.surgePods(); len(got) != 0 {
+		t.Fatalf("a surge opened over the held slots: %v", got)
+	}
+	hold := f.lastHold()
+	if hold == nil || hold.Gate != types.RolloutHoldGateBudget || hold.Target != f.target.Name {
+		t.Fatalf("the Component must report a Budget hold on %s, got %+v", f.target.Name, hold)
+	}
+	for _, want := range []string{retired.Name, wreckage.Name, "extra pod"} {
+		if !strings.Contains(hold.Reason, want) {
+			t.Fatalf("the hold must name %q, got %q", want, hold.Reason)
+		}
+	}
+	if res.RequeueAfter != terminatingSurgeGrace {
+		t.Fatalf("the pass must come back when the Terminating pod's grace elapses (%s), asked for %+v", terminatingSurgeGrace, res)
+	}
+
+	f.clk.Step(terminatingSurgeGrace + time.Second)
+	f.pass()
+
+	if got := f.surgePods(); len(got) != 0 {
+		t.Fatalf("the start on the holding Instance evicts its extra pod before it creates anything, got %v", got)
+	}
+	if err := f.c.Get(context.Background(), client.ObjectKeyFromObject(wreckage), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("the extra pod must be evicted by a start on its own Instance, got %v", err)
+	}
+	if row := f.in.ObservedState.Instance(1); row == nil || row.Phase != types.InstancePhaseUpdating {
+		t.Fatalf("the Instance holding the extra pod must be the one that starts, got %+v", row)
+	}
+	if row := f.in.ObservedState.Instance(0); row == nil || row.Phase != types.InstancePhaseReady {
+		t.Fatalf("the other Instance must wait for the slot, got %+v", row)
+	}
+	if hold := f.lastHold(); hold != nil {
+		t.Fatalf("the hold must clear once a start is admitted, still %+v", hold)
+	}
 }
 
 // correctedPushRows are the rows a corrected push finds after an attempt

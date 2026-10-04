@@ -181,6 +181,10 @@ type updateAdmission struct {
 	// charged to the per-Component budget, one per strategy arm.
 	inFlightSurge   int32
 	inFlightUnavail int32
+	// replacedExtraSlots are the surge slots held by live extra pods that
+	// a start admitted this pass replaces: that start is charged for the
+	// slot, so the pods stop holding it against the starts after it.
+	replacedExtraSlots int32
 	// gateUnavail is the coordination gate's within-pass delta: fresh
 	// starts that pull a SERVING pod from rotation. It diverges from
 	// inFlightUnavail on CoordGateExempt starts — a Failed zero-serving
@@ -208,13 +212,14 @@ func (a *updateAdmission) surge() bool {
 func (a *updateAdmission) admit(ctx context.Context, plan types.ComponentPlan, item UpdateItem) (bool, *types.RolloutHold) {
 	rolled := int32(len(a.selection.RolledNotServing))
 	if a.surge() {
-		// A Terminating pod still listed inside its grace holds the slot
-		// its surge took; the hold names it so the wait reads as the pod's.
-		prior := a.selection.PriorSurgeInFlight + rolled + a.selection.TerminatingSurge.Slots
+		// An extra pod still listed holds a slot: a Terminating one inside
+		// its grace, a live one until a start on its Instance evicts it.
+		// The hold names them so the wait reads as the pods'.
+		prior := a.selection.PriorSurgeInFlight + rolled + a.unreplacedExtraSlots(item)
 		if projected, denied := escalation.BudgetDenies(a.selection.SurgeBudget, prior, a.inFlightSurge); denied {
 			return false, &types.RolloutHold{
 				Gate:   types.RolloutHoldGateBudget,
-				Reason: fmt.Sprintf("per-Component surge budget %d exhausted (would become %d)%s%s", a.selection.SurgeBudget, projected, rolledNotServingClause(a.selection.RolledNotServing, a.target.Name), a.terminatingClause()),
+				Reason: fmt.Sprintf("per-Component surge budget %d exhausted (would become %d)%s%s", a.selection.SurgeBudget, projected, rolledNotServingClause(a.selection.RolledNotServing, a.target.Name), a.extraPodClause()),
 				Target: a.target.Name,
 			}
 		}
@@ -321,24 +326,47 @@ func rolledNotServingClause(rolled []int32, target string) string {
 	return fmt.Sprintf("; %s %s on revision %s not serving", noun, strings.Join(indices, ", "), target)
 }
 
-// terminatingClause names, for a surge denial, the Terminating pods
-// still counted against the budget; empty when none are.
-func (a *updateAdmission) terminatingClause() string {
-	pods := a.selection.TerminatingSurge.Pods
-	switch len(pods) {
+// unreplacedExtraSlots is what the Component's extra pods hold against
+// the surge budget when item is consulted: every slot counted, less the
+// ones starts admitted this pass already replace, less the ones item's
+// own Instance holds with live pods — a start there evicts them before it
+// creates anything, so the slot it takes is theirs.
+func (a *updateAdmission) unreplacedExtraSlots(item UpdateItem) int32 {
+	extra := a.selection.ExtraPodSurge
+	return extra.Slots - a.replacedExtraSlots - extra.LiveSlotsByInstance[item.Instance.Index]
+}
+
+// extraPodClause names, for a surge denial, the extra pods still counted
+// against the budget; empty when none are.
+func (a *updateAdmission) extraPodClause() string {
+	var clauses []string
+	switch terminating := a.selection.ExtraPodSurge.Terminating; len(terminating) {
 	case 0:
-		return ""
 	case 1:
-		return fmt.Sprintf("; Terminating pod %s still counts against the surge budget until its deletion grace elapses", pods[0])
+		clauses = append(clauses, fmt.Sprintf("Terminating pod %s still counts against the surge budget until its deletion grace elapses", terminating[0]))
+	default:
+		clauses = append(clauses, fmt.Sprintf("Terminating pods %s still count against the surge budget until their deletion grace elapses", strings.Join(terminating, ", ")))
 	}
-	return fmt.Sprintf("; Terminating pods %s still count against the surge budget until their deletion grace elapses", strings.Join(pods, ", "))
+	switch live := a.selection.ExtraPodSurge.Live; len(live) {
+	case 0:
+	case 1:
+		clauses = append(clauses, fmt.Sprintf("extra pod %s holds a surge slot until a start on its Instance replaces it", live[0]))
+	default:
+		clauses = append(clauses, fmt.Sprintf("extra pods %s hold surge slots until a start on their Instance replaces them", strings.Join(live, ", ")))
+	}
+	if len(clauses) == 0 {
+		return ""
+	}
+	return "; " + strings.Join(clauses, "; ")
 }
 
 // charge counts a fresh start the pass opened, so every later consult
-// projects against it.
+// projects against it. A surge start on an Instance whose live extra
+// pods hold slots takes those slots over.
 func (a *updateAdmission) charge(item UpdateItem) {
 	if a.surge() {
 		a.inFlightSurge++
+		a.replacedExtraSlots += a.selection.ExtraPodSurge.LiveSlotsByInstance[item.Instance.Index]
 		return
 	}
 	a.inFlightUnavail++

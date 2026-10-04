@@ -536,6 +536,54 @@ func TestReconcile_ScaleDownExtra_DrivesDelete(t *testing.T) {
 	}
 }
 
+// TestReconcile_ScaleDownRetiresTheReadyRowOnAHeldRevisionFirst pins the
+// victim of a scale-down under a held push: with one Instance Ready on
+// the pushed revision, whose ladder holds, and the other Ready on the
+// running revision, the plan keeps the running revision's row and the
+// scale-down admits the pushed one, whatever its index. Keeping the
+// pushed row would retire the only sound Instance and land the push by
+// attrition.
+//
+// Cells: instance/Ready/spec.replicasDown/before
+func TestReconcile_ScaleDownRetiresTheReadyRowOnAHeldRevisionFirst(t *testing.T) {
+	const running, pushed = "llama-70b-engine-aaaaaaaa", "llama-70b-engine-bbbbbbbb"
+	scheme := makeScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	deps := workloadtypes.Deps{Client: c}
+
+	in := minimalInput(t)
+	in.DesiredSpec.Replicas = 1
+	in.ObservedState.CurrentRevision = running
+	in.ObservedState.UpdateRevision = pushed
+	in.ObservedState.RetryBlocks = []workloadtypes.RetryBlock{{TargetRevision: pushed, State: workloadtypes.RetryBlockHeld, AttemptsStarted: 3}}
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady, RunningRevision: pushed, PodCount: 1, ServingPodCount: 1},
+		{Index: 1, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady, RunningRevision: running, PodCount: 1, ServingPodCount: 1},
+	}
+	store := installTestAtomicMutationStore(&in)
+	plan, err := workload.BuildPlan(workloadtypes.ComponentEngine, in.DesiredSpec, in.ObservedState)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if extras := workload.ScaleDownExtras(in.ObservedState.InstanceStatuses, plan); len(extras) != 1 || extras[0] != 0 {
+		t.Fatalf("the scale-down must retire the Ready row on the held revision, selected %v", extras)
+	}
+
+	result, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !result.Requeue {
+		t.Fatalf("scale-down admission must requeue, got %+v", result)
+	}
+	if status := store.status(0); status == nil || status.Phase != workloadtypes.InstancePhaseDeleting {
+		t.Fatalf("the Instance on the held revision must be the one admitted to delete, got %+v", status)
+	}
+	if status := store.status(1); status == nil || status.Phase != workloadtypes.InstancePhaseReady || status.RunningRevision != running {
+		t.Fatalf("the Instance on the running revision must be kept, got %+v", status)
+	}
+}
+
 // TestReconcile_MigrationInFlight_NotScaleDown asserts that an
 // Instance with Phase=Migrating is NOT scale-down-deleted, even when
 // the plan doesn't cover its index — otherwise Migrate's surge

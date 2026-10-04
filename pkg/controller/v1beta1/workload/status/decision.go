@@ -637,16 +637,11 @@ func RetryBlockStartAttempt(rb *types.RetryBlock) types.RetryBlockDisposition {
 }
 
 // RowRemembersCrashOn reports whether a row Ready on rev records a
-// failure of its current promoted pod set: a LastFailure dated after the
-// row entered Ready. A rebuild enters Ready anew, so a record of the set
-// it replaced reads as none.
+// failure of its current promoted pod set (types.RemembersCrash).
 func RowRemembersCrashOn(rows []types.InstanceStatus, rev string) bool {
 	for i := range rows {
 		row := &rows[i]
-		if row.Phase != types.InstancePhaseReady || row.RunningRevision != rev || row.LastFailure == nil || row.ReadySince == nil {
-			continue
-		}
-		if row.LastFailure.Time.After(row.ReadySince.Time) {
+		if row.Phase == types.InstancePhaseReady && row.RunningRevision == rev && types.RemembersCrash(row) {
 			return true
 		}
 	}

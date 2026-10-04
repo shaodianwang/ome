@@ -287,6 +287,14 @@ func RecreateOfDarkRow(s *InstanceStatus, strategy UpdateStrategyType) bool {
 		s.Phase == InstancePhaseFailed && s.ServingPodCount == 0
 }
 
+// RemembersCrash reports whether the row records a failure of its current
+// promoted pod set: a LastFailure dated after the row entered Ready. A
+// rebuild enters Ready anew, so a record of the set it replaced reads as
+// none.
+func RemembersCrash(s *InstanceStatus) bool {
+	return s != nil && s.LastFailure != nil && s.ReadySince != nil && s.LastFailure.Time.After(s.ReadySince.Time)
+}
+
 // DemotedReady reports whether the row is a Ready row demoted for losing
 // every pod: a settled Pending row that still records the revision it
 // ran. Only the demotion writes that shape — a first materialization

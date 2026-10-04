@@ -1,0 +1,76 @@
+# A strategy edit from RecreatePod to SurgeThenDrain lands while one
+# Instance is rebuilding at a revision whose image cannot be pulled. The
+# surge the edit admits beside the rebuild wedges on the same image, both
+# attempts are disposed with their pods left alive, and the Component
+# stands at replicas plus maxSurge with nothing Terminating. The corrective
+# push stays under that ceiling: the Instance whose replacement is left
+# alive starts by evicting it, and the dark Instance waits for the slot.
+scenario: switch-recreate-surge-ceiling
+arrows:
+  - T-ready-recreate
+  - T-drain-stuck
+  - T-ready-surge
+  - T-surge-stuck
+  - T-failed-corrective-surge
+cells:
+  - instance/Update/Drain/spec.strategy/before
+  - instance/Failed/spec.revision/before
+  - instance/Failed/gate.deny[Budget]/before
+initial:
+  spec:
+    replicas: 2
+    strategy: RecreatePod
+    maxSurge: "1"
+    maxUnavailable: "1"
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: both pods become Ready and enter rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+      - pod.ready[source]: {pod: {index: 1}}
+      - endpoint.rotationIn[source]: {pod: {index: 1}}
+  - tick: 3
+    note: the pod template changes to an image that cannot be pulled, and the strategy rebuilds Instance 0 in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: Instance 0's pod leaves rotation, so the rebuild deletes it
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the old pod is gone and the rebuild creates its replacement at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the strategy is edited to SurgeThenDrain while the rebuild is still materializing; the rebuild finishes on its pinned mechanism and Instance 1 surges a replacement beside it
+    events:
+      - spec.strategy: {strategy: SurgeThenDrain}
+  - tick: 7
+    note: two minutes on, longer than the grace, neither replacement has started
+    events:
+      - clock.advance: 2m
+  - tick: 8
+    note: the rebuilt pod wedges on the image and the recreate is disposed with the pod left alive
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}
+  - tick: 9
+    note: the surge replacement wedges on the same image and the surge is disposed with it left alive beside its serving source
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 1, ordinal: 1}, message: "manifest unknown"}
+  - tick: 10
+    note: the operator corrects the image; the Component already carries replicas plus maxSurge pods, so the dark Instance waits and the Instance holding the extra pod starts by evicting it
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 11
+    note: the evicted replacement is gone and the surge creates its replacement at the corrected revision, still within the ceiling
+    events:
+      - pod.deleted[target]: {pod: {index: 1, ordinal: 1}}

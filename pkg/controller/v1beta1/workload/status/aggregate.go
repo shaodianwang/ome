@@ -292,19 +292,25 @@ func RolloutComplete(insts []types.InstanceStatus, targetRevName string) bool {
 }
 
 // CurrentRevisionFor is the component-level revision rollup: what
-// status.currentRevision should name given the Instance rows. It is the
-// update revision once every Instance is Ready on it. It is withdrawn
+// status.currentRevision should name given the Instance rows and the
+// Component's retry ladder. It is the update revision once every Instance
+// is Ready on it and no RetryBlock names it: a block records a failure
+// of the revision no later attempt has answered — a crash of a promoted
+// set included, whose row reads Ready between crashes — and is removed
+// once the rows outlive it, a corrective revision supersedes it or an
+// operator releases a Held one, so the push reads landed only when the
+// revision has proven itself rather than by attrition. It is withdrawn
 // (empty) when it already names the update revision while some Instance
 // still runs another: a fleet rolled back onto its last promoted revision
 // is in flight until the last superseded Instance returns, and current
 // equal to update is what every reader takes for "no rollout in flight".
 // Any other row shape leaves current as recorded, so a repair on the
 // current revision never moves it.
-func CurrentRevisionFor(insts []types.InstanceStatus, current, update string) string {
+func CurrentRevisionFor(insts []types.InstanceStatus, current, update string, blocks []types.RetryBlock) string {
 	if update == "" {
 		return current
 	}
-	if RolloutComplete(insts, update) {
+	if RolloutComplete(insts, update) && types.FindRetryBlock(blocks, update) == nil {
 		return update
 	}
 	if current == update && anyInstanceRunsAnother(insts, update) {

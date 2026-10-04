@@ -105,41 +105,59 @@ func TestRolloutComplete(t *testing.T) {
 }
 
 // TestCurrentRevisionFor pins the rollup both ways: promoted once every
-// Instance is Ready on the update revision; withdrawn when current already
-// names the update revision while an Instance still runs another; left as
-// recorded on every other shape, a repair on the current revision included.
+// Instance is Ready on the update revision and its retry ladder records
+// no failure; withdrawn when current already names the update revision
+// while an Instance still runs another; left as recorded on every other
+// shape, a repair on the current revision included. A revision whose
+// block still stands has not landed, whatever its rows read between
+// crashes, so a push never lands by attrition.
 func TestCurrentRevisionFor(t *testing.T) {
 	const prior, next = "isvc-engine-aaaaaaaa", "isvc-engine-bbbbbbbb"
 	row := func(phase types.InstancePhase, rev string) types.InstanceStatus {
 		return types.InstanceStatus{Phase: phase, RunningRevision: rev}
 	}
+	block := func(state types.RetryBlockState) []types.RetryBlock {
+		return []types.RetryBlock{{TargetRevision: next, State: state, AttemptsStarted: 1}}
+	}
 	cases := []struct {
 		name            string
 		rows            []types.InstanceStatus
 		current, update string
+		blocks          []types.RetryBlock
 		want            string
 	}{
 		{"every Instance Ready on the update revision promotes it",
-			[]types.InstanceStatus{row(types.InstancePhaseReady, next), row(types.InstancePhaseReady, next)}, prior, next, next},
+			[]types.InstanceStatus{row(types.InstancePhaseReady, next), row(types.InstancePhaseReady, next)}, prior, next, nil, next},
+		{"every Instance Ready on a Held revision does not land it",
+			[]types.InstanceStatus{row(types.InstancePhaseReady, next), row(types.InstancePhaseReady, next)}, prior, next, block(types.RetryBlockHeld), prior},
+		{"every Instance Ready on a revision in backoff does not land it",
+			[]types.InstanceStatus{row(types.InstancePhaseReady, next), row(types.InstancePhaseReady, next)}, prior, next, block(types.RetryBlockBackoff), prior},
+		{"every Instance Ready on a revision with an attempt in flight does not land it",
+			[]types.InstanceStatus{row(types.InstancePhaseReady, next), row(types.InstancePhaseReady, next)}, prior, next, block(types.RetryBlockRetryInProgress), prior},
+		{"a block on another revision does not withhold the landing",
+			[]types.InstanceStatus{row(types.InstancePhaseReady, next), row(types.InstancePhaseReady, next)}, prior, next,
+			[]types.RetryBlock{{TargetRevision: prior, State: types.RetryBlockHeld}}, next},
+		{"a withdrawn current stays withdrawn while the update revision's block stands",
+			[]types.InstanceStatus{row(types.InstancePhaseReady, next), row(types.InstancePhaseReady, next)}, "", next, block(types.RetryBlockHeld), ""},
 		{"a forward roll in flight keeps the prior revision",
-			[]types.InstanceStatus{row(types.InstancePhaseReady, next), row(types.InstancePhaseUpdating, prior)}, prior, next, prior},
+			[]types.InstanceStatus{row(types.InstancePhaseReady, next), row(types.InstancePhaseUpdating, prior)}, prior, next, nil, prior},
 		{"a rollback onto the current revision withdraws it while every Instance runs the superseded one",
-			[]types.InstanceStatus{row(types.InstancePhaseUpdating, next), row(types.InstancePhaseReady, next)}, prior, prior, ""},
+			[]types.InstanceStatus{row(types.InstancePhaseUpdating, next), row(types.InstancePhaseReady, next)}, prior, prior, nil, ""},
 		{"one Instance still on the superseded revision is enough to withdraw",
-			[]types.InstanceStatus{row(types.InstancePhaseReady, prior), row(types.InstancePhaseReady, next)}, prior, prior, ""},
+			[]types.InstanceStatus{row(types.InstancePhaseReady, prior), row(types.InstancePhaseReady, next)}, prior, prior, nil, ""},
 		{"a repair on the current revision keeps it",
-			[]types.InstanceStatus{row(types.InstancePhaseRestarting, prior), row(types.InstancePhaseReady, prior)}, prior, prior, prior},
+			[]types.InstanceStatus{row(types.InstancePhaseRestarting, prior), row(types.InstancePhaseReady, prior)}, prior, prior, nil, prior},
 		{"an Instance that has not run anything yet decides nothing",
-			[]types.InstanceStatus{row(types.InstancePhaseCreating, ""), row(types.InstancePhaseReady, prior)}, prior, prior, prior},
+			[]types.InstanceStatus{row(types.InstancePhaseCreating, ""), row(types.InstancePhaseReady, prior)}, prior, prior, nil, prior},
 		{"withdrawn stays withdrawn until every Instance is Ready on the update revision",
-			[]types.InstanceStatus{row(types.InstancePhaseReady, prior), row(types.InstancePhaseUpdating, next)}, "", prior, ""},
+			[]types.InstanceStatus{row(types.InstancePhaseReady, prior), row(types.InstancePhaseUpdating, next)}, "", prior, nil, ""},
 		{"no update revision leaves current alone",
-			[]types.InstanceStatus{row(types.InstancePhaseReady, prior)}, prior, "", prior},
-		{"no Instances leave current alone", nil, prior, prior, prior},
+			[]types.InstanceStatus{row(types.InstancePhaseReady, prior)}, prior, "", nil, prior},
+		{"no Instances leave current alone", nil, prior, prior, nil, prior},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := status.CurrentRevisionFor(tc.rows, tc.current, tc.update); got != tc.want {
+			if got := status.CurrentRevisionFor(tc.rows, tc.current, tc.update, tc.blocks); got != tc.want {
 				t.Errorf("CurrentRevisionFor(current=%q, update=%q) = %q, want %q", tc.current, tc.update, got, tc.want)
 			}
 		})

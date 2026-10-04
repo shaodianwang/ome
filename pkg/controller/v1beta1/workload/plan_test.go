@@ -355,7 +355,7 @@ func TestInstancePlanIndices_MultiReplicaMigrationPreservesUnrelatedInstance(t *
 		{Index: 1, Phase: types.InstancePhaseReady},
 		{Index: 2, Phase: types.InstancePhaseCreating, Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate}},
 	}
-	got := instancePlanIndices(instances, 2)
+	got := instancePlanIndices(instances, 2, nil)
 	hit := map[int32]bool{}
 	for _, idx := range got {
 		hit[idx] = true
@@ -370,7 +370,7 @@ func TestInstancePlanIndices_PreservesSparseMigrationLayout(t *testing.T) {
 		{Index: 0, Phase: types.InstancePhaseMigrating},
 		{Index: 2, Phase: types.InstancePhaseCreating, Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate}},
 	}
-	got := instancePlanIndices(instances, 1)
+	got := instancePlanIndices(instances, 1, nil)
 	// Both migration-in-flight indices must be in the plan even though
 	// replicas=1.
 	hit := map[int32]bool{}
@@ -390,7 +390,7 @@ func TestInstancePlanIndices_MigrationReadyTargetReplacesSource(t *testing.T) {
 			Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &targetIndex}},
 		{Index: targetIndex, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: revision},
 	}
-	indices := instancePlanIndices(instances, 1)
+	indices := instancePlanIndices(instances, 1, nil)
 	if diff := cmp.Diff([]int32{targetIndex}, indices); diff != "" {
 		t.Fatalf("promoted migration target must replace its source (-want +got):\n%s", diff)
 	}
@@ -416,7 +416,7 @@ func TestInstancePlanIndices_MigrationRetiringSourceDoesNotDisplaceSteadyInstanc
 		{Index: targetIndex, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: revision},
 	}
 	want := []int32{1, 2, 3, 4, 5, 6, 7, 8}
-	if diff := cmp.Diff(want, instancePlanIndices(instances, 8)); diff != "" {
+	if diff := cmp.Diff(want, instancePlanIndices(instances, 8, nil)); diff != "" {
 		t.Fatalf("retiring migration source displaced a steady instance (-want +got):\n%s", diff)
 	}
 }
@@ -457,7 +457,7 @@ func TestInstancePlanIndices_MigrationSourceRequiresPromotedTargetProof(t *testi
 				test.target,
 			}
 			want := []int32{0, 1, 2}
-			if diff := cmp.Diff(want, instancePlanIndices(instances, 2)); diff != "" {
+			if diff := cmp.Diff(want, instancePlanIndices(instances, 2, nil)); diff != "" {
 				t.Fatalf("unproven migration target released its source (-want +got):\n%s", diff)
 			}
 		})
@@ -476,7 +476,7 @@ func TestInstancePlanIndices_SharedMigrationTargetKeepsAllParticipants(t *testin
 		{Index: sharedTarget, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: revision},
 	}
 	want := []int32{0, 1, 2, 3}
-	if diff := cmp.Diff(want, instancePlanIndices(instances, 3)); diff != "" {
+	if diff := cmp.Diff(want, instancePlanIndices(instances, 3, nil)); diff != "" {
 		t.Fatalf("shared migration target released a source or sibling (-want +got):\n%s", diff)
 	}
 }
@@ -493,7 +493,7 @@ func TestInstancePlanIndices_WrongPhaseMigrationReferenceBlocksRetirement(t *tes
 		{Index: sharedTarget, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: revision},
 	}
 	want := []int32{0, 1, 2, 3}
-	if diff := cmp.Diff(want, instancePlanIndices(instances, 2)); diff != "" {
+	if diff := cmp.Diff(want, instancePlanIndices(instances, 2, nil)); diff != "" {
 		t.Fatalf("wrong-phase migration reference released a valid source (-want +got):\n%s", diff)
 	}
 }
@@ -514,7 +514,7 @@ func TestInstancePlanIndices_MixedHandoffsSharingTargetKeepAllParticipants(t *te
 		{Index: sharedTarget, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: newRevision},
 	}
 	want := []int32{0, 1, 2, 3}
-	if diff := cmp.Diff(want, instancePlanIndices(instances, 3)); diff != "" {
+	if diff := cmp.Diff(want, instancePlanIndices(instances, 3, nil)); diff != "" {
 		t.Fatalf("mixed handoffs sharing one target released a participant (-want +got):\n%s", diff)
 	}
 }
@@ -532,7 +532,7 @@ func TestInstancePlanIndices_GangSurgePinsPair(t *testing.T) {
 		{Index: 1, Phase: types.InstancePhaseReady},
 		{Index: 3, Phase: types.InstancePhaseCreating, Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTarget}},
 	}
-	got := instancePlanIndices(instances, 2)
+	got := instancePlanIndices(instances, 2, nil)
 	hit := map[int32]bool{}
 	for _, idx := range got {
 		hit[idx] = true
@@ -562,11 +562,11 @@ func TestInstancePlanIndices_GangCleanupMarkerPinnedWhileReferenced(t *testing.T
 			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTargetCleanup}},
 	}
 	hit := map[int32]bool{}
-	for _, idx := range instancePlanIndices(referenced, 1) {
+	for _, idx := range instancePlanIndices(referenced, 1, nil) {
 		hit[idx] = true
 	}
 	if !hit[0] || !hit[1] {
-		t.Errorf("a referenced cleanup marker must stay pinned at replicas=1; got %v", instancePlanIndices(referenced, 1))
+		t.Errorf("a referenced cleanup marker must stay pinned at replicas=1; got %v", instancePlanIndices(referenced, 1, nil))
 	}
 
 	two := int32(2)
@@ -577,7 +577,7 @@ func TestInstancePlanIndices_GangCleanupMarkerPinnedWhileReferenced(t *testing.T
 		{Index: 2, Phase: types.InstancePhaseFailed,
 			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTargetCleanup, TargetRevision: "comp-rev-v2bbbbbb"}},
 	}
-	if diff := cmp.Diff([]int32{1}, instancePlanIndices(failedBehindReady, 1)); diff != "" {
+	if diff := cmp.Diff([]int32{1}, instancePlanIndices(failedBehindReady, 1, nil)); diff != "" {
 		t.Errorf("a failed pair loses the one slot to the Ready sibling and leaves together (-want +got):\n%s", diff)
 	}
 	if diff := cmp.Diff([]int32{0, 2}, ScaleDownExtras(failedBehindReady, types.ComponentPlan{Instances: []types.InstancePlan{{Index: 1}}})); diff != "" {
@@ -586,7 +586,7 @@ func TestInstancePlanIndices_GangCleanupMarkerPinnedWhileReferenced(t *testing.T
 
 	failedAlone := failedBehindReady[:1:1]
 	failedAlone = append(failedAlone, failedBehindReady[2])
-	if diff := cmp.Diff([]int32{0, 2}, instancePlanIndices(failedAlone, 1)); diff != "" {
+	if diff := cmp.Diff([]int32{0, 2}, instancePlanIndices(failedAlone, 1, nil)); diff != "" {
 		t.Errorf("a failed pair with no Ready row to prefer is kept whole (-want +got):\n%s", diff)
 	}
 
@@ -595,7 +595,7 @@ func TestInstancePlanIndices_GangCleanupMarkerPinnedWhileReferenced(t *testing.T
 		{Index: 1, Phase: types.InstancePhaseCreating,
 			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTargetCleanup}},
 	}
-	if got := instancePlanIndices(orphan, 1); len(got) != 1 || got[0] != 0 {
+	if got := instancePlanIndices(orphan, 1, nil); len(got) != 1 || got[0] != 0 {
 		t.Errorf("an unreferenced cleanup marker must fall out for the scale-down pipeline; got %v", got)
 	}
 }
@@ -637,7 +637,7 @@ func TestInstancePlanIndices_FailedGangSurgePairFollowsItsSource(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if diff := cmp.Diff(tc.want, instancePlanIndices(tc.instances, tc.replicas)); diff != "" {
+			if diff := cmp.Diff(tc.want, instancePlanIndices(tc.instances, tc.replicas, nil)); diff != "" {
 				t.Errorf("instancePlanIndices (-want +got):\n%s", diff)
 			}
 		})
@@ -657,7 +657,7 @@ func TestInstancePlanIndices_OrphanGangSurgeMarkerUnpinned(t *testing.T) {
 		{Index: 1, Phase: types.InstancePhaseFailed,
 			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTarget}},
 	}
-	got := instancePlanIndices(instances, 1)
+	got := instancePlanIndices(instances, 1, nil)
 	if len(got) != 1 || got[0] != 0 {
 		t.Errorf("orphan marker must be unpinned (plan {0}, marker 1 becomes a scale-down extra); got %v", got)
 	}
@@ -667,7 +667,7 @@ func TestInstancePlanIndices_OrphanGangSurgeMarkerUnpinned(t *testing.T) {
 	k := int32(1)
 	instances[0] = types.InstanceStatus{Index: 0, Phase: types.InstancePhaseUpdating, RunningRevision: "comp-rev-v1aaaaaa",
 		Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: "Surge", SurgeIndex: &k}}
-	got = instancePlanIndices(instances, 1)
+	got = instancePlanIndices(instances, 1, nil)
 	hit := map[int32]bool{}
 	for _, idx := range got {
 		hit[idx] = true
@@ -690,13 +690,13 @@ func TestInstancePlanIndices_GangSurgeReadyTargetRequiresDrainProof(t *testing.T
 	}
 
 	// A Ready occupant does not prove that a fresh claim owns the target.
-	if diff := cmp.Diff([]int32{0, 1, 2}, instancePlanIndices(statuses("Surge"), 2)); diff != "" {
+	if diff := cmp.Diff([]int32{0, 1, 2}, instancePlanIndices(statuses("Surge"), 2, nil)); diff != "" {
 		t.Fatalf("unconfirmed claim must stay pinned (-want +got):\n%s", diff)
 	}
 
 	// SurgeDrain follows target validation and is safe to release after the
 	// replacement is promoted.
-	if diff := cmp.Diff([]int32{0, 2}, instancePlanIndices(statuses(types.UpdateStepSurgeDrain), 2)); diff != "" {
+	if diff := cmp.Diff([]int32{0, 2}, instancePlanIndices(statuses(types.UpdateStepSurgeDrain), 2, nil)); diff != "" {
 		t.Fatalf("validated source should leave the steady plan (-want +got):\n%s", diff)
 	}
 }
@@ -755,7 +755,7 @@ func TestInstancePlanIndices_GangSurgeSourceRequiresPromotedTargetProof(t *testi
 				test.target,
 			}
 			want := []int32{0, 1, 2}
-			if diff := cmp.Diff(want, instancePlanIndices(instances, 2)); diff != "" {
+			if diff := cmp.Diff(want, instancePlanIndices(instances, 2, nil)); diff != "" {
 				t.Fatalf("unproven gang-surge target released its source (-want +got):\n%s", diff)
 			}
 		})
@@ -782,7 +782,7 @@ func TestInstancePlanIndices_GangSurgeRetiringSourceDoesNotDisplaceSteadyInstanc
 		{Index: targetIndex, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: newRevision},
 	}
 	want := []int32{1, 2, 3, 4, 5, 6, 7, 8}
-	indices := instancePlanIndices(instances, 8)
+	indices := instancePlanIndices(instances, 8, nil)
 	if diff := cmp.Diff(want, indices); diff != "" {
 		t.Fatalf("retiring gang-surge source displaced a steady instance (-want +got):\n%s", diff)
 	}
@@ -818,7 +818,7 @@ func TestInstancePlanIndices_ConcurrentRetiringSourcesDoNotDisplaceSteadyInstanc
 		{Index: targetNine, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: newRevision},
 	}
 	want := []int32{2, 3, 4, 5, 6, 7, 8, 9}
-	if diff := cmp.Diff(want, instancePlanIndices(instances, 8)); diff != "" {
+	if diff := cmp.Diff(want, instancePlanIndices(instances, 8, nil)); diff != "" {
 		t.Fatalf("retiring gang-surge sources displaced steady instances (-want +got):\n%s", diff)
 	}
 }
@@ -840,7 +840,7 @@ func TestInstancePlanIndices_SharedUpdateTargetKeepsAllParticipants(t *testing.T
 		{Index: sharedTarget, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: newRevision},
 	}
 	want := []int32{0, 1, 2, 3}
-	if diff := cmp.Diff(want, instancePlanIndices(instances, 3)); diff != "" {
+	if diff := cmp.Diff(want, instancePlanIndices(instances, 3, nil)); diff != "" {
 		t.Fatalf("shared update target released a source or sibling (-want +got):\n%s", diff)
 	}
 }
@@ -901,7 +901,7 @@ func TestInstancePlanIndices_ReadyRowOutOfRotationLeavesBeforeAHealthyOne(t *tes
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if diff := cmp.Diff(test.want, instancePlanIndices(test.instances, test.replicas)); diff != "" {
+			if diff := cmp.Diff(test.want, instancePlanIndices(test.instances, test.replicas, nil)); diff != "" {
 				t.Fatalf("a Ready row with a pod out of rotation must leave before a healthy one (-want +got):\n%s", diff)
 			}
 		})
@@ -933,7 +933,7 @@ func TestInstancePlanIndices_NonRetiringSelectionControls(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			want := []int32{0, 2}
-			if diff := cmp.Diff(want, instancePlanIndices(test.instances, 2)); diff != "" {
+			if diff := cmp.Diff(want, instancePlanIndices(test.instances, 2, nil)); diff != "" {
 				t.Fatalf("non-retiring selection changed (-want +got):\n%s", diff)
 			}
 		})
@@ -948,7 +948,7 @@ func TestInstancePlanIndices_SinglePodSurgeNotPinnedAsPair(t *testing.T) {
 	instances := []types.InstanceStatus{
 		{Index: 0, Phase: types.InstancePhaseUpdating, Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: "Surge"}},
 	}
-	got := instancePlanIndices(instances, 1)
+	got := instancePlanIndices(instances, 1, nil)
 	if len(got) != 1 || got[0] != 0 {
 		t.Errorf("single-pod surge must plan exactly {0}; got %v", got)
 	}
@@ -1115,7 +1115,7 @@ func TestInstancePlanIndices_ReplicaDropKeepsMigrationPair(t *testing.T) {
 		{Index: 3, Phase: types.InstancePhaseCreating,
 			Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate, SurgeIndex: &back}},
 	}
-	if diff := cmp.Diff([]int32{0, 3}, instancePlanIndices(instances, 1)); diff != "" {
+	if diff := cmp.Diff([]int32{0, 3}, instancePlanIndices(instances, 1, nil)); diff != "" {
 		t.Fatalf("replica drop must keep the in-flight migration pair and shed the Ready sibling (-want +got):\n%s", diff)
 	}
 }
@@ -1131,7 +1131,7 @@ func TestInstancePlanIndices_ReplicaDropKeepsGangSurgePair(t *testing.T) {
 			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTarget,
 				TargetRevision: "comp-rev-v2bbbbbb"}},
 	}
-	if diff := cmp.Diff([]int32{0, 3}, instancePlanIndices(instances, 1)); diff != "" {
+	if diff := cmp.Diff([]int32{0, 3}, instancePlanIndices(instances, 1, nil)); diff != "" {
 		t.Fatalf("replica drop must keep the in-flight gang surge pair and shed the Ready sibling (-want +got):\n%s", diff)
 	}
 }
@@ -1147,7 +1147,7 @@ func TestInstancePlanIndices_MigrationTargetNotReadyKeepsSourcePinned(t *testing
 		{Index: 1, Phase: types.InstancePhaseCreating,
 			Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate}},
 	}
-	if diff := cmp.Diff([]int32{0, 1}, instancePlanIndices(instances, 1)); diff != "" {
+	if diff := cmp.Diff([]int32{0, 1}, instancePlanIndices(instances, 1, nil)); diff != "" {
 		t.Fatalf("a not-yet-Ready migration target must keep the source pinned (-want +got):\n%s", diff)
 	}
 }
@@ -1194,7 +1194,7 @@ func TestInstancePlanIndices_GangSurgeDrainReleaseDemandsExactTargetProof(t *tes
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			instances := []types.InstanceStatus{test.target, source, sibling}
-			if diff := cmp.Diff([]int32{0, 1, 2}, instancePlanIndices(instances, 2)); diff != "" {
+			if diff := cmp.Diff([]int32{0, 1, 2}, instancePlanIndices(instances, 2, nil)); diff != "" {
 				t.Fatalf("unproven target must keep the drain-step source pinned (-want +got):\n%s", diff)
 			}
 		})
@@ -1213,7 +1213,7 @@ func TestInstancePlanIndices_GangSurgeDrainMissingTargetKeepsSourcePinned(t *tes
 			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurgeDrain,
 				SurgeIndex: &missing, TargetRevision: "comp-rev-newaaaa"}},
 	}
-	if diff := cmp.Diff([]int32{1}, instancePlanIndices(instances, 1)); diff != "" {
+	if diff := cmp.Diff([]int32{1}, instancePlanIndices(instances, 1, nil)); diff != "" {
 		t.Fatalf("missing target must keep the source pinned without inventing its index (-want +got):\n%s", diff)
 	}
 }
@@ -1231,12 +1231,12 @@ func TestInstancePlanIndices_OccupiedReferencedTargetStaysPinned(t *testing.T) {
 		{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: "comp-rev-otherccc"},
 		{Index: 2, Phase: types.InstancePhaseReady, RunningRevision: "comp-rev-newaaaa"},
 	}
-	if diff := cmp.Diff([]int32{0, 1, 2}, instancePlanIndices(instances, 2)); diff != "" {
+	if diff := cmp.Diff([]int32{0, 1, 2}, instancePlanIndices(instances, 2, nil)); diff != "" {
 		t.Fatalf("occupied referenced target must stay pinned at replicas=2 (-want +got):\n%s", diff)
 	}
 	// Under a replica drop the pinned pair still wins; the unreferenced
 	// sibling is the scale-down extra.
-	if diff := cmp.Diff([]int32{0, 1}, instancePlanIndices(instances, 1)); diff != "" {
+	if diff := cmp.Diff([]int32{0, 1}, instancePlanIndices(instances, 1, nil)); diff != "" {
 		t.Fatalf("occupied referenced target must stay pinned at replicas=1 (-want +got):\n%s", diff)
 	}
 }
@@ -1301,13 +1301,13 @@ func TestInstancePlanIndices_ShrinkingBudgetRetiresTheOpenRecreateFirst(t *testi
 		{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: "v1", PodCount: 1, ServingPodCount: 1},
 		{Index: 2, Phase: types.InstancePhaseReady, RunningRevision: "v1", PodCount: 1, ServingPodCount: 1},
 	}
-	if diff := cmp.Diff([]int32{1, 2}, instancePlanIndices(instances, 2)); diff != "" {
+	if diff := cmp.Diff([]int32{1, 2}, instancePlanIndices(instances, 2, nil)); diff != "" {
 		t.Fatalf("plan at two replicas (-want +got):\n%s", diff)
 	}
-	if diff := cmp.Diff([]int32{1}, instancePlanIndices(instances, 1)); diff != "" {
+	if diff := cmp.Diff([]int32{1}, instancePlanIndices(instances, 1, nil)); diff != "" {
 		t.Fatalf("plan at one replica (-want +got):\n%s", diff)
 	}
-	if diff := cmp.Diff([]int32{0, 1, 2}, instancePlanIndices(instances, 3)); diff != "" {
+	if diff := cmp.Diff([]int32{0, 1, 2}, instancePlanIndices(instances, 3, nil)); diff != "" {
 		t.Fatalf("plan at the full count (-want +got):\n%s", diff)
 	}
 }

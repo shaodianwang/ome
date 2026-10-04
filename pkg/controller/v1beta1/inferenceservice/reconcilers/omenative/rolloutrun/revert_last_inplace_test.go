@@ -47,7 +47,7 @@ func TestRevertAtTheLastInPlaceInstanceClosesTheRunSuperseded(t *testing.T) {
 	current := oldRev
 	pass := func(t *testing.T, target string, rows []workloadtypes.InstanceStatus) {
 		t.Helper()
-		current = workloadstatus.CurrentRevisionFor(rows, current, target)
+		current = workloadstatus.CurrentRevisionFor(rows, current, target, nil)
 		local := isvc.DeepCopy()
 		local.ObjectMeta.ResourceVersion = ""
 		if _, err := Reconcile(context.Background(), testInputs(t, local, irPublished(t, current, target, rows))); err != nil {
@@ -142,7 +142,7 @@ func TestRevertAtTheLastInstanceWaitsForTheProjectionBeforeJudgingTheRun(t *test
 	current := oldRev
 	pass := func(t *testing.T, target string, projectedFrom int64, rows []workloadtypes.InstanceStatus) {
 		t.Helper()
-		current = workloadstatus.CurrentRevisionFor(rows, current, target)
+		current = workloadstatus.CurrentRevisionFor(rows, current, target, nil)
 		local := isvc.DeepCopy()
 		local.ObjectMeta.ResourceVersion = ""
 		ir := irPublished(t, current, target, rows)

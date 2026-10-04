@@ -1,12 +1,18 @@
 package omenative_coordination_kind
 
 import (
+	"strconv"
+	"time"
+
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
@@ -148,5 +154,140 @@ var _ = ginkgo.Describe("behavior — update strategy edited mid-surge", ginkgo.
 			g.Expect(insts[0].ActiveOrdinal).To(Equal(int32(1)),
 				"the surge promote must advance ActiveOrdinal onto the replacement's slot")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+
+	// The edit lands while a RecreatePod roll is rebuilding an Instance at a
+	// revision whose image cannot be pulled. The surge the edit admits beside
+	// the rebuild wedges on the same image, both attempts are disposed with
+	// their pods left alive, and the Component stands at replicas plus
+	// maxSurge with nothing Terminating. A corrected push must stay under
+	// that ceiling: a replacement left alive holds a surge slot until a start
+	// on its own Instance replaces it, so the Component never carries more
+	// than replicas plus maxSurge live pods, however the wreckage was made.
+	ginkgo.It("keeps live pods within replicas plus maxSurge when the edit lands during a rebuild at a broken revision and a fix is pushed", func() {
+		const (
+			isvcName    = "strat-switch-kss2"
+			brokenImage = "ghcr.io/ome-projects/this-image-does-not-exist:v0"
+			replicas    = 2
+			maxSurge    = 1
+		)
+		one := intstr.FromInt(1)
+		readyTimeout := metav1.Duration{Duration: 45 * time.Second}
+
+		fix := newCoordFixture(ns.Name,
+			WithISVCName(isvcName),
+			WithoutDecoder(),
+			WithEngineReplicas(replicas),
+			WithEngineImage("fake-serving:v1"))
+		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
+			UpdateStrategy: &v1beta1.UpdateStrategy{
+				Type:          v1beta1.UpdateStrategyRecreatePod,
+				RollingUpdate: &v1beta1.RollingUpdate{MaxSurge: &one, MaxUnavailable: &one},
+			},
+			// Bounds the wedged attempts so both are disposed well inside the
+			// spec's wait, instead of the default readiness window.
+			InstanceReadyTimeout: &readyTimeout,
+		}
+
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+
+		ginkgo.By("waiting for both engine Instances Ready on the starting revision")
+		var startRevision string
+		Eventually(func(g Gomega) {
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(replicas))
+			for _, inst := range insts {
+				g.Expect(inst.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				g.Expect(inst.RunningRevision).NotTo(BeEmpty())
+			}
+			startRevision = insts[0].RunningRevision
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// The ceiling, sampled for the rest of the spec: pods no deletion
+		// has been requested for, since a Terminating pod is leaving and the
+		// budget already waits for its grace.
+		stop := util.StartSampler(suiteCtx, 100*time.Millisecond, func(g Gomega) {
+			snap, err := util.SnapshotPods(suiteCtx, k8sClient, ns.Name, isvcName)
+			g.Expect(err).NotTo(HaveOccurred())
+			live := 0
+			for _, pod := range snap.ByComponent[v1beta1.EngineComponent] {
+				if pod.DeletionTimestamp == nil {
+					live++
+				}
+			}
+			g.Expect(live).To(BeNumerically("<=", replicas+maxSurge),
+				"engine carries %d live pods; the ceiling is replicas(%d) plus maxSurge(%d)", live, replicas, maxSurge)
+		})
+		defer stop()
+
+		ginkgo.By("pushing a revision whose image cannot be pulled; the recreate rebuilds one Instance at it")
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Spec.Engine.PodSpec.Containers[0].Image = brokenImage
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("waiting for the rebuild to be materializing: the Instance on its Drain step with its rebuilt pod waiting on the image")
+		Eventually(func(g Gomega) {
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			rebuilding := int32(-1)
+			for _, inst := range insts {
+				if inst.Phase == v1beta1.OMENativeInstanceUpdating && inst.Operation != nil && inst.Operation.Step == "Drain" {
+					rebuilding = inst.Index
+				}
+			}
+			g.Expect(rebuilding).NotTo(Equal(int32(-1)), "no Instance is on a recreate's Drain step yet")
+			rebuilt := false
+			for _, pod := range listOMENativePods(g, ns.Name, isvcName) {
+				if pod.Labels[query.LabelInstanceIdx] == strconv.Itoa(int(rebuilding)) && pod.Spec.Containers[0].Image == brokenImage {
+					rebuilt = true
+				}
+			}
+			g.Expect(rebuilt).To(BeTrue(), "the rebuilt pod at the broken revision has not been created yet")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("editing the strategy to SurgeThenDrain while the rebuild is materializing")
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Spec.Engine.Lifecycle.UpdateStrategy.Type = v1beta1.UpdateStrategySurgeThenDrain
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("waiting for both attempts at the broken revision to be disposed")
+		Eventually(func(g Gomega) {
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(replicas))
+			for _, inst := range insts {
+				g.Expect(inst.Phase).To(Equal(v1beta1.OMENativeInstanceFailed),
+					"Instance %d must be disposed at the broken revision", inst.Index)
+			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("pushing the corrected image")
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Spec.Engine.PodSpec.Containers[0].Image = "fake-serving:v2"
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("expecting the fix to land on every Instance with nothing of the broken revision left")
+		Eventually(func(g Gomega) {
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(replicas))
+			for _, inst := range insts {
+				g.Expect(inst.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				g.Expect(inst.RunningRevision).NotTo(BeEmpty())
+				g.Expect(inst.RunningRevision).NotTo(Equal(startRevision))
+				g.Expect(inst.RunningRevision).To(Equal(insts[0].RunningRevision))
+			}
+			for _, pod := range listOMENativePods(g, ns.Name, isvcName) {
+				g.Expect(pod.Spec.Containers[0].Image).NotTo(Equal(brokenImage),
+					"pod %s still runs the broken revision", pod.Name)
+			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		// Ends the sampler before teardown so the ceiling is judged on the
+		// roll alone, and so a sampler failure surfaces here.
+		stop()
 	})
 })

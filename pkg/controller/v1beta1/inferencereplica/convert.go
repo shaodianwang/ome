@@ -1036,12 +1036,14 @@ func mirrorInstanceStatuses(ir *v1beta1.InferenceReplica, statuses []v1beta1.OME
 //   - authoritative Get the IR so the rollup observes per-Instance
 //     updates committed earlier in the same reconcile;
 //   - CurrentRevision follows status.CurrentRevisionFor: promoted to
-//     targetName once every Instance is Ready on it (a partition > 0
-//     never satisfies that, so a staged rollout does not promote — the
-//     Staged Ready reason derives downstream from the CurrentRevision !=
-//     UpdateRevision skew), and withdrawn while it names targetName but
-//     an Instance still runs another revision, the shape a rollback onto
-//     the last promoted revision leaves behind;
+//     targetName once every Instance is Ready on it and no RetryBlock
+//     names it (a partition > 0 never satisfies that, so a staged rollout
+//     does not promote — the Staged Ready reason derives downstream from
+//     the CurrentRevision != UpdateRevision skew; a revision whose ladder
+//     still records a failure has not landed, whatever the rows read
+//     between crashes), and withdrawn while it names targetName but an
+//     Instance still runs another revision, the shape a rollback onto the
+//     last promoted revision leaves behind;
 //   - an unchanged value short-circuits with no write (a converged steady
 //     state performs ZERO writes);
 //   - retry.RetryOnConflict mirrors buildMutateInstance.
@@ -1076,7 +1078,7 @@ func buildPromoteCurrentRevision(writer statusWriter, reads client.Reader, ir *v
 				return workloadtypes.ErrStatusMutationPrecondition
 			}
 			insts := v1beta1convert.InstanceStatusSliceToWorkload(fresh.Status.InstanceStatuses)
-			want := workloadstatus.CurrentRevisionFor(insts, fresh.Status.CurrentRevision, targetName)
+			want := workloadstatus.CurrentRevisionFor(insts, fresh.Status.CurrentRevision, targetName, retryBlocksFromIR(fresh))
 			if want == fresh.Status.CurrentRevision {
 				return nil
 			}

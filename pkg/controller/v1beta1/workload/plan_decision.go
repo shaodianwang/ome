@@ -167,10 +167,11 @@ type UpdateSelection struct {
 	// the same Instance.
 	PriorSurgeInFlight   int32
 	PriorUnavailInFlight int32
-	// TerminatingSurge is what the Component's Terminating pods still hold
-	// against the surge budget, computed for a capped SurgeThenDrain budget
-	// (escalation.TerminatingSurgeInFlight).
-	TerminatingSurge escalation.TerminatingSurge
+	// ExtraPodSurge is what the Component's extra pods hold against the
+	// surge budget — Terminating inside their grace, or alive beyond an
+	// Instance's own count — computed for a capped SurgeThenDrain budget
+	// (escalation.ExtraPodSurgeInFlight).
+	ExtraPodSurge escalation.ExtraPodSurge
 	// RolledNotServing lists, in plan order, the Instances already on the
 	// target revision that do not serve it (ops.RolledInstanceNotServing).
 	// They are the roll's open work: each holds a slot in the budget of
@@ -784,14 +785,15 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 	sort.SliceStable(selection.Items, func(i, j int) bool {
 		return selection.Items[i].ReplacesDarkPodSet && !selection.Items[j].ReplacesDarkPodSet
 	})
-	// A Terminating pod the API still lists holds its surge slot until it
-	// exits or passes its deletion deadline; the deadline raises no watch
-	// event, so a pass with a fresh start to admit wakes for it.
+	// An extra pod the API still lists holds a surge slot: a Terminating
+	// one until it exits or passes its deletion deadline, which raises no
+	// watch event, so a pass with a fresh start to admit wakes for it; a
+	// live one until a start on its Instance replaces it.
 	if selection.Strategy == types.UpdateStrategySurgeThenDrain && selection.SurgeBudget != escalation.BudgetNoLimit {
 		now := input.Now()
-		selection.TerminatingSurge = escalation.TerminatingSurgeInFlight(plan, input.ObservedState.InstanceStatuses, updateByInstance, selection.RolledNotServing, now)
-		if selection.TerminatingSurge.Slots > 0 && anyFreshStart(selection.Items) {
-			input.PassWake.Observe(selection.TerminatingSurge.NextRelease.Sub(now))
+		selection.ExtraPodSurge = escalation.ExtraPodSurgeInFlight(plan, input.ObservedState.InstanceStatuses, updateByInstance, selection.RolledNotServing, now)
+		if !selection.ExtraPodSurge.NextRelease.IsZero() && anyFreshStart(selection.Items) {
+			input.PassWake.Observe(selection.ExtraPodSurge.NextRelease.Sub(now))
 		}
 	}
 	// Budgets are decided here but spent in Execute, so record them with the
@@ -804,8 +806,9 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		"unavailBudget", selection.UnavailBudget,
 		"priorSurgeInFlight", selection.PriorSurgeInFlight,
 		"priorUnavailInFlight", selection.PriorUnavailInFlight,
-		"terminatingSurge", selection.TerminatingSurge.Slots,
-		"terminatingPods", selection.TerminatingSurge.Pods,
+		"extraPodSurge", selection.ExtraPodSurge.Slots,
+		"terminatingPods", selection.ExtraPodSurge.Terminating,
+		"liveExtraPods", selection.ExtraPodSurge.Live,
 		"rolledNotServing", selection.RolledNotServing,
 		"retryBlockDenied", selection.RetryBlockDenied)
 	selection.LadderHold = ladderHold(input, target, selection.RolledNotServing)

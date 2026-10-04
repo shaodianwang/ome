@@ -35,7 +35,7 @@ func BuildPlan(component types.ComponentType, desired types.WorkloadDesiredSpec,
 	// The plan grows beyond replicas during the surge phase of a
 	// migration; scale-down logic is responsible for picking the right
 	// deletion target after that surge resolves.
-	indices := instancePlanIndices(observed.InstanceStatuses, replicas)
+	indices := instancePlanIndices(observed.InstanceStatuses, replicas, observed.RetryBlocks)
 	instances := make([]types.InstancePlan, len(indices))
 	runners := runnersForInstance(desired.MultiPod, workerSize)
 	for i, idx := range indices {
@@ -173,9 +173,10 @@ func MigrationModeOrDefault(p *types.MigrationPolicy) types.MigrationMode {
 
 // instancePlanIndices computes the per-Instance index set the plan should
 // drive: live surge pairs (unbounded by replicas), then the existing
-// steady indices up to the replica cap — the Ready ones in rotation first,
-// oldest first within a tier — excluding sources whose replacements are
-// proven promoted, then new indices to round out scale-up.
+// steady indices up to the replica cap — in rank order (scaleDownRank),
+// oldest first within a rank — excluding sources whose replacements are
+// proven promoted, then new indices to round out scale-up. blocks is the
+// Component's retry ladder, which the rank reads a row's revision by.
 //
 // The replica cap counts only non-migration indices. Counting the
 // surge against it would drop a healthy non-migrating sibling out of
@@ -186,7 +187,7 @@ func MigrationModeOrDefault(p *types.MigrationPolicy) types.MigrationMode {
 // any steady row and its marker following the source in or out, so the
 // two leave the plan together and the scale-down retires them as one
 // unit instead of taking a healthy sibling.
-func instancePlanIndices(instances []types.InstanceStatus, replicas int32) []int32 {
+func instancePlanIndices(instances []types.InstanceStatus, replicas int32, blocks []types.RetryBlock) []int32 {
 	used := existingInstanceIndices(instances)
 	// "Protected" / "source" sets cover BOTH migration surge pairs and
 	// multi-pod (gang) update-surge pairs — the two cases that transiently
@@ -221,16 +222,14 @@ func instancePlanIndices(instances []types.InstanceStatus, replicas int32) []int
 		}
 	}
 
-	// Ready instances in rotation are the stable replicas, preferred to
-	// keep; a scale-down removes the others first.
-	preferredByIndex := map[int32]bool{}
+	// The steady rows are kept in rank order; a scale-down removes the
+	// lowest-ranked rows first.
+	rankByIndex := map[int32]int{}
 	statusByIndex := map[int32]types.InstanceStatus{}
 	retiringSources := map[int32]struct{}{}
 	for _, s := range instances {
 		statusByIndex[s.Index] = s
-		if keepsPreference(s) {
-			preferredByIndex[s.Index] = true
-		}
+		rankByIndex[s.Index] = scaleDownRank(s, blocks)
 	}
 
 	// A handoff source retires only after its replacement is Ready. Gang updates
@@ -286,10 +285,9 @@ func instancePlanIndices(instances []types.InstanceStatus, replicas int32) []int
 		}
 	}
 
-	// Pass 2: fill the steady replica budget. Prefer the Ready instances in
-	// rotation over the rest, then keep the oldest eligible index within
-	// each tier.
-	fill := func(wantPreferred bool) {
+	// Pass 2: fill the steady replica budget in rank order, keeping the
+	// oldest eligible index within each rank.
+	fill := func(rank int) {
 		for _, idx := range sorted {
 			if steadyCount >= replicas {
 				return
@@ -306,7 +304,7 @@ func instancePlanIndices(instances []types.InstanceStatus, replicas int32) []int
 			if _, follower := sourceOf[idx]; follower {
 				continue
 			}
-			if preferredByIndex[idx] != wantPreferred {
+			if rankByIndex[idx] != rank {
 				continue
 			}
 			indices = append(indices, idx)
@@ -320,8 +318,9 @@ func instancePlanIndices(instances []types.InstanceStatus, replicas int32) []int
 			}
 		}
 	}
-	fill(true)
-	fill(false)
+	for rank := 0; rank <= lowestScaleDownRank; rank++ {
+		fill(rank)
+	}
 
 	// Pass 3: allocate new slots for scale-up.
 	taken := make(map[int32]struct{}, len(used)+len(indices))
@@ -342,6 +341,26 @@ func instancePlanIndices(instances []types.InstanceStatus, replicas int32) []int
 	return indices
 }
 
+// scaleDownRank orders the steady rows a scale-down keeps, lowest kept
+// first: a serving row on a sound revision, any other row on a sound
+// revision, a serving row on a failing revision, then the rest. A row on
+// a failing revision ranks below every row on a sound one: its Ready is
+// the pause between crashes of a revision the ladder reads as failed,
+// not capacity the Component can keep.
+func scaleDownRank(s types.InstanceStatus, blocks []types.RetryBlock) int {
+	rank := 0
+	if !keepsPreference(s) {
+		rank++
+	}
+	if rowOnFailingRevision(s, blocks) {
+		rank += 2
+	}
+	return rank
+}
+
+// lowestScaleDownRank is the last rank scaleDownRank assigns.
+const lowestScaleDownRank = 3
+
 // keepsPreference reports whether a row is a stable replica the plan keeps
 // ahead of the rest: Ready, with every pod its published counts hold in
 // rotation. A Ready row that serves fewer pods than it has serves nothing
@@ -352,6 +371,35 @@ func keepsPreference(s types.InstanceStatus) bool {
 		return false
 	}
 	return s.PodCount == 0 || s.ServingPodCount >= s.PodCount
+}
+
+// rowOnFailingRevision reports whether the row stands on a revision the
+// retry ladder reads as failing: the revision its attempt is pinned to,
+// else the one it runs, carries a Held or Backoff RetryBlock — a failed
+// attempt no later attempt has answered — or an attempt in flight that
+// answers a crash this row remembers of its promoted set
+// (types.RemembersCrash). A revision with no block is sound whatever the
+// row's failure record says: that record also names expired migrations
+// and overdue drains, which say nothing about the revision.
+func rowOnFailingRevision(s types.InstanceStatus, blocks []types.RetryBlock) bool {
+	rev := s.TargetRevision
+	if rev == "" {
+		rev = s.RunningRevision
+	}
+	if rev == "" {
+		return false
+	}
+	b := types.FindRetryBlock(blocks, rev)
+	if b == nil {
+		return false
+	}
+	switch b.State {
+	case types.RetryBlockHeld, types.RetryBlockBackoff:
+		return true
+	case types.RetryBlockRetryInProgress:
+		return types.RemembersCrash(&s)
+	}
+	return false
 }
 
 func migrationHandoffPromoted(source, target types.InstanceStatus, targetReferences int) bool {

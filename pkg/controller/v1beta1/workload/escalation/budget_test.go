@@ -3,6 +3,7 @@ package escalation_test
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -894,6 +895,15 @@ func terminatingSurgePod(idx, ordinal int32, deadline time.Time) *corev1.Pod {
 	return pod
 }
 
+// liveSurgePod is one live pod of Instance idx at ordinal carrying the
+// revision hash rev: the shape a replacement a disposed attempt left
+// behind has.
+func liveSurgePod(idx, ordinal int32, rev string) *corev1.Pod {
+	pod := terminatingSurgePod(idx, ordinal, time.Time{})
+	pod.Labels[query.LabelRevisionHash] = rev
+	return pod
+}
+
 // gangPods returns n pods of Instance idx, Terminating until deadline when
 // deadline is non-zero.
 func gangPods(idx, n int32, deadline time.Time) []*corev1.Pod {
@@ -904,13 +914,15 @@ func gangPods(idx, n int32, deadline time.Time) []*corev1.Pod {
 	return pods
 }
 
-// TestTerminatingSurgeInFlight pins what a Component's Terminating pods
-// hold against its surge budget: a pod the API still lists inside its own
-// deletion grace, beyond its Instance's pod count, holds the slot its
-// surge took, and nothing else does. The deadline is the pod's
+// TestTerminatingSurgeInFlight pins what a Component's extra pods hold
+// against its surge budget: a pod the API still lists beyond its
+// Instance's pod count holds the slot its surge took — a Terminating pod
+// inside its own deletion grace, and a live pod a disposed attempt left
+// behind for as long as it exists. The deadline is the pod's
 // DeletionTimestamp, which the API stamps at the request time plus the
 // pod's grace, so a pod past it stops counting however long its kubelet
-// takes to reap it.
+// takes to reap it. A live extra pod is attributed to its Instance, whose
+// next start replaces it.
 //
 // Cells: instance/Ready/pod.terminating[source]/before, instance/Failed/gate.deny[Budget]/before
 func TestTerminatingSurgeInFlight(t *testing.T) {
@@ -933,6 +945,11 @@ func TestTerminatingSurgeInFlight(t *testing.T) {
 		return types.InstanceStatus{Index: idx, Incarnation: 1, Phase: types.InstancePhaseUpdating, RunningRevision: "prior-rev",
 			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: step, SurgeIndex: surgeIndex}}
 	}
+	// A disposed row names its revision in full, as the adapter records
+	// it, so its pods' revision hashes read against it.
+	failed := func(idx int32) types.InstanceStatus {
+		return types.InstanceStatus{Index: idx, Incarnation: 1, Phase: types.InstancePhaseFailed, RunningRevision: "llama-70b-engine-priorrev"}
+	}
 	cases := []struct {
 		name       string
 		plan       types.ComponentPlan
@@ -941,6 +958,8 @@ func TestTerminatingSurgeInFlight(t *testing.T) {
 		rolled     []int32
 		wantSlots  int32
 		wantPods   []string
+		wantLive   []string
+		wantByInst map[int32]int32
 		wantWakeAt time.Time
 	}{
 		{
@@ -965,13 +984,52 @@ func TestTerminatingSurgeInFlight(t *testing.T) {
 			},
 		},
 		{
-			name:     "a live extra pod with no deletion requested is not counted here",
+			name:     "a replacement a disposed attempt left alive beside its source holds one slot, attributed to its Instance",
+			plan:     planOf(singlePod, 0, 1),
+			statuses: []types.InstanceStatus{ready(0), failed(1)},
+			pods: map[int32][]*corev1.Pod{
+				0: {terminatingSurgePod(0, 0, time.Time{})},
+				1: {terminatingSurgePod(1, 0, time.Time{}), liveSurgePod(1, 1, "crash-rev")},
+			},
+			wantSlots:  1,
+			wantLive:   []string{"llama-70b-engine-1-default-0-1"},
+			wantByInst: map[int32]int32{1: 1},
+		},
+		{
+			name:     "a live extra pod beside a Terminating one counts with it, and only the Terminating one sets the wake",
+			plan:     planOf(singlePod, 0, 1),
+			statuses: []types.InstanceStatus{ready(0), failed(1)},
+			pods: map[int32][]*corev1.Pod{
+				0: {terminatingSurgePod(0, 0, time.Time{})},
+				1: {terminatingSurgePod(1, 0, time.Time{}), terminatingSurgePod(1, 1, within), liveSurgePod(1, 2, "crash-rev")},
+			},
+			wantSlots:  2,
+			wantPods:   []string{"llama-70b-engine-1-default-0-1"},
+			wantLive:   []string{"llama-70b-engine-1-default-0-2"},
+			wantByInst: map[int32]int32{1: 1},
+			wantWakeAt: within,
+		},
+		{
+			name:     "the live pods of an index the plan does not own are the scale-down's, not the budget's",
 			plan:     planOf(singlePod, 0, 1),
 			statuses: []types.InstanceStatus{ready(0), ready(1)},
 			pods: map[int32][]*corev1.Pod{
 				0: {terminatingSurgePod(0, 0, time.Time{})},
-				1: {terminatingSurgePod(1, 0, time.Time{}), terminatingSurgePod(1, 1, time.Time{})},
+				1: {terminatingSurgePod(1, 0, time.Time{})},
+				5: {terminatingSurgePod(5, 0, time.Time{})},
 			},
+		},
+		{
+			name:     "a gang's live extra pods count in whole Instances",
+			plan:     planOf(gang, 0, 1),
+			statuses: []types.InstanceStatus{ready(0), failed(1)},
+			pods: map[int32][]*corev1.Pod{
+				0: gangPods(0, 8, time.Time{}),
+				1: append(gangPods(1, 8, time.Time{}), liveSurgePod(1, 8, "crash-rev"), liveSurgePod(1, 9, "crash-rev")),
+			},
+			wantSlots:  1,
+			wantLive:   []string{"llama-70b-engine-1-default-0-8", "llama-70b-engine-1-default-0-9"},
+			wantByInst: map[int32]int32{1: 1},
 		},
 		{
 			name:     "a source draining under its own surge step is charged by the step, not again here",
@@ -1041,12 +1099,22 @@ func TestTerminatingSurgeInFlight(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := escalation.TerminatingSurgeInFlight(tc.plan, tc.statuses, tc.pods, tc.rolled, now)
+			got := escalation.ExtraPodSurgeInFlight(tc.plan, tc.statuses, tc.pods, tc.rolled, now)
 			if got.Slots != tc.wantSlots {
 				t.Errorf("slots = %d, want %d", got.Slots, tc.wantSlots)
 			}
-			if !slices.Equal(got.Pods, tc.wantPods) {
-				t.Errorf("pods = %v, want %v", got.Pods, tc.wantPods)
+			if !slices.Equal(got.Terminating, tc.wantPods) {
+				t.Errorf("terminating pods = %v, want %v", got.Terminating, tc.wantPods)
+			}
+			if !slices.Equal(got.Live, tc.wantLive) {
+				t.Errorf("live extra pods = %v, want %v", got.Live, tc.wantLive)
+			}
+			wantByInst := tc.wantByInst
+			if wantByInst == nil {
+				wantByInst = map[int32]int32{}
+			}
+			if !maps.Equal(got.LiveSlotsByInstance, wantByInst) {
+				t.Errorf("live slots by Instance = %v, want %v", got.LiveSlotsByInstance, wantByInst)
 			}
 			if !got.NextRelease.Equal(tc.wantWakeAt) {
 				t.Errorf("next release = %v, want %v", got.NextRelease, tc.wantWakeAt)
