@@ -1,0 +1,20 @@
+# p4395: [gen] node notready engine-mn W1+router N=2 rp None mig Auto co none relocated  Ne=2 Nd=0 Nr=2 ceil_e=2 ceil_d=0 ceil_r=2 fault=node:notready co=none topo=engine-mn during=idle lift=after-recover expect=relocated needs=forcedelete
+# reason: the kubelet under the highest-index engine Instance is stopped; the node reads NotReady and no pod of the Instance on it serves; once the node's unreachable evidence is older than the deployed force-delete threshold the policy frees the pod names it holds and the Instance is rebuilt on other nodes while the node is still down: the pod the node held is recreated at the same index on another node, and members on live nodes keep theirs; it serves on its running revision with no new revision and no reset mailbox; then the kubelet is started again and every pod the node held is gone; the move is the force-delete sweep plus the ordinary rebuild, not a migration, so migration mode Auto plays no part; the router is a negative control (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p4395 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", migrationPolicy: { mode: "Auto" }, updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

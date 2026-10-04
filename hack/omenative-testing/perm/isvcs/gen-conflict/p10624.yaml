@@ -1,0 +1,22 @@
+# p10624: [gen] conflict canary at soak engine N=8 once  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 fault=conflict:canary-serving@1 co=none topo=engine canary=auto form=once nophase=Failed cell=canary/Serving[soak]/competingWriter[once] target=isvc
+# reason: one competing write bumps the ISVC's resourceVersion while the second step of the engine unit's ladder soaks its split on engine single (8 Instances), so the controller's status writes carry a stale resourceVersion, conflict and are retried; the ladder walks every step to Stable with the step index never going back, each pod slot of the unit created once, every Instance on the canary revision serving, the rows following the pods in rotation within the configured requeues, the manager's events bounded and nothing left held
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p10624 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

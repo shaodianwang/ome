@@ -1,0 +1,13 @@
+# p4375: [gen] node scaleup engine N=4 persistent lift after-recover  mode=scaledown Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=node:settling floor_soft=1 co=none topo=engine to_e=5 lift=after-recover needs=forcedelete
+# reason: the engine is scaled from N to N+1 on engine alone, single-pod, and as it lands the kubelet of the node under the highest engine Instance is stopped; the node reads NotReady on the cluster's own grace and no pod of the Instance on it serves, every other pod that node ran going with it, so the capacity floor is reported rather than judged; the node stays down: once its unreachable evidence is older than the deployed force-delete threshold the policy frees the pod names it holds and the controller rebuilds the Instance on other nodes, Ready and serving with every pod the node held replaced, while the node is still down; then the kubelet is started again with nothing of the Instance left on it; the scale completes with the new Instance whole and serving and the survivors on their own pods, with every row settled, no hold left behind and the reset mailbox never written
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p4375 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

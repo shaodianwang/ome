@@ -1,0 +1,29 @@
+# p11633: [gen] canary fault-old crashloop:start kept at soak engine-mn W1 router N=2 rp None  mode=canary Ne=2 Nd=0 Nr=2 ceil_e=3 ceil_d=0 ceil_r=2 fault=crashloop:canary-serving@1 co=none topo=engine-mn canary=auto form=start victims=1 nophase=Failed cell=canary/Serving[soak]/stableBroken[crashStart]
+# reason: the leader pod of one old-revision engine Instance crashes at every start while the second step soaks its split on engine+router gang (2 Instances of 1 leader + 1 worker), under restart policy None; the cause stays until the ladder replaces the Instance; the ladder walks every step to Stable inside its budgets, the broken Instance ends on the canary revision serving, no repair is opened for it after the push, and the healthy Instances keep serving above N-1
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11633 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

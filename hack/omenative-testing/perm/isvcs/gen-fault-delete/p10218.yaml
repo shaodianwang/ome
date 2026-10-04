@@ -1,0 +1,13 @@
+# p10218: [gen] broken pending quota-kept delete engine N=4 rp None lift never  mode=recreate Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 fault=quota:-1 co=none topo=engine during=idle lift=never
+# reason: a quota one pod short of the running fleet is armed on the settled service, then the service is deleted: every pod goes within the teardown budget and the same name is re-applied, but its last pod cannot be admitted, so a row of the recreate waits with reason QuotaExceeded and no row reads Failed; the cause stays to the end, so the wait holds with its reason across the hold window and the service comes back only once the cause is gone
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p10218 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }

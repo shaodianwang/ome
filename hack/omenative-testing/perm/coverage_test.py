@@ -373,6 +373,14 @@ class FaultTest(unittest.TestCase):
         self.assertEqual([("webhook unavailable", "persistent", "-", "admission webhook")],
                          self.fault(fault="webhook:idle", during="idle", lift="after-window", topo="engine"))
 
+    def test_a_window_at_a_canary_state_sits_on_the_canary(self):
+        case = self.corpus.write(mode="canary", canary="auto", fault="webhook:canary-serving@1", lift="after-window",
+                                 nophase="Failed", cell="canary/Serving[soak]/webhookDown[afterWindow]", topo="engine")
+        self.assertEqual(("canary", [("webhook unavailable", "persistent", "-")]), (case.operation, case.fault_rows()))
+        case = self.corpus.write(mode="canary", canary="auto", fault="conflict:canary-serving@1", form="once", target="isvc",
+                                 nophase="Failed", cell="canary/Serving[soak]/competingWriter[once]", topo="engine")
+        self.assertEqual(("canary", [("apiserver conflict", "one-shot", "-")]), (case.operation, case.fault_rows()))
+
     def test_competing_writer_form_follows_its_writes(self):
         self.assertEqual([("apiserver conflict", "one-shot", "-", "competing writer on the isvc")],
                          self.fault(fault="conflict:settling", form="once", target="isvc", topo="engine"))
@@ -678,9 +686,10 @@ class CommittedCorpusTest(unittest.TestCase):
         for case in self.by_folder["gen-rollout"]:
             self.assertEqual(("push", []), (case.operation, case.faults), case.id)
         for case in self.by_folder["gen-fault"]:
-            # The hook half (from p1520) deletes the pod at the remaining operations' moments.
+            # The hook half (p1520-p1537) deletes the pod at the remaining operations' moments;
+            # the rows minted after it are the push on the shapes the first pass skipped.
             remaining = ("rollback", "strategy or policy edit", "runtime edit", "scale up", "scale down", "delete")
-            self.assertIn(case.operation, remaining if int(case.id[1:]) >= 1520 else ("push",), case.id)
+            self.assertIn(case.operation, remaining if 1520 <= int(case.id[1:]) <= 1537 else ("push",), case.id)
             self.assertEqual(["one-shot"], [f[1] for f in case.faults], case.id)
             self.assertIn(case.timing, ("settling", "rotating"), case.id)
         for case in self.by_folder["gen-restart"]:

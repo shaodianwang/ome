@@ -1,0 +1,18 @@
+# p10195: [gen] broken pending quota-kept up1 engine+router N=4 rp None lift never  mode=scaledown Ne=4 Nd=0 Nr=2 ceil_e=5 ceil_d=0 ceil_r=2 fault=quota:0 co=none topo=engine during=idle lift=never to_e=5
+# reason: a quota with room for no further pod is armed on the settled service, then the engine is scaled from 4 to 5: the new Instance's pod cannot be admitted, so its row waits with reason QuotaExceeded, nothing settled is taken down to make room, the healthy Instances keep their pods and keep serving at 4, and no row reads Failed; the cause stays to the end, so the wait holds with its reason across the hold window; the router is neither scaled nor waiting and keeps its pods
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p10195 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

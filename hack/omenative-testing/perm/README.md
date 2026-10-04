@@ -559,6 +559,12 @@ such as the recovery half of a podkill, carries both ids.
   taken down; the lift lets the ladder complete, `never` parks it at the
   capacity step's ready timeout (`terminal=Failed`) with the wait still
   reported.
+- **A window at a grid state.** `fault=webhook:canary-<state>[@step]
+  lift=after-hold|after-window` and `fault=conflict:canary-<state>[@step]
+  form=once|persist target=isvc|ir` open the window faults of the
+  "Fault cases" section while the ladder is at that state; the window
+  verdict is read beside the ladder's, with the step index never going back
+  (see "A window at every hook").
 - **`terminal=Stable|RolledBack|Failed`** — the expected terminal phase when the
   derivation from `analysis=`/`rollback=` does not apply; `Failed` asserts the
   park (no canary traffic, not fully rolled, nothing rolled back).
@@ -1007,8 +1013,8 @@ carries `perm.test/rev: "v1"` so the rollback is an annotation update, not
 a removal. Its continuation (`p10800`+) puts a break beside the rollback on
 the six shape families: each running-revision break, kept and one-shot, at
 each hook under a (strategy, group) pair of its own, the sibling forms at
-the first hook, and the held-moment breaks under every strategy, the crash
-kinds once, and on the grouped decoder. `rollback=1` in canary mode keeps
+the first hook, and the held-moment breaks under every strategy, every
+kind once, and on the grouped decoder. `rollback=1` in canary mode keeps
 its own meaning (the `ome.io/rollout-rollback` probe).
 
 A break rides beside the rollback in two places. On the running revision,
@@ -1031,14 +1037,24 @@ on a prefill/decode service) so the roll parks on its first pod: the
 kubelet shows the break, the status says why (a rolloutHold gate from the
 retry ladder or the budget, a Failed row, a RetryHeld or InstanceFailed
 event; waited for up to `HOLD_REASON_WAIT_S` after the break shows), and
-the starting revision is re-applied. `once=1` on a crash kind kills the
-pushed revision's first runner exactly once instead and rolls back as soon
-as the restart shows (the status need not have said why). The verdict
-reads the held reason first, then the rollback's end state, and adds that
-nothing of a revision that cannot start ever served, no pod of the
-withdrawn revision was created and no repair named a bumped Instance once
-the rollback fired. `once=1` and `lift=` do not combine with a rollback
-otherwise; `expect=` is the idle break's vocabulary and does not apply.
+the starting revision is re-applied. `once=1` is each kind's one-shot
+form: on a crash kind it kills the pushed revision's first runner exactly
+once and rolls back as soon as the restart shows; on `imagepull`,
+`configkey` and `stuck` it breaks the pushed revision's first pod once
+(pointed at the unpullable image while its runner starts, reading a key
+the ConfigMap lacks, the readiness switch set before it is ever Ready),
+rolls back as soon as the kubelet shows the break (the readiness switch
+once the pod has run `READINESS_NEW_BITE_S` without passing readiness),
+and takes the cause away once the rollback has fired (the image put back,
+the key put into the ConfigMap, the switch lifted; a pod the rollback has
+already removed took the switch with it). The status need not have said
+why under a one-shot cause. The verdict reads the held reason first, then
+the rollback's end state, and adds that nothing of a revision that cannot
+start ever served (asked of a kept break), the one-shot cause was taken
+away, no pod of the withdrawn revision was created and no repair named a
+bumped Instance once the rollback fired. `once=1` and `lift=` do not
+combine with a rollback otherwise; `expect=` is the idle break's
+vocabulary and does not apply.
 
 ### Small fleets and the engine behind a router (`gen-size/`, `gen-router-gang/`)
 
@@ -1380,9 +1396,12 @@ budget of zero holds it). The further rows run one case per ledger cell on
 the six shape families, under restart policy `None` and no group, on one
 scale-down, the scale-up and the delete: the missing key kept away (no
 scale-up: the new Instance would wait on the same key), the one-shot forms,
-a taint or a quota armed before the operation, and a crash at start on the
-sibling (the decoder beside a prefill/decode engine, the router in front of
-an engine fleet). `isvcs/MANIFEST.md` lists the cells left out and why.
+a taint or a quota armed before the operation (the quota kept to the end
+under the scale-up and the delete too: the new Instance's row, or a row of
+the recreate, waits with its reason across the hold window), and a crash at
+start on the sibling (the decoder beside a prefill/decode engine, the router
+in front of an engine fleet). `isvcs/MANIFEST.md` lists the cells left out
+and why.
 
 ### A fault at a moment of a move (`mode=migrate at=accept|surge|drain`)
 
@@ -1402,8 +1421,11 @@ rollout) and the source node's loss (`fault=node:notready`, always the node
 under the moved Instance's source pod, with `lift=after-recover` and
 `needs=forcedelete`: the kubelet is started again once the Instance has
 settled, and the cell SKIPs off the force-delete lane as the node family's
-do). A moment whose victim pod never shows within the grace is recorded as
-missed and fails the case. A break lowers the capacity floor by the one
+do). A quota with no room met by the request (`fault=quota:0 expect=fail`,
+the bounded-failure contract of the hand-written `fault/` cases; `lift=1`
+lifts it after the bounded failure and a fresh request completes) runs on
+the shapes those cases do not. A moment whose victim pod never shows within
+the grace is recorded as missed and fails the case. A break lowers the capacity floor by the one
 Instance it broke instead of waiving it; a node loss waives it (the dead
 node takes every pod on it).
 
@@ -1912,7 +1934,11 @@ cell on the six shape families (the surge strategy, the env edit):
   is Ready and serving on other nodes with every pod the node held
   replaced (under a delete, until those pods are gone), which is the
   force-delete policy's doing (`needs=forcedelete`, the policy twin); then
-  the kubelet is started again. Either way the operation must complete
+  the kubelet is started again. That form runs under every operation: a
+  rollback, an edit, a runtime edit, a scale-down and the canary keep the
+  victim Instance and rebuild it elsewhere, a push and a scale-up rebuild
+  it elsewhere on the revision they owe it, and a delete has the pods the
+  node held freed so the re-apply lands elsewhere. Either way the operation must complete
   within its budget plus the loss's (the NotReady grace and the settle
   window, or the relocation budget), the rows settle, nothing is held and
   the reset mailbox stays unwritten; `expect=` has no place, the
@@ -2399,7 +2425,13 @@ cell on the six shape families (the surge strategy, the env edit):
   cluster this harness owns (`SKIP` elsewhere); the quota runs anywhere.
   `isvcs/gen-pending/` crosses both causes with both moments, topology,
   restart policy, lift and (under the roll) strategy, with the quota sized
-  per cell as above. The same causes armed before a rollback (`rollback=1
+  per cell as above; it also arms a quota with no room before a canary push
+  on the shapes the hand-written canary cases do not run (`mode=canary
+  fault=quota:0`): kept, the capacity step parks the ladder Failed at its
+  ready timeout (`terminal=Failed`); lifted once the ladder has parked
+  (`verb=quotalift during=canary-failed`), the capacity lands, the park
+  holds and a resume (`verb2=resume`) walks the ladder to Stable. The same
+  causes armed before a rollback (`rollback=1
   during=draining`, the roll drain-first: its first replacement is what
   waits, and the rollback then owes that Instance on the starting revision
   under the same cause), before a strategy edit landed as the push lands
@@ -2494,7 +2526,17 @@ cell on the six shape families (the surge strategy, the env edit):
   annotation consumed and its Instance whole, and a delete comes back under
   the same name on fresh pods once the window has closed. A hook the
   operation passes before the window can open (the roll completes first)
-  is `INFRA-FAIL`, never a pass. Not under a canary step (`MISSING_HOOKS`).
+  is `INFRA-FAIL`, never a pass. Under a canary (`mode=canary`,
+  `fault=<kind>:canary-<state>[@step]`) the window opens at the grid state
+  it names and the canary driver watches it beside the ladder: the webhook
+  is pointed back by its lift rule, one competing write settles after
+  `LIFT_SETTLE_S`, a writer that persists stops when the ladder ends; the
+  window verdict is read with the ladder as the operation (each pod slot of
+  the unit created once), and the ladder's step index must never go back
+  while the window is open or after it (an outage holds the step where it
+  is; a retried status write moves the step once). The generated
+  `gen-webhook` and `gen-conflict` families open both windows at the second
+  step's soak on the six shape families.
 - **`fault=quota`, `fault=taint`, `fault=preempt`, `fault=webhook`, `via=preempt` and
   `pool=packed` cases run serially.** A quota case creates a *namespace-wide*
   ResourceQuota sized from a live usage snapshot, so run concurrently it both
@@ -2687,14 +2729,17 @@ Four generators write into `isvcs/`; re-run one after editing it:
   at the last gate before the cutover; the ladder still lands the fix on every
   broken Instance; continued at `p11500`–`p11699` with the remaining
   stable-side breaks on the six shape families: a readiness loss kept or
-  lifted, the key put back, a crash and a pull failure taken away again, and
-  one runner killed once) and `isvcs/gen-canary-fault-new/` (the push brings a
-  revision that crashes at start, crashes after Ready inside or past the first
-  soak, or cannot be pulled; the ladder parks where it bites and a rollback or
-  a fix push lands; then on the six shape families the missing key and the
-  never-Ready revision under both exits, their one-shot forms and the pull
-  failure that lifts, one runner killed once at start or after Ready, and a
-  taint armed before the push), the deletion and the eviction under a canary
+  lifted, the key put back, a crash and a pull failure taken away again, one
+  runner killed once, and the kept crash and pull failure on the gangs and
+  the engine-behind-a-router shapes) and `isvcs/gen-canary-fault-new/` (the
+  push brings a revision that crashes at start, crashes after Ready inside or
+  past the first soak, or cannot be pulled; the ladder parks where it bites
+  and a rollback or a fix push lands; then on the six shape families the
+  missing key and the never-Ready revision under both exits, their one-shot
+  forms and the pull failure that lifts, one runner killed once at start or
+  after Ready, a taint armed before the push, and the kept crash and pull
+  failure under both exits on the gangs and the engine-behind-a-router
+  shapes), the deletion and the eviction under a canary
   once and again (`gen-canary-podkill`, the six shape families), what a step's
   gates read (`p9050`–`p9249`) →
   `isvcs/gen-canary-fault-gate/` (the health metric breaches on the stable or
@@ -2813,7 +2858,16 @@ groups and scores correctly.
 committed cases: line 1 (the header) and line 2 (the `# reason:`) of every
 case under `isvcs/`, plus the facts a header does not carry and the body
 does (the engine's update strategy and budget, its restart policy, the gang
-width, the rollout group kind, the canary steps).
+width, the rollout group kind, the canary steps). The operations with no
+fault on the shapes the hand-written folders skip are generated as control
+rows in the operation's own family (`gen-rollout`, `gen-rollback`,
+`gen-switch`, `gen-fault-edit`, `gen-fault-delete`, `gen-fault-scale`,
+`gen-fault-move`), so every (shape, operation, no fault) cell of the product
+has a case; the single cells the shape axis left on the engine-behind-a-router
+shapes (a node lost at steady state, the key put back, a pull failure at
+steady state and under a push, a pod or a gang leader deleted under a push
+and once at a canary step, a rollback at the held moment) are generated the
+same way in the family that owns each verb.
 
 ```bash
 python3 coverage.py            # the Markdown ledger on stdout

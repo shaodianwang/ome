@@ -1,0 +1,33 @@
+# p10716: [gen] pending quota canary lifted pd N=8  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=2 fault=quota:0 co=none topo=pd canary=auto during=canary-failed verb=quotalift verb2=resume during2=canary-failed terminal=Stable cell=canary/Failed/capacityReached,canary/Failed/resume[afterCapacity]
+# reason: a quota with room for no further pod is in place when the canary push lands on engine+decoder+router single (8 Instances), so the first step's canary pod cannot be admitted; the capacity step waits with reason QuotaExceeded on its row, nothing settled is taken down to make room, the stable revision keeps serving every Instance and no traffic names the canary; the step parks the ladder Failed at its ready timeout, then the quota is lifted: the capacity the parked step asked for lands and the park holds anyway (still Failed at the same step with the capacity there, since capacity that arrives after the deadline does not un-park a canary), and a resume re-enters the ladder at its first step and walks every step to Stable with every Instance on the canary revision serving
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p10716 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          canary:
+            readyTimeout: "90s"
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

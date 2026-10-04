@@ -1,0 +1,18 @@
+# p1538: [gen] podkill settling engine+router N=4 SurgeThenDrain s1 rp None  Ne=4 Nd=0 Nr=2 ceil_e=5 ceil_d=0 ceil_r=2 fault=podkill:settling floor_soft=1 order_soft=1 co=none topo=engine victimcomp=engine
+# reason: kill a settled pod: repair overlaps the in-flight roll, both must complete; floor waived — the kill itself costs settled capacity the update budget cannot absorb while the repair restarts; order waived — the fault-induced deletion is a drain with no preceding surge; the router is a negative control (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1538 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

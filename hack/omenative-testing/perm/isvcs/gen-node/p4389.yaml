@@ -1,0 +1,27 @@
+# p4389: [gen] node push pd-mn W1 N=2 SurgeThenDrain s1 persistent lift after-recover  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=2 ceil_r=2 fault=node:rotating floor_soft=1 order_soft=1 co=none topo=pd-mn lift=after-recover needs=forcedelete
+# reason: the engine is bumped under SurgeThenDrain on prefill/decode as gangs of 1 leader + 1 worker, and at the first pod of the new revision the kubelet of the node under the highest engine Instance still on the starting revision is stopped; the node reads NotReady on the cluster's own grace and no pod of the Instance on it serves, every other pod that node ran going with it, so the capacity floor is reported rather than judged; the node stays down: once its unreachable evidence is older than the deployed force-delete threshold the policy frees the pod names it holds and the controller rebuilds the Instance on other nodes, Ready and serving with every pod the node held replaced, while the node is still down; then the kubelet is started again with nothing of the Instance left on it; the roll completes with every Instance on the new revision and serving, with every row settled, no hold left behind and the reset mailbox never written; each Instance is a gang, so the loss takes the member the node ran and the restart policy decides whether that member or the whole gang is rebuilt; decoder and router are negative controls (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p4389 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

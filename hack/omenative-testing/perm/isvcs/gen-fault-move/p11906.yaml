@@ -1,0 +1,23 @@
+# p11906: [gen] fault-move quota lifted pd N=4  mode=migrate Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 fault=quota:0 co=none topo=pd mig=Auto inst=0 expect=fail lift=1
+# reason: a move of engine Instance 0 is requested on prefill/decode, single-pod with a quota with room for no further pod in place: the replacement cannot be admitted, so the move ends Failed within its bound with the source Instance still Ready and serving, the request annotation consumed and its ledger entry terminal (the slot freed); nothing exceeds N+1 alive and nothing settled is taken down to make room; then the quota is lifted and a fresh request moves the Instance: it completes, the source drains and the Instance ends whole on its replacement, still within N+1 alive; decoder and router are negative controls (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p11906 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

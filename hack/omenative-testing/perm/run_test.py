@@ -1713,7 +1713,8 @@ class WindowFaultHeaderTest(unittest.TestCase):
         self.assertTrue(run._fault_ok("webhook:rotating"))
         self.assertTrue(run._fault_ok("conflict:draining"))
         self.assertTrue(run._fault_ok("webhook:migrating"))
-        self.assertFalse(run._fault_ok("conflict:canary-serving"))
+        self.assertTrue(run._fault_ok("conflict:canary-serving"), "a window opens at a canary grid state too")
+        self.assertTrue(run._fault_ok("webhook:canary-serving@1"))
         self.assertFalse(run._fault_ok("webhook:accept"))
         self.assertFalse(run._fault_ok("webhook"))
 
@@ -1749,6 +1750,24 @@ class WindowFaultHeaderTest(unittest.TestCase):
         self.assertTrue(any("holds a window over a push" in e for e in self._errs(kill + " fault=webhook:settling lift=after-hold")))
         self.assertTrue(any("does not combine" in e
                             for e in self._errs(self.BASE + " fault=conflict:settling form=once target=isvc during=rotating")))
+
+    def test_a_window_under_a_canary_opens_at_a_grid_state(self):
+        canary = ("# p999: x mode=canary canary=auto Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine "
+                  "nophase=Failed cell=canary/Serving[soak]/webhookDown[afterHold]")
+        self.assertEqual([], self._errs(canary + " fault=webhook:canary-serving@1 lift=after-hold"))
+        self.assertEqual([], self._errs(canary + " fault=webhook:canary-serving lift=after-window"))
+        self.assertEqual([], self._errs(canary + " fault=conflict:canary-serving@1 form=once target=isvc"))
+        self.assertEqual([], self._errs(canary + " fault=conflict:canary-staging form=persist target=ir"))
+        self.assertTrue(any("opens at a grid state" in e for e in self._errs(canary + " fault=webhook:settling lift=after-hold")))
+        self.assertTrue(any("needs lift=" in e for e in self._errs(canary + " fault=webhook:canary-serving@1")))
+        self.assertTrue(any("needs form=" in e for e in self._errs(canary + " fault=conflict:canary-serving@1 target=isvc")))
+        self.assertTrue(any("a window under a push or a runtime edit starts at a hook of the roll" in e
+                            for e in self._errs(self.BASE + " fault=webhook:canary-serving@1 lift=after-hold")))
+        self.assertEqual("canary", run._window_operation({"mode": "canary"}))
+        f = run._fault_new("p999", {"mode": "canary", "fault": "webhook:canary-serving@1", "lift": "after-hold"})
+        self.assertTrue(run._canary_window_fault(f))
+        self.assertFalse(run._canary_window_fault(run._fault_new("p999", {"fault": "webhook:settling", "lift": "after-hold"})))
+        self.assertFalse(run._canary_window_fault(run._fault_new("p999", {"mode": "canary", "fault": "podkill:canary-serving@1"})))
 
     def test_the_window_knobs_belong_to_their_faults(self):
         self.assertTrue(any("names the object a competing writer patches" in e for e in self._errs(self.BASE + " target=isvc")))
@@ -2387,7 +2406,8 @@ class WindowHooksTest(unittest.TestCase):
         has("as the scale lands", self.SCALE_DOWN + " fault=webhook:rotating lift=after-hold")
         has("at a hook of the roll", self.BASE + " fault=webhook:migrating lift=after-hold")
         has("at a hook of the roll", self.RT + " fault=conflict:migrating form=once target=isvc")
-        has("malformed header value fault=", self.CANARY + " fault=webhook:canary-serving lift=after-hold")
+        self.assertEqual([], self._errs(self.CANARY + " fault=webhook:canary-serving lift=after-hold"), "a window opens at a grid state")
+        has("malformed header value fault=", self.CANARY + " fault=webhook:canary-bogus lift=after-hold")
         has("does not combine", self.BASE + " fault=conflict:settling form=once target=isvc during=rotating")
         has("does not combine", self.RT + " fault=webhook:settling lift=after-hold during=rollout")
 
@@ -2723,7 +2743,44 @@ class GeneratedWindowFamiliesTest(unittest.TestCase):
         return [(n, kv, m) for n, kv, m in fam if "hook" not in m]
 
     def _more(self, fam):
-        return [(n, kv, m) for n, kv, m in fam if "hook" in m]
+        return [(n, kv, m) for n, kv, m in fam if "hook" in m and m["op"] != "canary"]
+
+    def _canary(self, fam):
+        return [(n, kv, m) for n, kv, m in fam if m.get("op") == "canary"]
+
+    def test_both_windows_open_at_a_canary_step_on_every_shape(self):
+        """The window faults at the second step's soak of the engine unit's
+        ladder, on the gate family's six shapes: one case per lift of the
+        webhook outage and per form of the competing writer, minted after
+        each family's other rows."""
+        for folder, fam, knobs in (("gen-webhook", self._canary(self.webhook), {"after-hold", "after-window"}),
+                                   ("gen-conflict", self._canary(self.conflict), {"once", "persist"})):
+            self.assertEqual(12, len(fam), folder)
+            self.assertEqual({f for f, *_ in generate_cases.GATE_SHAPES}, {m["shape"] for _n, _kv, m in fam}, folder)
+            self.assertEqual(knobs, {kv.get("lift") or kv.get("form") for _n, kv, _m in fam}, folder)
+            others = [int(n[1:]) for n, _kv, m in (self.webhook if folder == "gen-webhook" else self.conflict) if m.get("op") != "canary"]
+            self.assertGreater(min(int(n[1:]) for n, _kv, _m in fam), max(others), f"{folder}: minted after the other rows")
+            for name, kv, m in fam:
+                text = self.outputs[f"{folder}/{name}.yaml"]
+                reason = text.splitlines()[1]
+                kind = folder[4:]
+                self.assertEqual(("canary", "auto", f"{kind}:{generate_cases.CANARY_WINDOW_HOOK}", "Failed"),
+                                 (kv["mode"], kv["canary"], kv["fault"], kv["nophase"]), name)
+                self.assertTrue(run._cell_ok(kv["cell"]), name)
+                self.assertIn(generate_cases.CANARY_WINDOW_EVENT[kind], kv["cell"], name)
+                self.assertNotIn("during", kv, name)
+                self.assertNotIn("verb", kv, name)
+                self.assertIn("canary:", text, f"{name}: the ladder is the case's group")
+                self.assertIn("the step index never going back", reason, name)
+                self.assertIn("each pod slot of the unit created once", reason, name)
+                if kind == "webhook":
+                    self.assertIn("refused by admission", reason, name)
+                    self.assertIn("hold window" if kv["lift"] == "after-window" else "pointed back", reason, name)
+                else:
+                    self.assertEqual("isvc", kv["target"], name)
+                    self.assertIn("stale resourceVersion", reason, name)
+                    self.assertIn("one competing write" if kv["form"] == "once" else "until the ladder ends", reason, name)
+            self._validates(folder, fam)
 
     def test_webhook_family(self):
         fam = self._first(self.webhook)
@@ -2886,13 +2943,252 @@ class GeneratedWindowFamiliesTest(unittest.TestCase):
             for name, _kv, _m in fam:
                 self.assertTrue(any(lo <= int(name[1:]) < hi for lo, hi in blocks), (folder, name))
         manifest = self.outputs[generate_cases.MANIFEST_REL]
-        for text in ("| gen-webhook | 168 |", "| gen-conflict | 264 |", "By window operation", "By competing-writer form",
+        for text in ("| gen-webhook | 180 |", "| gen-conflict | 276 |", "By window operation", "By competing-writer form",
                      "By competing-writer target", "gen-webhook points the admission webhook", "gen-conflict runs a competing writer",
                      "as a rollback filed at the first new pod lands"):
             self.assertIn(text, manifest)
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LeftoverSinglesTest(unittest.TestCase):
+    """The single cells the shape axis left on the engine-behind-a-router
+    shapes: one case each in the family that owns the verb, minted after
+    every other row, each a valid case naming the router as its control."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.fam = [(f, n, kv, m) for f, n, kv, m in rows if m.get("single")]
+        cls.rows = rows
+
+    def test_one_case_per_cell_in_the_verbs_own_family(self):
+        self.assertEqual(17, len(self.fam))
+        by_folder = collections.Counter(f for f, _n, _kv, _m in self.fam)
+        self.assertEqual({"gen-node": 4, "gen-heal": 2, "gen-imagepull": 4, "gen-fault": 1, "gen-gang-member": 1,
+                          "gen-canary-podkill": 3, "gen-rollback": 2}, dict(by_folder))
+        router = {("engine", 2), ("engine-mn", 2)}
+        for folder in ("gen-node", "gen-heal", "gen-imagepull", "gen-rollback"):
+            self.assertEqual(router, {(kv["topo"], kv["Nr"]) for f, _n, kv, _m in self.fam if f == folder}, folder)
+        self.assertEqual({("engine-mn", 0), ("engine", 2), ("engine-mn", 2)},
+                         {(kv["topo"], kv["Nr"]) for f, _n, kv, _m in self.fam if f == "gen-canary-podkill"})
+        self.assertEqual({"repaired", "relocated"}, {kv["expect"] for f, _n, kv, _m in self.fam if f == "gen-node"})
+        for folder, name, kv, m in self.fam:
+            others = [int(x[1:]) for f, x, _kv, mm in self.rows if f == folder and not mm.get("single")]
+            self.assertGreater(int(name[1:]), max(others), f"{folder}/{name}: minted after the family's other rows")
+            self.assertEqual("none", kv["co"], name)
+            text = self.outputs[f"{folder}/{name}.yaml"]
+            reason = text.splitlines()[1]
+            self.assertEqual(bool(kv["Nr"]), "router:" in text, name)
+            if folder == "gen-canary-podkill":
+                self.assertEqual(("canary", "auto", f"podkill:{generate_cases.POD_FAULT_HOOK}", "stable", "engine"),
+                                 (kv["mode"], kv["canary"], kv["fault"], kv["victim"], kv["victimcomp"]), name)
+                self.assertNotIn("repeat", kv, name)
+                self.assertEqual(kv["topo"].endswith("-mn"), kv.get("kill") == "leader", name)
+                self.assertIn("the step keeps its state across the capacity dip", reason, name)
+                continue
+            self.assertIn("negative control", reason, name)
+            if folder == "gen-node":
+                self.assertEqual(("node:notready", "idle"), (kv["fault"], kv["during"]), name)
+                self.assertEqual(kv["expect"] == "relocated", kv.get("needs") == "forcedelete", name)
+                self.assertEqual(kv["expect"] == "relocated", kv["lift"] == "after-recover", name)
+            elif folder == "gen-heal":
+                self.assertEqual(("configkey:missing", "idle", "after-settle", "heals"), (kv["fault"], kv["during"], kv["lift"], kv["expect"]), name)
+                self.assertIn("kind: ConfigMap", text, name)
+            elif folder == "gen-imagepull":
+                self.assertEqual("imagepull:old", kv["fault"], name)
+                self.assertEqual("during" in kv, kv.get("expect") == "repaired", name)
+            elif folder == "gen-fault":
+                self.assertEqual(("podkill:settling", "engine"), (kv["fault"], kv["victimcomp"]), name)
+            elif folder == "gen-gang-member":
+                self.assertEqual(("podkill:settling", "leader", "stable", "engine"), (kv["fault"], kv["kill"], kv["victim"], kv["victimcomp"]), name)
+            elif folder == "gen-rollback":
+                self.assertEqual((1, "held", "stuck"), (kv["rollback"], kv["during"], kv["break"]), name)
+                self.assertFalse(run._rollback_held_break_case(kv), f"{name}: the kept probe is the plain rollback handler's")
+
+    def test_every_row_validates_as_a_case_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for folder, name, _kv, _m in self.fam:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(self.outputs[f"{folder}/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)
+
+
+class PlainOperationsTest(unittest.TestCase):
+    """The operations with no fault on the shapes the hand-written folders
+    skip: one case per ledger cell, in the family that owns the operation,
+    minted after every other row, each a valid case that names the router
+    or the decoder as its negative control."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.fam = [(f, n, kv, m) for f, n, kv, m in rows if m.get("plain")]
+        cls.rows = rows
+
+    def test_one_case_per_cell_in_the_operations_own_family(self):
+        self.assertEqual(17, len(self.fam))
+        by_folder = collections.Counter(f for f, _n, _kv, _m in self.fam)
+        self.assertEqual({"gen-rollout": 1, "gen-rollback": 2, "gen-switch": 2, "gen-fault-edit": 4, "gen-fault-delete": 4,
+                          "gen-fault-scale": 2, "gen-fault-move": 2}, dict(by_folder))
+        router = {("engine", 2), ("engine-mn", 2)}
+        wide = router | {("pd", 2), ("pd-mn", 2)}
+        for folder, want in (("gen-rollback", router), ("gen-switch", router), ("gen-fault-move", router),
+                             ("gen-fault-edit", wide), ("gen-fault-delete", wide)):
+            self.assertEqual(want, {(kv["topo"], kv["Nr"]) for f, _n, kv, _m in self.fam if f == folder}, folder)
+        self.assertEqual({("engine", 2)}, {(kv["topo"], kv["Nr"]) for f, _n, kv, _m in self.fam if f in ("gen-rollout", "gen-fault-scale")})
+        self.assertEqual({3, 5}, {kv["to_e"] for f, _n, kv, _m in self.fam if f == "gen-fault-scale"})
+        for folder, name, kv, m in self.fam:
+            others = [int(x[1:]) for f, x, _kv, mm in self.rows if f == folder and not mm.get("plain") and not mm.get("single")]
+            self.assertGreater(int(name[1:]), max(others), f"{folder}/{name}: minted after the family's other rows")
+            for k in ("fault", "break", "stuck", "img", "lift", "once"):
+                self.assertNotIn(k, kv, name)
+            self.assertEqual("none", kv["co"], name)
+            text = self.outputs[f"{folder}/{name}.yaml"]
+            reason = text.splitlines()[1]
+            # every Component rolls on a runtime edit, so that row has no control
+            self.assertIn("every Component rolls onto its own new revision" if folder == "gen-fault-edit" else "negative control",
+                          reason, name)
+            if folder == "gen-fault-edit":
+                self.assertEqual(("runtimerev", "env", "roll", f"ome-coordtest-rt-{name}"), (kv["mode"], kv["edit"], kv["expect"], kv["rt"]), name)
+                self.assertIn(f"name: ome-coordtest-rt-{name}", text.split("---")[0], name)
+            elif folder == "gen-fault-delete":
+                self.assertEqual("recreate", kv["mode"], name)
+            elif folder == "gen-fault-move":
+                self.assertEqual(("migrate", "Auto", 0), (kv["mode"], kv["mig"], kv["inst"]), name)
+                self.assertTrue(generate_cases.is_move_more_row(kv), name)
+            elif folder == "gen-rollback":
+                self.assertEqual((1, "rotating"), (kv["rollback"], kv["during"]), name)
+                self.assertIn('perm.test/rev: "v1"', text, name)
+            elif folder == "gen-switch":
+                self.assertEqual(("strategy:RecreatePod", "rotating"), (kv["edit"], kv["during"]), name)
+            if kv["Nr"] and not kv["Nd"]:
+                self.assertIn("router:", text, name)
+
+    def test_every_row_validates_as_a_case_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for folder, name, _kv, _m in self.fam:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(self.outputs[f"{folder}/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)
+
+
+class CanaryWindowTest(unittest.TestCase):
+    """A window fault at a canary grid state: the record, the tick that
+    opens, samples and closes it, the gate on the terminal, and the verdict
+    line on the step index."""
+
+    HDR = {"mode": "canary", "canary": "auto", "fault": "webhook:canary-serving@1", "lift": "after-hold",
+           "Ne": 2, "Nd": 0, "Nr": 2, "ceil_e": 3, "ceil_d": 0, "ceil_r": 2, "topo": "engine"}
+
+    def _ctx(self, hdr):
+        pods = {f"p999-engine-{i}-0": _rec("engine", i, "old", uid=f"u{i}") for i in range(2)}
+        pods.update({f"p999-router-{i}-0": _rec("router", i, "old", uid=f"r{i}") for i in range(2)})
+        ctx = _ctx_for(hdr, pods)
+        ctx.update(canary_hook=None, canary_step=None, trigger_ts=100.0, converged_at=None)
+        return ctx
+
+    def test_record_counts_the_units_slots_and_the_tick_opens_samples_and_closes(self):
+        ctx = self._ctx(self.HDR)
+        f = ctx["fault"]
+        win = run._canary_window_new(ctx, f, self.HDR, {"engine"})
+        self.assertEqual({"engine": 2, "router": 0}, win["expected_created"], "the ladder replaces the unit's slots once")
+        self.assertEqual("canary", win["op"])
+        closed, ticks = [], []
+        patches = {"_reconcile_counts": lambda m: {"x": (1, 0)}, "_manager_metrics": lambda: {},
+                   "_case_ir_names": lambda cid: ["ir-a"], "_window_tick": lambda c, f_, w, now: ticks.append(now),
+                   "_window_lift_due": lambda w, now: now >= 130.0, "_window_close": lambda c, f_, w: closed.append(now_box[0]) or w.update(window_end_ts=now_box[0], lifted_at=now_box[0] - w["fault_ts"])}
+        now_box = [100.0]
+        with contextlib.ExitStack() as stack:
+            for name, value in patches.items():
+                stack.enter_context(mock.patch.object(run, name, value))
+            # not yet due: nothing read
+            run._canary_window_tick(ctx, f, win, None, 100.0)
+            self.assertIsNone(win["metrics_before"])
+            # the state is due but the phase hook has not fired yet: the counters are read ahead of the outage
+            ctx["canary_hook"], ctx["canary_step"] = "canary-serving", 1
+            run._canary_window_tick(ctx, f, win, 1, 101.0)
+            self.assertEqual({"x": (1, 0)}, win["metrics_before"])
+            self.assertIsNone(win["fault_ts"])
+            self.assertFalse(run._canary_window_holds(f, win))
+            # fired by the phase hook: the window opens at the step it found
+            f.update(fired=True, fired_ts=102.0)
+            run._canary_window_tick(ctx, f, win, 1, 103.0)
+            self.assertEqual((102.0, 1, ["ir-a"], [1]), (win["fault_ts"], win["step_at_open"], win["ir_names"], win["step_samples"]))
+            self.assertTrue(run._canary_window_holds(f, win), "the terminal waits for the webhook's lift")
+            self.assertEqual([103.0], ticks)
+            # the step moves on and back: recorded once each, the regression kept
+            run._canary_window_tick(ctx, f, win, 2, 110.0)
+            run._canary_window_tick(ctx, f, win, 2, 111.0)
+            run._canary_window_tick(ctx, f, win, 1, 112.0)
+            self.assertEqual(([1, 2, 1], (2, 1)), (win["step_samples"], win["step_regressed"]))
+            self.assertEqual([], closed)
+            # the lift falls due: the window closes once, and the tick keeps reading the rows after it
+            now_box[0] = 131.0
+            run._canary_window_tick(ctx, f, win, 2, 131.0)
+            run._canary_window_tick(ctx, f, win, 2, 132.0)
+            self.assertEqual([131.0], closed)
+            self.assertEqual(6, len(ticks))
+            self.assertFalse(run._canary_window_holds(f, win))
+
+    def test_a_persisting_writer_holds_nothing_and_one_write_settles(self):
+        hdr = dict(self.HDR, fault="conflict:canary-serving@1", form="persist", target="isvc")
+        hdr.pop("lift")
+        ctx = self._ctx(hdr)
+        f = ctx["fault"]
+        win = run._canary_window_new(ctx, f, hdr, {"engine"})
+        f.update(fired=True, fired_ts=102.0)
+        closed = []
+        with mock.patch.object(run, "_window_tick", lambda *a: None), mock.patch.object(run, "_case_ir_names", lambda cid: []), \
+                mock.patch.object(run, "_window_close", lambda c, f_, w: closed.append(1) or w.update(window_end_ts=1.0)), \
+                mock.patch.object(run, "LIFT_SETTLE_S", 5.0):
+            run._canary_window_tick(ctx, f, win, 1, 103.0)
+            self.assertFalse(run._canary_window_holds(f, win), "a writer that persists stops when the ladder ends")
+            run._canary_window_tick(ctx, f, win, 1, 200.0)
+            self.assertEqual([], closed, "nothing closes it before the ladder's end")
+            once = dict(hdr, form="once")
+            ctx2, f2 = self._ctx(once), None
+            f2 = ctx2["fault"]
+            win2 = run._canary_window_new(ctx2, f2, once, {"engine"})
+            f2.update(fired=True, fired_ts=102.0)
+            run._canary_window_tick(ctx2, f2, win2, 1, 103.0)
+            self.assertTrue(run._canary_window_holds(f2, win2))
+            run._canary_window_tick(ctx2, f2, win2, 1, 108.0)
+            self.assertEqual([1], closed, "one write settles LIFT_SETTLE_S after it")
+
+    def test_the_verdict_reads_the_window_then_the_step_index(self):
+        ctx = self._ctx(self.HDR)
+        ctx["converged_at"] = 60.0
+        f = ctx["fault"]
+        win = run._canary_window_new(ctx, f, self.HDR, {"engine"})
+        f.update(fired=True, fired_ts=110.0)
+        win.update(fault_ts=110.0, step_at_open=1, step_samples=[1, 2, 3], window_end_ts=140.0, lifted_at=30.0)
+        seen = {}
+        patches = {"_window_checks": lambda f_, w, state, v, n, c: seen.update(state=state, conv=w["converged_at"], esc=w["escaped_at"]) or v,
+                   "_wait_rows_settled": lambda *a: (True, ""), "_leftover_hold": lambda cid: "",
+                   "_window_end_tally": lambda c, w: None, "_window_close": lambda c, f_, w: w.update(window_end_ts=1.0)}
+        with contextlib.ExitStack() as stack:
+            for name, value in patches.items():
+                stack.enter_context(mock.patch.object(run, name, value))
+            notes, checks = [], []
+            verdict = run._canary_window_checks(ctx, f, win, "CONVERGED", "PASS", notes, checks)
+            self.assertEqual(("PASS", "CONVERGED", 50.0, None), (verdict, seen["state"], seen["conv"], seen["esc"]))
+            self.assertTrue(any("never went back" in c and "opened at step 1" in c and "1 → 2 → 3" in c for c in checks), checks)
+            win["step_regressed"] = (2, 1)
+            notes, checks = [], []
+            verdict = run._canary_window_checks(ctx, f, win, "CONVERGED", "PASS", notes, checks)
+            self.assertEqual("FAIL", verdict)
+            self.assertTrue(any("went back from 2 to 1" in c for c in checks), checks)
+            # a window still open when the ladder ended: the ladder escaped it, and it is closed before the verdict
+            win.update(window_end_ts=None, step_regressed=None)
+            notes, checks = [], []
+            run._canary_window_checks(ctx, f, win, "CONVERGED", "PASS", notes, checks)
+            self.assertIsNotNone(seen["esc"])
+            self.assertEqual(1.0, win["window_end_ts"])
+            # never opened: nothing to judge here
+            win["fault_ts"] = None
+            self.assertEqual("PASS", run._canary_window_checks(ctx, f, win, "ROTATE_TIMEOUT", "PASS", [], []))
 
 
 class CanaryHookTest(unittest.TestCase):
@@ -6050,8 +6346,9 @@ class StrategySwitchFamilyTest(unittest.TestCase):
                              for a in generate_cases.RESTARTS for b in generate_cases.RESTARTS if a != b for h in hooks}
                 expected |= {("crash", topo, co, a, b, generate_cases.SWITCH_CRASH_HOOK)
                              for a, b in generate_cases.SWITCH_CRASH_PAIRS}
-        got = [self._cell(n, kv) for n, kv, _m in self.fam]
-        self.assertEqual(180, len(self.fam))
+        fam = [(n, kv, m) for n, kv, m in self.fam if not m.get("plain")]   # the router shapes' plain edits are PlainOperationsTest's
+        got = [self._cell(n, kv) for n, kv, _m in fam]
+        self.assertEqual(180, len(fam))
         self.assertEqual(len(got), len(set(got)), "every case is a distinct cell")
         self.assertEqual(expected, set(got))
         self.assertEqual({"engine", "pd", "engine-mn", "pd-mn"}, {kv["topo"] for _n, kv, _m in self.fam})
@@ -6128,7 +6425,7 @@ class StrategySwitchUnderBreakFamilyTest(unittest.TestCase):
         cls.plain = [(n, kv, m) for n, kv, m in fam if "fault" not in m and "held_break" not in m]
 
     def test_ids_continue_into_the_family_s_second_block(self):
-        self.assertEqual(180, len(self.plain))
+        self.assertEqual(182, len(self.plain), "the switch rows and the two plain edits on the router shapes")
         self.assertEqual(402, len(self.running) + len(self.held))
         ids = sorted(int(n[1:]) for n, _kv, _m in self.running + self.held)
         lo, hi = generate_cases.GEN_BLOCKS["gen-switch"]
@@ -6267,7 +6564,7 @@ class GeneratedHealAndImagepullFamiliesTest(unittest.TestCase):
         return "\n".join(out)
 
     def test_heal_family_crosses_every_axis(self):
-        fam = self._family("gen-heal")
+        fam = [(n, kv, m) for n, kv, m in self._family("gen-heal") if not m.get("single")]
         self.assertEqual(32, len(fam))
         self.assertEqual({(t, rp, lift, co) for t in self.TOPOS for rp in generate_cases.RESTARTS
                           for lift in generate_cases.HEAL_LIFTS for co in generate_cases.HEAL_COORDS},
@@ -6344,7 +6641,7 @@ class GeneratedHealAndImagepullFamiliesTest(unittest.TestCase):
 
     def test_imagepull_family_crosses_every_axis(self):
         g = generate_cases
-        fam = self._family("gen-imagepull")
+        fam = [(n, kv, m) for n, kv, m in self._family("gen-imagepull") if not m.get("single")]
         self.assertEqual(56, len(fam))
         settling = [(n, kv, m) for n, kv, m in fam if m["verb"] == "imagepull:settling"]
         idle = [(n, kv, m) for n, kv, m in fam if m["verb"] == "imagepull:idle"]
@@ -6406,7 +6703,8 @@ class GeneratedNodeFamilyTest(unittest.TestCase):
 
     def _rows(self):
         outputs, rows = generate_cases.build_outputs()
-        return outputs, [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-node" and kv.get("during") == "idle"]
+        return outputs, [(n, kv, m) for folder, n, kv, m in rows
+                         if folder == "gen-node" and kv.get("during") == "idle" and not m.get("single")]
 
     def test_generated_family_crosses_every_axis(self):
         outputs, fam = self._rows()
@@ -6472,12 +6770,13 @@ class GeneratedNodeHookFamilyTest(unittest.TestCase):
         cls.fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-node" and kv.get("during") != "idle"]
 
     def test_counts_shapes_forms_and_ids(self):
-        self.assertEqual(78, len(self.fam))
-        self.assertEqual(66, sum(1 for _n, kv, _m in self.fam if kv.get("mode") != "canary"))
+        self.assertEqual(96, len(self.fam))
+        self.assertEqual(84, sum(1 for _n, kv, _m in self.fam if kv.get("mode") != "canary"))
         shapes = {(t, generate_cases.router_count(t, nr)) for t, _n, _w, nr in generate_cases.DISRUPT_SHAPES}
         self.assertEqual(shapes, {(kv["topo"], kv["Nr"]) for _n, kv, _m in self.fam if kv.get("mode") != "canary"})
         forms = collections.Counter((m["op"], m["form"]) for _n, _kv, m in self.fam)
         self.assertEqual({("push", "one-shot"): 6, ("scaleup", "one-shot"): 6, ("delete", "one-shot"): 6,
+                          ("push", "persistent"): 6, ("scaleup", "persistent"): 6, ("delete", "persistent"): 6,
                           ("rollback", "one-shot"): 6, ("rollback", "persistent"): 6,
                           ("edit", "one-shot"): 6, ("edit", "persistent"): 6,
                           ("runtime", "one-shot"): 6, ("runtime", "persistent"): 6,
@@ -6485,8 +6784,10 @@ class GeneratedNodeHookFamilyTest(unittest.TestCase):
                           ("canary", "one-shot"): 6, ("canary", "persistent"): 6}, dict(forms))
         ids = sorted(int(n[1:]) for n, _kv, _m in self.fam)
         lo, hi = generate_cases.GEN_BLOCKS["gen-node"]
-        self.assertEqual((4296, 4373), (ids[0], ids[-1]), "minted after the idle halves, inside the family's block")
+        self.assertEqual((4296, 4391), (ids[0], ids[-1]), "minted after the idle halves, inside the family's block")
         self.assertLess(ids[-1], hi)
+        late = [int(n[1:]) for n, _kv, m in self.fam if m["form"] == "persistent" and m["op"] in generate_cases.NODE_HOOK_PERSISTENT_MORE_OPS]
+        self.assertEqual(list(range(4374, 4392)), sorted(late), "the push, scale-up and delete relocations are minted last")
 
     def test_every_row_names_its_hook_its_lift_and_the_lane_it_reads(self):
         for name, kv, m in self.fam:
@@ -6512,6 +6813,7 @@ class GeneratedNodeHookFamilyTest(unittest.TestCase):
             if form == "persistent":
                 self.assertIn("force-delete threshold", reason, name)
                 self.assertIn("while the node is still down", reason, name)
+                self.assertEqual(op == "delete", "nothing of the service left in the API" in reason, name)
             elif op == "delete":
                 self.assertIn("leave with the teardown", reason, name)
             else:
@@ -8660,7 +8962,8 @@ class PlainRollbackTest(unittest.TestCase):
     def test_generated_family_crosses_every_axis(self):
         outputs, rows = generate_cases.build_outputs()
         fam = [(n, kv, m) for folder, n, kv, m in rows
-               if folder == "gen-rollback" and "fault" not in m and "held_break" not in m]
+               if folder == "gen-rollback" and "fault" not in m and "held_break" not in m and not m.get("plain")
+               and not m.get("single")]
         self.assertEqual(126, len(fam))
         self.assertEqual(set(generate_cases.ROLLBACK_HOOKS), {m["hook"] for _n, _kv, m in fam})
         self.assertEqual(set(generate_cases.ROLLBACK_BUDGETS), {m["strat"] for _n, _kv, m in fam})
@@ -8700,11 +9003,24 @@ class PlainRollbackTest(unittest.TestCase):
     def test_breaks_beside_the_rollback_cross_the_six_shapes(self):
         outputs, rows = generate_cases.build_outputs()
         fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-rollback"]
-        self.assertEqual(462, len(fam))
+        self.assertEqual(484, len(fam), "the family's rows, the two plain rollbacks and the two held rollbacks on the router shapes")
+        fam = [(n, kv, m) for n, kv, m in fam if not m.get("plain") and not m.get("single")]
         running = [(n, kv, m) for n, kv, m in fam if "fault" in m]
         held = [(n, kv, m) for n, kv, m in fam if "held_break" in m]
         self.assertEqual(248, len(running), "ten rows x six shapes x four moments, plus the sibling rows")
-        self.assertEqual(88, len(held), "four kinds x six shapes x three strategies, the one-shot crash kinds, the decoder's")
+        self.assertEqual(106, len(held), "four kinds x six shapes x three strategies, every kind once, the decoder's")
+        once = [(n, kv, m) for n, kv, m in held if m["once"] and "victimcomp" not in kv]
+        self.assertEqual(30, len(once), "five kinds once on six shapes")
+        self.assertEqual(set(run.ROLLBACK_ONCE_BREAKS), {m["held_break"] for _n, _kv, m in once})
+        for n, kv, m in once:
+            self.assertEqual("SurgeThenDrain", m["strat"], n)
+            text = outputs[f"gen-rollback/{n}.yaml"]
+            if m["held_break"] in generate_cases.ROLLBACK_HELD_ONCE_MORE:
+                self.assertIn("once the rollback has fired", text, n)
+                self.assertIn("as soon as the break shows", text, n)
+                self.assertEqual(m["held_break"] == "configkey", "kind: ConfigMap" in text, n)
+            else:
+                self.assertIn("has its runner killed once", text, n)
         shapes = {(kv["topo"], kv["Nr"]) for _n, kv, _m in running}
         self.assertEqual(6, len(shapes))
         self.assertEqual(shapes, {(kv["topo"], kv["Nr"]) for _n, kv, _m in held})
@@ -8737,9 +9053,12 @@ class PlainRollbackTest(unittest.TestCase):
             self.assertIn('perm.test/rev: "v1"', text)
         self.assertEqual(8, sum(1 for _n, kv, _m in running if "victimcomp" in kv))
         once = [(n, kv, m) for n, kv, m in held if kv.get("once")]
-        self.assertEqual(14, len(once))
-        self.assertEqual(set(generate_cases.ROLLBACK_HELD_ONCE), {kv["break"] for _n, kv, _m in once})
-        self.assertEqual(set(generate_cases.ROLLBACK_HELD_BREAKS), {kv["break"] for _n, kv, _m in held})
+        self.assertEqual(32, len(once), "the crash kinds once on six shapes and the grouped decoder, the other kinds once on six")
+        self.assertEqual(set(generate_cases.ROLLBACK_HELD_ONCE) | set(generate_cases.ROLLBACK_HELD_ONCE_MORE),
+                         {kv["break"] for _n, kv, _m in once})
+        self.assertEqual(set(generate_cases.ROLLBACK_HELD_BREAKS) | {"stuck"}, {kv["break"] for _n, kv, _m in held})
+        self.assertEqual({"stuck"}, {kv["break"] for _n, kv, _m in held if kv["break"] not in generate_cases.ROLLBACK_HELD_BREAKS},
+                         "the readiness probe's kept form is the plain rollback family's; only its one-shot form is minted here")
         self.assertEqual({"SurgeThenDrain", "RecreatePod", "InPlaceIfPossible"},
                          {m["strat"] for _n, kv, m in held if not kv.get("once") and "victimcomp" not in kv})
         for n, kv, m in held:
@@ -8752,7 +9071,7 @@ class PlainRollbackTest(unittest.TestCase):
             self.assertEqual(kv["break"] == "configkey", "kind: ConfigMap" in text, n)
             self.assertEqual(kv["break"] in ("crash-start", "imagepull", "configkey") and not kv.get("once"),
                              "nothing of the broken revision ever served" in reason, n)
-            self.assertEqual(bool(kv.get("once")), "killed once" in reason, n)
+            self.assertEqual(bool(kv.get("once")), "killed once" in reason or "once the rollback has fired" in reason, n)
             if "victimcomp" in kv:
                 self.assertEqual(("decoder", "rolling"), (kv["victimcomp"], kv["co"]))
                 self.assertTrue(kv["topo"].startswith("pd"))
@@ -8806,12 +9125,15 @@ class RollbackUnderBreakTest(unittest.TestCase):
     def test_held_moment_break_forms(self):
         for kind in sorted(run.ROLLBACK_BREAKS):
             self.assertEqual([], self._errs(self.E1 + f" rollback=1 during=held break={kind}"), kind)
+        # every kind has its one-shot form: a crash kind as one kill, the
+        # others as a break of the first pod taken away once the rollback fired
+        self.assertEqual(run.ROLLBACK_BREAKS, run.ROLLBACK_ONCE_BREAKS)
         for kind in sorted(run.ROLLBACK_ONCE_BREAKS):
             self.assertEqual([], self._errs(self.E1 + f" rollback=1 during=held break={kind} once=1"), kind)
         self.assertEqual([], self._errs(self.PD + " rollback=1 during=held break=crash-start victimcomp=decoder"))
         has = lambda frag, h: self.assertTrue(any(frag in e for e in self._errs(h)), (frag, h))
         has("a rollback case carries one break", self.E1 + " fault=crashloop:old form=start rollback=1 during=held break=stuck")
-        has("once=1 kills the pushed revision's first runner once", self.E1 + " rollback=1 during=held break=imagepull once=1")
+        has("at the held moment is one of", self.E1 + " rollback=1 during=held break=bogus once=1")
         has("lift= does not combine with break=", self.E1 + " rollback=1 during=held break=imagepull lift=after-settle")
         has("both or neither", self.E1 + " rollback=1 during=rotating break=crash-start")
         has("names a member the push bumps beside the engine", self.E1 + " rollback=1 during=held break=crash-start victimcomp=decoder")
@@ -8827,6 +9149,14 @@ class RollbackUnderBreakTest(unittest.TestCase):
         self.assertTrue(run._rollback_held_break_case({"rollback": 1, "during": "held", "break": "imagepull"}))
         self.assertFalse(run._rollback_held_break_case({"rollback": 1, "during": "held", "break": "stuck"}),
                          "the readiness probe stays with the plain rollback handler")
+        self.assertTrue(run._rollback_held_break_case({"rollback": 1, "during": "held", "break": "stuck", "once": 1}),
+                        "its one-shot form is the readiness switch set once in the first pushed pod")
+        for kind, (fkind, form) in sorted(run.HELD_ONCE_FAULTS.items()):
+            hdr2 = run._held_once_header({"rollback": 1, "during": "held", "break": kind, "once": 1}, kind)
+            self.assertEqual(f"{fkind}:new", hdr2["fault"], kind)
+            self.assertEqual(form or None, hdr2.get("form"), kind)
+            self.assertEqual(None if fkind in ("crashloop", "readiness") else "after-settle", hdr2.get("lift"), kind)
+            self.assertEqual(kind in ("crash-start", "crash-load"), kind in run.ROLLBACK_CRASH_BREAKS)
         self.assertFalse(run._rollback_held_break_case({"rollback": 1, "during": "rotating", "fault": "crashloop:old"}))
         kept = lambda **kw: run._rollback_break_kept(dict({"kind": "crashloop", "form": "start", "lift": ""}, **kw))
         self.assertTrue(kept(kind="configkey", lift="never"))
@@ -11585,6 +11915,55 @@ class HandlerSmokeTest(unittest.TestCase):
         self.assertTrue(any("INFRA-FAIL" in c and "never showed the break" in c for c in out["checks"]), out["checks"])
 
 
+    def test_rollback_at_held_by_a_one_shot_pull_failure_lifts_the_cause_after_the_rollback(self):
+        """The pushed revision's first pod is pointed at the unpullable image
+        as it starts; the rollback fires as soon as the kubelet shows the
+        pull failure, the cause is taken away after it, and the fleet comes
+        back onto the starting revision: PASS, with the lift on the record."""
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 3, "ceil_d": 0, "ceil_r": 0, "rollback": 1, "during": "held",
+               "break": "imagepull", "once": 1, "topo": "engine"}
+        pods = {f"p999-engine-{i}-0": _rec("engine", i, "old", uid=f"u{i}") for i in range(2)}
+        ctx = _ctx_for(run._held_once_header(hdr, "imagepull"), pods)
+        ctx["hdr"] = hdr
+        self.assertEqual("imagepull", ctx["fault"]["kind"])
+        fired = {}
+
+        def script(c, n):
+            if n >= 3 and "fired" not in fired:
+                c["pod_state"]["p999-engine-0-1"] = _rec("engine", 0, "new", ready=False, uid="u-new", created="2")
+            if fired and n >= fired["at"] + 4:
+                c["pod_state"].pop("p999-engine-0-1", None)
+
+        def kubectl(*args, **kw):
+            if "--type=json" in args:
+                fired["fired"], fired["at"] = True, fleet.calls
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        def bump(ctx_, bumped, **kw):
+            ctx_["trigger_ts"] = time.time()
+            return True
+        lifted = []
+        fleet = _FakeFleet(ctx, script)
+        pod_obj = {"metadata": {"uid": "u-new"}, "spec": {"containers": [{"name": run.MAIN_CONTAINER, "image": "img"}]},
+                   "status": {"containerStatuses": [{"name": run.MAIN_CONTAINER, "restartCount": 0,
+                                                     "state": {"waiting": {"reason": "ErrImagePull"}}}]}}
+        out = self._run(run._rollback_held_break, ctx, fleet,
+                        {"_bump_rev": bump, "kubectl": kubectl, "_isvc_spec": lambda cid: {"engine": {"runner": {"image": "x"}}},
+                         "_isvc_events_since": lambda *a, **kw: [],
+                         "_pod_main_state": lambda name: (True, False, 0, "u-new"), "_get_pod": lambda name, ns=None: pod_obj,
+                         "_oneshot_new_lift": lambda f: lifted.append(f["kind"]) or True,
+                         "_ir_snapshot": lambda cid: {}, "_crash_new_why": lambda *a: (None, []),
+                         "_broken_revision_hold": lambda *a: "", "_fetch_initial_ir_items": lambda cid: [],
+                         "_rollback_ir_settled": lambda *a: (True, "settled"), "_rollback_fault_rows": lambda *a: (True, ""),
+                         "ONCE_POLL_S": 0.0, "HELD_BREAK_POLL_S": 0.0, "ROTATE_BASE_S": 6})
+        self.assertEqual(["imagepull"], lifted, "the cause is taken away once the rollback has fired")
+        self.assertEqual(("CONVERGED", "PASS"), (out["state"], out["verdict"]), out["checks"])
+        self.assertTrue(any("showed the break" in c and "ErrImagePull" in c for c in out["checks"]), out["checks"])
+        self.assertTrue(any("the cause was lifted" in c and "once the rollback had fired" in c for c in out["checks"]), out["checks"])
+        self.assertTrue(any("no pod of the withdrawn revision was created" in c for c in out["checks"]), out["checks"])
+        self.assertFalse(any("one-shot" in n and "restart" in n for n in out["notes"]), "no crash-once verdict rides a pull failure")
+
+
 class GeneratedFaultFamiliesTest(unittest.TestCase):
     """The readiness, gang-member and tight families: their size, and that
     every emitted header carries the knobs its runner path reads."""
@@ -11595,8 +11974,8 @@ class GeneratedFaultFamiliesTest(unittest.TestCase):
         cls.outputs, cls.rows = outputs, rows
         cls.by_folder = {}
         for folder, name, kv, meta in rows:
-            if folder == "gen-gang-member" and meta.get("half") == "hook":
-                continue   # the gang's member deleted at the remaining moments is GeneratedPodkillHookFamilyTest's
+            if folder == "gen-gang-member" and (meta.get("half") == "hook" or meta.get("single")):
+                continue   # the remaining moments are GeneratedPodkillHookFamilyTest's, the router shape LeftoverSinglesTest's
             cls.by_folder.setdefault(folder, []).append((name, kv, meta))
 
     def _hdr(self, folder, name):
@@ -12552,9 +12931,37 @@ class GeneratedDisruptionFamiliesTest(unittest.TestCase):
             self.assertIn("once the lift opens the nodes and drops the fillers", reason)
         self._validates(outputs, "gen-preempt", ops)
 
+    def test_a_quota_under_a_canary_parks_the_ladder_or_is_lifted_into_a_resume(self):
+        outputs, whole = self._rows("gen-pending")
+        fam = [(n, kv, m) for n, kv, m in whole if m.get("op") == "canary"]
+        self.assertEqual(9, len(fam), "kept on four shapes and lifted on five, beside the hand-written canary cases")
+        self.assertEqual(list(range(10710, 10719)), sorted(int(n[1:]) for n, _kv, _m in fam), "minted after the family's other rows")
+        kept = [(n, kv, m) for n, kv, m in fam if kv["terminal"] == "Failed"]
+        lifted = [(n, kv, m) for n, kv, m in fam if kv["terminal"] == "Stable"]
+        self.assertEqual((4, 5), (len(kept), len(lifted)))
+        self.assertEqual({"engine gang", "engine+router single", "engine+router gang", "engine+decoder+router gang"}, {m["shape"] for _n, _kv, m in kept})
+        self.assertEqual({"engine gang", "engine+router single", "engine+router gang", "engine+decoder+router gang",
+                          "engine+decoder+router single"}, {m["shape"] for _n, _kv, m in lifted})
+        for name, kv, m in fam:
+            text = outputs[f"gen-pending/{name}.yaml"]
+            reason = text.splitlines()[1]
+            self.assertEqual(("canary", "auto", "quota:0"), (kv["mode"], kv["canary"], kv["fault"]), name)
+            self.assertTrue(run._cell_ok(kv["cell"]), name)
+            self.assertIn(f'readyTimeout: "{generate_cases.HELD_READY_TIMEOUT}"', text, name)
+            self.assertIn("reason QuotaExceeded", reason, name)
+            if kv["terminal"] == "Stable":
+                self.assertEqual(("quotalift", "canary-failed", "resume", "canary-failed"),
+                                 (kv["verb"], kv["during"], kv["verb2"], kv["during2"]), name)
+                self.assertIn("the park holds anyway", reason, name)
+            else:
+                self.assertNotIn("verb", kv, name)
+                self.assertIn("nothing rolls back", reason, name)
+        self._validates(outputs, "gen-pending", fam)
+
     def test_pending_family_arms_the_quota_the_operation_needs(self):
         outputs, whole = self._rows("gen-pending")
-        self.assertEqual(210, len(whole))
+        self.assertEqual(219, len(whole))
+        whole = [(n, kv, m) for n, kv, m in whole if m.get("op") != "canary"]
         fam, ops = self._passes(whole)
         self.assertEqual((138, 72), (len(fam), len(ops)), "the tight-cluster family owns the gang surge roll held to the end by a quota")
         self.assertEqual([n for n, _kv, _m in fam], [f"p{i}" for i in range(7500, 7600)] + [f"p{i}" for i in range(9700, 9738)])
@@ -13419,9 +13826,19 @@ class GeneratedFaultMoveFamilyTest(unittest.TestCase):
 
     def test_the_move_under_every_fault_crosses_the_six_shapes(self):
         outputs, fam = self._more_rows()
-        self.assertEqual(238, len(fam))
+        self.assertEqual(247, len(fam))
         shapes = {("engine", 0), ("pd", 2), ("engine-mn", 0), ("engine", 2), ("engine-mn", 2), ("pd-mn", 2)}
         self.assertEqual(shapes, {(kv["topo"], kv["Nr"]) for _n, kv, _m in fam})
+        quota = [(n, kv, m) for n, kv, m in fam if kv.get("fault") == "quota:0"]
+        self.assertEqual(7, len(quota), "the quota kept on three shapes and lifted on four, beside the hand-written cases")
+        self.assertEqual({("engine", 2), ("engine-mn", 2), ("pd-mn", 2)}, {(kv["topo"], kv["Nr"]) for _n, kv, _m in quota if "lift" not in kv})
+        self.assertEqual({("engine", 2), ("engine-mn", 2), ("pd-mn", 2), ("pd", 2)}, {(kv["topo"], kv["Nr"]) for _n, kv, _m in quota if kv.get("lift") == 1})
+        for name, kv, m in quota:
+            self.assertEqual(("fail", kv["Ne"] + 1), (kv["expect"], kv["ceil_e"]), name)
+            reason = outputs[f"gen-fault-move/{name}.yaml"].splitlines()[1]
+            self.assertIn("ends Failed within its bound", reason, name)
+            self.assertIn("a fresh request moves the Instance" if kv.get("lift") == 1 else "no further move is attempted", reason, name)
+            self.assertEqual(kv["topo"].endswith("-mn"), "replacement gang from forming" in reason, name)
         ids = sorted(int(n[1:]) for n, _kv, _m in fam)
         blocks = generate_cases.id_blocks("gen-fault-move")
         self.assertEqual([(7800, 7900), (9800, 9900), (11700, 12000)], blocks)
@@ -13432,7 +13849,7 @@ class GeneratedFaultMoveFamilyTest(unittest.TestCase):
             key = kv.get("stuck") and "stuck" or str(kv.get("fault", "")).partition(":")[0]
             kinds[key] = kinds.get(key, 0) + 1
         self.assertEqual({"crashloop": 44, "imagepull": 16, "configkey": 34, "readiness": 46, "podkill": 18,
-                          "taint": 12, "evict": 24, "preempt": 6, "stuck": 38}, kinds)
+                          "taint": 12, "evict": 24, "preempt": 6, "stuck": 38, "quota": 7, "": 2}, kinds)
         for name, kv, m in fam:
             self.assertEqual(("migrate", "Auto", 0, "none"), (kv["mode"], kv["mig"], kv["inst"], kv["co"]))
             self.assertTrue(run._cell_ok(kv["cell"]) if "cell" in kv else True)
@@ -13574,7 +13991,7 @@ class GeneratedFaultEditFamilyTest(unittest.TestCase):
 
     def test_generated_family_crosses_every_axis(self):
         outputs, fam = self._rows()
-        self.assertEqual(230, len(fam), "128 crossings plus the further rows, one per ledger cell")
+        self.assertEqual(234, len(fam), "128 crossings plus the further rows, one per ledger cell, and the plain edit on four shapes")
         fam = [(n, kv, m) for n, kv, m in fam if "row" not in m]
         self.assertEqual(128, len(fam))
         breaks = [(n, kv, m) for n, kv, m in fam if "fault" in kv]
@@ -17582,7 +17999,7 @@ class CanaryBesideEveryFaultFamiliesTest(unittest.TestCase):
                    for folder in ("gen-canary-fault-old", "gen-canary-fault-new", "gen-canary-podkill")}
 
     def test_counts_shapes_and_the_continuation_block(self):
-        self.assertEqual({"gen-canary-fault-old": 135, "gen-canary-fault-new": 78, "gen-canary-podkill": 36},
+        self.assertEqual({"gen-canary-fault-old": 155, "gen-canary-fault-new": 102, "gen-canary-podkill": 39},
                          {folder: len(fam) for folder, fam in self.fam.items()})
         shapes = {f for f, *_ in generate_cases.GATE_SHAPES}
         for folder, fam in self.fam.items():
@@ -17598,16 +18015,51 @@ class CanaryBesideEveryFaultFamiliesTest(unittest.TestCase):
         self.assertEqual({"readiness never passes, persistent, running", "readiness never passes, one-shot, running",
                           "config missing, one-shot, running", "config missing, persistent, running",
                           "crash at start, one-shot, running", "crash after Ready, one-shot, running",
-                          "image pull, one-shot, running"},
+                          "image pull, one-shot, running", "crash at start, persistent, running",
+                          "crash after Ready, persistent, running", "image pull, persistent, running"},
                          rows["gen-canary-fault-old"])
         self.assertEqual({"config missing, persistent, new", "config missing, one-shot, new",
                           "readiness never passes, persistent, new", "readiness never passes, one-shot, new",
                           "image pull, one-shot, new", "crash at start, one-shot, new", "crash after Ready, one-shot, new",
+                          "image pull, persistent, new", "crash at start, persistent, new", "crash after Ready, persistent, new",
                           "pod Pending, one-shot", "pod Pending, persistent"},
                          rows["gen-canary-fault-new"])
         self.assertEqual({"pod deleted by hand, persistent", "gang member lost, persistent",
+                          "pod deleted by hand, one-shot", "gang member lost, one-shot",
                           "evicted or preempted, one-shot", "evicted or preempted, persistent"},
                          rows["gen-canary-podkill"])
+
+    def test_kept_crash_and_pull_rows_fill_the_shapes_the_storm_families_skip(self):
+        """The persistent crash and pull failure on the stable and the pushed
+        side run on the gangs and the engine-behind-a-router shapes alone:
+        the storm families carry the single-pod engine and prefill/decode
+        fleets. One case per cell on the stable side per restart policy where
+        the policy matters, one per exit on the pushed side."""
+        shapes = {f for f, *_ in generate_cases.kept_canary_shapes()}
+        self.assertEqual({"engine gang", "engine+router single", "engine+router gang", "engine+decoder+router gang"}, shapes)
+        stable = [(n, kv, m) for n, kv, m in self.fam["gen-canary-fault-old"]
+                  if m["row"].endswith("persistent, running") and m["row"].startswith(("crash", "image pull"))]
+        self.assertEqual(20, len(stable), "a crash at start and after Ready under both policies, a pull failure under None, on four shapes")
+        self.assertEqual(shapes, {m["shape"] for _n, _kv, m in stable})
+        for name, kv, m in stable:
+            self.assertEqual(("auto", f"canary-serving@1", 1, "Failed"), (kv["canary"], kv["fault"].partition(":")[2], kv["victims"], kv["nophase"]), name)
+            self.assertNotIn("lift", kv, name)
+            self.assertNotIn("once", kv, name)
+            self.assertIn("stableBroken[", kv["cell"], name)
+            self.assertIn("the cause stays until the ladder replaces the Instance", self.outputs[f"gen-canary-fault-old/{name}.yaml"], name)
+        self.assertEqual({"None"}, {m["rp"] for _n, kv, m in stable if kv["fault"].startswith("imagepull")})
+        self.assertEqual({"None", "RecreateInstance"}, {m["rp"] for _n, kv, m in stable if kv["fault"].startswith("crashloop")})
+        pushed = [(n, kv, m) for n, kv, m in self.fam["gen-canary-fault-new"] if m["row"].endswith("persistent, new")
+                  and not m["row"].startswith(("config missing", "readiness"))]
+        self.assertEqual(24, len(pushed), "a crash at start, a crash inside the first soak and a pull failure under both exits on four shapes")
+        self.assertEqual(shapes, {m["shape"] for _n, _kv, m in pushed})
+        self.assertEqual({"rollback", "rebump-fix"}, {kv["verb"] for _n, kv, _m in pushed})
+        for name, kv, m in pushed:
+            self.assertEqual(("canary-failed", "engine", "None"), (kv["during"], kv["victimcomp"], m["rp"]), name)
+            self.assertEqual("exitafter" in kv, kv.get("form") == "load", name)
+            self.assertIn("canaryBroken[", kv["cell"], name)
+            if kv["topo"].endswith("-mn"):
+                self.assertIn("leader runner", self.outputs[f"gen-canary-fault-new/{name}.yaml"], name)
 
     def test_stable_rows_cross_position_policy_and_restart_policy(self):
         fam = self.fam["gen-canary-fault-old"]
@@ -17679,7 +18131,10 @@ class CanaryBesideEveryFaultFamiliesTest(unittest.TestCase):
             self.assertEqual(generate_cases.POD_FAULT_HOOK, kv["fault"].partition(":")[2], name)
             self.assertEqual(("stable", "engine"), (kv["victim"], kv["victimcomp"]), name)
             self.assertTrue(run._cell_ok(kv["cell"]), name)
-            if kind == "podkill":
+            if kind == "podkill" and m.get("single"):
+                self.assertNotIn("repeat", kv, f"{name}: deleted once")
+                self.assertEqual(kv["topo"].endswith("-mn"), "kill" in kv, name)
+            elif kind == "podkill":
                 self.assertEqual(generate_cases.HOOK_REPEAT_N, kv["repeat"], name)
                 self.assertEqual(kv["topo"].endswith("-mn"), "kill" in kv, name)
             else:
@@ -17999,7 +18454,7 @@ class GeneratedFaultEditFurtherRowsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.outputs, rows = generate_cases.build_outputs()
-        cls.rows = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-fault-edit" and "row" in m]
+        cls.rows = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-fault-edit" and "row" in m and not m.get("plain")]
         cls.canary = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-canary-fault-old"
                       and m.get("verb") == "configkey kept@idle"]
 

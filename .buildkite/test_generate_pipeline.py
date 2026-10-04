@@ -1460,7 +1460,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         # The idle half is four shapes deep; the hook half adds the six
         # ledger shapes under every operation, the router shapes riding the
         # engine lanes, and the policy twin carries the relocating rows.
-        for topology, plain, policy in (("engine", 16, 9), ("pd", 12, 7), ("engine-mn", 16, 9), ("pd-mn", 12, 7)):
+        for topology, plain, policy in (("engine", 17, 13), ("pd", 12, 8), ("engine-mn", 17, 13), ("pd-mn", 12, 8)):
             self.assertEqual(shard_counts[("gen-node", topology, "")], plain)
             self.assertEqual(shard_counts[("gen-node", topology, gp.EVAL_FORCE_DELETE_SLUG)], policy)
         # Manager restarts run one at a time at 2-3 minutes each: six per shard.
@@ -1478,18 +1478,18 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-canary-second-rev", "pd", "")], 8)
         # The podkill and fault families also carry a canary beside the
         # remaining faults on the six shape families, the gangs included.
-        self.assertEqual(shard_counts[("gen-canary-podkill", "engine", "")], 3)
+        self.assertEqual(shard_counts[("gen-canary-podkill", "engine", "")], 4)
         self.assertEqual(shard_counts[("gen-canary-podkill", "engine-mn", "")], 2)
         self.assertEqual(shard_counts[("gen-canary-podkill", "pd", "")], 7)
         self.assertEqual(shard_counts[("gen-canary-podkill", "pd-mn", "")], 2)
-        self.assertEqual(shard_counts[("gen-canary-fault-old", "engine", "")], 25)
-        self.assertEqual(shard_counts[("gen-canary-fault-old", "engine-mn", "")], 5)
+        self.assertEqual(shard_counts[("gen-canary-fault-old", "engine", "")], 26)
+        self.assertEqual(shard_counts[("gen-canary-fault-old", "engine-mn", "")], 6)
         self.assertEqual(shard_counts[("gen-canary-fault-old", "pd", "")], 61)
-        self.assertEqual(shard_counts[("gen-canary-fault-old", "pd-mn", "")], 5)
-        self.assertEqual(shard_counts[("gen-canary-fault-new", "engine", "")], 9)
-        self.assertEqual(shard_counts[("gen-canary-fault-new", "engine-mn", "")], 4)
+        self.assertEqual(shard_counts[("gen-canary-fault-old", "pd-mn", "")], 6)
+        self.assertEqual(shard_counts[("gen-canary-fault-new", "engine", "")], 10)
+        self.assertEqual(shard_counts[("gen-canary-fault-new", "engine-mn", "")], 6)
         self.assertEqual(shard_counts[("gen-canary-fault-new", "pd", "")], 19)
-        self.assertEqual(shard_counts[("gen-canary-fault-new", "pd-mn", "")], 3)
+        self.assertEqual(shard_counts[("gen-canary-fault-new", "pd-mn", "")], 5)
         self.assertEqual(shard_counts[("gen-canary-fault-gate", "engine", "")], 13)
         self.assertEqual(shard_counts[("gen-canary-fault-gate", "engine-mn", "")], 3)
         self.assertEqual(shard_counts[("gen-canary-fault-gate", "pd", "")], 29)
@@ -1498,7 +1498,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         # moments per running-revision break on every shape and the held
         # moment under every strategy.
         self.assertEqual(shard_counts[("gen-rollback", "engine", "")], 10)
-        self.assertEqual(shard_counts[("gen-rollback", "engine-mn", "")], 9)
+        self.assertEqual(shard_counts[("gen-rollback", "engine-mn", "")], 10)
         self.assertEqual(shard_counts[("gen-rollback", "pd", "")], 6)
         self.assertEqual(shard_counts[("gen-rollback", "pd-mn", "")], 6)
         self.assertEqual(shard_counts[("gen-crashloop-new", "engine", "")], 1)
@@ -1541,7 +1541,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         # a router; the prefill/decode topologies one shape each. The
         # evictions run in the pool; the preemptions and the pending causes
         # run one at a time.
-        for topology, evict, preempt, pending in (("engine", 2, 12, 24), ("engine-mn", 3, 12, 23), ("pd", 1, 6, 12),
+        for topology, evict, preempt, pending in (("engine", 2, 12, 25), ("engine-mn", 3, 12, 24), ("pd", 1, 6, 13),
                                                   ("pd-mn", 2, 6, 12)):
             self.assertEqual(shard_counts[("gen-evict", topology, "")], evict)
             self.assertEqual(shard_counts[("gen-preempt", topology, "")], preempt)
@@ -1555,15 +1555,15 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         # The engine topologies carry the engine alone and the engine behind
         # a router; a broken-Instance operation waits for the status's word
         # and a settled fleet, so the rows pack a few per shard.
-        self.assertEqual(shard_counts[("gen-fault-scale", "engine", "")], 12)
-        self.assertEqual(shard_counts[("gen-fault-scale", "engine-mn", "")], 10)
+        self.assertEqual(shard_counts[("gen-fault-scale", "engine", "")], 13)
+        self.assertEqual(shard_counts[("gen-fault-scale", "engine-mn", "")], 11)
         self.assertEqual(shard_counts[("gen-fault-scale", "pd", "")], 8)
         self.assertEqual(shard_counts[("gen-fault-scale", "pd-mn", "")], 6)
-        for topology, shards in (("engine", 4), ("engine-mn", 4), ("pd", 3), ("pd-mn", 3)):
+        for topology, shards in (("engine", 5), ("engine-mn", 5), ("pd", 3), ("pd-mn", 3)):
             self.assertEqual(shard_counts[("gen-fault-delete", topology, "")], shards)
         # The move beside the remaining faults rides the plain lanes; the
         # exclusive taint and preemption cells shard on their own minutes.
-        for topology, plain, policy in (("engine", 9, 4), ("engine-mn", 10, 4), ("pd", 6, 2), ("pd-mn", 6, 2)):
+        for topology, plain, policy in (("engine", 11, 4), ("engine-mn", 11, 4), ("pd", 6, 2), ("pd-mn", 7, 2)):
             self.assertEqual(shard_counts[("gen-fault-move", topology, "")], plain)
             self.assertEqual(shard_counts[("gen-fault-move", topology, gp.EVAL_FORCE_DELETE_SLUG)], policy)
         self.assertEqual(shard_counts[("gen-fault-edit", "engine", "")], 6)
@@ -1589,8 +1589,8 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         # A webhook outage runs alone at about six minutes: three per shard.
         # A competing writer stays in the pool. The engine topologies carry
         # the engine alone and the engine behind a router.
-        self.assertEqual(shard_counts[("gen-webhook", "engine", "")], 19)
-        self.assertEqual(shard_counts[("gen-webhook", "engine-mn", "")], 19)
+        self.assertEqual(shard_counts[("gen-webhook", "engine", "")], 20)
+        self.assertEqual(shard_counts[("gen-webhook", "engine-mn", "")], 20)
         self.assertEqual(shard_counts[("gen-webhook", "pd", "")], 10)
         self.assertEqual(shard_counts[("gen-webhook", "pd-mn", "")], 10)
         self.assertEqual(shard_counts[("gen-conflict", "engine", "")], 6)
@@ -1608,7 +1608,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-lift", "engine-mn", "")], 3)
         self.assertEqual(shard_counts[("gen-lift", "pd", "")], 2)
         self.assertEqual(shard_counts[("gen-lift", "pd-mn", "")], 2)
-        self.assertEqual(job_count, 1102)
+        self.assertEqual(job_count, 1137)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin
@@ -1652,9 +1652,9 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertFalse(plain_cases & needing)
         # The twin's node losses run one at a time, so it is sharded like
         # the plain lane: the variant names the label and the key.
-        self.assertIn("gen-node / engine [1/9] [forcedelete]", yaml_text)
-        self.assertIn("gen-node / engine [1/9] [ome-scheduler] [forcedelete]", yaml_text)
-        self.assertIn('key: "omenative-e2e-gen-node-engine-ome-scheduler-forcedelete-1-of-9"', yaml_text)
+        self.assertIn("gen-node / engine [1/13] [forcedelete]", yaml_text)
+        self.assertIn("gen-node / engine [1/13] [ome-scheduler] [forcedelete]", yaml_text)
+        self.assertIn('key: "omenative-e2e-gen-node-engine-ome-scheduler-forcedelete-1-of-13"', yaml_text)
 
     def test_eval_group_emits_unique_subshard_keys_and_readable_labels(self):
         with mock.patch.dict(
@@ -2193,7 +2193,7 @@ class TestEvalTargeted(PipelineTestCase):
         self.assertEqual(gp._top_level_keys(batches[-1]), ["chart-ome-release"])
         # The fixture round, 5% sampled under the pinned commit: the pin
         # moves with the corpus like the full and smoke totals.
-        self.assertEqual(sum(gp._job_count(document) for document in batches), 407)
+        self.assertEqual(sum(gp._job_count(document) for document in batches), 416)
 
 
 class TestEvalVerdicts(unittest.TestCase):
@@ -3082,9 +3082,9 @@ class TestEvalMode(PipelineTestCase):
         committed = sorted(case for _, _, cases in self.groups for case in cases)
         default = sorted(case for child in self.runner_jobs(self.full, scheduler="") for case in self.cases_of(child))
         self.assertEqual(default, committed)
-        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 1102)
-        self.assertEqual(len(self.runner_jobs(self.full)), 2521)
-        self.assertEqual(len(self.full), 2535)
+        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 1137)
+        self.assertEqual(len(self.runner_jobs(self.full)), 2601)
+        self.assertEqual(len(self.full), 2615)
         self.assertEqual(len(self.smoke), 203)
         self.assertEqual(len(self.smoke_batches), 3)
         self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 312)
@@ -3256,7 +3256,7 @@ class TestPipelineUploads(PipelineTestCase):
     def test_todays_corpus_uploads_within_the_limit_and_the_total_is_pinned(self):
         self.assert_uploads_are_well_formed(self.batches, self.children)
         self.assertGreater(len(self.batches), 2)
-        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2645)
+        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2725)
 
     def test_the_full_round_records_its_verdicts_after_every_eval_group(self):
         last = self.batches[-1]

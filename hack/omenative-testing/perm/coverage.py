@@ -245,8 +245,9 @@ def _fault(v):
     if kind == "taint":
         return param == "all"
     if kind in ("webhook", "conflict"):
-        # a window on the settled service, as the operation lands, at a hook of the roll, or at a moment of a move (at=)
-        return param in ("idle", "settling", "rotating", "draining", "migrating")
+        # a window on the settled service, as the operation lands, at a hook of the roll, at a moment of a move (at=),
+        # or at a canary grid state
+        return param in ("idle", "settling", "rotating", "draining", "migrating") or _hook(param)
     if kind in ("podkill", "ctrlrestart", "evict", "preempt"):
         return param in FAULT_PHASES or _hook(param) or (kind == "ctrlrestart" and param == "idle")
     if kind in ("crashloop", "imagepull"):

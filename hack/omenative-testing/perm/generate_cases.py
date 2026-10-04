@@ -75,10 +75,9 @@ runners (run.py + the KIND CI lane) already implement:
                           operation in flight (fault=node:<hook>): a push, a
                           rollback, a strategy edit, a runtime edit, a scale
                           up or down, a delete and the canary ladder on the
-                          six ledger shapes, transient (lift=after-settle) on
-                          every one and kept down until the policy relocates
-                          the Instance (lift=after-recover, needs=forcedelete)
-                          on the rows whose ledger cell has that form
+                          six ledger shapes, transient (lift=after-settle) and
+                          kept down until the policy relocates the Instance
+                          (lift=after-recover, needs=forcedelete) on every one
     gen-ctrlrestart/ p4600+ the manager pod is deleted under an operation in
                           flight (fault=ctrlrestart:<hook>): mid-surge,
                           mid-drain, mid-migration, mid-canary and
@@ -1243,10 +1242,6 @@ MISSING_HOOKS = [
     "a pending cause armed mid-roll (a taint or a quota at the rotating hook) — "
     "taint:all and quota:<n> are armed before the bump; only preempt fires at a "
     "hook",
-    "a webhook outage or a competing writer at a canary step — the window faults "
-    "open on the settled service, at a hook of a push or a runtime edit, as a "
-    "rollback, a mid-roll edit, a scale or a delete lands, and at a moment of a "
-    "move, not while a canary ladder is at a step",
 ]
 
 
@@ -2449,11 +2444,16 @@ def emit_node_relocation(add):
 # so the pods it ran serve again) runs on every operation and holds on
 # either lane; the loss the node does not come back from until the
 # force-delete policy has relocated the Instance (lift=after-recover,
-# needs=forcedelete) runs on the operations that keep the victim Instance
-# and whose ledger row has the persistent form: a rollback, an edit, a
-# runtime edit, a scale-down and the canary.
+# needs=forcedelete) runs on every operation too: under a rollback, an
+# edit, a runtime edit, a scale-down and the canary the victim Instance is
+# kept and rebuilt elsewhere; under a push and a scale-up it is rebuilt
+# elsewhere on the revision the operation owes it; under a delete the pods
+# the node held are freed and the re-apply lands elsewhere. The push,
+# scale-up and delete rows of that form are minted after the family's
+# other rows, so those keep their ids.
 NODE_HOOK_OPS = ["push", "rollback", "edit", "runtime", "scaledown", "scaleup", "delete"]
 NODE_HOOK_PERSISTENT_OPS = {"rollback", "edit", "runtime", "scaledown", "canary"}
+NODE_HOOK_PERSISTENT_MORE_OPS = ["push", "scaleup", "delete"]
 NODE_HOOK_FORMS = [("one-shot", "after-settle"), ("persistent", "after-recover")]
 # The hook each operation offers the loss: the first pod of the new revision
 # under a push or a runtime edit (the roll is visibly in flight), the first
@@ -2493,6 +2493,11 @@ def _node_hook_reason(op, form, shape, topo, gang):
     elif form == "one-shot":
         out += ("; nothing rebuilds the Instance elsewhere in the meantime, and once that has held for the settle window "
                 "the kubelet is started again: the pods it ran were never stopped, so they serve again on their own pods")
+    elif op == "delete":
+        out += ("; the node stays down: the pods it held are stuck on their way out until its unreachable evidence is "
+                "older than the deployed force-delete threshold and the policy frees their names, so the teardown "
+                "completes with nothing of the service left in the API and the re-apply comes up whole on other nodes "
+                "while the node is still down; then the kubelet is started again with nothing of the service left on it")
     else:
         out += ("; the node stays down: once its unreachable evidence is older than the deployed force-delete threshold "
                 "the policy frees the pod names it holds and the controller rebuilds the Instance on other nodes, Ready "
@@ -2508,30 +2513,36 @@ def _node_hook_reason(op, form, shape, topo, gang):
     return out
 
 
+def _add_node_hook(add, topo, n, w, nr, op, form, lift):
+    """One row of the hook half: the operation with the kubelet under the
+    victim stopped at its hook, in the form the lift names."""
+    strat, surge, unavail = HOOK_STRAT if op == "push" else _op_strategy(op, False)
+    hook = NODE_HOOK_AT.get(op, HOOK_PHASE)
+    kv = dict(_node_hook_kv(op, topo, n, nr), fault=f"node:{hook}", lift=lift, co="none", topo=topo)
+    if op != "delete":
+        kv["floor_soft"] = 1
+    if op in NODE_HOOK_ROLLS:
+        kv["order_soft"] = 1
+    if form == "persistent":
+        kv["needs"] = NODE_NEEDS["relocated"]
+    desc = (f"{GEN_MARK} node {op} {shape_tag(topo, w, nr)} N={n}"
+            + (f" {strat} {budget_tag(strat, surge, unavail)}" if op in NODE_HOOK_ROLLS else "")
+            + f" {form} lift {lift}")
+    meta = dict(strat=strat if op in NODE_HOOK_ROLLS else "(dormant: nothing rolls)", verb=f"node:{op}",
+                faultop=f"node {op}", op=op, form=form, lift=lift, hook=hook)
+    add("gen-node", desc, kv, _node_hook_comps(op, topo, n, w, nr),
+        _node_hook_reason(op, form, shape_words(topo, w, nr), topo, is_mn(topo)) + _op_controls(topo, nr, op),
+        meta, cell=("node-hook", op, form, topo, w, nr), dedicated=(op == "runtime"))
+
+
 def emit_node_hooks(add):
     """The hook half of gen-node, minted after the idle halves."""
     for topo, n, w, nr in DISRUPT_SHAPES:
         for op in NODE_HOOK_OPS:
-            strat, surge, unavail = HOOK_STRAT if op == "push" else _op_strategy(op, False)
             for form, lift in NODE_HOOK_FORMS:
                 if form == "persistent" and op not in NODE_HOOK_PERSISTENT_OPS:
                     continue
-                hook = NODE_HOOK_AT.get(op, HOOK_PHASE)
-                kv = dict(_node_hook_kv(op, topo, n, nr), fault=f"node:{hook}", lift=lift, co="none", topo=topo)
-                if op != "delete":
-                    kv["floor_soft"] = 1
-                if op in NODE_HOOK_ROLLS:
-                    kv["order_soft"] = 1
-                if form == "persistent":
-                    kv["needs"] = NODE_NEEDS["relocated"]
-                desc = (f"{GEN_MARK} node {op} {shape_tag(topo, w, nr)} N={n}"
-                        + (f" {strat} {budget_tag(strat, surge, unavail)}" if op in NODE_HOOK_ROLLS else "")
-                        + f" {form} lift {lift}")
-                meta = dict(strat=strat if op in NODE_HOOK_ROLLS else "(dormant: nothing rolls)", verb=f"node:{op}",
-                            faultop=f"node {op}", op=op, form=form, lift=lift, hook=hook)
-                add("gen-node", desc, kv, _node_hook_comps(op, topo, n, w, nr),
-                    _node_hook_reason(op, form, shape_words(topo, w, nr), topo, is_mn(topo)) + _op_controls(topo, nr, op),
-                    meta, cell=("node-hook", op, form, topo, w, nr), dedicated=(op == "runtime"))
+                _add_node_hook(add, topo, n, w, nr, op, form, lift)
     for family, topo, n, w, nr in GATE_SHAPES:
         for form, lift in NODE_HOOK_FORMS:
             hook = NODE_HOOK_AT["canary"]
@@ -2545,6 +2556,10 @@ def emit_node_hooks(add):
                 _node_hook_reason("canary", form, _gate_shape_words(family, n, w), topo, is_mn(topo)), meta,
                 cell=("node-hook", "canary", form, topo, w, nr),
                 coord=lib.canary_block(story_ladder("auto"), components=gate_group(topo)))
+    form, lift = NODE_HOOK_FORMS[1]
+    for topo, n, w, nr in DISRUPT_SHAPES:
+        for op in NODE_HOOK_PERSISTENT_MORE_OPS:
+            _add_node_hook(add, topo, n, w, nr, op, form, lift)
 
 
 # ── gen-ctrlrestart: the manager restarts under an operation in flight ──────
@@ -3173,6 +3188,7 @@ def _emit_canary_stable_breaks(add):
     # Minted after every other stable row, so the rows above keep their ids.
     for family, topo, n, w, nr in GATE_SHAPES:
         _emit_canary_kept_key(add, family, topo, n, w, nr, _canary_shape(topo, w, nr), gate_group(topo))
+    _emit_canary_kept_stable_breaks(add)
 
 
 def _stable_kept_key_reason(family, n, w):
@@ -3391,6 +3407,93 @@ def _emit_canary_pushed_breaks(add):
             add("gen-canary-fault-new", desc, kv, gate_comps(topo, n, w, nr, GATE_RP),
                 _pending_canary_reason(lift, family, n, w), meta, cell=("pushed-pending", lift, topo, nr),
                 coord=lib.canary_block(story_ladder("auto"), components=group, ready_timeout=timeout))
+    _emit_canary_kept_pushed_breaks(add)
+
+
+# ── the kept crash and pull failure under a canary on the remaining shapes ──
+# The storm families break the stable side for good, and push a revision
+# that crashes or cannot be pulled, on the single-pod engine and
+# prefill/decode fleets; these rows run the same breaks as the engine unit's
+# ladder on the gangs and the engine-behind-a-router shapes: one stable
+# Instance broken at the second step's soak (a crash at start and after
+# Ready under both restart policies, a pull failure under None), and the
+# pushed engine revision broken at start, inside the first soak and by a
+# pull failure, under both exits at the park. Minted after the families'
+# other rows, so those keep their ids.
+KEPT_CANARY_STORY_FAMILIES = ("engine single", "engine+decoder+router single")
+KEPT_STABLE_ROWS = [("crashloop", "start", RESTARTS), ("crashloop", "load", RESTARTS), ("imagepull", None, ["None"])]
+KEPT_PUSHED_NAMES = ["crashStart", "crashInSoak", "imagePull"]
+KEPT_POSITION = "soak"
+
+
+def _kept_stable_reason(kind, form, rp, family, n, w):
+    shape = _gate_shape_words(family, n, w)
+    how = {("crashloop", "start"): "crashes at every start",
+           ("crashloop", "load"): "dies after Ready and comes back between crashes",
+           ("imagepull", None): "sits in ImagePullBackOff"}[(kind, form)]
+    pod = "the leader pod of one old-revision engine Instance" if w else "one old-revision engine pod"
+    return (f"{pod} {how} {_stable_position_words(KEPT_POSITION)} on {shape}, under restart policy {RP_FULL[rp]}; the "
+            f"cause stays until the ladder replaces the Instance; the ladder walks every step to Stable inside its "
+            f"budgets, the broken Instance ends on the canary revision serving, no repair is opened for it after the "
+            f"push, and the healthy Instances keep serving above N-1")
+
+
+def _kept_pushed_reason(name, exit_verb, family, n, w):
+    shape = _gate_shape_words(family, n, w)
+    where = ", where the break lands on each gang Instance's leader runner" if w else ""
+    return f"on {shape}{where}: {_new_break_reason(name, exit_verb, GATE_RP, None)}"
+
+
+def kept_canary_shapes():
+    """The gate family's shapes the storm families do not run on."""
+    return [s for s in GATE_SHAPES if s[0] not in KEPT_CANARY_STORY_FAMILIES]
+
+
+def _emit_canary_kept_stable_breaks(add):
+    for family, topo, n, w, nr in kept_canary_shapes():
+        shape = _canary_shape(topo, w, nr)
+        group = gate_group(topo)
+        for kind, form, rps in KEPT_STABLE_ROWS:
+            label = _storm_label(kind, form or "start")
+            for rp in rps:
+                kv = gate_kv(topo, n, nr)
+                kv.update(canary="auto", fault=f"{kind}:{STABLE_POSITIONS[KEPT_POSITION]}", victims=1, co="none", topo=topo)
+                if form:
+                    kv["form"] = form
+                kv.update(nophase="Failed",
+                          cell=f"canary/{STABLE_POSITION_STATE[KEPT_POSITION]}/stableBroken[{_storm_cell(kind, form or 'start')}]")
+                desc = f"{GEN_MARK} canary fault-old {label} kept at {KEPT_POSITION} {shape} N={n} rp {rp}"
+                meta = dict(strat="SurgeThenDrain", verb=f"{label}@{KEPT_POSITION}", rp=rp, shape=family,
+                            row=_ledger_row(kind, form, False, "running"))
+                add("gen-canary-fault-old", desc, kv, gate_comps(topo, n, w, nr, rp),
+                    _kept_stable_reason(kind, form, rp, family, n, w), meta,
+                    cell=("kept-stable-break", kind, form, topo, nr, rp),
+                    coord=lib.canary_block(story_ladder("auto"), components=group))
+
+
+def _emit_canary_kept_pushed_breaks(add):
+    for family, topo, n, w, nr in kept_canary_shapes():
+        shape = _canary_shape(topo, w, nr)
+        group = gate_group(topo)
+        for name, kind, form, exit_after in NEW_BREAKS:
+            if name not in KEPT_PUSHED_NAMES:
+                continue
+            for exit_verb, terminal in NEW_BREAK_EXITS:
+                kv = gate_kv(topo, n, nr)
+                kv.update(canary="auto", fault=f"{kind}:{CRASHLOOP_NEW_HOOK}", victimcomp="engine",
+                          during="canary-failed", verb=exit_verb, terminal=terminal, co="none", topo=topo)
+                if form:
+                    kv["form"] = form
+                if exit_after:
+                    kv["exitafter"] = exit_after
+                kv["cell"] = f"canary/{NEW_BREAK_STATE[name]}/canaryBroken[{name}],{NEW_BREAK_EXIT_CELL[exit_verb]}"
+                desc = f"{GEN_MARK} canary fault-new {name} kept exit {exit_verb} {shape} N={n} rp {GATE_RP}"
+                meta = dict(strat="SurgeThenDrain", verb=f"{kind}:new:{name}:{exit_verb}", rp=GATE_RP, shape=family,
+                            row=_ledger_row(kind, form, False, "new"))
+                add("gen-canary-fault-new", desc, kv, gate_comps(topo, n, w, nr, GATE_RP),
+                    _kept_pushed_reason(name, exit_verb, family, n, w), meta,
+                    cell=("kept-pushed-break", name, exit_verb, topo, nr),
+                    coord=lib.canary_block(story_ladder("auto"), components=group, ready_timeout=HELD_READY_TIMEOUT))
 
 
 # ── the deletion and the eviction under a canary, once and again ────────────
@@ -3901,9 +4004,11 @@ def _rollback_reason(hook, strat, topo, co):
 # the family's axes are all touched; a sibling nobody bumped (the router of
 # an engine fleet, the decoder outside a group) breaks the same way at the
 # first new pod. The pushed revision breaks at the held moment (break=
-# beyond stuck) under each strategy, the crash kinds also as one kill of
-# the first runner, and on a grouped prefill/decode service the decoder's
-# pushed revision breaks instead of the engine's.
+# beyond stuck) under each strategy, every kind also once (a crash kind as
+# one kill of the first runner; a pull failure, a missing key or the
+# readiness switch on the first pod, taken away once the rollback has
+# fired), and on a grouped prefill/decode service the decoder's pushed
+# revision breaks instead of the engine's.
 ROLLBACK_FAULT_SHAPES = [("engine", 4, 0, False), ("engine-mn", 2, 1, False), ("engine", 4, 0, True),
                          ("engine-mn", 2, 1, True), ("pd", 4, 0, True), ("pd-mn", 2, 1, True)]
 ROLLBACK_FAULT_ROWS = [
@@ -3920,13 +4025,28 @@ ROLLBACK_SIBLING_MOMENT = ROLLBACK_FAULT_MOMENTS[0][:4]
 ROLLBACK_HELD_BREAKS = ["crash-start", "crash-load", "imagepull", "configkey"]
 ROLLBACK_HELD_STRATS = [("SurgeThenDrain", 1, 0), ("RecreatePod", 0, 1), ("InPlaceIfPossible", 0, 1)]
 ROLLBACK_HELD_ONCE = ["crash-start", "crash-load"]
+# The one-shot forms beyond the crash kinds, minted after the family's
+# other rows so every earlier id keeps its case.
+ROLLBACK_HELD_ONCE_MORE = ["imagepull", "configkey", "stuck"]
 ROLLBACK_HELD_SIBLING_SHAPES = [("pd", 4, 0, True), ("pd-mn", 2, 1, True)]
 # The bumped members' Instance ready timeout under a pushed-revision break:
 # a revision that never comes up parks its row Failed within the wait the
 # runner gives the status to say why.
 ROLLBACK_HELD_READY_TIMEOUT = READINESS_NEW_TIMEOUT
 ROLLBACK_BREAK_WORDS = {"crash-start": "a runner that dies at every start", "crash-load": "a runner that exits after Ready",
-                        "imagepull": "an image that cannot be pulled", "configkey": "a ConfigMap key the ConfigMap lacks"}
+                        "imagepull": "an image that cannot be pulled", "configkey": "a ConfigMap key the ConfigMap lacks",
+                        "stuck": "a readiness probe it never passes"}
+# How the one-shot form of each held-moment break beyond the crash kinds
+# lands on the pushed revision's first pod, and how the cause goes away
+# once the rollback has fired.
+ROLLBACK_HELD_ONCE_WORDS = {
+    "imagepull": ("is pointed at an image that cannot be pulled while its runner is still starting, before it was "
+                  "ever Ready, and the kubelet reports the pull failure", "the image is put back"),
+    "configkey": ("reads a ConfigMap key the ConfigMap lacks, so it waits on the key and the kubelet reports it "
+                  "missing", "the key is put into the ConfigMap"),
+    "stuck": ("has its readiness switch set while its runner is still starting, so it runs without ever turning "
+              "Ready", "the switch is lifted"),
+}
 
 
 def _rollback_fault_kept(fault, form, lift):
@@ -4012,7 +4132,11 @@ def _rollback_fault_reason(fault, form, lift, hook, strat, co, topo, router, vic
 
 def _rollback_held_reason(kind, once, strat, co, topo, router, victim):
     pod = "leader pod" if is_mn(topo) else "pod"
-    if once:
+    if once and kind in ROLLBACK_HELD_ONCE_WORDS:
+        broken, lifted = ROLLBACK_HELD_ONCE_WORDS[kind]
+        how = (f"the push's first {victim} {pod} {broken}; the starting revision is re-applied as soon as the break "
+               f"shows and {lifted} once the rollback has fired")
+    elif once:
         how = (f"the push's first {victim} {pod} has its runner killed once, "
                f"{'during its first start, before it was ever Ready' if kind == 'crash-start' else 'once it is Ready and serving'}, "
                f"and the kubelet restarts it; the starting revision is re-applied as soon as the restart shows")
@@ -4118,6 +4242,10 @@ def _emit_rollback_held_breaks(add):
         strat, surge, unavail = ROLLBACK_HELD_STRATS[0]
         one(topo, n, w, router, "crash-start", False, strat, surge, unavail, "rolling", "decoder")
         one(topo, n, w, router, "crash-start", True, strat, surge, unavail, "rolling", "decoder")
+    for topo, n, w, router in ROLLBACK_FAULT_SHAPES:
+        for kind in ROLLBACK_HELD_ONCE_MORE:
+            strat, surge, unavail = ROLLBACK_HELD_STRATS[0]
+            one(topo, n, w, router, kind, True, strat, surge, unavail, "none", "engine")
 
 
 def emit_rollback(add):
@@ -5773,6 +5901,61 @@ def emit_pending(add):
                             _pending_reason(cause, "roll", topo, rp, lift, strat, w, nr), meta,
                             cell=("pending", cause, "roll", topo, w, strat, rp, lift, nr))
     _emit_pending_ops(add)
+    _emit_pending_canary(add)
+
+
+# ── a quota under a canary ───────────────────────────────────────────────────
+# A quota with room for no further pod is in place when the canary push
+# lands: the first step's canary pod cannot be admitted, so the capacity
+# step parks the ladder Failed at its ready timeout with the wait still
+# reported (kept), or the quota is lifted once the ladder has parked, the
+# capacity the step asked for lands, the park holds anyway and a resume
+# walks the ladder to Stable (lifted). The engine unit's ladder on the
+# gate family's shapes the hand-written canary cases do not run; minted
+# after the family's other rows.
+PENDING_CANARY_KEPT_SKIP = ("engine single", "engine+decoder+router single")
+PENDING_CANARY_LIFTED_SKIP = ("engine single",)
+PENDING_CANARY_KEPT_CELL = "canary/Staging/readyTimeout[quota]"
+PENDING_CANARY_LIFTED_CELL = "canary/Failed/capacityReached,canary/Failed/resume[afterCapacity]"
+
+
+def _pending_canary_quota_reason(lifted, family, n, w):
+    shape = _gate_shape_words(family, n, w)
+    out = (f"a quota with room for no further pod is in place when the canary push lands on {shape}, so the first "
+           f"step's canary pod{' (a gang that cannot form)' if w else ''} cannot be admitted; the capacity step waits "
+           f"with reason QuotaExceeded on its row, nothing settled is taken down to make room, the stable revision keeps "
+           f"serving every Instance and no traffic names the canary")
+    if not lifted:
+        return out + ("; the quota stays, so the step parks the ladder Failed at its ready timeout with the wait still "
+                      "reported and nothing rolls back")
+    return out + ("; the step parks the ladder Failed at its ready timeout, then the quota is lifted: the capacity the "
+                  "parked step asked for lands and the park holds anyway (still Failed at the same step with the capacity "
+                  "there, since capacity that arrives after the deadline does not un-park a canary), and a resume "
+                  "re-enters the ladder at its first step and walks every step to Stable with every Instance on the "
+                  "canary revision serving")
+
+
+def _emit_pending_canary(add):
+    for family, topo, n, w, nr in GATE_SHAPES:
+        shape = _canary_shape(topo, w, nr)
+        group = gate_group(topo)
+        for lifted, skip in ((False, PENDING_CANARY_KEPT_SKIP), (True, PENDING_CANARY_LIFTED_SKIP)):
+            if family in skip:
+                continue
+            kv = gate_kv(topo, n, nr)
+            kv.update(canary="auto", fault="quota:0", co="none", topo=topo)
+            if lifted:
+                kv.update(terminal="Stable", during="canary-failed", verb="quotalift", verb2="resume",
+                          during2="canary-failed", cell=PENDING_CANARY_LIFTED_CELL)
+            else:
+                kv.update(terminal="Failed", cell=PENDING_CANARY_KEPT_CELL)
+            label = "lifted" if lifted else "kept"
+            desc = f"{GEN_MARK} pending quota canary {label} {shape} N={n}"
+            meta = dict(strat="SurgeThenDrain", verb=f"pending:quota:canary:{label}", faultop="quota canary", op="canary",
+                        rp=GATE_RP, lift=("quotalift" if lifted else "never"), shape=family)
+            add("gen-pending", desc, kv, gate_comps(topo, n, w, nr, GATE_RP), _pending_canary_quota_reason(lifted, family, n, w),
+                meta, cell=("pending-canary", label, topo, nr),
+                coord=lib.canary_block(story_ladder("auto"), components=group, ready_timeout=HELD_READY_TIMEOUT))
 
 
 # ── The pending causes and the pod faults under the remaining operations ────
@@ -6563,6 +6746,9 @@ BROKEN_ONCE = [("crashloop", "start"), ("crashloop", "load"), ("imagepull", None
 BROKEN_PENDING = [("taint", {"down1": "taint:all", "up1": "taint:all", "delete": "taint:all"}, ["after-settle", "never"]),
                   ("quota", {"down1": "quota:0", "up1": "quota:0", "delete": "quota:-1"}, ["after-settle"]),
                   ("quota-kept", {"down1": "quota:0"}, ["never"])]
+# The quota kept to the end under the scale-up and the delete, minted after
+# the family's other rows so those keep their ids.
+BROKEN_PENDING_KEPT_MORE = {"up1": "quota:0", "delete": "quota:-1"}
 BROKEN_PENDING_TOKEN = {"taint": "Unschedulable", "quota": "QuotaExceeded"}
 
 
@@ -6798,6 +6984,21 @@ def emit_fault_more(add):
                     dict(strat="(dormant: nothing rolls)", verb=f"crashloop:start{':once' if once else ''}@{op}", rp=rp, op=op,
                          victim=victim),
                     cell=("broken-more", "sibling", victim, once, topo, w, op, nr))
+    for topo, n, w, nr in BROKEN_SHAPES:
+        for op, target in [row for row in BROKEN_MORE_OPS[n] if row[0] == "up1"] + [("delete", None)]:
+            mode = "recreate" if op == "delete" else "scaledown"
+            folder = "gen-fault-delete" if op == "delete" else "gen-fault-scale"
+            ceil_e = max(n, target or n)
+            fault, lift = BROKEN_PENDING_KEPT_MORE[op], "never"
+            kv = dict(mode=mode, **counts(topo, n, nr), ceil_e=ceil_e, ceil_d=(n if is_pd(topo) else 0),
+                      ceil_r=router_count(topo, nr), fault=fault, during=IDLE_PHASE, co="none", topo=topo, lift=lift)
+            if op != "delete":
+                kv["to_e"] = target
+            tag = f"{shape_tag(topo, w, nr)} N={n} rp {rp}"
+            add(folder, f"{GEN_MARK} broken pending quota-kept {op} {tag} lift {lift}", kv, _broken_comps(topo, n, w, rp, nr),
+                _broken_pending_reason("quota-kept", fault, lift, topo, n, target, op, nr),
+                dict(strat="(dormant: nothing rolls)", verb=f"pending:quota-kept@{op}", rp=rp, op=op, lift=lift),
+                cell=("broken-more", "pending", "quota-kept", lift, topo, w, op, nr))
 
 
 def emit_fault_scale(add):
@@ -7014,10 +7215,12 @@ MOVE_SIBLING = {"engine": "router", "engine-mn": "router", "pd": "decoder", "pd-
 def is_move_more_row(kv):
     """True for a gen-fault-move row of the move beside the remaining
     faults: a stuck push, a pod taken or pending, the missing key, the
-    readiness switch, a break healed again or a runner killed once."""
+    readiness switch, a break healed again, a runner killed once or a quota
+    the request meets."""
     kind = str(kv.get("fault", "")).partition(":")[0]
-    return bool(kv.get("stuck") or kv.get("once") or kv.get("lift") == "after-settle"
-                or kind in ("configkey", "readiness", "podkill", "taint", "evict", "preempt"))
+    plain = "fault" not in kv and not kv.get("stuck")
+    return bool(plain or kv.get("stuck") or kv.get("once") or kv.get("lift") == "after-settle"
+                or kind in ("configkey", "readiness", "podkill", "taint", "evict", "preempt", "quota"))
 
 
 def _move_request_words(topo, w, nr):
@@ -7333,6 +7536,53 @@ def _emit_fault_move_more(add):
             add("gen-fault-move", desc, kv, comps(topo, n, w, lib.lifecycle(), d_life=d_life, nr=nr),
                 _move_stuck_reason("imagepull", "held", topo, w, nr, "decoder"), meta,
                 cell=("fault-move-stuck", "imagepull", "held", "decoder", topo, w, nr))
+    _emit_fault_move_quota(add)
+
+
+# ── a quota under the move ──────────────────────────────────────────────────
+# The request meets a quota with room for no further pod: the replacement
+# cannot be admitted, so the move ends Failed within its bound with the
+# source still serving (kept), and once the quota is lifted a fresh request
+# completes (lifted). The shapes the hand-written fault cases do not run,
+# as (topology, routers on an engine-only shape); minted after the family's
+# other rows.
+MOVE_QUOTA_KEPT = [("pd-mn", 0), ("engine-mn", lib.NR), ("engine", lib.NR)]
+MOVE_QUOTA_LIFTED = [("pd-mn", 0), ("pd", 0), ("engine-mn", lib.NR), ("engine", lib.NR)]
+
+
+def _move_quota_reason(lifted, topo, w, nr):
+    gang = ", a gang that moves whole, so the quota keeps its replacement gang from forming" if w else ""
+    out = (f"{_move_request_words(topo, w, nr)} with a quota with room for no further pod in place{gang}: the replacement "
+           f"cannot be admitted, so the move ends Failed within its bound with the source Instance still Ready and "
+           f"serving, the request annotation consumed and its ledger entry terminal (the slot freed); nothing exceeds "
+           f"N+1 alive and nothing settled is taken down to make room")
+    if not lifted:
+        out += "; the quota stays to the end, so the source keeps serving and no further move is attempted"
+    else:
+        out += ("; then the quota is lifted and a fresh request moves the Instance: it completes, the source drains and "
+                "the Instance ends whole on its replacement, still within N+1 alive")
+    if is_pd(topo):
+        out += "; decoder and router are negative controls (co=none)"
+    elif nr:
+        out += "; the router is a negative control (co=none)"
+    return out
+
+
+def _emit_fault_move_quota(add):
+    for topo, n, w, nr in MOVE_SHAPES:
+        for lifted, shapes in ((False, MOVE_QUOTA_KEPT), (True, MOVE_QUOTA_LIFTED)):
+            if (topo, nr) not in shapes:
+                continue
+            kv = dict(mode="migrate", **counts(topo, n, nr), ceil_e=n + 1, ceil_d=(n if is_pd(topo) else 0),
+                      ceil_r=router_count(topo, nr), co="none", topo=topo, mig="Auto", inst=0, fault="quota:0", expect="fail")
+            if lifted:
+                kv["lift"] = 1
+            label = "lifted" if lifted else "kept"
+            meta = dict(strat="SurgeThenDrain", verb=f"quota@move:{label}", rp="None", victim="engine", at="accept", who="moved")
+            desc = f"{GEN_MARK} fault-move quota {label} {shape_tag(topo, w, nr)} N={n}"
+            life = lib.lifecycle()
+            add("gen-fault-move", desc, kv, comps(topo, n, w, life, d_life=(lib.lifecycle() if is_pd(topo) else None), nr=nr),
+                _move_quota_reason(lifted, topo, w, nr), meta, cell=("fault-move-quota", label, topo, w, nr))
 
 
 # ── gen-webhook / gen-conflict: the admission webhook unreachable, a competing writer ──
@@ -7525,6 +7775,7 @@ def emit_webhook(add):
                         _webhook_reason(op, lift, topo, w, nr, strat), meta,
                         cell=("webhook", op, topo, w, nr, strat, lift))
     _emit_more_windows(add, "webhook")
+    _emit_canary_windows(add, "webhook")
 
 
 def emit_conflict(add):
@@ -7545,6 +7796,75 @@ def emit_conflict(add):
                         _conflict_reason(op, form, target, topo, w, nr), meta,
                         cell=("conflict", op, topo, w, nr, form, target))
     _emit_more_windows(add, "conflict")
+    _emit_canary_windows(add, "conflict")
+
+
+# ── a window at a canary step ───────────────────────────────────────────────
+# The webhook outage and the competing writer open while the second step of
+# the engine unit's ladder soaks its split, on the ledger's six shape
+# families (the gate family's shapes): the step waits with a reason while
+# admission refuses and the ladder completes once the webhook is back; a
+# competing write is retried and the step moves once. Minted after each
+# family's other rows, so those keep their ids.
+CANARY_WINDOW_HOOK = "canary-serving@1"
+CANARY_WINDOW_STATE = "Serving[soak]"
+CANARY_WINDOW_KNOBS = {"webhook": [("after-hold", "afterHold", dict(lift="after-hold")),
+                                   ("after-window", "afterWindow", dict(lift="after-window"))],
+                       "conflict": [("once", "once", dict(form="once", target="isvc")),
+                                    ("persist", "persist", dict(form="persist", target="isvc"))]}
+CANARY_WINDOW_EVENT = {"webhook": "webhookDown", "conflict": "competingWriter"}
+
+
+def _canary_window_promise():
+    return ("the ladder walks every step to Stable with the step index never going back, each pod slot of the unit "
+            "created once, every Instance on the canary revision serving, the rows following the pods in rotation "
+            "within the configured requeues, the manager's events bounded and nothing left held")
+
+
+def _canary_webhook_reason(lift, family, n, w):
+    shape = _gate_shape_words(family, n, w)
+    back = ("the webhook stays unreachable across the hold window, then its webhooks are pointed back"
+            if lift == "after-window" else
+            "the webhooks are pointed back once the status has said why (or the reason wait has run out)")
+    return (f"the admission webhook is made unreachable while the second step of the engine unit's ladder soaks its "
+            f"split on {shape}: its webhooks are pointed at a Service that does not exist, so every write the webhooks "
+            f"intercept is refused while status writes pass; the next pod the ladder creates is refused by admission, so "
+            f"the step must wait and the status must say why in the webhook's own words (an event on the ISVC or an "
+            f"InferenceReplica, a row failure or wait, a hold or a condition) while the stable side keeps serving and the "
+            f"rows follow the pods in rotation; the manager's reconciles stay bounded; {back}, admission must answer again, "
+            f"and {_canary_window_promise()}")
+
+
+def _canary_conflict_reason(form, family, n, w):
+    shape = _gate_shape_words(family, n, w)
+    writes = ("one competing write bumps the ISVC's resourceVersion while the second step of the engine unit's ladder "
+              "soaks its split" if form == "once" else
+              "a competing writer bumps the ISVC's resourceVersion every few hundred milliseconds from the second "
+              "step's soak until the ladder ends")
+    return (f"{writes} on {shape}, so the controller's status writes carry a stale resourceVersion, conflict and are "
+            f"retried; {_canary_window_promise()}")
+
+
+def _emit_canary_windows(add, kind):
+    folder = f"gen-{kind}"
+    for family, topo, n, w, nr in GATE_SHAPES:
+        shape = _canary_shape(topo, w, nr)
+        group = gate_group(topo)
+        for label, variant, knobs in CANARY_WINDOW_KNOBS[kind]:
+            kv = gate_kv(topo, n, nr)
+            kv.update(canary="auto", fault=f"{kind}:{CANARY_WINDOW_HOOK}", co="none", topo=topo, nophase="Failed",
+                      cell=f"canary/{CANARY_WINDOW_STATE}/{CANARY_WINDOW_EVENT[kind]}[{variant}]")
+            kv.update(knobs)
+            reason = (_canary_webhook_reason(label, family, n, w) if kind == "webhook"
+                      else _canary_conflict_reason(label, family, n, w))
+            desc = f"{GEN_MARK} {kind} canary at soak {shape} N={n} {label}"
+            meta = dict(strat="SurgeThenDrain", verb=f"{kind}:{CANARY_WINDOW_HOOK}", winop=f"{kind} canary", op="canary",
+                        hook=CANARY_WINDOW_HOOK, rp=GATE_RP, shape=family)
+            if kind == "conflict":
+                meta.update(cform=label, target="isvc")
+            add(folder, desc, kv, gate_comps(topo, n, w, nr, GATE_RP), reason, meta,
+                cell=("canary-window", kind, label, topo, nr),
+                coord=lib.canary_block(story_ladder("auto"), components=group))
 
 
 def _more_window_kv(kind, op, hook, topo, n, nr, strat, surge, unavail, knobs):
@@ -8696,12 +9016,220 @@ def build_outputs():
     emit_conflict(add)
     emit_crash_once(add)
     emit_lift(add)
+    _emit_plain_ops(add)
+    _emit_leftover_singles(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
                  + "; ".join(repr(k) for k in sorted(stale)))
     outputs[MANIFEST_REL] = manifest(rows)
     return outputs, rows
+
+
+# ── the plain operations on the shapes the hand-written folders skip ───────
+# One case per ledger cell with no fault: a push on the engine behind a
+# router; a rollback and a strategy edit on both engine-behind-a-router
+# shapes; a runtime edit and a delete on the router shapes and the
+# prefill/decode gang; a scale up and a scale down on the engine behind a
+# router; a move on both router shapes. Each lands in the family that owns
+# the operation, minted after every other row of every family, as the
+# control row the faulted rows are read against.
+PLAIN_STRAT = ("SurgeThenDrain", 1, 0)
+PLAIN_ROUTER_SHAPES = [("engine", 4, 0, lib.NR), ("engine-mn", 2, 1, lib.NR)]
+PLAIN_WIDE_SHAPES = [("pd", 4, 0, 0), ("pd-mn", 2, 1, 0)] + PLAIN_ROUTER_SHAPES
+
+
+def _plain_controls(topo, nr):
+    if is_pd(topo):
+        return "; decoder and router are negative controls (co=none)"
+    return "; the router is a negative control (co=none)" if nr else ""
+
+
+def _plain_gang(topo):
+    return "; each engine Instance is a gang of a leader and a worker, moved and rolled whole" if is_mn(topo) else ""
+
+
+def _emit_plain_ops(add):
+    strat, surge, unavail = PLAIN_STRAT
+    life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+    topo, n, w, nr = PLAIN_ROUTER_SHAPES[0]
+    kv = dict(**counts(topo, n, nr), **ceilings(topo, n, strat, surge, nr), co="none", topo=topo)
+    add("gen-rollout", f"{GEN_MARK} rollout {shape_tag(topo, w, nr)} N={n} {strat} {budget_tag(strat, surge, unavail)}", kv,
+        comps(topo, n, w, life, nr=nr),
+        f"plain bump of the engine behind a router: rolls within the surge budget (peak <= {kv['ceil_e']}), never below N "
+        f"ready, and the roll completes with every engine Instance on the new revision and serving{_plain_controls(topo, nr)}",
+        dict(strat=strat, verb="none", plain=True), cell=("plain", "push", topo, w, nr))
+    for topo, n, w, nr in PLAIN_ROUTER_SHAPES:
+        shape = shape_tag(topo, w, nr)
+        kv = dict(**_crash_once_counts(topo, n, True), **_crash_once_ceilings(topo, n, True, strat, surge),
+                  co="none", topo=topo, rollback=1, during="rotating")
+        add("gen-rollback", f"{GEN_MARK} rollback at rotating {shape} N={n} {strat} {budget_tag(strat, surge, unavail)} co none",
+            kv, None, _rollback_reason("rotating", strat, topo, "none") + _plain_controls(topo, nr),
+            dict(strat=strat, verb="rollback:rotating", hook="rotating", plain=True), cell=("plain", "rollback", topo, w, nr),
+            body=functools.partial(_rollback_fault_body, topo=topo, n=n, w=w, router=True, life=life, co="none",
+                                   configkey=False, coord=None))
+        to = "RecreatePod"
+        esurge, eunavail = switch_budget(strat, to)
+        elife = lib.lifecycle(strat=strat, surge=esurge, unavail=eunavail)
+        kv = _switch_fault_kv(topo, n, True, esurge, "none", dict(edit=f"strategy:{to}", during="rotating"))
+        add("gen-switch", f"{GEN_MARK} switch rotating {shape} N={n} {strat} to {to}", kv, None,
+            _switch_strategy_reason(topo, strat, to, "rotating", "none") + _plain_controls(topo, nr),
+            dict(strat=strat, verb="edit:rotating", edit=f"strategy {strat} to {to} at rotating", plain=True),
+            cell=("plain", "edit", topo, w, nr),
+            body=functools.partial(_switch_fault_body, topo=topo, n=n, w=w, router=True, life=elife, co="none",
+                                   configkey=False, coord=None))
+        kv = dict(mode="migrate", **counts(topo, n, nr), ceil_e=n + 1, ceil_d=0, ceil_r=router_count(topo, nr),
+                  co="none", topo=topo, mig="Auto", inst=0)
+        add("gen-fault-move", f"{GEN_MARK} fault-move plain {shape} N={n}", kv, comps(topo, n, w, lib.lifecycle(), nr=nr),
+            f"{_move_request_words(topo, w, nr)} with nothing in its way: the move completes end to end and is recorded "
+            f"once, the replacement comes up whole elsewhere and the source drains, the Instance ends Ready and serving on "
+            f"its replacement, nothing exceeds N+1 alive, the other Instances keep serving throughout and every row "
+            f"settles{_plain_gang(topo)}{_plain_controls(topo, nr)}",
+            dict(strat=strat, verb="none@move", rp="None", victim="engine", at="accept", who="moved", plain=True),
+            cell=("plain", "move", topo, w, nr))
+    for topo, n, w, nr in PLAIN_WIDE_SHAPES:
+        shape = shape_tag(topo, w, nr)
+        kv = dict(_edit_kv(topo, n, strat, surge, nr), co="none", topo=topo, expect="roll", edit="env")
+        add("gen-fault-edit", f"{GEN_MARK} fault-edit plain edit env {shape} N={n} {strat}", kv,
+            comps(topo, n, w, life, d_life=life, nr=nr),
+            f"the operator gives the dedicated runtime every Component inherits a new runner env on {shape_words(topo, w, nr)} "
+            f"under {strat}, so every Component rolls onto its own new revision: {_op_end('runtime')}, within the surge "
+            f"budget of every Component, with every row settled and nothing left held{_plain_gang(topo)}",
+            dict(strat=strat, verb="none@edit", rp="None", rtedit="env", row="none", plain=True),
+            cell=("plain", "runtime", topo, w, nr), dedicated=True)
+        kv = dict(_op_kv("delete", topo, n, nr, False), co="none", topo=topo)
+        add("gen-fault-delete", f"{GEN_MARK} plain delete {shape} N={n}", kv, _op_comps("delete", topo, n, w, nr, False),
+            f"{_op_does('delete', False, topo)} on {shape_words(topo, w, nr)} with nothing broken: every pod goes within "
+            f"the teardown budget, no pod stays Terminating and no finalizer wedges, and {_op_end('delete')}"
+            f"{_plain_gang(topo)}{_plain_controls(topo, nr)}",
+            dict(strat="(dormant: nothing rolls)", verb="none@delete", rp="None", op="delete", plain=True),
+            cell=("plain", "delete", topo, w, nr))
+    topo, n, w, nr = PLAIN_ROUTER_SHAPES[0]
+    for op in ("scaleup", "scaledown"):
+        kv = dict(_op_kv(op, topo, n, nr, False), co="none", topo=topo)
+        add("gen-fault-scale", f"{GEN_MARK} plain {op} {shape_tag(topo, w, nr)} N={n}", kv, _op_comps(op, topo, n, w, nr, False),
+            f"{_op_does(op, False, topo)} on {shape_words(topo, w, nr)} with nothing broken: {_op_end(op)}, nothing surges "
+            f"above the target, the untouched Instances keep their pods and keep serving, and every row settles Ready with no "
+            f"operation open{_plain_controls(topo, nr)}",
+            dict(strat="(dormant: nothing rolls)", verb=f"none@{op}", rp="None", op=op, plain=True),
+            cell=("plain", op, topo, w, nr))
+
+
+# ── the single cells the shape axis left on the router shapes ──────────────
+# One case per ledger cell on the engine-behind-a-router shapes (single-pod
+# and gang), each in the family that owns the verb and minted after every
+# other row: the node lost once and for good at steady state (gen-node); the
+# ConfigMap key put back once its wait has shown, and a pull failure of the
+# running revision at steady state and as a push lands (gen-heal,
+# gen-imagepull); a pod deleted by hand under a push on the single-pod shape
+# and a gang leader lost under a push on the gang (gen-fault,
+# gen-gang-member); a stable pod or gang leader deleted once at a canary
+# step on the engine gang and both router shapes (gen-canary-podkill); and a
+# rollback at the held moment of a push that never passes readiness
+# (gen-rollback).
+SINGLE_ROUTER_SHAPES = [("engine", 4, 0, lib.NR), ("engine-mn", 2, 1, lib.NR)]
+SINGLE_RP = "None"
+SINGLE_MIG = "Auto"
+SINGLE_NODE_OUTCOMES = [("repaired", "after-settle"), NODE_RELOCATION]
+
+
+def _single_router_control():
+    return "; the router is a negative control (co=none)"
+
+
+def _emit_leftover_singles(add):
+    rp, mig = SINGLE_RP, SINGLE_MIG
+    strat, surge, unavail = PLAIN_STRAT
+    for topo, n, w, nr in SINGLE_ROUTER_SHAPES:
+        tag = shape_tag(topo, w, nr)
+        gang = is_mn(topo)
+        # A Ready Instance loses its node: once (the kubelet started again
+        # once the bite has held) and for good (relocated by the policy).
+        life = lib.lifecycle(restart=RP_FULL[rp], mig={"mode": mig})
+        for outcome, lift in SINGLE_NODE_OUTCOMES:
+            kv = dict(**counts(topo, n, nr), **ceilings(topo, n, "SurgeThenDrain", 0, nr),
+                      fault=f"node:{NODE_PARAM}", during="idle", lift=lift, expect=outcome, co="none", topo=topo)
+            if outcome in NODE_NEEDS:
+                kv["needs"] = NODE_NEEDS[outcome]
+            add("gen-node", f"{GEN_MARK} node notready {tag} N={n} rp {rp} mig {mig} co none {outcome}", kv,
+                comps(topo, n, w, life, nr=nr), _node_reason(outcome, rp, mig, "none") + _single_router_control(),
+                dict(strat="SurgeThenDrain", verb=f"node:{outcome}", rp=rp, mig=mig, single=True),
+                cell=("single", "node", outcome, topo, w, nr))
+        # The running revision's key removed and put back once its wait has shown.
+        life = lib.lifecycle(restart=RP_FULL[rp])
+
+        def heal_body(name, topo=topo, n=n, w=w, nr=nr, life=life):
+            cm = f"{name}{HEAL_CONFIG_SUFFIX}"
+            cs = comps(topo, n, w, life, nr=nr)
+            cs[0]["runner"] = lib.configmap_env(cm, HEAL_CONFIG_KEY, HEAL_CONFIG_VAR, gang=is_mn(topo))
+            return lib.render(name, cs, docs=[lib.configmap_doc(cm, {HEAL_CONFIG_KEY: HEAL_CONFIG_VALUE})])
+
+        kv = dict(**counts(topo, n, nr), ceil_e=n, ceil_d=0, ceil_r=nr, fault="configkey:missing", co="none", topo=topo,
+                  during="idle", lift="after-settle", expect="heals")
+        add("gen-heal", f"{GEN_MARK} heal configkey {tag} N={n} rp {rp} lift after-settle co none", kv, None,
+            _heal_reason(rp, "none", "after-settle", topo) + _single_router_control(),
+            dict(strat="(dormant: nothing rolls)", verb="configkey:after-settle", rp=rp, single=True),
+            cell=("single", "heal", topo, w, nr), body=heal_body)
+        # A pull failure of the running revision: at steady state, and as a push lands.
+        kv = dict(**counts(topo, n, nr), ceil_e=n, ceil_d=0, ceil_r=nr, fault="imagepull:old", co="none", topo=topo,
+                  during="idle", expect="repaired")
+        add("gen-imagepull", f"{GEN_MARK} imagepull idle {tag} N={n} rp {rp}", kv, comps(topo, n, w, life, nr=nr),
+            _imagepull_idle_reason(topo) + _single_router_control(),
+            dict(strat="(dormant: nothing rolls)", verb="imagepull:idle", rp=rp, single=True),
+            cell=("single", "imagepull", "idle", topo, w, nr))
+        kv = dict(**counts(topo, n, nr), **ceilings(topo, n, strat, surge, nr), fault="imagepull:old", floor_soft=1,
+                  co="none", topo=topo)
+        add("gen-imagepull", f"{GEN_MARK} imagepull {tag} N={n} {strat} {budget_tag(strat, surge, unavail)} rp {rp} co none", kv,
+            comps(topo, n, w, lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp]), nr=nr),
+            _imagepull_reason(strat, "none") + _single_router_control(),
+            dict(strat=strat, verb="imagepull:settling", rp=rp, single=True),
+            cell=("single", "imagepull", "settling", topo, w, nr))
+        # A pod, or a gang's leader, deleted by hand as the push lands.
+        roll_life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+        if gang:
+            kv = dict(**counts(topo, n, nr), **ceilings(topo, n, strat, surge, nr), restart=rp, kill="leader",
+                      fault="podkill:settling", co="none", topo=topo, victim="stable", victimcomp="engine",
+                      floor_slack=1, order_soft=1)
+            add("gen-gang-member", f"{GEN_MARK} gang leader lost settling {tag} N={n} {strat} rp {rp}", kv,
+                comps(topo, n, w, roll_life, nr=nr), _gang_member_reason("settling", "leader", strat, rp) + _single_router_control(),
+                dict(strat=strat, verb="podkill:settling:leader", rp=rp, single=True),
+                cell=("single", "gang-member", topo, w, nr))
+        else:
+            waivers = _podkill_waivers(topo, strat, "settling")
+            kv = dict(**counts(topo, n, nr), **ceilings(topo, n, strat, surge, nr), fault="podkill:settling",
+                      victimcomp="engine", **waivers, co="none", topo=topo)
+            add("gen-fault", f"{GEN_MARK} podkill settling {tag} N={n} {strat} {budget_tag(strat, surge, unavail)} rp {rp}", kv,
+                comps(topo, n, w, roll_life, nr=nr), _podkill_reason(topo, strat, "settling", waivers) + _single_router_control(),
+                dict(strat=strat, verb="podkill:settling", rp=rp, single=True), cell=("single", "podkill", topo, w, nr))
+        # A rollback at the held moment of a push that never passes readiness.
+        kv = dict(**_crash_once_counts(topo, n, True), **_crash_once_ceilings(topo, n, True, strat, surge),
+                  co="none", topo=topo, rollback=1, during="held")
+        kv["break"] = "stuck"
+        add("gen-rollback", f"{GEN_MARK} rollback at held {tag} N={n} {strat} {budget_tag(strat, surge, unavail)} co none", kv, None,
+            _rollback_reason("held", strat, topo, "none") + _single_router_control(),
+            dict(strat=strat, verb="rollback:held", hook="held", single=True), cell=("single", "rollback-held", topo, w, nr),
+            body=functools.partial(_rollback_fault_body, topo=topo, n=n, w=w, router=True,
+                                   life=lib.lifecycle(strat=strat, surge=surge, unavail=unavail), co="none",
+                                   configkey=False, coord=None))
+    # A stable pod, or a gang's leader, deleted once at the first split of
+    # the engine unit's ladder: the engine gang and both router shapes.
+    for family, topo, n, w, nr in GATE_SHAPES:
+        if family not in ("engine gang", "engine+router single", "engine+router gang"):
+            continue
+        kv = gate_kv(topo, n, nr)
+        kv.update(canary="auto", fault=f"podkill:{POD_FAULT_HOOK}", victim="stable", victimcomp="engine", co="none", topo=topo)
+        member = "leader" if is_mn(topo) else None
+        if member:
+            kv["kill"] = member
+        variant = "gangOnce" if is_mn(topo) else "stableOnce"
+        kv.update(nophase="Failed", cell=f"canary/Serving/capacityDropped[{variant}]")
+        lost = "gang member lost" if is_mn(topo) else "pod deleted by hand"
+        add("gen-canary-podkill", f"{GEN_MARK} canary podkill podkill once at auto {_canary_shape(topo, w, nr)} N={n} rp {rp}"
+            + (f" target {member}" if member else ""), kv, gate_comps(topo, n, w, nr, rp),
+            _pod_fault_reason("podkill", 0, "auto", member, rp, family, n, w),
+            dict(strat="SurgeThenDrain", verb="podkill@auto", rp=rp, shape=family, row=f"{lost}, one-shot", single=True),
+            cell=("single", "canary-podkill", topo, nr),
+            coord=lib.canary_block(story_ladder("auto"), components=gate_group(topo)))
 
 
 def manifest(rows):
@@ -9012,7 +9540,13 @@ def manifest(rows):
         " never its fix; the stable-side break does not hold the ladder, the pod placed"
         " for the first capacity step waits on the same key, and the ladder parks at that"
         " step naming the missing key, the stable side still serving and no traffic"
-        " reaching the step whose pod never came up. Left out, with the reason: one kill"
+        " reaching the step whose pod never came up. The kept crash and pull failure,"
+        " which the storm families drive on the single-pod engine and prefill/decode"
+        " fleets, run on the gangs and the engine-behind-a-router shapes too: one stable"
+        " Instance crashing at start or after Ready under both restart policies, or"
+        " sitting in ImagePullBackOff, at the second step's soak; and the pushed engine"
+        " revision crashing at start, crashing inside the first soak or unpullable, under"
+        " both exits at the park. Left out, with the reason: one kill"
         " at start on the running side at a grid state (a running pod has"
         " no first start to catch; its one-shot form is the lifted crash); a preemption at"
         " a grid state (its press runs in the pending driver's own watch; the eviction"
@@ -9196,7 +9730,12 @@ def manifest(rows):
         " after a pod is gone; on a gang under RecreateInstance that leaves"
         " the whole gang short of one member. A gang surge roll held to the"
         " end by that quota is the tight-cluster family's cell, so the pending"
-        " family leaves its `quota:<members-1> lift=never` cell out.",
+        " family leaves its `quota:<members-1> lift=never` cell out. A quota"
+        " with no room is also armed before a canary push on the shapes the"
+        " hand-written canary cases do not run (minted after the other rows):"
+        " kept, the capacity step parks the ladder Failed at its ready timeout;"
+        " lifted once the ladder has parked, the capacity lands, the park holds"
+        " and a resume walks the ladder to Stable.",
         "- under a rollback, a strategy edit, a runtime edit, a scale and a delete"
         " the three families run one case per ledger cell under restart policy"
         " None: a taint or a quota armed before a rollback (drain-first, the"
@@ -9267,7 +9806,11 @@ def manifest(rows):
         " to one is down by one there, and down by two asks for zero, which the"
         " API refuses (minReplicas 0 needs KEDA autoscaling). A rolling group is"
         " crossed in where a"
-        " decoder exists; the delete family keeps the same axes.",
+        " decoder exists; the delete family keeps the same axes. The quota is"
+        " also kept to the end under the scale-up and the delete (minted after"
+        " the other rows): the new Instance's row, or a row of the recreate,"
+        " waits with its reason across the hold window and nothing settled is"
+        " taken down to make room.",
         "- gen-fault-move fires the fault at a moment of a move (at=accept, the"
         " request recorded; at=surge, the replacement pod up; at=drain, the"
         " source going) on the moved Instance (its source pod at accept, its"
@@ -9307,7 +9850,11 @@ def manifest(rows):
         " push stuck beside a move (the router is bumped by no group, so a"
         " stuck router push has no driver) and the missing key or the"
         " readiness switch on the router (its image carries neither the"
-        " fixture's ConfigMap env nor the readiness switch).",
+        " fixture's ConfigMap env nor the readiness switch). The request also"
+        " meets a quota with no room (fault=quota:0 expect=fail, the bounded-"
+        " failure contract of the hand-written fault cases; lift=1 lifts it"
+        " after the failure and a fresh request completes) on the shapes those"
+        " cases do not run, minted after the other rows.",
         "- gen-fault-edit edits the dedicated runtime every Component inherits"
         " (engine, decoder and router each roll onto their own revision) under"
         " the surge and the drain-first strategies, and breaks a pod of the"
@@ -9394,7 +9941,11 @@ def manifest(rows):
         " (every Component rolls), as soon as a move's request is recorded,"
         " and as a delete lands (the same name is re-created once the window"
         " has closed); each reads the same window verdict, and the operation"
-        " must complete once the webhook is back.",
+        " must complete once the webhook is back. It also opens while the"
+        " second step of the engine unit's ladder soaks its split, on the six"
+        " shape families as the gate family runs them: the step waits with a"
+        " reason while admission refuses, the ladder completes once the"
+        " webhook is back and its step index never goes back.",
         "- gen-conflict runs a competing writer (an annotation patch of the"
         " ISVC or of every InferenceReplica of the service; target=isvc|ir)"
         " once or until the operation completes (form=once|persist) over the"
@@ -9403,7 +9954,30 @@ def manifest(rows):
         " The writer is per service, so its cases run in the concurrent pool."
         " The reconcile counters are read on the webhook cases only (they run"
         " alone); a conflict case bounds the controller's events on its own"
-        " objects.",
+        " objects. The writer also runs over the engine unit's ladder at the"
+        " second step's soak on the six shape families (one write, or writes"
+        " until the ladder ends; the ISVC as the target): the status write is"
+        " retried and the step moves once, never back.",
+        "- The plain operations on the shapes the hand-written folders do not run,"
+        " one case per ledger cell with no fault, land in the family that owns the"
+        " operation as the control row its faulted rows are read against, minted"
+        " after every other row: a push on the engine behind a router"
+        " (gen-rollout); a rollback and a strategy edit on both engine-behind-a-"
+        " router shapes (gen-rollback, gen-switch); a runtime edit and a delete on"
+        " the router shapes and the prefill/decode gang (gen-fault-edit,"
+        " gen-fault-delete); a scale up and a scale down on the engine behind a"
+        " router (gen-fault-scale); a move on both router shapes (gen-fault-move).",
+        "- The single cells the shape axis left on the engine-behind-a-router"
+        " shapes, one case each in the family that owns the verb and minted after"
+        " every other row: the node lost once and for good at steady state"
+        " (gen-node); the key put back once its wait has shown, and a pull failure"
+        " of the running revision at steady state and as a push lands (gen-heal,"
+        " gen-imagepull); a pod deleted by hand under a push on the single-pod"
+        " shape and a gang leader lost under a push on the gang (gen-fault,"
+        " gen-gang-member); a stable pod or gang leader deleted once at the first"
+        " split of a canary on the engine gang and both router shapes"
+        " (gen-canary-podkill); and a rollback at the held moment of a push that"
+        " never passes readiness (gen-rollback).",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

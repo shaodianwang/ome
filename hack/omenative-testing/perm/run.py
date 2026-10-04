@@ -2416,17 +2416,18 @@ WINDOW_FAULTS = {WEBHOOK_FAULT, CONFLICT_FAULT}
 WINDOW_ROLL_HOOKS = {"settling", "rotating", "draining"}
 WINDOW_MOVE_PHASE = "migrating"
 WINDOW_PHASES = {IDLE_FAULT_PHASE, WINDOW_MOVE_PHASE} | WINDOW_ROLL_HOOKS
-WINDOW_MODES = {"rollout", "scaledown", "runtimerev", "migrate", "recreate"}
+WINDOW_MODES = {"rollout", "scaledown", "runtimerev", "migrate", "recreate", "canary"}
 # The operation a window case holds its fault over, read from the header:
 # the settled service, a push, a rollback or a mid-roll edit of a rollout
-# case, a scale, a runtime edit, a move or a delete.
-WINDOW_OPS = {"idle", "push", "rollback", "edit", "scale", "runtime", "move", "delete"}
+# case, a scale, a runtime edit, a move, a delete or a canary ladder at a
+# grid state.
+WINDOW_OPS = {"idle", "push", "rollback", "edit", "scale", "runtime", "move", "delete", "canary"}
 # The hooks a rollback may fire at before its window opens (held needs a
 # broken revision, which a window case does not carry).
 WINDOW_ROLLBACK_HOOKS = {"settling", "rotating", "draining", "last"}
 WINDOW_WHAT = {"idle": "the steady service", "push": "the push", "rollback": "the rollback",
                "edit": "the roll under its edit", "scale": "the scale", "runtime": "the runtime edit",
-               "move": "the move", "delete": "the delete"}
+               "move": "the move", "delete": "the delete", "canary": "the ladder"}
 # webhook: after-hold points the Service back once the status has said why
 # a write waits (or the reason wait has run out; at idle, after the settle
 # window); after-window keeps the webhook unreachable across the hold window
@@ -3455,12 +3456,20 @@ ROLLBACK_FAULT_HOOKS = {"settling", "rotating", "draining", "last"}
 # What parks the push at the held moment: the readiness probe it never
 # passes (stuck), a runner that dies at every start (crash-start), one that
 # exits after Ready (crash-load), an image that cannot be pulled (imagepull)
-# or a ConfigMap key the ConfigMap lacks (configkey). once=1 on a crash
-# kind kills the pushed revision's first runner exactly once instead.
+# or a ConfigMap key the ConfigMap lacks (configkey). once=1 is each kind's
+# one-shot form: a crash kind kills the pushed revision's first runner
+# exactly once, the other kinds break its first pod once and the cause is
+# taken away once the rollback has fired.
 ROLLBACK_BREAKS = {ROLLBACK_BREAK, "crash-start", "crash-load", "imagepull", "configkey"}
 # The breaks a stuck push may carry beside the unpullable image (stuck= with break=).
 STUCK_BREAKS = set(ROLLBACK_BREAKS)
-ROLLBACK_ONCE_BREAKS = {"crash-start", "crash-load"}
+ROLLBACK_CRASH_BREAKS = {"crash-start", "crash-load"}
+ROLLBACK_ONCE_BREAKS = set(ROLLBACK_BREAKS)
+# The fault each one-shot held-moment break rides on the push's first
+# victim pod, and its form or lift.
+HELD_ONCE_FAULTS = {"crash-start": ("crashloop", "start"), "crash-load": ("crashloop", "load"),
+                    "imagepull": ("imagepull", ""), "configkey": ("configkey", ""),
+                    ROLLBACK_BREAK: (READINESS_FAULT, "recover")}
 # How long the parked roll is given to say why after its first pod has shown
 # the break, before the rollback lands anyway (the verdict then wants the
 # reason).
@@ -3481,10 +3490,40 @@ def _rollback_fault_case(hdr):
 
 def _rollback_held_break_case(hdr):
     """True for a rollback at the held moment whose push carries a break
-    beyond the readiness probe."""
+    beyond the readiness probe, or the probe's one-shot form (the readiness
+    switch set once in the pushed revision's first pod)."""
+    kind = str(hdr.get("break", ""))
     return (hdr.get("mode", "rollout") == "rollout" and hdr.get("rollback") == 1
             and str(hdr.get("during", "")) == "held"
-            and str(hdr.get("break", "")) in ROLLBACK_BREAKS - {ROLLBACK_BREAK})
+            and (kind in ROLLBACK_BREAKS - {ROLLBACK_BREAK} or (kind == ROLLBACK_BREAK and bool(hdr.get("once")))))
+
+
+def _held_once_header(hdr, kind):
+    """The header a held-moment break's one-shot form runs under: the fault
+    it rides on the pushed revision's first victim pod (HELD_ONCE_FAULTS),
+    its form, and the lift where the cause is taken away by hand."""
+    fkind, form = HELD_ONCE_FAULTS[kind]
+    hdr2 = dict(hdr, fault=f"{fkind}:{CRASHLOOP_NEW}")
+    if form:
+        hdr2["form"] = form
+    if fkind not in ("crashloop", READINESS_FAULT):
+        hdr2["lift"] = HEAL_LIFT
+    return hdr2
+
+
+def _held_once_lift(f):
+    """Take a one-shot held-moment break's cause away once the rollback has
+    fired: the image put back, the key put into the ConfigMap, the readiness
+    switch lifted; a victim pod the rollback has already removed took the
+    switch with it. (lifted, how)."""
+    if _oneshot_new_lift(f):
+        return True, "lifted"
+    if f["kind"] == READINESS_FAULT:
+        live = _pod_main_state(f["crash_pod"]) if f.get("crash_pod") else None
+        if live is None or live[3] != f.get("crash_uid"):
+            f["switch_lifted"] = True
+            return True, "gone with the withdrawn revision's pod"
+    return False, ""
 
 
 def _rollback_break_kept(f):
@@ -3782,7 +3821,7 @@ def _held_break_symptom(kind, pod_state, victim, old_hashes, ready_seen):
             return name, f"waits in {waiting}"
         restarts = sum(int(cs.get("restartCount") or 0) for cs in ((obj or {}).get("status") or {}).get("containerStatuses") or []
                        if cs.get("name") == MAIN_CONTAINER)
-        if kind in ROLLBACK_ONCE_BREAKS and restarts:
+        if kind in ROLLBACK_CRASH_BREAKS and restarts:
             return name, f"restarted {restarts} time(s)"
     return None, ""
 
@@ -3791,17 +3830,20 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
     """during=held break=<kind> beyond the readiness probe: the push carries
     a break on the victim member's runner, the roll parks on its first pod
     (the kubelet shows the break, the status says why), and the starting
-    revision is re-applied. once=1 kills the pushed revision's first runner
-    exactly once instead and rolls back as soon as the restart shows. The
-    verdict reads the held reason first, then the rollback's end state:
+    revision is re-applied. once=1 is the kind's one-shot form: a crash kind
+    kills the pushed revision's first runner exactly once and rolls back as
+    soon as the restart shows; a pull failure, a missing key or the
+    readiness switch breaks its first pod once, rolls back as soon as the
+    break shows, and the cause is taken away once the rollback has fired.
+    The verdict reads the held reason first, then the rollback's end state:
     nothing of the withdrawn revision left, no further pod of it created
     and no repair opened for it once the rollback fired."""
     kind, once = str(hdr.get("break")), bool(hdr.get("once"))
     victim = str(hdr.get("victimcomp") or BREAK_DEFAULT_COMP)
-    hdr2 = dict(hdr)
-    if once:
-        # The one-shot kill rides the crash-once machinery on the pushed revision's first pod.
-        hdr2.update(fault=f"crashloop:{CRASHLOOP_NEW}", form="start" if kind == "crash-start" else "load")
+    crash = kind in ROLLBACK_CRASH_BREAKS
+    # The one-shot form rides the crash-once machinery (a crash kind) or the
+    # one-shot pushed-revision break on the push's first pod.
+    hdr2 = _held_once_header(hdr, kind) if once else dict(hdr)
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr2)
     if err:
         return _write_fail(case_id, desc, hdr, *err)
@@ -3816,10 +3858,10 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
     if not _rollback_snapshot(rb, _isvc_spec(case_id), bumped):
         return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [rb["error"]], [f"  ✗ {rb['error']}"])
     old = set(ctx["old_hashes"])
-    print(f"  Phase 2: push a revision whose {victim} {'first runner is killed once' if once else 'runner is broken'} "
-          f"({kind}) on {sorted(bumped)}, roll back once the roll is held on it")
+    how = "first runner is killed once" if once and crash else "first pod is broken once" if once else "runner is broken"
+    print(f"  Phase 2: push a revision whose {victim} {how} ({kind}) on {sorted(bumped)}, roll back once the roll is held on it")
     if once:
-        ok, armed = _bump_rev(ctx, bumped), "a plain bump; the kill lands on the first pod"
+        ok, armed = _edit_once_arm(ctx, f, kind, bumped, victim)
     else:
         ok, armed = _held_break_arm(ctx, kind, bumped, victim)
     if not ok:
@@ -3827,7 +3869,7 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
                        [f"trigger failed: {ctx.get('trigger_error')}"], [f"  ✗ trigger failed: {ctx.get('trigger_error')}"])
     push_ts = ctx["trigger_ts"]
     hb = {"kind": kind, "once": once, "armed": armed, "bite_at": None, "bite": "", "why_at": None, "why": "",
-          "event": "", "served": None, "fire_at": None, "late_pods": [], "late_repairs": []}
+          "event": "", "served": None, "fire_at": None, "late_pods": [], "late_repairs": [], "lifted_at": None, "lift": ""}
     budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in bumped))
     print(f"  Phase 3: waiting for the roll to park on the broken pod (≤{budget}s"
           + ("" if once else f"; then {HELD_BREAK_WHY_WAIT_S}s for the status to say why") + ")")
@@ -3835,6 +3877,10 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
     while time.time() - push_ts < budget and not ctx["closed"]:
         _read_one(ctx)
         now = time.time()
+        if once and not crash and not f.get("fired"):
+            _oneshot_new_fire(f, ctx)
+        if once and f.get("infra_fail"):
+            break
         for name, p in ctx["pod_state"].items():
             if p and p["alive"] and p.get("comp") in bumped and _pod_on_new(p, old):
                 if p.get("uid") and p["uid"] not in new_uids:
@@ -3852,8 +3898,11 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
         last_poll = now
         if hb["bite_at"] is None:
             if once:
-                if f.get("restart_seen"):
-                    hb["bite_at"], hb["bite"] = now - push_ts, f"{f.get('crash_pod')} restarted after the one kill"
+                bitten = bool(f.get("restart_seen")) if crash else bool(f.get("fired") and _oneshot_new_bitten(f, ctx))
+                if bitten:
+                    hb["bite_at"] = now - push_ts
+                    hb["bite"] = (f"{f.get('crash_pod')} restarted after the one kill" if crash
+                                  else f"{f.get('crash_pod')} shows {f.get('bite')}")
             else:
                 pod, what = _held_break_symptom(kind, ctx["pod_state"], victim, old, ready_seen)
                 if pod:
@@ -3878,7 +3927,7 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
         # as _fault_finalize makes it win when there is a record.
         msg = f"{kind}: the pushed revision never showed the break within {budget}s ({armed})"
         if f is not None:
-            f["infra_fail"] = msg
+            f["infra_fail"] = f.get("infra_fail") or msg
         else:
             apparatus = msg
             notes.append(f"INFRA-FAIL: {msg}")
@@ -3886,6 +3935,15 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
     else:
         _rollback_fire(rb, case_id, bumped, ctx["pod_state"], old, ppi, time.time() - push_ts)
         hb["fire_at"] = time.time()
+        if once and not crash:
+            lifted, how = _held_once_lift(f)
+            if lifted:
+                hb["lifted_at"], hb["lift"] = time.time() - push_ts, how
+                f["notes"].append(f"{f.get('cause', 'the cause')} {how} {hb['lifted_at']:.0f}s after the push, "
+                                  f"once the rollback had fired")
+                print(f"    ⚡ {f['notes'][-1]}")
+            else:
+                f["infra_fail"] = f"{f['kind']}:{CRASHLOOP_NEW}: {f.get('cause', 'the cause')} could not be lifted after the rollback"
         if rb["error"]:
             state = "TRIGGER_FAIL"
         else:
@@ -3922,7 +3980,7 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
     grouped = bool(ctx["info"].get("policy")) and bool(ctx["info"].get("members"))
     verdict = _rollback_checks(rb, case_id, state, ctx.get("converged_at"), ctx["pod_state"], old, ppi,
                                N, bumped, configured, grouped, push_ts, verdict, notes, checks)
-    if once and f.get("fired") and not f.get("infra_fail"):
+    if once and crash and f.get("fired") and not f.get("infra_fail"):
         out = _once_observe(case_id, f, ctx["pod_state"], old, False, N, configured, ROWS_SETTLE_S,
                             surges=(ctx.get("inv") or {}).get("surges"))
         out.update(side="new", op="rollback", rp=str(hdr.get("restart") or "RecreateInstance"))
@@ -3941,10 +3999,10 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
 def _held_break_checks(hb, victim, verdict, notes, checks):
     """The held moment's verdict before the rollback's: the pushed revision
     showed its break, the status said why the roll parked (asked of a kept
-    break; a one-shot kill may be over before the status reacts), nothing of
-    a revision that cannot start ever served, and once the rollback fired no
-    further pod of the withdrawn revision was created and no repair named a
-    bumped Instance."""
+    break; a one-shot cause may be over before the status reacts), nothing of
+    a revision that cannot start ever served, a one-shot cause taken away
+    once the rollback fired, and once it fired no further pod of the
+    withdrawn revision was created and no repair named a bumped Instance."""
     kind, once = hb["kind"], hb["once"]
     label = f"held by {kind}" + (" once" if once else "")
     if hb["bite_at"] is None:
@@ -3954,12 +4012,14 @@ def _held_break_checks(hb, victim, verdict, notes, checks):
         checks.append(f"  ✓ {label}: status said why the roll parked {hb['why_at']:.0f}s after the push: {hb['why']}"
                       + (f"; event {hb['event'][:100]}" if hb["event"] else ""))
     elif once:
-        checks.append(f"  ⓘ {label}: the status reported no hold before the rollback (one restart need not open one)")
+        checks.append(f"  ⓘ {label}: the status reported no hold before the rollback (a one-shot cause need not open one)")
     else:
         verdict = "FAIL"
         notes.append(f"the roll parked on the broken {victim} pod but status never said why")
         checks.append(f"  ✗ {label}: the status said nothing about why the roll parked within {HELD_BREAK_WHY_WAIT_S}s "
                       f"of the break showing (no rolloutHold gate, Failed row, RetryHeld or InstanceFailed event)")
+    if hb.get("lifted_at") is not None:
+        checks.append(f"  ✓ {label}: the cause was {hb['lift']} {hb['lifted_at']:.0f}s after the push, once the rollback had fired")
     if kind in ("crash-start", "imagepull", "configkey") and not once:
         if hb["served"] is not None:
             verdict = "FAIL"
@@ -4017,10 +4077,8 @@ EDIT_BREAK_PARAMS = {"crashloop": IDLE_FAULT_PHASE, "imagepull": IDLE_FAULT_PHAS
 EDIT_BREAKS = ROLLBACK_BREAKS
 EDIT_BREAK_HOOKS = {"held", "rotating"}
 # The fault each one-shot pushed-revision break rides on the push's first
-# victim pod, and its form or lift.
-EDIT_ONCE_FAULTS = {"crash-start": ("crashloop", "start"), "crash-load": ("crashloop", "load"),
-                    "imagepull": ("imagepull", ""), "configkey": ("configkey", ""),
-                    ROLLBACK_BREAK: (READINESS_FAULT, "recover")}
+# victim pod, and its form or lift: the held moment's.
+EDIT_ONCE_FAULTS = HELD_ONCE_FAULTS
 # The update mode the watcher counts a kept break's push by: the exit
 # switch and the missing key are env diffs, the probe a template diff, so
 # an in-place strategy recreates and the pods are counted by hash.
@@ -4626,14 +4684,7 @@ def _edit_held_break(case_id, yaml_file, desc, hdr):
     the edit on the live spec and the roll's end."""
     kind, once = str(hdr.get("break")), bool(hdr.get("once"))
     victim = str(hdr.get("victimcomp") or BREAK_DEFAULT_COMP)
-    hdr2 = dict(hdr)
-    if once:
-        fkind, form = EDIT_ONCE_FAULTS[kind]
-        hdr2["fault"] = f"{fkind}:{CRASHLOOP_NEW}"
-        if form:
-            hdr2["form"] = form
-        if fkind not in ("crashloop", READINESS_FAULT):
-            hdr2["lift"] = HEAL_LIFT
+    hdr2 = _held_once_header(hdr, kind) if once else dict(hdr)
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr2)
     if err:
         return _write_fail(case_id, desc, hdr, *err)
@@ -5242,7 +5293,9 @@ def _fault_ok(v):
     if kind == "taint":
         return param in TAINT_TARGETS
     if kind in WINDOW_FAULTS:
-        return param in WINDOW_PHASES
+        # A window on the settled service, at a hook of an operation, at a
+        # moment of a move, or at a canary grid state.
+        return param in WINDOW_PHASES or _canary_hook_ok(param)
     if kind == "ctrlrestart" and param == IDLE_FAULT_PHASE:
         return True
     if kind in ("podkill", "ctrlrestart", "evict", "preempt"):
@@ -5352,6 +5405,13 @@ def _canary_stable_hook_fault(f):
     phase hook fires it like a crash there."""
     return bool(f) and f.get("kind") in CANARY_STABLE_FAULTS - BREAK_FAULTS \
         and str(f.get("param") or "").partition("@")[0] in CANARY_HOOKS
+
+
+def _canary_window_fault(f):
+    """A window fault aimed at a canary grid state: the phase hook opens it
+    there (the webhook outage, the competing writer) and the ladder's own
+    driver watches the window and closes it."""
+    return bool(f) and f.get("kind") in WINDOW_FAULTS and str(f.get("param") or "").partition("@")[0] in CANARY_HOOKS
 
 
 def _canary_oneshot_new(f):
@@ -8653,7 +8713,8 @@ def _fault_tick(ctx):
       draining  → first old-revision pod observed on its way out;
       migrating → migration accept observed (_migrate sets ctx['fault_migrating'])."""
     f = ctx.get("fault")
-    if not f or (f["kind"] not in HOOK_FAULTS and not _canary_stable_hook_fault(f) and not _node_hook_fault(f)):
+    if not f or (f["kind"] not in HOOK_FAULTS and not _canary_stable_hook_fault(f) and not _node_hook_fault(f)
+                 and not _canary_window_fault(f)):
         return
     if ctx.get("trigger_ts") is None or _fault_fired_by_handler(f) or _fault_before_push(f) or _metric_on_new(f):
         return
@@ -13213,7 +13274,7 @@ def _window_new(f, hdr, op):
             "events": None, "event_reasons": {}, "window_s": None, "window_end_ts": None,
             "metrics_before": None, "reconciles": None,
             "lifted_at": None, "converged_at": None, "rows_settled": None, "rows_why": "", "leftover_hold": None,
-            "owned_uids": set()}
+            "owned_uids": set(), "step_samples": [], "step_at_open": None, "step_regressed": None}
 
 
 def _window_tick(ctx, f, win, now):
@@ -13401,6 +13462,8 @@ def _window_operation(hdr):
         return "move"
     if mode == "recreate":
         return "delete"
+    if mode == "canary":
+        return "canary"
     if str(hdr.get("during", "")) == IDLE_FAULT_PHASE:
         return "idle"
     if hdr.get("rollback") == 1:
@@ -15018,11 +15081,9 @@ def validate_case_file(path):
                 errs.append(f"{path}:1: break={fields['break']} is the pushed revision's break; fault={fields['fault']} "
                             f"breaks the running one — a rollback case carries one break")
             if "lift" in fields:
-                errs.append(f"{path}:1: lift= does not combine with break= (once=1 on break="
-                            f"{'|'.join(sorted(ROLLBACK_ONCE_BREAKS))} is the one-shot form of the held moment)")
-            if "once" in fields and str(fields["break"]) not in ROLLBACK_ONCE_BREAKS:
-                errs.append(f"{path}:1: once=1 kills the pushed revision's first runner once "
-                            f"(needs break={'|'.join(sorted(ROLLBACK_ONCE_BREAKS))})")
+                errs.append(f"{path}:1: lift= does not combine with break= (once=1 is the one-shot form of the held moment)")
+            if str(fields["break"]) not in ROLLBACK_BREAKS:
+                errs.append(f"{path}:1: break={fields['break']} at the held moment is one of {'|'.join(sorted(ROLLBACK_BREAKS))}")
             vcomp = str(fields.get("victimcomp", ""))
             if vcomp and vcomp != BREAK_DEFAULT_COMP:
                 if vcomp != "decoder" or fields.get("Nd", 0) == 0 or str(fields.get("co", "none")) == "none":
@@ -15361,7 +15422,10 @@ def validate_case_file(path):
         if mode not in WINDOW_MODES:
             errs.append(f"{path}:1: fault={fields.get('fault')} holds a window over a push, a rollback or a mid-roll edit "
                         f"(mode=rollout), the settled service (mode=rollout during={IDLE_FAULT_PHASE}), a scale "
-                        f"(mode=scaledown), a runtime edit (mode=runtimerev), a move (mode=migrate) or a delete (mode=recreate)")
+                        f"(mode=scaledown), a runtime edit (mode=runtimerev), a move (mode=migrate), a delete (mode=recreate) "
+                        f"or a canary ladder at a grid state (mode=canary)")
+        if wop == "canary" and not _canary_hook_ok(fault_param):
+            errs.append(f"{path}:1: a window under a canary opens at a grid state (fault={fault_kind}:canary-<state>[@step])")
         if (fault_param == IDLE_FAULT_PHASE) != (during == IDLE_FAULT_PHASE):
             errs.append(f"{path}:1: fault={fault_kind}:{IDLE_FAULT_PHASE} is the window on the settled service and goes with "
                         f"during={IDLE_FAULT_PHASE}; fault={fault_kind}:settling starts as the operation lands, with no during=")
@@ -18024,14 +18088,7 @@ def _runtimerev_carried(case_id, yaml_file, desc, hdr, csr):
     first pushed pod and the roll completes on its own with no hold."""
     kind, once = str(hdr.get("break")), bool(hdr.get("once"))
     victim = str(hdr.get("victimcomp") or BREAK_DEFAULT_COMP)
-    hdr2 = dict(hdr)
-    if once:
-        fkind, form = EDIT_ONCE_FAULTS[kind]
-        hdr2["fault"] = f"{fkind}:{CRASHLOOP_NEW}"
-        if form:
-            hdr2["form"] = form
-        if fkind not in ("crashloop", READINESS_FAULT):
-            hdr2["lift"] = HEAL_LIFT
+    hdr2 = _held_once_header(hdr, kind) if once else dict(hdr)
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr2)
     if err:
         return _write_fail(case_id, desc, hdr, *err)
@@ -22343,6 +22400,96 @@ def _canary_once_checks(ctx, f, hdr, verdict, notes, checks):
     return _once_checks(f, out, verdict, notes, checks)
 
 
+def _canary_window_new(ctx, f, hdr, group):
+    """The window record of a window fault at a canary grid state: the
+    ladder replaces each pod slot of the unit once, which is what the
+    completion check counts the created pods against."""
+    win = _window_new(f, hdr, "canary")
+    win["expected_created"] = {c: (ctx["N"][c] * ctx["pods_per_inst"].get(c, 1) if c in group else 0)
+                               for c in ctx["configured"]}
+    return win
+
+
+def _canary_window_holds(f, win):
+    """True while a window the ladder must outlast is still open: the
+    webhook outage until its lift, one competing write until its settle
+    window; a writer that persists stops when the ladder ends, so it holds
+    nothing."""
+    if not f.get("fired") or f.get("infra_fail") or win["fault_ts"] is None or win["window_end_ts"] is not None:
+        return False
+    return not (f["kind"] == CONFLICT_FAULT and win["form"] == "persist")
+
+
+def _canary_window_tick(ctx, f, win, step, now):
+    """Per poll of a window aimed at a canary grid state. Before the phase
+    hook opens it: the manager's reconcile counters, read ahead of the
+    outage once its state is due. Once open: the window's own tick (what
+    admission and the status say, the rows against the pods in rotation),
+    the step index as each sample shows it, and the close once the lift is
+    due (the webhook by its lift rule; one competing write once its settle
+    window has run; a writer that persists stops when the ladder ends)."""
+    if f.get("infra_fail"):
+        return
+    if not f.get("fired"):
+        if (f["kind"] == WEBHOOK_FAULT and win["metrics_before"] is None
+                and _hook_due(f["param"], ctx.get("canary_hook"), ctx.get("canary_step"))):
+            win["metrics_before"] = _reconcile_counts(_manager_metrics()) or None
+        return
+    if win["fault_ts"] is None:
+        win["fault_ts"], win["step_at_open"] = f.get("fired_ts") or now, step
+        win["ir_names"] = _case_ir_names(ctx["case_id"])
+        print(f"  Phase 3: the window is open at {ctx.get('canary_hook')} step={step}; watching the ladder under it "
+              f"(≤{_window_span(win)}s before the lift is due)")
+    if step is not None:
+        last = win["step_samples"][-1] if win["step_samples"] else None
+        if last is not None and step < last and not win["step_regressed"]:
+            win["step_regressed"] = (last, step)
+        if last != step:
+            win["step_samples"].append(step)
+    _window_tick(ctx, f, win, now)
+    if win["window_end_ts"] is not None:
+        return
+    if f["kind"] == WEBHOOK_FAULT:
+        due = _window_lift_due(win, now)
+    else:
+        due = win["form"] != "persist" and now - win["fault_ts"] >= LIFT_SETTLE_S
+    if due:
+        _window_close(ctx, f, win)
+
+
+def _canary_window_checks(ctx, f, win, state, verdict, notes, checks):
+    """The window verdict beside the ladder's: the window's own checks (what
+    admission and the status said, the rows against the pods in rotation,
+    the events and reconciles, the lift, the ladder completing once the
+    window closed with each pod slot of the unit created once, nothing left
+    held) and the step index never going back while the window was open or
+    after it: an outage holds the step where it is, a competing write is
+    retried and the step moves once."""
+    if win["fault_ts"] is None:
+        return verdict   # the grid state was never reached: the hook-fault check says so
+    if win["window_end_ts"] is None:
+        if state == "CONVERGED":
+            win["escaped_at"] = time.time() - win["fault_ts"]
+        _window_close(ctx, f, win)
+    if state == "CONVERGED":
+        win["converged_at"] = ctx["trigger_ts"] + ctx["converged_at"] - win["fault_ts"]
+        win["rows_settled"], win["rows_why"] = _wait_rows_settled(ctx["case_id"], ctx["N"], ctx["configured"], ROWS_SETTLE_S)
+        win["leftover_hold"] = _leftover_hold(ctx["case_id"])
+    _window_end_tally(ctx, win)
+    verdict = _window_checks(f, win, state, verdict, notes, checks)
+    label = f"{f['kind']}:{f['param']}"
+    walked = " → ".join(str(x) for x in win["step_samples"]) or "none seen"
+    if win["step_regressed"]:
+        before, after = win["step_regressed"]
+        verdict = "FAIL"
+        notes.append(f"{label}: the step index went back from {before} to {after}")
+        checks.append(f"  ✗ {label}: the ladder's step index went back from {before} to {after} with the window open or "
+                      f"after it (steps {walked}) — a step was served again")
+    else:
+        checks.append(f"  ✓ {label}: the step index never went back (opened at step {win['step_at_open']}; steps {walked})")
+    return verdict
+
+
 def _canary_pending_tick(ctx, f, out, comps, lift, now):
     """Per poll under a pending cause armed before the canary push: the wait
     the product reports on an Instance row of the unit, any row that reads
@@ -22686,6 +22833,12 @@ def _canary(case_id, yaml_file, desc, hdr):
     (per-revision Services + weighted HTTPRoute) and is out of this harness's
     scope — the harness verifies the producer-side weights OME writes to status."""
     lifecycle = {}
+    if _canary_window_fault(_fault_new(case_id, hdr)):
+        kind = str(hdr.get("fault", "")).partition(":")[0]
+        reason = _fault_capability(kind)
+        if reason:
+            print(f"  ⓘ {kind} fault unavailable here: {reason}")
+            return _write_fail(case_id, desc, hdr, "SKIP", f"{kind} fault unavailable here: {reason}")
     if _node_hook_fault(_fault_new(case_id, hdr)):
         reason = _node_fault_capability()
         if reason:
@@ -22817,6 +22970,10 @@ def _canary(case_id, yaml_file, desc, hdr):
     pending = fault if fault and fault.get("kind") == "taint" else None
     pend = {"bitten_at": None, "token": "", "row": None, "message": "", "failed": [], "lifted_at": None,
             "since": None, "last_poll": 0.0, "park_at": None}
+    # A window opened at a grid state: the webhook outage or the competing
+    # writer over the ladder, judged by the window verdict beside the ladder's.
+    window = fault if _canary_window_fault(fault) else None
+    win = _canary_window_new(ctx, fault, hdr, group) if window else None
     lift = str(hdr.get("lift") or "")
     newbreak = {"bite": None, "park": None, "ready_seen": set(), "uids": {}, "peak_crash": 0,
                 "phases_before_exit": set()}
@@ -23039,6 +23196,8 @@ def _canary(case_id, yaml_file, desc, hdr):
             _canary_oneshot_new_tick(ctx, fault, oneshot, now)
         if pending:
             _canary_pending_tick(ctx, pending, pend, sorted(group), lift, now)
+        if window:
+            _canary_window_tick(ctx, window, win, step, now)
         # A quota lift lets the parked step's capacity land; a second verb
         # after the lift waits for it, so the park is judged with capacity there.
         if quota_verb and (verb2_fired if verb2 == "quotalift" else verb_fired) and not capacity_landed:
@@ -23224,6 +23383,8 @@ def _canary(case_id, yaml_file, desc, hdr):
             pods_settled = False   # the hold is judged at the release
         if oneshot_new and oneshot["bitten_at"] is not None and oneshot["lifted_at"] is None and not fault.get("infra_fail"):
             pods_settled = False   # the cause is taken away before the terminal is judged
+        if window and _canary_window_holds(window, win):
+            pods_settled = False   # the window is closed before the terminal is judged
         if _fault_repeats(fault) and fault.get("fired_count") and int(fault["fired_count"]) < int(fault["repeat"]) \
                 and not fault.get("infra_fail"):
             pods_settled = False   # the window stays open until the repetitions are spent
@@ -23344,6 +23505,8 @@ def _canary(case_id, yaml_file, desc, hdr):
         verdict = _oneshot_new_checks(ctx, oneshot, state, verdict, notes, checks)
     if pending:
         verdict = _canary_pending_checks(pending, pend, lift, verdict, notes, checks)
+    if window:
+        verdict = _canary_window_checks(ctx, window, win, state, verdict, notes, checks)
     if _fault_repeats(ctx.get("fault")):
         op_pods = sum(N[c] * ctx["pods_per_inst"].get(c, 1) for c in group) * (2 if expect_rollback else 1)
         verdict = _repeat_checks(ctx["fault"], ctx["pods_per_inst"], group, op_pods, ctx["trigger_ts"], verdict, notes, checks)

@@ -1,0 +1,18 @@
+# p10199: [gen] plain scaledown engine+router N=4  mode=scaledown Ne=4 Nd=0 Nr=2 ceil_e=4 ceil_d=0 ceil_r=2 co=none topo=engine to_e=3
+# reason: the engine is scaled from N to N-1 on engine behind a router, single-pod with nothing broken: the scale completes with the engine at N-1 and the survivors on their own pods, nothing surges above the target, the untouched Instances keep their pods and keep serving, and every row settles Ready with no operation open; the router is a negative control (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p10199 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
