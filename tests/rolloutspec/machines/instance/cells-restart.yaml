@@ -166,8 +166,8 @@ cells:
     windows: [before]
     outcome: escalate
     to: Failed
-    guard: the reason is in the terminal waiting set, the pod has held it past StuckPodGrace, and the pod set is not fully serving
-    note: the fast escalation stamps Phase Failed with the waiting reason and the pod's termination detail on LastFailure and preserves the operation, since a Restart attempt is never disposed (workload/escalation.go, status_aggregate.go)
+    guard: the reason is in the terminal waiting set, the pod is at the row's incarnation, it has held the reason past StuckPodGrace since its waiting episode began, and the pod set is not fully serving
+    note: the fast escalation stamps Phase Failed with the waiting reason and the pod's termination detail on LastFailure and preserves the operation, since a Restart attempt is never disposed (workload/escalation.go). A pod of the incarnation before the row's is the set the repair drains and deletes - the repair owns it until the rebuild runs - so its wedge is the repair's reason and never fails the row (evidence.AttemptStuckPods), and a stamp decided on an observation older than the repair's claim is withheld on the fresh row (status.StampFailedOnStuckPod); a row never holds a Restart operation at Failed with no pod set behind it
     placement: perm
     coverage: {perm: [], unit: [TestRestart_CapturesLastFailureBeforeDrain], kind: [], replay: [restart-stuck]}
     status: decided
@@ -765,7 +765,7 @@ cells:
     windows: [before]
     outcome: escalate
     to: Failed
-    guard: a recreated pod has held a terminal waiting reason since its creation past the configured grace and the pod set is not fully serving
+    guard: a recreated pod, at the row's incarnation, has held a terminal waiting reason for the configured grace since its waiting episode began - its creation, or the moment its containers last stopped being ready - and the pod set is not fully serving
     note: the fast path fails the Instance without waiting out the operation deadline, recording the waiting reason and the pod's termination detail on LastFailure and preserving the operation, since a Restart attempt is never disposed (workload/escalation.go)
     placement: perm
     coverage: {perm: [], unit: [], kind: [], replay: [restart-stuckgrace]}

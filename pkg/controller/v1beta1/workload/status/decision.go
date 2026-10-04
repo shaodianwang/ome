@@ -82,12 +82,22 @@ func StampFailedKeepingOperation(termination *types.InstanceTermination) func(*t
 // LastFailure in the same write so the wedged pod's diagnostics survive
 // the recreate or teardown that follows; nil leaves LastFailure alone.
 //
+// blamedIncarnation is the incarnation label of the pod the stamp blames,
+// zero when it carries none. The stamp is decided on the pass's
+// observation and applied to the fresh row, and only a Restart bumps a
+// row's incarnation: a blamed pod below the fresh row's incarnation is
+// the set a repair claimed since the observation. The repair owns that
+// set until its replacement runs, so the stamp is withheld.
+//
 // A fresh-empty slot (Phase=="") from the writer's append path is a
 // sentinel for a slot deleted out from under us — don't resurrect. An
 // already-Failed slot is a no-op.
-func StampFailedOnStuckPod(termination *types.InstanceTermination) func(*types.InstanceStatus) bool {
+func StampFailedOnStuckPod(termination *types.InstanceTermination, blamedIncarnation int64) func(*types.InstanceStatus) bool {
 	return func(s *types.InstanceStatus) bool {
 		if s.Phase == "" || s.Phase == types.InstancePhaseFailed {
+			return false
+		}
+		if blamedIncarnation > 0 && s.Incarnation > blamedIncarnation {
 			return false
 		}
 		s.Phase = types.InstancePhaseFailed
@@ -97,6 +107,19 @@ func StampFailedOnStuckPod(termination *types.InstanceTermination) func(*types.I
 		}
 		return true
 	}
+}
+
+// ApplyStamp runs one stamp through the single-row seam and reports
+// whether it changed the row. The seam consumes the stamp's own answer,
+// and a caller that announces the stamp has nothing to announce for one
+// the fresh row withheld.
+func ApplyStamp(ctx context.Context, input types.ReconcileInput, idx int32, stamp func(*types.InstanceStatus) bool) (bool, error) {
+	committed := false
+	err := input.MutateInstance(ctx, idx, func(s *types.InstanceStatus) bool {
+		committed = stamp(s)
+		return committed
+	})
+	return committed, err
 }
 
 // EnterReady flips s into Ready and stamps ReadySince when this is an

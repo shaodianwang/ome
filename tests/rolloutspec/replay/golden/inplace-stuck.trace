@@ -34,7 +34,8 @@ tick=5 pod patch name=svc-a-engine-0-default-0 images=main=registry.example.com/
 tick=5 pod patch name=svc-a-engine-0-default-0 labels=[ome.io/revision-hash:882059bb→6f8b1e6c]
 tick=5 hold cleared
 tick=5 pass result=after:5s
-tick=6 note the wedged pod now carries the target revision, so the escalation charges that revision and disposes the roll
+tick=6 note the wedged pod now carries the target revision and the pull has failed for longer than the grace, so the escalation charges that revision and disposes the roll
+tick=6 apply clock.advance by=2m0s now=t+4m0s
 tick=6 row=0 write no-op precondition=no-change
 tick=6 hold cleared
 tick=6 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Held attempts=1 reason=ImagePullBackOff}

@@ -1,6 +1,7 @@
 # The patched pod wedges on its image. The escalation measures the wedge from
-# the pod's creationTimestamp, so a pod already older than the stuck-pod grace
-# is disposed on the pass that first reads the reason.
+# the start of the pod's waiting episode - the patch that took a serving pod
+# out of service, not the pod's creation - so the attempt is disposed on the
+# pass that reads a reason held for longer than the stuck-pod grace.
 scenario: inplace-stuck
 arrows:
   - T-ready-inplace
@@ -39,4 +40,6 @@ timeline:
     events:
       - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}
   - tick: 6
-    note: the wedged pod now carries the target revision, so the escalation charges that revision and disposes the roll
+    note: the wedged pod now carries the target revision and the pull has failed for longer than the grace, so the escalation charges that revision and disposes the roll
+    events:
+      - clock.advance: 2m

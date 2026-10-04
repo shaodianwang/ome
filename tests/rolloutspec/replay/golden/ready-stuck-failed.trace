@@ -43,15 +43,19 @@ tick=6 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-6f8b1e
 tick=6 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c complete (activeOrdinal=1)
 tick=6 hold cleared
 tick=6 pass result=requeue
-tick=7 note the rolled pod is two minutes old, longer than the grace
+tick=7 note the rolled pod is two minutes old, longer than the grace, which proves nothing on its own
 tick=7 apply clock.advance by=2m0s now=t+2m0s
 tick=7 hold cleared
 tick=7 row=0 write no-op precondition=no-change
 tick=7 pass result=none
-tick=8 note the rolled pod wedges, and because its hash disagrees with the Component's current revision the escalation stamps Failed
+tick=8 note the rolled pod wedges; it served before, so the grace runs from the wedge and the pass that reads it stamps nothing yet
 tick=8 apply pod.servingOff[target] pod=svc-a-engine-0-default-1 now=t+2m0s
 tick=8 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-default-1 reason=ImagePullBackOff now=t+2m0s
 tick=8 hold cleared
-tick=8 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-6f8b1e6c activeOrdinal=1 readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
-tick=8 warn instanceFailed index=0 pod=svc-a-engine-0-default-1 reason=ImagePullBackOff
 tick=8 pass result=after:5s
+tick=9 note the wedge has outlasted the grace, and because the pod's hash disagrees with the Component's current revision the escalation stamps Failed
+tick=9 apply clock.advance by=2m0s now=t+4m0s
+tick=9 hold cleared
+tick=9 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-6f8b1e6c activeOrdinal=1 readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
+tick=9 warn instanceFailed index=0 pod=svc-a-engine-0-default-1 reason=ImagePullBackOff
+tick=9 pass result=after:5s

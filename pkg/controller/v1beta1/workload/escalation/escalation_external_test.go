@@ -9,8 +9,10 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
+	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -364,8 +366,8 @@ func TestEscalation_MultiInstanceStamps_OneBatchedWrite(t *testing.T) {
 			warnsBeforeWrite = len(warns)
 			for _, m := range muts {
 				for i := range store {
-					if store[i].Index == m.Index {
-						m.Mutate(&store[i])
+					if store[i].Index == m.Index && m.Mutate(&store[i]) && m.OnCommit != nil {
+						m.OnCommit(nil, nil)
 					}
 				}
 			}
@@ -2420,6 +2422,307 @@ func TestEscalation_RepairWaitingOnWorkloadIsAnnouncedOnce(t *testing.T) {
 			}
 			if !strings.HasPrefix(row.LastFailure.Message, "couldn't find key mode in ConfigMap") {
 				t.Errorf("failure message %q must keep the kubelet's own message", row.LastFailure.Message)
+			}
+		})
+	}
+}
+
+// parkedPodAt is a pod created an hour ago, parked in reason for that
+// whole hour, at the named incarnation and revision hash: the shape of a
+// pod the fast path reads as stuck under any grace.
+func parkedPodAt(name, reason, incarnation, hash string, now time.Time) *corev1.Pod {
+	hourAgo := metav1.NewTime(now.Add(-time.Hour))
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			CreationTimestamp: hourAgo,
+			Labels:            map[string]string{query.LabelInstanceIncarnation: incarnation, query.LabelRevisionHash: hash},
+		},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodPending,
+			Conditions: []corev1.PodCondition{{Type: corev1.ContainersReady, Status: corev1.ConditionFalse, LastTransitionTime: hourAgo}},
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "main",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}},
+			}},
+		},
+	}
+}
+
+// A Restarting row is judged on the pods at its incarnation. The set of
+// the incarnation before it is what the repair drains and deletes, so a
+// wedge there is the repair's reason and the row keeps its Restart; a
+// wedge on the rebuild, at the row's incarnation, fails the row with the
+// operation preserved and is announced once.
+//
+// Cells: instance/Restart/Drain/pod.waiting[CrashLoopBackOff]/before
+func TestEscalation_RestartingRowIsJudgedOnItsRebuild(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name        string
+		incarnation string
+		wantPhase   workloadtypes.InstancePhase
+		wantWarns   int
+	}{
+		{name: "the pod the repair is replacing", incarnation: "1", wantPhase: workloadtypes.InstancePhaseRestarting},
+		{name: "the rebuilt pod", incarnation: "2", wantPhase: workloadtypes.InstancePhaseFailed, wantWarns: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			insts := []workloadtypes.InstanceStatus{{
+				Index:       0,
+				Incarnation: 2,
+				Phase:       workloadtypes.InstancePhaseRestarting,
+				PodCount:    1,
+				Operation: &workloadtypes.InstanceOperation{
+					Type:     workloadtypes.InstanceOperationRestart,
+					Step:     workloadtypes.RestartStepDrain,
+					Deadline: metav1.NewTime(now.Add(30 * time.Minute)),
+				},
+			}}
+			input, rec := escalationFixture(insts)
+			input.StuckPodGrace = time.Second
+			input.ObservedState.CurrentRevision = "own-engine-currenthash"
+			pod := parkedPodAt("engine-0-default-0", "CrashLoopBackOff", tc.incarnation, "currenthash", now)
+
+			if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1), map[int32][]*corev1.Pod{0: {pod}}); err != nil {
+				t.Fatalf("escalation pass: %v", err)
+			}
+			if rec.store[0].Phase != tc.wantPhase {
+				t.Errorf("Phase: got %q want %q", rec.store[0].Phase, tc.wantPhase)
+			}
+			if rec.store[0].Operation == nil || rec.store[0].Operation.Type != workloadtypes.InstanceOperationRestart {
+				t.Errorf("Operation: got %+v want the Restart kept", rec.store[0].Operation)
+			}
+			if len(rec.warns) != tc.wantWarns {
+				t.Errorf("WarnInstanceFailed: got %v want %d call(s)", rec.warns, tc.wantWarns)
+			}
+		})
+	}
+}
+
+// The fast path decides on the pass's observation and stamps the fresh
+// row. A repair that claimed the row's pod set since the observation —
+// the row read Ready with a leftover pod against the current revision,
+// and reads Restarting at a bumped incarnation when the stamp lands —
+// keeps it: the stamp is withheld on both status seams and nothing is
+// announced. With no claim the same evidence fails the row and is
+// announced once.
+//
+// Cells: instance/Ready/timer.stuckPodGrace/before, instance/Ready/pod.containerRestart/before
+func TestEscalation_StuckStampYieldsToARepairThatClaimedThePod(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name      string
+		claimed   bool
+		batched   bool
+		wantPhase workloadtypes.InstancePhase
+		wantWarns int
+	}{
+		{name: "repair claimed the set, single-row seam", claimed: true, wantPhase: workloadtypes.InstancePhaseRestarting},
+		{name: "repair claimed the set, batched seam", claimed: true, batched: true, wantPhase: workloadtypes.InstancePhaseRestarting},
+		{name: "no claim, single-row seam", wantPhase: workloadtypes.InstancePhaseFailed, wantWarns: 1},
+		{name: "no claim, batched seam", batched: true, wantPhase: workloadtypes.InstancePhaseFailed, wantWarns: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			observed := []workloadtypes.InstanceStatus{{Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady, PodCount: 1, RunningRevision: "own-engine-otherhash"}}
+			input, rec := escalationFixture(observed)
+			input.StuckPodGrace = time.Second
+			input.ObservedState.CurrentRevision = "own-engine-currenthash"
+			if tc.claimed {
+				rec.store[0] = workloadtypes.InstanceStatus{
+					Index: 0, Incarnation: 2, Phase: workloadtypes.InstancePhaseRestarting, PodCount: 1, RunningRevision: "own-engine-otherhash",
+					Operation: &workloadtypes.InstanceOperation{Type: workloadtypes.InstanceOperationRestart, Step: workloadtypes.RestartStepDrain},
+				}
+			}
+			if tc.batched {
+				input.ApplyInstanceMutations = func(_ context.Context, muts []workloadtypes.InstanceMutation) error {
+					for _, m := range muts {
+						for i := range rec.store {
+							if rec.store[i].Index != m.Index {
+								continue
+							}
+							if m.Mutate(&rec.store[i]) && m.OnCommit != nil {
+								m.OnCommit(nil, nil)
+							}
+						}
+					}
+					return nil
+				}
+			}
+			pod := parkedPodAt("engine-0-default-0", "CrashLoopBackOff", "1", "otherhash", now)
+
+			if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1), map[int32][]*corev1.Pod{0: {pod}}); err != nil {
+				t.Fatalf("escalation pass: %v", err)
+			}
+			if rec.store[0].Phase != tc.wantPhase {
+				t.Errorf("Phase: got %q want %q", rec.store[0].Phase, tc.wantPhase)
+			}
+			if tc.claimed && (rec.store[0].Operation == nil || rec.store[0].Operation.Type != workloadtypes.InstanceOperationRestart) {
+				t.Errorf("Operation: got %+v want the repair's Restart kept", rec.store[0].Operation)
+			}
+			if len(rec.warns) != tc.wantWarns {
+				t.Errorf("WarnInstanceFailed: got %v want %d call(s)", rec.warns, tc.wantWarns)
+			}
+		})
+	}
+}
+
+// crashLoopRowNamingTheLoop is a settled or restarting row whose promoted
+// set crashed after it entered Ready and that names the loop on its
+// failure record, as the restart pass writes it while a held revision's
+// set serves between crashes.
+func crashLoopRowNamingTheLoop(now time.Time, phase workloadtypes.InstancePhase, incarnation int64, revision string) workloadtypes.InstanceStatus {
+	readySince := metav1.NewTime(now.Add(-time.Hour))
+	return workloadtypes.InstanceStatus{
+		Index:           0,
+		Incarnation:     incarnation,
+		Phase:           phase,
+		PodCount:        1,
+		RunningRevision: revision,
+		ReadySince:      &readySince,
+		LastFailure: &workloadtypes.InstanceTermination{
+			PodName: "engine-0-default-0", ContainerName: "main", Reason: "CrashLoopBackOff",
+			Message: "back-off restarting failed container; " + workloadops.CrashLoopServingNote,
+			Time:    metav1.NewTime(now.Add(-10 * time.Minute)),
+		},
+	}
+}
+
+// crashLoopPodBack is a pod of a crash loop as it reads at one moment:
+// serving again since brokeOrBackAgo, or down again in CrashLoopBackOff
+// since then. It was created an hour ago, so its age is past any grace.
+func crashLoopPodBack(now time.Time, incarnation, hash string, serving bool, since time.Duration) *corev1.Pod {
+	at := metav1.NewTime(now.Add(-since))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "engine-0-default-0",
+			CreationTimestamp: metav1.NewTime(now.Add(-time.Hour)),
+			Labels:            map[string]string{query.LabelInstanceIncarnation: incarnation, query.LabelRevisionHash: hash},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	status := corev1.ContainerStatus{Name: "main", RestartCount: 3,
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error", FinishedAt: at}}}
+	if serving {
+		status.Ready = true
+		status.State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: at}}
+		pod.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.ContainersReady, Status: corev1.ConditionTrue, LastTransitionTime: at},
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: at},
+			{Type: "ome.io/serving", Status: corev1.ConditionTrue, LastTransitionTime: at},
+		}
+	} else {
+		status.State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}
+		pod.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.ContainersReady, Status: corev1.ConditionFalse, LastTransitionTime: at},
+			{Type: corev1.PodReady, Status: corev1.ConditionFalse, LastTransitionTime: at},
+			{Type: "ome.io/serving", Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(now.Add(-time.Hour))},
+		}
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{status}
+	return pod
+}
+
+// A crash-loop park the restart pass returned to Ready while its set
+// serves between crashes keeps its record and the loop's note, on a
+// revision the Component has not made current. The escalation has nothing
+// to stamp on it: a serving set holds no waiting reason, and a set that is
+// down again is measured from that break, not from the pod's creation, so
+// the row stays the restart pass's to park. Only a set that has held the
+// reason past the grace is stamped, with no operation, which is the shape
+// the unpark reads back the moment the set serves again.
+//
+// Cells: instance/Failed/pod.containersReady[source]/before, instance/Ready/timer.stuckPodGrace/before
+func TestEscalation_UnparkedCrashLoopRowIsNotReStampedWhileItServes(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name      string
+		pod       *corev1.Pod
+		wantPhase workloadtypes.InstancePhase
+		wantWarns int
+	}{
+		{name: "the set serves again, back for a moment", pod: crashLoopPodBack(now, "1", "otherhash", true, 0), wantPhase: workloadtypes.InstancePhaseReady},
+		{name: "the set serves again, back for an hour", pod: crashLoopPodBack(now, "1", "otherhash", true, time.Hour), wantPhase: workloadtypes.InstancePhaseReady},
+		{name: "the set is down again, inside the grace", pod: crashLoopPodBack(now, "1", "otherhash", false, 0), wantPhase: workloadtypes.InstancePhaseReady},
+		{name: "the set has been down past the grace", pod: crashLoopPodBack(now, "1", "otherhash", false, time.Minute), wantPhase: workloadtypes.InstancePhaseFailed, wantWarns: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			insts := []workloadtypes.InstanceStatus{crashLoopRowNamingTheLoop(now, workloadtypes.InstancePhaseReady, 1, "own-engine-otherhash")}
+			input, rec := escalationFixture(insts)
+			input.StuckPodGrace = time.Second
+			input.ObservedState.CurrentRevision = "own-engine-currenthash"
+
+			if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1), map[int32][]*corev1.Pod{0: {tc.pod}}); err != nil {
+				t.Fatalf("escalation pass: %v", err)
+			}
+			got := rec.store[0]
+			if got.Phase != tc.wantPhase {
+				t.Errorf("Phase: got %q want %q", got.Phase, tc.wantPhase)
+			}
+			if got.Operation != nil {
+				t.Errorf("Operation: got %+v want none on a settled row", got.Operation)
+			}
+			if len(rec.warns) != tc.wantWarns {
+				t.Errorf("WarnInstanceFailed: got %v want %d call(s)", rec.warns, tc.wantWarns)
+			}
+			if tc.wantPhase != workloadtypes.InstancePhaseFailed {
+				if got.ReadySince == nil || !got.ReadySince.Equal(insts[0].ReadySince) || got.LastFailure == nil || !got.LastFailure.Time.Equal(&insts[0].LastFailure.Time) {
+					t.Errorf("row = %+v, want its anchor and record untouched", got)
+				}
+				return
+			}
+			// The stamp left the park the unpark reads: Failed, no operation,
+			// a record. Once the set serves it returns to Ready.
+			if err := status.UnparkServing(context.Background(), input, 0, ""); err != nil {
+				t.Fatalf("UnparkServing: %v", err)
+			}
+			if rec.store[0].Phase != workloadtypes.InstancePhaseReady {
+				t.Errorf("after the set serves: Phase got %q want Ready", rec.store[0].Phase)
+			}
+		})
+	}
+}
+
+// A Restart attempt whose row names the loop on its failure record is
+// judged as any Restart is, on the pods at its incarnation: the set the
+// repair is replacing keeps the Restart in flight whatever the record
+// says, and a wedged rebuild fails the row with the operation preserved.
+//
+// Cells: instance/Restart/Drain/pod.waiting[CrashLoopBackOff]/before
+func TestEscalation_RestartingRowNamingTheLoopIsJudgedOnItsRebuild(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name        string
+		incarnation string
+		wantPhase   workloadtypes.InstancePhase
+		wantWarns   int
+	}{
+		{name: "the pod the repair is replacing", incarnation: "1", wantPhase: workloadtypes.InstancePhaseRestarting},
+		{name: "the rebuilt pod", incarnation: "2", wantPhase: workloadtypes.InstancePhaseFailed, wantWarns: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := crashLoopRowNamingTheLoop(now, workloadtypes.InstancePhaseRestarting, 2, "own-engine-currenthash")
+			row.Operation = &workloadtypes.InstanceOperation{
+				Type:     workloadtypes.InstanceOperationRestart,
+				Step:     workloadtypes.RestartStepDrain,
+				Deadline: metav1.NewTime(now.Add(30 * time.Minute)),
+			}
+			input, rec := escalationFixture([]workloadtypes.InstanceStatus{row})
+			input.StuckPodGrace = time.Second
+			input.ObservedState.CurrentRevision = "own-engine-currenthash"
+			pod := crashLoopPodBack(now, tc.incarnation, "currenthash", false, time.Hour)
+
+			if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1), map[int32][]*corev1.Pod{0: {pod}}); err != nil {
+				t.Fatalf("escalation pass: %v", err)
+			}
+			if rec.store[0].Phase != tc.wantPhase {
+				t.Errorf("Phase: got %q want %q", rec.store[0].Phase, tc.wantPhase)
+			}
+			if rec.store[0].Operation == nil || rec.store[0].Operation.Type != workloadtypes.InstanceOperationRestart {
+				t.Errorf("Operation: got %+v want the Restart kept", rec.store[0].Operation)
+			}
+			if len(rec.warns) != tc.wantWarns {
+				t.Errorf("WarnInstanceFailed: got %v want %d call(s)", rec.warns, tc.wantWarns)
 			}
 		})
 	}

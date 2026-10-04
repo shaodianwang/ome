@@ -1,7 +1,8 @@
 # A create attempt whose pod cannot pull its image. The escalation measures
-# the wedge from the pod's creationTimestamp, so the reason has to land on a
-# pod that is already older than the stuck-pod grace for the fast path to
-# fire on the same pass that observes it.
+# the wedge from the start of the pod's waiting episode - its creation, as
+# the pod never served - so the reason has to land on a pod that is already
+# older than the stuck-pod grace for the fast path to fire on the same pass
+# that observes it.
 scenario: T-create-stuck
 arrows:
   - T-empty-create

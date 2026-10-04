@@ -276,7 +276,11 @@ func Run(ctx context.Context, in PassInput) error {
 			// bare reason.
 			termination := types.PodTerminationWithReason(rowEvidence.StuckPod, rowEvidence.StuckReason, metav1.NewTime(now))
 			idx, podName, reason := row.Index, rowEvidence.StuckPod.Name, rowEvidence.StuckReason
-			stamps.add(idx, status.StampFailedOnStuckPod(termination), func() {
+			// The stamp lands on the fresh row and names the pod it blames
+			// by incarnation, so a repair that claimed the pod set since
+			// this observation keeps it.
+			blamed, _ := query.InstanceIncarnationFromLabels(rowEvidence.StuckPod)
+			stamps.add(idx, status.StampFailedOnStuckPod(termination, blamed), func() {
 				input.WarnInstanceFailed(idx, podName, reason)
 			})
 			continue
@@ -474,49 +478,64 @@ func singlePodSurgeAttempt(row *types.InstanceStatus, desiredPods int32) bool {
 // failureStampBuffer coalesces the escalation pass's plain Failed
 // stamps into one batched status write. Buffer only standalone stamps:
 // mutations nothing later in the reconcile depends on being persisted
-// first. Each buffered warn fires only after its stamp's write
-// succeeded, matching the immediate path (a failed write emits nothing;
-// the evidence re-escalates next reconcile). A nil warn is a mutation
-// that carries no operator-facing event of its own.
+// first. Each buffered warn fires only after its stamp changed the row
+// and the write succeeded, matching the immediate path: a failed write
+// emits nothing and the evidence re-escalates next reconcile, and a
+// stamp the fresh row withheld announces nothing. A nil warn is a
+// mutation that carries no operator-facing event of its own.
 type failureStampBuffer struct {
-	input types.ReconcileInput
-	muts  []types.InstanceMutation
-	warns []func()
+	input  types.ReconcileInput
+	stamps []bufferedStamp
+}
+
+// bufferedStamp is one stamp with the warning it owes once it commits.
+type bufferedStamp struct {
+	mutation  types.InstanceMutation
+	warn      func()
+	committed bool
 }
 
 func (b *failureStampBuffer) add(idx int32, mutate func(*types.InstanceStatus) bool, warn func()) {
-	b.muts = append(b.muts, types.InstanceMutation{Index: idx, Mutate: mutate})
-	b.warns = append(b.warns, warn)
+	b.stamps = append(b.stamps, bufferedStamp{mutation: types.InstanceMutation{Index: idx, Mutate: mutate}, warn: warn})
 }
 
 // flush persists the buffered stamps — one batched write when the
-// adapter provides ApplyInstanceMutations, one MutateInstance call per
-// stamp otherwise — then fires the deferred warnings. Empty buffer =
-// zero writes. The buffer resets whichever path ran.
+// adapter provides ApplyInstanceMutations, one single-row write per
+// stamp otherwise — then fires the warnings of the stamps that
+// committed. Empty buffer = zero writes. The buffer resets whichever
+// path ran.
 func (b *failureStampBuffer) flush(ctx context.Context) error {
-	if len(b.muts) == 0 {
+	if len(b.stamps) == 0 {
 		return nil
 	}
 	if b.input.ApplyInstanceMutations != nil {
-		if err := b.input.ApplyInstanceMutations(ctx, b.muts); err != nil {
+		muts := make([]types.InstanceMutation, len(b.stamps))
+		for i := range b.stamps {
+			stamp := &b.stamps[i]
+			muts[i] = stamp.mutation
+			muts[i].OnCommit = func(_, _ *types.InstanceStatus) { stamp.committed = true }
+		}
+		if err := b.input.ApplyInstanceMutations(ctx, muts); err != nil {
 			return err
 		}
-		for _, warn := range b.warns {
-			if warn != nil {
-				warn()
+		for _, stamp := range b.stamps {
+			if stamp.committed && stamp.warn != nil {
+				stamp.warn()
 			}
 		}
 	} else {
-		for i, m := range b.muts {
-			if err := b.input.MutateInstance(ctx, m.Index, m.Mutate); err != nil {
+		for i := range b.stamps {
+			stamp := &b.stamps[i]
+			committed, err := status.ApplyStamp(ctx, b.input, stamp.mutation.Index, stamp.mutation.Mutate)
+			if err != nil {
 				return err
 			}
-			if b.warns[i] != nil {
-				b.warns[i]()
+			if committed && stamp.warn != nil {
+				stamp.warn()
 			}
 		}
 	}
-	b.muts, b.warns = nil, nil
+	b.stamps = nil
 	return nil
 }
 

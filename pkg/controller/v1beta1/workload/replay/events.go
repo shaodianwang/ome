@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	types "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -267,7 +268,14 @@ func applyPodWaiting(ctx context.Context, d *driver, ev TimelineEvent) (string, 
 	name := d.podName(ref)
 	return "pod=" + name + " reason=" + ev.Variant, d.patchPod(ctx, name, func(pod *corev1.Pod) {
 		pod.Status.Phase = corev1.PodPending
-		setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, d.clock.Now())
+		// A kubelet reports ContainersReady=False with a pod's first status,
+		// so a pod that never served has held it since its creation; only a
+		// pod that served transitions now.
+		notReadySince := d.clock.Now()
+		if !hasPodCondition(pod, corev1.ContainersReady) && !pod.CreationTimestamp.IsZero() {
+			notReadySince = pod.CreationTimestamp.Time
+		}
+		setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, notReadySince)
 		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 			Name:  container,
 			Image: podImage(pod, container),
@@ -277,6 +285,17 @@ func applyPodWaiting(ctx context.Context, d *driver, ev TimelineEvent) (string, 
 			}},
 		}}
 	})
+}
+
+// hasPodCondition reports whether the pod carries a condition of the
+// named type, whatever its status.
+func hasPodCondition(pod *corev1.Pod, condType corev1.PodConditionType) bool {
+	for i := range pod.Status.Conditions {
+		if pod.Status.Conditions[i].Type == condType {
+			return true
+		}
+	}
+	return false
 }
 
 // applyContainerRestart is the kubelet restarting a container in place:
@@ -589,8 +608,9 @@ func applyOperationDeadline(_ context.Context, d *driver, ev TimelineEvent) (str
 
 // applyStuckPodGrace advances the clock onto the earliest instant at which
 // a pod wedged in a terminal waiting reason has held it for the configured
-// stuck-pod grace. The deadline is the pod's own creationTimestamp plus the
-// configured grace, so the scenario names neither.
+// stuck-pod grace. The deadline is the start of the pod's own waiting
+// episode (evidence.WaitingEpisodeStart) plus the configured grace, so the
+// scenario names neither.
 func applyStuckPodGrace(ctx context.Context, d *driver, ev TimelineEvent) (string, error) {
 	grace, err := ParseDuration("config.stuckPodGrace", d.cfg.StuckPodGrace)
 	if err != nil {
@@ -605,10 +625,11 @@ func applyStuckPodGrace(ctx context.Context, d *driver, ev TimelineEvent) (strin
 	}
 	var earliest time.Time
 	for _, pod := range pods {
-		if !waitingTerminally(pod) || pod.CreationTimestamp.IsZero() {
+		since := evidence.WaitingEpisodeStart(pod)
+		if !waitingTerminally(pod) || since.IsZero() {
 			continue
 		}
-		due := pod.CreationTimestamp.Time.Add(grace)
+		due := since.Add(grace)
 		if earliest.IsZero() || due.Before(earliest) {
 			earliest = due
 		}

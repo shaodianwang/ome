@@ -688,7 +688,7 @@ cells:
     outcome: escalate
     to: Failed
     guard: a pod of the attempt already holds one of the terminal waiting reasons when the grace elapses and the pod set is not fully serving; the elapsed grace by itself only arms the check
-    note: the grace is measured from pod creationTimestamp by the stuck-pod evidence in escalation/escalation.go, which reports a pod held in a terminal kubelet waiting reason past it, and escalation.go routes a disposable Create attempt through the disposition, which records a RetryBlock against the pinned revision or a relocation directive and clears the operation in one write
+    note: the grace is measured from the start of the pod's waiting episode - its creation, or the moment its containers last stopped being ready - by the stuck-pod evidence in escalation/escalation.go, which reports a pod held in a terminal kubelet waiting reason past it, and escalation.go routes a disposable Create attempt through the disposition, which records a RetryBlock against the pinned revision or a relocation directive and clears the operation in one write
     invariants: [one.operation.per.instance]
     placement: perm
     coverage: {perm: [], unit: [TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused], kind: [], replay: [T-create-stuckgrace]}

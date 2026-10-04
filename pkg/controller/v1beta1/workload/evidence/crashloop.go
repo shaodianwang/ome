@@ -22,7 +22,8 @@ import (
 // Three things keep it narrow:
 //
 //   - The grace comes from lifecycle.stuckPodGracePeriod and is measured
-//     the way every other reader of this evidence measures it. Unset
+//     from the pod's creation (PodWedgedPastGrace): the time a pod gets to
+//     come up, after which a parked pod is a wedge at once. Unset
 //     disables the shape, exactly as it disables the fast escalation.
 //   - An off-revision wedge is a leftover, not this row's workload:
 //     there is no revision for a rebuild to land on, and the escalation
@@ -64,7 +65,7 @@ func CrashLoopWedgedPod(input types.ReconcileInput, s *types.InstanceStatus, exp
 		if !podOnCurrentRevision(pod, currentHash) {
 			continue
 		}
-		if reason, stuck := PodStuckInTerminalWaiting(pod, now, input.StuckPodGrace); stuck {
+		if reason, wedged := PodWedgedPastGrace(pod, now, input.StuckPodGrace); wedged {
 			return pod, reason, 0
 		}
 		if left := TerminalWaitingGraceLeft(pod, now, input.StuckPodGrace); left > 0 && (graceLeft == 0 || left < graceLeft) {

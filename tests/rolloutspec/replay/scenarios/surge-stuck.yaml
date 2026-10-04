@@ -1,7 +1,8 @@
 # The replacement wedges on its image while the source keeps serving. The
-# escalation measures the wedge from the pod's creationTimestamp, so the
-# reason lands on a replacement already older than the stuck-pod grace and
-# the attempt is disposed on the pass that first reads it.
+# escalation measures the wedge from the start of the pod's waiting episode -
+# its creation, as the replacement never served - so the reason lands on a
+# replacement already older than the stuck-pod grace and the attempt is
+# disposed on the pass that first reads it.
 scenario: surge-stuck
 arrows:
   - T-ready-surge

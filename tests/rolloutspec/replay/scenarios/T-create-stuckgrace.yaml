@@ -1,7 +1,7 @@
 # The same wedge as T-create-stuck, observed from the other side: the pull
 # failure lands on a pod too young to be stuck, so the attempt keeps polling
 # until the grace itself elapses. timer.stuckPodGrace resolves the deadline
-# from the pod's creationTimestamp and the configured grace, so the scenario
+# from the start of the pod's waiting episode and the configured grace, so the scenario
 # states neither duration twice.
 scenario: T-create-stuckgrace
 arrows:

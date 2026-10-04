@@ -41,7 +41,9 @@ timeline:
     events:
       - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}
   - tick: 6
-    note: the wedged pod now carries the target revision, so the escalation charges that revision and disposes the roll
+    note: the wedged pod now carries the target revision and the pull has failed for longer than the grace, so the escalation charges that revision and disposes the roll
+    events:
+      - clock.advance: 2m
   - tick: 7
     note: the block comes due and the roll re-drives in place at the same target
     events:

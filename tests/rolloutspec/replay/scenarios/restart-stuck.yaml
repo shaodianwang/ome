@@ -1,7 +1,8 @@
 # The Restart's rebuilt pod cannot pull its image. The escalation measures
-# the wedge from the pod's creationTimestamp, so the reason lands on a pod
-# already older than the grace and the row fails on the pass that reads it,
-# with the Restart operation preserved.
+# the wedge from the start of the pod's waiting episode - its creation, as
+# the pod never served - so the reason lands on a pod already older than the
+# grace and the row fails on the pass that reads it, with the Restart
+# operation preserved.
 scenario: restart-stuck
 arrows:
   - T-ready-restart

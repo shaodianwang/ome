@@ -141,7 +141,7 @@ func TestStampFailedKeepingOperation_KeepsTheOperationOnTheRow(t *testing.T) {
 func TestStampFailedOnStuckPod_NeedsNoOperation(t *testing.T) {
 	now := metav1.NewTime(time.Date(2026, time.September, 21, 0, 0, 0, 0, time.UTC))
 	termination := &types.InstanceTermination{PodName: "engine-0-default-0", Reason: "CrashLoopBackOff", Time: now}
-	mutate := StampFailedOnStuckPod(termination)
+	mutate := StampFailedOnStuckPod(termination, 0)
 
 	settled := types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady}
 	if !mutate(&settled) || settled.Phase != types.InstancePhaseFailed || settled.LastFailure == nil {
@@ -159,7 +159,7 @@ func TestStampFailedOnStuckPod_NeedsNoOperation(t *testing.T) {
 		t.Fatal("a slot with no phase must not be resurrected")
 	}
 	untouched := types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady, LastFailure: settled.LastFailure}
-	if !StampFailedOnStuckPod(nil)(&untouched) || untouched.LastFailure != settled.LastFailure {
+	if !StampFailedOnStuckPod(nil, 0)(&untouched) || untouched.LastFailure != settled.LastFailure {
 		t.Fatal("a nil termination leaves LastFailure alone")
 	}
 }
@@ -296,5 +296,59 @@ func TestUnparkServing_ReturnsAParkToReadyKeepingItsAnchor(t *testing.T) {
 	}
 	if rows[4].Phase != types.InstancePhaseReady || rows[4].LastFailure.Message != "back-off" {
 		t.Fatalf("an unpark with no note = %+v, want Ready with the message as it was", rows[4])
+	}
+}
+
+// The stuck-pod stamp is decided on the pass's observation and applied
+// to the fresh row, and only a Restart bumps a row's incarnation: a
+// blamed pod below the fresh row's incarnation is the set a repair
+// claimed since the observation, and the stamp is withheld. A pod at the
+// row's incarnation, a pod with no label, and a row that records no
+// incarnation are stamped as before.
+func TestStampFailedOnStuckPod_WithholdsFromAPodTheRepairReplaced(t *testing.T) {
+	now := metav1.NewTime(time.Date(2026, time.September, 21, 0, 0, 0, 0, time.UTC))
+	termination := &types.InstanceTermination{PodName: "engine-0-default-0", Reason: "CrashLoopBackOff", Time: now}
+	claimed := func() types.InstanceStatus {
+		return types.InstanceStatus{Index: 0, Incarnation: 2, Phase: types.InstancePhaseRestarting,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationRestart, Step: types.RestartStepDrain}}
+	}
+	row := claimed()
+	if StampFailedOnStuckPod(termination, 1)(&row) || row.Phase != types.InstancePhaseRestarting || row.LastFailure != nil {
+		t.Fatalf("row = %+v, want the repair's claim kept over a pod of the incarnation it replaces", row)
+	}
+	row = claimed()
+	if !StampFailedOnStuckPod(termination, 2)(&row) || row.Phase != types.InstancePhaseFailed || row.Operation == nil {
+		t.Fatalf("row = %+v, want Failed with the operation preserved for a pod of the rebuild", row)
+	}
+	row = claimed()
+	if !StampFailedOnStuckPod(termination, 0)(&row) || row.Phase != types.InstancePhaseFailed {
+		t.Fatalf("row = %+v, want Failed for a pod that carries no incarnation", row)
+	}
+	unrecorded := types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady}
+	if !StampFailedOnStuckPod(termination, 1)(&unrecorded) || unrecorded.Phase != types.InstancePhaseFailed {
+		t.Fatalf("row = %+v, want Failed for a row that records no incarnation", unrecorded)
+	}
+}
+
+// ApplyStamp runs the stamp through the single-row seam and reports
+// whether it changed the row; the seam's own answer is not visible to
+// the caller otherwise.
+func TestApplyStamp_ReportsWhetherTheStampTook(t *testing.T) {
+	rows := map[int32]*types.InstanceStatus{0: {Index: 0, Phase: types.InstancePhaseReady}}
+	writes := 0
+	input := types.ReconcileInput{MutateInstance: func(_ context.Context, idx int32, mutate func(*types.InstanceStatus) bool) error {
+		if mutate(rows[idx]) {
+			writes++
+		}
+		return nil
+	}}
+	stamp := StampFailedOnStuckPod(&types.InstanceTermination{Reason: "CrashLoopBackOff"}, 0)
+	committed, err := ApplyStamp(context.Background(), input, 0, stamp)
+	if err != nil || !committed || writes != 1 {
+		t.Fatalf("first apply: committed=%v err=%v writes=%d, want the stamp to take once", committed, err, writes)
+	}
+	committed, err = ApplyStamp(context.Background(), input, 0, stamp)
+	if err != nil || committed || writes != 1 {
+		t.Fatalf("second apply: committed=%v err=%v writes=%d, want a no-op on the Failed row", committed, err, writes)
 	}
 }

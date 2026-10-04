@@ -5,21 +5,53 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
+// Two readings share the terminal waiting set and the operator's grace,
+// and differ in what the grace is measured from.
+//
+// PodStuckInTerminalWaiting is the escalation's reading of an attempt's
+// pod: parked for the grace since its waiting episode began
+// (WaitingEpisodeStart). An attempt's pod that served and then broke is
+// measured from the break, so a pod older than the grace is not stuck on
+// the pass that first reads its waiting reason.
+//
+// PodWedgedPastGrace is the repair's reading of a settled row's pod:
+// parked, and older than the grace. The grace is the time a pod gets to
+// come up, and a pod that had it and parks is broken at once, whether or
+// not it served first.
+
 // PodStuckInTerminalWaiting returns (reason, true) when pod has at
 // least one container — regular or init — parked in a terminal waiting
-// reason for at least grace, otherwise ("", false).
+// reason for at least grace since its waiting episode began, otherwise
+// ("", false).
 //
-// Stuck duration is measured from CreationTimestamp, since the kubelet
-// exposes no per-state transition time on a waiting container. For
-// ImagePullBackOff the kubelet retries at least once before flipping to
-// BackOff (~30s on a 404), so the operator's grace is what separates a
-// stuck pull from the brief PodInitializing / ContainerCreating /
+// The kubelet exposes no per-state transition time on a waiting
+// container, so the episode begins at the pod's creation, or at the
+// moment its containers last stopped being ready when it served first.
+// For ImagePullBackOff the kubelet retries at least once before flipping
+// to BackOff (~30s on a 404), so the operator's grace is what separates
+// a stuck pull from the brief PodInitializing / ContainerCreating /
 // ImagePulling window. A pod with no creation stamp cannot prove any
 // duration and is never stuck.
 func PodStuckInTerminalWaiting(pod *corev1.Pod, now time.Time, grace time.Duration) (string, bool) {
+	since := WaitingEpisodeStart(pod)
+	if since.IsZero() {
+		return "", false
+	}
+	if now.Sub(since) < grace {
+		return "", false
+	}
+	return terminalWaitingReason(pod)
+}
+
+// PodWedgedPastGrace returns (reason, true) when pod is older than grace
+// and has at least one container — regular or init — parked in a
+// terminal waiting reason, otherwise ("", false). A pod with no creation
+// stamp cannot prove any age and is never wedged.
+func PodWedgedPastGrace(pod *corev1.Pod, now time.Time, grace time.Duration) (string, bool) {
 	if pod == nil || pod.CreationTimestamp.IsZero() {
 		return "", false
 	}
@@ -30,11 +62,10 @@ func PodStuckInTerminalWaiting(pod *corev1.Pod, now time.Time, grace time.Durati
 }
 
 // TerminalWaitingGraceLeft is how much of grace a pod parked in a
-// terminal waiting reason has left before PodStuckInTerminalWaiting
-// reads it as stuck: zero once the grace has passed, for a pod parked in
-// no such reason, and for a pod with no creation stamp. The grace
-// ending raises no event, so a pass that read the pod inside it owes
-// itself this wait.
+// terminal waiting reason has left before PodWedgedPastGrace reads it as
+// wedged: zero once the grace has passed, for a pod parked in no such
+// reason, and for a pod with no creation stamp. The grace ending raises
+// no event, so a pass that read the pod inside it owes itself this wait.
 func TerminalWaitingGraceLeft(pod *corev1.Pod, now time.Time, grace time.Duration) time.Duration {
 	if pod == nil || pod.CreationTimestamp.IsZero() {
 		return 0
@@ -46,6 +77,29 @@ func TerminalWaitingGraceLeft(pod *corev1.Pod, now time.Time, grace time.Duratio
 		return left
 	}
 	return 0
+}
+
+// WaitingEpisodeStart is when the pod's current waiting episode began,
+// the instant the escalation's grace is measured from: the later of the
+// pod's creation and the last transition of its ContainersReady condition
+// away from True. A pod that served and then broke is measured from the
+// break, not from its creation; one that never served, or carries no
+// condition yet, is measured from its creation. Zero for a nil pod or
+// one with no creation stamp, which can prove no duration.
+func WaitingEpisodeStart(pod *corev1.Pod) time.Time {
+	if pod == nil || pod.CreationTimestamp.IsZero() {
+		return time.Time{}
+	}
+	since := pod.CreationTimestamp.Time
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type != corev1.ContainersReady || cond.Status == corev1.ConditionTrue {
+			continue
+		}
+		if cond.LastTransitionTime.Time.After(since) {
+			since = cond.LastTransitionTime.Time
+		}
+	}
+	return since
 }
 
 // terminalWaitingReason names the terminal kubelet waiting reason a
@@ -115,28 +169,53 @@ func PodsForStuckCheck(s types.InstanceStatus, byIdx map[int32][]*corev1.Pod) []
 	return out
 }
 
-// AttemptStuckPods narrows the pods a stuck check may blame an Update
-// attempt for to the pods that carry the attempt's revision. The pod an
-// update is replacing may be the broken workload the roll corrects: a
-// single-pod surge shares its index with the source it will drain, a
-// recreate holds the old incarnation until its drain deletes it, and an
-// in-place patch carries the old revision until the patch restamps it.
-// A wedge on any of those is the roll's reason, never its failure; the
-// gang surge reads the same rule through its replacement bucket. A pod
-// with no revision label stays in scope, as does every pod of an attempt
-// that is not an Update. attemptRev names the revision the attempt is
-// converging toward; empty leaves the scope open.
+// AttemptStuckPods narrows the pods a stuck check may blame an attempt
+// for to the pods that are the attempt's own. The pod an attempt is
+// replacing may be the broken workload the attempt corrects, and a wedge
+// on it is the attempt's reason, never its failure.
+//
+// An Update is judged on the pods that carry its revision: a single-pod
+// surge shares its index with the source it will drain, a recreate holds
+// the old incarnation until its drain deletes it, and an in-place patch
+// carries the old revision until the patch restamps it; the gang surge
+// reads the same rule through its replacement bucket. A pod with no
+// revision label stays in scope. attemptRev names the revision the
+// attempt is converging toward; empty leaves the scope open.
+//
+// A Restart is judged on the pods at the row's incarnation: the set of
+// the incarnation before it is what the repair drains and deletes, and
+// the repair owns that set until its replacement runs. A pod with no
+// incarnation label stays in scope. Every pod of any other attempt is in
+// scope.
 func AttemptStuckPods(s types.InstanceStatus, pods []*corev1.Pod, attemptRev string) []*corev1.Pod {
-	if s.Operation == nil || s.Operation.Type != types.InstanceOperationUpdate {
+	if s.Operation == nil {
+		return pods
+	}
+	var own func(*corev1.Pod) bool
+	switch s.Operation.Type {
+	case types.InstanceOperationUpdate:
+		own = func(pod *corev1.Pod) bool { return podOnAttemptRevision(pod, attemptRev) }
+	case types.InstanceOperationRestart:
+		own = func(pod *corev1.Pod) bool { return !podBelowIncarnation(pod, s.Incarnation) }
+	default:
 		return pods
 	}
 	out := make([]*corev1.Pod, 0, len(pods))
 	for _, pod := range pods {
-		if pod != nil && podOnAttemptRevision(pod, attemptRev) {
+		if pod != nil && own(pod) {
 			out = append(out, pod)
 		}
 	}
 	return out
+}
+
+// podBelowIncarnation reports whether the pod carries an incarnation
+// label below incarnation: a pod of a set a Restart is replacing. Only a
+// Restart bumps a row's incarnation, so no other attempt leaves such a
+// pod behind. A pod with no label is not read as below.
+func podBelowIncarnation(pod *corev1.Pod, incarnation int64) bool {
+	inc, ok := query.InstanceIncarnationFromLabels(pod)
+	return ok && inc < incarnation
 }
 
 // FirstWorkloadCausedPod returns the first live (non-deleting) pod whose

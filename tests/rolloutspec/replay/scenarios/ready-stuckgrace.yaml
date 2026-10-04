@@ -1,7 +1,7 @@
 # The same off-current wedge as ready-stuck-failed, observed from the other
 # side: the waiting reason lands on a pod younger than the grace, so nothing
 # escalates until the grace itself elapses. timer.stuckPodGrace resolves the
-# deadline from the pod's creationTimestamp and the configured grace.
+# deadline from the start of the pod's waiting episode and the configured grace.
 scenario: ready-stuckgrace
 arrows:
   - T-empty-create

@@ -1534,8 +1534,8 @@ func (h *recoveryHarness) kubelet() {
 		unbound := len(h.nodeNames) > 0 && pod.Spec.NodeName == "" && !h.placementHeld
 		if pod.CreationTimestamp.IsZero() || unbound {
 			if pod.CreationTimestamp.IsZero() {
-				// PodStuckInTerminalWaiting measures stuck age from CreationTimestamp
-				// against the fake clock; stamp it deterministically.
+				// The stuck-pod grace runs from the pod's creation until it first
+				// serves, against the fake clock; stamp the creation deterministically.
 				pod.CreationTimestamp = metav1.NewTime(h.clk.Now())
 			}
 			if unbound {

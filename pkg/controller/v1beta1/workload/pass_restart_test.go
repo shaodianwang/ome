@@ -3266,3 +3266,173 @@ func requireBreakAfterPushKeepsHealthyServing(t *testing.T, h *recoveryHarness, 
 		t.Fatalf("a restart was recorded for an Instance the roll owned: %v", h.events)
 	}
 }
+
+// failedRepairWithoutPods reports the index of a row parked Failed with
+// its Restart operation preserved and no live pod behind it, or -1 when no
+// row reads that way. Such a row has no owner: the repair reads it as a
+// spent attempt whose set is incomplete, the Create pass as a parked
+// operation, and the roll as a row already on its revision.
+func failedRepairWithoutPods(h *recoveryHarness) int32 {
+	for _, s := range h.irStatuses() {
+		if parkedRepair(h, s.Index) && len(h.podsOf(s.Index)) == 0 {
+			return s.Index
+		}
+	}
+	return -1
+}
+
+// A promoted runner that crash-loops after it served, on a pod older than
+// the stuck-pod grace: the policy's repair and the stuck-pod escalation
+// read that pod in the same reconcile. The repair owns the pod's
+// replacement, so no pass leaves the row Failed with its Restart
+// operation and no pod behind it, and the Instance serves again, rebuilt
+// at a new incarnation, within a bounded number of passes. Two readings
+// meet the pod: a single-pod Instance whose crash lands while the roll
+// still has Instances to move, so its pod disagrees with the Component's
+// current revision, and a gang whose worker crash-loops under a routed
+// Service, where the leader's drain takes a further pass.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Restart/Drain/pod.waiting[CrashLoopBackOff]/before
+func TestCrashAfterPromotion_RepairNeverOutlivesItsPodSet(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		multiPod bool
+		routed   bool
+		replicas int32
+		// midRoll crashes the first Instance the roll promotes while the
+		// others still run the previous revision.
+		midRoll bool
+		runner  string
+	}{
+		{name: "four single-pod Instances under RecreatePod maxUnavailable 1, the crash lands mid-roll", replicas: 4, midRoll: true},
+		{name: "a leader+worker gang under a routed Service, the worker crash-loops", multiPod: true, routed: true, replicas: 1, runner: workloadtypes.RunnerWorker},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryHarnessFor(t, tc.multiPod, constants.MainContainerName)
+			h.recorder = record.NewFakeRecorder(256)
+			h.replicas = tc.replicas
+			h.routed = tc.routed
+			policy := workloadtypes.RestartPolicyRecreateInstance
+			h.lifecycle.RestartPolicy = &policy
+			h.useRollingBudget(workloadtypes.UpdateStrategyRecreatePod)
+			if !h.run(60, func() bool { return h.settledOn(h.revV1, tc.replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled on v1 for %d instances", tc.replicas)
+			}
+			// The pod set holds Ready well past the grace before it breaks.
+			for i := 0; i < 3; i++ {
+				h.step()
+			}
+
+			broken := int32(0)
+			if tc.midRoll {
+				h.setTarget(h.revFixed, fixedImage)
+				promoted := func() bool {
+					for _, s := range h.irStatuses() {
+						if s.Phase == workloadtypes.InstancePhaseReady && s.Operation == nil && s.RunningRevision == h.revFixed.Name {
+							broken = s.Index
+							return true
+						}
+					}
+					return false
+				}
+				if !h.run(20, promoted) || h.currentRevision == h.revFixed.Name {
+					h.dumpState("mid-roll")
+					t.Fatalf("no Instance was promoted on %s while the roll still had Instances to move", h.revFixed.Name)
+				}
+				h.step()
+			}
+			before := h.instance(broken).Incarnation
+			h.crashPod(broken, tc.runner, crashStartImage)
+
+			const bound = 12
+			servesAgain := func() bool {
+				s := h.instance(broken)
+				return s != nil && s.Phase == workloadtypes.InstancePhaseReady && s.Operation == nil &&
+					s.Incarnation > before && servingReady(h, broken, len(h.desired.Runners))
+			}
+			pass := 0
+			h.runWithInvariant(bound, servesAgain, func() {
+				pass++
+				if idx := failedRepairWithoutPods(h); idx >= 0 {
+					h.dumpState("repair outlived its pod set")
+					t.Fatalf("pass %d: Instance %d reads Failed with its Restart operation and no pod behind it: %+v (events=%v)",
+						pass, idx, *h.instance(idx), h.events)
+				}
+			})
+			if !servesAgain() {
+				h.dumpState("not serving again")
+				t.Fatalf("Instance %d did not serve again at a new incarnation within %d passes of its crash: %+v (events=%v)",
+					broken, bound, *h.instance(broken), h.events)
+			}
+		})
+	}
+}
+
+// A post-Ready crash whose rebuild wedges from birth parks the repair
+// through the stuck-pod escalation, with the wedged set behind it. The
+// park has the exits the decided cells name and nothing else is needed:
+// the repair re-arms on the ladder once its delay elapses and heals, or,
+// with no ladder configured, a corrected revision takes the Instance.
+// Neither path passes through a Failed row that holds its Restart
+// operation with no pod.
+//
+// Cells: instance/Restart/Drain/pod.waiting[CrashLoopBackOff]/before, instance/Failed/timer.repairRetry/before, instance/Failed/spec.revision/before
+func TestRepairParkedOnItsRebuild_ExitsThroughTheLadderOrTheCorrectedPush(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		ladder *workloadtypes.RetryPolicy
+		push   bool
+	}{
+		{name: "the ladder re-arms the repair", ladder: retryLadder(3, time.Minute)},
+		{name: "no ladder, a corrected revision takes the Instance", push: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRestartHarness(t, 1)
+			h.recorder = record.NewFakeRecorder(256)
+			h.retryPolicy = tc.ladder
+			for i := 0; i < 3; i++ {
+				h.step()
+			}
+			before := h.instance(0).Incarnation
+
+			// The serving pod crash-loops; every pod built from now on parks
+			// in the same loop and stays parked after the cause is gone.
+			h.armWedge("CrashLoopBackOff", true)
+			h.crashPod(0, "", crashStartImage)
+			noOrphanedRepair := func() {
+				if idx := failedRepairWithoutPods(h); idx >= 0 {
+					h.dumpState("repair outlived its pod set")
+					t.Fatalf("Instance %d reads Failed with its Restart operation and no pod behind it: %+v (events=%v)", idx, *h.instance(idx), h.events)
+				}
+			}
+			if !h.runWithInvariant(20, func() bool { return parkedRepair(h, 0) }, noOrphanedRepair) {
+				h.dumpState("park")
+				t.Fatalf("the wedged rebuild never parked the repair at Failed (events=%v)", h.events)
+			}
+			parked := h.instance(0)
+			if parked.Incarnation <= before {
+				t.Fatalf("the park holds incarnation %d, want the rebuild's, above %d", parked.Incarnation, before)
+			}
+			if got := len(h.podsOf(0)); got != 1 {
+				t.Fatalf("the parked repair has %d pods behind it, want its wedged rebuild", got)
+			}
+
+			h.clearWedge()
+			if tc.push {
+				h.setTarget(h.revFixed, fixedImage)
+			}
+			if !h.runWithInvariant(40, func() bool { return servingReady(h, 0, 1) }, noOrphanedRepair) {
+				h.dumpState("exit")
+				t.Fatalf("the parked repair never left Failed (events=%v)", h.events)
+			}
+			got := h.instance(0)
+			if tc.push && got.RunningRevision != h.revFixed.Name {
+				t.Errorf("running revision = %q, want the corrected %q", got.RunningRevision, h.revFixed.Name)
+			}
+			if !tc.push && got.Incarnation != parked.Incarnation+1 {
+				t.Errorf("incarnation = %d, want %d: one rebuild on the ladder", got.Incarnation, parked.Incarnation+1)
+			}
+		})
+	}
+}

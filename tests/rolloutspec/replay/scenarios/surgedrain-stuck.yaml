@@ -1,7 +1,8 @@
 # The replacement regresses into a terminal waiting reason after the step has
 # advanced to SurgeDrain. The source is already out of rotation, so the
-# fully-serving guard cannot suppress the escalation, and the replacement is
-# old enough for the stuck-pod fast path to fire on the pass that reads it.
+# fully-serving guard cannot suppress the escalation, and once the replacement
+# has held the reason for longer than the stuck-pod grace - measured from the
+# regression, not from the pod's creation - the fast path fires.
 scenario: surgedrain-stuck
 arrows:
   - T-ready-surge
@@ -41,6 +42,10 @@ timeline:
     events:
       - clock.advance: 2m
   - tick: 6
-    note: the replacement wedges on its image, and being older than the grace it is disposed on the pass that reads the reason
+    note: the replacement wedges on its image; it served before, so the grace runs from the regression and the pass that reads it disposes nothing yet
     events:
       - pod.waiting[ImagePullBackOff]: {pod: {index: 0, ordinal: 1}, message: "manifest unknown"}
+  - tick: 7
+    note: the wedge has outlasted the grace, so the attempt is disposed on the pass that reads it
+    events:
+      - clock.advance: 2m
