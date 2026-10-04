@@ -987,6 +987,16 @@ def _pod_ready(obj):
     return False
 
 
+def _pod_ready_since(obj):
+    """The epoch at which the pod's Ready condition last turned True; None
+    while it is not Ready. Invariant D reads it to tell a served gang short
+    a member from a gang forming."""
+    for c in (obj.get("status", {}).get("conditions") or []):
+        if c.get("type") == "Ready":
+            return _event_epoch(c.get("lastTransitionTime")) if c.get("status") == "True" else None
+    return None
+
+
 def _main_container_ready(obj):
     """True when the kubelet reports the main container ready. Diagnostics
     only: it is what the kubelet last wrote, Ready or not."""
@@ -1774,14 +1784,30 @@ def _inv_check_node_exclusion(inv, pod_state, hits, now):
                  f"{HOSTNAME_LABEL} NotIn [{', '.join(p['excl'])}] node affinity term")
 
 
+def _gang_served_before(served, members):
+    """True when a bound member of the gang was Ready and serving before the
+    oldest member without a node was created: the gang served whole and is
+    short a member, whose replacement the scheduler holds alone by policy —
+    a repair, not a gang forming. `served` is invariant D's record of each
+    pod UID's earliest Ready-and-serving moment."""
+    born = [_event_epoch(m.get("created")) for m in members if not m.get("node")]
+    born = [b for b in born if b is not None]
+    if not born:
+        return False
+    oldest = min(born)
+    return any(served.get(m.get("uid"), math.inf) < oldest for m in members if m.get("node"))
+
+
 def _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now):
     """Invariant D, one tick, only when OME_EVAL_SCHEDULER names a scheduler:
     D1 every live case pod carries that schedulerName (the runtime's name
        reached the rendered pods); D2 every multi-pod Instance's pods share
        one pod-group label whose PodGroup exists with minMember == pods per
-       Instance; D3 a gang binds as a unit — once any member has a node, every
-       existing member has one within INV_SUSTAIN_D ticks. Teardown is not a
-       gang event: pods being deleted are not counted."""
+       Instance; D3 a gang binds as a unit — once any member of a forming
+       gang has a node, every existing member has one within INV_SUSTAIN_D
+       ticks; a gang that served whole and is short a member is a repair,
+       whose replacement waits alone by policy, and is not judged. Teardown
+       is not a gang event: pods being deleted are not counted."""
     live = [p for p in pod_state.values() if p and p["alive"]]
     untyped = [p for p in live if "sched" not in p or "pg" not in p or "node" not in p]
     if untyped:
@@ -1797,7 +1823,11 @@ def _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now):
                      f"{p['comp']}/{p.get('inst', '0')} pod runs under scheduler "
                      f"{p.get('sched') or 'default'!r}, expected {SCHED_NAME!r}")
     gangs = defaultdict(list)
+    served = inv.setdefault("d_served", {})   # pod UID → the earliest moment it was seen Ready and serving
     for p in live:
+        if p.get("ready") and p.get("serving") and p.get("uid"):
+            since = p.get("ready_since")
+            served[p["uid"]] = min(served.get(p["uid"], math.inf), now if since is None else since)
         if pods_per_inst.get(p["comp"], 1) > 1:
             gangs[(p["comp"], p.get("inst", "0"))].append(p)
     if not gangs:
@@ -1806,7 +1836,7 @@ def _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now):
     for (comp, inst), members in sorted(gangs.items()):
         want = pods_per_inst[comp]
         bound = [m for m in members if m.get("node")]
-        if bound and len(bound) < len(members):
+        if bound and len(bound) < len(members) and not _gang_served_before(served, members):
             key = ("D", "partial-gang", comp, inst)
             _inv_hit(inv, hits, key, key, INV_SUSTAIN_D, now,
                      f"{comp}/{inst}: {len(bound)} of {len(members)} live gang pods bound to a node "
@@ -6982,8 +7012,9 @@ def _node_lift_tick(ctx, f, now):
     the bite; after-recover once every pod the node held is gone from the
     API and the Instance is Ready and serving on other nodes (under a
     delete, once those pods are gone), which the force-delete policy brings
-    about while the node stays down. The bite, the recovery and the lift are
-    recorded on the fault; a kubelet that cannot be started is apparatus."""
+    about while the node stays down. The bite, the relocation, the sweep and
+    the lift are recorded on the fault; a kubelet that cannot be started is
+    apparatus."""
     if not _node_hook_fault(f) or not f.get("fired") or not f.get("node") or f.get("infra_fail") or f.get("lifted_at"):
         return
     if now - f.get("node_poll_ts", 0.0) < 2.0:
@@ -7002,7 +7033,9 @@ def _node_lift_tick(ctx, f, now):
         lost = f.get("lost_uids") or set()
         if f.get("reaped_at") is None and not _uids_present(ctx["pod_state"], lost):
             f["reaped_at"] = now
-        due = f.get("reaped_at") is not None and (f.get("hook_op_kind") == "delete" or _instance_relocated(pods, lost, node))
+        if f.get("relocated_at") is None and f.get("hook_op_kind") != "delete" and _instance_relocated(pods, lost, node):
+            f["relocated_at"] = now
+        due = f.get("reaped_at") is not None and (f.get("hook_op_kind") == "delete" or f.get("relocated_at") is not None)
         if due:
             f["recovered_at"] = now
     else:
@@ -7056,9 +7089,11 @@ def _node_hook_watch(ctx, f, done, budget):
 def _node_hook_checks(f, what, completed, state, verdict, notes, checks):
     """The verdict of a node loss at a hook of an operation. The fault must
     have fired and the node bitten (apparatus otherwise); after-recover
-    needs the Instance relocated while the node was down (under a delete,
-    the pods it held gone) and nothing the node held left in the API; the
-    kubelet must have been started again at the lift's phase; the operation
+    needs the Instance back Ready and serving on other nodes while the node
+    was down (a delete relocates nothing) and every pod the node held swept
+    from the API, two checks read apart since a relocation can complete
+    while a drained pod lingers; the kubelet must have been started again
+    at the lift's phase; the operation
     must complete (completed is None where the caller's own verdict judges
     that); and the reset mailbox stays unwritten where the caller read it."""
     if not f or f.get("infra_fail") or f.get("skip"):
@@ -7076,30 +7111,31 @@ def _node_hook_checks(f, what, completed, state, verdict, notes, checks):
     checks.append(f"  ✓ {kind}: node {node} read NotReady with no pod of {comp} Instance {inst} serving there "
                   f"{f['bite_ts'] - t0:.0f}s after the stop at {where} of {what}")
     if lift == "after-recover":
-        if f.get("recovered_at") is None:
+        relocates = f.get("hook_op_kind") != "delete"   # a delete relocates nothing: the sweep alone is owed
+        relocated, swept = f.get("relocated_at"), f.get("reaped_at")
+        if relocates and relocated is None:
             verdict = "FAIL"
             notes.append(f"{kind}: {comp} Instance {inst} was not relocated while node {node} was down")
-            checks.append(f"  ✗ {kind}: {comp} Instance {inst} never came back Ready and serving on other nodes with every "
-                          f"pod the node held replaced while the node was down (relocation needs the force-delete policy)")
+            checks.append(f"  ✗ {kind}: {comp} Instance {inst} never came back Ready and serving on other nodes while "
+                          f"node {node} was down (relocation needs the force-delete policy)")
+        elif relocates:
+            checks.append(f"  ✓ {kind}: {comp} Instance {inst} back Ready and serving on other nodes {relocated - t0:.0f}s "
+                          f"after the stop, while the node was still down")
+        if swept is None:
+            verdict = "FAIL"
+            notes.append(f"{kind}: pods the node held were still in the API")
+            checks.append(f"  ✗ {kind}: pods the node held were still in the API (the policy's sweep must leave nothing "
+                          f"the node held behind, a drained pod included)")
+        else:
+            checks.append(f"  ✓ {kind}: every pod the node held was swept {swept - t0:.0f}s after the stop")
+        if (relocates and relocated is None) or swept is None:
             return verdict
-        how = ("every pod the node held gone" if f.get("hook_op_kind") == "delete"
-               else "Ready and serving on other nodes with every pod the node held replaced")
-        checks.append(f"  ✓ {kind}: {comp} Instance {inst} relocated — {how} {f['recovered_at'] - t0:.0f}s after the stop, "
-                      f"while the node was still down")
     if f.get("lifted_at") is None:
         verdict = "FAIL"
         notes.append(f"{kind}: the kubelet of {node} was never started again (lift={lift})")
         checks.append(f"  ✗ {kind}: the watch ended before the kubelet of {node} was started again (lift={lift} never came due)")
         return verdict
     checks.append(f"  ✓ {kind}: the kubelet of {node} started again {f['lifted_at'] - t0:.0f}s after the stop (lift={lift})")
-    if lift == "after-recover":
-        if f.get("reaped_at") is None:
-            verdict = "FAIL"
-            notes.append(f"{kind}: pods the node held were still in the API")
-            checks.append(f"  ✗ {kind}: pods the node held were still in the API (the policy's sweep must leave nothing "
-                          f"of the Instance behind)")
-        else:
-            checks.append(f"  ✓ {kind}: every pod the node held was gone {f['reaped_at'] - t0:.0f}s after the stop")
     if completed is True:
         checks.append(f"  ✓ {what} completed with the node loss in its window")
     elif completed is False:
@@ -12353,6 +12389,30 @@ def _preempt_close_nodes(f, nodes):
     return True, f"{TAINT_KEY}=NoSchedule on {len(nodes)} node(s) ({', '.join(nodes)}), the fillers tolerating it"
 
 
+def _case_pods_leaving(items, case_id):
+    """The names of the case's pods among `items` that carry a deletion
+    timestamp, sorted."""
+    out = []
+    for it in items or []:
+        meta = it.get("metadata") or {}
+        if meta.get("deletionTimestamp") and (meta.get("labels") or {}).get("ome.io/inferenceservice") == case_id:
+            out.append(str(meta.get("name") or ""))
+    return sorted(out)
+
+
+def _node_pods_settled(node, case_id):
+    """The pods bound to `node` once no pod of the case there is on its way
+    out: the room a leaving pod still holds would seat the press without a
+    preemption, so the press is sized after it has left. The last read when
+    one is still leaving at LIFT_SETTLE_S; None when the node cannot be read."""
+    deadline = time.time() + LIFT_SETTLE_S
+    while True:
+        items = _node_pods(node)
+        if items is None or not _case_pods_leaving(items, case_id) or time.time() >= deadline:
+            return items
+        time.sleep(1.0)
+
+
 def _preempt_fill(f, target, node, pod_state):
     """Take the spare CPU of every other eligible node, close every eligible
     node to the case with the pending taint, then press on the target pod's
@@ -12386,7 +12446,7 @@ def _preempt_fill(f, target, node, pod_state):
             f["infra_fail"] = f"preempt: {msg}"
             return
         f["notes"].append(f"fault armed: {msg}")
-    items = _node_pods(node)
+    items = _node_pods_settled(node, f["case_id"])
     free = _node_cpu_free(node, items)
     if free is None:
         f["infra_fail"] = f"preempt: cannot read the spare CPU of {node}"
@@ -12418,10 +12478,11 @@ def _preempt_fill(f, target, node, pod_state):
 
 
 def _fault_preempt_fire(f, pod_state, pods_per_inst, old_hashes):
-    """Aim the preemption at the node of the podkill victim. A victim not
-    bound yet leaves the fault due again after FAULT_RETRY_S."""
+    """Aim the preemption at the node of the podkill victim (aim_inst names
+    the Instance it rides). A victim not bound yet leaves the fault due
+    again after FAULT_RETRY_S."""
     target = _aimed_pod(f, pod_state) or _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=f.get("victim"),
-                                                         comp=f.get("victimcomp") or None)
+                                                         comp=f.get("victimcomp") or None, prefer_inst=f.get("aim_inst"))
     if not target:
         f["infra_fail"] = "preempt: no live pod to aim at"
         return
@@ -12632,13 +12693,25 @@ def _pending_lift(f):
     return False
 
 
-def _pending_watch(ctx, f, comps, lift, done, budget, inst=None):
+def _pending_done_premature(f, landed):
+    """True while a done reading cannot mean the cause never bound: the
+    rollback or edit the watch holds (`landed`) has not fired at its hook,
+    so what it does has not begun; or the press has not taken a pod of the
+    case yet."""
+    if landed and not landed.get("fired"):
+        return True
+    return f.get("kind") == "preempt" and not f.get("crash_pod")
+
+
+def _pending_watch(ctx, f, comps, lift, done, budget, inst=None, landed=None):
     """Watch an operation whose pod the cluster cannot place or admit: the
     wait the product reports on the Instance row, any row that reads Failed
     meanwhile, the lift once the wait has held LIFT_SETTLE_S (lift=after-settle)
     and done() sustained after it, or the hold across IDLE_HOLD_S (lift=never).
     done() before any wait, or after one with the cause still in place, means
-    the cause never bound. Returns (state, observations)."""
+    the cause never bound — once a done reading can mean that: not while the
+    landed rollback or edit (`landed`) has not fired, nor before a press has
+    taken a pod. Returns (state, observations)."""
     case_id, t0 = ctx["case_id"], ctx["trigger_ts"]
     tokens = PENDING_TOKENS[f["kind"]]
     out = {"bitten_at": None, "token": "", "row": None, "message": "", "failed": [], "lifted_at": None,
@@ -12672,11 +12745,12 @@ def _pending_watch(ctx, f, comps, lift, done, budget, inst=None):
             out["waiting_at_end"] = bool(hit)
         if lifted_ts is None:
             if done():
-                if out["bitten_at"] is None:
-                    out["unbound_at"], state = now - t0, "UNBOUND"
-                else:
+                if out["bitten_at"] is not None:
                     out["escaped_at"], state = now - t0, "ESCAPED"
-                break
+                    break
+                if not _pending_done_premature(f, landed):
+                    out["unbound_at"], state = now - t0, "UNBOUND"
+                    break
             if lift == "after-settle" and bitten_since is not None and now - bitten_since >= LIFT_SETTLE_S:
                 print(f"  Phase 4: lift — {f.get('cause', 'the cause')} removed")
                 if not _pending_lift(f):
@@ -12716,6 +12790,9 @@ def _pending_checks(f, lift, state, out, ctx, comps, allowance, verdict, notes, 
     if state == "UNBOUND":
         f["infra_fail"] = (f"{kind}: the operation completed {out['unbound_at']:.0f}s in with {cause} in place "
                            f"and no wait reported — the cause never bound")
+        return verdict
+    if kind == "preempt" and not f.get("crash_pod"):
+        f["infra_fail"] = f"{kind}: the press never preempted a pod of the case ({state})"
         return verdict
     if out["bitten_at"] is None:
         verdict = "FAIL"
@@ -12814,7 +12891,7 @@ def _pending_roll(case_id, yaml_file, desc, hdr):
     if rb or medit:
         ctx["on_read"] = lambda c: _pending_op_tick(c, rb, medit, bumped)
     print(f"  Phase 3: watching {WINDOW_WHAT[op]} wait on the cause (≤{budget}s)")
-    state, out = _pending_watch(ctx, f, sorted(configured), lift, done, budget)
+    state, out = _pending_watch(ctx, f, sorted(configured), lift, done, budget, landed=rb or medit)
     ctx.pop("on_read", None)
     verdict, notes, checks = "PASS", [], []
     landed = rb or medit
@@ -13825,6 +13902,8 @@ def _op_launch(ctx, hdr, op, then):
 
     def done():
         agg = ctx.get("agg") or {}
+        if (st["rb"] and not st["rb"]["fired"]) or (st["medit"] and not st["medit"]["fired"]):
+            return False   # the rollback or edit has not fired at its hook: what it does has not begun
         if op == "move":
             _window_move_poll(mv, case_id, time.time(), every=ROW_POLL_S * 2)
             return _window_move_done(ctx, ctx["fault"], mv)
@@ -13839,6 +13918,9 @@ def _op_launch(ctx, hdr, op, then):
                 return False
             if c in acting and op == "rollback" and updated != 0:
                 return False
+        if st["scale_down"] and any(p and p["alive"] and p["comp"] in acting and int(p.get("inst", 0) or 0) >= target[p["comp"]]
+                                    for p in ctx["pod_state"].values()):
+            return False   # a pod of an Instance the scale takes is still alive
         if op == "rollback":
             return not any(p and p["alive"] and p["comp"] in acting and _pod_on_new(p, ctx["old_hashes"])
                            for p in ctx["pod_state"].values())
@@ -14216,9 +14298,10 @@ def _hook_op(case_id, yaml_file, desc, hdr):
         budget = min(MAX_BUDGET_S, budget + CTRL_READY_S)   # the operation waits on the manager's return
     if kind == "node":
         budget = _node_hook_budget(ctx, f, budget)
+    if kind in ("node", "preempt") and st["scale_down"]:
         comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
-        if st["scale_down"] and comp in acting:
-            f["aim_inst"] = target[comp] - 1   # the highest Instance the scale keeps; the loss never rides one it takes
+        if comp in acting:
+            f["aim_inst"] = target[comp] - 1   # the highest Instance the scale keeps; the pod taken never rides one it takes
     if mv is not None:
         mv["accept_abandoned"] = True   # a move may answer a pod taken at its moment by abandoning with a reason
     reached, why = _window_wait_hook(ctx, op, hook, rb, medit, mv, acting, done, budget)
@@ -15320,8 +15403,9 @@ def validate_case_file(path):
     hook_verbs = {str(fields.get(k, "")) for k in ("verb", "verb2")} - {""}
     sided_fault = fault_kind == METRIC_FAULT or (fault_kind in BREAK_FAULTS and _canary_hook_ok(fault_param))
     if "victim" in fields and not at_move and not sided_fault and not (
-            str(fields.get("fault", "")).startswith(("podkill:", "evict:")) or "podkill" in hook_verbs):
-        errs.append(f"{path}:1: victim= aims a podkill or an eviction (needs fault=podkill:<hook>, fault=evict:<hook> or verb=podkill), "
+            str(fields.get("fault", "")).startswith(("podkill:", "evict:", "preempt:")) or "podkill" in hook_verbs):
+        errs.append(f"{path}:1: victim= aims a podkill, an eviction or a preemption (needs fault=podkill:<hook>, "
+                    f"fault=evict:<hook>, fault=preempt:<hook> or verb=podkill), "
                     f"a move-moment fault (needs mode=migrate at=<moment>), or names the side a metric breach or a break "
                     f"at a canary hook hits (victim=stable|canary)")
     held_break = (mode == "rollout" and fields.get("rollback") == 1 and "break" in fields) or edit_held
@@ -16197,6 +16281,7 @@ def _apply_event(ctx, ev):
             "uid": meta.get("uid", ""),
             "newanno": annos.get(TRIGGER_ANNO) == TRIGGER_VAL,
             "created": meta.get("creationTimestamp", ""),
+            "ready_since": _pod_ready_since(obj),
             **_pod_placement(obj, labels),
             **_pod_template(obj),
         }
@@ -24175,6 +24260,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                                    "uid": meta.get("uid", ""), "newanno": False,
                                    "serving": _pod_serving(obj),
                                    "created": meta.get("creationTimestamp", ""),
+                                   "ready_since": _pod_ready_since(obj),
                                    **_pod_placement(obj, labels),
                                    **_pod_template(obj)}
             agg = aggregate(pod_state, None, surge_modes, pods_per_inst)
@@ -24813,6 +24899,7 @@ def run_case(case_id):
                                    "pairing": labels.get(PAIRING_LABEL, ""),
                                    "serving": _pod_serving(obj),
                                    "created": meta.get("creationTimestamp", ""),
+                                   "ready_since": _pod_ready_since(obj),
                                    **_pod_placement(obj, labels),
                                    **_pod_template(obj)}
 

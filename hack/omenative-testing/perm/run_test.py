@@ -1254,6 +1254,66 @@ class SupersededRevisionInvariantTest(unittest.TestCase):
             self.assertTrue(run.HDR_VALIDATORS[knob]("H"))
 
 
+class GangSchedulingInvariantTest(unittest.TestCase):
+    """Invariant D's gang half: a forming gang must bind as a unit, while a
+    gang that served whole and lost a member is a repair the scheduler holds
+    alone by policy, not a partial bind."""
+
+    EARLY, LATE = "2026-10-01T10:00:00Z", "2026-10-01T10:05:00Z"
+
+    def _member(self, name, *, node, ready, created, ready_since=None):
+        return {"comp": "engine", "inst": "0", "runner": "leader" if "leader" in name else "worker", "alive": True,
+                "ready": ready, "serving": ready, "hash": "a1b2c3d4", "uid": f"uid-{name}", "created": created,
+                "ready_since": run._event_epoch(ready_since) if ready_since else None,
+                "sched": "ome-scheduler", "pg": "p1-engine-0", "node": node, "excl": []}
+
+    def _inv(self):
+        with mock.patch.object(run, "SCHED_NAME", "ome-scheduler"):
+            return run._inv_new("p1", {})
+
+    def _ticks(self, inv, pods, ticks):
+        with mock.patch.object(run, "SCHED_NAME", "ome-scheduler"), \
+                mock.patch.object(run, "_list_podgroups", lambda case_id: {"p1-engine-0": 2}):
+            observe_ticks(inv, pods, ticks, start=run._event_epoch(self.LATE) + 1.0, pods_per_inst={"engine": 2})
+
+    def test_the_record_carries_when_the_pod_turned_ready(self):
+        obj = pod_object("engine-0", "engine", 0, "a1b2c3d4", "img:1", "v1")
+        for c in obj["status"]["conditions"]:
+            if c["type"] == "Ready":
+                c["lastTransitionTime"] = self.EARLY
+        self.assertEqual(run._event_epoch(self.EARLY), watcher_record(obj)["ready_since"])
+        self.assertIsNone(watcher_record(pod_object("engine-0", "engine", 0, "a1b2c3d4", "img:1", "v1", ready=False))["ready_since"])
+
+    def test_a_served_gang_short_a_member_is_a_repair_not_a_partial_bind(self):
+        inv = self._inv()
+        pods = {"p1-engine-0-leader-0": self._member("p1-engine-0-leader-0", node="", ready=False, created=self.LATE),
+                "p1-engine-0-worker-0": self._member("p1-engine-0-worker-0", node="w2", ready=True, created=self.EARLY,
+                                                     ready_since="2026-10-01T10:00:30Z")}
+        self._ticks(inv, pods, run.INV_SUSTAIN_D + 2)
+        self.assertEqual({}, inv["viol"])
+        self.assertTrue(inv["d_seen"])
+        # The survivor's serving moment is remembered: a readiness flip later does not make it a forming gang.
+        pods["p1-engine-0-worker-0"].update(ready=False, serving=False, ready_since=None)
+        self._ticks(inv, pods, run.INV_SUSTAIN_D + 2)
+        self.assertEqual({}, inv["viol"])
+
+    def test_a_forming_gang_with_one_member_bound_is_a_partial_bind(self):
+        inv = self._inv()
+        pods = {"p1-engine-0-leader-0": self._member("p1-engine-0-leader-0", node="w1", ready=False, created=self.LATE),
+                "p1-engine-0-worker-0": self._member("p1-engine-0-worker-0", node="", ready=False, created=self.LATE)}
+        self._ticks(inv, pods, run.INV_SUSTAIN_D - 1)
+        self.assertEqual({}, inv["viol"], "the gang may still be arriving")
+        self._ticks(inv, pods, 1)
+        key = ("D", "partial-gang", "engine", "0")
+        self.assertEqual([key], list(inv["viol"]))
+        self.assertIn("1 of 2 live gang pods bound to a node", inv["viol"][key]["detail"])
+        # A bound member that turned Ready after its sibling was created formed with it: still a partial bind.
+        inv = self._inv()
+        pods["p1-engine-0-leader-0"].update(ready=True, serving=True, ready_since=run._event_epoch("2026-10-01T10:05:20Z"))
+        self._ticks(inv, pods, run.INV_SUSTAIN_D)
+        self.assertEqual([key], list(inv["viol"]))
+
+
 class InvariantTickTest(unittest.TestCase):
     """The tick reads each snapshot once through kubectl and hands them to
     the pure observation; the revision list is read only while a live pod
@@ -6933,17 +6993,24 @@ class NodeHookLiftAndVerdictTest(unittest.TestCase):
         with mock.patch.object(run, "_node_ready", return_value=False), mock.patch.object(run, "_node_restore", return_value=True) as restore:
             run._node_lift_tick(self._ctx(stuck), f, 130.0)
             restore.assert_not_called()
-            rebuilt = {"e-3": {"comp": "engine", "inst": "3", "node": "worker-2", "ready": True, "serving": True, "uid": "u-new", "alive": True}}
+            self.assertEqual((None, None), (f.get("relocated_at"), f.get("reaped_at")))
+            # Back on another node while the drained pod lingers Terminating on the dead one: the sweep is still owed.
+            lingering = {"e-3": {"comp": "engine", "inst": "3", "node": "worker-2", "ready": True, "serving": True, "uid": "u-new", "alive": True},
+                         "e-3-old": {"comp": "engine", "inst": "3", "node": "worker-1", "ready": False, "serving": False, "uid": "u-old", "alive": False}}
+            run._node_lift_tick(self._ctx(lingering), f, 135.0)
+            restore.assert_not_called()
+            self.assertEqual((135.0, None, None), (f["relocated_at"], f.get("reaped_at"), f.get("recovered_at")))
+            rebuilt = {"e-3": lingering["e-3"]}
             run._node_lift_tick(self._ctx(rebuilt), f, 140.0)
             restore.assert_called_once()
-            self.assertEqual((140.0, 140.0, 140.0), (f["reaped_at"], f["recovered_at"], f["lifted_at"]))
+            self.assertEqual((135.0, 140.0, 140.0, 140.0), (f["relocated_at"], f["reaped_at"], f["recovered_at"], f["lifted_at"]))
 
     def test_under_a_delete_the_recovery_is_the_lost_pods_gone(self):
         f = self._fault("after-recover", bite_ts=120.0, node_poll_ts=0.0, hook_op_kind="delete")
         with mock.patch.object(run, "_node_ready", return_value=False), mock.patch.object(run, "_node_restore", return_value=True) as restore:
             run._node_lift_tick(self._ctx({}), f, 140.0)
             restore.assert_called_once()
-            self.assertEqual(140.0, f["recovered_at"])
+            self.assertEqual((140.0, None), (f["recovered_at"], f.get("relocated_at")))
 
     def test_a_kubelet_that_will_not_start_is_apparatus(self):
         f = self._fault("after-settle", bite_ts=120.0, node_poll_ts=0.0)
@@ -6978,12 +7045,23 @@ class NodeHookLiftAndVerdictTest(unittest.TestCase):
         self.assertEqual("PASS", self._verdict(f)[0])
         self.assertIn("never read NotReady", f["infra_fail"])
         self.assertEqual("FAIL", self._verdict(self._fault("after-settle", bite_ts=140.0))[0])
-        verdict, notes, _text = self._verdict(self._fault("after-recover", bite_ts=140.0))
+        verdict, notes, text = self._verdict(self._fault("after-recover", bite_ts=140.0))
         self.assertEqual("FAIL", verdict)
         self.assertIn("not relocated", notes[0])
-        verdict, notes, _text = self._verdict(self._fault("after-recover", bite_ts=140.0, recovered_at=300.0, lifted_at=300.0))
-        self.assertEqual("FAIL", verdict)
+        self.assertIn("✗ node: engine Instance 3 never came back Ready and serving on other nodes while node worker-1 was down", text)
+        self.assertIn("✗ node: pods the node held were still in the API", text)
+        # Back on other nodes while the drained pod was never swept: the relocation check passes on its own.
+        verdict, notes, text = self._verdict(self._fault("after-recover", bite_ts=140.0, relocated_at=190.0))
+        self.assertEqual(("FAIL", 1), (verdict, len(notes)))
         self.assertIn("still in the API", notes[0])
+        self.assertIn("✓ node: engine Instance 3 back Ready and serving on other nodes 90s after the stop", text)
+        self.assertIn("✗ node: pods the node held were still in the API", text)
+        self.assertNotIn("started again", text)
+        ok, notes, text = self._verdict(self._fault("after-recover", bite_ts=140.0, relocated_at=190.0, reaped_at=200.0,
+                                                    recovered_at=200.0, lifted_at=200.0))
+        self.assertEqual(("PASS", []), (ok, notes))
+        self.assertIn("✓ node: engine Instance 3 back Ready and serving on other nodes 90s after the stop", text)
+        self.assertIn("✓ node: every pod the node held was swept 100s after the stop", text)
         verdict, notes, _text = self._verdict(self._fault("after-settle", bite_ts=140.0, lifted_at=165.0), completed=False, state="ROTATE_TIMEOUT")
         self.assertEqual("FAIL", verdict)
         self.assertIn("did not complete", notes[0])
@@ -6993,7 +7071,8 @@ class NodeHookLiftAndVerdictTest(unittest.TestCase):
         ok, _n, text = self._verdict(self._fault("after-recover", bite_ts=140.0, recovered_at=300.0, lifted_at=300.0,
                                                  reaped_at=280.0, hook_op_kind="delete"), completed=None)
         self.assertEqual("PASS", ok)
-        self.assertIn("every pod the node held gone", text)
+        self.assertIn("every pod the node held was swept 180s after the stop", text)
+        self.assertNotIn("Ready and serving on other nodes", text, "a delete relocates nothing")
         self.assertNotIn("completed with", text)
 
 
@@ -12614,6 +12693,39 @@ class PreemptFaultTest(unittest.TestCase):
         self.assertEqual(("preempt", "never", run.IDLE_FAULT_PHASE), (f["kind"], f["lift"], f["during"]))
         self.assertTrue(run._fault_at_idle(f), "the phase hook leaves it alone; the kill drives it")
 
+    def test_the_press_is_sized_once_room_on_its_way_out_has_left(self):
+        leaving = {"metadata": {"name": "p999-engine-4-default-0", "deletionTimestamp": "t",
+                                "labels": {"ome.io/inferenceservice": "p999"}}}
+        other = {"metadata": {"name": "other-case", "deletionTimestamp": "t", "labels": {"ome.io/inferenceservice": "p998"}}}
+        staying = {"metadata": {"name": "p999-engine-0-default-0", "labels": {"ome.io/inferenceservice": "p999"}}}
+        self.assertEqual(["p999-engine-4-default-0"], run._case_pods_leaving([leaving, other, staying], "p999"))
+        self.assertEqual([], run._case_pods_leaving(None, "p999"))
+        reads = [[leaving, staying], [leaving, staying], [staying]]
+        with mock.patch.object(run, "_node_pods", lambda node: reads.pop(0)), mock.patch.object(run.time, "sleep", lambda s: None):
+            self.assertEqual([staying], run._node_pods_settled("kind-worker", "p999"))
+        self.assertEqual([], reads, "read again until the leaving pod has gone")
+        with mock.patch.object(run, "_node_pods", lambda node: [leaving]), mock.patch.object(run.time, "sleep", lambda s: None), \
+                mock.patch.object(run, "LIFT_SETTLE_S", 0):
+            self.assertEqual([leaving], run._node_pods_settled("kind-worker", "p999"), "the last read once the budget is spent")
+        with mock.patch.object(run, "_node_pods", lambda node: None):
+            self.assertIsNone(run._node_pods_settled("kind-worker", "p999"))
+
+    def test_the_fire_rides_the_instance_the_handler_aimed_at(self):
+        pod_state = {f"p999-engine-{i}-default-0": {"alive": True, "comp": "engine", "inst": str(i), "ready": True, "serving": True,
+                                                    "node": "kind-worker", "hash": "old", "runner": "default"} for i in range(4)}
+        aimed = []
+        with mock.patch.object(run, "_preempt_fill", lambda ff, target, node, pods: aimed.append(target)):
+            run._fault_preempt_fire(self._armed(), pod_state, {"engine": 1}, {"old"})
+            f = self._armed()
+            f["aim_inst"] = 2
+            run._fault_preempt_fire(f, pod_state, {"engine": 1}, {"old"})
+        self.assertEqual(["p999-engine-0-default-0", "p999-engine-2-default-0"], aimed)
+
+    def test_header_takes_a_stable_victim_for_the_press(self):
+        hook = " fault=preempt:settling floor_soft=1 order_soft=1 co=none during=rotating rollback=1 lift=after-settle"
+        self.assertEqual([], self._errs(self.BASE + hook + " victim=stable"))
+        self.assertTrue(any("aims a podkill, an eviction or a preemption" in e for e in self._errs(self.BASE + " victim=stable")))
+
 
 class PendingHoldTest(unittest.TestCase):
     """A pod the cluster cannot place or admit: the Instance row names the
@@ -12641,7 +12753,8 @@ class PendingHoldTest(unittest.TestCase):
 
     def _f(self, lift):
         return {"case_id": "p999", "kind": "preempt", "param": "rotating", "lift": lift, "fired": True,
-                "infra_fail": None, "notes": [], "cause": "the filler pods holding every node's spare CPU"}
+                "infra_fail": None, "notes": [], "cause": "the filler pods holding every node's spare CPU",
+                "crash_pod": "p999-engine-1-default-0"}   # the press has taken this pod
 
     def _out(self, **kw):
         out = {"bitten_at": 12.0, "token": "Unschedulable", "row": ("engine", "1"), "message": "Insufficient cpu",
@@ -12746,8 +12859,32 @@ class PendingHoldTest(unittest.TestCase):
         with mock.patch.object(run, "_read_one", lambda c, timeout=1.0: None), mock.patch.object(run, "_ir_rows_by_index", lambda a, b: {}), \
                 mock.patch.object(run, "ROW_POLL_S", 0):
             state, out = run._pending_watch(self._watch_ctx(), self._f("never"), ["engine"], "never", lambda: True, 30)
-        self.assertEqual("UNBOUND", state)
+        self.assertEqual("UNBOUND", state, "nothing still to land: a done reading is the cause never binding")
         self.assertIsNotNone(out["unbound_at"])
+        # The same reading while the landed rollback has not fired says nothing: the
+        # rollback fires on a later tick, its pod waits, and the hold is read.
+        rb = {"hook": "draining", "fired": False}
+        ticks = {"n": 0}
+
+        def read_one(c, timeout=1.0):
+            ticks["n"] += 1
+            if ticks["n"] == 3:
+                rb["fired"] = True
+        with mock.patch.object(run, "_read_one", read_one), \
+                mock.patch.object(run, "_ir_rows_by_index", lambda a, b: waiting_rows if rb["fired"] else {}), \
+                mock.patch.object(run, "IDLE_HOLD_S", 0), mock.patch.object(run, "ROW_POLL_S", 0):
+            state, out = run._pending_watch(self._watch_ctx(), self._f("never"), ["engine"], "never",
+                                            lambda: not rb["fired"], 30, landed=rb)
+        self.assertEqual("HELD", state)
+        self.assertIsNone(out["unbound_at"])
+        self.assertGreaterEqual(ticks["n"], 3, "the watch outlived the done reading until the rollback fired")
+        # A cause that truly never binds once the rollback has fired still reads UNBOUND.
+        rb, ticks["n"] = {"hook": "draining", "fired": False}, 0
+        with mock.patch.object(run, "_read_one", read_one), mock.patch.object(run, "_ir_rows_by_index", lambda a, b: {}), \
+                mock.patch.object(run, "ROW_POLL_S", 0):
+            state, out = run._pending_watch(self._watch_ctx(), self._f("never"), ["engine"], "never", lambda: True, 30, landed=rb)
+        self.assertEqual("UNBOUND", state)
+        self.assertTrue(rb["fired"] and ticks["n"] >= 3, "judged only once the rollback had fired")
         with mock.patch.object(run, "_read_one", lambda c, timeout=1.0: None), mock.patch.object(run, "_ir_rows_by_index", lambda a, b: waiting_rows), \
                 mock.patch.object(run, "ROW_POLL_S", 0), mock.patch.object(run, "IDLE_HOLD_S", 3600):
             state, out = run._pending_watch(self._watch_ctx(), self._f("never"), ["engine"], "never", lambda: True, 30)
@@ -12756,6 +12893,39 @@ class PendingHoldTest(unittest.TestCase):
                 mock.patch.object(run, "ROW_POLL_S", 0):
             state, out = run._pending_watch(self._watch_ctx(), self._f("never"), ["engine"], "never", lambda: False, 0)
         self.assertEqual("NO_WAIT", state)
+
+    def test_watch_judges_a_press_only_once_it_has_bitten(self):
+        f = self._f("after-settle")
+        f.update(crash_pod=None, fire_ts=1.0)
+        ticks = {"n": 0}
+
+        def read_one(c, timeout=1.0):
+            ticks["n"] += 1
+
+        def victim(ff, pods):
+            if ticks["n"] >= 3:
+                ff["crash_pod"] = "p999-engine-1-default-0"
+            return ff.get("crash_pod")
+        with mock.patch.object(run, "_read_one", read_one), mock.patch.object(run, "_preempt_victim", victim), \
+                mock.patch.object(run, "_ir_rows_by_index", lambda a, b: {}), mock.patch.object(run, "ROW_POLL_S", 0):
+            state, out = run._pending_watch(self._watch_ctx(), f, ["engine"], "after-settle", lambda: True, 30)
+        self.assertEqual("UNBOUND", state)
+        self.assertGreaterEqual(ticks["n"], 3, "a done reading before the press has taken a pod is not judged")
+
+    def test_a_press_that_never_bit_is_apparatus_not_a_missing_wait(self):
+        ctx, comps, allow = self._ctx({"engine": 4}), ["engine"], {"engine": 0}
+        f = self._f("after-settle")
+        f["crash_pod"] = None
+        notes = []
+        self.assertEqual("PASS", run._pending_checks(f, "after-settle", "NO_WAIT", self._out(bitten_at=None), ctx, comps, allow,
+                                                     "PASS", notes, []))
+        self.assertIn("the press never preempted a pod of the case (NO_WAIT)", f["infra_fail"])
+        self.assertEqual([], notes)
+        f = dict(self._f("after-settle"), kind="taint", cause="the taint", crash_pod=None)
+        notes = []
+        self.assertEqual("FAIL", run._pending_checks(f, "after-settle", "NO_WAIT", self._out(bitten_at=None), ctx, comps, allow,
+                                                     "PASS", notes, []))
+        self.assertIsNone(f["infra_fail"], "a cause that is no press is judged on the missing wait")
 
 
 class PendingCauseTest(unittest.TestCase):
@@ -13022,6 +13192,15 @@ class GeneratedDisruptionFamiliesTest(unittest.TestCase):
             self.assertEqual(m["op"] in ("rollback", "edit", "runtime"), kv["ceil_e"] == kv["Ne"] + 1 and m["op"] != "scaleup")
             self.assertIn("reason Unschedulable", reason)
             self.assertIn("once the lift opens the nodes and drops the fillers", reason)
+            # The rollback withdraws its surge pod and the scale-down takes an Instance:
+            # the press aims at a settled Instance each keeps.
+            self.assertEqual(m["op"] == "rollback", kv.get("victim") == "stable", name)
+            if m["op"] == "rollback":
+                self.assertIn("which the rollback keeps (the surge pod it withdraws is no target)", reason)
+            elif m["op"] == "scaledown":
+                self.assertIn("the highest Instance the scale keeps (the Instance it takes is no target)", reason)
+            else:
+                self.assertIn("presses on the node of the aimed pod", reason)
         self._validates(outputs, "gen-preempt", ops)
 
     def test_a_quota_under_a_canary_parks_the_ladder_or_is_lifted_into_a_resume(self):
@@ -17681,19 +17860,30 @@ class HookOperationTest(unittest.TestCase):
             self.assertEqual({"engine": {"runner": {"image": "x"}}}, st["rb"]["snapshot"])
             self.assertEqual(("bump", ["engine"]), calls[-1])
             ctx["agg"] = {"engine": (4, 4, 0)}
+            self.assertFalse(st["done"](), "whole before the rollback fired is the state it starts from, not its end")
+            st["rb"]["fired"] = True
             self.assertTrue(st["done"](), "every Instance back on the starting revision")
             ctx["pod_state"]["p999-engine-0"]["hash"] = "new"
             self.assertFalse(st["done"](), "a pod of the new revision is still alive")
             hdr = {"Ne": 4, "fault": "evict:settling", "edit": "strategy:RecreatePod", "during": "rotating", "mode": "rollout"}
-            st = run._op_launch(self._ctx(hdr), hdr, "edit", "the fault")
+            ctx = self._ctx(hdr)
+            st = run._op_launch(ctx, hdr, "edit", "the fault")
             self.assertEqual(("strategy", "RecreatePod", "rotating"), (st["medit"]["kind"], st["medit"]["value"], st["medit"]["hook"]))
             self.assertEqual(4, st["expected_created"]["engine"])
+            ctx["agg"] = {"engine": (4, 4, 4)}
+            self.assertFalse(st["done"](), "not done while the edit has not fired")
+            st["medit"]["fired"] = True
+            self.assertTrue(st["done"]())
             hdr = {"Ne": 4, "fault": "evict:settling", "mode": "scaledown", "to_e": 3}
             ctx = self._ctx(hdr)
             st = run._op_launch(ctx, hdr, "scale", "the fault")
             self.assertEqual(("scale", {"engine": 3}), calls[-1])
             self.assertEqual(({"engine"}, True, {"u3"}, 3), (st["acting"], st["scale_down"], st["owned_uids"], ctx["N"]["engine"]))
             self.assertEqual(0, st["expected_created"]["engine"])
+            ctx["agg"] = {"engine": (3, 3, 0)}
+            self.assertFalse(st["done"](), "a pod of the Instance the scale takes is still alive")
+            ctx["pod_state"]["p999-engine-3"]["alive"] = False
+            self.assertTrue(st["done"]())
             hdr = {"Ne": 4, "fault": "preempt:settling", "mode": "scaledown", "to_e": 5, "lift": "after-settle"}
             ctx = self._ctx(hdr)
             st = run._op_launch(ctx, hdr, "scale", "the fault")

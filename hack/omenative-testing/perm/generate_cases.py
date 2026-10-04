@@ -569,8 +569,11 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     the drain-first one. The eviction's persistent form (repeat=) needs a pod
     that comes back: a delete brings none back, so its cell has the one-shot
     form only, and a scale-up's persistent form is the repeating family's
-    cell. A preemption holds a pod the operation places, and a delete places
-    nothing until its recreate, so the delete meets the eviction alone.
+    cell. A preemption holds a pod the operation places or, where it places
+    none (a rollback at its first surge pod withdraws that pod, a scale-down
+    takes an Instance), the repair of a settled Instance it keeps, which the
+    press is aimed at; a delete places nothing until its recreate, so the
+    delete meets the eviction alone.
   - The broken-Instance families aim the break at Instance 0, the lowest
     index, so a scale-down's natural victim (the highest index) and the
     broken Instance differ and the order of removal can be told apart. The
@@ -5997,7 +6000,10 @@ HOOK_STRAT = ("SurgeThenDrain", 1, 0)
 HOOK_REPEAT_N = 2
 HOOK_EVICT_REPEATS = ["rollback", "edit", "runtime", "scaledown"]
 # The preemption lands at the hooks of the operations that place a pod the
-# press can hold; a delete places nothing until its recreate.
+# press can hold, or that keep settled Instances whose repair it holds (a
+# rollback at its first surge pod withdraws that pod, a scale-down takes an
+# Instance: the press aims at one each keeps); a delete places nothing
+# until its recreate.
 HOOK_PREEMPT_OPS = ["rollback", "edit", "runtime", "scaledown", "scaleup"]
 OP_WORDS = {"rollback": "the rollback", "edit": "the roll under its edit", "runtime": "the runtime edit",
             "scaledown": "the scale-down", "scaleup": "the scale-up", "delete": "the delete"}
@@ -6138,9 +6144,16 @@ def _evict_op_reason(op, form, topo, w, nr):
 def _preempt_op_reason(op, topo, w, nr):
     at = {"rollback": "as the rollback lands", "edit": "as the edit lands", "runtime": "as the edit lands",
           "scaledown": "as the scale lands", "scaleup": "as the scale lands"}[op]
+    # A rollback at its first surge pod withdraws that pod and a scale-down
+    # takes an Instance: neither places a pod, so the press aims at a settled
+    # Instance the operation keeps and holds its repair.
+    aim = {"rollback": "the node of a settled pod of the starting revision, which the rollback keeps (the surge pod "
+                       "it withdraws is no target)",
+           "scaledown": "the node of a pod of the highest Instance the scale keeps (the Instance it takes is no "
+                        "target)"}.get(op, "the node of the aimed pod")
     out = (f"{_op_does(op, False, topo)} on {shape_words(topo, w, nr)}, and {at} fillers take the spare CPU of every "
-           f"node, the pending taint closes every node to the case, and a higher-priority filler presses on the node "
-           f"of the aimed pod, so the scheduler preempts one pod of the case there; the Instance waits with reason "
+           f"node, the pending taint closes every node to the case, and a higher-priority filler presses on {aim}, "
+           f"so the scheduler preempts one pod of the case there; the Instance waits with reason "
            f"Unschedulable, nothing settled is taken down to make room and no row reads Failed; once the lift opens the "
            f"nodes and drops the fillers {_op_end(op)}; floor and order waived, since the preemption itself takes a pod "
            f"the budget cannot absorb")
@@ -6200,12 +6213,16 @@ def _emit_evict_ops(add):
 
 def _emit_preempt_ops(add):
     """A preemption as a rollback, an edit, a runtime edit or a scale lands,
-    the nodes opened again once the wait has held."""
+    the nodes opened again once the wait has held. The rollback's press is
+    aimed at a settled pod of the starting revision: the surge pod the
+    rollback withdraws is the one pod it takes away."""
     for topo, n, w, nr in DISRUPT_SHAPES:
         for op in HOOK_PREEMPT_OPS:
             strat, surge, unavail = _op_strategy(op, False)
             kv = dict(_op_kv(op, topo, n, nr, False), fault=f"preempt:{HOOK_PHASE}", floor_soft=1, order_soft=1,
                       co="none", topo=topo, lift="after-settle")
+            if op == "rollback":
+                kv["victim"] = "stable"
             if is_pd(topo):
                 kv["victimcomp"] = "engine"
             desc = (f"{GEN_MARK} preempt {op} {shape_tag(topo, w, nr)} N={n}"
@@ -9758,9 +9775,11 @@ def manifest(rows):
         " before a runtime edit; an eviction as each operation lands, once and,"
         " where what it took comes back, again (a delete brings nothing back, so"
         " its cell is one-shot; a scale-up's persistent form is the repeating"
-        " family's); a preemption as each operation that places a pod lands,"
-        " the nodes opened again once the wait has held (a delete places nothing"
-        " until its recreate, so it meets the eviction alone).",
+        " family's); a preemption as each operation lands, aimed at a pod the"
+        " operation places or, under a rollback at its first surge pod and a"
+        " scale-down, at a settled Instance it keeps, the nodes opened again"
+        " once the wait has held (a delete places nothing until its recreate,"
+        " so it meets the eviction alone).",
         "- gen-budget drives the percent budgets the engine resolves: maxSurge under"
         " SurgeThenDrain and maxUnavailable under RecreatePod at"
         f" {', '.join(BUDGET_PERCENTS)} on fleets of 4 and 8 Instances, for a plain"
