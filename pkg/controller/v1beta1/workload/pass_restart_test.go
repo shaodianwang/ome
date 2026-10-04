@@ -3136,3 +3136,133 @@ func (h *recoveryHarness) sawEventWith(reason workloadtypes.EventReason, detail 
 	}
 	return false
 }
+
+// TestReconcile_GroupedRoll_BreakAfterPush_KeepsHealthyInstancesServing is
+// the closed-loop story for a Component bumped in a rolling group whose
+// highest Instance breaks on the running revision right after the push,
+// once the first Instance's surge is already in flight. The break is the
+// only capacity the Component loses: at every pass the healthy Instances
+// stay in rotation, so the Instances serving never drop below N-1, and no
+// healthy Instance leaves its revision before the broken one lands the
+// fix. The surge already in flight finishes its cycle, the broken Instance
+// takes the slot it frees and is the next to land, serving is back at N
+// from that landing to the end, no repair opens under either restart
+// policy, no pod is created on the broken revision, and the surge budget
+// holds throughout. The next-to-land order is pinned for a pod that dies
+// at every start; a pod that dies after Ready is up between its crashes,
+// serves by the Component's own reading of its pod set in those windows,
+// and keeps its place in plan order, so only the floor is pinned for it.
+// Single-pod and leader+worker shapes, both crash forms, both restart
+// policies, standalone and listed in a rolling group.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-surge, instance/Ready/pod.containerRestart/boundary@T-ready-surge, instance/Ready/spec.revision/boundary@T-ready-crashloop-restart
+func TestReconcile_GroupedRoll_BreakAfterPush_KeepsHealthyInstancesServing(t *testing.T) {
+	const surge, unavail = int32(1), int32(0)
+	for _, gang := range []bool{false, true} {
+		shape, replicas := "single", int32(4)
+		if gang {
+			shape, replicas = "gang", 2
+		}
+		for _, roll := range rollShapes {
+			for _, policy := range []workloadtypes.RestartPolicy{workloadtypes.RestartPolicyNone, workloadtypes.RestartPolicyRecreateInstance} {
+				for _, form := range []crashForm{crashAtStart, crashAfterUp} {
+					t.Run(fmt.Sprintf("%s/%s/%s/%s", shape, roll.name, policy, form), func(t *testing.T) {
+						h := offTargetCrashHarness(t, gang, workloadtypes.UpdateStrategySurgeThenDrain, surge, unavail, policy, replicas)
+						consults := 0
+						if roll.gated {
+							h.gate = rollingGroupGate(h, replicas, surge, unavail, &consults)
+						}
+						h.events = nil
+						bumpedAt := h.clk.Now()
+						h.setTarget(h.revFixed, fixedImage)
+						if !h.run(3, func() bool { return escalation.CurrentSurgeInFlight(h.irStatuses()) == 1 }) {
+							h.dumpState("after the push")
+							t.Fatalf("the push opened no surge")
+						}
+						victim := replicas - 1
+						breakInstance(t, h, victim, gang, form)
+						requireBreakAfterPushKeepsHealthyServing(t, h, victim, replicas, surge, bumpedAt, form == crashAtStart)
+					})
+				}
+			}
+		}
+	}
+}
+
+// requireBreakAfterPushKeepsHealthyServing drives a roll that has one
+// surge in flight and the Instance at victim freshly broken on v1 until
+// the Component settles on the fix, and checks after every pass that the
+// break is the only capacity the roll costs: serving never drops below
+// replicas-1 while the broken Instance stands, and never below replicas
+// once no pod runs its crash image; no repair opens; the surge budget
+// holds; every pod created after bumpedAt runs the fix. With dark set,
+// the broken Instance serves nothing at every pass, so the Instances
+// neither in flight nor broken must stay untouched on v1 and in rotation
+// until it lands: it is the next to land after the surge that was already
+// open.
+func requireBreakAfterPushKeepsHealthyServing(t *testing.T, h *recoveryHarness, victim, replicas, surge int32, bumpedAt time.Time, dark bool) {
+	t.Helper()
+	fixedHash := query.RevisionOf(h.revFixed).Hash()
+	var healthy []int32
+	for idx := int32(1); idx < victim; idx++ {
+		healthy = append(healthy, idx)
+	}
+	brokenPods := func() int {
+		n := 0
+		for _, pod := range h.livePods() {
+			if image := pod.Spec.Containers[0].Image; image == crashStartImage || image == crashLoadImage {
+				n++
+			}
+		}
+		return n
+	}
+	victimLanded := false
+	invariant := func() {
+		if h.repairInFlight() {
+			h.dumpState("repair opened")
+			t.Fatalf("a repair opened on an Instance whose revision is not the roll target")
+		}
+		if n := escalation.CurrentSurgeInFlight(h.irStatuses()); n > surge {
+			t.Fatalf("%d surges in flight, budget %d", n, surge)
+		}
+		for _, pod := range h.livePods() {
+			if !pod.CreationTimestamp.Time.After(bumpedAt) {
+				continue
+			}
+			if pod.Labels[query.LabelRevisionHash] != fixedHash || pod.Spec.Containers[0].Image != fixedImage {
+				h.dumpState("pod created off the fix")
+				t.Fatalf("pod %s was created on %s after the fix was pushed", pod.Name, pod.Spec.Containers[0].Image)
+			}
+		}
+		if !victimLanded && brokenPods() == 0 {
+			victimLanded = true
+		}
+		floor := replicas - 1
+		if victimLanded {
+			floor = replicas
+		}
+		if n := h.servingInstances(); n < floor {
+			h.dumpState("below the floor")
+			t.Fatalf("%d Instances serving, floor %d (broken Instance landed the fix: %v)", n, floor, victimLanded)
+		}
+		if victimLanded || !dark {
+			return
+		}
+		for _, peer := range healthy {
+			if !h.untouchedOn(peer, h.revV1) || !h.instanceServes(peer) {
+				h.dumpState("healthy peer taken first")
+				t.Fatalf("instance %d left v1 before the broken instance %d landed the fix", peer, victim)
+			}
+		}
+	}
+	if !h.runWithInvariant(120, func() bool { return h.settledOn(h.revFixed, replicas) }, invariant) {
+		h.dumpState("after the bump")
+		t.Fatalf("the Component never settled on the fixed revision")
+	}
+	if !victimLanded {
+		t.Fatalf("the broken Instance never landed the fix")
+	}
+	if h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+		t.Fatalf("a restart was recorded for an Instance the roll owned: %v", h.events)
+	}
+}
