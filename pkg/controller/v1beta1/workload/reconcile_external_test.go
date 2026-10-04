@@ -5150,10 +5150,13 @@ func TestExecuteActiveScaleDownExcludesDeferredExtrasFromEscalation(t *testing.T
 		prunes++
 		return nil
 	}
+	// The retained repair keeps a live pod: an elapsed deadline parks a set,
+	// and a repair with none behind it waits instead.
+	retained := enginePod(in.Key.OwnerName, in.Key.Namespace, 0)
 	pod := enginePod(in.Key.OwnerName, in.Key.Namespace, 2)
-	client := fake.NewClientBuilder().WithScheme(makeScheme(t)).WithObjects(pod).Build()
+	client := fake.NewClientBuilder().WithScheme(makeScheme(t)).WithObjects(retained, pod).Build()
 	deps := workloadtypes.Deps{Client: client, APIReader: client, Expectations: workloadtypes.NewExpectations()}
-	snapshot := workload.SnapshotWithPodsForTest(in, map[int32][]*corev1.Pod{2: {pod}})
+	snapshot := workload.SnapshotWithPodsForTest(in, map[int32][]*corev1.Pod{0: {retained}, 2: {pod}})
 	decision := workload.Decision{
 		Actions:  []workload.PlannedAction{{Kind: workload.ActionScaleDown, Extras: []int32{1, 2}}},
 		Escalate: true,

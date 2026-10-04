@@ -320,6 +320,18 @@ func Run(ctx context.Context, in PassInput) error {
 			continue
 		}
 		idx := row.Index
+		if op.Type == types.InstanceOperationRestart {
+			// A set the repair's drain has already deleted is not one a
+			// park can stand on: the stamp waits for the pass that observes
+			// the rebuilt set.
+			gone, err := repairSetGone(ctx, deps, input, plan, idx)
+			if err != nil {
+				return fmt.Errorf("read the repair's pod set (instance=%d): %w", idx, err)
+			}
+			if gone {
+				continue
+			}
+		}
 		// The teardown that follows deletes the blamed pods, so revision-scoped
 		// evidence must survive on LastFailure: a workload-caused waiting reason
 		// — or a pod that ran every container yet never reported ready — names
@@ -473,6 +485,27 @@ func singlePodSurgeAttempt(row *types.InstanceStatus, desiredPods int32) bool {
 	return row != nil && desiredPods == 1 && row.Operation != nil &&
 		row.Operation.Type == types.InstanceOperationUpdate &&
 		row.Operation.Step == types.UpdateStepSurge && row.Operation.SurgeIndex == nil
+}
+
+// repairSetGone reports whether every pod of the Instance is deleting or
+// gone on a live read: the repair's drain has deleted the set it replaces
+// and the rebuild has not run yet. The deadline was judged on the pass's
+// pod observation, which predates that delete, and a spent repair's exits
+// are read off its pods, so a park with no set behind it has none. The
+// repair owns the set until the rebuilt one exists; the elapsed deadline
+// parks that one. A set still live on the read — a drain not finished, or
+// a rebuilt set in any state — parks as the deadline says.
+func repairSetGone(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, idx int32) (bool, error) {
+	pods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, idx)
+	if err != nil {
+		return false, err
+	}
+	for _, pod := range pods {
+		if pod.DeletionTimestamp == nil {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // failureStampBuffer coalesces the escalation pass's plain Failed

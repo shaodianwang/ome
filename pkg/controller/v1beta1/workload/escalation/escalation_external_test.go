@@ -2,10 +2,12 @@ package escalation_test
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
@@ -18,6 +20,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	clocktesting "k8s.io/utils/clock/testing"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // Escalation-pass guards: the pass decides the Failed transition from
@@ -382,8 +386,12 @@ func TestEscalation_MultiInstanceStamps_OneBatchedWrite(t *testing.T) {
 		},
 	}
 	input.ObservedState.InstanceStatuses = append([]workloadtypes.InstanceStatus(nil), insts...)
+	pods := map[int32][]*corev1.Pod{}
+	for _, inst := range insts {
+		pods[inst.Index] = []*corev1.Pod{waitingPod("engine-"+strconv.Itoa(int(inst.Index))+"-default-0", "PodInitializing", "node-a", now.Add(-time.Hour))}
+	}
 
-	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil); err != nil {
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, pods); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
@@ -433,7 +441,8 @@ func TestEscalation_BatchedWriteFails_NoWarnings(t *testing.T) {
 	}
 	input.ObservedState.InstanceStatuses = insts
 
-	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil); err == nil {
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{},
+		map[int32][]*corev1.Pod{0: {waitingPod("engine-0-default-0", "PodInitializing", "node-a", now.Add(-time.Hour))}}); err == nil {
 		t.Fatalf("escalation pass: got nil error, want the flush failure surfaced")
 	}
 	if warned != 0 {
@@ -525,7 +534,10 @@ func TestEscalation_DispositionFlushesPendingStamps(t *testing.T) {
 			{Index: 0, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
 			{Index: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
 		}},
-		map[int32][]*corev1.Pod{1: {stuck}}); err != nil {
+		map[int32][]*corev1.Pod{
+			0: {waitingPod("engine-0-default-0", "PodInitializing", "node-a", now.Add(-time.Hour))},
+			1: {stuck},
+		}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
@@ -715,6 +727,113 @@ func TestEscalation_RestartDeadlineElapsed_FailsInstance(t *testing.T) {
 	if len(rec.warns) != 1 {
 		t.Errorf("WarnInstanceFailed: got %v want one call", rec.warns)
 	}
+}
+
+// A Restart's elapsed deadline parks a set, and the pass reads which set
+// there is off the live pods, not off the observation the deadline was
+// judged on: the repair's drain may have deleted that set since. With the
+// set gone or terminating the stamp waits, and the row keeps its repair;
+// with a pod live — the drain not finished, or the rebuilt set present —
+// the row parks with the Restart preserved, as the decided cell says.
+//
+// Cells: instance/Restart/Drain/timer.operationDeadline/before
+func TestEscalation_RestartDeadlineParksOnlyALiveSet(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name  string
+		live  []*corev1.Pod
+		parks bool
+	}{
+		{name: "the drained set is gone", live: nil, parks: false},
+		{name: "the drained set is terminating", live: []*corev1.Pod{terminating(incarnationPod("engine-0-default-0", 1, now))}, parks: false},
+		{name: "the drain has not finished", live: []*corev1.Pod{incarnationPod("engine-0-default-0", 1, now)}, parks: true},
+		{name: "the rebuilt set exists", live: []*corev1.Pod{terminating(incarnationPod("engine-0-default-0", 1, now)), incarnationPod("engine-0-default-0-r", 2, now)}, parks: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			insts := []workloadtypes.InstanceStatus{{
+				Index:       0,
+				Incarnation: 2,
+				Phase:       workloadtypes.InstancePhaseRestarting,
+				PodCount:    1,
+				Operation: &workloadtypes.InstanceOperation{
+					Type:     workloadtypes.InstanceOperationRestart,
+					Step:     "Drain",
+					Deadline: metav1.NewTime(now.Add(-time.Minute)),
+				},
+			}}
+			input, rec := escalationFixture(insts)
+			input.Key = workloadtypes.Key{Namespace: "ns", OwnerName: "own", Component: workloadtypes.ComponentEngine}
+			objs := make([]client.Object, 0, len(tc.live))
+			for _, pod := range tc.live {
+				objs = append(objs, pod)
+			}
+			deps := workloadtypes.Deps{APIReader: fake.NewClientBuilder().WithScheme(makeScheme(t)).WithObjects(objs...).Build()}
+			plan := singleInstancePlan(0, 1)
+			plan.Component = workloadtypes.ComponentEngine
+
+			// The observation predates the drain's delete: the old pod reads live.
+			observed := incarnationPod("engine-0-default-0", 1, now)
+			if err := runEscalationPass(t, deps, input, plan, map[int32][]*corev1.Pod{0: {observed}}); err != nil {
+				t.Fatalf("escalation pass: %v", err)
+			}
+
+			got := rec.store[0]
+			if got.Operation == nil || got.Operation.Type != workloadtypes.InstanceOperationRestart {
+				t.Fatalf("Operation: got %+v want the Restart kept either way", got.Operation)
+			}
+			if !tc.parks {
+				if got.Phase != workloadtypes.InstancePhaseRestarting {
+					t.Errorf("Phase: got %q want Restarting, the repair still owns the set", got.Phase)
+				}
+				if len(rec.warns) != 0 {
+					t.Errorf("WarnInstanceFailed: got %v want none", rec.warns)
+				}
+				return
+			}
+			if got.Phase != workloadtypes.InstancePhaseFailed {
+				t.Errorf("Phase: got %q want Failed", got.Phase)
+			}
+			if len(rec.warns) != 1 {
+				t.Errorf("WarnInstanceFailed: got %v want one call", rec.warns)
+			}
+		})
+	}
+}
+
+// incarnationPod builds a Pending pod of Instance 0 at the given
+// incarnation, labeled the way the live lister selects.
+func incarnationPod(name string, incarnation int64, created time.Time) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         "ns",
+			CreationTimestamp: metav1.NewTime(created.Add(-time.Hour)),
+			Labels: map[string]string{
+				constants.InferenceServicePodLabelKey: "own",
+				constants.OMEComponentLabel:           string(workloadtypes.ComponentEngine),
+				query.LabelManagedBy:                  query.ManagedByOMENative,
+				query.LabelInstanceIdx:                "0",
+				query.LabelInstanceIncarnation:        strconv.FormatInt(incarnation, 10),
+			},
+		},
+		Spec: corev1.PodSpec{NodeName: "node-a"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "main",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}},
+			}},
+		},
+	}
+}
+
+// terminating marks the pod as deleting: a deletion stamp held open by a
+// finalizer, the way a pod reads between its delete and its removal.
+func terminating(pod *corev1.Pod) *corev1.Pod {
+	now := metav1.Now()
+	pod.DeletionTimestamp = &now
+	pod.Finalizers = []string{"example.com/termination"}
+	return pod
 }
 
 // DeadlineExceeded is outside the terminal waiting set, so the fast

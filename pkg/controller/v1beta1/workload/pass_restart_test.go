@@ -3436,3 +3436,136 @@ func TestRepairParkedOnItsRebuild_ExitsThroughTheLadderOrTheCorrectedPush(t *tes
 		})
 	}
 }
+
+// podsBelowIncarnation reports whether a live pod of the Instance carries
+// an incarnation below incarnation: the set a repair drains and deletes.
+func podsBelowIncarnation(h *recoveryHarness, idx int32, incarnation int64) bool {
+	for _, pod := range h.podsOf(idx) {
+		if inc, ok := query.InstanceIncarnationFromLabels(pod); ok && inc < incarnation {
+			return true
+		}
+	}
+	return false
+}
+
+// A gang's repair drains its surviving leader over a further pass under a
+// routed Service, and the attempt's deadline elapses in the pass the
+// drain's delete lands. The repair owns the set it is deleting: no pass
+// leaves the row Failed with its Restart operation and no pod behind it,
+// and the Instance serves again, rebuilt at a new incarnation, within a
+// bounded number of passes.
+//
+// Cells: instance/Restart/Drain/timer.operationDeadline/before, instance/Restart/Drain/pod.deleted[source]/before
+func TestDeadlineElapsesAsTheDrainDeletes_RepairKeepsItsPodSet(t *testing.T) {
+	h := newRecoveryHarness(t, true)
+	h.recorder = record.NewFakeRecorder(256)
+	h.routed = true
+	policy := workloadtypes.RestartPolicyRecreateInstance
+	// The deadline ends inside the pass that drains the leader, so it is
+	// read as elapsed in the pass the drain's delete lands.
+	h.lifecycle = workloadtypes.Lifecycle{
+		RestartPolicy:        &policy,
+		InstanceReadyTimeout: &metav1.Duration{Duration: recoveryStepFloor / 2},
+	}
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(30, func() bool { return h.settledOn(h.revV1, 1) }) {
+		h.dumpState("initial create")
+		t.Fatalf("the gang never settled on v1")
+	}
+	for i := 0; i < 3; i++ {
+		h.step()
+	}
+	before := h.instance(0).Incarnation
+
+	// The worker is lost; the leader still serves and is drained first.
+	h.loseRunner(0, "worker")
+
+	const bound = 12
+	servesAgain := func() bool {
+		s := h.instance(0)
+		return s != nil && s.Phase == workloadtypes.InstancePhaseReady && s.Operation == nil &&
+			s.Incarnation > before && servingReady(h, 0, 2)
+	}
+	deadlineElapsedDuringDrain := false
+	passes := -1
+	h.runWithInvariant(bound, servesAgain, func() {
+		passes++
+		if s := h.instance(0); s != nil && s.Phase == workloadtypes.InstancePhaseRestarting && s.Operation != nil &&
+			h.clk.Now().After(s.Operation.Deadline.Time) && podsBelowIncarnation(h, 0, s.Incarnation) {
+			deadlineElapsedDuringDrain = true
+		}
+		if idx := failedRepairWithoutPods(h); idx >= 0 {
+			h.dumpState("repair outlived its pod set")
+			t.Fatalf("after pass %d: Instance %d reads Failed with its Restart operation and no pod behind it: %+v (events=%v)",
+				passes, idx, *h.instance(idx), h.events)
+		}
+	})
+	if !deadlineElapsedDuringDrain {
+		h.dumpState("no race")
+		t.Fatalf("the deadline never elapsed while the repair still held the set it drains, so the story missed the race (events=%v)", h.events)
+	}
+	if !servesAgain() {
+		h.dumpState("not serving again")
+		t.Fatalf("Instance 0 did not serve again at a new incarnation within %d passes of losing its worker: %+v (events=%v)",
+			bound, *h.instance(0), h.events)
+	}
+}
+
+// A repair whose rebuilt pod never comes up is ended by the operation
+// deadline with that pod behind it: the park keeps the Restart operation
+// and its pod set, and the ladder re-arms the repair once its delay has
+// elapsed, which heals the Instance once the fault is gone.
+//
+// Cells: instance/Restart/Drain/timer.operationDeadline/before, instance/Failed/timer.repairRetry/before
+func TestDeadlineElapsesOnAWedgedRebuild_RepairParksWithItsPodSet(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.recorder = record.NewFakeRecorder(256)
+	// Only the deadline ends the attempt: the fast escalation is off.
+	h.stuckGrace = 0
+	h.retryPolicy = retryLadder(3, time.Minute)
+	policy := workloadtypes.RestartPolicyRecreateInstance
+	h.lifecycle = workloadtypes.Lifecycle{
+		RestartPolicy:        &policy,
+		InstanceReadyTimeout: &metav1.Duration{Duration: 2 * time.Minute},
+	}
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(30, func() bool { return h.settledOn(h.revV1, 1) }) {
+		h.dumpState("initial create")
+		t.Fatalf("the Instance never settled on v1")
+	}
+	before := h.instance(0).Incarnation
+
+	// The pod is deleted out from under the Instance; every pod built from
+	// now on parks in a crash loop and stays parked after the cause is gone.
+	h.armWedge("CrashLoopBackOff", true)
+	h.losePods(0)
+	noOrphanedRepair := func() {
+		if idx := failedRepairWithoutPods(h); idx >= 0 {
+			h.dumpState("repair outlived its pod set")
+			t.Fatalf("Instance %d reads Failed with its Restart operation and no pod behind it: %+v (events=%v)", idx, *h.instance(idx), h.events)
+		}
+	}
+	if !h.runWithInvariant(20, func() bool { return parkedRepair(h, 0) }, noOrphanedRepair) {
+		h.dumpState("park")
+		t.Fatalf("the deadline never parked the repair at Failed (events=%v)", h.events)
+	}
+	parked := h.instance(0)
+	if parked.LastFailure == nil || parked.LastFailure.Reason != escalation.DeadlineExceededReason {
+		t.Fatalf("the park records %+v, want the elapsed deadline", parked.LastFailure)
+	}
+	if parked.Incarnation <= before {
+		t.Fatalf("the park holds incarnation %d, want the rebuild's, above %d", parked.Incarnation, before)
+	}
+	if got := len(h.podsOf(0)); got != 1 || !h.atIncarnation(0, parked.Incarnation) {
+		t.Fatalf("the parked repair has %d pods behind it, want its wedged rebuild at incarnation %d", got, parked.Incarnation)
+	}
+
+	h.clearWedge()
+	if !h.runWithInvariant(40, func() bool { return servingReady(h, 0, 1) }, noOrphanedRepair) {
+		h.dumpState("exit")
+		t.Fatalf("the parked repair never left Failed (events=%v)", h.events)
+	}
+	if got := h.instance(0); got.Incarnation != parked.Incarnation+1 {
+		t.Errorf("incarnation = %d, want %d: one rebuild on the ladder", got.Incarnation, parked.Incarnation+1)
+	}
+}

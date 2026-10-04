@@ -149,7 +149,7 @@ cells:
     outcome: ignore
     note: the in-flight restart owns the pod set — Phase A counts the deletion as drain progress and Phase B recreates any missing pod at the bumped incarnation; the loss-below-Ready trigger excludes Phase Restarting, so no second restart is armed
     placement: perm
-    coverage: {perm: [], unit: [TestRestart_DeletesOldPodOnceDrained, TestRestart_ConvergesAcrossPasses], kind: []}
+    coverage: {perm: [], unit: [TestRestart_DeletesOldPodOnceDrained, TestRestart_ConvergesAcrossPasses, TestDeadlineElapsesAsTheDrainDeletes_RepairKeepsItsPodSet], kind: []}
     status: decided
   - state: Restart/Drain
     event: pod.deleted
@@ -342,10 +342,10 @@ cells:
     windows: [before]
     outcome: escalate
     to: Failed
-    guard: the deadline elapsed, no pod of the Instance is held by an admission scheduling gate, and the pod set is not fully serving
-    note: a Restart attempt is not disposable, so the stamp keeps the operation and records on LastFailure the blamed pod's workload-caused waiting reason when one exists, falling back to the bare DeadlineExceeded diagnostic when none does, because the teardown that follows deletes the blamed pods. Two readiness limbos are named rather than left bare — a pod that ran every container without ever reporting ContainersReady is recorded under reason ContainersNotReady, and a pod whose containers all report ready but whose Ready condition never follows a readiness gate it declares is recorded under reason ReadinessGateNotSatisfied with the unsatisfied gates. Both are evidence only and select no branch, since either limbo is ambiguous between the revision and the node. The preserved operation does not park the row for good, because a Restart parked at Failed is read as a spent attempt, so the gang-member-loss trigger may re-arm the whole gang under a fresh deadline, while the single-pod path still recovers through the Create pass
+    guard: the deadline elapsed, no pod of the Instance is held by an admission scheduling gate, the pod set is not fully serving, and a pod of the Instance is live on a fresh read
+    note: a Restart attempt is not disposable, so the stamp keeps the operation and records on LastFailure the blamed pod's workload-caused waiting reason when one exists, falling back to the bare DeadlineExceeded diagnostic when none does, because the teardown that follows deletes the blamed pods. Two readiness limbos are named rather than left bare — a pod that ran every container without ever reporting ContainersReady is recorded under reason ContainersNotReady, and a pod whose containers all report ready but whose Ready condition never follows a readiness gate it declares is recorded under reason ReadinessGateNotSatisfied with the unsatisfied gates. Both are evidence only and select no branch, since either limbo is ambiguous between the revision and the node. The preserved operation does not park the row for good, because a Restart parked at Failed is read as a spent attempt whose exits are read off its pod set - a rebuilt set that comes up resumes the promote, a wedged one re-arms on the ladder, and a gang short of a member re-arms through the lost-member trigger under a fresh deadline. A set the repair's drain has already deleted - every pod of the Instance deleting or gone on a fresh read - is the repair's until the rebuilt set exists, so the stamp waits for the pass that observes it (escalation.repairSetGone); a row never holds a Restart operation at Failed with no pod set behind it
     placement: perm
-    coverage: {perm: [], unit: [TestEscalation_RestartDeadlineElapsed_FailsInstance], kind: [], replay: [restart-deadline]}
+    coverage: {perm: [], unit: [TestEscalation_RestartDeadlineElapsed_FailsInstance, TestEscalation_RestartDeadlineParksOnlyALiveSet, TestDeadlineElapsesAsTheDrainDeletes_RepairKeepsItsPodSet, TestDeadlineElapsesOnAWedgedRebuild_RepairParksWithItsPodSet], kind: [], replay: [restart-deadline]}
     status: decided
   - state: Restart/Drain
     event: timer.operationDeadline
