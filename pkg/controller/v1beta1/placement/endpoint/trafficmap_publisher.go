@@ -35,6 +35,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	placementcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
+	"github.com/ome-projects/ome/pkg/validation"
 )
 
 const (
@@ -514,7 +515,7 @@ func (r *TrafficMapPublisherReconciler) readTrafficMapOwner(
 
 func publisherOwnerActive(owner *v1beta1.InferenceService) bool {
 	return owner != nil && owner.DeletionTimestamp.IsZero() &&
-		placementcontroller.IsPlacementEligible(owner) && !routingOptedOut(owner)
+		placementcontroller.IsPlacementEligible(owner) && validation.ValidatePlacementIntent(owner) == nil && !routingOptedOut(owner)
 }
 
 func (r *TrafficMapPublisherReconciler) validateLivePublisherOwner(

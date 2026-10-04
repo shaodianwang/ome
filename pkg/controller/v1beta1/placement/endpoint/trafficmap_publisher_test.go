@@ -177,7 +177,7 @@ func TestTrafficMapPublisherModeOnlyPlacement(t *testing.T) {
 		{name: "all", policy: v1beta1.PlacementPolicyClusterAffinity, mode: v1beta1.PlacementModeAll, want: true},
 		{name: "split", policy: v1beta1.PlacementPolicyClusterAffinity, mode: v1beta1.PlacementModeSplit, want: true},
 		{name: "capacity", policy: v1beta1.PlacementPolicyClusterAffinity, mode: v1beta1.PlacementModeSplitByCapacity, want: true},
-		{name: "legacy", policy: v1beta1.PlacementPolicyLegacy, mode: v1beta1.PlacementModeAll},
+		{name: "legacy", policy: v1beta1.PlacementPolicy("Legacy"), mode: v1beta1.PlacementModeAll},
 		{name: "omitted policy", mode: v1beta1.PlacementModeSingle},
 		{name: "local"},
 	} {
@@ -3637,7 +3637,7 @@ func publisherTestObjects() (*v1beta1.InferenceService, *v1beta1.TrafficMap) {
 	owner := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
 		Name: "model", Namespace: "team-a", UID: types.UID("owner-uid"), Generation: 2,
 	}, Spec: v1beta1.InferenceServiceSpec{Placement: &v1beta1.PlacementSpec{
-		Mode: v1beta1.PlacementModeSingle, Requirements: "accelerator=test",
+		Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle,
 	}}}
 	trafficMap := &v1beta1.TrafficMap{
 		ObjectMeta: metav1.ObjectMeta{

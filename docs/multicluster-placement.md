@@ -1,16 +1,14 @@
 # Multicluster placement
 
-An InferenceService selects the new contract with
-`spec.placement.policy: ClusterAffinity` and an explicit `mode`. Without that
-opt-in, selector strings and annotations retain Legacy behavior through upgrades.
-An ordinary service without any placement intent stays local. Placement does
-not adopt an unrelated member service with the same name.
+An InferenceService declares multicluster placement with
+`spec.placement.policy: ClusterAffinity` and an explicit supported `mode`.
+An ordinary service without placement intent stays local. Placement does not
+adopt an unrelated member service with the same name. Omitting affinity matches
+every registration; empty or null affinity is invalid.
 
-The following sections describe ClusterAffinity. Legacy continues to support
-implicit Single, typed-over-annotation selector precedence, Packed/spread Split,
-anti-sliver settings, routing-factor aliases, updates, and failover. In Legacy,
-no selectors means no matching clusters; in ClusterAffinity, omitted affinity
-matches every registration.
+Legacy placement is unsupported. Migrate sources, derived copies, and writers
+on a compatibility release before installing this schema or controller. The
+[upgrade procedure](#retiring-legacy-placement) below describes that prerequisite.
 
 `Single` races eligible members for admission and retains one winner. `All`
 places the full service on every eligible member. `Split` assigns exact shares
@@ -24,8 +22,9 @@ annotation. An unsupported backend sets the advisory
 `PlacementBackendReady=False` condition and holds workload and mounted model
 configuration updates. Existing serving resources remain intact; correcting the
 runtime or service resumes reconciliation. VirtualDeployment cannot participate.
-Member deletion still permits cleanup. Local services and Legacy members retain
-all deployment modes and do not gain this condition.
+Member deletion still permits cleanup. Local services retain all deployment
+modes and do not gain this condition. Origin-marked members without an execution
+policy stop before workload writes, including during direct ownership handoff.
 
 The source checks each target through its identified direct member connection
 before granting workload updates, then verifies runtime dependencies and source
@@ -106,7 +105,9 @@ published for routing, even while loser resources await cleanup.
 A matching Single winner remains sticky. An affinity change that excludes it
 can start a bounded replacement race while the current winner keeps serving.
 Unknown member health retains the winner's identity and allocation; a missing
-connection does not prove that its workloads have stopped.
+connection does not prove that its workloads have stopped. A terminally failed
+winner remains selected and reports Failed. Until the terminal condition clears,
+later source changes are not applied to that winner.
 
 `maxSurge` is a whole-replica allowance shared by placement and member rollout
 surge. An omitted allowance blocks moves between homes. Zero permits no excess;
@@ -276,7 +277,7 @@ allocations; missing support cannot acknowledge the accepted demand.
 
 ## Status and rollout
 
-`PlacementInputValid` reports syntax and obsolete fields. `PlacementSatisfied`
+`PlacementInputValid` reports syntax and obsolete selector annotations. `PlacementSatisfied`
 requires every assigned floor to be admitted; extra admission on one home does
 not compensate for another home's shortfall. `PlacementConverged` reports
 whether members have applied the allocation. Serving readiness remains
@@ -310,29 +311,41 @@ flat-only policy readers cannot establish allocation authority from them.
 Deleting a service can still follow finalizer cleanup, and ordinary local
 services ignore placement execution annotations.
 
-Opt in one source deliberately after upgrading member controllers and retiring
-old hub writers. Existing Legacy sources do not require migration for this
-upgrade. Update the source in one write:
+## Retiring Legacy placement
 
-- Set `policy: ClusterAffinity`.
-- Replace `requirements`, `clusterSelector`, and the corresponding placement
-  annotations with `clusterAffinity` and an explicit mode.
+Complete migration using a compatibility release **before** installing this
+schema or binary. Audit all sources, derived copies, and writers, including
+resources managed outside GitOps. Update each source in one write:
+
+- Set `policy: ClusterAffinity` and an explicit mode.
+- Replace `requirements`, `clusterSelector`, and both selector annotations with
+  `clusterAffinity`. Combine requirements that were ANDed in the same term.
 - Remove `split.spread` and `split.minReplicasPerCluster`, including explicit
   false, zero, empty, or null values. Choose equal or weighted static shares.
   Packed placement has no equivalent.
 - Move placement `capacityFactors` to `spec.routing.capacityFactors`.
 
-Legacy restrictions remain honored until opt-in. ClusterAffinity rejects them,
-including explicit empty/zero values preserved through storage round trips.
-The policy cannot be removed from an existing source: draining and recreating
-it is required to return to Legacy. Downgrading to an old hub binary also
-requires migrating or restoring opted-in sources first.
+Wait for accepted plans, placement convergence, and Ready status. Every derived
+copy must retain its source ownership and carry `ome.io/placement-policy:
+ClusterAffinity` plus a valid `ome.io/placement-execution` envelope. Compare ISVC,
+InferenceReplica, and Pod identities to detect unintended replacement. Require
+the explicit policy in writer validation so a later promotion cannot restore
+Legacy intent.
 
-Deploy compatibility support together with the affinity implementation. A build
-that only rejects legacy intent holds old sources and stops their placement and
-routing updates, even though existing member pods may keep serving.
+The retired fields are absent from the schema. Strict field validation rejects
+them; non-strict clients may have them pruned before admission sees them. Do not
+rely on an upgrade to preserve or translate their restrictions. Selector
+annotations are rejected, and policy and mode are required.
 
-For per-service opt-in, writer exclusion, stored-object checks, and rollback,
-follow the [migration and rollback procedure](../oeps/0018.4-cluster-affinity-placement/README.md#migration).
-Retain legacy fields in the schema until every legacy source and writer has
-been retired; pruning them can erase restrictions before validation sees them.
+The policy cannot be removed from an existing source: changing placement
+ownership requires draining and recreating it. Rollback must use a
+ClusterAffinity-capable release. Restoring a schema does not restore removed
+restrictions or make a Legacy writer safe.
+
+Execution envelope versions 1, 2, and 3 and existing flat policies remain
+readable. Status recovery and endpoint-publisher cleanup are separate
+compatibility contracts. The policy metric now carries `policy` and `mode`;
+selector/spread labels and the per-cluster minimum metric are removed.
+
+See the [retirement decision](../oeps/0018.4-cluster-affinity-placement/README.md#legacy-retirement)
+and the [compatibility migration procedure](../oeps/0018.4-cluster-affinity-placement/README.md#migration).

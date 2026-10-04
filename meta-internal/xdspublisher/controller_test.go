@@ -225,7 +225,10 @@ func TestFreshNonmatchingSourceWithdrawsThroughLifecycleWithoutExternalCalls(t *
 	owner := testISVC("model-a")
 	owner.Generation = 2
 	owner.Labels = map[string]string{"publish": "false"}
-	owner.Spec.Placement = &v1beta1.PlacementSpec{Requirements: "accelerator=test"}
+	owner.Spec.Placement = &v1beta1.PlacementSpec{
+		Policy: v1beta1.PlacementPolicyClusterAffinity,
+		Mode:   v1beta1.PlacementModeAll,
+	}
 	trafficMap := testTrafficMap()
 	trafficMap.UID = "traffic-map-uid"
 	trafficMap.Generation = 3
@@ -279,7 +282,8 @@ func TestRetainLastPositiveReplaysAllHomesUnreadyAcrossGeneration(t *testing.T) 
 	owner := testISVC("model-a")
 	owner.Generation = 3
 	owner.Spec.Placement = &v1beta1.PlacementSpec{
-		Mode: v1beta1.PlacementModeSplit, Requirements: "accelerator=test",
+		Policy: v1beta1.PlacementPolicyClusterAffinity,
+		Mode:   v1beta1.PlacementModeSplit,
 	}
 	owner.Status.ObservedGeneration = owner.Generation
 	owner.Status.Placement = &v1beta1.PlacementStatus{Phase: v1beta1.PlacementPhasePlaced}
@@ -378,7 +382,10 @@ func TestNonmatchingSourceDrainsExistingClaimsThroughLifecycle(t *testing.T) {
 	owner := testISVC("model-a")
 	owner.Generation = 2
 	owner.Labels = map[string]string{"publish": "false"}
-	owner.Spec.Placement = &v1beta1.PlacementSpec{Requirements: "accelerator=test"}
+	owner.Spec.Placement = &v1beta1.PlacementSpec{
+		Policy: v1beta1.PlacementPolicyClusterAffinity,
+		Mode:   v1beta1.PlacementModeAll,
+	}
 	trafficMap := testTrafficMap()
 	trafficMap.UID = "traffic-map-uid"
 	trafficMap.Generation = 3

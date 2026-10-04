@@ -178,7 +178,7 @@ var _ = ginkgo.DescribeTable("Direct ClusterAffinity adoption (KIND)",
 		ginkgo.By("serving member-local workloads before creating a hub source")
 		for _, member := range members {
 			local := env.createMemberOwnedISVC(member, model, runtime)
-			gomega.Expect(protocol.IsAffinityMember(local)).To(gomega.BeFalse())
+			gomega.Expect(protocol.IsMember(local)).To(gomega.BeFalse())
 			gomega.Eventually(func(g gomega.Gomega) {
 				before[member.wcName] = adoptionIdentityOn(g, member, key)
 			}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
@@ -243,7 +243,7 @@ var _ = ginkgo.DescribeTable("Direct ClusterAffinity adoption (KIND)",
 					g.Expect(next.c.client.Get(next.c.ctx, key, unowned)).To(gomega.Succeed())
 					g.Expect(unowned.Labels[placement.PlacementOriginLabel]).To(gomega.BeEmpty())
 					g.Expect(unowned.Annotations[placement.PlacementOriginUIDAnnotation]).To(gomega.BeEmpty())
-					g.Expect(protocol.IsAffinityMember(unowned)).To(gomega.BeFalse())
+					g.Expect(protocol.IsMember(unowned)).To(gomega.BeFalse())
 				}).WithTimeout(3 * placementRequeue).WithPolling(pollInterval).Should(gomega.Succeed())
 			}
 		}

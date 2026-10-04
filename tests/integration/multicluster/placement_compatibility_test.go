@@ -18,11 +18,13 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/placement/protocol"
 	ometesting "github.com/ome-projects/ome/pkg/utils/testing"
 	"github.com/ome-projects/ome/pkg/validation"
 )
 
-func TestStoredLegacyPlacementSurvivesSchemaUpgrade(t *testing.T) {
+func TestMigratedPlacementSurvivesSchemaUpgrade(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "crd", "full", "ome.io_inferenceservices.yaml"))
 	if err != nil {
 		t.Fatal(err)
@@ -31,17 +33,17 @@ func TestStoredLegacyPlacementSurvivesSchemaUpgrade(t *testing.T) {
 	if err := yaml.Unmarshal(data, current); err != nil {
 		t.Fatal(err)
 	}
-	data, err = os.ReadFile(filepath.Join("testdata", "legacy-placement-schema.json"))
+	data, err = os.ReadFile(filepath.Join("testdata", "placement-compatibility-schema.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyPlacement := apiextensionsv1.JSONSchemaProps{}
-	if err := json.Unmarshal(data, &legacyPlacement); err != nil {
+	previousPlacement := apiextensionsv1.JSONSchemaProps{}
+	if err := json.Unmarshal(data, &previousPlacement); err != nil {
 		t.Fatal(err)
 	}
 	previous := current.DeepCopy()
 	spec := previous.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"]
-	spec.Properties["placement"] = legacyPlacement
+	spec.Properties["placement"] = previousPlacement
 	spec.XValidations = nil
 	previous.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"] = spec
 	env := ometesting.EtcdForBusyHosts(&envtest.Environment{CRDs: []*apiextensionsv1.CustomResourceDefinition{previous}})
@@ -68,21 +70,16 @@ func TestStoredLegacyPlacementSurvivesSchemaUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []struct {
-		name                   string
-		placement, annotations string
-		derived                bool
+		name      string
+		placement string
+		derived   bool
 	}{
 		{name: "member-local"},
-		{name: "annotation source", annotations: `{"ome.io/accelerator-requirements":"accelerator=gpu-a","ome.io/cluster-selector":"region=west"}`},
-		{name: "implicit Single", placement: `{"requirements":"accelerator=gpu-a"}`},
-		{name: "empty typed intent", placement: `{}`},
-		{name: "explicit Single", placement: `{"mode":"Single","clusterSelector":"metadata.name=member-a"}`},
-		{name: "All", placement: `{"mode":"All","requirements":"accelerator=gpu-a"}`},
-		{name: "Packed", placement: `{"mode":"Split","requirements":"accelerator=gpu-a","split":{"replicas":3,"spread":false}}`},
-		{name: "spread and anti-sliver", placement: `{"mode":"Split","requirements":"accelerator=gpu-a","split":{"replicas":3,"spread":true,"minReplicasPerCluster":2,"maxReplicasPerCluster":4}}`},
-		{name: "routing alias", placement: `{"mode":"All","requirements":"accelerator=gpu-a","capacityFactors":{"member-a":"2"}}`},
-		{name: "typed overrides annotation", placement: `{"clusterSelector":"region=east"}`, annotations: `{"ome.io/cluster-selector":"region=west"}`},
-		{name: "old derived copy", derived: true, placement: `{"mode":"Split","requirements":"accelerator=gpu-a","split":{"replicas":3,"spread":false}}`},
+		{name: "Single", placement: `{"policy":"ClusterAffinity","mode":"Single"}`},
+		{name: "All", placement: `{"policy":"ClusterAffinity","mode":"All","clusterAffinity":[{"matchExpressions":[{"key":"region","operator":"In","values":["west"]}]}]}`},
+		{name: "weighted Split", placement: `{"policy":"ClusterAffinity","mode":"Split","clusterAffinity":[{"weight":3,"matchFields":[{"key":"metadata.name","operator":"In","values":["member-a"]}]}],"split":{"replicas":3,"maxReplicasPerCluster":4}}`},
+		{name: "capacity Split", placement: `{"policy":"ClusterAffinity","mode":"SplitByCapacity","maxSurge":1,"split":{"replicas":3}}`},
+		{name: "derived copy", derived: true},
 	}
 	stored := make([]*v1beta1.InferenceService, len(cases))
 	for i, tt := range cases {
@@ -94,15 +91,13 @@ func TestStoredLegacyPlacementSurvivesSchemaUpgrade(t *testing.T) {
 			}
 			object.Object["spec"].(map[string]any)["placement"] = p
 		}
-		if tt.annotations != "" {
-			var a map[string]any
-			if err := json.Unmarshal([]byte(tt.annotations), &a); err != nil {
-				t.Fatal(err)
-			}
-			object.Object["metadata"].(map[string]any)["annotations"] = a
-		}
 		if tt.derived {
 			object.SetLabels(map[string]string{"ome.io/placement-origin": "source-uid"})
+			execution, err := protocol.Encode(&v1beta1.PlacementExecutionPolicy{PlanID: "plan-a", Revision: 1, SourceUID: "source-uid", ClusterUID: "member-uid"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			object.SetAnnotations(map[string]string{constants.PlacementPolicy: string(v1beta1.PlacementPolicyClusterAffinity), constants.PlacementExecution: execution})
 		}
 		if err := cl.Create(t.Context(), object); err != nil {
 			t.Fatalf("seed %s: %v", tt.name, err)
@@ -156,7 +151,7 @@ func TestStoredLegacyPlacementSurvivesSchemaUpgrade(t *testing.T) {
 		if err := cl.Update(t.Context(), source); err != nil {
 			t.Fatal(err)
 		}
-		for _, p := range []*v1beta1.PlacementSpec{nil, {Mode: v1beta1.PlacementModeSingle}, {Policy: v1beta1.PlacementPolicyLegacy, Mode: v1beta1.PlacementModeSingle}} {
+		for _, p := range []*v1beta1.PlacementSpec{nil, {Mode: v1beta1.PlacementModeSingle}, {Policy: v1beta1.PlacementPolicy("Legacy"), Mode: v1beta1.PlacementModeSingle}} {
 			changed := source.DeepCopy()
 			changed.Spec.Placement = p
 			if err := cl.Update(t.Context(), changed, client.DryRunAll); err == nil {

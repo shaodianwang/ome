@@ -69,7 +69,10 @@ var _ = ginkgo.Describe("InferenceService policy-ref feature gate", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		isvc := mkConsumer(uniqueName("consumer"), uniqueName("request-activity"))
-		isvc.Spec.Placement = &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSplit}
+		isvc.Spec.Placement = &v1beta1.PlacementSpec{
+			Policy: v1beta1.PlacementPolicyClusterAffinity,
+			Mode:   v1beta1.PlacementModeSplit,
+		}
 		gomega.Expect(warned.Create(suiteCtx, isvc)).To(gomega.Succeed(),
 			"the unbounded-ceiling combination warns, never rejects")
 		ginkgo.DeferCleanup(func() {

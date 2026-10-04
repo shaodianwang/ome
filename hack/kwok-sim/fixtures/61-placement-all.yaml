@@ -38,8 +38,7 @@ metadata:
     kwok-sim/managed: "true"
 spec:
   placement:
-    # The OEP-0018.4 contract. Omitted, the placement is Legacy, which rejects
-    # clusterAffinity and holds the ISVC Pending with InvalidPlacementIntent.
+    # Placement requires an explicit policy and mode.
     policy: ClusterAffinity
     mode: All
     clusterAffinity:

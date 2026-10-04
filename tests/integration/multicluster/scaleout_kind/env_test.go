@@ -9,9 +9,13 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
+	"github.com/ome-projects/ome/pkg/placement/protocol"
 	ometesting "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 	"github.com/ome-projects/ome/tests/integration/framework"
 	"github.com/ome-projects/ome/tests/integration/kindfix"
@@ -324,6 +328,12 @@ func (e *specEnv) createDerivedLookalike(m memberReg, name, model, runtime, cont
 		placement.PlacementControlPlaneLabel: controlPlane,
 	}
 	d.Annotations[placement.PlacementOriginUIDAnnotation] = originUID
+	registration := &v1beta1.WorkloadCluster{}
+	gomega.Expect(controlCluster.client.Get(controlCluster.ctx, client.ObjectKey{Name: m.wcName}, registration)).To(gomega.Succeed())
+	execution, err := protocol.Encode(&v1beta1.PlacementExecutionPolicy{PlanID: name, Revision: 1, SourceUID: types.UID(originUID), ClusterUID: registration.UID})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	d.Annotations[constants.PlacementPolicy] = string(v1beta1.PlacementPolicyClusterAffinity)
+	d.Annotations[constants.PlacementExecution] = execution
 	mustCreate(m.c, d)
 	ginkgo.DeferCleanup(func() { deleteIfExists(m.c, d) })
 	return d

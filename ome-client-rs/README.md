@@ -47,8 +47,8 @@ make rust-integration-test   # boots etcd + kube-apiserver from the controller-r
                              # + event subscription against a real apiserver.
 ```
 
-Placement fixtures cover all affinity modes, ordinary local services, omitted
-and explicit Legacy policy, zero and false values, accepted home floors,
+Placement fixtures cover all affinity modes, ordinary local services, explicit
+policy and mode, zero and false values, accepted home floors,
 movement state, capacity provenance, and routing authority. The integration
 test compares raw API-server JSON after typed create/read/replace and status
 replacement, and checks schema rejection of invalid placement. It installs

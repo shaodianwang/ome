@@ -16,7 +16,7 @@ import (
 )
 
 var _ = ginkgo.Describe("Multicluster member backend guard (KIND)", func() {
-	ginkgo.It("holds opted-in backend changes and preserves local and legacy raw services", func() {
+	ginkgo.It("holds member backend changes and preserves local raw services", func() {
 		env := setupSpecEnv()
 		model, runtime := env.seedModelRuntimeOnMembers()
 		source := runnableSourceISVC(env.isvcNS, env.isvcName, model, runtime, v1beta1.PlacementModeSingle, 1)
@@ -79,18 +79,12 @@ var _ = ginkgo.Describe("Multicluster member backend guard (KIND)", func() {
 		awaitCondition(corev1.ConditionFalse)
 
 		unplannedServices := map[client.ObjectKey]types.UID{}
-		for _, tc := range []struct{ name, origin string }{
-			{name: "local-raw"},
-			{name: "legacy-raw", origin: "legacy-source"},
-		} {
-			local := runnableSourceISVC(env.isvcNS, uniqueName(tc.name), model, runtime, v1beta1.PlacementModeSingle, 1)
+		{
+			local := runnableSourceISVC(env.isvcNS, uniqueName("local-raw"), model, runtime, v1beta1.PlacementModeSingle, 1)
 			local.Spec.Placement = nil
 			local.Spec.DeploymentMode = ptr.To(constants.RawDeployment)
 			local.Annotations = map[string]string{constants.DeploymentMode: string(constants.RawDeployment)}
 			local.Spec.Engine.Annotations = map[string]string{constants.DeploymentMode: string(constants.RawDeployment)}
-			if tc.origin != "" {
-				local.Annotations[constants.PlacementOriginUID] = tc.origin
-			}
 			env.applyEngineResources(local)
 			mustCreate(member, local)
 			ginkgo.DeferCleanup(func() { deleteIfExists(member, local) })

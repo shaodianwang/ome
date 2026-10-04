@@ -3094,35 +3094,19 @@ pub struct InferenceServicePlacement {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        rename = "capacityFactors"
-    )]
-    pub capacity_factors: Option<BTreeMap<String, IntOrString>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
         rename = "clusterAffinity"
     )]
     pub cluster_affinity: Option<Vec<InferenceServicePlacementClusterAffinity>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "clusterSelector"
-    )]
-    pub cluster_selector: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "maxSurge")]
     pub max_surge: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<InferenceServicePlacementMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy: Option<InferenceServicePlacementPolicy>,
+    pub mode: InferenceServicePlacementMode,
+    pub policy: InferenceServicePlacementPolicy,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         rename = "replacementTimeout"
     )]
     pub replacement_timeout: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requirements: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split: Option<InferenceServicePlacementSplit>,
 }
@@ -3191,7 +3175,6 @@ pub enum InferenceServicePlacementMode {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum InferenceServicePlacementPolicy {
-    Legacy,
     ClusterAffinity,
 }
 
@@ -3203,16 +3186,8 @@ pub struct InferenceServicePlacementSplit {
         rename = "maxReplicasPerCluster"
     )]
     pub max_replicas_per_cluster: Option<i32>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "minReplicasPerCluster"
-    )]
-    pub min_replicas_per_cluster: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicas: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spread: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

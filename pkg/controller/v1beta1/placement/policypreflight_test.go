@@ -323,15 +323,13 @@ func TestPreflightPolicies_SplitCeilings(t *testing.T) {
 	}{
 		{name: "static split", mode: v1beta1.PlacementModeSplit, policy: v1beta1.PlacementPolicyClusterAffinity},
 		{name: "capacity split", mode: v1beta1.PlacementModeSplitByCapacity, policy: v1beta1.PlacementPolicyClusterAffinity},
-		{name: "legacy split", mode: v1beta1.PlacementModeSplit, policy: v1beta1.PlacementPolicyLegacy},
 	} {
 		t.Run(placement.name, func(t *testing.T) {
 			for _, tc := range []struct {
-				name     string
-				cap      int32
-				wantHold bool
+				name string
+				cap  int32
 			}{
-				{name: "unset ceiling", wantHold: placement.policy == v1beta1.PlacementPolicyLegacy},
+				{name: "unset ceiling"},
 				{name: "explicit ceiling permits placement", cap: 45},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
@@ -344,15 +342,10 @@ func TestPreflightPolicies_SplitCeilings(t *testing.T) {
 					if out == nil {
 						t.Fatal("missing preflight result")
 					}
-					if diff := cmp.Diff(tc.wantHold, out.hold); diff != "" {
+					if diff := cmp.Diff(false, out.hold); diff != "" {
 						t.Error(diff)
 					}
-					cond := stagedPreflight(t, r, isvc.UID)
-					if tc.wantHold {
-						if diff := cmp.Diff(v1beta1.PlacementPolicyPreflightReasonUnboundedSplitCeiling, cond.Reason); diff != "" {
-							t.Error(diff)
-						}
-					} else if diff := cmp.Diff([]string{"a"}, out.eligible); diff != "" {
+					if diff := cmp.Diff([]string{"a"}, out.eligible); diff != "" {
 						t.Error(diff)
 					}
 				})

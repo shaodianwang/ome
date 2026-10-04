@@ -1353,7 +1353,7 @@
                 "type": "prometheus",
                 "uid": "${datasource}"
               },
-              "expr": "max by (exported_namespace, isvc, mode, requirements, cluster_selector, spread) (ome_isvc_placement_policy_info{endpoint=\"metrics\",cluster=~\"$control_plane\",isvc=~\"$isvc\"})",
+              "expr": "max by (exported_namespace, isvc, policy, mode) (ome_isvc_placement_policy_info{endpoint=\"metrics\",cluster=~\"$control_plane\",isvc=~\"$isvc\"})",
               "refId": "U",
               "instant": true,
               "format": "table"
@@ -1389,10 +1389,8 @@
                   "names": [
                     "exported_namespace",
                     "isvc",
-                    "mode",
-                    "requirements",
-                    "cluster_selector",
-                    "spread"
+                    "policy",
+                    "mode"
                   ]
                 }
               }
@@ -1405,10 +1403,8 @@
                 "renameByName": {
                   "exported_namespace": "Namespace",
                   "isvc": "InferenceService",
-                  "mode": "Mode",
-                  "requirements": "Accelerator requirements",
-                  "cluster_selector": "Cluster selector",
-                  "spread": "Spread"
+                  "policy": "Policy",
+                  "mode": "Mode"
                 }
               }
             }

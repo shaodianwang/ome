@@ -87,14 +87,20 @@ async fn placement_intent_and_status_roundtrip() -> anyhow::Result<()> {
     }
     for (name, placement) in [
         ("missing-mode", json!({"policy": "ClusterAffinity"})),
+        ("missing-policy", json!({"mode": "Single"})),
+        (
+            "retired-policy",
+            json!({"policy": "Legacy", "mode": "Single"}),
+        ),
         (
             "negative-surge",
             json!({"policy": "ClusterAffinity", "mode": "All", "maxSurge": -1}),
         ),
     ] {
-        let spec = serde_json::from_value(json!({"placement": placement}))?;
-        let err = api
-            .create(&PostParams::default(), &InferenceService::new(name, spec))
+        let object = DynamicObject::new(name, &ApiResource::erase::<InferenceService>(&()))
+            .data(json!({"spec": {"placement": placement}}));
+        let err = raw
+            .create(&PostParams::default(), &object)
             .await
             .expect_err("invalid placement must reach API validation");
         assert!(

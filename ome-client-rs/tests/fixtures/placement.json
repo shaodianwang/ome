@@ -109,40 +109,6 @@
           "maxSurge": 4
         }
       }
-    },
-    {
-      "name": "legacy-implicit",
-      "spec": {
-        "placement": {
-          "mode": "Split",
-          "requirements": "tier=serving",
-          "clusterSelector": "region=west",
-          "split": {
-            "spread": false,
-            "minReplicasPerCluster": 0
-          },
-          "capacityFactors": {
-            "member-a": 0,
-            "member-b": "1.5"
-          }
-        }
-      }
-    },
-    {
-      "name": "legacy-explicit",
-      "spec": {
-        "placement": {
-          "policy": "Legacy",
-          "mode": "Split",
-          "requirements": "",
-          "clusterSelector": "",
-          "split": {
-            "spread": false,
-            "minReplicasPerCluster": 0
-          },
-          "capacityFactors": {}
-        }
-      }
     }
   ],
   "statuses": [

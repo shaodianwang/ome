@@ -1,5 +1,9 @@
 # OEP-0018.4: Cluster affinity and replica allocation for placement
 
+> Implementation update: the Legacy placement compatibility window is closed.
+> [Legacy retirement](#legacy-retirement) supersedes the compatibility behavior
+> described below; it requires migration before the schema or controllers change.
+
 **Implementation status, 2026-09-29.** Single keeps
 its admission race, overlapping weighted terms add, capacity means total
 eligible hardware, and static Split preserves ratios during an admission
@@ -821,11 +825,47 @@ transport timing fallbacks require separate compatibility review before removal.
 
 The generated Rust client preserves placement intent, persisted allocations,
 member execution policies, and TrafficMap modes. Serialization fixtures cover
-Legacy field presence and ClusterAffinity data; API-server tests verify that
+ClusterAffinity intent and execution authority; API-server tests verify that
 typed spec and status updates retain their raw JSON representation. CI checks
 the four placement protocol clients against the generated CRDs.
 
+### Legacy retirement
+
+Placement requires `policy: ClusterAffinity` and an explicit supported `mode`.
+The Go API, generated CRD, and Rust client omit `requirements`,
+`clusterSelector`, `capacityFactors`, `split.spread`, and
+`split.minReplicasPerCluster`. Routing factors belong under `spec.routing`.
+The Legacy reconciler, selector precedence, Packed/spread allocation,
+anti-sliver handling, and routing-factor alias are removed. Strict API field
+validation rejects retired fields; clients using non-strict validation can
+have unknown fields pruned, so admission is not a substitute for auditing
+manifests before this upgrade.
+
+Before deploying this schema or binary, audit every source, derived copy, and
+writer, including resources outside GitOps. Every source must use the explicit
+policy and mode, and every derived copy must carry matching source ownership,
+`ome.io/placement-policy: ClusterAffinity`, and a valid
+`ome.io/placement-execution` envelope. Remove both selector annotations. Verify
+accepted plans and Ready status after migration, and compare workload identities
+to detect unintended replacement. Reject retired input in GitOps validation so
+subsequent promotions cannot restore it.
+
+Origin-marked members without execution authority stop before workload writes.
+Ordinary local services retain their execution behavior. Direct adoption keeps
+the origin handoff: the hub may observe a member before it has stamped execution
+authority, while the member controller waits for that authority. Deletion still
+permits cleanup. Execution envelopes v1, v2, and v3, ownership fencing, status
+recovery, and endpoint-publisher cleanup are separate contracts and remain
+supported. The policy metric exposes `policy` and `mode`; selector/spread labels
+and the per-cluster minimum metric are removed.
+
+Rollback must use a ClusterAffinity-capable release. Restoring an older schema
+does not restore removed restrictions or authorize a Legacy writer.
+
 ### Migration
+
+The following procedure describes the compatibility release used before
+Legacy retirement.
 
 The field audit covers every field in the existing
 [`PlacementSpec` and `SplitSpec`](../../pkg/apis/ome/v1beta1/placement_types.go):

@@ -1189,13 +1189,11 @@ def mc_control_plane():
 
     p.append(mc_labelled_table(
         "Declared placement policy",
-        f'max by (exported_namespace, isvc, mode, requirements, cluster_selector, spread) '
+        f'max by (exported_namespace, isvc, policy, mode) '
         f'(ome_isvc_placement_policy_info{{{MC_PLACE},isvc=~"$isvc"}})',
         (0, y, 12, 8),
-        ["exported_namespace", "isvc", "mode", "requirements", "cluster_selector", "spread"],
-        {"exported_namespace": "Namespace", "isvc": "InferenceService", "mode": "Mode",
-         "requirements": "Accelerator requirements", "cluster_selector": "Cluster selector",
-         "spread": "Spread"},
+        ["exported_namespace", "isvc", "policy", "mode"],
+        {"exported_namespace": "Namespace", "isvc": "InferenceService", "policy": "Policy", "mode": "Mode"},
         desc="What the ISVC asked for, from spec.placement. Diff this against 'Where each ISVC "
              "landed' to see intent against outcome."))
     p.append(panel(

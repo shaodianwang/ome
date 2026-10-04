@@ -40,8 +40,8 @@ func TestAffinityMatchDiagnostics(t *testing.T) {
 		{name: "empty term remains invalid", edit: func(s *v1beta1.InferenceService) {
 			s.Spec.Placement.ClusterAffinity = []v1beta1.ClusterAffinityTerm{{}}
 		}},
-		{name: "legacy has no affinity diagnostics", edit: func(s *v1beta1.InferenceService) {
-			s.Spec.Placement = &v1beta1.PlacementSpec{Requirements: "region=east"}
+		{name: "unselected policy has no affinity diagnostics", edit: func(s *v1beta1.InferenceService) {
+			s.Spec.Placement = &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeAll}
 		}},
 		{name: "weighted terms retain original indexes", edit: func(s *v1beta1.InferenceService) {
 			s.Spec.Placement.Mode = v1beta1.PlacementModeSplit

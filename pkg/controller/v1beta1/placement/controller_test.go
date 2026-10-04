@@ -1879,8 +1879,8 @@ func TestModeOnlyPlacementClusterEvents(t *testing.T) {
 		{name: "all", policy: v1beta1.PlacementPolicyClusterAffinity, mode: v1beta1.PlacementModeAll, want: true},
 		{name: "split", policy: v1beta1.PlacementPolicyClusterAffinity, mode: v1beta1.PlacementModeSplit, want: true},
 		{name: "capacity", policy: v1beta1.PlacementPolicyClusterAffinity, mode: v1beta1.PlacementModeSplitByCapacity, want: true},
-		{name: "legacy", policy: v1beta1.PlacementPolicyLegacy, mode: v1beta1.PlacementModeAll},
-		{name: "omitted policy", mode: v1beta1.PlacementModeSingle},
+		{name: "retired policy requeues for validation", policy: v1beta1.PlacementPolicy("Legacy"), mode: v1beta1.PlacementModeAll, want: true},
+		{name: "omitted policy requeues for validation", mode: v1beta1.PlacementModeSingle, want: true},
 		{name: "local"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1891,8 +1891,10 @@ func TestModeOnlyPlacementClusterEvents(t *testing.T) {
 			}
 			var wantIndex []string
 			wantRequests := []ctrl.Request{}
-			if tt.want {
+			if source.Spec.Placement != nil {
 				wantIndex = []string{placementEligibleIndexValue}
+			}
+			if tt.want {
 				wantRequests = append(wantRequests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(source)})
 			}
 			if diff := cmp.Diff(wantIndex, placementEligibleIndexExtractor(source)); diff != "" {

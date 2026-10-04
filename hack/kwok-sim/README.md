@@ -562,8 +562,8 @@ unforgettable:
    registration; an ISVC without `spec.placement` remains local.
 
 Every `6*-placement-*.yaml` sets `spec.placement.policy: ClusterAffinity`, the
-OEP-0018.4 contract. Without it the placement is Legacy, which rejects
-`clusterAffinity`: the ISVC holds `Pending` with `PlacementInputValid=False`,
+OEP-0018.4 contract. Both policy and mode are required by the CRD. Stored
+placement intent that omits either holds with `PlacementInputValid=False`,
 reason `InvalidPlacementIntent`, and nothing fans out.
 
 The hub is also configured for `SplitByCapacity`. `up.sh --multicluster-role

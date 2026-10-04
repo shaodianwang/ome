@@ -1,8 +1,6 @@
 package multicluster
 
 import (
-	"time"
-
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -10,14 +8,12 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	ometesting "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
-	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // These specs (S8-S11) drive the single-mode placement lifecycle beyond the
@@ -229,97 +225,6 @@ var _ = ginkgo.Describe("Multi-cluster placement lifecycle", func() {
 			_, ok2 := getDerivedOn(member2Cluster, isvcNS, isvcName)
 			g.Expect(ok2).To(gomega.BeFalse(), "a terminally-failed placement must not re-fan-out")
 		}, "2.5s", eventuallyPoll).Should(gomega.Succeed())
-	})
-
-	ginkgo.It("delivers a corrected rollout policy to a failed legacy Single member without replacing it", func() {
-		for _, name := range []string{wc1Name, wc2Name} {
-			gomega.Eventually(func(g gomega.Gomega) {
-				wc := &v1beta1.WorkloadCluster{}
-				g.Expect(controlCluster.client.Get(controlCluster.ctx, client.ObjectKey{Name: name}, wc)).To(gomega.Succeed())
-				wc.Labels[constants.WorkloadClusterRolloutPolicyLabel] = placement.WorkloadClusterRolloutPolicyCapability
-				g.Expect(controlCluster.client.Update(controlCluster.ctx, wc)).To(gomega.Succeed())
-			}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
-		}
-		original := &v1beta1.RolloutPolicy{
-			ObjectMeta: metav1.ObjectMeta{Name: uniqueName("canary-original"), Namespace: isvcNS},
-			Spec: v1beta1.RolloutPolicySpec{Canary: &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{
-				{Capacity: intstr.FromString("50%"), Traffic: 10, Pause: &v1beta1.RolloutPause{Duration: &metav1.Duration{Duration: time.Minute}}},
-				{Capacity: intstr.FromString("100%"), Traffic: 100},
-			}}},
-		}
-		corrected := original.DeepCopy()
-		corrected.Name = uniqueName("canary-corrected")
-		corrected.Spec.Canary.Steps[0].Traffic = 25
-		mustCreate(controlCluster, original)
-		mustCreate(controlCluster, corrected)
-		ginkgo.DeferCleanup(func() {
-			deleteIfExists(controlCluster, original)
-			deleteIfExists(controlCluster, corrected)
-		})
-		source := sourceISVC(isvcNS, isvcName, requirement())
-		source.Spec.Placement = &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSingle, Requirements: requirement()}
-		source.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
-			Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
-			PolicyRef:  &v1beta1.RolloutPolicyRef{Name: original.Name, Progression: v1beta1.RolloutProgressionCanary},
-		}}}
-		mustCreate(controlCluster, source)
-		gomega.Eventually(func() bool {
-			_, ok := getDerivedOn(member1Cluster, isvcNS, isvcName)
-			return ok
-		}, eventuallyTimeout, eventuallyPoll).Should(gomega.BeTrue())
-		admitDerivedOn(member1Cluster, isvcNS, isvcName)
-		gomega.Eventually(func(g gomega.Gomega) {
-			ps := placementStatusOf(isvcNS, isvcName)
-			g.Expect(ps).NotTo(gomega.BeNil())
-			g.Expect(ps.Cluster).To(gomega.Equal(wc1Name))
-			g.Expect(ps.Phase).To(gomega.Equal(v1beta1.PlacementPhasePlaced))
-			_, other := getDerivedOn(member2Cluster, isvcNS, isvcName)
-			g.Expect(other).To(gomega.BeFalse())
-		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
-		before, ok := getDerivedOn(member1Cluster, isvcNS, isvcName)
-		gomega.Expect(ok).To(gomega.BeTrue())
-		gomega.Expect(before.Spec.Rollout.Groups[0].Canary).To(gomega.Equal(original.Spec.Canary))
-		failed := []v1beta1.OMENativeInstanceStatus{
-			{Index: 0, Phase: v1beta1.OMENativeInstanceFailed, Admitted: true},
-			{Index: 1, Phase: v1beta1.OMENativeInstanceReady, Admitted: true, ServingPodCount: 1},
-		}
-		upsertEngineIRStatusOn(member1Cluster, isvcNS, isvcName, failed)
-		persistedRows, err := util.GetInstanceStatuses(member1Cluster.ctx, member1Cluster.client,
-			client.ObjectKey{Namespace: isvcNS, Name: isvcName + "-engine"})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		gomega.Eventually(func(g gomega.Gomega) {
-			ps := placementStatusOf(isvcNS, isvcName)
-			g.Expect(ps).NotTo(gomega.BeNil())
-			g.Expect(ps.Phase).To(gomega.Equal(v1beta1.PlacementPhaseFailed))
-		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
-		gomega.Eventually(func(g gomega.Gomega) {
-			g.Expect(controlCluster.client.Get(controlCluster.ctx, client.ObjectKeyFromObject(source), source)).To(gomega.Succeed())
-			source.Spec.Rollout.Groups[0].PolicyRef.Name = corrected.Name
-			g.Expect(controlCluster.client.Update(controlCluster.ctx, source)).To(gomega.Succeed())
-		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
-		gomega.Eventually(func(g gomega.Gomega) {
-			after, found := getDerivedOn(member1Cluster, isvcNS, isvcName)
-			g.Expect(found).To(gomega.BeTrue())
-			g.Expect(after.UID).To(gomega.Equal(before.UID))
-			g.Expect(after.Spec.Rollout.Groups[0].PolicyRef).To(gomega.BeNil())
-			g.Expect(after.Spec.Rollout.Groups[0].Canary).To(gomega.Equal(corrected.Spec.Canary))
-		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
-		gomega.Consistently(func(g gomega.Gomega) {
-			ps := placementStatusOf(isvcNS, isvcName)
-			g.Expect(ps).NotTo(gomega.BeNil())
-			g.Expect(ps.Phase).To(gomega.Equal(v1beta1.PlacementPhaseFailed))
-			g.Expect(ps.Cluster).To(gomega.Equal(wc1Name))
-			g.Expect(ps.Endpoint).To(gomega.BeNil())
-			after, found := getDerivedOn(member1Cluster, isvcNS, isvcName)
-			g.Expect(found).To(gomega.BeTrue())
-			g.Expect(after.UID).To(gomega.Equal(before.UID))
-			_, other := getDerivedOn(member2Cluster, isvcNS, isvcName)
-			g.Expect(other).To(gomega.BeFalse())
-			rows, err := util.GetInstanceStatuses(member1Cluster.ctx, member1Cluster.client,
-				client.ObjectKey{Namespace: isvcNS, Name: isvcName + "-engine"})
-			g.Expect(err).To(gomega.Succeed())
-			g.Expect(cmp.Diff(persistedRows, rows)).To(gomega.BeEmpty())
-		}, 2*placementRequeue, eventuallyPoll).Should(gomega.Succeed())
 	})
 
 	ginkgo.It("S11 origin guard: a user-owned same-named ISVC on a candidate is never overwritten or swept", func() {

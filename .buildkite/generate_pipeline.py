@@ -221,7 +221,6 @@ MC_KIND_SPEC_GROUPS = (
     ("placement", "Multi-cluster placement", (
         "fanout", "lifecycle", "endpoint", "ownership", "reshard", "scale",
         "trafficmap_gc", "capacity", "backend", "all_plan", "member_recreation",
-        "legacy_compatibility",
     )),
     ("quota", "Multi-cluster Kueue quota", (
         "admission", "split_quota", "queue_routing", "single_race", "single_move", "single_loss", "single_zero_floor", "all_zero_floor", "gang",
