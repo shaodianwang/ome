@@ -382,16 +382,23 @@ func executeActions(ctx context.Context, deps types.Deps, input types.ReconcileI
 }
 
 // reportIdleUpdate stands in for the update pass on a Decision that
-// planned none because the roll has nothing left to do (Decision.UpdateIdle):
-// it reports a nil hold where the update pass would have, so a hold a
-// prior pass recorded clears. A pass that ends before the update position,
-// on a scale wave or a repair, never reaches it and leaves the hold
-// standing.
+// planned none. A roll with nothing left to do (Decision.UpdateIdle)
+// reports a nil hold where the update pass would have, so a hold a prior
+// pass recorded clears; a roll waiting on the target's ladder with
+// nothing to run (Decision.LadderHold) reports the ladder hold there,
+// every pass, so the hold names what the ladder's attempt rebuilds as the
+// wait goes on. A pass that ends before the update position, on a scale
+// wave or a repair, never reaches it and leaves the hold standing.
 func reportIdleUpdate(input types.ReconcileInput, decision Decision) {
-	if !decision.UpdateIdle || input.RecordRolloutHold == nil {
+	if input.RecordRolloutHold == nil {
 		return
 	}
-	input.RecordRolloutHold(nil)
+	switch {
+	case decision.UpdateIdle:
+		input.RecordRolloutHold(nil)
+	case decision.LadderHold != nil:
+		input.RecordRolloutHold(decision.LadderHold)
+	}
 }
 
 // demoteUnbackedInstances applies the truth pass: the status-only

@@ -17,6 +17,7 @@ tick=3 warn instanceFailed index=0 pod=svc-a-engine-0-default-0 reason=ImagePull
 tick=3 pass result=after:5s
 tick=4 note the wedged pod is recycled, so nothing of the failed attempt remains
 tick=4 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+5m1s
+tick=4 hold gate=RetryBlock target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb in backoff after 1 failed attempt(s): ImagePullBackOff
 tick=4 pass result=after:2m0s
 tick=5 note the operator corrects the image, and the Create pass claims the empty row at the revision no block denies
 tick=5 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+5m1s

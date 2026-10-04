@@ -1392,6 +1392,9 @@ type recoveryHarness struct {
 	// holdVerdicts counts the passes whose update pass reported a verdict,
 	// a hold or none; a pass that reported none appends nothing to holds.
 	holdVerdicts int
+	// verdict is the most recent verdict the update pass reported: the
+	// hold, or nil when it reported none.
+	verdict *workloadtypes.RolloutHold
 
 	// component is the Component the loop drives. Every Component runs
 	// the same loop, so a story names one only to run under its pod
@@ -2753,8 +2756,10 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 		DrainHolds:                &workloadtypes.DrainHolds{},
 		RecordRolloutHold: func(hold *workloadtypes.RolloutHold) {
 			h.holdVerdicts++
+			h.verdict = nil
 			if hold != nil {
 				h.holds = append(h.holds, *hold)
+				h.verdict = &h.holds[len(h.holds)-1]
 			}
 		},
 		WarnRetryHeld: func(rev string, attempts int32, reason string) {
@@ -10778,4 +10783,224 @@ func drainFakeEvents(rec *record.FakeRecorder) []string {
 			return out
 		}
 	}
+}
+
+// A crash-loop park follows its pod set through a corrected roll. While
+// the roll waits to take a parked gang, the gang serving again between
+// crashes returns its row to Ready in the pass that observes every member
+// serving, whichever pass each member came back in; the roll then takes
+// the gang as the serving Instance it is.
+//
+// Cells: instance/Failed/pod.containersReady[source]/before, instance/Failed/spec.revision/before, instance/Ready/gate.deny[Held]/before
+func TestCrashLoopAfterPromotion_ParkedGangFollowsItsSetThroughTheCorrectedRoll(t *testing.T) {
+	const replicas = 2
+	h := newRecoveryHarnessFor(t, true, constants.MainContainerName)
+	h.replicas = replicas
+	repair := workloadtypes.RestartPolicyRecreateInstance
+	h.lifecycle.RestartPolicy = &repair
+	// Only the leader dies, a few passes after it serves and inside a
+	// grace that outlives every pod; the worker stays up, so the gang is
+	// whole again in the pass its leader comes back.
+	h.crashAfterServed = 4
+	h.crashLeaderOnly = true
+	h.stuckGrace = 10 * time.Minute
+	h.stepCap = recoveryStepFloor
+	h.useRollingBudget(workloadtypes.UpdateStrategyRecreatePod)
+	if !h.run(60, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 for %d gangs", replicas)
+	}
+
+	revCrash := h.crashRevision(flapAfterServingImage)
+	// gangServes reports whether every member of the Instance is
+	// ContainersReady and in rotation.
+	gangServes := func(idx int32) bool {
+		pods := h.podsOf(idx)
+		if len(pods) < len(h.desired.Runners) {
+			return false
+		}
+		for _, pod := range pods {
+			if !podreadiness.IsContainersReady(pod) || !podreadiness.IsServing(pod) {
+				return false
+			}
+		}
+		return true
+	}
+	// The ladder holds and the second gang is parked with its leader down
+	// while the first is settled on the crashing revision: the push lands
+	// on that shape, so the roll takes the first gang and the parked one
+	// waits behind the unavailability budget.
+	parkedBehind := func() bool {
+		first, second := h.instance(0), h.instance(1)
+		return h.heldOn(revCrash.Name) && first != nil && second != nil &&
+			first.RunningRevision == revCrash.Name && first.Operation == nil &&
+			second.RunningRevision == revCrash.Name && second.Operation == nil &&
+			second.Phase == workloadtypes.InstancePhaseFailed && !gangServes(1)
+	}
+	if !h.run(160, parkedBehind) {
+		h.dumpState("parked gang")
+		t.Fatalf("the story never reached a held ladder with the second gang parked on %s (held=%v, rows=%+v)", revCrash.Name, h.heldOn(revCrash.Name), h.irStatuses())
+	}
+
+	h.setTarget(h.revFixed, fixedImage)
+	servedWhileParkedBehind := false
+	observe := func() {
+		second := h.instance(1)
+		if second == nil || second.Operation != nil || second.RunningRevision != revCrash.Name || !gangServes(1) {
+			return
+		}
+		if second.Phase == workloadtypes.InstancePhaseFailed {
+			h.dumpState("failed while serving")
+			t.Fatalf("Instance 1 reads Failed while its gang serves again (leader and worker ContainersReady and in rotation) and the corrected roll is on another Instance; the park must return to Ready in the pass that observes the set serving (rows=%+v)", h.irStatuses())
+		}
+		if first := h.instance(0); second.Phase == workloadtypes.InstancePhaseReady && first != nil && first.RunningRevision != h.revFixed.Name {
+			servedWhileParkedBehind = true
+		}
+	}
+	if !h.runWithInvariant(120, func() bool { return h.settledOn(h.revFixed, replicas) }, observe) {
+		h.dumpState("corrected revision")
+		t.Fatalf("the corrected revision did not land on every gang")
+	}
+	if !servedWhileParkedBehind {
+		h.dumpState("shape")
+		t.Fatalf("the parked gang never served again while the roll was on the other Instance; the story did not exercise the unpark")
+	}
+}
+
+// A crash loop over several Instances of a pushed revision is one ladder:
+// its attempt rebuilds every Instance that crashed on the revision, one
+// rebuild at a time, and the hold that announces the attempt names each
+// of them, so every rebuild is one the status announced before it opened.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Budget]/before, instance/Ready/gate.deny[Held]/before
+func TestCrashLoopAfterPromotion_TheLadderNamesEveryInstanceItsAttemptRebuilds(t *testing.T) {
+	const replicas = 4
+	h := newRecoveryHarnessFor(t, false, constants.MainContainerName)
+	h.replicas = replicas
+	repair := workloadtypes.RestartPolicyRecreateInstance
+	h.lifecycle.RestartPolicy = &repair
+	h.crashAfterServed = 4
+	h.stuckGrace = 10 * time.Minute
+	h.stepCap = recoveryStepFloor
+	// A backoff long enough for the next promoted Instance to crash inside
+	// it, so one attempt has two Instances to rebuild.
+	h.retryPolicy = &workloadtypes.RetryPolicy{MaxAttempts: 3, InitialDelay: 2 * time.Minute, MaxDelay: 10 * time.Minute, Multiplier: 2}
+	h.useRollingBudget(workloadtypes.UpdateStrategyRecreatePod)
+	if !h.run(60, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+	}
+
+	revCrash := h.crashRevision(flapAfterServingImage)
+	// announced is, per attempt time the ladder announced, the Instances
+	// the hold named as the attempt's rebuilds. A hold reported while the
+	// attempt runs names the Instances still to rebuild under it, and adds
+	// to the latest time announced.
+	announced := map[time.Time]map[int32]bool{}
+	var times []time.Time
+	var latest time.Time
+	verdicts := h.holdVerdicts
+	readAnnouncement := func() {
+		if block := h.findBlock(revCrash.Name); block != nil && block.State == workloadtypes.RetryBlockBackoff && block.NextRetryAt != nil {
+			at := block.NextRetryAt.Time
+			if _, ok := announced[at]; !ok {
+				announced[at] = map[int32]bool{}
+				times = append(times, at)
+			}
+			latest = at
+		}
+		if h.holdVerdicts == verdicts {
+			return
+		}
+		verdicts = h.holdVerdicts
+		hold := h.verdict
+		if hold == nil || hold.Gate != workloadtypes.RolloutHoldGateRetryBlock || hold.Target != revCrash.Name || latest.IsZero() {
+			return
+		}
+		for _, idx := range namedRebuilds(hold.Reason) {
+			announced[latest][idx] = true
+		}
+	}
+	// The first crash-revision pod of an Instance is the roll's; every
+	// later one is a rebuild, owed to an announced attempt that named its
+	// Instance.
+	seen := map[types.UID]struct{}{}
+	rolled := map[int32]bool{}
+	rebuilt := map[int32]int{}
+	checkRebuilds := func() {
+		for _, pod := range h.livePods() {
+			if pod.Spec.Containers[0].Image != flapAfterServingImage {
+				continue
+			}
+			if _, ok := seen[pod.UID]; ok {
+				continue
+			}
+			seen[pod.UID] = struct{}{}
+			idx := instanceIndexOf(pod)
+			if !rolled[idx] {
+				rolled[idx] = true
+				continue
+			}
+			rebuilt[idx]++
+			var window time.Time
+			for _, at := range times {
+				if !at.After(h.clk.Now()) && at.After(window) {
+					window = at
+				}
+			}
+			if window.IsZero() {
+				h.dumpState("rebuild before any announcement")
+				t.Fatalf("crash-revision pod %s of Instance %d appeared at %s before the ladder announced any attempt", pod.Name, idx, h.clk.Now().Format(time.RFC3339))
+			}
+			if !announced[window][idx] {
+				var named []int32
+				for i := range announced[window] {
+					named = append(named, i)
+				}
+				h.dumpState("unannounced rebuild")
+				t.Fatalf("crash-revision pod %s of Instance %d appeared at %s under the attempt announced for %s, which named Instances %v: the rebuild was not announced for its Instance (last hold %+v)",
+					pod.Name, idx, h.clk.Now().Format(time.RFC3339), window.Format(time.RFC3339), named, h.lastHold())
+			}
+		}
+	}
+	h.runWithInvariant(200, func() bool { return h.heldOn(revCrash.Name) }, func() {
+		readAnnouncement()
+		checkRebuilds()
+	})
+	if !h.heldOn(revCrash.Name) {
+		h.dumpState("ladder never held")
+		t.Fatalf("the retry ladder never held %s (held warnings=%v, rebuilt=%v)", revCrash.Name, h.heldWarnings, rebuilt)
+	}
+	if len(rebuilt) < 2 {
+		h.dumpState("one Instance")
+		t.Fatalf("the story rebuilt %v; two Instances must crash and be rebuilt under one announced attempt", rebuilt)
+	}
+
+	h.setTarget(h.revFixed, fixedImage)
+	if !h.run(120, func() bool { return h.settledOn(h.revFixed, replicas) }) {
+		h.dumpState("corrected revision")
+		t.Fatalf("the corrected revision did not land on every Instance")
+	}
+}
+
+// namedRebuilds is the Instances a ladder hold names as the rebuilds of
+// its attempt, none when it names none.
+func namedRebuilds(reason string) []int32 {
+	const clause = "the attempt rebuilds Instance"
+	i := strings.Index(reason, clause)
+	if i < 0 {
+		return nil
+	}
+	rest := strings.TrimPrefix(strings.TrimPrefix(reason[i+len(clause):], "s"), " ")
+	if j := strings.Index(rest, ";"); j >= 0 {
+		rest = rest[:j]
+	}
+	var out []int32
+	for _, field := range strings.Split(rest, ",") {
+		var idx int32
+		if _, err := fmt.Sscan(strings.TrimSpace(field), &idx); err == nil {
+			out = append(out, idx)
+		}
+	}
+	return out
 }

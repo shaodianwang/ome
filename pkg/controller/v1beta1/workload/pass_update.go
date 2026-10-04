@@ -284,9 +284,12 @@ func (a *updateAdmission) drainWithheld() *types.RolloutHold {
 // (workloadops.RetryBlockDenyingFreshStart). Plan computes it once per
 // pass: the update pass reports it for a start the trigger denied, and
 // the idle verdict yields to it. The wording is the status layer's own
-// reading of the block, with the Instances the roll waits on named, so
-// the operator reads one story whichever layer reports it.
-func ladderHold(input types.ReconcileInput, target *appsv1.ControllerRevision, rolledNotServing []int32) *types.RolloutHold {
+// reading of the block, with the Instances the roll waits on named and
+// the Instances whose crashed set the ladder's attempt rebuilds
+// (ladderRebuilds), so the operator reads one story whichever layer
+// reports it and a reader pacing on the block's nextRetryAt knows every
+// rebuild the attempt admits.
+func ladderHold(input types.ReconcileInput, target *appsv1.ControllerRevision, rolledNotServing, ladderRebuilds []int32) *types.RolloutHold {
 	b := workloadops.RetryBlockDenyingFreshStart(input, target)
 	if b == nil {
 		return nil
@@ -303,8 +306,9 @@ func ladderHold(input types.ReconcileInput, target *appsv1.ControllerRevision, r
 		return nil
 	}
 	return &types.RolloutHold{
-		Gate:   gate,
-		Reason: fmt.Sprintf("update to %s %s after %d failed attempt(s): %s%s", b.TargetRevision, state, b.AttemptsStarted, b.Reason, rolledNotServingClause(rolledNotServing, target.Name)),
+		Gate: gate,
+		Reason: fmt.Sprintf("update to %s %s after %d failed attempt(s): %s%s%s", b.TargetRevision, state, b.AttemptsStarted, b.Reason,
+			rolledNotServingClause(rolledNotServing, target.Name), ladderRebuildsClause(ladderRebuilds)),
 		Target: target.Name,
 	}
 }
@@ -315,15 +319,33 @@ func rolledNotServingClause(rolled []int32, target string) string {
 	if len(rolled) == 0 {
 		return ""
 	}
-	indices := make([]string, 0, len(rolled))
-	for _, idx := range rolled {
-		indices = append(indices, strconv.Itoa(int(idx)))
+	noun, indices := instanceNoun(rolled)
+	return fmt.Sprintf("; %s %s on revision %s not serving", noun, indices, target)
+}
+
+// ladderRebuildsClause names, for a ladder denial, the Instances whose
+// crashed set the ladder's attempt rebuilds when it opens, one rebuild
+// per Instance named; empty when the attempt rebuilds none.
+func ladderRebuildsClause(rebuilds []int32) string {
+	if len(rebuilds) == 0 {
+		return ""
+	}
+	noun, indices := instanceNoun(rebuilds)
+	return fmt.Sprintf("; the attempt rebuilds %s %s", noun, indices)
+}
+
+// instanceNoun is the noun and the comma-joined list a clause names a
+// non-empty set of Instance indices with.
+func instanceNoun(indices []int32) (string, string) {
+	names := make([]string, 0, len(indices))
+	for _, idx := range indices {
+		names = append(names, strconv.Itoa(int(idx)))
 	}
 	noun := "Instance"
-	if len(rolled) > 1 {
+	if len(indices) > 1 {
 		noun = "Instances"
 	}
-	return fmt.Sprintf("; %s %s on revision %s not serving", noun, strings.Join(indices, ", "), target)
+	return noun, strings.Join(names, ", ")
 }
 
 // unreplacedExtraSlots is what the Component's extra pods hold against

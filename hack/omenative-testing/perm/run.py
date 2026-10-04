@@ -2441,7 +2441,10 @@ BREAK_BITE_S = int(60 * TIMEOUT_MULT)
 BREAK_REACT_S = int(60 * TIMEOUT_MULT)
 CRASHLOOP_PARAMS = {CRASHLOOP_VICTIM, CRASHLOOP_NEW}
 # The events that say why a roll toward a crashing revision stopped: the
-# retry ladder's hold, or an Instance escalated to Failed.
+# retry ladder's hold, or an Instance escalated to Failed. Until one is
+# emitted, the victim's own rolloutHold from a gate that says why
+# (CRASH_NEW_WHY_GATES) stands for them: the hold is the product's primary
+# signal, and it names the Component by standing on its InferenceReplica.
 CRASH_NEW_WHY_EVENTS = {"RetryHeld", "InstanceFailed"}
 # The rolloutHold gates that say it in status: the retry ladder's backoff
 # (its retry block names the next attempt's time) and its bound, and a
@@ -2449,8 +2452,12 @@ CRASH_NEW_WHY_EVENTS = {"RetryHeld", "InstanceFailed"}
 # Sequential) is the group opening or pacing its run, not the crash.
 RETRY_BLOCK_GATE, HELD_GATE, BUDGET_GATE = "RetryBlock", "Held", "Budget"
 CRASH_NEW_WHY_GATES = {RETRY_BLOCK_GATE, HELD_GATE, BUDGET_GATE}
-# The retry block state whose nextRetryAt is an attempt still to come.
+# The retry block state whose nextRetryAt is an attempt still to come, the
+# state of an attempt under way, and the clause of a RetryBlock hold that
+# names the Instances the attempt rebuilds, one rebuild per Instance named.
 RETRY_BLOCK_BACKOFF = "Backoff"
+RETRY_BLOCK_IN_PROGRESS = "RetryInProgress"
+LADDER_REBUILDS_RE = re.compile(r"the attempt rebuilds Instances? ([0-9][0-9, ]*)")
 # form=load kills the runner this often while it is up; the kubelet's own
 # back-off then holds each restart longer than the last.
 CRASH_KILL_INTERVAL_S = float(os.environ.get("OME_TEST_CRASH_KILL_INTERVAL_S", "15"))
@@ -9736,11 +9743,12 @@ def _ir_snapshot(case_id):
 
 
 def _crash_new_why(snapshot, events, victim):
-    """(status, events) of what the product says about the crashing
+    """(status, said) of what the product says about the crashing
     revision: the victim Component's rolloutHold from a gate that says why
     (CRASH_NEW_WHY_GATES) or a victim Instance row at Failed (None when
-    neither), and the hold or escalation events naming the victim
-    Component."""
+    neither), and what named the victim Component — the hold or escalation
+    events naming it, else that rolloutHold, which names the Component by
+    standing on its InferenceReplica, until an event does."""
     comp = snapshot.get(victim) or {}
     hold = comp.get("hold")
     failed = [row for row in comp.get("rows", []) if str(row.get("phase")) == "Failed"]
@@ -9749,6 +9757,8 @@ def _crash_new_why(snapshot, events, victim):
     status = None
     if hold and str(hold.get("gate")) in CRASH_NEW_WHY_GATES:
         status = f"rolloutHold gate={hold.get('gate')} target={str(hold.get('target'))[-12:]} reason={str(hold.get('reason'))[:120]}"
+        if not said:
+            said = [f"rolloutHold gate={hold.get('gate')} on {victim}: {str(hold.get('reason'))[:120]}"]
     elif failed:
         row = failed[0]
         status = f"Instance {row.get('index')} row Failed" + (f" ({row.get('lastFailure')})" if row.get("lastFailure") else "")
@@ -9775,24 +9785,42 @@ def _crash_new_ladder(snapshot, victim):
     """What the retry ladder reports for the victim Component: {"gate": its
     rolloutHold's gate, "next_retry_at": the epoch of the attempt a backoff
     announces (its retry block's nextRetryAt), None when no attempt is
-    pending}; None when the Component reports no hold that says why."""
+    pending, "in_progress": whether the block's attempt is under way,
+    "rebuilds": the Instances the hold names as the attempt's rebuilds};
+    None when the Component reports no hold that says why."""
     comp = snapshot.get(victim) or {}
     hold = comp.get("hold") or {}
     gate = str(hold.get("gate") or "")
     if gate not in CRASH_NEW_WHY_GATES:
         return None
-    next_retry_at = None
+    next_retry_at, in_progress = None, False
     if gate == RETRY_BLOCK_GATE:
         for block in comp.get("retry") or []:
-            if block.get("targetRevision") == hold.get("target") and block.get("state") == RETRY_BLOCK_BACKOFF:
+            if block.get("targetRevision") != hold.get("target"):
+                continue
+            if block.get("state") == RETRY_BLOCK_BACKOFF:
                 next_retry_at = _event_epoch(block.get("nextRetryAt"))
-    return {"gate": gate, "next_retry_at": next_retry_at}
+            in_progress = block.get("state") == RETRY_BLOCK_IN_PROGRESS
+    return {"gate": gate, "next_retry_at": next_retry_at, "in_progress": in_progress,
+            "rebuilds": _ladder_rebuilds(hold.get("reason"))}
+
+
+def _ladder_rebuilds(reason):
+    """The Instances a RetryBlock hold's reason names as the rebuilds of
+    the ladder's attempt (LADDER_REBUILDS_RE), as the strings the pod
+    records carry; empty when it names none."""
+    m = LADDER_REBUILDS_RE.search(str(reason or ""))
+    if not m:
+        return set()
+    return {part.strip() for part in m.group(1).split(",") if part.strip()}
 
 
 def _crash_new_note_ladder(hold, ladder, now, push_ts, moves):
     """Record what the ladder says this poll — a retry time newly
-    announced, or its bound reached — as the story moving. True while an
-    announced attempt is still to come."""
+    announced, the Instances its attempt rebuilds, or its bound reached —
+    as the story moving. An attempt under way names the Instances it still
+    rebuilds under the last time announced. True while an announced
+    attempt is still to come."""
     if not ladder:
         return False
     at = ladder["next_retry_at"]
@@ -9800,6 +9828,14 @@ def _crash_new_note_ladder(hold, ladder, now, push_ts, moves):
         hold["windows"].append(at)
         moves.extend((now, at))
         print(f"    retry announced: the ladder's next attempt at {at - push_ts:.0f}s")
+    window = at
+    if window is None and ladder["in_progress"] and hold["windows"]:
+        window = hold["windows"][-1]
+    if window is not None and ladder["rebuilds"] - hold["rebuilds"].get(window, set()):
+        named = hold["rebuilds"].setdefault(window, set())
+        named |= ladder["rebuilds"]
+        print(f"    retry announced: the attempt at {window - push_ts:.0f}s rebuilds Instance(s) "
+              f"{', '.join(sorted(named, key=int))}")
     if ladder["gate"] == HELD_GATE and hold["held_at"] is None:
         hold["held_at"] = now - push_ts
         moves.append(now)
@@ -9807,23 +9843,34 @@ def _crash_new_note_ladder(hold, ladder, now, push_ts, moves):
     return at is not None and at > now
 
 
-def _crash_new_unannounced(created, windows, why_at, held_at, per_attempt):
+def _crash_new_unannounced(created, windows, rebuilds, why_at, held_at, per_attempt):
     """The crash-revision pods created after status first said why that no
     announced retry explains, oldest first. A backoff's next-retry time
-    explains one attempt: per_attempt pods created at or after it and
-    before the next announced time; nothing is explained once the ladder
-    reached its bound. created is {pod uid: creation epoch}; a pod in the
+    explains one attempt for each Instance the ladder named as the
+    attempt's rebuilds (one Instance, whichever, when it named none):
+    per_attempt pods of that Instance created at or after the time and
+    before the next announced one; nothing is explained once the ladder
+    reached its bound. created is {pod uid: (creation epoch, Instance)},
+    rebuilds is {retry time: the Instances named for it}; a pod in the
     poll that saw the why predates it."""
     out, used = [], defaultdict(int)
-    for uid, at in sorted(created.items(), key=lambda kv: (kv[1], kv[0])):
+    for uid, (at, inst) in sorted(created.items(), key=lambda kv: (kv[1][0], kv[0])):
         if at <= why_at + CRASH_NEW_POLL_S:
             continue
         window = max((w for w in windows if w - CRASH_NEW_POLL_S <= at), default=None)
         past_bound = held_at is not None and at > held_at + CRASH_NEW_POLL_S
-        if window is None or past_bound or used[window] >= per_attempt:
+        if window is None or past_bound:
+            out.append(uid)
+            continue
+        named = rebuilds.get(window) or set()
+        if named and inst not in named:
+            out.append(uid)
+            continue
+        slot = (window, inst if named else None)
+        if used[slot] >= per_attempt:
             out.append(uid)
         else:
-            used[window] += 1
+            used[slot] += 1
     return out
 
 
@@ -9834,8 +9881,9 @@ def _crash_new_watch_hold(ctx, victim, bumped, allowance, crash_hashes, uid_seen
     a backoff and reaches its bound (Held) after its last — or the budget
     runs out. Records the crash (bite), the budget claim (Instances off the
     running revision, with the capacity floor's debounce), the attempts
-    (distinct crash-revision pods, with when each was created), the status
-    and event that say why, the retry times the ladder announced, when it
+    (distinct crash-revision pods, with when each was created and for
+    which Instance), the status and event that say why, the retry times
+    the ladder announced and the Instances it named for each, when it
     reached its bound, and what each sound bumped member did meanwhile."""
     N, ppi, old = ctx["N"], ctx["pods_per_inst"], set(ctx["old_hashes"])
     form, case_id, push_ts = ctx["fault"]["form"], ctx["case_id"], ctx["trigger_ts"]
@@ -9844,7 +9892,7 @@ def _crash_new_watch_hold(ctx, victim, bumped, allowance, crash_hashes, uid_seen
     hold = {"budget": budget, "bitten_at": None, "status_at": None, "status": "", "event_at": None, "event": "",
             "peak_off": 0, "off_span": 0.0, "min_running": N[victim], "peak_crash": 0,
             "attempts_at_status": None, "peer": {c: "rolling" for c in peers}, "believed": False,
-            "windows": [], "held_at": None}
+            "windows": [], "rebuilds": {}, "held_at": None}
     print(f"  Phase 3: watching the roll toward the crashing revision (budget {allowance} Instance(s) off "
           f"the running revision; status must say why within {budget}s, every further attempt at a time the "
           f"ladder announced, then quiet for {IDLE_HOLD_S}s)")
@@ -9858,7 +9906,7 @@ def _crash_new_watch_hold(ctx, victim, bumped, allowance, crash_hashes, uid_seen
                 crash_hashes.add(p["hash"])
                 if p.get("uid") and p["uid"] not in uid_seen:
                     uid_seen[p["uid"]] = now
-                    created[p["uid"]] = _event_epoch(p.get("created")) or now
+                    created[p["uid"]] = (_event_epoch(p.get("created")) or now, str(p.get("inst", "0")))
                     moves.append(now)
                     if hold["status_at"] is not None:
                         print(f"    attempt: {name} on the crashing revision ({now - push_ts:.0f}s)")
@@ -9914,8 +9962,8 @@ def _crash_new_watch_hold(ctx, victim, bumped, allowance, crash_hashes, uid_seen
     hold["attempts_unannounced"] = []
     if hold["status_at"] is not None:
         bound = None if hold["held_at"] is None else push_ts + hold["held_at"]
-        hold["attempts_unannounced"] = _crash_new_unannounced(created, hold["windows"], push_ts + hold["status_at"],
-                                                              bound, max(1, ppi.get(victim, 1)))
+        hold["attempts_unannounced"] = _crash_new_unannounced(created, hold["windows"], hold["rebuilds"],
+                                                              push_ts + hold["status_at"], bound, max(1, ppi.get(victim, 1)))
     return hold
 
 
@@ -9968,9 +10016,11 @@ def _crash_new_checks(ctx, f, out, victim, bumped, allowance, verdict, notes, ch
     crashing revision is in flight: no more Instances than the budget allows
     are off the running revision (so it keeps serving at the capacity
     floor), the product says why the roll stopped — a hold or an escalation
-    in status, and an event — and once it has, no further attempt at that
-    revision is made; a sound member of the group converges or holds with a
-    reason. After the fix push: every bumped Instance ends on the fixed
+    in status, and an event, or the hold naming the Component until an
+    event does — and once it has, no further attempt at that revision is
+    made but the rebuilds the ladder announced, one per Instance it named;
+    a sound member of the group converges or holds with a reason. After
+    the fix push: every bumped Instance ends on the fixed
     revision and serving, nothing rebuilds the crashing revision, no hold is
     left in status. Peaks, isolation of untouched Components and gang
     atomicity hold throughout."""
@@ -10011,13 +10061,15 @@ def _crash_new_checks(ctx, f, out, victim, bumped, allowance, verdict, notes, ch
         checks.append(f"  ✓ why: {hold['status']} ({hold['status_at']:.0f}s after the push)")
     if hold["event_at"] is None:
         verdict = "FAIL"
-        notes.append(f"no {'/'.join(sorted(CRASH_NEW_WHY_EVENTS))} event named {victim}")
-        checks.append(f"  ✗ why: no {' or '.join(sorted(CRASH_NEW_WHY_EVENTS))} event named component={victim}")
+        notes.append(f"no {'/'.join(sorted(CRASH_NEW_WHY_EVENTS))} event named {victim} and no rolloutHold on it said why")
+        checks.append(f"  ✗ why: no {' or '.join(sorted(CRASH_NEW_WHY_EVENTS))} event named component={victim}, and no "
+                      f"rolloutHold on {victim} stood for one")
     else:
         checks.append(f"  ✓ why: {hold['event'][:200]} ({hold['event_at']:.0f}s)")
     if hold["status_at"] is not None:
         windows, bound = hold.get("windows") or [], hold.get("held_at")
-        ladder = (f"{len(windows)} retry time(s) announced; "
+        named = any(hold.get("rebuilds", {}).values())
+        ladder = (f"{len(windows)} retry time(s) announced{', naming the Instances each attempt rebuilds' if named else ''}; "
                   + (f"the ladder held at {bound:.0f}s" if bound is not None else "the ladder's bound was not reached"))
         if hold["attempts_unannounced"]:
             verdict = "FAIL"

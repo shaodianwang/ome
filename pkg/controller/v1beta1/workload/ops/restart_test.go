@@ -3057,3 +3057,30 @@ func TestRestart_ProvenSetClearsTheCrashLoopNote(t *testing.T) {
 		})
 	}
 }
+
+// A crash-loop episode is status truth about the set the row holds and
+// opens nothing, so no roll target takes it from the restart pass: a park
+// whose set serves again returns to Ready under a corrected target as it
+// does under its own, while a park whose set is down is the roll's.
+//
+// Cells: instance/Failed/pod.containersReady[source]/before, instance/Failed/spec.revision/before
+func TestRepairYieldsToTarget_CrashLoopEpisodeFollowsItsSet(t *testing.T) {
+	corrected := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-0000next", Namespace: "prod"}}
+	for _, tc := range []struct {
+		name    string
+		serving bool
+		want    bool
+	}{
+		{name: "a park whose set serves again is unparked under the corrected target", serving: true, want: false},
+		{name: "a park whose set is down is left to the roll", serving: false, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHeldCrashLoop(t, v1beta1.OMENativeInstanceFailed, tc.serving, 30*time.Second)
+			in := h.input(true)
+			in.ObservedState.UpdateRevision = corrected.Name
+			if got := ops.RepairYieldsToTarget(in, h.plan, h.plan.Instances[0], corrected, []*corev1.Pod{h.pod}); got != tc.want {
+				t.Fatalf("RepairYieldsToTarget = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -49,6 +49,7 @@ tick=5 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/Surge
 tick=5 pass result=after:5s
 tick=6 note the wedged replacement is gone and the roll re-drives the surge; the new replacement must avoid node-1
 tick=6 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+30m1s
+tick=6 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
 tick=6 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
 tick=6 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#3{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
 tick=6 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c (newOrdinal=1)

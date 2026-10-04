@@ -256,6 +256,13 @@ type Decision struct {
 	// that gave up on the revision stays reported.
 	UpdateIdle bool
 
+	// LadderHold is the hold an unpaused roll waits on when the target's
+	// RetryBlock denies every start at the trigger stage and nothing else
+	// is selected (UpdateSelection.LadderHold with no items). Execute
+	// reports it at the update pass's position, so the wait says what
+	// the ladder's attempt rebuilds on every pass that reaches it.
+	LadderHold *types.RolloutHold
+
 	// Owned is the pass's rows grouped by the owner that may advance
 	// them. Built once here, from the ownership table; Execute hands it
 	// to every pass so a verb reads the list it owns rather than
@@ -408,6 +415,11 @@ func Plan(ctx context.Context, input types.ReconcileInput, plan types.ComponentP
 			// drive, and no ladder that still holds the target, whether a
 			// candidate reached its gate or a partition kept every one back.
 			decision.UpdateIdle = len(selection.Items) == 0 && len(selection.RetryBlockDenied) == 0 && selection.LadderHold == nil
+			// A roll with nothing to run but starts the ladder denies waits
+			// on the ladder: the hold is reported at the update position.
+			if len(selection.Items) == 0 {
+				decision.LadderHold = selection.LadderHold
+			}
 		}
 		if len(selection.Items) > 0 {
 			decision.Actions = append(decision.Actions, PlannedAction{Kind: ActionUpdate, Update: &selection})
@@ -811,8 +823,21 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		"liveExtraPods", selection.ExtraPodSurge.Live,
 		"rolledNotServing", selection.RolledNotServing,
 		"retryBlockDenied", selection.RetryBlockDenied)
-	selection.LadderHold = ladderHold(input, target, selection.RolledNotServing)
+	selection.LadderHold = ladderHold(input, target, selection.RolledNotServing, ladderRebuilds(input, plan, target, updateByInstance))
 	return selection, retryBlockWait, nil
+}
+
+// ladderRebuilds lists, in plan order, the Instances whose crashed set
+// the target's retry ladder rebuilds in its attempt
+// (workloadops.LadderPacesRebuild), for the ladder hold to name.
+func ladderRebuilds(input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, byInstance map[int32][]*corev1.Pod) []int32 {
+	var rebuilds []int32
+	for _, inst := range plan.Instances {
+		if workloadops.LadderPacesRebuild(input, plan, inst, target.Name, byInstance[inst.Index]) {
+			rebuilds = append(rebuilds, inst.Index)
+		}
+	}
+	return rebuilds
 }
 
 // anyFreshStart reports whether the selection carries a start the pass

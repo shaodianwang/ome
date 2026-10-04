@@ -35,6 +35,7 @@ tick=5 warn instanceFailed index=0 pod=nil reason=CreateContainerError: attempt 
 tick=5 pass result=after:5s
 tick=6 note the dead replacement is recycled, leaving the surge slot empty
 tick=6 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+2m0s
+tick=6 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=CreateContainerError container=main message=failed to create containerd task} precondition=ok
 tick=6 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
 tick=6 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#3{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} lastFailure={pod=svc-a-engine-0-default-1 reason=CreateContainerError container=main message=failed to create containerd task} precondition=ok
 tick=6 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c (newOrdinal=1)

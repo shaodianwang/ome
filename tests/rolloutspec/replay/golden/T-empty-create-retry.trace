@@ -1,4 +1,5 @@
 tick=1 note the index is planned but the revision is in Backoff, so no row is allocated
+tick=1 hold gate=RetryBlock target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb in backoff after 1 failed attempt(s): ImagePullBackOff
 tick=1 pass result=after:2m0s
 tick=2 note the block comes due and the Create pass opens the attempt it was denying
 tick=2 apply timer.retryAt to=t+2m1s now=t+2m1s

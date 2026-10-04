@@ -51,4 +51,5 @@ tick=7 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-88205
 tick=7 pass result=after:5s
 tick=8 note nothing re-drives a Held revision
 tick=8 apply clock.advance by=10m0s now=t+19m1s
+tick=8 hold gate=Held target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c held after 2 failed attempt(s): CrashLoopBackOff
 tick=8 pass result=after:5s

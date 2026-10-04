@@ -10432,6 +10432,32 @@ class CrashloopNewFaultTest(unittest.TestCase):
         self.assertEqual((None, []), run._crash_new_why({"engine": {"hold": None, "rows": [{"index": 0, "phase": "Updating"}]}}, [], "engine"))
         self.assertEqual((None, []), run._crash_new_why({}, [], "engine"))
 
+    def test_why_the_hold_stands_for_the_event_until_one_names_the_component(self):
+        # The hold is the product's primary signal: a Budget hold on the
+        # victim's own InferenceReplica says why before any event does, and
+        # names the Component by standing on it. An event, once there, is
+        # what said why; a Failed row alone still owes the event, and a
+        # coordination gate's hold stands for nothing.
+        budget = {"engine": {"hold": {"gate": "Budget", "target": "p999-engine-abc",
+                                      "reason": "per-Component unavailability budget 1 exhausted (would become 3); "
+                                                "Instance 0 on revision p999-engine-abc not serving"}, "rows": []}}
+        status, said = run._crash_new_why(budget, [], "engine")
+        self.assertTrue(status.startswith("rolloutHold gate=Budget"))
+        self.assertEqual(1, len(said))
+        self.assertTrue(said[0].startswith("rolloutHold gate=Budget on engine: per-Component unavailability budget 1"), said)
+        decoder_only = [("InstanceFailed", "InferenceReplica ns/p999-decoder component=decoder instance=0 escalated to Phase=Failed")]
+        _status, said = run._crash_new_why(budget, decoder_only, "engine")
+        self.assertTrue(said[0].startswith("rolloutHold gate=Budget on engine"),
+                        "an event naming another Component leaves the hold standing for this one")
+        named = [("RetryHeld", "InferenceReplica ns/p999-engine component=engine update to revision x held after 3 failed attempt(s)")]
+        _status, said = run._crash_new_why(budget, named, "engine")
+        self.assertEqual(1, len(said))
+        self.assertTrue(said[0].startswith("RetryHeld:"), "the event, once there, is what said why")
+        failed = {"engine": {"hold": None, "rows": [{"index": 0, "phase": "Failed", "lastFailure": "Error"}]}}
+        self.assertEqual([], run._crash_new_why(failed, [], "engine")[1], "a Failed row alone still owes the event")
+        plan = {"engine": {"hold": {"gate": "Plan", "target": "p999-engine-abc", "reason": "no active run"}, "rows": []}}
+        self.assertEqual((None, []), run._crash_new_why(plan, [], "engine"))
+
     def test_why_is_the_ladder_a_budget_hold_or_a_failed_row_not_a_coordination_gate(self):
         # The group's opening hold (gate=Plan, "no active run for this
         # rollout group") is the run opening, not the crash; so is any
@@ -10732,12 +10758,31 @@ class CrashloopNewLadderTest(unittest.TestCase):
         rows = [{"index": i, "phase": "Failed" if i in failed else "Ready"} for i in range(4)]
         return {"engine": {"hold": hold, "rows": rows, "retry": retry or []}}
 
-    def _backoff(self, attempts, next_at):
+    def _backoff(self, attempts, next_at, rebuilds=()):
+        """The hold of a backoff, naming the Instances its attempt rebuilds
+        when rebuilds is given."""
         hold = {"gate": "RetryBlock", "target": self.TARGET,
-                "reason": f"update to {self.TARGET} in backoff after {attempts} failed attempt(s): CrashLoopBackOff"}
+                "reason": f"update to {self.TARGET} in backoff after {attempts} failed attempt(s): CrashLoopBackOff"
+                          + self._rebuilds_clause(rebuilds)}
         block = {"targetRevision": self.TARGET, "state": "Backoff", "attemptsStarted": attempts,
                  "nextRetryAt": self._stamp(next_at)}
         return {"hold": hold, "retry": [block], "failed": (0,)}
+
+    def _in_progress(self, attempts, rebuilds=()):
+        """The hold of an attempt under way: the block is RetryInProgress
+        and the hold names the Instances still to rebuild under it."""
+        hold = {"gate": "RetryBlock", "target": self.TARGET,
+                "reason": f"update to {self.TARGET} retrying one attempt at a time after {attempts} failed attempt(s): "
+                          f"CrashLoopBackOff" + self._rebuilds_clause(rebuilds)}
+        block = {"targetRevision": self.TARGET, "state": "RetryInProgress", "attemptsStarted": attempts}
+        return {"hold": hold, "retry": [block], "failed": (0,)}
+
+    @staticmethod
+    def _rebuilds_clause(rebuilds):
+        if not rebuilds:
+            return ""
+        noun = "Instances" if len(rebuilds) > 1 else "Instance"
+        return f"; the attempt rebuilds {noun} {', '.join(str(i) for i in rebuilds)}"
 
     def _held(self, attempts):
         hold = {"gate": "Held", "target": self.TARGET,
@@ -10856,6 +10901,73 @@ class CrashloopNewLadderTest(unittest.TestCase):
         hold, _ended = self._replay(script)
         self.assertEqual(["u2"], hold.get("attempts_unannounced"), "a pod with no retry announced is the roll going on")
         self.assertEqual("FAIL", self._judge(hold)[0])
+
+    def test_ladder_reads_the_instances_the_hold_names(self):
+        ladder = run._crash_new_ladder(self._snapshot(**self._backoff(1, 124, rebuilds=(0, 1))), "engine")
+        self.assertEqual({"0", "1"}, ladder["rebuilds"])
+        self.assertEqual(124.0, ladder["next_retry_at"])
+        self.assertFalse(ladder["in_progress"])
+        ladder = run._crash_new_ladder(self._snapshot(**self._in_progress(1, rebuilds=(1,))), "engine")
+        self.assertEqual({"1"}, ladder["rebuilds"])
+        self.assertIsNone(ladder["next_retry_at"])
+        self.assertTrue(ladder["in_progress"])
+        self.assertEqual(set(), run._crash_new_ladder(self._snapshot(**self._backoff(1, 124)), "engine")["rebuilds"],
+                         "a hold that names no rebuild announces one attempt of whichever Instance")
+
+    def _two_instance_script(self):
+        """Two Instances crash on the pushed revision and the ladder rebuilds
+        both in each attempt, the second twenty seconds after the first,
+        once the first's rebuild came up. The backoff hold names the first
+        Instance when its crash is counted and both once the second's is."""
+        second = self._pod("e1", 1, "crash", "c1", 30, ready=False)
+        return {
+            1: {"pods": self._fleet("u1", 1)},
+            30: {"pods": {**self._fleet("u1", 1), **second}},
+            64: {"snapshot": self._snapshot(**self._backoff(1, 124, rebuilds=(0,))), "events": [self.FAILED_EVENT]},
+            90: {"snapshot": self._snapshot(**self._backoff(1, 124, rebuilds=(0, 1)))},
+            124: {"pods": {**self._fleet("u2", 124), **second}, "snapshot": self._snapshot()},
+            144: {"pods": {**self._fleet("u2", 124), **self._pod("e1", 1, "crash", "u6", 144, ready=False)}},
+            185: {"snapshot": self._snapshot(**self._backoff(2, 305, rebuilds=(0, 1)))},
+            305: {"pods": {**self._fleet("u3", 305), **self._pod("e1", 1, "crash", "u6", 144, ready=False)},
+                  "snapshot": self._snapshot()},
+            325: {"pods": {**self._fleet("u3", 305), **self._pod("e1", 1, "crash", "u7", 325, ready=False)}},
+            365: {"snapshot": self._snapshot(**self._held(3)),
+                  "events": [self.FAILED_EVENT, ("RetryHeld", f"InferenceReplica sandbox/p999-engine component=engine "
+                                                              f"update to {self.TARGET} held after 3 failed attempt(s)")]},
+        }
+
+    def test_an_attempt_rebuilds_every_instance_the_hold_names_for_it(self):
+        hold, _ended = self._replay(self._two_instance_script())
+        self.assertEqual([124.0, 305.0], hold.get("windows"))
+        self.assertEqual({124.0: {"0", "1"}, 305.0: {"0", "1"}}, hold.get("rebuilds"))
+        self.assertEqual([], hold["attempts_unannounced"],
+                         "the second Instance's rebuild, twenty seconds after the first's, is the attempt the hold named it for")
+        self.assertEqual(6, hold["attempts"], "the roll's two pods and two rebuilds of each Instance")
+
+    def test_a_rebuild_of_an_instance_the_attempt_did_not_name_is_the_roll_going_on(self):
+        script = self._two_instance_script()
+        script[90] = {"snapshot": self._snapshot(**self._backoff(1, 124, rebuilds=(0,)))}
+        script[185] = {"snapshot": self._snapshot(**self._backoff(2, 305, rebuilds=(0,)))}
+        hold, _ended = self._replay(script)
+        self.assertEqual(["u6", "u7"], hold["attempts_unannounced"])
+        # A hold that names no Instance announces one attempt of whichever
+        # Instance: the first rebuild takes it and the second is unannounced.
+        for second in (64, 90, 185):
+            script[second]["snapshot"]["engine"]["hold"]["reason"] = script[second]["snapshot"]["engine"]["hold"]["reason"].split(";")[0]
+        hold, _ended = self._replay(script)
+        self.assertEqual({}, {at: named for at, named in hold["rebuilds"].items() if named})
+        self.assertEqual(["u6", "u7"], hold["attempts_unannounced"])
+
+    def test_an_attempt_under_way_names_the_instances_it_still_rebuilds(self):
+        # The second Instance crashes after the attempt opened: the hold of
+        # the attempt under way names it, under the time the attempt was
+        # announced for, so its rebuild when the first's came up is announced.
+        script = self._two_instance_script()
+        script[90] = {"snapshot": self._snapshot(**self._backoff(1, 124, rebuilds=(0,)))}
+        script[130] = {"snapshot": self._snapshot(**self._in_progress(1, rebuilds=(1,)))}
+        hold, _ended = self._replay(script)
+        self.assertEqual({"0", "1"}, hold["rebuilds"][124.0])
+        self.assertEqual([], hold["attempts_unannounced"])
 
 
 class RatioBandTest(unittest.TestCase):

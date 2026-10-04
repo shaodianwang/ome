@@ -646,13 +646,16 @@ func rebuildRevision(s *workload.InstanceStatus) string {
 // first materialization pinned to a superseded revision and materializes
 // a demoted row that has no pod left.
 //
-// Three rows are never yielded: an open Restart, which is driven on — its
+// Four rows are never yielded: an open Restart, which is driven on — its
 // rebuild follows the target itself while it has created no pod
-// (rebuildFollowsTarget); a Migrate-owned row, which its record owns; and
-// a row demoted for losing every pod that holds pods again, which no
+// (rebuildFollowsTarget); a Migrate-owned row, which its record owns; a
+// row demoted for losing every pod that holds pods again, which no
 // update trigger reads, so its repair rebuilds the revision it records and
-// the roll follows once it is Ready. A row that records no revision, or a
-// pass with no target, has nothing to compare.
+// the roll follows once it is Ready; and a row owed a crash-loop episode
+// (readCrashLoopEpisode), which is status truth about the set the row
+// holds and opens nothing, so the park follows its set through the roll
+// that waits to take it. A row that records no revision, or a pass with
+// no target, has nothing to compare.
 //
 // The roll the row is left to must be one that can start (rollTargetOpen):
 // an Instance kept dark for the length of a pause or a hold is worse than
@@ -664,6 +667,9 @@ func RepairYieldsToTarget(input workload.ReconcileInput, plan workload.Component
 	}
 	s := input.ObservedState.Instance(inst.Index)
 	if s == nil || s.Phase == workload.InstancePhaseRestarting || isMigrateOwnedStatus(s) {
+		return false
+	}
+	if readCrashLoopEpisode(input, s, inst.TotalPods(), instancePods).step != crashLoopNothing {
 		return false
 	}
 	rev := rebuildRevision(s)
@@ -1290,6 +1296,22 @@ func RestartOpensLadderAttempt(input workload.ReconcileInput, plan workload.Comp
 		return l.rev
 	}
 	return ""
+}
+
+// LadderPacesRebuild reports whether rev's retry ladder paces a rebuild
+// of this row's crashed set: the row runs rev, its crash counts on the
+// ladder, a trigger of the restart pass would rebuild the set, and the
+// ladder has not admitted the rebuild — its backoff is not due, or
+// another attempt at rev is in flight. The rebuild is part of the
+// ladder's attempt when it opens, so the hold that announces the attempt
+// names every such row.
+func LadderPacesRebuild(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, rev string, instancePods []*corev1.Pod) bool {
+	s := input.ObservedState.Instance(inst.Index)
+	if s == nil || rev == "" || s.RunningRevision != rev {
+		return false
+	}
+	l := readCrashLadder(input, s, inst.TotalPods(), instancePods)
+	return l != nil && !l.held && !l.open && crashRebuildWarranted(input, plan, s, inst.TotalPods(), instancePods)
 }
 
 // RestartOpensUnavailability reports whether a restart selection for
