@@ -69,10 +69,12 @@ func (r *Reconciler) executePlannedAllocation(ctx context.Context, source *v1bet
 	observations := r.observeSplitMembers(ctx, accepted, eligible)
 	if proposal.Mode == v1beta1.PlacementModeAll {
 		for name, observed := range observations {
+			// The standing read still describes an unreadable planned home. It keeps
+			// the plan it last acknowledged; only unverified ready capacity is withheld.
 			if home, exists := standing.get(name); exists && !observed.Candidate.ObservationKnown {
 				candidate := *home.candidate.DeepCopy()
-				candidate.Allocation = observed.Candidate.Allocation
-				candidate.ObservationKnown, candidate.AppliedPlanID, candidate.ReadyReplicas = false, "", 0
+				candidate.Allocation, candidate.AppliedPlanID = observed.Candidate.Allocation, observed.Candidate.AppliedPlanID
+				candidate.ObservationKnown, candidate.ReadyReplicas = false, 0
 				observed.Candidate = candidate
 				observations[name] = observed
 			}

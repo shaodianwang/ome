@@ -244,3 +244,52 @@ func TestAllZeroFloorConvergence(t *testing.T) {
 		})
 	}
 }
+
+// TestAllZeroFloorUnreadableObservationKeepsAppliedPlan retains idle zero-floor
+// homes while one home's inventory read fails on alternating passes. The idle
+// plan never changes and the home's acknowledged plan survives every pass; an
+// unreadable pass reports only an unknown observation.
+func TestAllZeroFloorUnreadableObservationKeepsAppliedPlan(t *testing.T) {
+	f := allZeroFixture(t, false)
+	f.reconcile(t)
+	for name := range f.workers {
+		seedSingleAdmission(t, f, name, declaredComponents(f.source)...)
+		acknowledgeSingleFloor(t, f, name, 0)
+	}
+	stored := f.reconcile(t)
+	if candidate := candidateOf(t, stored, "member-a"); !candidate.ObservationKnown || candidate.AppliedPlanID != stored.Status.Placement.Plan.ID {
+		t.Fatalf("idle home has not acknowledged the accepted plan: %+v", candidate)
+	}
+	readable := workloadcluster.NewNeverCachingClient(f.workers["member-a"])
+	unreadable := unreadableAllMember(f, "member-a")
+	for pass, known := range []bool{true, false, true, false, false, true} {
+		f.connections.m["member-a"] = readable
+		if !known {
+			f.connections.m["member-a"] = unreadable
+		}
+		got := f.reconcile(t)
+		if diff := cmp.Diff(stored.Status.Placement.Plan, got.Status.Placement.Plan); diff != "" {
+			t.Fatalf("pass %d changed the idle plan (-want +got):\n%s", pass, diff)
+		}
+		candidate := candidateOf(t, got, "member-a")
+		if diff := cmp.Diff(got.Status.Placement.Plan.ID, candidate.AppliedPlanID); diff != "" {
+			t.Fatalf("pass %d (readable=%t) lost the acknowledged plan (-want +got):\n%s", pass, known, diff)
+		}
+		if diff := cmp.Diff(known, candidate.ObservationKnown); diff != "" {
+			t.Fatalf("pass %d observation flag (-want +got):\n%s", pass, diff)
+		}
+		if candidate.Allocation.CurrentHome == nil || candidate.Allocation.DesiredHome == nil || candidate.Allocation.DrainRequested || candidate.ReadyReplicas != 0 {
+			t.Fatalf("pass %d changed the retained zero floor: %+v", pass, candidate)
+		}
+		wantReason := "AllocationConverged"
+		if !known {
+			wantReason = "AwaitingMemberConvergence"
+		}
+		if diff := cmp.Diff(wantReason, got.Status.GetCondition(v1beta1.PlacementConverged).Reason); diff != "" {
+			t.Fatalf("pass %d convergence (-want +got):\n%s", pass, diff)
+		}
+		if diff := cmp.Diff(v1beta1.PlacementPhasePlaced, got.Status.Placement.Phase); diff != "" {
+			t.Fatalf("pass %d phase (-want +got):\n%s", pass, diff)
+		}
+	}
+}
