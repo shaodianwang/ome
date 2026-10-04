@@ -3089,10 +3089,17 @@ class CanaryWindowTest(unittest.TestCase):
         ctx.update(canary_hook=None, canary_step=None, trigger_ts=100.0, converged_at=None)
         return ctx
 
+    @staticmethod
+    def _new(ctx, f, hdr):
+        # The record reads the controller's requeue from its ConfigMap; the
+        # unit test has no cluster, so the lifecycle block reads as absent.
+        with mock.patch.object(run, "_controller_lifecycle_config", lambda: ({}, None)):
+            return run._canary_window_new(ctx, f, hdr, {"engine"})
+
     def test_record_counts_the_units_slots_and_the_tick_opens_samples_and_closes(self):
         ctx = self._ctx(self.HDR)
         f = ctx["fault"]
-        win = run._canary_window_new(ctx, f, self.HDR, {"engine"})
+        win = self._new(ctx, f, self.HDR)
         self.assertEqual({"engine": 2, "router": 0}, win["expected_created"], "the ladder replaces the unit's slots once")
         self.assertEqual("canary", win["op"])
         closed, ticks = [], []
@@ -3137,7 +3144,7 @@ class CanaryWindowTest(unittest.TestCase):
         hdr.pop("lift")
         ctx = self._ctx(hdr)
         f = ctx["fault"]
-        win = run._canary_window_new(ctx, f, hdr, {"engine"})
+        win = self._new(ctx, f, hdr)
         f.update(fired=True, fired_ts=102.0)
         closed = []
         with mock.patch.object(run, "_window_tick", lambda *a: None), mock.patch.object(run, "_case_ir_names", lambda cid: []), \
@@ -3150,7 +3157,7 @@ class CanaryWindowTest(unittest.TestCase):
             once = dict(hdr, form="once")
             ctx2, f2 = self._ctx(once), None
             f2 = ctx2["fault"]
-            win2 = run._canary_window_new(ctx2, f2, once, {"engine"})
+            win2 = self._new(ctx2, f2, once)
             f2.update(fired=True, fired_ts=102.0)
             run._canary_window_tick(ctx2, f2, win2, 1, 103.0)
             self.assertTrue(run._canary_window_holds(f2, win2))
@@ -3161,7 +3168,7 @@ class CanaryWindowTest(unittest.TestCase):
         ctx = self._ctx(self.HDR)
         ctx["converged_at"] = 60.0
         f = ctx["fault"]
-        win = run._canary_window_new(ctx, f, self.HDR, {"engine"})
+        win = self._new(ctx, f, self.HDR)
         f.update(fired=True, fired_ts=110.0)
         win.update(fault_ts=110.0, step_at_open=1, step_samples=[1, 2, 3], window_end_ts=140.0, lifted_at=30.0)
         seen = {}
