@@ -10,7 +10,10 @@ import (
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -50,7 +53,7 @@ const kueueRolloutTimeout = 3 * time.Minute
 
 // InstallKueue brings Kueue up inside a KIND cluster: it loads the controller
 // image the node cannot pull, applies the rendered install manifest, and waits
-// until the deployment is Available.
+// until the deployment is Available and its webhook answers.
 //
 // Kueue has to RUN, not merely be registered — pods are gated by its mutating
 // webhook, so its CRDs alone prove nothing about admission. That is the whole
@@ -123,10 +126,10 @@ func kueueImage(root string) (string, error) {
 // that environment variable when a mirror is required.
 const defaultKueueImageRepo = "registry.k8s.io/kueue/kueue"
 
-// waitForKueueReady blocks until the controller reports an available replica.
-// Until it does, the webhook endpoint is not serving and any pod created in a
-// managed namespace is admitted ungated — which would make an admission spec
-// pass for entirely the wrong reason.
+// waitForKueueReady blocks until the controller reports an available replica
+// and its webhook answers. Until it does, the webhook endpoint is not serving
+// and any pod created in a managed namespace is admitted ungated — which would
+// make an admission spec pass for entirely the wrong reason.
 func waitForKueueReady(ctx context.Context, cfg *rest.Config, clusterName string) error {
 	c, err := client.New(cfg, client.Options{Scheme: kindutil.BaseScheme()})
 	if err != nil {
@@ -137,11 +140,40 @@ func waitForKueueReady(ctx context.Context, cfg *rest.Config, clusterName string
 	for {
 		dep := &appsv1.Deployment{}
 		if err := c.Get(ctx, key, dep); err == nil && dep.Status.AvailableReplicas > 0 {
-			return nil
+			return waitForKueueWebhook(ctx, c, clusterName)
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("InstallKueue: %s not Available on %s within %s",
 				key.Name, clusterName, kueueRolloutTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// waitForKueueWebhook blocks until Kueue's webhook answers. An available
+// replica is not enough: the webhook server binds its port only once its
+// serving certificate is in place, which trails the readiness probe, and an
+// object created in that gap fails with the API server unable to call the
+// webhook. The probe is a server dry-run create of a ResourceFlavor, a
+// cluster-scoped kind the narrowed namespace selector never skips, so it
+// persists nothing and exercises the same path a spec's first Kueue object
+// takes.
+func waitForKueueWebhook(ctx context.Context, c client.Client, clusterName string) error {
+	deadline := time.Now().Add(kueueRolloutTimeout)
+	for {
+		probe := &unstructured.Unstructured{}
+		probe.SetGroupVersionKind(schema.GroupVersionKind{Group: "kueue.x-k8s.io", Version: "v1beta2", Kind: "ResourceFlavor"})
+		probe.SetName("kindfix-webhook-probe")
+		err := c.Create(ctx, probe, client.DryRunAll)
+		if err == nil || apierrors.IsAlreadyExists(err) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("InstallKueue: webhook on %s not answering within %s: %w", clusterName, kueueRolloutTimeout, err)
 		}
 		select {
 		case <-ctx.Done():
