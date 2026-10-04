@@ -174,6 +174,12 @@ type UpdateSelection struct {
 	// SurgeThenDrain no source leaves rotation while they exceed the
 	// unavailability budget.
 	RolledNotServing []int32
+	// RetryBlockDenied lists, in plan order, the Instances the target's
+	// RetryBlock denied a fresh start at the trigger stage: a Held
+	// ladder, an attempt already in flight, or a Backoff not yet due.
+	// They never reach the pass's admission, so the block is the denial
+	// the pass reports when nothing else progressed.
+	RetryBlockDenied []int32
 }
 
 // PlannedAction is one pass-level action selected for this reconcile.
@@ -676,6 +682,9 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 			continue
 		}
 		if !decision.Trigger {
+			if decision.RetryBlockDenied {
+				selection.RetryBlockDenied = append(selection.RetryBlockDenied, inst.Index)
+			}
 			// Denied by a not-yet-due Backoff RetryBlock — keep the
 			// earliest re-evaluation time across Instances.
 			if decision.RetryAfter > 0 && (retryBlockWait == 0 || decision.RetryAfter < retryBlockWait) {
@@ -762,7 +771,8 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		"unavailBudget", selection.UnavailBudget,
 		"priorSurgeInFlight", selection.PriorSurgeInFlight,
 		"priorUnavailInFlight", selection.PriorUnavailInFlight,
-		"rolledNotServing", selection.RolledNotServing)
+		"rolledNotServing", selection.RolledNotServing,
+		"retryBlockDenied", selection.RetryBlockDenied)
 	return selection, retryBlockWait, nil
 }
 

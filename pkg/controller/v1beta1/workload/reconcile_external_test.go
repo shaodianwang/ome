@@ -6355,9 +6355,11 @@ func (h *recoveryHarness) lastHold() *workloadtypes.RolloutHold {
 // is off the running revision, which keeps serving at N minus the
 // budget; under RecreatePod the one start admitted while the promoted
 // Instance still served finishes and nothing further starts. The
-// Component's status names the Budget hold with the Instances behind it
-// and the revision, no pod of that revision is created once the hold is
-// reported, and a corrected revision then lands on every Instance.
+// Component's status names the hold with the Instances behind it and the
+// revision: the Budget hold, or the ladder's once the revision's retry
+// ladder denies the starts before the budget is asked. No pod of that
+// revision is created once the hold is reported, and a corrected
+// revision then lands on every Instance.
 //
 // Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Budget]/before, instance/Update/Surge/gate.deny[Budget]/before
 func TestCrashAfterPromotion_RollHoldsAtTheBudget(t *testing.T) {
@@ -6416,9 +6418,9 @@ func TestCrashAfterPromotion_RollHoldsAtTheBudget(t *testing.T) {
 				t.Fatalf("the promoted revision never crashed; the story did not run")
 			}
 			hold := h.lastHold()
-			if hold == nil || hold.Gate != workloadtypes.RolloutHoldGateBudget || hold.Target != revCrash.Name {
+			if hold == nil || (hold.Gate != workloadtypes.RolloutHoldGateBudget && hold.Gate != workloadtypes.RolloutHoldGateRetryBlock) || hold.Target != revCrash.Name {
 				h.dumpState("hold")
-				t.Fatalf("the Component must report a Budget hold on %s, got %+v", revCrash.Name, hold)
+				t.Fatalf("the Component must report a Budget or RetryBlock hold on %s, got %+v", revCrash.Name, hold)
 			}
 			if !strings.Contains(hold.Reason, "not serving") || !strings.Contains(hold.Reason, revCrash.Name) {
 				t.Fatalf("the hold must name the Instances on the crashing revision that are not serving, got %q", hold.Reason)
@@ -9152,18 +9154,19 @@ func TestCrashAfterPromotion_GangPushStopsAtItsBudgetAndSaysWhy(t *testing.T) {
 				t.Fatalf("no row on the crashing revision %s reads Failed with an InstanceFailed warning (failed warnings=%v, held warnings=%v)", revCrash.Name, h.failedWarnings, h.heldWarnings)
 			}
 			// A repair in flight owns the passes it runs in; the roll reports
-			// its hold once the pass reaches the update pass again, unless
-			// the held ladder denies every start before the budget is asked,
-			// in which case the Held block itself is the status that says why.
+			// its hold once the pass reaches the update pass again: the
+			// budget's, or the ladder's when the ladder denies the starts
+			// before the budget is asked. A held ladder that leaves the pass
+			// nothing to run is itself the status that says why.
 			h.run(20, func() bool { return h.lastHold() != nil || h.heldOn(revCrash.Name) })
 			if got := h.restartsRecorded(); got != restartsAtHeld {
 				h.dumpState("repair after the hold")
 				t.Fatalf("repairs opened after the ladder held: %d at the hold, %d after", restartsAtHeld, got)
 			}
 			hold := h.lastHold()
-			if hold != nil && (hold.Target != revCrash.Name || (hold.Gate != workloadtypes.RolloutHoldGateBudget && hold.Gate != workloadtypes.RolloutHoldGateHeld)) {
+			if hold != nil && (hold.Target != revCrash.Name || (hold.Gate != workloadtypes.RolloutHoldGateBudget && hold.Gate != workloadtypes.RolloutHoldGateRetryBlock && hold.Gate != workloadtypes.RolloutHoldGateHeld)) {
 				h.dumpState("hold")
-				t.Fatalf("the Component must report a Budget or Held hold on %s, got %+v", revCrash.Name, hold)
+				t.Fatalf("the Component must report a Budget, RetryBlock or Held hold on %s, got %+v", revCrash.Name, hold)
 			}
 			if hold == nil && !h.heldOn(revCrash.Name) {
 				h.dumpState("hold")

@@ -101,6 +101,12 @@ func executeUpdatePass(ctx context.Context, deps types.Deps, input types.Reconci
 			anyUpdating = true
 		}
 	}
+	// A start the target's RetryBlock denied at the trigger stage never
+	// reached the admission above; the block is the denial it stands on,
+	// superseded by progress on the same terms as any other.
+	if firstDenial == nil && len(selection.RetryBlockDenied) > 0 {
+		firstDenial = admission.retryBlockHold(input)
+	}
 	if anyUpdateRan && len(selection.RolledNotServing) == 0 {
 		// Forward progress this pass: whatever was gated for a DIFFERENT
 		// Instance is superseded — the Component is not stuck, it will
@@ -258,6 +264,36 @@ func (a *updateAdmission) drainWithheld() *types.RolloutHold {
 	return &types.RolloutHold{
 		Gate:   types.RolloutHoldGateBudget,
 		Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted%s; no source leaves rotation", a.selection.UnavailBudget, a.rolledNotServingClause()),
+		Target: a.target.Name,
+	}
+}
+
+// retryBlockHold is the hold the target's RetryBlock stands for when it
+// denied a fresh start at the trigger stage: the Held gate for a held
+// ladder, the RetryBlock gate for an attempt already in flight (the
+// ladder admits one at a time) or a Backoff not yet due. Nil when the
+// target carries no block in a denying state. The wording is the status
+// layer's own reading of the block, with the Instances the roll waits
+// on named, so the operator reads one story whichever layer reports it.
+func (a *updateAdmission) retryBlockHold(input types.ReconcileInput) *types.RolloutHold {
+	b := types.FindRetryBlock(input.ObservedState.RetryBlocks, a.target.Name)
+	if b == nil {
+		return nil
+	}
+	gate, state := types.RolloutHoldGateRetryBlock, ""
+	switch b.State {
+	case types.RetryBlockHeld:
+		gate, state = types.RolloutHoldGateHeld, "held"
+	case types.RetryBlockRetryInProgress:
+		state = "retrying one attempt at a time"
+	case types.RetryBlockBackoff:
+		state = "in backoff"
+	default:
+		return nil
+	}
+	return &types.RolloutHold{
+		Gate:   gate,
+		Reason: fmt.Sprintf("update to %s %s after %d failed attempt(s): %s%s", b.TargetRevision, state, b.AttemptsStarted, b.Reason, a.rolledNotServingClause()),
 		Target: a.target.Name,
 	}
 }

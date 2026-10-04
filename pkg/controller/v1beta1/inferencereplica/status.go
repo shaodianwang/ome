@@ -162,8 +162,9 @@ const (
 // When the Update pass did not run (holdObserved is false — nothing needed
 // updating this pass, or Plan selected no target), the RetryBlock/Held
 // state persisted in status is the only signal available, since a
-// RetryBlock-denied Instance never reaches the Update pass to be gated
-// there — see computeRetryBlockRolloutHold.
+// RetryBlock-denied Instance is never selected for the Update pass and
+// the pass reports the block only when it runs for other Instances — see
+// computeRetryBlockRolloutHold.
 //
 // The returned duration is how long until the earliest in-rotation pod still
 // inside the spec.minReadySeconds window becomes Available (0 when none is

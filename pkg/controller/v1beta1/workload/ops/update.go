@@ -523,6 +523,10 @@ type UpdateTriggerDecision struct {
 	// Backoff RetryBlock for the current target; re-evaluate then. 0
 	// otherwise (including Held, which has no time bound).
 	RetryAfter time.Duration
+	// RetryBlockDenied: fresh re-triggering was denied by the current
+	// target's RetryBlock — Held, an attempt already in flight, or a
+	// Backoff not yet due (RetryAfter carries its wake-up).
+	RetryBlockDenied bool
 	// AdoptRevision: RunningRevision is empty but the Instance's
 	// runtime-ready pods already match the target — stamp
 	// Ready-on-target (BackfillRunningRevision) so future evaluations
@@ -588,7 +592,7 @@ func evaluateUpdateTriggerFast(input workload.ReconcileInput, inst workload.Inst
 		denied, retryAfter := evaluateRetryBlockGate(b, input.Now(),
 			anyInFlightUpdateAt(input.ObservedState.InstanceStatuses, target.Name))
 		if denied {
-			return UpdateTriggerDecision{RetryAfter: retryAfter}, false
+			return UpdateTriggerDecision{RetryAfter: retryAfter, RetryBlockDenied: true}, false
 		}
 	}
 
