@@ -1025,7 +1025,12 @@ the settled service before the push, the status reacts to it, the push
 follows and the starting revision is re-applied at
 `during=settling|rotating|draining|last`; the one-shot forms
 (`lift=after-settle`, readiness `form=recover`) take the cause away once
-the rollback has fired. The victim must end on the starting revision too:
+the rollback has fired. The key kept away reaches `settling` and
+`rotating` only: the roll takes the broken Instance first and its
+replacement cannot start without the key, so no pod of the starting
+revision ever drains and neither the draining nor the last hook arrives
+(the generated family takes those two moments at `rotating` under their
+own strategy and group). The victim must end on the starting revision too:
 Ready and serving (rebuilt by a repair or the roll back, or healed in
 place; the repairs that named it are reported, not judged), unless its
 cause outlives a rebuild (the key kept away, the readiness switch kept),

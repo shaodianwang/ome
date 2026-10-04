@@ -829,6 +829,15 @@ def gang_atomicity_checks(ctx, comps, verdict, notes, checks):
     return verdict
 
 
+def _surge_order_open(rb):
+    """Whether the surge-before-drain rule still counts drains: a rollback
+    re-targets the roll at the starting revision, so every pod created after
+    it fires is on that revision and no further surge can be credited; a
+    drain after it (the repair of a pod that never served) is not the roll's
+    ordering."""
+    return not (rb and rb.get("fired"))
+
+
 def surge_before_drain_checks(ctx, comps, verdict, notes, checks):
     """Surge-before-drain ordering for the _read_one handlers: a source pod must
     not begin draining before its Ready surge replacement (drained-old must not
@@ -4154,6 +4163,18 @@ def _held_break_arm(ctx, kind, bumped, victim):
     return _bump_rev(ctx, bumped, env=env, image_comps={victim}), f"ConfigMap key {cm_name}/{missing}"
 
 
+def _held_break_bite(ctx, hb, victim, at, what):
+    """Record the moment the pushed revision's break showed on the victim
+    member and lower the capacity floor by that one Instance: a pod that bit
+    after Ready displaced a healthy one, and the dip until its replacement
+    is Ready is the break's cost, as a running-revision break's victims are
+    costed."""
+    hb["bite_at"], hb["bite"] = at, what
+    allowance = ctx.setdefault("floor_allowance", {})
+    allowance[victim] = allowance.get(victim, 0) + 1
+    print(f"    bite: {what} ({at:.0f}s)")
+
+
 def _held_break_symptom(kind, pod_state, victim, old_hashes, ready_seen):
     """What the kubelet shows on the pushed revision's victim pods: the
     first pod whose main container waits for the kind's reason, has
@@ -4207,7 +4228,7 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
                        [f"victimcomp={victim} is not a member the push bumps ({sorted(bumped)})"], [])
     ctx["modes"] = update_modes(ctx["info"], configured, "env" if kind in ("crash-load", "configkey") else None)
     ctx["track_comps"] = sorted(bumped)
-    rb = _rollback_new(hdr)
+    rb = ctx["rb"] = _rollback_new(hdr)
     if not _rollback_snapshot(rb, _isvc_spec(case_id), bumped):
         return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [rb["error"]], [f"  ✗ {rb['error']}"])
     old = set(ctx["old_hashes"])
@@ -4253,16 +4274,14 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
             if once:
                 bitten = bool(f.get("restart_seen")) if crash else bool(f.get("fired") and _oneshot_new_bitten(f, ctx))
                 if bitten:
-                    hb["bite_at"] = now - push_ts
-                    hb["bite"] = (f"{f.get('crash_pod')} restarted after the one kill" if crash
-                                  else f"{f.get('crash_pod')} shows {f.get('bite')}")
+                    _held_break_bite(ctx, hb, victim, now - push_ts,
+                                     f"{f.get('crash_pod')} restarted after the one kill" if crash
+                                     else f"{f.get('crash_pod')} shows {f.get('bite')}")
             else:
                 pod, what = _held_break_symptom(kind, ctx["pod_state"], victim, old, ready_seen)
                 if pod:
-                    hb["bite_at"], hb["bite"] = now - push_ts, f"{pod} {what}"
-            if hb["bite_at"] is not None:
-                print(f"    bite: {hb['bite']} ({hb['bite_at']:.0f}s)")
-            else:
+                    _held_break_bite(ctx, hb, victim, now - push_ts, f"{pod} {what}")
+            if hb["bite_at"] is None:
                 continue
         if hb["why_at"] is None:
             status, said = _crash_new_why(_ir_snapshot(case_id), _isvc_events_since(case_id, push_ts), victim)
@@ -4779,6 +4798,14 @@ def _edit_break_new():
             "rebuilds_policy": ""}
 
 
+def _uids_before_fix(pod_state, broken, seen):
+    """The broken revision's pods that predate the fix push: every one seen
+    while the roll parked and every one alive at the push, the repairs the
+    edit's own policy opened between the edit and the push included. Only a
+    pod outside this set retried the superseded revision."""
+    return set(seen) | {p["uid"] for p in pod_state.values() if p and p.get("uid") and p.get("hash") in broken}
+
+
 def _edit_kept_watch(ctx, bumped, victim, medit, hb, budget, fix=None):
     """A kept break beside the edit: watch the roll park on the broken pod
     (the bite, then the status saying why), land the edit at its moment,
@@ -4824,8 +4851,7 @@ def _edit_kept_watch(ctx, bumped, victim, medit, hb, budget, fix=None):
             pod, what = _edit_break_symptom(kind, ctx["pod_state"], victim, old, ready_seen, first_new_at, now)
             if not pod:
                 continue
-            hb["bite_at"], hb["bite"] = now - push_ts, f"{pod} {what}"
-            print(f"    bite: {hb['bite']} ({hb['bite_at']:.0f}s)")
+            _held_break_bite(ctx, hb, victim, now - push_ts, f"{pod} {what}")
         if hb["why_at"] is None:
             status, said = _crash_new_why(_ir_snapshot(case_id), _isvc_events_since(case_id, push_ts), victim)
             status = status or _broken_revision_hold(case_id, bumped, old, push_ts)
@@ -4852,7 +4878,7 @@ def _edit_kept_watch(ctx, bumped, victim, medit, hb, budget, fix=None):
         hb["fix"] = ctx.get("trigger_error", "fix bump failed")
         return "TRIGGER_FAIL"
     hb["fix_at"], hb["fix"] = ctx["trigger_ts"] - push_ts, what
-    pre_fix_uids = set(new_uids)
+    pre_fix_uids = _uids_before_fix(ctx["pod_state"], broken, new_uids)
     fix_budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in bumped))
     print(f"  Phase 4: fix push — {what} on {sorted(bumped)}; watching it land under the edited spec (≤{fix_budget}s)")
     late = []
@@ -4902,10 +4928,9 @@ def _edit_once_watch(ctx, bumped, victim, medit, hb, budget):
             bitten = bool(f.get("restart_seen")) if crash else bool(f.get("fired") and _oneshot_new_bitten(f, ctx))
             if bitten:
                 out["bitten_at"], f["bite_ts"] = now - push_ts, now
-                hb["bite_at"] = out["bitten_at"]
-                hb["bite"] = (f"{f.get('crash_pod')} restarted after the one kill" if crash
-                              else f"{f.get('crash_pod')} shows {f.get('bite')}")
-                print(f"    bite: {hb['bite']} ({out['bitten_at']:.0f}s)")
+                _held_break_bite(ctx, hb, victim, out["bitten_at"],
+                                 f"{f.get('crash_pod')} restarted after the one kill" if crash
+                                 else f"{f.get('crash_pod')} shows {f.get('bite')}")
         if medit is not None:
             if medit["hook"] == "rotating":
                 _midroll_tick(medit, case_id, bumped, ctx["pod_state"], old, now - push_ts)
@@ -5507,6 +5532,12 @@ CORDON_LABEL = "perm.test/cordoned"
 # selector (charts/ome-resources/templates/ome-controller/deployment.yaml).
 CTRL_NS = os.environ.get("OME_TEST_CTRL_NS", "ome")
 CTRL_SELECTOR = os.environ.get("OME_TEST_CTRL_SELECTOR", "control-plane=ome-controller-manager")
+# The manager's leader-election Lease (the chart's lock, in the manager's
+# namespace) and the duration assumed when the Lease cannot be read: a
+# lease no shutdown released outlives its holder by that long, and the
+# rows move only under a manager that holds it.
+CTRL_LEASE = os.environ.get("OME_TEST_CTRL_LEASE", "ome-controller-manager-leader-lock")
+CTRL_LEASE_S = int(float(os.environ.get("OME_TEST_CTRL_LEASE_S", "60")))
 # The controller's ConfigMap and the key of its lifecycle block, where the
 # force-delete policy a node case is read against is declared.
 CTRL_CONFIGMAP = os.environ.get("OME_TEST_CTRL_CONFIGMAP", "inferenceservice-config")
@@ -6728,6 +6759,7 @@ def _once_observe(case_id, f, pod_state, old_hashes, expect_new, N, configured, 
         "bitten": (bool(f.get("restart_seen")) or restarts > int(f.get("crash_restarts") or 0)
                    or bool(repairs) or (rebuilt and not expect_new)),
         "restarts": restarts, "rebuilt": rebuilt, "final": final,
+        "present": bool(pods),
         "serving": bool(pods) and all(p.get("ready") and p.get("serving") for _n, p in pods),
         "on_revision": on_revision, "expect_new": expect_new,
         "repairs": repairs,
@@ -6745,7 +6777,8 @@ def _once_checks(f, out, verdict, notes, checks):
     policy promises one: none under a push of the running revision (the roll
     owns the Instance) or under restart policy None; under
     RecreateInstanceOnPodRestart one rebuild, required for a settled pod that
-    restarted after Ready, allowed and reported otherwise, never two."""
+    restarted after Ready, allowed and reported otherwise, never two. A
+    victim whose index a rollback withdrew is reported, not judged."""
     comp, inst, form = f["crash_comp"], f["crash_inst"], f.get("form")
     side, op, rp = out["side"], out["op"], out["rp"]
     final = str(out.get("final") or inst)
@@ -6774,7 +6807,12 @@ def _once_checks(f, out, verdict, notes, checks):
         checks.append(f"  ✗ {label}: {line}")
 
     revision = "new" if out["expect_new"] else "running"
-    if out["serving"] and out["on_revision"]:
+    if op == "rollback" and not out.get("present", True):
+        # The rollback withdrew the index the kill landed on; the fleet it
+        # left behind is the rollback's own checks to judge.
+        checks.append(f"  ⓘ {label}: {who} was withdrawn by the rollback (no pod stands at its index), "
+                      f"so its end state is not judged")
+    elif out["serving"] and out["on_revision"]:
         checks.append(f"  ✓ {label}: {who} is Ready and serving on the {revision} revision")
     elif not out["serving"]:
         fail(f"{who} not Ready and serving at the end", f"{who} did not end Ready and serving (a crash that heals by itself must leave the Instance serving)")
@@ -9215,6 +9253,64 @@ def _ctrl_pods_state():
     return out
 
 
+def _ctrl_lease():
+    """The manager's leader-election Lease as the apiserver holds it (see
+    _lease_facts); None when it cannot be read."""
+    r = kubectl("-n", CTRL_NS, "get", "lease", CTRL_LEASE, "-o", "json")
+    if r.returncode != 0:
+        return None
+    try:
+        return _lease_facts(json.loads(r.stdout).get("spec") or {})
+    except Exception:
+        return None
+
+
+def _lease_facts(spec):
+    """{pod, renewed, duration} of a Lease spec: the holder's pod name (the
+    identity is the pod name and a random suffix), the epoch of its last
+    renewal and the lease duration in seconds."""
+    holder = str(spec.get("holderIdentity") or "")
+    return {"pod": holder.partition("_")[0], "renewed": _event_epoch(spec.get("renewTime")),
+            "duration": int(spec.get("leaseDurationSeconds") or 0)}
+
+
+def _lease_held_by_live_manager(lease, pods, now):
+    """True when the Lease names a manager pod that is Ready and renewed it
+    within the lease duration; pods is _ctrl_pods_state()'s [(name, Ready)]."""
+    if not lease or not lease["pod"] or lease["renewed"] is None:
+        return False
+    if lease["pod"] not in {n for n, ready in pods if ready}:
+        return False
+    return now - lease["renewed"] <= max(lease["duration"], 1)
+
+
+def _rows_settle_window(f, poll_s=CTRL_POLL_S):
+    """(seconds, how) the row-settle window runs after a repeating manager
+    restart: it starts once a live manager holds the Lease, waited for up to
+    twice the lease duration (a lease no shutdown released outlives its
+    holder by one), and runs its usual length; with the Lease unreadable, or
+    not held by a live manager in time, the usual window is extended by the
+    lease duration instead. The usual window, silently, for any other fault."""
+    if not f or f.get("kind") != "ctrlrestart" or not f.get("fired") or f.get("ctrl_gated"):
+        return ROWS_SETTLE_S, ""
+    t0 = time.time()
+    lease = _ctrl_lease()
+    if lease is None:
+        return ROWS_SETTLE_S + CTRL_LEASE_S, (f"the manager's Lease {CTRL_LEASE} could not be read; the row-settle "
+                                              f"window is extended by {CTRL_LEASE_S}s")
+    duration = lease["duration"] or CTRL_LEASE_S
+    while True:
+        if _lease_held_by_live_manager(lease, _ctrl_pods_state(), time.time()):
+            return ROWS_SETTLE_S, (f"a live manager ({lease['pod']}) holds the Lease {time.time() - t0:.0f}s after "
+                                   f"the last restart; the row-settle window starts now")
+        if time.time() - t0 >= 2 * duration:
+            return ROWS_SETTLE_S + duration, (f"no live manager held the Lease within {2 * duration}s of the last "
+                                              f"restart (holder {lease['pod'] or '(none)'}); the row-settle window "
+                                              f"is extended by {duration}s")
+        time.sleep(poll_s)
+        lease = _ctrl_lease() or lease
+
+
 def _ctrl_back(f, now):
     """True once the manager pods are Ready again under names other than
     the ones the last restart deleted; polled every CTRL_POLL_S."""
@@ -9436,11 +9532,17 @@ def _repeat_checks(f, pods_per_inst, bumped, op_pods, window_start, verdict, not
     return verdict
 
 
-def _repeat_end_checks(case_id, N, configured, verdict, notes, checks):
+def _repeat_end_checks(case_id, N, configured, verdict, notes, checks, ctrl=None):
     """The end state after the lift: every row Ready with no operation open,
-    and no rollout hold left on any Component."""
-    settled, why = _wait_rows_settled(case_id, N, configured, ROWS_SETTLE_S)
-    verdict = _rows_settled_checks(settled, why, verdict, notes, checks)
+    and no rollout hold left on any Component. ctrl is the fault record;
+    after manager restarts the settle window waits for a live manager to
+    hold the Lease (_rows_settle_window)."""
+    settle_s, how = _rows_settle_window(ctrl)
+    if how:
+        print(f"    {how}")
+        checks.append(f"  ⓘ ctrlrestart: {how}")
+    settled, why = _wait_rows_settled(case_id, N, configured, settle_s)
+    verdict = _rows_settled_checks(settled, why, verdict, notes, checks, window_s=settle_s)
     holds = _rollout_holds(case_id, configured)
     if holds:
         verdict = "FAIL"
@@ -11171,7 +11273,7 @@ def _idle_ctrl_loop(ctx, f, hdr):
         else:
             checks.append("  ✓ ctrlrestart: no repair opened on the idle service across the manager's restart")
     verdict = _repeat_checks(f, ppi, set(), 0, ctx["trigger_ts"], verdict, notes, checks)
-    verdict = _repeat_end_checks(ctx["case_id"], N, configured, verdict, notes, checks)
+    verdict = _repeat_end_checks(ctx["case_id"], N, configured, verdict, notes, checks, ctrl=f)
     return ("HELD" if verdict != "FAIL" else "MOVED"), verdict, notes, checks
 
 
@@ -14182,6 +14284,7 @@ def _op_launch(ctx, hdr, op, then):
           "mv": None, "dstate": {"last_poll": 0.0, "gone": False},
           "mcomp": "engine" if "engine" in configured else sorted(configured)[0], "error": None}
     N0, target, mcomp, rb, mv = st["N0"], st["target"], st["mcomp"], st["rb"], None
+    ctx["rb"] = rb   # _apply_event closes the surge-before-drain rule once it fires
     if op == "scale":
         acting = {c for c in configured if target[c] != N[c]}
     elif op in ("runtime", "delete"):
@@ -14725,7 +14828,7 @@ def _hook_op(case_id, yaml_file, desc, hdr):
         verdict = _repeat_checks(f, ppi, acting, _hook_op_pods(st, ppi), ctx["trigger_ts"], verdict, notes, checks)
     if completed and op != "delete":
         want = {c: (target[c] if op == "scale" else N0[c]) for c in COMPS}
-        verdict = _repeat_end_checks(case_id, want, configured, verdict, notes, checks)
+        verdict = _repeat_end_checks(case_id, want, configured, verdict, notes, checks, ctrl=f)
     if op == "delete" and completed and kind == "ctrlrestart" and f.get("fired") and not f.get("ctrl_gated"):
         # The re-apply is admitted by the restarted manager's webhook: wait for it to answer.
         if not _wait_ctrl_ready(CTRL_READY_S) or not _wait_webhook_admits_apply(yaml_file, CTRL_READY_S):
@@ -16582,7 +16685,8 @@ def _apply_event(ctx, ev):
         od = ctx.setdefault("old_drained", defaultdict(set))
         if is_new and ready:
             nr[comp].add(name)
-        if (not is_new) and rev and (ev.get("type") == "DELETED" or deletion is not None):
+        if (not is_new) and rev and (ev.get("type") == "DELETED" or deletion is not None) \
+                and _surge_order_open(ctx.get("rb")):
             od[comp].add(name)
         mu_pods = resolve_max_unavailable(ctx["info"].get("max_unavail", {}).get(comp, 0),
                                           ctx["N"].get(comp, 0)) * ctx["pods_per_inst"].get(comp, 1)
@@ -18123,13 +18227,13 @@ def _wait_rows_settled(case_id, N, configured, budget_s, fresh_indexes=False):
         time.sleep(2.0)
 
 
-def _rows_settled_checks(settled, why, verdict, notes, checks):
+def _rows_settled_checks(settled, why, verdict, notes, checks, window_s=ROWS_SETTLE_S):
     """No Instance is left mid-operation once the pods have converged."""
     if settled:
         checks.append("  ✓ every Instance row settled after the roll: Ready, no operation open")
         return verdict
     notes.append(f"an Instance was left mid-operation after the roll ({why})")
-    checks.append(f"  ✗ an Instance row did not settle within {ROWS_SETTLE_S}s after the roll ({why}) — left mid-operation")
+    checks.append(f"  ✗ an Instance row did not settle within {window_s}s after the roll ({why}) — left mid-operation")
     return "FAIL"
 
 
@@ -19645,7 +19749,7 @@ def _migrate(case_id, yaml_file, desc, hdr):
             if _fault_repeats(f):
                 verdict = _repeat_checks(f, ctx["pods_per_inst"], {mcomp}, ctx["pods_per_inst"].get(mcomp, 1),
                                          ctx["trigger_ts"], verdict, notes, checks)
-                verdict = _repeat_end_checks(case_id, N, sorted(ctx["configured"]), verdict, notes, checks)
+                verdict = _repeat_end_checks(case_id, N, sorted(ctx["configured"]), verdict, notes, checks, ctrl=f)
         # A migration surges a replacement before draining the source, so capacity
         # must never drop below the floor, gangs must stay whole, and no two gangs
         # may collapse onto one index (the fleet-wipe shape at migration scale).
@@ -20235,6 +20339,25 @@ def _stuck_move(case_id, yaml_file, desc, hdr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
+def _scale_premise_missed(pre_pods, old_hashes, scaled, bumped, target, N):
+    """Why a scale-down of a pushed member cannot be judged: its verdict keeps
+    a survivor on the running revision, so a fleet whose every Instance is
+    already on the pushed revision at the scale leaves it nothing to keep.
+    pre_pods is {component: {index: [(uid, hash)]}}; "" when the premise
+    holds."""
+    for c in sorted(set(scaled) & set(bumped)):
+        if target.get(c, N[c]) >= N[c]:
+            continue
+        by_index = pre_pods.get(c) or {}
+        if any(pods and all(h in old_hashes for _u, h in pods) for pods in by_index.values()):
+            continue
+        where = ", ".join(f"{idx}:{'/'.join(sorted({h or '?' for _u, h in pods}))}"
+                          for idx, pods in sorted(by_index.items(), key=lambda kv: _index_key(kv[0])))
+        return (f"{c}: every Instance was already on the pushed revision at the scale ({where}), so the "
+                f"scale-down has no running-revision survivor to keep")
+    return ""
+
+
 def _stuck_scale(case_id, yaml_file, desc, hdr):
     """A scale lands on a Component stuck on a broken revision (stuck=failed:
     the first attempt has failed; stuck=held: the retry ladder is spent),
@@ -20300,6 +20423,12 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     # The rows at the controller's first pass after the scale, per scaled
     # Component: (rows, IR generation observed, seconds after the patch).
     first_pass = {c: None for c in scaled}
+    missed = _scale_premise_missed(pre_pods, ctx["old_hashes"], scaled, bumped, target, N)
+    if missed:
+        print(f"  ✗ PREMISE MISSED: {missed}")
+        notes.append(f"INFRA-FAIL: {missed}")
+        checks.append(f"  ✗ INFRA-FAIL (the case's premise): {missed}")
+        return _finish(case_id, desc, hdr, ctx, "PREMISE_MISSED", "INFRA-FAIL", notes, checks)
     print(f"  Phase 3: scale {' '.join(f'{c} {N[c]}→{target[c]}' for c in sorted(scaled))} while {stuck}"
           + (f" (the {', '.join(sorted(bumped))} push, which the scale leaves alone)" if sibling else "")
           + (f" (expected to go first: {expected_victims})" if expected_victims else ""))
@@ -21768,7 +21897,7 @@ def _kill_repeat(case_id, desc, hdr, ctx, via, policy, lift, pending, kcomp, ktg
     verdict = min_ready_checks(ctx, sorted(configured), verdict, notes, checks)
     verdict = _idle_peak_checks(ctx, verdict, notes, checks)
     if state == "RECOVERED":
-        verdict = _repeat_end_checks(case_id, N, configured, verdict, notes, checks)
+        verdict = _repeat_end_checks(case_id, N, configured, verdict, notes, checks, ctrl=rec)
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
@@ -23970,7 +24099,7 @@ def _canary(case_id, yaml_file, desc, hdr):
     if _fault_repeats(ctx.get("fault")):
         op_pods = sum(N[c] * ctx["pods_per_inst"].get(c, 1) for c in group) * (2 if expect_rollback else 1)
         verdict = _repeat_checks(ctx["fault"], ctx["pods_per_inst"], group, op_pods, ctx["trigger_ts"], verdict, notes, checks)
-        verdict = _repeat_end_checks(case_id, N, ctx["configured"], verdict, notes, checks)
+        verdict = _repeat_end_checks(case_id, N, ctx["configured"], verdict, notes, checks, ctrl=ctx.get("fault"))
     verdict = _hook_fault_fired_checks(ctx.get("fault"), phases, verdict, notes, checks)
     if _node_hook_fault(ctx.get("fault")):
         verdict = _node_hook_checks(ctx["fault"], "the canary", None, "", verdict, notes, checks)
@@ -24781,7 +24910,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
         op_pods = sum(max(0, target[c] - N[c]) * pods_per_inst.get(c, 1) for c in configured)
         verdict = _repeat_checks(fault, pods_per_inst, set(), op_pods, trigger_ts, verdict, notes, checks)
         if state == "CONVERGED":
-            verdict = _repeat_end_checks(case_id, target, configured, verdict, notes, checks)
+            verdict = _repeat_end_checks(case_id, target, configured, verdict, notes, checks, ctrl=fault)
     # A pod deleted by hand as the scale lands: a one-shot deletion's
     # replacement runs the image its revision label names, and a gang's
     # lost member is judged against the restart policy.
@@ -25200,7 +25329,7 @@ def run_case(case_id):
                 is_new = bool(rev and rev not in old_hashes)
                 if is_new and ready:
                     new_ready[comp].add(name)
-                if (not is_new) and rev and (ev_type == "DELETED" or deletion is not None):
+                if (not is_new) and rev and (ev_type == "DELETED" or deletion is not None) and _surge_order_open(rb):
                     old_drained[comp].add(name)
                 # Instances of headroom: SurgeThenDrain surges maxUnavailable=0, so
                 # drained pods must never lead ready-surge pods (per pods_per_inst).
@@ -25539,7 +25668,7 @@ def run_case(case_id):
                       if modes.get(c) != "inplace" or pods_per_inst.get(c, 1) > 1)
         verdict = _repeat_checks(fault, pods_per_inst, bumped, op_pods, trigger_ts, verdict, notes, checks)
         if state == "CONVERGED":
-            verdict = _repeat_end_checks(case_id, N, configured, verdict, notes, checks)
+            verdict = _repeat_end_checks(case_id, N, configured, verdict, notes, checks, ctrl=fault)
 
     # Check 6c: the mid-roll edit was applied at its hook and the live spec
     # carries it on every bumped member.

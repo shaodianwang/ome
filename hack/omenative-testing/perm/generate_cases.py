@@ -488,6 +488,12 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     single-pod topology: an annotation-only diff is patched in place, so no
     pod of the starting revision ever drains and the hook never arrives (a
     gang falls back to a whole-gang recreate, which drains).
+  - A rollback's draining and last hooks are not emitted over the key kept
+    away on the running revision: the roll takes the broken Instance
+    first and its replacement cannot start without the key, so no
+    pod of the starting revision ever drains and neither hook arrives; the
+    kept-key row takes those two moments at rotating instead, under their
+    own strategy and group (ROLLBACK_KEPT_KEY_HOOKS).
   - crashloop:new arms the engine's new revision (victimcomp defaults to
     engine), so its group axis exists only where a sound member rolls beside
     it (pd, pd-mn: co=rolling); InPlaceOnly is left out, since form=load's
@@ -4068,6 +4074,21 @@ def _rollback_fault_kept(fault, form, lift):
     return (fault == "configkey:missing" and lift == "never") or (fault == "readiness:old" and form == "persist")
 
 
+# A key kept away parks the roll on its victim: the roll takes the broken
+# Instance first and its replacement cannot start without the key, so no pod of the starting revision ever drains and neither the
+# draining nor the last hook arrives. Those two moments of the kept-key
+# row fire at rotating instead, under their own strategy and group.
+ROLLBACK_KEPT_KEY_HOOKS = {"draining": "rotating", "last": "rotating"}
+
+
+def _rollback_fault_hook(fault, form, lift, hook):
+    """The hook a running-revision break's rollback fires at: the moment's
+    own, or the reachable one a kept key leaves it (ROLLBACK_KEPT_KEY_HOOKS)."""
+    if fault == "configkey:missing" and lift == "never":
+        return ROLLBACK_KEPT_KEY_HOOKS.get(hook, hook)
+    return hook
+
+
 def _rollback_fault_oneshot(fault, form, lift):
     return lift == "after-settle" or (fault == "readiness:old" and form == "recover")
 
@@ -4183,6 +4204,7 @@ def _emit_rollback_faults(add):
         shape = _lift_shape(topo, w, router)
         for fault, form, lift in ROLLBACK_FAULT_ROWS:
             for hook, strat, surge, unavail, co in ROLLBACK_FAULT_MOMENTS:
+                hook = _rollback_fault_hook(fault, form, lift, hook)
                 kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, surge),
                           fault=fault, co=co, topo=topo, rollback=1, during=hook)
                 if form:
@@ -4200,7 +4222,7 @@ def _emit_rollback_faults(add):
                                      ready_timeout=(HEAL_FAILED_READY_TIMEOUT if configkey else None))
                 coord = lib.coord_for(co, comps=("engine", "decoder") if is_pd(topo) else ("engine",)) if co != "none" else None
                 add("gen-rollback", desc, kv, None, _rollback_fault_reason(fault, form, lift, hook, strat, co, topo, router, "engine"),
-                    meta, cell=("rollback-fault", fault, form, lift, hook, topo, w, router),
+                    meta, cell=("rollback-fault", fault, form, lift, hook, strat, co, topo, w, router),
                     body=functools.partial(_rollback_fault_body, topo=topo, n=n, w=w, router=router, life=life, co=co,
                                            configkey=configkey, coord=coord))
     hook, strat, surge, unavail = ROLLBACK_SIBLING_MOMENT
@@ -9383,6 +9405,12 @@ def manifest(rows):
         " pod itself and its recreate trips the UID-stability check by harness"
         " design (a missing component-scoped victim hook, see below).",
         "- `fault=podkill:migrating` needs `mode=migrate` — out of scope here.",
+        "- A rollback over the key kept away on the running revision fires at"
+        " `settling` and `rotating` only: the roll takes the broken Instance first"
+        " and its replacement cannot start without the key, so no"
+        " pod of the starting revision ever drains and neither the draining nor"
+        " the last hook arrives; the kept-key row takes those two moments at"
+        " `rotating` under their own strategy and group.",
         "- A router in front of an engine fleet is a break victim under a canary"
         " alone: elsewhere the runner admits engine and decoder pods, so the"
         " sibling rows of the engine-behind-a-router shapes outside a canary"

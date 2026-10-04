@@ -3,6 +3,7 @@ import ast
 import contextlib
 import copy
 import datetime
+import inspect
 import io
 import json
 import os
@@ -16738,7 +16739,7 @@ class KillRepeatFollowsTheVictimTest(unittest.TestCase):
                                   allowed.append(dict(allowance)) or verdict), \
                 mock.patch.object(run, "_repeat_checks", repeat_checks), \
                 mock.patch.object(run, "_isvc_events_since", lambda *a, **kw: []), \
-                mock.patch.object(run, "_repeat_end_checks", lambda case_id, N, configured, verdict, notes, checks: verdict), \
+                mock.patch.object(run, "_repeat_end_checks", lambda case_id, N, configured, verdict, notes, checks, ctrl=None: verdict), \
                 mock.patch.object(run, "_finish", lambda case_id, desc, hdr, c, state, verdict, notes, checks:
                                   finished.append((state, verdict, notes, checks)) or 0):
             run._kill_repeat("p1", "desc", {"repeat": repeat}, ctx, "preempt", "None", "after-settle", pending, "engine", "")
@@ -19198,3 +19199,373 @@ class GeneratedFaultEditFurtherRowsTest(unittest.TestCase):
                       manifest)
         self.assertNotIn("while the set stays wedged", manifest)
         self.assertIn("since a fresh pod cannot clear a missing key, is owed no re-arm", manifest)
+
+
+class SurgeOrderAfterRollbackTest(unittest.TestCase):
+    """The surge-before-drain rule under a rollback: once the starting
+    revision is re-applied no further surge can be credited, so a drain
+    after it (the repair of a pod that never served) is not the roll's
+    ordering; a source drained ahead of a Ready surge before it still is."""
+
+    def _ctx(self, rb):
+        return {"pod_state": {}, "info": {"strat": {"engine": "SurgeThenDrain"}, "max_unavail": {"engine": 0}},
+                "N": {"engine": 4}, "pods_per_inst": {"engine": 1}, "trigger_ts": 1.0, "old_hashes": {"a1"}, "rb": rb}
+
+    @staticmethod
+    def _event(kind, name, index, revision, ready=True, deleting=False):
+        obj = pod_object(name, "engine", index, revision, "img", "" if revision == "a1" else "v2",
+                         ready=ready, serving=ready)
+        if deleting:
+            obj["metadata"]["deletionTimestamp"] = "2026-01-01T00:00:00Z"
+        return {"type": kind, "object": obj}
+
+    def _settled(self, ctx):
+        for i in range(4):
+            run._apply_event(ctx, self._event("ADDED", f"e{i}", i, "a1", ready=(i != 3)))   # Instance 3 is the broken one
+
+    def test_the_rule_is_open_until_a_rollback_fires(self):
+        self.assertTrue(run._surge_order_open(None))
+        self.assertTrue(run._surge_order_open({"fired": False}))
+        self.assertFalse(run._surge_order_open({"fired": True}))
+
+    def test_a_drain_after_the_rollback_fired_is_not_the_rolls_ordering(self):
+        ctx = self._ctx({"fired": True})
+        self._settled(ctx)
+        run._apply_event(ctx, self._event("ADDED", "e4", 4, "b1", ready=False))     # the surge pod the push brought up
+        run._apply_event(ctx, self._event("DELETED", "e4", 4, "b1", ready=False))   # withdrawn by the rollback
+        run._apply_event(ctx, self._event("DELETED", "e3", 3, "a1", ready=False))   # the kept victim's repair
+        self.assertFalse(ctx.get("order_viol"))
+        checks = []
+        self.assertEqual("PASS", run.surge_before_drain_checks(ctx, ["engine"], "PASS", [], checks))
+        self.assertTrue(any("surge-before-drain held" in c for c in checks), checks)
+
+    def test_a_serving_source_drained_ahead_of_a_ready_surge_still_breaches(self):
+        rb = {"fired": False}
+        ctx = self._ctx(rb)
+        self._settled(ctx)
+        run._apply_event(ctx, self._event("MODIFIED", "e0", 0, "a1", deleting=True))
+        self.assertEqual({"engine": 1}, ctx["order_viol"])
+        notes, checks = [], []
+        self.assertEqual("FAIL", run.surge_before_drain_checks(ctx, ["engine"], "PASS", notes, checks))
+        self.assertTrue(any("surge-before-drain violated" in c for c in checks), checks)
+        rb["fired"] = True
+        run._apply_event(ctx, self._event("DELETED", "e3", 3, "a1", ready=False))
+        self.assertEqual({"engine": 1}, ctx["order_viol"], "a breach before the rollback stays; nothing counts after it")
+
+    def test_the_rollback_record_is_where_the_event_reader_looks(self):
+        src = inspect.getsource(run._op_launch) + inspect.getsource(run._rollback_held_break)
+        self.assertEqual(2, src.count('ctx["rb"]'), "both rollback drivers publish their record to the event reader")
+
+
+class RollbackKeptKeyHooksTest(unittest.TestCase):
+    """The key kept away on the running revision parks the roll on its
+    victim before any pod of the starting revision drains, so the draining
+    and last moments of that row fire at rotating, each under the strategy
+    and group its moment carries; every other row keeps all four hooks."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, cls.rows = generate_cases.build_outputs()
+
+    def test_the_hook_reader_moves_only_the_kept_keys_unreachable_moments(self):
+        hook = generate_cases._rollback_fault_hook
+        self.assertEqual("rotating", hook("configkey:missing", "", "never", "draining"))
+        self.assertEqual("rotating", hook("configkey:missing", "", "never", "last"))
+        self.assertEqual("settling", hook("configkey:missing", "", "never", "settling"))
+        self.assertEqual("rotating", hook("configkey:missing", "", "never", "rotating"))
+        self.assertEqual("draining", hook("configkey:missing", "", "after-settle", "draining"))
+        self.assertEqual("last", hook("readiness:old", "persist", "", "last"))
+        self.assertEqual("draining", hook("crashloop:old", "start", "", "draining"))
+
+    def test_the_kept_key_rolls_back_at_reachable_hooks_only(self):
+        fam = [(n, kv, m) for f, n, kv, m in self.rows
+               if f == "gen-rollback" and m.get("fault") == "configkey:missing" and "victimcomp" not in kv]
+        kept = [(n, kv, m) for n, kv, m in fam if m["lift"] == "never"]
+        lifted = [(n, kv, m) for n, kv, m in fam if m["lift"] == "after-settle"]
+        self.assertEqual({"settling", "rotating"}, {kv["during"] for _n, kv, _m in kept})
+        self.assertEqual({"settling", "rotating", "draining", "last"}, {kv["during"] for _n, kv, _m in lifted})
+        self.assertEqual(len(lifted), len(kept), "the row keeps one case per moment, so no id moves")
+        for shape in {(kv["topo"], kv["Nr"]) for _n, kv, _m in kept}:
+            cells = [(m["strat"], kv["co"]) for n, kv, m in kept if (kv["topo"], kv["Nr"]) == shape and kv["during"] == "rotating"]
+            self.assertEqual(3, len(cells), shape)
+            self.assertEqual(len(cells), len(set(cells)), "each moved moment keeps its own strategy and group")
+        for n, kv, m in kept:
+            text = self.outputs[f"gen-rollback/{n}.yaml"]
+            head, reason = text.splitlines()[:2]
+            self.assertIn(f"rollback at {kv['during']} over configkey never", head)
+            self.assertEqual(f"rollback:{kv['during']}:configkey:missing", m["verb"])
+            self.assertIn(generate_cases.ROLLBACK_MOMENT[kv["during"]], reason)
+            self.assertNotIn("draining", reason)
+        manifest = self.outputs[generate_cases.MANIFEST_REL]
+        self.assertIn("neither the draining nor the last hook arrives", manifest)
+
+
+class HeldBreakFloorTest(unittest.TestCase):
+    """A break the push carries, at the held moment: the pushed Instance
+    that bit may have displaced a healthy one, so the capacity floor allows
+    for it from the bite on; without a bite the basis stays plain."""
+
+    def _ctx(self):
+        return {"N": {"engine": 4}, "info": {"max_unavail": {"engine": 0}}, "hdr": {},
+                "min_ready": {"engine": 3}, "floor_sust": {"engine": 16.0}}
+
+    def test_the_floor_allows_for_the_pushed_instance_that_bit(self):
+        ctx, hb = self._ctx(), {"bite_at": None, "bite": ""}
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            run._held_break_bite(ctx, hb, "engine", 39.0, "e0 was Ready and then was not")
+        self.assertEqual((39.0, "e0 was Ready and then was not"), (hb["bite_at"], hb["bite"]))
+        self.assertIn("bite: e0 was Ready and then was not (39s)", out.getvalue())
+        self.assertEqual({"engine": 1}, ctx["floor_allowance"])
+        checks = []
+        self.assertEqual("PASS", run.min_ready_checks(ctx, ["engine"], "PASS", [], checks))
+        self.assertTrue(any("min ready 3 ≥ N-maxUnavailable-1broken=3" in c for c in checks), checks)
+
+    def test_without_a_bite_the_basis_stays_plain(self):
+        ctx, notes, checks = self._ctx(), [], []
+        self.assertEqual("FAIL", run.min_ready_checks(ctx, ["engine"], "PASS", notes, checks))
+        self.assertTrue(any("min ready 3 < N-maxUnavailable=4" in c for c in checks), checks)
+
+    def test_the_bite_adds_to_an_allowance_the_case_already_carries(self):
+        ctx = dict(self._ctx(), floor_allowance={"engine": 1, "decoder": 1})
+        with contextlib.redirect_stdout(io.StringIO()):
+            run._held_break_bite(ctx, {"bite_at": None, "bite": ""}, "engine", 5.0, "e0 waits in CrashLoopBackOff")
+        self.assertEqual({"engine": 2, "decoder": 1}, ctx["floor_allowance"])
+
+
+class KeptWatchFixPushTest(unittest.TestCase):
+    """The kept break's watch through the edit and the fix push: a pod the
+    newly enabled policy rebuilt between the edit and the push predates the
+    push, a broken-revision pod created after the push does not; and the
+    bite lowers the capacity floor."""
+
+    @staticmethod
+    def _pod(inst, hash_, uid, ready=True):
+        return {"alive": True, "comp": "engine", "inst": str(inst), "hash": hash_, "uid": uid,
+                "ready": ready, "serving": ready, "runner": "default"}
+
+    def _ctx(self):
+        return {"case_id": "p1", "closed": False, "trigger_ts": time.time(), "old_hashes": {"a1"},
+                "N": {"engine": 2, "decoder": 0, "router": 0}, "configured": {"engine"},
+                "pods_per_inst": {"engine": 1, "decoder": 1, "router": 1}, "fault": None,
+                "pod_state": {"e0": self._pod(0, "b1", "u-b0", ready=False), "e1": self._pod(1, "a1", "u-a1")}}
+
+    def _watch(self, ctx, before_push=(), after_push=()):
+        hb = run._edit_break_new()
+        hb.update(kind="crash-load", once=False, armed="the exit switch")
+
+        def fix():
+            for name, p in before_push:
+                ctx["pod_state"][name] = p
+            ctx["trigger_ts"] = time.time()
+            return True, "the override dropped"
+
+        def converge(c, bumped, budget, stale):
+            for name, p in after_push:
+                c["pod_state"][name] = p
+            c["on_read"](c)
+            # the fix lands: every broken-revision pod goes, Instance 0 comes back fixed
+            for name, p in list(c["pod_state"].items()):
+                if p and p.get("hash") in stale and p.get("hash") not in c["old_hashes"]:
+                    c["pod_state"][name] = None
+            c["pod_state"]["e0f"] = self._pod(0, "c1", "u-c0")
+            c["converged_at"] = 1.0
+            return "CONVERGED"
+
+        with mock.patch.object(run, "_read_one", lambda c: None), \
+                mock.patch.object(run, "_edit_break_symptom", lambda *a: ("e0", "was Ready and then was not")), \
+                mock.patch.object(run, "_ir_snapshot", lambda cid: {}), \
+                mock.patch.object(run, "_isvc_events_since", lambda cid, since, **kw: []), \
+                mock.patch.object(run, "_crash_new_why", lambda snap, ev, victim: ("rolloutHold gate=Budget", ["ev"])), \
+                mock.patch.object(run, "_leftover_hold", lambda cid: ""), \
+                mock.patch.object(run, "_watch_convergence", converge), \
+                mock.patch.object(run, "EDIT_FIX_SETTLE_S", 0), \
+                mock.patch.object(run, "HELD_BREAK_POLL_S", 0), \
+                contextlib.redirect_stdout(io.StringIO()):
+            state = run._edit_kept_watch(ctx, {"engine"}, "engine", None, hb, 30.0, fix=fix)
+        return state, hb
+
+    def test_a_rebuild_before_the_push_predates_it(self):
+        ctx = self._ctx()
+        state, hb = self._watch(ctx, before_push=[("e0r", self._pod(0, "b1", "u-b0-rebuilt", ready=False))])
+        self.assertEqual("CONVERGED", state)
+        self.assertEqual([], hb["late_pods"])
+        self.assertEqual({"engine": 1}, ctx["floor_allowance"], "the bite lowered the floor by the Instance that bit")
+        checks = []
+        self.assertEqual("PASS", run._edit_break_checks(hb, "engine", "PASS", [], checks))
+        self.assertTrue(any("no pod of the broken revision was created after the fix push" in c for c in checks), checks)
+
+    def test_a_broken_revision_pod_created_after_the_push_is_still_flagged(self):
+        ctx = self._ctx()
+        state, hb = self._watch(ctx, after_push=[("e0l", self._pod(0, "b1", "u-after", ready=False))])
+        self.assertEqual("CONVERGED", state)
+        self.assertEqual(["e0l"], hb["late_pods"])
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._edit_break_checks(hb, "engine", "PASS", notes, checks))
+        self.assertTrue(any("created after the fix push" in c for c in checks), checks)
+
+    def test_the_set_before_the_fix_is_what_was_seen_or_alive_at_the_push(self):
+        pods = {"e0": self._pod(0, "b1", "u-b0"), "e1": self._pod(1, "a1", "u-a1"), "gone": None,
+                "e0r": self._pod(0, "b1", "u-rebuilt")}
+        self.assertEqual({"u-seen", "u-b0", "u-rebuilt"}, run._uids_before_fix(pods, {"b1"}, {"u-seen": 1.0}))
+
+
+class OnceVictimWithdrawnTest(unittest.TestCase):
+    """A one-shot crash on the pushed revision's first pod, rolled back at
+    held: the index the kill landed on may be a surge index the rollback
+    withdrew, which is reported, not judged; an index that survives is."""
+
+    def _f(self):
+        return {"kind": "crashloop", "param": "new", "form": "start", "once": True, "fired": True, "kills": 1,
+                "crash_comp": "engine", "crash_inst": "2", "crash_pod": "e2", "crash_uid": "u2", "notes": [],
+                "restart_seen": True}
+
+    def _out(self, **over):
+        out = {"fired": True, "kills": 1, "bitten": True, "restarts": 1, "rebuilt": False, "present": False,
+               "serving": False, "on_revision": False, "expect_new": False, "repairs": [], "escalations": [],
+               "rows_settled": True, "rows_why": "", "side": "new", "op": "rollback", "rp": "RecreateInstance",
+               "new_hash": False}
+        out.update(over)
+        return out
+
+    def test_a_surge_index_the_rollback_withdrew_is_informational(self):
+        notes, checks = [], []
+        self.assertEqual("PASS", run._once_checks(self._f(), self._out(), "PASS", notes, checks))
+        self.assertEqual([], notes)
+        self.assertTrue(any("withdrawn by the rollback" in c and c.lstrip().startswith("ⓘ") for c in checks), checks)
+        self.assertFalse(any("did not end Ready and serving" in c for c in checks))
+
+    def test_an_index_that_survives_the_rollback_is_still_judged(self):
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._once_checks(self._f(), self._out(present=True), "PASS", notes, checks))
+        self.assertTrue(any("did not end Ready and serving" in c for c in checks), checks)
+        checks = []
+        self.assertEqual("PASS", run._once_checks(self._f(), self._out(present=True, serving=True, on_revision=True),
+                                                  "PASS", [], checks))
+        self.assertTrue(any("Ready and serving on the running revision" in c for c in checks), checks)
+
+    def test_only_a_rollback_withdraws(self):
+        self.assertEqual("FAIL", run._once_checks(self._f(), self._out(op="push", side="new", expect_new=True), "PASS", [], []))
+
+    def test_observe_reports_whether_a_pod_stands_at_the_index(self):
+        f = self._f()
+        gone = {"e0": {"alive": True, "comp": "engine", "inst": "0", "hash": "old", "uid": "u0", "ready": True, "serving": True, "runner": "default"},
+                "e1": {"alive": True, "comp": "engine", "inst": "1", "hash": "old", "uid": "u1", "ready": True, "serving": True, "runner": "default"}}
+        with mock.patch.object(run, "_pod_main_state", lambda name: None), \
+                mock.patch.object(run, "_isvc_events_since", lambda c, s, **kw: []), \
+                mock.patch.object(run, "_wait_rows_settled", lambda *a, **k: (True, "")):
+            out = run._once_observe("p1", f, gone, {"old"}, False, {"engine": 2}, {"engine"}, 1)
+            self.assertEqual(("2", False, False), (out["final"], out["present"], out["serving"]))
+            back = dict(gone, e2={"alive": True, "comp": "engine", "inst": "2", "hash": "old", "uid": "u2b", "ready": True, "serving": True, "runner": "default"})
+            out = run._once_observe("p1", f, back, {"old"}, False, {"engine": 2}, {"engine"}, 1)
+            self.assertEqual((True, True, True), (out["present"], out["serving"], out["on_revision"]))
+
+
+class ScaleDownPremiseTest(unittest.TestCase):
+    """A scale-down of a pushed member keeps a survivor on the running
+    revision; when every Instance is already on the pushed revision at the
+    scale the case cannot judge the victim choice and says so."""
+
+    def test_a_running_revision_survivor_keeps_the_premise(self):
+        pre = {"engine": {"0": [("u0", "a1")], "1": [("u1", "b1")]}}
+        self.assertEqual("", run._scale_premise_missed(pre, {"a1"}, {"engine"}, {"engine"}, {"engine": 1}, {"engine": 2}))
+
+    def test_every_instance_on_the_pushed_revision_misses_it(self):
+        pre = {"engine": {"0": [("u0", "b1")], "1": [("u1", "b1")]}}
+        why = run._scale_premise_missed(pre, {"a1"}, {"engine"}, {"engine"}, {"engine": 1}, {"engine": 2})
+        self.assertIn("engine: every Instance was already on the pushed revision at the scale (0:b1, 1:b1)", why)
+        self.assertIn("no running-revision survivor to keep", why)
+        half = {"engine": {"0": [("l0", "a1"), ("w0", "b1")], "1": [("u1", "b1")]}}
+        self.assertTrue(run._scale_premise_missed(half, {"a1"}, {"engine"}, {"engine"}, {"engine": 1}, {"engine": 2}),
+                        "a gang half on the pushed revision is no running-revision survivor")
+
+    def test_only_a_scale_down_of_a_pushed_member_has_the_premise(self):
+        pre = {"engine": {"0": [("u0", "b1")], "1": [("u1", "b1")]}, "router": {"0": [("r0", "a1")]}}
+        self.assertEqual("", run._scale_premise_missed(pre, {"a1"}, {"router"}, {"engine"}, {"router": 2}, {"engine": 2, "router": 1}),
+                         "the sibling form scales a member the push left alone")
+        self.assertEqual("", run._scale_premise_missed(pre, {"a1"}, {"engine"}, {"engine"}, {"engine": 3}, {"engine": 2}),
+                         "a scale-up keeps nothing")
+
+    def test_the_scale_runner_reports_a_missed_premise_as_apparatus(self):
+        src = inspect.getsource(run._stuck_scale)
+        self.assertIn('_scale_premise_missed(pre_pods, ctx["old_hashes"], scaled, bumped, target, N)', src)
+        self.assertIn('"PREMISE_MISSED", "INFRA-FAIL"', src)
+        self.assertLess(src.index("_scale_premise_missed("), src.index('"patch", "isvc", case_id'),
+                        "the premise is read before the scale lands")
+
+
+class SettleWindowAfterManagerRestartsTest(unittest.TestCase):
+    """The row-settle window after repeated manager restarts: it starts once
+    a live manager holds the leader-election Lease; with the Lease
+    unreadable or not held in time it is extended by the lease duration."""
+
+    LEASE = {"holderIdentity": "ome-controller-manager-abc_7f3e2c1d", "renewTime": "2026-10-04T10:12:13.123456Z",
+             "leaseDurationSeconds": 60}
+
+    def _fault(self, **more):
+        f = {"kind": "ctrlrestart", "param": "settling", "fired": True, "repeat": 3, "fired_count": 3}
+        f.update(more)
+        return f
+
+    def test_the_lease_facts_name_the_holder_pod(self):
+        facts = run._lease_facts(self.LEASE)
+        self.assertEqual("ome-controller-manager-abc", facts["pod"])
+        self.assertEqual(60, facts["duration"])
+        self.assertAlmostEqual(run._event_epoch("2026-10-04T10:12:13.123456Z"), facts["renewed"])
+        self.assertEqual({"pod": "", "renewed": None, "duration": 0}, run._lease_facts({}))
+
+    def test_a_live_manager_holds_the_lease_when_ready_and_renewing(self):
+        now = 1_000_000.0
+        lease = {"pod": "m-new", "renewed": now - 5, "duration": 60}
+        live = [("m-new", True), ("m-old", False)]
+        self.assertTrue(run._lease_held_by_live_manager(lease, live, now))
+        self.assertFalse(run._lease_held_by_live_manager(lease, [("m-old", True)], now), "held by a pod that is gone")
+        self.assertFalse(run._lease_held_by_live_manager(lease, [("m-new", False)], now), "the holder is not Ready")
+        self.assertFalse(run._lease_held_by_live_manager(dict(lease, renewed=now - 61), live, now), "a stale renewal")
+        self.assertFalse(run._lease_held_by_live_manager(dict(lease, pod=""), live, now))
+        self.assertFalse(run._lease_held_by_live_manager(None, live, now))
+
+    def test_the_window_starts_once_a_live_manager_holds_the_lease(self):
+        held = {"pod": "m-new", "renewed": time.time(), "duration": 60}
+        with mock.patch.object(run, "_ctrl_lease", return_value=held), \
+                mock.patch.object(run, "_ctrl_pods_state", return_value=[("m-new", True)]):
+            window, how = run._rows_settle_window(self._fault(), poll_s=0)
+        self.assertEqual(run.ROWS_SETTLE_S, window)
+        self.assertIn("a live manager (m-new) holds the Lease", how)
+        self.assertIn("the row-settle window starts now", how)
+
+    def test_the_window_is_extended_when_the_lease_cannot_be_read_or_is_not_held_in_time(self):
+        with mock.patch.object(run, "_ctrl_lease", return_value=None):
+            window, how = run._rows_settle_window(self._fault(), poll_s=0)
+        self.assertEqual(run.ROWS_SETTLE_S + run.CTRL_LEASE_S, window)
+        self.assertIn("could not be read", how)
+        self.assertIn(f"extended by {run.CTRL_LEASE_S}s", how)
+        dead = {"pod": "m-dead", "renewed": time.time(), "duration": 1}
+        with mock.patch.object(run, "_ctrl_lease", return_value=dead), \
+                mock.patch.object(run, "_ctrl_pods_state", return_value=[("m-new", True)]):
+            window, how = run._rows_settle_window(self._fault(), poll_s=0.05)
+        self.assertEqual(run.ROWS_SETTLE_S + 1, window)
+        self.assertIn("no live manager held the Lease within 2s", how)
+        self.assertIn("holder m-dead", how)
+
+    def test_other_faults_keep_the_plain_window(self):
+        for f in (None, self._fault(kind="podkill"), self._fault(fired=False), self._fault(ctrl_gated=True)):
+            with mock.patch.object(run, "_ctrl_lease", side_effect=AssertionError("the Lease is not read")):
+                self.assertEqual((run.ROWS_SETTLE_S, ""), run._rows_settle_window(f))
+
+    def test_the_end_checks_wait_the_window_the_lease_decides(self):
+        waited = []
+        with mock.patch.object(run, "_rows_settle_window", lambda f: (123, "a live manager holds the Lease")), \
+                mock.patch.object(run, "_wait_rows_settled", lambda cid, N, c, s: waited.append(s) or (False, "engine: updatedReplicas 3/4")), \
+                mock.patch.object(run, "_rollout_holds", lambda cid, c: []), \
+                contextlib.redirect_stdout(io.StringIO()):
+            notes, checks = [], []
+            verdict = run._repeat_end_checks("p1", {"engine": 4}, {"engine"}, "PASS", notes, checks, ctrl=self._fault())
+        self.assertEqual(([123], "FAIL"), (waited, verdict))
+        self.assertTrue(any("ⓘ ctrlrestart: a live manager holds the Lease" in c for c in checks), checks)
+        self.assertTrue(any("did not settle within 123s" in c for c in checks), checks)
+
+    def test_every_repeat_end_check_names_the_fault_that_repeated(self):
+        src = inspect.getsource(run)
+        calls = re.findall(r"_repeat_end_checks\((?!case_id, N, configured, verdict, notes, checks, ctrl=None)[^\n]*", src)
+        self.assertTrue(calls)
+        self.assertTrue(all("ctrl=" in c for c in calls), [c for c in calls if "ctrl=" not in c])
