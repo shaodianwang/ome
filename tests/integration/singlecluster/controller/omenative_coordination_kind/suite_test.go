@@ -79,8 +79,8 @@ func TestOMENativeCoordinationKindController(t *testing.T) {
 		BuildImages: kindfix.FakeServingImages(),
 		// This suite owns the authoritative multi-pod topology contract, so
 		// install and register the optional scheduler-plugins PodGroup API.
-		// Pods still use KIND's default scheduler; PodGroup creation is the
-		// controller contract under test, not coscheduling behavior.
+		// PodGroup creation is the controller contract under test; which
+		// scheduler binds the pods is the scheduler dimension below.
 		CRDPaths: kindfix.GangCRDPaths(),
 		Scheme:   kindfix.GangScheme(),
 		// OMENative is driven through the IR-managed path: the cross-Component

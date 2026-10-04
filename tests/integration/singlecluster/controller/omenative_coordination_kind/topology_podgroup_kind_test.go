@@ -131,15 +131,14 @@ var _ = ginkgo.Describe("OMENative multi-pod topology contract", ginkgo.Ordered,
 			g.Expect(pods).To(HaveLen(2))
 			var worker *corev1.Pod
 			for i := range pods {
+				g.Expect(pods[i].Labels).To(HaveKeyWithValue(query.LabelPodGroup, initialPodGroup))
+				expectBoundBySuiteScheduler(g, &pods[i])
 				if pods[i].Labels[query.LabelRunner] == string(v1beta1.RunnerNameWorker) {
 					worker = &pods[i]
 				}
 			}
 			g.Expect(worker).NotTo(BeNil())
-			g.Expect(worker.Labels).To(HaveKeyWithValue(query.LabelPodGroup, initialPodGroup))
 			g.Expect(requiredAffinityTopologyKeys(worker)).To(ContainElement(topologyKey))
-			g.Expect(worker.Spec.SchedulerName).To(Or(BeEmpty(), Equal(corev1.DefaultSchedulerName)),
-				"installing the PodGroup API must not opt pods into a missing custom scheduler")
 			g.Expect(podreadiness.IsContainersReady(worker)).To(BeTrue())
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
@@ -174,10 +173,18 @@ var _ = ginkgo.Describe("OMENative multi-pod topology contract", ginkgo.Ordered,
 			g.Expect(ir.Status.CurrentRevision).NotTo(Equal(initialRevision))
 			g.Expect(ir.Status.CurrentRevision).To(Equal(ir.Status.UpdateRevision))
 
+			pgs := &schedulingv1alpha1.PodGroupList{}
+			g.Expect(k8sClient.List(suiteCtx, pgs, client.InNamespace(ns.Name))).To(Succeed())
+			g.Expect(pgs.Items).To(HaveLen(1), "source PodGroup must be collected after surge promotion")
+			g.Expect(pgs.Items[0].Annotations).To(HaveKeyWithValue(query.AnnotationTopologyKey, updatedTopologyKey))
+
 			pods := listOMENativePods(g, ns.Name, isvcName)
 			g.Expect(pods).To(HaveLen(2))
 			var worker *corev1.Pod
 			for i := range pods {
+				g.Expect(pods[i].Labels).To(HaveKeyWithValue(query.LabelPodGroup, pgs.Items[0].Name),
+					"both members belong to the surge PodGroup")
+				expectBoundBySuiteScheduler(g, &pods[i])
 				if pods[i].Labels[query.LabelRunner] == string(v1beta1.RunnerNameWorker) {
 					worker = &pods[i]
 				}
@@ -185,11 +192,6 @@ var _ = ginkgo.Describe("OMENative multi-pod topology contract", ginkgo.Ordered,
 			g.Expect(worker).NotTo(BeNil())
 			g.Expect(requiredAffinityTopologyKeys(worker)).To(ContainElement(updatedTopologyKey))
 			g.Expect(requiredAffinityTopologyKeys(worker)).NotTo(ContainElement(topologyKey))
-
-			pgs := &schedulingv1alpha1.PodGroupList{}
-			g.Expect(k8sClient.List(suiteCtx, pgs, client.InNamespace(ns.Name))).To(Succeed())
-			g.Expect(pgs.Items).To(HaveLen(1), "source PodGroup must be collected after surge promotion")
-			g.Expect(pgs.Items[0].Annotations).To(HaveKeyWithValue(query.AnnotationTopologyKey, updatedTopologyKey))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

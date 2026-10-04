@@ -107,9 +107,9 @@ KIND_KEEP_CLUSTER=true \
   applied at suite startup (the OMENative reconciler hard-requires it).
 - `tests/integration/dep-crds/scheduler-plugins/` PodGroup CRD is
   applied so multi-pod topology and gang object wiring run end to end.
-- This suite deliberately keeps KIND's default scheduler. The separate
-  `ome_scheduler_kind` suite owns custom-scheduler admission and topology
-  placement so the large rollout suite does not duplicate that setup.
+- The suite runs under KIND's default scheduler unless `OME_TEST_SCHEDULER`
+  names the gang scheduler; then the fixture runtime selects it and specs
+  expect the pods to bind through it (`kindfix.SchedulerName()`).
 - The suite uses the production controller code paths (no mocks /
   fakes other than the fake-serving HTTP server) — bugs caught here
   reflect real controller behavior.

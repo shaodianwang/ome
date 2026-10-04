@@ -167,6 +167,22 @@ func podIsReady(pod *corev1.Pod) bool {
 	return false
 }
 
+// expectBoundBySuiteScheduler asserts pod names the suite's scheduler and is
+// bound. Under the gang scheduler the pod selects it by name (kube-scheduler
+// skips pods naming another profile, so a bound pod went through the gang
+// scheduler); with none installed the pod keeps the cluster default, which the
+// API server back-fills as default-scheduler.
+func expectBoundBySuiteScheduler(g gomega.Gomega, pod *corev1.Pod) {
+	if name := kindfix.SchedulerName(); name != "" {
+		g.Expect(pod.Spec.SchedulerName).To(gomega.Equal(name),
+			"pod %s must select the suite's gang scheduler", pod.Name)
+	} else {
+		g.Expect(pod.Spec.SchedulerName).To(gomega.Or(gomega.BeEmpty(), gomega.Equal(corev1.DefaultSchedulerName)),
+			"installing the PodGroup API must not opt pod %s into a missing custom scheduler", pod.Name)
+	}
+	g.Expect(pod.Spec.NodeName).NotTo(gomega.BeEmpty(), "pod %s must be bound", pod.Name)
+}
+
 // trafficForComponent returns the per-Component Traffic[] from the
 // ISVC's component status, or nil when the entry is missing.
 func trafficForComponent(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) []v1beta1.ComponentTrafficTarget {
