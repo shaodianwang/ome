@@ -2,7 +2,10 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -56,11 +59,56 @@ func escalateStuckTerminatingPods(ctx context.Context, deps workload.Deps, input
 	return nil
 }
 
+// SweepStuckTerminatingPods applies the escalation to every Terminating
+// pod of the Component, bucketed by Instance index as the pass observed
+// them, whether or not an operation still waits on the pod. A drained pod
+// that a finished or abandoned operation left behind has no verb pass to
+// re-read it, and a node that has stopped reporting raises no event to
+// wake one, so the Component pass is the one reader every such pod has.
+// Pods are visited in index and name order so the writes land in the same
+// order on every pass.
+//
+// Reports the earliest exact policy boundary among the pods left in place
+// (zero when none has one) so a pass with no sooner wake-up can come back
+// at it, and the joined errors of the pods whose evidence could not be
+// read or whose delete failed: one pod's error does not shield another's
+// from the sweep.
+func SweepStuckTerminatingPods(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, byInstance map[int32][]*corev1.Pod) (time.Time, error) {
+	if input.ForceDelete == nil {
+		return time.Time{}, nil
+	}
+	indices := make([]int32, 0, len(byInstance))
+	for idx := range byInstance {
+		indices = append(indices, idx)
+	}
+	slices.Sort(indices)
+	var (
+		earliest time.Time
+		errs     []error
+	)
+	for _, idx := range indices {
+		pods := slices.Clone(byInstance[idx])
+		slices.SortFunc(pods, func(a, b *corev1.Pod) int { return strings.Compare(a.Name, b.Name) })
+		for _, pod := range pods {
+			if pod == nil || pod.DeletionTimestamp == nil {
+				continue
+			}
+			at, err := escalateStuckTerminatingWithDeadline(ctx, deps, input, pod, idx)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			earliest = earlierTime(earliest, at)
+		}
+	}
+	return earliest, errors.Join(errs...)
+}
+
 // escalateStuckTerminatingWithDeadline also reports the next exact policy
 // boundary. Callers without a periodic poll use it to preserve time-driven
 // force-delete progress without inventing a default cadence.
 func escalateStuckTerminatingWithDeadline(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, pod *corev1.Pod, idx int32) (time.Time, error) {
-	if input.ForceDelete == nil {
+	if input.ForceDelete == nil || input.Swept.Swept(pod.UID) {
 		return time.Time{}, nil
 	}
 	res := evidence.StuckTerminating(ctx, deps.Reader(), pod, input.ForceDelete, input.Now())
@@ -89,6 +137,7 @@ func escalateStuckTerminatingWithDeadline(ctx context.Context, deps workload.Dep
 		}
 		return time.Time{}, fmt.Errorf("force-delete pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
+	input.Swept.Record(uid)
 
 	// Event + ledger AFTER the successful delete: a crash in this window
 	// loses only the audit record, never repeats the action — the object

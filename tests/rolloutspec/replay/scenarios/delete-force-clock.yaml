@@ -3,6 +3,11 @@
 # longer exists, so the wave is blocked on a disappearance that will never
 # come; the overdue clock is what turns the evidence actionable.
 scenario: delete-force-clock
+intentional: >-
+  the Component-wide sweep runs ahead of the wave on the same pass, so the
+  wave's own live read already finds the force-deleted pod absent and the
+  row is removed in the pass that freed it; the next pass has nothing
+  left to do
 arrows:
   - T-ready-scaledown
   - T-delete-force-clock
@@ -40,8 +45,8 @@ timeline:
     events:
       - pod.stuckTerminating: {pod: {index: 1}}
   - tick: 4
-    note: the overdue clock lands on a pod whose node is gone, so the sweep force-deletes it with grace zero under its observed UID
+    note: the overdue clock lands on a pod whose node is gone, so the sweep force-deletes it with grace zero under its observed UID ahead of the wave, whose own read then finds it absent and removes the row in the same pass
     events:
       - timer.forceDelete[overdueSlack]: {slack: 1s}
   - tick: 5
-    note: the wave completes on the resulting absence and the row is removed
+    note: the Component is at rest with the retired Instance gone

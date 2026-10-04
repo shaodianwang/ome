@@ -12,13 +12,14 @@ tick=3 note the kubelet on node-1 stops acknowledging the deletion, which leaves
 tick=3 apply pod.stuckTerminating pod=svc-a-engine-1-default-0 deletionDeadline=t+0s now=t+0s
 tick=3 row=1 write no-op precondition=no-change
 tick=3 pass result=after:30s
-tick=4 note the overdue clock lands on a pod whose node is gone, so the sweep force-deletes it with grace zero under its observed UID
+tick=4 note the overdue clock lands on a pod whose node is gone, so the sweep force-deletes it with grace zero under its observed UID ahead of the wave, whose own read then finds it absent and removes the row in the same pass
 tick=4 apply timer.forceDelete[overdueSlack] to=t+1m1s now=t+1m1s
-tick=4 row=1 write no-op precondition=no-change
 tick=4 pod delete name=svc-a-engine-1-default-0 grace=0 uidPrecondition=set
 tick=4 event Warning PodForceDeleted OMENative component=engine instance=1: force-deleted stuck-Terminating pod svc-a-engine-1-default-0 on node node-1 (evidence=node-gone, 1m1s past the pod's own deletion deadline)
-tick=4 pass result=after:30s
-tick=5 note the wave completes on the resulting absence and the row is removed
-tick=5 row=1 write no-op precondition=no-change
-tick=5 row=1 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
-tick=5 pass result=requeue
+tick=4 row=1 write no-op precondition=no-change
+tick=4 row=1 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=4 pass result=requeue
+tick=5 note the Component is at rest with the retired Instance gone
+tick=5 hold cleared
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pass result=none

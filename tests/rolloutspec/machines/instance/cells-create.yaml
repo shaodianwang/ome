@@ -168,7 +168,7 @@ cells:
   - state: Create/CreatePods
     event: pod.stuckTerminating
     outcome: defer
-    note: the pod read is not filtered on deletionTimestamp, so a wedged terminating pod still occupies its name slot and the pass sees nothing missing to create; there is no force-delete path outside the scale-down pipeline, so the attempt converges only when the pod finally goes or the operation deadline elapses
+    note: the pod read is not filtered on deletionTimestamp, so a wedged terminating pod still occupies its name slot and the pass sees nothing missing to create; the attempt converges when the pod goes - on its kubelet, or on the Component pass's force-delete sweep once its node is provably dead under a configured policy - or when the operation deadline elapses
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -706,7 +706,7 @@ cells:
   - state: Create/CreatePods
     event: timer.forceDelete
     outcome: ignore
-    note: escalateStuckTerminating is called only from the scale-down batch and the migration expiry, so neither the overdue-slack nor the node-unreachable clock is evaluated for a row whose operation is a Create; a wedged pod keeps its name slot until the attempt expires
+    note: the Component pass sweeps every Terminating pod of the Component ahead of the verb passes, so a wedged occupant of one of the attempt's names is force-deleted once its node is gone or unreachable past the threshold and the pod is past its own deadline plus the slack, and the attempt rebuilds the name on the resulting absence; the Create operation itself reads neither clock (pkg/controller/v1beta1/workload/reconcile.go)
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current

@@ -158,7 +158,7 @@ cells:
     transition: T-delete-force
     outcome: transition
     to: Delete/Drain
-    note: "actionable node-death evidence only, which is a missing Node object or an unreachable taint or NotReady condition older than the threshold, read live and vetoed by a current Ready=True. The pod is deleted with grace zero under its observed UID, then evented and ledgered; the row stays Delete/Drain and completes through the ordinary removal"
+    note: "actionable node-death evidence only, which is a missing Node object or an unreachable taint or NotReady condition older than the threshold, read live and vetoed by a current Ready=True. The pod is deleted with grace zero under its observed UID, then evented and ledgered; the row stays Delete/Drain and completes through the ordinary removal - in the same pass when the Component-wide sweep ahead of the wave freed the pod, since the wave's own live read then finds it absent"
     guard: "pod overdue past its own deletion deadline, no foreign finalizer, node gone or provably unreachable past the threshold"
     invariants: [delete.by.observed.uid]
     placement: kind

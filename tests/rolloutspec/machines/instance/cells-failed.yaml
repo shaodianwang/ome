@@ -860,7 +860,7 @@ cells:
     event: config.changed
     variants: [forceDelete]
     outcome: ignore
-    note: escalateStuckTerminating in ops/force_delete.go is reached only from the delete batch and the migration drain, so arming or disarming the policy changes nothing for a Failed row's stuck pods
+    note: the policy is re-read every pass and arms or disarms the Component-wide sweep over the row's Terminating pods, a retired replacement's included; the edit itself writes nothing to a Failed row (pkg/controller/v1beta1/workload/reconcile.go)
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -930,10 +930,10 @@ cells:
   - state: Failed
     event: timer.forceDelete
     outcome: ignore
-    note: ops/force_delete.go is called only from the delete batch and the migration drain, so neither clock is consulted for a Failed row; its stuck pods are waited on rather than forced
+    note: a Failed row's stuck pods are swept like every other row's - the Component pass force-deletes a Terminating pod of the row whose node is gone or has been unreachable past the threshold once the pod is past its own deadline plus the slack, with the event and the audit row, and wakes itself at the exact boundary; the row itself is untouched, and the pass that waits on the pod - a gang surge's abandon, a parked repair - goes on from the resulting absence (pkg/controller/v1beta1/workload/reconcile.go, pkg/controller/v1beta1/workload/ops/force_delete.go)
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestForceDelete_DrainedPodNoOperationWaitsOnIsSweptAtThePolicyBoundary, TestSweepStuckTerminatingPods_VisitsEveryBucketInOrderAndWakesOnTheEarliestBoundary], kind: []}
+    status: decided
   - state: Failed
     event: timer.teardownDeadline
     windows: [before]

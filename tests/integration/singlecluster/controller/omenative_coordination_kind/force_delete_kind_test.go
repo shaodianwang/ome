@@ -10,9 +10,11 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
@@ -30,6 +32,15 @@ const forceDeleteLifecycleJSON = `{"forceDelete":{"overdueSlack":"15s","nodeUnre
 // lifecycleNoForceDeleteJSON pins the control: lifecycle block present,
 // forceDelete key absent — absent means the escalation does not exist.
 const lifecycleNoForceDeleteJSON = `{}`
+
+// forceDeleteAbandonedLifecycleJSON arms the escalation beside a short
+// stuck-pod grace, so a replacement whose image never pulls parks its
+// row at Failed inside the suite budget.
+const forceDeleteAbandonedLifecycleJSON = `{"forceDelete":{"overdueSlack":"15s","nodeUnreachableThreshold":"30s"},"stuckPodGracePeriod":"20s"}`
+
+// unpullableImage is a tag no registry serves: a pod on it parks in
+// ErrImagePull / ImagePullBackOff and never reaches ContainersReady.
+const unpullableImage = "ghcr.io/ome-projects/this-image-does-not-exist:v0"
 
 // =========================================================================
 // KIND node pause helpers (docker-level kubelet freeze)
@@ -293,6 +304,157 @@ var _ = ginkgo.Describe("OMENative force-delete escalation (KIND)", ginkgo.Order
 		Eventually(func(g Gomega) {
 			g.Expect(instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)).To(HaveLen(1))
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+
+	// A drained pod no operation waits on. A roll to an image that never
+	// pulls parks the Instance at Failed; its node is paused; the image is
+	// rolled back, so the wreckage sweep drains and deletes the wedged
+	// replacement, which its frozen kubelet never finishes, and the
+	// Instance returns to Ready on its serving pod with no operation left
+	// to re-read the Terminating pod. The Component pass still
+	// force-deletes it once the node has been unreachable for the
+	// threshold and the pod is past its own deadline plus the slack, with
+	// the event and the ledger row, and the serving pod is never touched.
+	ginkgo.It("force-deletes a drained pod no operation waits on once its node is dead", func() {
+		const isvcName = "fd-abandoned"
+		configureLifecycleConfig(forceDeleteAbandonedLifecycleJSON)
+
+		fix := newCoordFixture(ns.Name, WithISVCName(isvcName),
+			WithoutDecoder(),
+			WithEngineReplicas(1),
+			WithEngineImage("fake-serving:v1"))
+		// One pod of the Component per node: the replacement lands away
+		// from the pod it would replace, so pausing its node freezes
+		// nothing else of the Instance.
+		fix.ISVC.Spec.Engine.PodSpec.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{constants.InferenceServicePodLabelKey: isvcName}},
+				TopologyKey:   corev1.LabelHostname,
+			}},
+		}}
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+
+		ginkgo.By("waiting for the engine Instance to reach Ready")
+		Eventually(func(g Gomega) {
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		source := aliveEnginePodForInstance(Default, ns.Name, isvcName, 0)
+		Expect(source.Spec.NodeName).NotTo(BeEmpty(), "serving pod must be scheduled")
+
+		ginkgo.By("rolling to an image that never pulls, so the replacement wedges and the row fails")
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Spec.Engine.PodSpec.Containers[0].Image = unpullableImage
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		var wedged *corev1.Pod
+		Eventually(func(g Gomega) {
+			wedged = nil
+			for _, p := range listOMENativePods(g, ns.Name, isvcName) {
+				if p.UID != source.UID && p.Spec.Containers[0].Image == unpullableImage && p.Spec.NodeName != "" {
+					pod := p
+					wedged = &pod
+				}
+			}
+			g.Expect(wedged).NotTo(BeNil(), "the replacement must be bound to a node")
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceFailed))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		Expect(wedged.Spec.NodeName).NotTo(Equal(source.Spec.NodeName), "the replacement must sit on its own node")
+		node := wedged.Spec.NodeName
+		podKey := client.ObjectKey{Namespace: ns.Name, Name: wedged.Name}
+
+		ginkgo.By("pausing node " + node + " under the wedged replacement")
+		pauseKindNode(node)
+
+		ginkgo.By("rolling back: the wreckage sweep drains and deletes the replacement, which its frozen kubelet never finishes")
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Spec.Engine.PodSpec.Containers[0].Image = "fake-serving:v1"
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		drained := &corev1.Pod{}
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(suiteCtx, podKey, drained)).To(Succeed())
+			g.Expect(drained.UID).To(Equal(wedged.UID), "the drained pod must be the original replacement, not a successor")
+			g.Expect(drained.DeletionTimestamp).NotTo(BeNil())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("the Instance is Ready on its serving pod with no operation while the drained pod is still in the API")
+		Eventually(func(g Gomega) {
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(insts[0].Operation).To(BeNil())
+			cur := &corev1.Pod{}
+			g.Expect(k8sClient.Get(suiteCtx, podKey, cur)).To(Succeed())
+			g.Expect(cur.UID).To(Equal(wedged.UID))
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Within-grace veto: nothing may remove the pod before its own
+		// deletionTimestamp + overdueSlack, exactly as for a wave's victim.
+		deadline := drained.DeletionTimestamp.Add(forceDeleteOverdueSlack)
+		if guard := time.Until(deadline) - 2*time.Second; guard > 0 {
+			ginkgo.By("holding inside the pod's own grace window: no early force-delete")
+			Consistently(func(g Gomega) {
+				cur := &corev1.Pod{}
+				g.Expect(k8sClient.Get(suiteCtx, podKey, cur)).To(Succeed())
+				g.Expect(cur.UID).To(Equal(wedged.UID))
+				g.Expect(eventsWithReason(g, ns.Name, "PodForceDeleted")).To(BeEmpty(),
+					"no force-delete may fire inside the grace window")
+			}, guard, time.Second).Should(Succeed())
+		}
+
+		ginkgo.By("expecting the Component pass to force-delete the drained pod once the node is provably dead")
+		Eventually(func(g Gomega) {
+			cur := &corev1.Pod{}
+			err := k8sClient.Get(suiteCtx, podKey, cur)
+			if err != nil {
+				g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+				return
+			}
+			g.Expect(cur.UID).NotTo(Equal(wedged.UID),
+				"the drained pod object must disappear despite the paused kubelet")
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("PodForceDeleted Warning names the pod and its node")
+		Eventually(func(g Gomega) {
+			evts := eventsWithReason(g, ns.Name, "PodForceDeleted")
+			g.Expect(evts).NotTo(BeEmpty())
+			named := false
+			for _, e := range evts {
+				g.Expect(e.Type).To(Equal(corev1.EventTypeWarning))
+				if strings.Contains(e.Message, wedged.Name) && strings.Contains(e.Message, node) {
+					named = true
+				}
+			}
+			g.Expect(named).To(BeTrue(), "PodForceDeleted must name pod %s and node %s", wedged.Name, node)
+		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("audit ledger records the terminal ForceDelete row keyed by the pod UID")
+		Eventually(func(g Gomega) {
+			var rows []auditEntryShape
+			for _, e := range loadLedger(g, ns.Name, isvcName).Entries {
+				if e.Reason == "ForceDelete" {
+					rows = append(rows, e)
+				}
+			}
+			g.Expect(rows).To(HaveLen(1))
+			g.Expect(rows[0].RequestUUID).To(Equal(string(wedged.UID)))
+			g.Expect(rows[0].Outcome).To(Equal("force-delete-unreachable"))
+			g.Expect(rows[0].FromNode).To(Equal(node))
+		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("the serving pod and its row are untouched")
+		Expect(aliveEnginePodForInstance(Default, ns.Name, isvcName, 0).UID).To(Equal(source.UID),
+			"the pod on the live node must be the one that served throughout")
+		insts := instanceStatuses(Default, ns.Name, isvcName, v1beta1.EngineComponent)
+		Expect(insts).To(HaveLen(1))
+		Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 	})
 
 	ginkgo.It("config absent: the identical wedge is left alone — no force-delete, no event; unpause releases it", func() {

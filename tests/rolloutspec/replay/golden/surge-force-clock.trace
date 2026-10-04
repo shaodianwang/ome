@@ -30,9 +30,9 @@ tick=4 hold cleared
 tick=4 pass result=after:5s
 tick=5 note the overdue clock lands and the sweep force-deletes the wedged source before the surge runs, leaving the step where it was
 tick=5 apply timer.forceDelete[overdueSlack] to=t+1m1s now=t+1m1s
-tick=5 row=0 write no-op precondition=no-change
 tick=5 pod delete name=svc-a-engine-0-default-0 grace=0 uidPrecondition=set
 tick=5 event Warning PodForceDeleted OMENative component=engine instance=0: force-deleted stuck-Terminating pod svc-a-engine-0-default-0 on node node-0 (evidence=node-gone, 1m1s past the pod's own deletion deadline)
+tick=5 row=0 write no-op precondition=no-change
 tick=5 row=0 write no-op precondition=no-change
 tick=5 hold cleared
 tick=5 pass result=after:5s

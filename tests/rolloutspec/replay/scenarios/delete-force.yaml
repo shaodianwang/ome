@@ -3,6 +3,11 @@
 # observed, so the stuck pod itself is the trigger and the sweep acts on the
 # pass that first reads it.
 scenario: delete-force
+intentional: >-
+  the Component-wide sweep runs ahead of the wave on the same pass, so the
+  wave's own live read already finds the force-deleted pod absent and the
+  row is removed in the pass that freed it; the next pass has nothing
+  left to do
 arrows:
   - T-ready-scaledown
   - T-delete-force
@@ -36,9 +41,9 @@ timeline:
     events:
       - endpoint.rotationOut[source]: {pod: {index: 1}}
   - tick: 3
-    note: five minutes on the pod is still there, and the reason arrives with the clock already well past its deadline plus the slack, so the stuck pod is force-deleted on the pass that reads it
+    note: five minutes on the pod is still there, and the reason arrives with the clock already well past its deadline plus the slack, so the stuck pod is force-deleted on the pass that reads it, ahead of the wave, whose own read then finds it absent and removes the row in the same pass
     events:
       - clock.advance: 5m
       - pod.stuckTerminating: {pod: {index: 1}}
   - tick: 4
-    note: the wave completes on the resulting absence and the row is removed
+    note: the Component is at rest with the retired Instance gone

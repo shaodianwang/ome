@@ -1482,7 +1482,10 @@ func newComponentRecoveryHarness(t *testing.T, multiPod bool, container string, 
 	h.c = fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
 		WithObjects(isvc).
-		WithInterceptorFuncs(interceptor.Funcs{Create: h.interceptCreate, Delete: h.interceptDelete}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: h.interceptCreate, Delete: h.interceptDelete,
+			Get: h.interceptGet, List: h.interceptList, Update: h.interceptUpdate,
+		}).
 		Build()
 	h.revV1 = h.ensureRevision(h.podSpec(goodImage))
 	h.revBad = h.ensureRevision(h.podSpec(badImage))
@@ -2200,12 +2203,19 @@ func (h *recoveryHarness) interceptDelete(ctx context.Context, cl client.WithWat
 	if options.GracePeriodSeconds != nil && *options.GracePeriodSeconds == 0 {
 		// A grace-0 delete removes the object without its kubelet's say,
 		// so the termination model's stand-in finalizer comes off first.
+		// On a pod already Terminating that write is itself what takes
+		// the object out of the fake apiserver, and the delete behind it
+		// then finds nothing; the request succeeded either way, as a
+		// grace-0 delete does on a cluster.
 		stored.Finalizers = removeString(stored.Finalizers, terminationFinalizer)
 		if err := cl.Update(ctx, stored); err != nil {
 			return err
 		}
 		delete(h.terminatingUntil, pod.Name)
-		return cl.Delete(ctx, stored, opts...)
+		if err := cl.Delete(ctx, stored, opts...); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		return nil
 	}
 	if stored.DeletionTimestamp == nil {
 		grace := h.podGrace
@@ -2219,6 +2229,75 @@ func (h *recoveryHarness) interceptDelete(ctx context.Context, cl client.WithWat
 		}
 	}
 	return cl.Delete(ctx, stored, opts...)
+}
+
+// kubeletStopped reports whether the kubelet under pod has stopped: its
+// node is dead, or the pod itself was marked as one its kubelet has
+// stopped reporting.
+func (h *recoveryHarness) kubeletStopped(pod *corev1.Pod) bool {
+	return h.deadNodes[pod.Spec.NodeName] || h.kubeletGone[pod.Name]
+}
+
+// showTeardown presents a Terminating pod whose kubelet has stopped the
+// way the apiserver would. On a cluster nothing but the kubelet's missing
+// acknowledgement keeps such a pod, so it carries no finalizer: the
+// harness finalizer that stands in for that kubelet is hidden from every
+// read, because a finalizer is exactly the evidence that makes the
+// force-delete sweep decline the pod. Its deletion deadline is the one the
+// termination model recorded on the fake clock - the request plus the
+// grace, as the apiserver stamps it - so the policy's slack is measured
+// from the instant the pass deleted it.
+func (h *recoveryHarness) showTeardown(pod *corev1.Pod) {
+	if pod.DeletionTimestamp == nil || !h.kubeletStopped(pod) {
+		return
+	}
+	pod.Finalizers = removeString(pod.Finalizers, terminationFinalizer)
+	if len(pod.Finalizers) == 0 {
+		pod.Finalizers = nil
+	}
+	if until, ok := h.terminatingUntil[pod.Name]; ok {
+		deadline := metav1.NewTime(until)
+		pod.DeletionTimestamp = &deadline
+	}
+}
+
+// interceptGet and interceptList are the read half of showTeardown.
+func (h *recoveryHarness) interceptGet(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := cl.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if pod, ok := obj.(*corev1.Pod); ok {
+		h.showTeardown(pod)
+	}
+	return nil
+}
+
+func (h *recoveryHarness) interceptList(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+	if err := cl.List(ctx, list, opts...); err != nil {
+		return err
+	}
+	if pods, ok := list.(*corev1.PodList); ok {
+		for i := range pods.Items {
+			h.showTeardown(&pods.Items[i])
+		}
+	}
+	return nil
+}
+
+// interceptUpdate puts the stored deletion metadata back on a whole-object
+// write of a pod read through showTeardown: the finalizer is what keeps
+// the object in the fake apiserver at all, only the kubelet model takes it
+// off once its node is back, and the stored deletion timestamp is
+// immutable there.
+func (h *recoveryHarness) interceptUpdate(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+	if pod, ok := obj.(*corev1.Pod); ok && pod.DeletionTimestamp != nil && h.kubeletStopped(pod) {
+		stored := &corev1.Pod{}
+		if err := cl.Get(ctx, client.ObjectKeyFromObject(pod), stored); err == nil {
+			pod.Finalizers = stored.Finalizers
+			pod.DeletionTimestamp = stored.DeletionTimestamp
+		}
+	}
+	return cl.Update(ctx, obj, opts...)
 }
 
 // finishTermination is the kubelet termination model's node half: once
@@ -10213,5 +10292,490 @@ func TestPolicyFlipMidHold_FixLandsWithoutRebuildingTheBrokenRevision(t *testing
 				t.Fatalf("a rebuild that had created no pod when the fix landed must come back on the fix, not on the broken revision")
 			}
 		})
+	}
+}
+
+// Force-delete of a drained pod no operation waits on. A roll to a
+// revision whose replacement never comes up is rolled back once the row
+// has failed. The wreckage sweep drains and deletes the abandoned
+// replacement, and the kubelet under it has stopped - before the delete
+// or after it - so the pod stays Terminating. The Component converges on
+// its running revision on the other nodes: for a single pod the drained
+// replacement then belongs to no operation at all, and for a gang the
+// abandon of the replacement gang waits on the member the dead node
+// holds. Under the force-delete policy the Component pass force-deletes
+// the pod, with the event and the audit row, on the first pass at or
+// after the later of its two boundaries - the pod's own deletion deadline
+// plus the slack, and the node unreachable for the threshold - and that
+// pass is woken by the boundary itself. Before it nothing is deleted, and
+// the pods on live nodes are never touched. Without the policy the pod
+// stays until its kubelet returns.
+
+const (
+	abandonedPodThreshold = 90 * time.Second
+	abandonedPodSlack     = 30 * time.Second
+)
+
+// abandonedReplacementStory is one shape of the story: the pod shape, and
+// whether the node under the replacement died before the wreckage sweep
+// deleted it, which puts the deletion deadline plus the slack last, or
+// after, which puts the node threshold last.
+type abandonedReplacementStory struct {
+	name           string
+	multiPod       bool
+	nodeDiesBefore bool
+}
+
+func abandonedReplacementStories() []abandonedReplacementStory {
+	return []abandonedReplacementStory{
+		{"single pod, the node dies after the drain", false, false},
+		{"single pod, the node died before the drain", false, true},
+		{"gang, the node dies after the drain", true, false},
+		{"gang, the node died before the drain", true, true},
+	}
+}
+
+// newAbandonedReplacementHarness converges two Instances on v1 over six
+// nodes under SurgeThenDrain, rolls them toward a revision whose image
+// never pulls, and returns once the first replacement is bound to a node
+// and wedging there. The retry ladder is off, so the park that follows
+// stands until the rollback.
+func newAbandonedReplacementHarness(t *testing.T, story abandonedReplacementStory, policy *workloadtypes.ForceDeletePolicy) *recoveryHarness {
+	t.Helper()
+	h := newRecoveryHarness(t, story.multiPod)
+	h.replicas = 2
+	recreate := workloadtypes.RestartPolicyRecreateInstance
+	h.lifecycle.RestartPolicy = &recreate
+	h.podGrace = 30 * time.Second
+	h.stuckGrace = 30 * time.Second
+	h.retryPolicy = nil
+	h.forceDelete = policy
+	h.recorder = record.NewFakeRecorder(256)
+	h.useNodes("node-a", "node-b", "node-c", "node-d", "node-e", "node-f")
+	h.useRollingBudget(workloadtypes.UpdateStrategySurgeThenDrain)
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(30, func() bool { return h.settledOn(h.revV1, 2) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never converged on v1")
+	}
+	h.setTarget(h.revBad, badImage)
+	if !h.run(20, h.replacementBound) {
+		h.dumpState("roll to the bad image")
+		t.Fatalf("no replacement was bound to a node under the image that never pulls")
+	}
+	return h
+}
+
+// replacementBound reports whether the replacement pod the story strands
+// is bound to a node.
+func (h *recoveryHarness) replacementBound() bool {
+	for _, pod := range h.podsOnImage(badImage) {
+		if (!h.multiPod || pod.Labels[query.LabelRunner] == "leader") && pod.Spec.NodeName != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// anyRowFailed reports whether any row is parked at Failed.
+func (h *recoveryHarness) anyRowFailed() bool {
+	for _, s := range h.irStatuses() {
+		if s.Phase == workloadtypes.InstancePhaseFailed {
+			return true
+		}
+	}
+	return false
+}
+
+// podsOnImage returns every pod object, Terminating ones included, whose
+// container runs image.
+func (h *recoveryHarness) podsOnImage(image string) []*corev1.Pod {
+	h.t.Helper()
+	pods := &corev1.PodList{}
+	if err := h.c.List(h.ctx, pods, client.InNamespace(recoveryNS)); err != nil {
+		h.t.Fatalf("list pods: %v", err)
+	}
+	var out []*corev1.Pod
+	for i := range pods.Items {
+		if pods.Items[i].Spec.Containers[0].Image == image {
+			out = append(out, &pods.Items[i])
+		}
+	}
+	return out
+}
+
+// abandonedReplacementPod is the replacement pod the story strands: the
+// one pod of a single-pod replacement, the leader of a replacement gang.
+// Its node holds nothing of the serving revision.
+func (h *recoveryHarness) abandonedReplacementPod() *corev1.Pod {
+	h.t.Helper()
+	var victim *corev1.Pod
+	for _, pod := range h.podsOnImage(badImage) {
+		if !h.multiPod || pod.Labels[query.LabelRunner] == "leader" {
+			victim = pod
+		}
+	}
+	if victim == nil || victim.Spec.NodeName == "" {
+		h.dumpState("replacement")
+		h.t.Fatalf("no bound replacement pod on %s", badImage)
+	}
+	for _, pod := range h.podsOnNode(victim.Spec.NodeName) {
+		if pod.Spec.Containers[0].Image == goodImage {
+			h.t.Fatalf("node model placed serving pod %s beside the replacement on %s", pod.Name, victim.Spec.NodeName)
+		}
+	}
+	return victim
+}
+
+// terminatingPod reports whether the pod object is still in the API and
+// Terminating.
+func (h *recoveryHarness) terminatingPod(pod *corev1.Pod) bool {
+	h.t.Helper()
+	cur := &corev1.Pod{}
+	if err := h.c.Get(h.ctx, client.ObjectKeyFromObject(pod), cur); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false
+		}
+		h.t.Fatalf("get pod %s: %v", pod.Name, err)
+	}
+	return cur.UID == pod.UID && cur.DeletionTimestamp != nil
+}
+
+// nodeNotReadySince is the transition time the API holds for name's
+// NodeReady condition - the instant the node-death clock runs from.
+func (h *recoveryHarness) nodeNotReadySince(name string) time.Time {
+	h.t.Helper()
+	node := &corev1.Node{}
+	if err := h.c.Get(h.ctx, types.NamespacedName{Name: name}, node); err != nil {
+		h.t.Fatalf("get node %s: %v", name, err)
+	}
+	for _, cond := range node.Status.Conditions {
+		if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
+			return cond.LastTransitionTime.Time
+		}
+	}
+	h.t.Fatalf("node %s is not NotReady", name)
+	return time.Time{}
+}
+
+// deletionDeadline is the deletion deadline the API presents for pod.
+func (h *recoveryHarness) deletionDeadline(pod *corev1.Pod) time.Time {
+	h.t.Helper()
+	cur := &corev1.Pod{}
+	if err := h.c.Get(h.ctx, client.ObjectKeyFromObject(pod), cur); err != nil {
+		h.t.Fatalf("get pod %s: %v", pod.Name, err)
+	}
+	if cur.DeletionTimestamp == nil {
+		h.t.Fatalf("pod %s is not Terminating", pod.Name)
+	}
+	return cur.DeletionTimestamp.Time
+}
+
+// requireServingPodsKept fails when the serving revision's pods are not
+// exactly the ones in kept, each live.
+func (h *recoveryHarness) requireServingPodsKept(kept map[string]bool) {
+	h.t.Helper()
+	pods := h.podsOnImage(goodImage)
+	if len(pods) != len(kept) {
+		h.dumpState("serving pods")
+		h.t.Fatalf("serving revision has %d pod(s), want its original %d", len(pods), len(kept))
+	}
+	for _, pod := range pods {
+		if !kept[wedgeKey(pod)] || pod.DeletionTimestamp != nil {
+			h.t.Fatalf("serving pod %s was replaced or deleted; pods on live nodes are never touched", pod.Name)
+		}
+	}
+}
+
+// forceDeleteRecord returns the force-delete audit row for pod, or nil.
+func (h *recoveryHarness) forceDeleteRecord(pod *corev1.Pod) *audit.Entry {
+	h.t.Helper()
+	ledger, err := audit.LoadLedgerForOwner(h.ctx, h.c, h.isvc)
+	if err != nil {
+		h.t.Fatalf("load audit ledger: %v", err)
+	}
+	for i := range ledger.Entries {
+		if ledger.Entries[i].Reason == audit.ReasonForceDelete && ledger.Entries[i].RequestUUID == string(pod.UID) {
+			return &ledger.Entries[i]
+		}
+	}
+	return nil
+}
+
+// strandAbandonedReplacement lets the wedged replacement park its row at
+// Failed, rolls the Component back to v1 and leaves the replacement pod
+// Terminating on a dead node: the kubelet under it stops while the pod is
+// still wedging, or once the pod is Terminating, as the story says. A
+// gang's failed replacement is abandoned by the update pass as soon as
+// its row fails, with or without the rollback, so the first timing is
+// what puts the deletion deadline plus the slack past the node threshold.
+// Returns the pod and the instant it turns actionable under policy: the
+// later of its deletion deadline plus the slack, strictly past, and the
+// node's recorded transition plus the threshold, both read back from the
+// API as the pass reads them.
+func (h *recoveryHarness) strandAbandonedReplacement(story abandonedReplacementStory, policy *workloadtypes.ForceDeletePolicy) (*corev1.Pod, time.Time) {
+	h.t.Helper()
+	victim := h.abandonedReplacementPod()
+	deadNode := victim.Spec.NodeName
+	if story.nodeDiesBefore {
+		h.failNode(deadNode)
+	}
+	if !h.run(40, h.anyRowFailed) {
+		h.dumpState("roll to the bad image")
+		h.t.Fatalf("no row parked at Failed under the image that never pulls")
+	}
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(10, func() bool { return h.terminatingPod(victim) }) {
+		h.dumpState("rollback")
+		h.t.Fatalf("the rollback never drained and deleted the replacement %s", victim.Name)
+	}
+	if !story.nodeDiesBefore {
+		h.failNode(deadNode)
+	}
+	slackAt := h.deletionDeadline(victim).Add(policy.OverdueSlack + time.Nanosecond)
+	nodeAt := h.nodeNotReadySince(deadNode).Add(policy.NodeUnreachableThreshold)
+	if story.nodeDiesBefore == nodeAt.After(slackAt) {
+		h.t.Fatalf("story shape: node threshold at %v, slack boundary at %v; the timing must make the other clock last",
+			nodeAt.Format(time.TimeOnly), slackAt.Format(time.TimeOnly))
+	}
+	return victim, laterOf(slackAt, nodeAt)
+}
+
+func laterOf(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
+
+// Cells: instance/Ready/timer.forceDelete[nodeUnreachable]/before, instance/Ready/timer.forceDelete[overdueSlack]/before, instance/Failed/timer.forceDelete[nodeUnreachable]/before, instance/Failed/timer.forceDelete[overdueSlack]/before, instance/Update/GangSurgeTargetCleanup/timer.forceDelete[nodeUnreachable]/before, instance/Update/GangSurgeTargetCleanup/timer.forceDelete[overdueSlack]/before
+func TestForceDelete_DrainedPodNoOperationWaitsOnIsSweptAtThePolicyBoundary(t *testing.T) {
+	for _, story := range abandonedReplacementStories() {
+		t.Run(story.name, func(t *testing.T) {
+			policy := &workloadtypes.ForceDeletePolicy{
+				NodeUnreachableThreshold: abandonedPodThreshold,
+				OverdueSlack:             abandonedPodSlack,
+			}
+			h := newAbandonedReplacementHarness(t, story, policy)
+			serving := podIdentities(h.podsOnImage(goodImage))
+			victim, boundary := h.strandAbandonedReplacement(story, policy)
+			deadNode := victim.Spec.NodeName
+
+			untouched := func() {
+				t.Helper()
+				if h.sawEvent(workloadtypes.EventReasonPodForceDeleted) {
+					t.Fatalf("a pod was force-deleted at %v, before the policy boundary %v", h.clk.Now().Format(time.TimeOnly), boundary.Format(time.TimeOnly))
+				}
+				if !h.terminatingPod(victim) {
+					t.Fatalf("the drained pod %s left the API before the boundary without a force-delete", victim.Name)
+				}
+				h.requireServingPodsKept(serving)
+			}
+			// A controller with nothing else to do is woken only by the
+			// wait its last pass asked for; an idle hour stands in for
+			// the resync a pass that asked for nothing would wait on. A
+			// pass that would oversleep the boundary is noted, and the
+			// clock is taken to the boundary anyway so the sweep's own
+			// claim is judged first.
+			lateWake := ""
+			for h.clk.Now().Before(boundary) {
+				untouched()
+				res, err := h.pass()
+				if err != nil {
+					t.Fatalf("Reconcile: %v", err)
+				}
+				wait := h.sleepAfter(res, time.Hour)
+				if wake := h.clk.Now().Add(wait); wake.After(boundary) {
+					if lateWake == "" {
+						lateWake = fmt.Sprintf("the pass at %v asked to wake at %v, past the policy boundary %v",
+							h.clk.Now().Format(time.TimeOnly), wake.Format(time.TimeOnly), boundary.Format(time.TimeOnly))
+					}
+					wait = boundary.Sub(h.clk.Now())
+				}
+				h.clk.Step(wait)
+			}
+			untouched()
+
+			if _, err := h.pass(); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if !h.sawEvent(workloadtypes.EventReasonPodForceDeleted) {
+				h.dumpState("at the boundary")
+				t.Fatalf("the drained pod %s on %s was not force-deleted at the policy boundary %v, with no operation waiting on it",
+					victim.Name, deadNode, boundary.Format(time.TimeOnly))
+			}
+			if lateWake != "" {
+				t.Fatalf("%s: a Terminating pod on a dying node must wake the pass at its boundary", lateWake)
+			}
+			named := false
+			for _, e := range h.events {
+				if strings.Contains(e, string(workloadtypes.EventReasonPodForceDeleted)) && strings.Contains(e, victim.Name) && strings.Contains(e, deadNode) {
+					named = true
+				}
+			}
+			if !named {
+				t.Fatalf("the force-delete event must name pod %s and node %s; events: %v", victim.Name, deadNode, h.events)
+			}
+			idx, _ := query.InstanceIdxFromLabels(victim)
+			if e := h.forceDeleteRecord(victim); e == nil || e.Outcome != audit.OutcomeForceDeleteUnreachable || e.FromNode != deadNode || e.SourceInstance != idx {
+				t.Fatalf("audit row for %s = %+v, want a force-delete-unreachable row from %s on instance %d", victim.Name, e, deadNode, idx)
+			}
+			if on := h.podsOnNode(deadNode); len(on) != 0 {
+				t.Fatalf("%d pod object(s) still bound to %s after the force delete", len(on), deadNode)
+			}
+			h.requireServingPodsKept(serving)
+
+			// The Component is at rest on v1, and stays so when the kubelet
+			// returns to a node with nothing of it left.
+			if !h.run(10, func() bool { return h.settledOn(h.revV1, 2) }) {
+				h.dumpState("after the force delete")
+				t.Fatalf("the Component did not come to rest on v1 once the dead node's pod was freed")
+			}
+			h.recoverNode(deadNode)
+			for i := 0; i < 3; i++ {
+				h.step()
+				h.requireServingPodsKept(serving)
+			}
+			if !h.settledOn(h.revV1, 2) || len(h.podsOnNode(deadNode)) != 0 {
+				h.dumpState("after the node returned")
+				t.Fatalf("the Component moved after the node returned")
+			}
+		})
+	}
+}
+
+// Cells: instance/Ready/timer.forceDelete[nodeUnreachable]/before, instance/Failed/timer.forceDelete[nodeUnreachable]/before
+func TestForceDelete_WithoutThePolicyADrainedPodOnADeadNodeWaitsForItsKubelet(t *testing.T) {
+	for _, story := range abandonedReplacementStories() {
+		if story.nodeDiesBefore {
+			continue
+		}
+		t.Run(story.name, func(t *testing.T) {
+			h := newAbandonedReplacementHarness(t, story, nil)
+			serving := podIdentities(h.podsOnImage(goodImage))
+			victim, boundary := h.strandAbandonedReplacement(story, &workloadtypes.ForceDeletePolicy{
+				NodeUnreachableThreshold: abandonedPodThreshold,
+				OverdueSlack:             abandonedPodSlack,
+			})
+			deadNode := victim.Spec.NodeName
+
+			// Long past the boundary such a policy would carry.
+			for h.clk.Now().Before(boundary.Add(10 * abandonedPodThreshold)) {
+				h.step()
+				if h.sawEvent(workloadtypes.EventReasonPodForceDeleted) {
+					t.Fatalf("without a force-delete policy nothing may force-delete; events: %v", h.events)
+				}
+				if !h.terminatingPod(victim) {
+					t.Fatalf("the drained pod %s left the API while its kubelet was down and no policy was configured", victim.Name)
+				}
+				h.requireServingPodsKept(serving)
+			}
+
+			// The kubelet returns and finishes the termination it owed.
+			h.recoverNode(deadNode)
+			if !h.run(10, func() bool { return h.settledOn(h.revV1, 2) && len(h.podsOnNode(deadNode)) == 0 }) {
+				h.dumpState("after the node returned")
+				t.Fatalf("the returning kubelet did not finish the termination, or the Component did not come to rest on v1")
+			}
+			h.requireServingPodsKept(serving)
+		})
+	}
+}
+
+// Teardown with a Terminating pod whose index no row covers: the wave has
+// no candidate to escalate it through, so the sweep force-deletes it on
+// actionable node-death evidence with the event and the audit row, and
+// inside the threshold the pass wakes at the boundary and touches nothing.
+func TestReconcile_Teardown_SweepsATerminatingPodOfARowlessIndex(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	const deadNode = "dead-node"
+	policy := &workloadtypes.ForceDeletePolicy{OverdueSlack: 2 * time.Minute, NodeUnreachableThreshold: 5 * time.Minute}
+	cases := []struct {
+		name        string
+		notReadyFor time.Duration
+		deleted     bool
+		wake        time.Duration
+	}{
+		{"node unreachable past the threshold", 10 * time.Minute, true, 0},
+		{"node unreachable inside the threshold", 2 * time.Minute, false, 3 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := minimalInput(t)
+			in.Teardown = true
+			in.Clock = clocktesting.NewFakeClock(now)
+			in.ForceDelete = policy
+			in.ObservedState.InstanceStatuses = nil
+			installTestAtomicMutationStore(&in)
+
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: deadNode}}
+			setNodeReady(node, corev1.ConditionUnknown, now.Add(-tc.notReadyFor))
+			// The apiserver holds the pod until a kubelet acknowledges the
+			// termination; a stand-in finalizer keeps the fake object the
+			// same way, and the live read presents the pod as the
+			// apiserver would, Terminating with no finalizer of its own.
+			pod := enginePod(in.Key.OwnerName, in.Key.Namespace, 3)
+			pod.Spec.NodeName = deadNode
+			stored := pod.DeepCopy()
+			stored.Finalizers = []string{"test.example.com/kubelet"}
+			c := fake.NewClientBuilder().WithScheme(makeScheme(t)).WithObjects(in.OwnerObject, node, stored).Build()
+			deletedAt := metav1.NewTime(now.Add(-10 * time.Minute))
+			observed := pod.DeepCopy()
+			observed.DeletionTimestamp = &deletedAt
+			in.AuthoritativePods = &workloadtypes.ComponentPodSnapshot{
+				Pods:       []*corev1.Pod{observed},
+				ByInstance: map[int32][]*corev1.Pod{3: {observed}},
+			}
+			rec := record.NewFakeRecorder(16)
+
+			result, err := workload.Reconcile(context.Background(), workloadtypes.Deps{
+				Client: c, APIReader: c, Expectations: workloadtypes.NewExpectations(), Recorder: rec,
+			}, in, minimalPlan(), nil)
+			if err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			events := drainFakeEvents(rec)
+			cur := &corev1.Pod{}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), cur); err != nil {
+				t.Fatalf("get pod: %v", err)
+			}
+			ledger, lerr := audit.LoadLedgerForOwner(context.Background(), c, in.OwnerObject)
+			if lerr != nil {
+				t.Fatalf("load ledger: %v", lerr)
+			}
+			if !tc.deleted {
+				if len(events) != 0 || cur.DeletionTimestamp != nil || len(ledger.Entries) != 0 {
+					t.Fatalf("inside the threshold nothing may be deleted, evented or ledgered: events=%v deleted=%v entries=%d", events, cur.DeletionTimestamp != nil, len(ledger.Entries))
+				}
+				if result.Requeue || result.RequeueAfter != tc.wake { //nolint:staticcheck // the bare backoff has no non-deprecated spelling
+					t.Fatalf("result = %+v, want a wake-up at the node threshold in %v", result, tc.wake)
+				}
+				return
+			}
+			if cur.DeletionTimestamp == nil {
+				t.Fatalf("the rowless pod was not force-deleted on actionable node-death evidence")
+			}
+			if len(events) != 1 || !strings.Contains(events[0], string(workloadtypes.EventReasonPodForceDeleted)) ||
+				!strings.Contains(events[0], pod.Name) || !strings.Contains(events[0], deadNode) {
+				t.Fatalf("events = %v, want one PodForceDeleted naming %s and %s", events, pod.Name, deadNode)
+			}
+			if len(ledger.Entries) != 1 || ledger.Entries[0].Reason != audit.ReasonForceDelete ||
+				ledger.Entries[0].RequestUUID != string(pod.UID) || ledger.Entries[0].FromNode != deadNode || ledger.Entries[0].SourceInstance != 3 {
+				t.Fatalf("ledger = %+v, want one force-delete row for %s from %s on instance 3", ledger.Entries, pod.UID, deadNode)
+			}
+		})
+	}
+}
+
+// drainFakeEvents moves every event the recorder holds into a slice.
+func drainFakeEvents(rec *record.FakeRecorder) []string {
+	var out []string
+	for {
+		select {
+		case e := <-rec.Events:
+			out = append(out, e)
+		default:
+			return out
+		}
 	}
 }

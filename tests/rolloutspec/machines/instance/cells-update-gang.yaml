@@ -892,7 +892,7 @@ cells:
   - state: Update/GangSurgeTarget
     event: timer.forceDelete
     outcome: ignore
-    note: the update pass sweeps the Terminating pods of the row it is dispatching, and the replacement gang is a different index the source's pass never lists, so pkg/controller/v1beta1/workload/ops/force_delete.go is still unreachable from this marker
+    note: the update pass sweeps only the Terminating pods of the row it dispatches, and the replacement gang is a different index the source's pass never lists; the Component pass sweeps every Terminating pod of the Component ahead of it, so a marker pod wedged on a dead node is force-deleted there at the policy boundary and the attempt goes on from the absence (pkg/controller/v1beta1/workload/reconcile.go)
     placement: perm
     coverage: {perm: [], unit: [TestUpdateWithPods_MarkerPodsAreOutsideTheSourcesSweep], kind: []}
     status: decided
@@ -1590,13 +1590,12 @@ cells:
     outcome: n/a
     reason: the retirement issues no create — it only deletes the retired replacement's pods and removes its status row
     status: current
-  # GAP: a retired pod wedged on a dead node has no unwedger.
   - state: Update/GangSurgeTargetCleanup
     event: timer.forceDelete
     outcome: ignore
-    note: the update pass sweeps the Terminating pods of the row it is dispatching, and the retired marker is a different index the source's pass never lists, so pkg/controller/v1beta1/workload/ops/force_delete.go stays unreachable, the clock elapsing on a retired pod force-deletes nothing and the marker cannot complete until an operator intervenes
-    placement: kind
-    coverage: {perm: [], unit: [TestUpdateWithPods_MarkerPodsAreOutsideTheSourcesSweep], kind: []}
+    note: the update pass sweeps only the Terminating pods of the row it dispatches and the retired marker is a different index, but the Component pass sweeps every Terminating pod of the Component ahead of it - a retired pod wedged on a dead node is force-deleted there once the node is gone or unreachable past the threshold and the pod is past its own deadline plus the slack, and the retirement completes on the resulting absence (pkg/controller/v1beta1/workload/reconcile.go)
+    placement: unit
+    coverage: {perm: [], unit: [TestUpdateWithPods_MarkerPodsAreOutsideTheSourcesSweep, TestForceDelete_DrainedPodNoOperationWaitsOnIsSweptAtThePolicyBoundary], kind: []}
     status: decided
   - state: Update/GangSurgeTargetCleanup
     event: timer.stuckPodGrace

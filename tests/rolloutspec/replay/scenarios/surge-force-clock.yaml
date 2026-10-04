@@ -3,6 +3,9 @@
 # waiting on that pod, but the sweep at the top of the update pass clears it
 # anyway, so the step is not left reading a pod nothing runs.
 scenario: surge-force-clock
+intentional: >-
+  the Component-wide sweep runs ahead of the hold pass, so the force-delete
+  and its event precede the pass's row writes
 arrows:
   - T-ready-surge
   - T-surge-force-clock

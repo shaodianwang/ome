@@ -28,6 +28,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
@@ -47,10 +48,11 @@ import (
 // it and produces the Decision; Execute applies the Decision through
 // the workload/ops state machines and runs the escalation pass.
 //
-// Execute runs the hold pass, then the op actions in the order
-// executeActions numbers them (scale-down, demotion, restart, migration
-// expiry, migration, update, create), then escalation. Which pass may
-// advance a row is the ownership table's answer, never the order's.
+// Execute runs the force-delete sweep, the hold pass, then the op
+// actions in the order executeActions numbers them (scale-down, demotion,
+// restart, migration expiry, migration, update, create), then escalation.
+// Which pass may advance a row is the ownership table's answer, never the
+// order's.
 //
 // target may be nil when DesiredSpec.PodSpec is nil (MinReplicas=0).
 // Restart / Update passes short-circuit on nil target; Create returns
@@ -81,6 +83,12 @@ func Reconcile(ctx context.Context, deps types.Deps, input types.ReconcileInput,
 	if input.PassWake == nil {
 		input.PassWake = &types.PassWake{}
 	}
+	// One record of the pods the force-delete sweep removed, so the
+	// operation passes reading the same observation delete none of them
+	// a second time.
+	if input.Swept == nil {
+		input.Swept = &types.SweptPods{}
+	}
 
 	// Teardown: the owner is being deleted, so every observed Instance is
 	// a scale-down extra and nothing else runs. The caller owns completion
@@ -106,7 +114,8 @@ func Reconcile(ctx context.Context, deps types.Deps, input types.ReconcileInput,
 	return types.NoSoonerThan(res, input.Pacing.Pending()), err
 }
 
-// Execute applies the Decision: the hold pass, then the op-pass action
+// Execute applies the Decision: the force-delete sweep over every
+// Terminating pod of the Component, the hold pass, then the op-pass action
 // loop, then the end-of-pass bookkeeping (endOfPassBookkeeping). A
 // scale-down status commit
 // is a pass boundary because it invalidates the plan. While an admitted wave
@@ -125,6 +134,28 @@ func Reconcile(ctx context.Context, deps types.Deps, input types.ReconcileInput,
 // reported first and an end-of-pass error is appended to it, never
 // substituted for it.
 func Execute(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, decision Decision) (ctrl.Result, error) {
+	// The decision layer grouped the rows by owner once; every pass below
+	// reads its own list out of that one answer.
+	input.Owned = &decision.Owned
+	// The force-delete sweep runs ahead of every pass, over every
+	// Terminating pod of the Component: a drained pod no operation waits
+	// on any more has no verb pass to re-read it, and the node under it
+	// raises no event. The hold pass judges on the same memoized read and
+	// asks the sweep's own question, so a pod freed here is not held. A
+	// sweep error neither suspends the verb passes nor outranks their
+	// error; it is appended, and the pass fails on it so the backoff
+	// supplies another reading.
+	sweepAt, sweepErr := sweepStuckTerminatingPods(ctx, deps, input, plan, snapshot.CachedPods)
+	res, err := executeDecision(ctx, deps, input, plan, target, snapshot, decision)
+	if sweepErr != nil {
+		err = errors.Join(err, sweepErr)
+	}
+	return wakeForPolicyBoundary(res, input.Now(), sweepAt), err
+}
+
+// executeDecision is Execute past the sweep: the hold pass, the action
+// loop and the end-of-pass bookkeeping.
+func executeDecision(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, decision Decision) (ctrl.Result, error) {
 	// Holds first, for every row, before any verb pass: a token is
 	// written as soon as its condition is observed. What the owner does
 	// about it — abandon the step now or finish to its boundary — is the
@@ -135,9 +166,6 @@ func Execute(ctx context.Context, deps types.Deps, input types.ReconcileInput, p
 	// every row derives its own holds, so one row's failed read must not
 	// freeze another row's operation. The op error stays the pass's
 	// primary failure and is reported first.
-	// The decision layer grouped the rows by owner once; every pass below
-	// reads its own list out of that one answer.
-	input.Owned = &decision.Owned
 	heldRows, holdErr := runHoldPass(ctx, deps, input, plan, snapshot, scaleDownExtras(decision))
 	res, endsPass, err := executeActions(ctx, deps, input, plan, target, snapshot, decision)
 	if holdErr != nil {
@@ -187,6 +215,46 @@ func endOfPassBookkeeping(ctx context.Context, deps types.Deps, input types.Reco
 		return err
 	}
 	return escalation.PruneOutlivedRetryBlocks(ctx, input, plan, target, snapshot.CachedPods)
+}
+
+// sweepStuckTerminatingPods is the Component-wide force-delete sweep:
+// every Terminating pod of the Component, from the pass's one memoized
+// pod read, is judged on the evidence and thresholds the per-operation
+// escalations use, whether or not an operation still waits on it. With
+// no policy configured nothing is read. Reports the earliest policy
+// boundary among the pods left in place.
+func sweepStuckTerminatingPods(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, pods func(context.Context) (map[int32][]*corev1.Pod, error)) (time.Time, error) {
+	if input.ForceDelete == nil {
+		return time.Time{}, nil
+	}
+	byIdx, err := pods(ctx)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("workload.Reconcile: list pods for the force-delete sweep (component=%s): %w", plan.Component, err)
+	}
+	at, err := workloadops.SweepStuckTerminatingPods(ctx, deps, input, byIdx)
+	if err != nil {
+		return at, fmt.Errorf("workload.Reconcile: force-delete sweep (component=%s): %w", plan.Component, err)
+	}
+	return at, nil
+}
+
+// wakeForPolicyBoundary folds the sweep's next policy boundary into the
+// pass result. The evidence turns actionable on a clock and a node that
+// has stopped reporting emits no event, so a pass with no sooner wake-up
+// comes back exactly at the boundary. A pass already asking for the
+// immediate requeue re-runs the sweep sooner than any boundary and is
+// left as it is; a boundary already reached asks for that requeue itself.
+func wakeForPolicyBoundary(res ctrl.Result, now, at time.Time) ctrl.Result {
+	if at.IsZero() || res.Requeue { //nolint:staticcheck // the bare backoff has no non-deprecated spelling
+		return res
+	}
+	if !at.After(now) {
+		if res.RequeueAfter > 0 {
+			return res
+		}
+		return types.RequeueNow()
+	}
+	return types.EarliestWake(res, at.Sub(now))
 }
 
 // runHoldPass evaluates every external hold once, for every observed
@@ -399,7 +467,10 @@ func scaleDownResult(input types.ReconcileInput, outcome workloadops.DeleteBatch
 // reconcileTeardown runs the scale-down pipeline over every observed
 // Instance. Not the Paused gate, not Restart / Migrate / Update / Create,
 // not the escalation pass: the scale-down pipeline owns wedge escalation
-// through lifecycle.forceDelete.
+// through lifecycle.forceDelete for the rows it drives, and the
+// force-delete sweep covers a pod of an index with no row left, from the
+// live read the wave already took, so no pod holds the teardown open
+// past the policy's boundary.
 func reconcileTeardown(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan) (ctrl.Result, error) {
 	extras := TeardownExtras(input.ObservedState.InstanceStatuses)
 	snapshot := NewObservedSnapshot(deps, input, plan.Component, input.ObservedState.InstanceStatuses)
@@ -408,7 +479,8 @@ func reconcileTeardown(ctx context.Context, deps types.Deps, input types.Reconci
 		return ctrl.Result{}, err
 	}
 	res, _, _ := scaleDownResult(input, outcome)
-	return res, nil
+	sweepAt, sweepErr := sweepStuckTerminatingPods(ctx, deps, input, plan, snapshot.LivePods)
+	return wakeForPolicyBoundary(res, input.Now(), sweepAt), sweepErr
 }
 
 func scaleDownPollResult(input types.ReconcileInput, policyRequeueAfter time.Duration, policyDeadlineDue bool) ctrl.Result {

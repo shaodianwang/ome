@@ -320,6 +320,11 @@ type ReconcileInput struct {
 	// per pass and folds it into the result.
 	PassWake *PassWake
 
+	// Swept records the pods the force-delete sweep removed this pass, so
+	// an operation that reaches one of them on the same observation issues
+	// no second delete. The dispatcher allocates it per pass.
+	Swept *SweptPods
+
 	// Gangs carries what each multi-pod Instance's PodGroup says about
 	// its gang, recorded by the PodGroup pass that runs ahead of the
 	// dispatcher. The pod-create choke point reads it to keep members off
