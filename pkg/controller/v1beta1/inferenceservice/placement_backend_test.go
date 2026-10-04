@@ -126,12 +126,12 @@ func TestPlacementBackendReconcile(t *testing.T) {
 			delete(f.service.Annotations, constants.PlacementExecution)
 			f.service.Finalizers = nil
 		}},
-		{name: "retired placement policy holds", wantError: "ClusterAffinity", change: func(f *fixture) {
+		{name: "placement without the ClusterAffinity policy holds", wantError: "ClusterAffinity", change: func(f *fixture) {
 			f.service.Annotations = nil
 			f.service.Spec.Placement = &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeAll}
 			f.service.Finalizers = nil
 		}},
-		{name: "retired selector annotation holds", wantError: "unsupported", change: func(f *fixture) {
+		{name: "selector annotation holds", wantError: "unsupported", change: func(f *fixture) {
 			f.service.Annotations = map[string]string{constants.ClusterSelector: "region=east"}
 			f.service.Finalizers = nil
 		}},
