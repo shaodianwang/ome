@@ -239,7 +239,7 @@ func TestLegacyUnknownHomesRetainAllocation(t *testing.T) {
 	}{
 		{name: "Single retains unknown winner", mode: v1beta1.PlacementModeSingle, registeredReady: true, wantUnchanged: true},
 		{name: "All continues healthy home", mode: v1beta1.PlacementModeAll, registeredReady: true, wantFloor: 3},
-		{name: "Packed retains unknown admission", mode: v1beta1.PlacementModeSplit, registeredReady: true, wantFloor: 5},
+		{name: "Packed retains unknown admission", mode: v1beta1.PlacementModeSplit, registeredReady: true, wantFloor: 3},
 		{name: "Packed reserves unready home", mode: v1beta1.PlacementModeSplit, wantFloor: 3},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -314,6 +314,8 @@ func TestLegacySplitTargets(t *testing.T) {
 	}{
 		{name: "Packed over-requests unadmitted deficit", admitted: map[string]int32{}, floor: 5, want: map[string]int32{"a": 5, "b": 5}},
 		{name: "Packed trims excess in preference order", admitted: map[string]int32{"a": 4, "b": 3}, floor: 5, want: map[string]int32{"a": 4, "b": 1}},
+		{name: "Packed tops up the standing home before an empty candidate", admitted: map[string]int32{"b": 3}, floor: 5, want: map[string]int32{"a": 2, "b": 5}},
+		{name: "Packed sheds the smaller admission first", admitted: map[string]int32{"a": 2, "b": 5}, floor: 5, want: map[string]int32{"a": 0, "b": 5}},
 		{name: "Packed clips to local ceiling", admitted: map[string]int32{}, floor: 5, ceiling: 2, want: map[string]int32{"a": 2, "b": 2}},
 		{name: "spread clips to local ceiling", floor: 5, ceiling: 2, spread: true, want: map[string]int32{"a": 2, "b": 2}},
 		{name: "spread rounds each home up", floor: 5, spread: true, want: map[string]int32{"a": 3, "b": 3}},
@@ -348,6 +350,144 @@ func TestLegacyComponentReplicaBands(t *testing.T) {
 			got := [6]int{*service.Spec.Engine.MinReplicas, service.Spec.Engine.MaxReplicas, *service.Spec.Decoder.MinReplicas, service.Spec.Decoder.MaxReplicas, *service.Spec.Router.MinReplicas, service.Spec.Router.MaxReplicas}
 			if diff := cmp.Diff([6]int{3, tt.wantMax, 3, tt.wantMax, 1, 2}, got); diff != "" {
 				t.Fatal(diff)
+			}
+		})
+	}
+}
+
+// legacyPackedSource is a Packed source whose status records one standing home
+// holding `admitted` serving replicas, with a desired count of `desired`.
+func legacyPackedSource(standing string, admitted, desired int32) *v1beta1.InferenceService {
+	source := legacySource(v1beta1.PlacementModeSplit)
+	source.Spec.Placement.Split = &v1beta1.SplitSpec{Replicas: ptr.To(desired)}
+	source.Finalizers = []string{PlacementFinalizer}
+	source.Status.Placement = &v1beta1.PlacementStatus{Phase: v1beta1.PlacementPhasePlaced, Candidates: []v1beta1.CandidatePlacement{
+		{Cluster: standing, Phase: v1beta1.CandidatePhaseAdmitted, AdmittedReplicas: admitted, ReadyReplicas: admitted},
+	}}
+	return source
+}
+
+// derivedFloorOn reads a member's derived engine floor, or -1 when the member
+// holds no derived copy.
+func derivedFloorOn(t *testing.T, worker client.Client) (int, *v1beta1.InferenceService) {
+	t.Helper()
+	derived := &v1beta1.InferenceService{}
+	err := worker.Get(t.Context(), types.NamespacedName{Namespace: "prod", Name: "svc"}, derived)
+	if apierrors.IsNotFound(err) {
+		return -1, nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return *derived.Spec.Engine.MinReplicas, derived
+}
+
+// admitDerivedOn makes a member report `n` admitted, ready engine instances for
+// the derived copy it holds, the way a member that ran its request would.
+func admitDerivedOn(t *testing.T, worker client.Client, n int) {
+	t.Helper()
+	derived := &v1beta1.InferenceService{}
+	if err := worker.Get(t.Context(), types.NamespacedName{Namespace: "prod", Name: "svc"}, derived); err != nil {
+		t.Fatal(err)
+	}
+	flags := make([]bool, n)
+	for i := range flags {
+		flags[i] = true
+	}
+	ir := irWithInstances(v1beta1.EngineComponent, flags...)
+	ir.Status.ReadyReplicas = int32(n)
+	objects := observedWorkerObjects(derived.DeepCopy(), ir)
+	for _, obj := range objects[2:] {
+		if err := worker.Create(t.Context(), obj); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A Packed replica update is a top-up: the home already serving is asked for
+// the new count on top of its share, an empty candidate only for the deficit,
+// and when the empty candidate admits first the serving home keeps its copy.
+// The standing home's position in name order must not change any of that.
+func TestLegacyPackedReplicaUpdateRetainsServingHome(t *testing.T) {
+	for _, tt := range []struct{ name, standing, empty string }{
+		{name: "standing home sorts first", standing: "a", empty: "b"},
+		{name: "standing home sorts last", standing: "b", empty: "a"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := testScheme(t)
+			source := legacyPackedSource(tt.standing, 3, 5)
+			workers := map[string]client.WithWatch{
+				tt.standing: workerWithReplicaCounts(t, scheme, "svc."+tt.standing+".example.com", 3, 3),
+				tt.empty:    emptyWorker(scheme),
+			}
+			peers := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{}}
+			for name, worker := range workers {
+				peers.m[name] = workloadcluster.NewNeverCachingClient(worker)
+			}
+			r, _ := newPlacer(scheme, peers, source, readyWC("a", map[string]string{"accelerator": "gpu-a"}), readyWC("b", map[string]string{"accelerator": "gpu-a"}))
+			if _, err := r.Reconcile(t.Context(), req()); err != nil {
+				t.Fatal(err)
+			}
+			standingFloor, standingDerived := derivedFloorOn(t, workers[tt.standing])
+			emptyFloor, _ := derivedFloorOn(t, workers[tt.empty])
+			if diff := cmp.Diff([2]int{5, 2}, [2]int{standingFloor, emptyFloor}); diff != "" {
+				t.Errorf("floors after the update (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(types.UID("member-uid"), standingDerived.UID); diff != "" {
+				t.Errorf("standing derived identity (-want +got):\n%s", diff)
+			}
+
+			admitDerivedOn(t, workers[tt.empty], emptyFloor)
+			if _, err := r.Reconcile(t.Context(), req()); err != nil {
+				t.Fatal(err)
+			}
+			standingFloor, standingDerived = derivedFloorOn(t, workers[tt.standing])
+			emptyFloor, _ = derivedFloorOn(t, workers[tt.empty])
+			if standingDerived == nil {
+				t.Fatal("serving home lost its derived copy to the empty candidate")
+			}
+			if diff := cmp.Diff(types.UID("member-uid"), standingDerived.UID); diff != "" {
+				t.Fatalf("standing derived identity (-want +got):\n%s", diff)
+			}
+			if standingFloor < 3 {
+				t.Fatalf("serving home trimmed below its serving share: floor %d", standingFloor)
+			}
+			if diff := cmp.Diff(5, standingFloor+emptyFloor); diff != "" {
+				t.Fatalf("floors after admission (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// Once both homes admitted their requests, surplus is shed from the smaller
+// admission: the home holding the larger share keeps its copy whichever name
+// sorts first.
+func TestLegacyPackedTrimKeepsLargerAdmission(t *testing.T) {
+	for _, tt := range []struct{ name, larger, smaller string }{
+		{name: "larger home sorts first", larger: "a", smaller: "b"},
+		{name: "larger home sorts last", larger: "b", smaller: "a"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := testScheme(t)
+			source := legacyPackedSource(tt.larger, 5, 5)
+			source.Status.Placement.Candidates = append(source.Status.Placement.Candidates,
+				v1beta1.CandidatePlacement{Cluster: tt.smaller, Phase: v1beta1.CandidatePhaseAdmitted, AdmittedReplicas: 2, ReadyReplicas: 2})
+			workers := map[string]client.WithWatch{
+				tt.larger:  workerWithReplicaCounts(t, scheme, "svc."+tt.larger+".example.com", 5, 5),
+				tt.smaller: workerWithReplicaCounts(t, scheme, "svc."+tt.smaller+".example.com", 2, 2),
+			}
+			peers := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{}}
+			for name, worker := range workers {
+				peers.m[name] = workloadcluster.NewNeverCachingClient(worker)
+			}
+			r, _ := newPlacer(scheme, peers, source, readyWC("a", map[string]string{"accelerator": "gpu-a"}), readyWC("b", map[string]string{"accelerator": "gpu-a"}))
+			if _, err := r.Reconcile(t.Context(), req()); err != nil {
+				t.Fatal(err)
+			}
+			largerFloor, _ := derivedFloorOn(t, workers[tt.larger])
+			smallerFloor, _ := derivedFloorOn(t, workers[tt.smaller])
+			if diff := cmp.Diff([2]int{5, -1}, [2]int{largerFloor, smallerFloor}); diff != "" {
+				t.Fatalf("floors after trim (-want +got):\n%s", diff)
 			}
 		})
 	}

@@ -473,8 +473,11 @@ func (r *Reconciler) legacyReconcileSplit(
 	return res, err
 }
 
-// legacySplitApportion over-requests a deficit in candidate order and trims
-// surplus admission. Spread requests a rounded-up share independently per home.
+// legacySplitApportion over-requests a deficit and trims surplus admission in
+// Packed preference order: the largest admitted share first, then the given
+// candidate order. A serving home is topped up, an empty candidate is asked
+// only for the deficit, and surplus is shed from the smaller admissions.
+// Spread requests a rounded-up share independently per home.
 func legacySplitApportion(candidates []string, admitted map[string]int32, desired, maxPer int32, spread bool) map[string]int32 {
 	targets := make(map[string]int32, len(candidates))
 	if len(candidates) == 0 {
@@ -493,20 +496,21 @@ func legacySplitApportion(candidates []string, admitted map[string]int32, desire
 		}
 		return targets
 	}
+	order := legacySplitPreference(candidates, admitted)
 	var total int32
-	for _, c := range candidates {
+	for _, c := range order {
 		total += admitted[c]
 	}
 	remaining := desired
 	if total >= desired {
-		for _, c := range candidates { // TRIM
+		for _, c := range order { // TRIM
 			t := capTo(min(admitted[c], remaining))
 			targets[c] = t
 			remaining -= t
 		}
 		return targets
 	}
-	for _, c := range candidates { // FILL
+	for _, c := range order { // FILL
 		if remaining <= 0 {
 			targets[c] = 0
 			continue
@@ -515,6 +519,16 @@ func legacySplitApportion(candidates []string, admitted map[string]int32, desire
 		remaining -= admitted[c]
 	}
 	return targets
+}
+
+// legacySplitPreference orders Packed candidates by admitted share, largest
+// first, keeping the given order among equal shares.
+func legacySplitPreference(candidates []string, admitted map[string]int32) []string {
+	order := slices.Clone(candidates)
+	sort.SliceStable(order, func(i, j int) bool {
+		return admitted[order[i]] > admitted[order[j]]
+	})
+	return order
 }
 
 func (r *Reconciler) legacyFanOut(ctx context.Context, isvc *v1beta1.InferenceService, candidates []string) ([]string, error) {
