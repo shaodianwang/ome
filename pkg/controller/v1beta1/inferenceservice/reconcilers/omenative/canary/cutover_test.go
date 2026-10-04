@@ -186,6 +186,7 @@ func TestReconcile_CutoverCompletesWhenEverySecondaryHasRolled(t *testing.T) {
 	in.PerRevisionPods = map[string]int32{"new": 4}
 	in.Secondaries[v1beta1.DecoderComponent] = MemberRevisions{CanaryRevisionHash: "dnew", StableRevisionHash: "dold", ReadyCanaryCapacity: 3, DesiredReplicas: 4}
 	in.GroupReadyPerRevisionPods[v1beta1.DecoderComponent] = map[string]int32{"dnew": 3, "dold": 1}
+	mustReconcile(t, isvc, in) // 100% traffic moves; the release reads the next pass's count
 	expectReleased(t, isvc, mustReconcile(t, isvc, in), 2)
 
 	// The decoder's replacement is Ready but its stable instance still serves.
@@ -214,8 +215,9 @@ func TestReconcile_DoneWithoutStableIdentityReadsStable(t *testing.T) {
 
 // A single-step plan cuts over the same way: all but one instance stage on
 // the canary revision, traffic moves once they are Ready, the undelayed
-// cutover releases the last stable instance in the same pass, and the unit
-// reads Stable once that instance has rolled.
+// cutover releases the last stable instance on the next pass, on that
+// pass's own capacity count, and the unit reads Stable once that instance
+// has rolled.
 func TestReconcile_SingleStepPlanStagesAllButTheLastInstance(t *testing.T) {
 	steps := []v1beta1.RolloutGroupStep{{Capacity: intstr.FromString("100%"), Traffic: 100}}
 	isvc := pinActiveRun(canaryISVC(steps, nil))
@@ -225,8 +227,11 @@ func TestReconcile_SingleStepPlanStagesAllButTheLastInstance(t *testing.T) {
 		t.Fatalf("staging must hold one stable instance, got phase=%q res=%+v", phaseOf(isvc), res)
 	}
 	in.PerRevisionPods = map[string]int32{"new": 3, "old": 1}
-	expectReleased(t, isvc, mustReconcile(t, isvc, in), 1)
+	if res := mustReconcile(t, isvc, in); res.Partition != 1 || phaseOf(isvc) != v1beta1.RolloutPhasePromoting {
+		t.Fatalf("100%% traffic moves with the stable instance still held, got phase=%q res=%+v", phaseOf(isvc), res)
+	}
 	expectSoleTarget(t, isvc, v1beta1.EngineComponent, "new")
+	expectReleased(t, isvc, mustReconcile(t, isvc, in), 1)
 	in.PerRevisionPods = map[string]int32{"new": 4}
 	expectStableAfterRoll(t, isvc, mustReconcile(t, isvc, in))
 }

@@ -258,8 +258,9 @@ func (r *Result) wake(d time.Duration) *Result {
 // in-memory. No-op (Active=false) when spec.rollout.canary is unset. Per step it
 // performs capacity → traffic → pause, advancing on promotion; the final step
 // (TrafficWeight 100) shifts traffic off the stable revision, drains it,
-// releases its last instance to roll, and reads Stable once every instance
-// serves the canary revision.
+// releases its last instance to roll on a later pass that has counted the
+// canary capacity itself, and reads Stable once every instance serves the
+// canary revision.
 func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// Operator annotations are applied in status first and removed by the
 	// controller after the flush; the pass only records which ones it took,
@@ -382,17 +383,23 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 	// or not the step's capacity is met yet.
 	publishReadyRevisions(in)
 	state := rollout.StateOf(cs, in.ISVC.Status.Components[in.Component].RolloutPhase, len(plan.Steps))
-	if (readyCanary < newCount || !in.SecondaryCapacityReady) && state != rollout.CanaryStateDraining {
-		// A drain is exempt: the final traffic write has landed, and capacity
-		// lost after cutover is the workload engine's repair, not a canary
-		// state.
-		if cs.CapacityWaitSince == nil {
-			cs.CapacityWaitSince = &metav1.Time{Time: in.Now}
+	capacityShort := readyCanary < newCount || !in.SecondaryCapacityReady
+	if capacityShort && cs.CapacityWaitSince == nil {
+		cs.CapacityWaitSince = &metav1.Time{Time: in.Now}
+	}
+	if capacityShort && capacityGateExpired(cs, resolveReadyTimeout(in, plan), in.Now) {
+		// A drain's split names the canary revision alone, so its park hands
+		// the traffic back to the held stable instance, as a crash park does.
+		if state == rollout.CanaryStateDraining {
+			returnTrafficToStable(in)
 		}
-		if capacityGateExpired(cs, resolveReadyTimeout(in, plan), in.Now) {
-			parkFailed(in.ISVC, in.Component, cs, v1beta1.CanaryFailureCapacityTimeout, in.Now)
-			return (&Result{Active: true, Partition: partition}).wake(in.ParkedRequeue), nil
-		}
+		parkFailed(in.ISVC, in.Component, cs, v1beta1.CanaryFailureCapacityTimeout, in.Now)
+		return (&Result{Active: true, Partition: partition}).wake(in.ParkedRequeue), nil
+	}
+	if capacityShort && state != rollout.CanaryStateDraining {
+		// A drain is exempt from this hold: capacity lost after the final
+		// traffic write is the workload engine's repair, and the drain's own
+		// release waits on it below, inside the same timeout.
 		if state == rollout.CanaryStateServing || state == rollout.CanaryStatePreHold {
 			// A split that was serving keeps its phase and its programmed
 			// weight through a dip; the gate only keeps the step from moving.
@@ -410,7 +417,9 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhasePending)
 		return (&Result{Active: true, Partition: partition}).wake(in.Requeue), nil
 	}
-	cs.CapacityWaitSince = nil
+	if !capacityShort {
+		cs.CapacityWaitSince = nil
+	}
 
 	// Pre-step hold (repin clamp): the pinned plan was replaced mid-run and
 	// the clamped step would raise exposure, so the traffic raise waits for
@@ -447,7 +456,8 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 		// final step is entered well before traffic moves, so measuring from
 		// step entry could consume the whole window before cutover. The pass
 		// whose traffic write moved the weight to 100 is that moment.
-		if weightBefore != 100 {
+		shifted := weightBefore != 100
+		if shifted {
 			cs.StepEnteredTime = &metav1.Time{Time: in.Now}
 		}
 		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhasePromoting)
@@ -473,6 +483,12 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 			case decAdvance:
 				// gate passed at 100% — fall through to the drain window + completion.
 			}
+		}
+		// The release cannot be undone, so it is decided on a count taken
+		// after the 100% write landed: the pass that moved traffic ends here,
+		// and a drain short of canary capacity holds it until it is back.
+		if shifted || capacityShort {
+			return (&Result{Active: true, Partition: partition}).wake(in.Requeue), nil
 		}
 		if drainElapsed(cs, plan, in.Now) {
 			// A promote that opens the final gate stays live through the drain

@@ -51,6 +51,7 @@ func TestDispatch_MembersRecordTheRolledOutRevisions(t *testing.T) {
 	f.dispatch("advance")
 	f.movePod("engine", "engold", "engnew", "0")
 	f.movePod("decoder", "decold", "decnew", "0")
+	f.dispatch("shift") // 100% traffic moves; the release reads the next pass's count
 	f.dispatch("cut over")
 	if f.phase() != v1beta1.RolloutPhaseStable {
 		t.Fatalf("the ladder must complete, got %q", f.phase())
@@ -78,6 +79,7 @@ func TestDispatch_RollbackStableResolvesFromTheRolledOutRevision(t *testing.T) {
 	f.dispatch("advance")
 	f.movePod("engine", "engold", "engnew", "0")
 	f.movePod("decoder", "decold", "decnew", "0")
+	f.dispatch("shift") // 100% traffic moves; the release reads the next pass's count
 	f.dispatch("cut over")
 	if f.phase() != v1beta1.RolloutPhaseStable {
 		t.Fatalf("the ladder must complete, got %q", f.phase())
@@ -152,6 +154,7 @@ func TestReconcile_CompletionRecordsEveryMembersRevisions(t *testing.T) {
 	mustReconcile(t, isvc, in)
 	delete(isvc.Annotations, constants.RolloutPromoteAnnotation)
 	in.PerRevisionPods = map[string]int32{"new": 4}
+	mustReconcile(t, isvc, in) // 100% traffic moves; the release reads the next pass's count
 	if res := mustReconcile(t, isvc, in); !res.Complete {
 		t.Fatalf("the ungated final step completes, got %+v", res)
 	}
@@ -212,6 +215,7 @@ func TestReconcile_UnbumpedMemberRecordsItsRevisionWithoutDemotion(t *testing.T)
 	mustReconcile(t, isvc, in)
 	delete(isvc.Annotations, constants.RolloutPromoteAnnotation)
 	in.PerRevisionPods = map[string]int32{"new": 4}
+	mustReconcile(t, isvc, in) // 100% traffic moves; the release reads the next pass's count
 	if res := mustReconcile(t, isvc, in); !res.Complete {
 		t.Fatalf("the ungated final step completes, got %+v", res)
 	}

@@ -175,6 +175,7 @@ func doneRollingTwoReplicas(t *testing.T) (*v1beta1.InferenceService, ReconcileI
 	annotate(isvc, constants.RolloutPromoteAnnotation, "new")
 	mustReconcile(t, isvc, in)
 	delete(isvc.Annotations, constants.RolloutPromoteAnnotation)
+	mustReconcile(t, isvc, in) // 100% traffic moves; the release reads the next pass's count
 	res := mustReconcile(t, isvc, in)
 	cs := rollout.CanaryStatusFor(&isvc.Status, v1beta1.EngineComponent)
 	if cs.CurrentStep != 2 || phaseOf(isvc) != v1beta1.RolloutPhasePromoting || res.Complete {

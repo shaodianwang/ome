@@ -185,6 +185,7 @@ func TestDispatch_SecondaryConvergesWithThePromotion(t *testing.T) {
 	// The final step's capacity: every instance of every member on its target.
 	f.movePod("engine", "engold", "engnew", "0")
 	f.movePod("decoder", "decold", "decnew", "0")
+	f.dispatch("shift") // 100% traffic moves; the release reads the next pass's count
 	f.dispatch("cut over")
 	cs := rollout.CanaryStatusFor(&f.isvc.Status, v1beta1.EngineComponent)
 	if cs == nil || cs.CurrentStep != 2 || f.phase() != v1beta1.RolloutPhaseStable {
@@ -293,6 +294,7 @@ func TestReconcile_SecondaryTrafficFollowsTheLadder(t *testing.T) {
 	})
 
 	in.PerRevisionPods = map[string]int32{"new": 4}
+	mustReconcile(t, isvc, in) // 100% traffic moves; the release reads the next pass's count
 	if res := mustReconcile(t, isvc, in); !res.Complete {
 		t.Fatalf("the ungated final step completes at 100%%, got %+v", res)
 	}
