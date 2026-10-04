@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/record"
 	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
@@ -3985,5 +3986,99 @@ func TestRollbackRevisionMustBeControlledByTheReplica(t *testing.T) {
 	cr, err = r.rollbackRevision(context.Background(), ir, ir)
 	if !errors.Is(err, injected) || cr != nil {
 		t.Fatalf("read failure: cr=%v err=%v, want the injected error", cr, err)
+	}
+}
+
+// A gang whose owner name is long enough that its per-revision headless
+// Service name must be bounded reaches Ready with the running revision the
+// same way a short-named one does: every reader of a derived Service name
+// goes through the shared helper, so the bounded name is found exactly as
+// it was written.
+func TestReconcile_LongOwnerNameGangReachesReadyLikeAShortOne(t *testing.T) {
+	const long = "crash-after-ready-gang-surgethendrain"
+	engine := workloadtypes.ComponentEngine
+	// Premise: the long owner's per-revision headless name does not fit the
+	// label limit and is bounded; the short owner's fits as written.
+	if raw := long + "-engine-rev-abcd1234-headless"; len(raw) <= validation.DNS1035LabelMaxLength ||
+		query.PerRevisionHeadlessServiceName(long, engine, "abcd1234") == raw {
+		t.Fatalf("premise: %q must be bounded by the per-revision headless Service name helper", raw)
+	}
+	for _, owner := range []string{"short-owner", long} {
+		t.Run(owner, func(t *testing.T) {
+			ctx := context.Background()
+			ir := baselineIR(owner+"-engine", "default", 1)
+			ir.Spec.ParentRef.Name = owner
+			ir.OwnerReferences[0].Name = owner
+			ir.Spec.Runners = []v1beta1.Runner{
+				{Name: v1beta1.RunnerNameLeader, Size: 1, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "ome-container", Image: "sgl:1.0"}},
+				}}},
+				{Name: v1beta1.RunnerNameWorker, Size: 1, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "ome-container", Image: "sgl:1.0"}},
+				}}},
+			}
+			r, c := newReconciler(t, ir)
+			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+			// Pass 1 materializes the gang under the owner's name.
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Fatalf("create pass: %v", err)
+			}
+			pods := listPods(t, c, ir.Namespace)
+			if len(pods) != 2 {
+				t.Fatalf("want the leader and the worker, got %v", podNames(pods))
+			}
+			for _, pod := range pods {
+				if pod.Spec.Subdomain != query.HeadlessServiceName(owner, engine) {
+					t.Fatalf("pod %s subdomain %q is not the owner's headless Service", pod.Name, pod.Spec.Subdomain)
+				}
+			}
+			now := metav1.Now()
+			for i := range pods {
+				pods[i].Status.Phase = corev1.PodRunning
+				pods[i].Status.Conditions = append(pods[i].Status.Conditions, corev1.PodCondition{
+					Type: corev1.ContainersReady, Status: corev1.ConditionTrue, LastTransitionTime: now,
+				})
+				if err := c.Status().Update(ctx, &pods[i]); err != nil {
+					t.Fatalf("containers ready: %v", err)
+				}
+			}
+
+			// Pass 2 writes the serving gate on every ContainersReady pod.
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Fatalf("serving pass: %v", err)
+			}
+			pods = listPods(t, c, ir.Namespace)
+			for i := range pods {
+				if !podreadiness.IsServing(&pods[i]) {
+					t.Fatalf("pod %s was not marked serving", pods[i].Name)
+				}
+				pods[i].Status.Conditions = append(pods[i].Status.Conditions, corev1.PodCondition{
+					Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: now,
+				})
+				if err := c.Status().Update(ctx, &pods[i]); err != nil {
+					t.Fatalf("pod ready: %v", err)
+				}
+			}
+
+			// Pass 3 promotes the row onto the revision its pods carry.
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Fatalf("promote pass: %v", err)
+			}
+			row := instanceRow(t, c, ir)
+			if row.Phase != v1beta1.OMENativeInstanceReady || row.Operation != nil {
+				t.Fatalf("row must be Ready with no operation, got %+v (op %+v)", row, row.Operation)
+			}
+			fresh := &v1beta1.InferenceReplica{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(ir), fresh); err != nil {
+				t.Fatal(err)
+			}
+			if row.RunningRevision == "" || row.RunningRevision != fresh.Status.UpdateRevision {
+				t.Fatalf("row runs %q, want the target revision %q", row.RunningRevision, fresh.Status.UpdateRevision)
+			}
+			if query.RevisionFromName(row.RunningRevision).Hash() != pods[0].Labels[query.LabelRevisionHash] {
+				t.Fatalf("row runs %q but its pods carry revision hash %q", row.RunningRevision, pods[0].Labels[query.LabelRevisionHash])
+			}
+		})
 	}
 }

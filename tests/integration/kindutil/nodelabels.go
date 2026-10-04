@@ -6,14 +6,20 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
-// LabelClusterBaseModelReady stamps
-// `models.ome.io/clusterbasemodel.<name>=Ready` on every Node in the
-// cluster, so the OME pod-injection NodeSelector (which OME's
-// production model-agent normally populates after the per-node model
-// download completes) is satisfied under KIND. Without this, ISVC
-// pods stay Pending with "didn't match Pod's node affinity/selector."
+// LabelClusterBaseModelReady stamps the model-Ready label of a
+// ClusterBaseModel on every Node in the cluster, so the OME pod-injection
+// NodeSelector (which OME's production model-agent normally populates
+// after the per-node model download completes) is satisfied under KIND.
+// Without this, ISVC pods stay Pending with "didn't match Pod's node
+// affinity/selector."
+//
+// The key is derived through the same helper the controller selects pods
+// on: a model name past the label budget is bounded with a hash there, and
+// the node label must carry that exact key or no pod of the model schedules.
 //
 // Test fixtures call this after the ClusterBaseModel is applied and
 // before the InferenceService is created. Idempotent — re-labeling a
@@ -23,17 +29,16 @@ import (
 // RunKindSuite first, then label individual nodes selectively via
 // LabelNode rather than this all-nodes helper.
 func LabelClusterBaseModelReady(ctx context.Context, c client.Client, cbmName string) error {
-	key := fmt.Sprintf("models.ome.io/clusterbasemodel.%s", cbmName)
-	return labelAllNodes(ctx, c, key, "Ready")
+	return labelAllNodes(ctx, c, constants.GetClusterBaseModelLabel(cbmName), "Ready")
 }
 
 // LabelBaseModelReady is the namespaced-BaseModel analog of
 // LabelClusterBaseModelReady. Same Ready-label contract; different
 // label key shape (production pod-injection chooses the key based on
-// whether the model is namespaced or cluster-scoped).
+// whether the model is namespaced or cluster-scoped), derived through
+// the controller's helper for the same reason.
 func LabelBaseModelReady(ctx context.Context, c client.Client, namespace, bmName string) error {
-	key := fmt.Sprintf("models.ome.io/%s.basemodel.%s", namespace, bmName)
-	return labelAllNodes(ctx, c, key, "Ready")
+	return labelAllNodes(ctx, c, constants.GetBaseModelLabel(namespace, bmName), "Ready")
 }
 
 // LabelNode adds key=value to one specific node by name. Useful for

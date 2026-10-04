@@ -9,6 +9,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
@@ -325,7 +326,7 @@ var _ = ginkgo.Describe("OMENative event recorder (KIND)", ginkgo.Ordered, func(
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{{Name: "main", Image: "fake-serving:v1"}},
 				NodeSelector: map[string]string{
-					"models.ome.io/clusterbasemodel.evt-orphan-isvc-cbm": "Ready",
+					constants.GetClusterBaseModelLabel("evt-orphan-isvc-cbm"): "Ready",
 				},
 			},
 		}
