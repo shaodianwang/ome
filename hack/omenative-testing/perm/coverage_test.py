@@ -623,9 +623,68 @@ class LedgerTest(unittest.TestCase):
         self.assertIn(("engine+router gang", "canary", ("sibling broken", "one-shot", "new")), product)
         raw = len(coverage.SHAPE_FAMILIES) * len(coverage.OPERATIONS) * len(coverage.all_fault_rows())
         # the steady state with no fault, a lost gang member on single pods, a
-        # hand-deleted pod on gangs, and the four sibling rows on the two
-        # engine-only families
-        self.assertEqual(raw - 6 - 72 - 72 - 96, len(product))
+        # hand-deleted pod on gangs, the four sibling rows on the two
+        # engine-only families, then the pause and freeze columns, the new-side
+        # rows at steady state, the gate rows outside a canary, and the
+        # one-shot new-side rows under a scale, a move and a delete
+        self.assertEqual(raw - 6 - 72 - 72 - 96 - 540 - 80 - 312 - 136, len(product))
+        self.assertEqual(3528 - 1314, len(product))
+
+    def test_the_triage_removals_name_their_sentences_and_counts(self):
+        sentences = {
+            "a pause or a freeze is a moment of another cell, not an operation a fault crosses: the cell is proved by "
+            "pausing while the operation and the fault are in flight, or by the fault landing while paused, which the "
+            "ledger records as the `paused` timing and the operation+operation overlap of the fault's own cell": 540,
+            "a fault on the new revision has no meaning under an operation that creates no new revision": 80,
+            "a metric breach and an unusable analysis source are read by a canary step's analysis gate alone; no other "
+            "operation reads the health metric or the analysis source": 312,
+            "a one-shot fault on the new revision is over before a scale, a move or a delete can be aimed at it: what the "
+            "operation then meets is a plain roll, which is the operation+operation overlap, and a new revision that "
+            "stays broken is the persistent row": 136,
+        }
+        removed = coverage.removed_by_reason()
+        self.assertEqual(sentences, {reason: removed[reason] for reason in sentences})
+        self.assertEqual([reason for reason, _p in coverage.EXCLUDED_CELLS][-4:], list(sentences))
+        self.assertEqual(1314, sum(removed.values()))
+        product = coverage.product_cells()
+        # the pause and freeze columns keep only the kill family's own cells
+        self.assertIn(("engine single", "pause", ("pod deleted by hand", "one-shot", "-")), product)
+        self.assertIn(("engine+decoder+router gang", "freeze", ("gang member lost", "one-shot", "-")), product)
+        self.assertNotIn(("engine+router single", "pause", ("pod deleted by hand", "one-shot", "-")), product)
+        self.assertNotIn(("engine single", "pause", ("pod deleted by hand", "persistent", "-")), product)
+        self.assertNotIn(("engine single", "freeze", ("crash at start", "persistent", "running")), product)
+        self.assertNotIn(("engine single", "pause", coverage.NO_FAULT), product)
+        self.assertEqual(8, sum(1 for _f, operation, _r in product if operation in ("pause", "freeze")))
+        # a new-side fault at steady state; the running side stays
+        self.assertNotIn(("engine single", "steady state", ("crash at start", "one-shot", "new")), product)
+        self.assertIn(("engine single", "steady state", ("crash at start", "one-shot", "running")), product)
+        # the gate rows under a canary alone
+        self.assertNotIn(("engine single", "push", ("metric breach", "persistent", "running")), product)
+        self.assertNotIn(("engine single", "steady state", ("analysis source unusable", "one-shot", "-")), product)
+        self.assertIn(("engine single", "canary", ("metric breach", "one-shot", "new")), product)
+        self.assertIn(("engine single", "canary", ("analysis source unusable", "persistent", "-")), product)
+        # a one-shot new-side fault under a side operation; the persistent row and the rolls stay
+        self.assertNotIn(("engine single", "scale up", ("crash at start", "one-shot", "new")), product)
+        self.assertNotIn(("engine+router gang", "delete", ("sibling broken", "one-shot", "new")), product)
+        self.assertIn(("engine single", "scale up", ("crash at start", "persistent", "new")), product)
+        self.assertIn(("engine single", "push", ("crash at start", "one-shot", "new")), product)
+        self.assertIn(("engine single", "rollback", ("crash at start", "one-shot", "new")), product)
+
+    def test_check_fails_on_a_removed_cell_with_a_case_and_on_a_rule_removing_nothing(self):
+        from unittest import mock
+        self.corpus.write(topo="engine", fault="metric:new")
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = coverage.check(self.corpus.cases())
+        self.assertEqual(1, rc)
+        self.assertIn("cell removed with a reason has a case: engine single / push / metric breach, persistent, new: p9001",
+                      err.getvalue())
+        idle = [("the idle rows", lambda family, operation, row: operation == "steady state" and row[2] == "new")]
+        with mock.patch.object(coverage, "EXCLUDED_CELLS", coverage.EXCLUDED_CELLS + idle):
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                coverage.check(self.corpus.cases())
+        self.assertIn("removal rule removes no cell: the idle rows", err.getvalue())
 
     def test_a_case_fills_its_cell_and_the_rest_stay_empty(self):
         self.corpus.write(fault="podkill:rotating", topo="engine")

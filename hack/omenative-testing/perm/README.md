@@ -2925,10 +2925,23 @@ The ledger's cell is (shape family, operation, fault row):
   (`mode=migrate at=`) sits on the `migrating` timing, and `victim=sibling`
   there puts it on the decoder as a sibling break.
 
-Cells the product does not need carry a written reason in `EXCLUDED_CELLS`
-(a steady state with no fault asserts nothing; a single-pod Instance has no
-gang member to lose; on a gang a hand-deleted pod is a lost member; an
-engine-only service has no sibling Component to break). The
+Cells the product does not need carry a written reason in `EXCLUDED_CELLS`,
+and a cell counts under the first rule that matches: a steady state with no
+fault asserts nothing; a single-pod Instance has no gang member to lose; on
+a gang a hand-deleted pod is a lost member; an engine-only service has no
+sibling Component to break; a pause or a freeze is a moment of another cell,
+not an operation a fault crosses (the cell is proved by pausing while the
+operation and the fault are in flight, or by the fault landing while paused,
+the `paused` timing and the operation+operation overlap of the fault's own
+cell), so the two columns keep only the kill family's pause-after-a-kill
+cells; a fault on the new revision has no meaning under an operation that
+creates no new revision (steady state); a metric breach and an unusable
+analysis source are read by a canary step's analysis gate alone; a one-shot
+fault on the new revision is over before a scale, a move or a delete can be
+aimed at it, so only the persistent row stays under those (what the
+operation meets is a plain roll, the operation+operation overlap). The
+ledger prints the cells each reason removes; `--check` fails on a removed
+cell that has a case and on a rule that removes nothing. The
 report lists the empty cells biggest holes first (the fault rows,
 operations and shape families with no case anywhere, then counts per axis
 value, then every hole by name), crosses the operations and faults with the

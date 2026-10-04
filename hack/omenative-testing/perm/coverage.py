@@ -12,9 +12,10 @@ that prove them.
   python3 coverage.py            # the Markdown ledger on stdout
   python3 coverage.py --cases    # ... plus the per-case table
   python3 coverage.py --json     # the same facts as JSON
-  python3 coverage.py --check    # nonzero when a story has no cell or a
+  python3 coverage.py --check    # nonzero when a story has no cell, a
                                  # header carries a key or value the parser
-                                 # does not know (run_test.py runs this)
+                                 # does not know, or a cell removed with a
+                                 # reason has a case (run_test.py runs this)
 
 The tables at the top are the editable part: STORIES maps each operator
 story to a predicate over a parsed case, and the vocabularies name every
@@ -138,7 +139,21 @@ NOT_DERIVABLE = [
 
 # Cells removed from the product. A cell leaves the product only with a
 # written reason; a predicate over (shape family, operation, fault row)
-# names the cells it removes.
+# names the cells it removes, and a cell counts under the first rule that
+# matches. `--check` fails on a removed cell that has a case.
+GATE_FAULTS = ("metric breach", "analysis source unusable")
+# The only cases the pause and freeze columns hold: the kill family's
+# (`mode=kill pause=`), a pod deleted by hand on a single-pod Instance or a
+# gang member lost, once, then paused, on the shapes that family runs.
+KILL_PAUSE_SHAPES = ("engine single", "engine gang", "engine+decoder+router single", "engine+decoder+router gang")
+
+
+def kill_pause_cell(family, row):
+    kind, form, _side = row
+    lost = "pod deleted by hand" if family.endswith("single") else "gang member lost"
+    return kind == lost and form == "one-shot" and family in KILL_PAUSE_SHAPES
+
+
 EXCLUDED_CELLS = [
     ("no operation and no fault leaves nothing to assert",
      lambda family, operation, row: operation == "steady state" and row == NO_FAULT),
@@ -148,6 +163,21 @@ EXCLUDED_CELLS = [
      lambda family, operation, row: row[0] == "gang member lost" and family.endswith("single")),
     ("on a gang a pod deleted by hand is a lost gang member",
      lambda family, operation, row: row[0] == "pod deleted by hand" and family.endswith("gang")),
+    ("a pause or a freeze is a moment of another cell, not an operation a fault crosses: the cell is proved by "
+     "pausing while the operation and the fault are in flight, or by the fault landing while paused, which the "
+     "ledger records as the `paused` timing and the operation+operation overlap of the fault's own cell",
+     lambda family, operation, row: operation in ("pause", "freeze") and not kill_pause_cell(family, row)),
+    # steady state alone: a scale, a move or a delete can land on a push in flight or held
+    ("a fault on the new revision has no meaning under an operation that creates no new revision",
+     lambda family, operation, row: operation == "steady state" and row[2] == "new"),
+    ("a metric breach and an unusable analysis source are read by a canary step's analysis gate alone; no other "
+     "operation reads the health metric or the analysis source",
+     lambda family, operation, row: row[0] in GATE_FAULTS and operation != "canary"),
+    ("a one-shot fault on the new revision is over before a scale, a move or a delete can be aimed at it: what the "
+     "operation then meets is a plain roll, which is the operation+operation overlap, and a new revision that "
+     "stays broken is the persistent row",
+     lambda family, operation, row: operation in ("scale up", "scale down", "migrate", "delete")
+     and row[1] == "one-shot" and row[2] == "new"),
 ]
 
 
@@ -942,6 +972,19 @@ def excluded(family, operation, row):
     return any(predicate(family, operation, row) for _reason, predicate in EXCLUDED_CELLS)
 
 
+def removed_by_reason():
+    """{reason: cells} over the raw product; a cell counts under the first rule that matches."""
+    counts = Counter()
+    for family in SHAPE_FAMILIES:
+        for operation in OPERATIONS:
+            for row in all_fault_rows():
+                for reason, predicate in EXCLUDED_CELLS:
+                    if predicate(family, operation, row):
+                        counts[reason] += 1
+                        break
+    return counts
+
+
 def product_cells():
     """Every cell of the ledger's product that is not removed with a reason."""
     return [(family, operation, row) for family in SHAPE_FAMILIES for operation in OPERATIONS
@@ -1100,14 +1143,7 @@ def render_holes(cells):
             continue
         out.append(f"- **{fault_row_label(row)}**: " + name_holes(row, empty, product))
     out += ["", "### Removed from the product", ""]
-    removed = Counter()
-    for family in SHAPE_FAMILIES:
-        for operation in OPERATIONS:
-            for row in all_fault_rows():
-                for reason, predicate in EXCLUDED_CELLS:
-                    if predicate(family, operation, row):
-                        removed[reason] += 1
-                        break
+    removed = removed_by_reason()
     out += table(["reason", "cells"], [[reason, removed.get(reason, 0)] for reason, _p in EXCLUDED_CELLS])
     return out
 
@@ -1271,8 +1307,9 @@ def case_json(case):
 # ── --check ─────────────────────────────────────────────────────────────────
 def check(cases):
     """The problems that fail the check: header keys run.py knows and this
-    parser does not, header values no vocabulary holds, and stories no case
-    proves. Prints them; returns the exit code."""
+    parser does not, header values no vocabulary holds, stories no case
+    proves, removal rules with no reason or no cell, and removed cells a case
+    occupies. Prints them; returns the exit code."""
     problems = [f"{c.id}: {p}" for c in cases for p in c.problems]
     problems += [f"{c.id}: unknown axis value {axis}={value}" for c in cases for axis, value in unknown_axes(c)]
     try:
@@ -1281,15 +1318,27 @@ def check(cases):
             problems.append(f"run.py validates header key {key}= that coverage.py does not classify")
     except ImportError:
         pass
-    for number, text, proving, _cells in story_cells(cases, matrix_cells(cases)):
+    cells = matrix_cells(cases)
+    for number, text, proving, _cells in story_cells(cases, cells):
         if not proving:
             problems.append(f"story {number} has no case: {text}")
+    removed = removed_by_reason()
+    for reason, _predicate in EXCLUDED_CELLS:
+        if not reason.strip():
+            problems.append("a removal rule names no reason")
+        elif not removed.get(reason):
+            problems.append(f"removal rule removes no cell: {reason}")
+    for (family, operation, row), members in sorted(cells.items()):
+        if family in SHAPE_FAMILIES and operation in OPERATIONS and excluded(family, operation, row):
+            problems.append(f"cell removed with a reason has a case: {family} / {operation} / "
+                            f"{fault_row_label(row)}: {', '.join(c.id for c in members)}")
     for problem in problems:
         print(problem, file=sys.stderr)
     if problems:
         print(f"\ncoverage.py --check: FAIL — {len(problems)} problem(s)", file=sys.stderr)
         return 1
-    print(f"coverage.py --check: OK — {len(cases)} cases, every header value classified, every story has a cell")
+    print(f"coverage.py --check: OK — {len(cases)} cases, every header value classified, every story has a cell, "
+          f"every removed cell has a reason and no case")
     return 0
 
 

@@ -9978,6 +9978,26 @@ def manifest(rows):
         " split of a canary on the engine gang and both router shapes"
         " (gen-canary-podkill); and a rollback at the held moment of a push that"
         " never passes readiness (gen-rollback).",
+        "- The coverage ledger (coverage.py, `EXCLUDED_CELLS`) removes a cell of"
+        " its product only with a written reason, and a cell counts under the"
+        " first rule that matches; beside the four shape rules, four rules"
+        " remove 1068 cells. The pause and freeze columns outside the kill"
+        " family's own cells (540): a pause or a freeze is a moment of another"
+        " cell, not an operation a fault crosses: the cell is proved by pausing"
+        " while the operation and the fault are in flight, or by the fault"
+        " landing while paused, which the ledger records as the `paused` timing"
+        " and the operation+operation overlap of the fault's own cell.",
+        "- The new-side rows at steady state (80): a fault on the new revision"
+        " has no meaning under an operation that creates no new revision.",
+        "- The metric-breach and analysis-source rows outside a canary (312): a"
+        " metric breach and an unusable analysis source are read by a canary"
+        " step's analysis gate alone; no other operation reads the health metric"
+        " or the analysis source.",
+        "- The one-shot new-side rows under a scale, a move and a delete (136):"
+        " a one-shot fault on the new revision is over before a scale, a move or"
+        " a delete can be aimed at it: what the operation then meets is a plain"
+        " roll, which is the operation+operation overlap, and a new revision"
+        " that stays broken is the persistent row.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]
