@@ -734,7 +734,7 @@ func TestEscalation_RestartDeadlineElapsed_FailsInstance(t *testing.T) {
 // judged on: the repair's drain may have deleted that set since. With the
 // set gone or terminating the stamp waits, and the row keeps its repair;
 // with a pod live — the drain not finished, or the rebuilt set present —
-// the row parks with the Restart preserved, as the decided cell says.
+// the row parks with the Restart preserved.
 //
 // Cells: instance/Restart/Drain/timer.operationDeadline/before
 func TestEscalation_RestartDeadlineParksOnlyALiveSet(t *testing.T) {

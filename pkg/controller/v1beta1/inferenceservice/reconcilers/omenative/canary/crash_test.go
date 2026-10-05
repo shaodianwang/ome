@@ -25,7 +25,7 @@ import (
 // A canary that serves and then keeps dying is the canary's verdict, not a
 // capacity dip: the ladder parks at the step where it happened, nothing
 // routes to the broken revision, and the operator's rollback or next push
-// lands. A single restart is the dip the pod-loss cells cover. The stories
+// lands. A single restart is a capacity dip, not a crash. The stories
 // below drive an eight-Instance engine through a timed ladder and break the
 // canary inside the soak and after it.
 
@@ -179,8 +179,8 @@ func TestReconcile_CanaryCrashAfterSoakParksTheNextStep(t *testing.T) {
 }
 
 // TestReconcile_CanaryCrashIsNotAPodLoss pins the line between the two: a
-// pod that is merely gone keeps the split and the step, as the pod-loss cells
-// require, and the same counts with a crash observed park the step.
+// pod that is merely gone keeps the split and the step, and the same counts
+// with a crash observed park the step.
 func TestReconcile_CanaryCrashIsNotAPodLoss(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

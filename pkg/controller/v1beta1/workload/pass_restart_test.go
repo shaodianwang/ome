@@ -3594,7 +3594,7 @@ func TestCrashAfterPromotion_RepairNeverOutlivesItsPodSet(t *testing.T) {
 
 // A post-Ready crash whose rebuild wedges from birth parks the repair
 // through the stuck-pod escalation, with the wedged set behind it. The
-// park has the exits the decided cells name and nothing else is needed:
+// park has two exits and needs nothing else:
 // the repair re-arms on the ladder once its delay elapses and heals, or,
 // with no ladder configured, a corrected revision takes the Instance.
 // Neither path passes through a Failed row that holds its Restart

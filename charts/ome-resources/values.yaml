@@ -543,7 +543,7 @@ ome:
     #         cloud.google.com/managed-by: slice-scheduler
     #         slice.gke.io/retry-on-failure: "true"
     #       readyStates: [ACTIVE, ACTIVE_DEGRADED]
-    #       podAnnotations: [cloud.google.com/slice-priority]
+    #       podAnnotations: [example.com/slice-priority]
     tpuSliceProvisioning: {}
     # inferenceReplica configures InferenceReplica admission. controllerIdentity
     # names the identity the InferenceService controller writes with; the

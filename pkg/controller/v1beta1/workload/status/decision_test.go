@@ -304,7 +304,7 @@ func TestUnparkServing_ReturnsAParkToReadyKeepingItsAnchor(t *testing.T) {
 // blamed pod below the fresh row's incarnation is the set a repair
 // claimed since the observation, and the stamp is withheld. A pod at the
 // row's incarnation, a pod with no label, and a row that records no
-// incarnation are stamped as before.
+// incarnation are stamped.
 func TestStampFailedOnStuckPod_WithholdsFromAPodTheRepairReplaced(t *testing.T) {
 	now := metav1.NewTime(time.Date(2026, time.September, 21, 0, 0, 0, 0, time.UTC))
 	termination := &types.InstanceTermination{PodName: "engine-0-default-0", Reason: "CrashLoopBackOff", Time: now}

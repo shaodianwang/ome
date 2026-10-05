@@ -80,7 +80,7 @@ data:
   #         "slice.gke.io/retry-on-failure": "true"
   #       },
   #       "readyStates": ["ACTIVE", "ACTIVE_DEGRADED"],
-  #       "podAnnotations": ["cloud.google.com/slice-priority"]
+  #       "podAnnotations": ["example.com/slice-priority"]
   #     }
   #   }
 

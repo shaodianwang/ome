@@ -3141,11 +3141,9 @@ func TestReconcileRelocationDirectives_ReadyWithOpNotPruned(t *testing.T) {
 	}
 }
 
-// A directive recorded before revision scoping carries no revision. It
-// still counts on the Instance's relocation budget but projects no
-// exclusion: a rebuild at any revision is free to land where there is
-// room, which is what unwedges a fleet whose only exclusion blocked its
-// only placement.
+// A directive that carries no revision keeps its place in the Instance's
+// relocation budget but projects no exclusion: a rebuild at any revision
+// is free to land where there is room.
 func TestReconcileRelocationDirectives_RevisionlessDirectiveExcludesNothing(t *testing.T) {
 	ir := baselineIR("llama-engine", "prod", 1)
 	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
@@ -4126,7 +4124,7 @@ func TestRollbackRevisionMustBeControlledByTheReplica(t *testing.T) {
 // goes through the shared helper, so the bounded name is found exactly as
 // it was written.
 func TestReconcile_LongOwnerNameGangReachesReadyLikeAShortOne(t *testing.T) {
-	const long = "crash-after-ready-gang-surgethendrain"
+	const long = "long-gang-owner-name-past-label-limit"
 	engine := workloadtypes.ComponentEngine
 	// Premise: the long owner's per-revision headless name does not fit the
 	// label limit and is bounded; the short owner's fits as written.

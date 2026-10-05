@@ -972,7 +972,7 @@ func podRunsDesiredRunnerImage(input workload.ReconcileInput, s *workload.Instan
 // Component's minReadySeconds, and no shorter than the stuck-pod grace,
 // the age below which a crash is not yet read as a wedge. A pod set that
 // held Ready for the window and breaks later is a steady-state break,
-// repaired as it always was and never counted.
+// repaired through the ordinary restart path and never counted.
 func crashWindow(input workload.ReconcileInput) time.Duration {
 	return time.Duration(ProvenWindowSeconds(input.DesiredSpec.MinReadySeconds, input.StuckPodGrace)) * time.Second
 }
@@ -1141,7 +1141,7 @@ func runnerRestartTrigger(input workload.ReconcileInput, s *workload.InstanceSta
 // the block with the same transition the writer applies. Nil when there
 // is no such crash, the crash came after the pod set had held the crash
 // window on a revision whose ladder does not hold (a steady-state break,
-// repaired as before), or the ladder records nothing for it: no ladder
+// rebuilt without the ladder counting it), or the ladder records nothing for it: no ladder
 // is configured, or the cause is the environment's. A set is counted once: a later sighting of the same
 // set, with the block moved on under other attempts, records nothing. A
 // ladder whose backoff is not due deposits that wait on the pass, which

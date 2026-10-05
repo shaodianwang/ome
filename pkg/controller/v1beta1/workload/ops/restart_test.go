@@ -2931,7 +2931,7 @@ func TestRestart_HeldLadderKeepsAServingSetReadyAndNamesTheLoop(t *testing.T) {
 	}
 }
 
-// Once the set is out of serving the hold parks the row as it always has:
+// Once the set is out of serving the hold parks the row:
 // Failed, no operation, the crash recorded, one warning naming the hold.
 //
 // Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Held]/before
