@@ -268,6 +268,13 @@ const (
 	// breached, there is no cap to judge against, and the request waits
 	// rather than failing.
 	EventReasonMigrationPolicyUnconfigured EventReason = "MigrationPolicyUnconfigured"
+	// EventReasonMigrationDeferred fires once per cause when a fresh
+	// migration record is deferred on a wait no operation in flight on
+	// its source ends by itself: the source is Failed at the revision it
+	// runs with its repair parked, or the Component pauses new surges.
+	// The record stays Accepted carrying the cause, proceeds on its own
+	// once the cause clears, and names it if its deadline passes first.
+	EventReasonMigrationDeferred EventReason = "MigrationDeferred"
 	// EventReasonInstanceReadyTimeoutUnconfigured is a Warning fired once,
 	// on the pass that raises the matching condition, when a Component
 	// opens operations with no readiness deadline because neither

@@ -402,11 +402,11 @@ cells:
     event: spec.migrateRequest
     outcome: reject
     guard: the row carries no operation and its target revision is not the one it runs - a disposed Create or Update attempt whose revision never started
-    note: a fresh migration record on such a row is closed Failed in the pass that picks it, the revision and its retry ladder named on the record message and a MigrationRequestRejected event, since only a corrected or released revision moves the row and a defer would park the record silently until its deadline (ops/migrate.go migrationSourceRevisionNotStarted). A Failed row at its running revision - a parked repair - still defers without taking ownership, as every source that is not steady Ready does; the record stays Accepted and re-answers each pass until the repair brings the row back
+    note: a fresh migration record on such a row is closed Failed in the pass that picks it, the revision and its retry ladder named on the record message and a MigrationRequestRejected event, since only a corrected or released revision moves the row and a defer would park the record silently until its deadline (ops/migrate.go migrationSourceRevisionNotStarted). A Failed row at its running revision - a parked repair, or no repair open - still defers without taking ownership, as every source that is not steady Ready does, but not mute - the record stays Accepted carrying the failure and where the repair and its ladder stand, one MigrationDeferred event per cause change says the same, a pass that finds nothing changed rewrites nothing, the row coming back Ready lets the same record allocate, and a deadline that passes first closes the record naming that wait rather than the surge it never allocated (ops/migrate.go migrationSourceRepairParked)
     placement: perm
     coverage:
       perm: []
-      unit: [TestPlan_Migrate_SelectsOldestManualRecord, TestMigrate_SourceFailedOnARevisionThatHasNotStarted_RejectedAtOnce, TestMigrationSourceRevisionNotStarted]
+      unit: [TestPlan_Migrate_SelectsOldestManualRecord, TestMigrate_SourceFailedOnARevisionThatHasNotStarted_RejectedAtOnce, TestMigrationSourceRevisionNotStarted, TestMigrate_SourceFailedAtItsRunningRevision_WaitsNamingTheParkedRepair, TestMigrateExpiry_AcceptedRecordNamesTheCauseItWaitedOn]
       kind: []
     status: current
   - state: Failed

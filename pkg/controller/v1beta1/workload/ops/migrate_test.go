@@ -455,6 +455,12 @@ type migFixture struct {
 	// retryBlocks is the owner's per-revision retry ladder state the pass
 	// observes, as the adapter mirrors it.
 	retryBlocks []workload.RetryBlock
+	// retryPolicy is the operator's retry ladder a parked repair's standing
+	// is read against; nil is a deployment with none configured.
+	retryPolicy *workload.RetryPolicy
+	// pauseNewSurge holds fresh migration reservations, as the adapter
+	// does while placement execution pauses surge.
+	pauseNewSurge bool
 	// conditions captures every Component condition the pass stamps, in
 	// write order, when a test wires the capture.
 	conditions *[]metav1.Condition
@@ -632,6 +638,8 @@ func (f *migFixture) input(t *testing.T) workload.ReconcileInput {
 	in.StuckPodGrace = f.stuckPodGrace
 	in.MigrationAudit = f.migrationAudit
 	in.ObservedState.RetryBlocks = append([]workload.RetryBlock(nil), f.retryBlocks...)
+	in.UpdateRetryPolicy = f.retryPolicy
+	in.PauseNewSurge = f.pauseNewSurge
 	if f.conditions != nil {
 		in.WriteAggregateCondition = func(_ context.Context, cond metav1.Condition) error {
 			*f.conditions = append(*f.conditions, cond)
@@ -2185,6 +2193,206 @@ func TestMigrate_SourceMidOperationOnAReadyRow_StillWaits(t *testing.T) {
 	}
 	if ledger.HasCompletedOrFailedRequest(uuid) {
 		t.Errorf("a defer writes no terminal ledger row")
+	}
+}
+
+// seedSourceFailedAtRunningRevision leaves the source row as a repair
+// parked at Failed does: Failed at the revision it runs, the failure on
+// LastFailure and, with repair set, the spent Restart operation carrying
+// the re-arms already taken. Returns the running revision.
+func seedSourceFailedAtRunningRevision(t *testing.T, f *migFixture, idx int32, reason string, repair bool, retryCount int32) string {
+	t.Helper()
+	ir := f.getIR(t)
+	row := migrationStatusByIndex(t, ir, idx)
+	now := metav1.Now()
+	row.Phase = v1beta1.OMENativeInstanceFailed
+	row.TargetRevision = row.RunningRevision
+	row.LastFailure = &v1beta1.InstanceTermination{PodName: "engine-0-default-0", Reason: reason, Time: now}
+	row.Operation = nil
+	if repair {
+		row.Operation = legacyToV1beta1Op(&workload.InstanceOperation{
+			ID: "op-repair", Type: workload.InstanceOperationRestart, Step: workload.RestartStepDrain,
+			TargetRevision: row.RunningRevision, Reason: reason, RetryCount: retryCount,
+			StartedAt: now, LastProgressAt: now, Deadline: metav1.NewTime(now.Add(f.plan.InstanceReadyTimeout)),
+		})
+	}
+	if err := f.c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("seed Failed source: %v", err)
+	}
+	return row.RunningRevision
+}
+
+// seedSourceReadyAgain leaves the source row as a repair's promote does:
+// Ready at its running revision with no operation.
+func seedSourceReadyAgain(t *testing.T, f *migFixture, idx int32) {
+	t.Helper()
+	ir := f.getIR(t)
+	row := migrationStatusByIndex(t, ir, idx)
+	row.Phase = v1beta1.OMENativeInstanceReady
+	row.Operation = nil
+	if err := f.c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("seed Ready source: %v", err)
+	}
+}
+
+// assertMigrationWaitsNaming pins one named wait: the pass defers without
+// ownership, the record stays Accepted and unallocated with every want on
+// its message, exactly one MigrationDeferred event carries that message,
+// no terminal ledger row exists, and a second pass with nothing changed
+// rewrites nothing and emits nothing.
+func assertMigrationWaitsNaming(t *testing.T, f *migFixture, uuid string, wants ...string) {
+	t.Helper()
+	done, accepted := f.pass(t, uuid)
+	if done || accepted {
+		t.Fatalf("the move must defer without ownership: done=%v accepted=%v", done, accepted)
+	}
+	rec := f.record(t, uuid)
+	if rec.Phase != workload.MigrationPhaseAccepted || rec.SurgeInstance != nil || rec.CompletedAt != nil {
+		t.Fatalf("deferred record must stay Accepted and unallocated; got %+v", *rec)
+	}
+	for _, want := range wants {
+		if !strings.Contains(rec.Message, want) {
+			t.Errorf("record Message = %q, want substring %q", rec.Message, want)
+		}
+	}
+	events := migWedgeEvents(t, f)
+	if len(events) != 1 || countEventsWithReason(events, workload.EventReasonMigrationDeferred) != 1 {
+		t.Fatalf("want exactly one %s event, got %v", workload.EventReasonMigrationDeferred, events)
+	}
+	if !strings.Contains(events[0], rec.Message) {
+		t.Errorf("the event must carry the reason; event=%q message=%q", events[0], rec.Message)
+	}
+	ledger, err := audit.LoadLedgerForOwner(context.Background(), f.c, f.isvc)
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	if ledger.HasCompletedOrFailedRequest(uuid) {
+		t.Errorf("a deferred move writes no terminal ledger row")
+	}
+
+	before := *rec
+	if done, accepted = f.pass(t, uuid); done || accepted {
+		t.Fatalf("a pass with nothing new must keep deferring: done=%v accepted=%v", done, accepted)
+	}
+	if diff := cmp.Diff(before, *f.record(t, uuid)); diff != "" {
+		t.Errorf("the record changed on a pass with nothing new (-want +got):\n%s", diff)
+	}
+	if events := migWedgeEvents(t, f); len(events) != 0 {
+		t.Errorf("a pass with nothing new emits nothing; got %v", events)
+	}
+}
+
+// A move whose source is Failed at the revision it runs waits for the
+// repair parked on that row, and says so: the record stays Accepted and
+// unallocated, its message names the failure and where the repair and
+// its ladder stand, one event carries the same, and a pass that finds
+// nothing changed writes and emits nothing more. The row coming back
+// Ready lets the same record allocate.
+// Cells: instance/Failed/spec.migrateRequest/before
+func TestMigrate_SourceFailedAtItsRunningRevision_WaitsNamingTheParkedRepair(t *testing.T) {
+	ladder := &workload.RetryPolicy{MaxAttempts: 3, InitialDelay: time.Minute, MaxDelay: time.Hour, Multiplier: 2}
+	cases := []struct {
+		name       string
+		repair     bool
+		retryCount int32
+		block      *workload.RetryBlock
+		policy     *workload.RetryPolicy
+		want       []string
+	}{
+		{
+			name:   "repair parked under a held ladder",
+			repair: true,
+			block:  &workload.RetryBlock{State: workload.RetryBlockHeld, AttemptsStarted: 3, Reason: "CrashLoopBackOff"},
+			policy: ladder,
+			want:   []string{"retry block Held after 3 failed attempt(s): CrashLoopBackOff", "release the revision or reset the Instance"},
+		},
+		{
+			name:   "repair parked with no ladder configured",
+			repair: true,
+			want:   []string{"no retry ladder is configured", "reset the Instance or publish a corrected revision"},
+		},
+		{
+			name:       "repair parked with every re-arm spent",
+			repair:     true,
+			retryCount: 3,
+			policy:     ladder,
+			want:       []string{"after 3 re-arm(s) with every retry spent", "reset the Instance or publish a corrected revision"},
+		},
+		{
+			name:   "repair parked until its ladder re-arms it",
+			repair: true,
+			policy: ladder,
+			want:   []string{"until the retry ladder re-arms it"},
+		},
+		{
+			name: "no repair open",
+			want: []string{"no repair is open on it"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSinglePodMigFixture(t)
+			f.recorder = record.NewFakeRecorder(16)
+			f.retryPolicy = tc.policy
+			const uuid = "mig-source-parked"
+			f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+			rev := seedSourceFailedAtRunningRevision(t, f, 0, "CrashLoopBackOff", tc.repair, tc.retryCount)
+			if tc.block != nil {
+				b := *tc.block
+				b.TargetRevision = rev
+				f.retryBlocks = []workload.RetryBlock{b}
+			}
+
+			wants := append([]string{
+				workload.InstanceKey(f.component, 0), rev, "Failed", "CrashLoopBackOff", "Ready again",
+			}, tc.want...)
+			assertMigrationWaitsNaming(t, f, uuid, wants...)
+			src := findInstanceStatusOnIRForFixture(t, f, 0)
+			if src == nil || src.Phase != v1beta1.OMENativeInstanceFailed || (src.Operation != nil) != tc.repair {
+				t.Errorf("the source row must be left as it was; got %+v", src)
+			}
+
+			// The repair un-parks and brings the row back Ready: the same
+			// record allocates on the next pass.
+			f.retryBlocks = nil
+			seedSourceReadyAgain(t, f, 0)
+			if done, accepted := f.pass(t, uuid); done || !accepted {
+				t.Fatalf("a Ready source must let the record allocate: done=%v accepted=%v", done, accepted)
+			}
+			if rec := f.record(t, uuid); !rec.SurgeAllocated() || rec.Phase != workload.MigrationPhaseSurgePending {
+				t.Fatalf("record must be SurgePending with a surge index; got %+v", *rec)
+			}
+		})
+	}
+}
+
+// A request filed while the Component pauses new surges waits for the
+// pause, and says so: the record stays Accepted and unallocated with the
+// pause as its message, one event carries it, a pass under the same
+// pause writes and emits nothing more, and the pause lifting lets the
+// same record allocate.
+func TestMigrate_PausedComponent_WaitsNamingThePause(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	f.recorder = record.NewFakeRecorder(16)
+	f.pauseNewSurge = true
+	const uuid = "mig-paused"
+	f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+	beforePods := f.listPods(t)
+
+	assertMigrationWaitsNaming(t, f, uuid, "placement pause")
+	if diff := cmp.Diff(beforePods, f.listPods(t)); diff != "" {
+		t.Errorf("pods changed while paused (-want +got):\n%s", diff)
+	}
+	if src := findInstanceStatusOnIRForFixture(t, f, 0); src == nil || src.Operation != nil || src.Phase != v1beta1.OMENativeInstanceReady {
+		t.Errorf("the source row must not be stamped while paused; got %+v", src)
+	}
+
+	f.pauseNewSurge = false
+	if done, accepted := f.pass(t, uuid); done || !accepted {
+		t.Fatalf("the pause lifting must let the record allocate: done=%v accepted=%v", done, accepted)
+	}
+	if rec := f.record(t, uuid); !rec.SurgeAllocated() || rec.Phase != workload.MigrationPhaseSurgePending {
+		t.Fatalf("record must be SurgePending with a surge index; got %+v", *rec)
 	}
 }
 
@@ -4550,7 +4758,12 @@ func TestPlacementPauseMigrationSurge(t *testing.T) {
 				if diff := cmp.Diff(beforePods, f.listPods(t)); diff != "" {
 					t.Errorf("pods changed while held (-want +got):\n%s", diff)
 				}
-				if diff := cmp.Diff(beforeRecord, *f.record(t, uuid)); diff != "" {
+				afterRecord := *f.record(t, uuid)
+				if !strings.Contains(afterRecord.Message, "placement pause") {
+					t.Errorf("held record must name the pause; got %q", afterRecord.Message)
+				}
+				beforeRecord.Message, afterRecord.Message = "", ""
+				if diff := cmp.Diff(beforeRecord, afterRecord); diff != "" {
 					t.Errorf("reservation changed while held (-want +got):\n%s", diff)
 				}
 				return

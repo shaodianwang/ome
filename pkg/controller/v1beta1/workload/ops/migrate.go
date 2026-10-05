@@ -68,7 +68,11 @@ func ledgerOwnerGVK(input workload.ReconcileInput) schema.GroupVersionKind {
 //     run the fresh-request guards (steady-Ready source — a Failed
 //     source on a revision it never started is rejected, not waited
 //     on — resolveSourceNode, capacity over status.migrations, overlay
-//     pre-check); rejections mark the record Failed. The move binds to
+//     pre-check); rejections mark the record Failed. A wait that no
+//     operation in flight ends by itself — the Component pausing new
+//     surges, a source Failed at its running revision with its repair
+//     parked — is named on the record (deferMigration), which stays
+//     Accepted and proceeds once the cause clears. The move binds to
 //     the Instance: a source rebuilt off the request's FromNode since
 //     the request leaves the node it runs on, and the record says so; a
 //     source a gang roll rebuilt under another index is followed there
@@ -141,6 +145,11 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return true, true, nil
 	}
 	if input.PauseNewSurge && !entry.SurgeAllocated() {
+		// The pause is placement's to lift: the record names it as what
+		// the move waits on and allocates once it has.
+		if err := deferMigration(ctx, deps, input, entry, migrationPausedMessage, false); err != nil {
+			return false, false, fmt.Errorf("Migrate: record placement pause (uuid=%s): %w", requestUUID, err)
+		}
 		return false, false, nil
 	}
 
@@ -223,7 +232,14 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			// Defer without taking ownership — signal to caller that
 			// fall-through is safe so the in-flight op (Update/Restart/
 			// Create) can converge. accepted=false is load-bearing here;
-			// the record stays Accepted and retries next pass.
+			// the record stays Accepted and retries next pass. A source
+			// Failed at the revision it runs has no such op to wait on:
+			// the record names the parked repair instead of waiting mute.
+			if msg, parked := migrationSourceRepairParked(input, source); parked {
+				if err := deferMigration(ctx, deps, input, entry, msg, true); err != nil {
+					return false, false, fmt.Errorf("Migrate: record parked source repair (uuid=%s): %w", requestUUID, err)
+				}
+			}
 			return false, false, nil
 		}
 		// A promoted replacement is still its handoff's until the source
@@ -948,18 +964,78 @@ func migrationSourceRevisionNotStarted(source *workload.InstanceStatus) bool {
 // revision that has not started and where its retry ladder stands, so
 // the operator knows what to correct or release before asking again.
 func migrationSourceRevisionNotStartedReason(input workload.ReconcileInput, source *workload.InstanceStatus) string {
-	ladder := "no retry is scheduled"
-	if source.LastFailure != nil && source.LastFailure.Reason != "" {
-		ladder += ": " + source.LastFailure.Reason
+	failureReason := ""
+	if source.LastFailure != nil {
+		failureReason = source.LastFailure.Reason
 	}
-	if b := workload.FindRetryBlock(input.ObservedState.RetryBlocks, source.TargetRevision); b != nil {
-		ladder = fmt.Sprintf("retry block %s after %d failed attempt(s)", b.State, b.AttemptsStarted)
+	return fmt.Sprintf("source %s is Failed on revision %s, which has not started (%s); correct or release the revision, then request the move again",
+		workload.InstanceKey(input.Key.Component, source.Index), source.TargetRevision,
+		migrationRevisionLadder(input, source.TargetRevision, failureReason))
+}
+
+// migrationRevisionLadder words where rev's retry ladder stands for a
+// record message: the block's state and attempts when one exists, else
+// that no retry is scheduled, with failureReason when known.
+func migrationRevisionLadder(input workload.ReconcileInput, rev, failureReason string) string {
+	if b := workload.FindRetryBlock(input.ObservedState.RetryBlocks, rev); b != nil {
+		ladder := fmt.Sprintf("retry block %s after %d failed attempt(s)", b.State, b.AttemptsStarted)
 		if b.Reason != "" {
 			ladder += ": " + b.Reason
 		}
+		return ladder
 	}
-	return fmt.Sprintf("source %s is Failed on revision %s, which has not started (%s); correct or release the revision, then request the move again",
-		workload.InstanceKey(input.Key.Component, source.Index), source.TargetRevision, ladder)
+	ladder := "no retry is scheduled"
+	if failureReason != "" {
+		ladder += ": " + failureReason
+	}
+	return ladder
+}
+
+// migrationSourceRepairParked reports a source Failed at the revision it
+// runs with no operation in flight — a repair parked on it, or none open
+// — and words the wait: the failure, where the repair and its ladder
+// stand, and that the row coming back Ready is what lets the move go.
+func migrationSourceRepairParked(input workload.ReconcileInput, source *workload.InstanceStatus) (string, bool) {
+	if source == nil || source.Phase != workload.InstancePhaseFailed || source.RunningRevision == "" ||
+		(source.TargetRevision != "" && source.TargetRevision != source.RunningRevision) ||
+		(source.Operation != nil && !SpentRepair(source)) {
+		return "", false
+	}
+	failure := ""
+	if summary := RepairFailureSummary(source); summary != "" {
+		failure = " (" + summary + ")"
+	}
+	return fmt.Sprintf("waiting for source %s, Failed on its running revision %s%s, to be Ready again: %s",
+		workload.InstanceKey(input.Key.Component, source.Index), source.RunningRevision, failure,
+		migrationSourceRepairStanding(input, source)), true
+}
+
+// migrationSourceRepairStanding words what holds a Failed source's
+// repair, in the order the restart pass decides a parked repair's exits:
+// the running revision's retry block, the repair's own ladder, or no
+// repair open at all. Where nothing automatic releases the hold, the
+// operator action that does is named.
+func migrationSourceRepairStanding(input workload.ReconcileInput, source *workload.InstanceStatus) string {
+	const release = "; release the revision or reset the Instance"
+	const reset = "; reset the Instance or publish a corrected revision"
+	switch {
+	case rebuildRetryBlockDenies(input, source):
+		standing := "its rebuild waits on the revision's " + migrationRevisionLadder(input, source.RunningRevision, "")
+		if revisionHeld(input, source.RunningRevision) {
+			standing += release
+		}
+		return standing
+	case !SpentRepair(source):
+		return "no repair is open on it"
+	case workload.RepairWaitsOnWorkload(source):
+		return "its repair is parked, " + RepairWaitingNote
+	case input.UpdateRetryPolicy == nil:
+		return "its repair is parked and no retry ladder is configured to re-arm it" + reset
+	case RepairRetriesExhausted(input, source):
+		return fmt.Sprintf("its repair is parked after %d re-arm(s) with every retry spent", source.Operation.RetryCount) + reset
+	default:
+		return "its repair is parked until the retry ladder re-arms it"
+	}
 }
 
 // handoffPinsIndex reports whether another row's operation names idx as
@@ -1308,20 +1384,8 @@ func holdMigrationForUnconfiguredCapacity(ctx context.Context, deps workload.Dep
 	if err := writeMigrationCapacityCondition(ctx, input, true); err != nil {
 		return err
 	}
-	if entry != nil && entry.Message == migrationCapacityUnconfiguredMessage {
-		return nil
-	}
-	// The closure's own answer is the edge: a record that already reads
-	// as held under a stale observation must not re-warn.
-	opened := false
-	if err := input.MutateMigration(ctx, uuid, func(m *workload.MigrationRecord) bool {
-		if m.Phase.Terminal() || m.Message == migrationCapacityUnconfiguredMessage {
-			return false
-		}
-		m.Message = migrationCapacityUnconfiguredMessage
-		opened = true
-		return true
-	}); err != nil {
+	opened, err := recordMigrationWait(ctx, input, entry, migrationCapacityUnconfiguredMessage)
+	if err != nil {
 		return fmt.Errorf("record capacity hold: %w", err)
 	}
 	if !opened {
@@ -1329,6 +1393,56 @@ func holdMigrationForUnconfiguredCapacity(ctx context.Context, deps workload.Dep
 	}
 	workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationPolicyUnconfigured,
 		"OMENative migration uuid=%s held: %s", uuid, migrationCapacityUnconfiguredMessage)
+	return nil
+}
+
+// recordMigrationWait writes msg as the reason a non-terminal record
+// waits. Edge-triggered on the message: the write, and the true return
+// the caller's one event hangs on, happen only on the pass whose reason
+// differs from the record's, so a wait of many passes costs one write.
+// The closure's own answer is the edge: a record that already reads as
+// waiting under a stale observation must not re-announce.
+func recordMigrationWait(ctx context.Context, input workload.ReconcileInput, entry *workload.MigrationRecord, msg string) (bool, error) {
+	if entry == nil || entry.Message == msg {
+		return false, nil
+	}
+	opened := false
+	if err := input.MutateMigration(ctx, entry.RequestUUID, func(m *workload.MigrationRecord) bool {
+		if m.Phase.Terminal() || m.Message == msg {
+			return false
+		}
+		m.Message = msg
+		opened = true
+		return true
+	}); err != nil {
+		return false, err
+	}
+	return opened, nil
+}
+
+// migrationPausedMessage is what a fresh record carries while the
+// Component pauses new surges: placement execution holds the surge
+// allowance, and nothing the move does lifts that.
+const migrationPausedMessage = "waiting for the placement pause to lift: placement execution holds new surge allocations"
+
+// deferMigration records why a fresh record is deferred when no
+// operation in flight on its source will end the wait by itself: the
+// record carries the cause until it clears, so an expiry can name it,
+// and one event per cause change says so — a Warning when warn is set.
+func deferMigration(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, entry *workload.MigrationRecord, msg string, warn bool) error {
+	opened, err := recordMigrationWait(ctx, input, entry, msg)
+	if err != nil {
+		return fmt.Errorf("record deferred migration: %w", err)
+	}
+	if !opened {
+		return nil
+	}
+	emit := workload.RecordNormal
+	if warn {
+		emit = workload.RecordWarning
+	}
+	emit(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationDeferred,
+		"OMENative migration uuid=%s deferred: %s", entry.RequestUUID, msg)
 	return nil
 }
 
@@ -1361,18 +1475,8 @@ func migrationParkedMessage(input workload.ReconcileInput, sourcePods []*corev1.
 // pods are gone.
 func parkMigrationOnSourceTeardown(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, entry *workload.MigrationRecord, sourcePods []*corev1.Pod) error {
 	msg := migrationParkedMessage(input, sourcePods)
-	if entry.Message == msg {
-		return nil
-	}
-	opened := false
-	if err := input.MutateMigration(ctx, entry.RequestUUID, func(m *workload.MigrationRecord) bool {
-		if m.Phase.Terminal() || m.Message == msg {
-			return false
-		}
-		m.Message = msg
-		opened = true
-		return true
-	}); err != nil {
+	opened, err := recordMigrationWait(ctx, input, entry, msg)
+	if err != nil {
 		return fmt.Errorf("record parked migration: %w", err)
 	}
 	if !opened {
