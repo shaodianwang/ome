@@ -3413,11 +3413,11 @@ class GeneratedWindowFamiliesTest(unittest.TestCase):
                 self.assertIn('type: "SurgeThenDrain"', self.outputs[f"gen-conflict/{name}.yaml"])
         self._validates("gen-conflict", fam)
 
-    def _check_more(self, folder, fam, per_cell):
+    def _check_more(self, folder, fam, per_cell, kept_empty=0):
         """The second pass of a window family: every (operation, hook) of
         WINDOW_MORE_OPS on every shape under the kind's knobs, each header
         naming its operation and each reason the operator's act, the fault
-        and the promise."""
+        and the promise; kept_empty cells are minted with no case."""
         self.assertEqual(6, len(self._families(fam)))
         self.assertEqual({f"{folder[4:]} {label}" for label in self.MORE}, {m["winop"] for _n, _kv, m in fam})
         self.assertEqual(set(generate_cases.WINDOW_MORE_OPS), {(m["op"], m["hook"]) for _n, _kv, m in fam})
@@ -3425,7 +3425,7 @@ class GeneratedWindowFamiliesTest(unittest.TestCase):
         # The webhook's push hooks run under both pod-rebuilding strategies.
         per_pass = 6 * (len(generate_cases.WINDOW_MORE_OPS) + (2 if folder == "gen-webhook" else 0))
         self.assertEqual(per_pass, len(cells))
-        self.assertEqual(per_pass * per_cell, len(fam))
+        self.assertEqual(per_pass * per_cell - kept_empty, len(fam))
         for name, kv, m in fam:
             text = self.outputs[f"{folder}/{name}.yaml"]
             header, reason = text.splitlines()[:2]
@@ -3493,9 +3493,15 @@ class GeneratedWindowFamiliesTest(unittest.TestCase):
 
     def test_conflict_family_at_every_hook(self):
         fam = self._more(self.conflict)
-        self._check_more("gen-conflict", fam, 4)
+        kept_empty = len(generate_cases.WINDOW_SHAPES) * len(generate_cases.CONFLICT_FORMS)
+        self._check_more("gen-conflict", fam, 4, kept_empty=kept_empty)
         self.assertEqual({("once", "isvc"), ("once", "ir"), ("persist", "isvc"), ("persist", "ir")},
-                         {(kv["form"], kv["target"]) for _n, kv, _m in fam})
+                         {(kv["form"], kv["target"]) for _n, kv, m in fam if m["op"] != "delete"})
+        self.assertEqual({"ir"}, {kv["target"] for _n, kv, m in fam if m["op"] == "delete"},
+                         "a write on the ISVC has no window as the delete lands; the InferenceReplicas outlive their pods")
+        self.assertNotIn("gen-conflict/p10460.yaml", self.outputs)
+        self.assertTrue(self.outputs["gen-conflict/p10462.yaml"].startswith("# p10462: [gen] conflict delete engine N=4 once on ir "),
+                        "the ids of the cells kept empty stay minted, so the ids after them keep their places")
         for name, kv, m in fam:
             reason = self.outputs[f"gen-conflict/{name}.yaml"].splitlines()[1]
             self.assertNotIn("lift", kv)
@@ -3515,10 +3521,12 @@ class GeneratedWindowFamiliesTest(unittest.TestCase):
             for name, _kv, _m in fam:
                 self.assertTrue(any(lo <= int(name[1:]) < hi for lo, hi in blocks), (folder, name))
         manifest = self.outputs[generate_cases.MANIFEST_REL]
-        for text in ("| gen-webhook | 180 |", "| gen-conflict | 276 |", "By window operation", "By competing-writer form",
+        for text in ("| gen-webhook | 180 |", "| gen-conflict | 264 |", "By window operation", "By competing-writer form",
                      "By competing-writer target", "gen-webhook points the admission webhook", "gen-conflict runs a competing writer",
-                     "as a rollback filed at the first new pod lands"):
+                     "as a rollback filed at the first new pod lands", "### Ids kept empty",
+                     "| p10460 | gen-conflict | conflict delete engine N=4 once on isvc |"):
             self.assertIn(text, manifest)
+        self.assertEqual(12, manifest.count("| gen-conflict | conflict delete "), "every id kept empty names its cell and reason")
 
 if __name__ == "__main__":
     unittest.main()
@@ -7819,7 +7827,8 @@ class CtrlHookWatchAndVerdictTest(unittest.TestCase):
         self.assertFalse(run._repeat_pending(self._fault(repeat=3, fired_count=1, fired=False)))
         self.assertFalse(run._repeat_pending(self._fault(repeat=3, fired_count=1, ctrl_gated=True)))
         self.assertFalse(run._repeat_pending(self._fault(repeat=3, fired_count=1, infra_fail="x")))
-        self.assertFalse(run._repeat_pending(dict(self._fault(repeat=3, fired_count=1), kind="evict")))
+        self.assertTrue(run._repeat_pending(dict(self._fault(repeat=3, fired_count=1), kind="evict")),
+                        "a repeating eviction holds the window for its repetitions too")
         self.assertFalse(run._repeat_pending(None))
 
     def test_the_watch_holds_the_window_until_the_repetitions_are_spent(self):
@@ -8112,7 +8121,8 @@ class PodkillHookWatchAndVerdictTest(unittest.TestCase):
                          "the push and the scale drivers keep their own convergence")
         self.assertFalse(run._repeat_pending(self._fault(repeat=3, fired_count=1, fired=False)))
         self.assertFalse(run._repeat_pending(self._fault(repeat=3, fired_count=1, infra_fail="x")))
-        self.assertFalse(run._repeat_pending(dict(self._fault(repeat=3, fired_count=1), kind="evict")))
+        self.assertTrue(run._repeat_pending(dict(self._fault(repeat=3, fired_count=1), kind="evict")),
+                        "a repeating eviction holds the window for its repetitions too")
 
     def test_the_fire_records_label_truth_when_a_driver_asks(self):
         pods = {"p999-engine-0-0": _rec("engine", 0, "aaa"), "p999-engine-1-0": _rec("engine", 1, "aaa")}
@@ -10162,6 +10172,49 @@ class EditUnderBreakTest(unittest.TestCase):
         self.assertEqual("None", run._edit_once_policy({}, dict(fired, value="None")))
         self.assertEqual("RecreateInstance", run._edit_once_policy({}, dict(fired, fired=False)))
         self.assertEqual("None", run._edit_once_policy({"restart": "None"}, {"kind": "strategy", "value": "RecreatePod", "fired": True}))
+
+    def test_the_served_check_counts_only_pods_whose_runner_reads_the_removed_key(self):
+        f = {"kind": "configkey", "crash_comp": "engine", "crash_inst": "3", "cm_name": "p999-config", "cm_key": "value"}
+        pods = {"e0": _rec("engine", 0, "old", uid="e0"), "d0": _rec("decoder", 0, "old", uid="d0"),
+                "d1": _rec("decoder", 1, "new", uid="d1", created="3")}
+        ctx = {"case_id": "p999", "pod_state": pods, "old_hashes": {"old"}, "trigger_ts": time.time(), "closed": False, "fault": f}
+        ref = {"name": "A", "valueFrom": {"configMapKeyRef": {"name": "p999-config", "key": "value"}}}
+        specs = {"d1": {"spec": {"containers": [{"name": run.MAIN_CONTAINER, "env": []}]}},
+                 "r1": {"spec": {"containers": [{"name": run.MAIN_CONTAINER, "env": [ref]}]}}}
+        reads, read_live = [], []
+
+        def read_one(c):
+            reads.append(1)
+            if len(reads) >= 3:
+                c["closed"] = True
+
+        def get_pod(name, ns=None):
+            read_live.append(name)
+            return specs[name]
+
+        def watch(hold_why):
+            reads.clear()
+            read_live.clear()
+            ctx["closed"] = False
+            hold = {"at": None, "why": "", "served": None}
+            with mock.patch.object(run, "_read_one", read_one), mock.patch.object(run, "_get_pod", get_pod), \
+                    mock.patch.object(run, "_broken_revision_hold", lambda *a: hold_why), contextlib.redirect_stdout(io.StringIO()):
+                state = run._edit_fault_watch_hold(ctx, {"engine", "decoder", "router"}, hold, 30)
+            return state, hold, list(read_live)
+        state, hold, read = watch("")
+        self.assertEqual(("NO_HOLD", None), (state, hold["served"]),
+                         "the decoder reads no key: its new pod serving is no pod of a revision that cannot start")
+        self.assertEqual(["d1"], read, "a pod outside the broken Component is read once a watch for what its runner reads")
+        pods["r1"] = _rec("router", 1, "new", uid="r1", created="3")
+        state, hold, read = watch("")
+        self.assertIsNotNone(hold["served"], "a router pod whose runner reads the key served although the key is away")
+        self.assertEqual(["d1", "r1"], read)
+        pods.pop("r1")
+        pods["e4"] = _rec("engine", 4, "new", uid="e4", created="3")
+        state, hold, read = watch("engine Instance 3 Failed: CreateContainerConfigError")
+        self.assertEqual("HELD", state)
+        self.assertIsNotNone(hold["served"], "a pod of the broken Component serving on the new revision")
+        self.assertEqual(["d1"], read, "the broken Component's pods read the key by construction: never read")
 
     def test_before_push_verdict(self):
         f = {"kind": "configkey", "notes": ["the break had bitten 12s after it landed", "the push follows once the status said why"]}
@@ -13290,6 +13343,34 @@ class PreemptFaultTest(unittest.TestCase):
         with mock.patch.object(run, "_pod_preempted", lambda n, **_k: self.fail("the same live pod is not read")):
             self.assertIsNone(run._preempt_victim(f, {"e0": {"alive": True, "uid": "u-old"}}))
 
+    def test_a_victim_placed_after_the_fire_is_attributed_from_the_schedulers_record(self):
+        # The roll under the press places a surge pod on the pressed node after
+        # the fire, and the scheduler takes the youngest pod there: that one.
+        f = self._armed()
+        f.update(pre_alive={"e0": {"comp": "engine", "inst": "0", "serving": True, "uid": "u-e0"}},
+                 aim_node="kind-worker", fire_ts=1.0, not_victim=set(), preempted=[])
+        e0 = {"alive": True, "uid": "u-e0", "comp": "engine", "inst": "0", "ready": True, "serving": True}
+        r1 = {"alive": True, "uid": "u-r1", "comp": "router", "inst": "0", "ready": False, "serving": False}
+        with mock.patch.object(run, "_pod_preempted", lambda n, **_k: self.fail("nothing is gone yet")):
+            self.assertIsNone(run._preempt_victim(f, {"e0": e0, "r1": r1}))
+            self.assertIsNone(run._preempt_victim(f, {"e0": e0, "r1": dict(r1, ready=True, serving=True)}))
+        asked = []
+        gone = {"e0": e0, "r1": dict(r1, alive=False)}
+        with mock.patch.object(run, "_pod_preempted", lambda n, **k: asked.append((n, k.get("uid"))) or True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual("r1", run._preempt_victim(f, gone))
+        self.assertEqual([("r1", "u-r1")], asked, "read by the UID the pod was placed under")
+        self.assertEqual(("router", "0", True), (f["crash_comp"], f["crash_inst"], f["victim_was_serving"]),
+                         "it served before it was taken, so its Component's floor is lowered by one")
+        self.assertTrue(any("preempted r1 (router instance 0)" in n for n in f["notes"]), f["notes"])
+        g = self._armed()
+        g.update(pre_alive={"e0": {"comp": "engine", "inst": "0", "serving": True, "uid": "u-e0"}},
+                 aim_node="kind-worker", fire_ts=1.0, not_victim=set(), preempted=[])
+        with mock.patch.object(run, "_pod_preempted", lambda n, **_k: True), contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(run._preempt_victim(g, {"e0": e0, "r1": r1}))
+            self.assertEqual("r1", run._preempt_victim(g, {"e0": e0, "r1": None}))
+        self.assertFalse(g["victim_was_serving"], "a pod taken before it ever served lowers no floor")
+
     def test_preemption_is_read_off_the_condition_or_the_event(self):
         marked = {"status": {"conditions": [{"type": "DisruptionTarget", "reason": "PreemptionByScheduler"}]},
                   "metadata": {"deletionTimestamp": "t"}}
@@ -15491,6 +15572,26 @@ class RepeatingFaultLoopTest(unittest.TestCase):
     def _cycle(self, comp="engine", inst="0", uid="u0"):
         return {"fired_at": 100.0, "comp": comp, "inst": inst, "uid": uid, "reported": False, "lie": None,
                 "retired": False, "back_at": None, "short_since": None, "sampled_at": 0.0, "samples": 0}
+
+    def test_a_repeating_eviction_holds_the_window_until_spent_or_refused(self):
+        f = {"kind": "evict", "param": "settling", "repeat": 2, "fired": True, "fired_count": 1, "infra_fail": None}
+        self.assertTrue(run._repeat_pending(f), "the Instance coming back raises no event a scale waits on; the window waits")
+        self.assertFalse(run._repeat_pending(dict(f, fired_count=2)), "spent")
+        self.assertFalse(run._repeat_pending(dict(f, refused_since=100.0)),
+                         "refused: the retry window holds the window, then the budget's verdict closes it")
+        self.assertFalse(run._repeat_pending(dict(f, fired=False, fired_count=0)))
+        self.assertFalse(run._repeat_pending(dict(f, infra_fail="x")))
+
+    def test_the_window_base_holds_the_pods_on_their_way_out_too(self):
+        f = {"kind": "ctrlrestart", "repeat": 3}
+        pods = {"e0": _rec("engine", 0, "old", uid="u0", alive=False), "e1": _rec("engine", 1, "old", uid="u1", alive=False),
+                "e2": _rec("engine", 2, "old", uid="u2")}
+        run._repeat_observe(f, pods)
+        self.assertEqual({"u0", "u1", "u2"}, f["base_uids"], "a delete has every pod terminating before the first tick")
+        self.assertEqual({"old"}, f["base_hashes"])
+        pods["e3"] = _rec("engine", 3, "old", uid="u3")
+        run._repeat_observe(f, pods)
+        self.assertEqual({"u3"}, f["seen_uids"] - f["base_uids"], "only a pod created after the window opened counts as created")
 
     def test_pick_pod_prefers_the_instance_taken_before_while_it_fits_the_aim(self):
         pods, ppi = self._pods(), {"engine": 1}
@@ -18006,6 +18107,30 @@ class LiftPushedReadinessTest(unittest.TestCase):
             run._pod_main_state, run._readiness_switch = orig[0], orig[1]
             run._FAULT_CLEANUPS[:] = orig[2]
 
+    def test_the_held_lift_reads_a_withdrawn_victim_as_gone(self):
+        failed = subprocess.CompletedProcess([], 1, "", "error: cannot exec into a container in a terminating pod")
+        f = {"kind": run.READINESS_FAULT, "crash_pod": "n1", "crash_uid": "b", "switch_lifted": False}
+
+        def pod(uid="b", running=True, deleting=False):
+            meta = {"uid": uid, **({"deletionTimestamp": "t"} if deleting else {})}
+            state = {"running": {"startedAt": "t"}} if running else {"terminated": {"exitCode": 0}}
+            return {"metadata": meta, "status": {"containerStatuses": [{"name": run.MAIN_CONTAINER, "state": state}]}}
+        for live, how in ((pod(deleting=True), "the rollback is deleting it"), (pod(running=False), "its runner is not running"),
+                          (pod(uid="z"), "another pod carries its name"), (None, "it is gone")):
+            g = dict(f)
+            with mock.patch.object(run, "_readiness_switch", lambda p, on: failed), mock.patch.object(run, "_get_pod", lambda n, ns=None: live):
+                self.assertEqual((True, "gone with the withdrawn revision's pod"), run._held_once_lift(g), how)
+            self.assertTrue(g["switch_lifted"], how)
+        g = dict(f)
+        with mock.patch.object(run, "_readiness_switch", lambda p, on: failed), mock.patch.object(run, "_get_pod", lambda n, ns=None: pod()):
+            self.assertEqual((False, ""), run._held_once_lift(g), "a live pod whose exec failed for another reason is not lifted")
+        self.assertFalse(g["switch_lifted"])
+        g = dict(f)
+        with mock.patch.object(run, "_readiness_switch", lambda p, on: subprocess.CompletedProcess([], 0, "", "")), \
+                mock.patch.object(run, "_get_pod", lambda n, ns=None: self.fail("a lifted switch needs no read")):
+            self.assertEqual((True, "lifted"), run._held_once_lift(g))
+        self.assertTrue(g["switch_lifted"])
+
     def _ctx(self, uid="b", **over):
         f = run._fault_new("p999", {"fault": "readiness:new", "form": "recover"})
         f.update(fired=True, fired_ts=1.0, crash_pod="n1", crash_inst="1", crash_comp="engine", crash_uid="b",
@@ -19850,3 +19975,48 @@ class SettleWindowAfterManagerRestartsTest(unittest.TestCase):
         calls = re.findall(r"_repeat_end_checks\((?!case_id, N, configured, verdict, notes, checks, ctrl=None)[^\n]*", src)
         self.assertTrue(calls)
         self.assertTrue(all("ctrl=" in c for c in calls), [c for c in calls if "ctrl=" not in c])
+
+
+class ScaleWatchUnderAnEvictionTest(unittest.TestCase):
+    """The scale watcher's gates under an eviction as the scale lands: the
+    target is reached in alive Instances as well as Ready ones, a refused
+    eviction is asked again between pod events, and the window stays open
+    for the budget's answer once the fleet stands at its target."""
+
+    def test_at_target_needs_the_alive_count_as_well_as_the_ready_one(self):
+        target, configured = {"engine": 3, "decoder": 0, "router": 0}, {"engine"}
+        self.assertFalse(run._scale_at_target({"engine": (4, 3, 0)}, target, configured),
+                         "an evicted Instance drops the Ready count to the target while the tail still stands")
+        self.assertFalse(run._scale_at_target({"engine": (3, 2, 0)}, target, configured))
+        self.assertTrue(run._scale_at_target({"engine": (3, 3, 0)}, target, configured))
+        up = {"engine": 5, "decoder": 0, "router": 0}
+        self.assertFalse(run._scale_at_target({"engine": (5, 4, 0)}, up, configured), "the new Instance is not Ready yet")
+        self.assertTrue(run._scale_at_target({"engine": (5, 5, 0)}, up, configured))
+        self.assertFalse(run._scale_at_target({}, target, configured))
+        both = {"engine": 3, "decoder": 2, "router": 0}
+        self.assertFalse(run._scale_at_target({"engine": (3, 3, 0), "decoder": (3, 2, 0)}, both, {"engine", "decoder"}))
+        self.assertTrue(run._scale_at_target({"engine": (3, 3, 0), "decoder": (2, 2, 0)}, both, {"engine", "decoder"}))
+
+    def test_a_refused_eviction_is_asked_again_between_pod_events(self):
+        refused = {"kind": "evict", "fired": False, "retry_at": 105.0, "infra_fail": None}
+        self.assertTrue(run._fault_asks_again(refused))
+        self.assertFalse(run._fault_asks_again(dict(refused, fired=True)), "admitted: the pod events carry the rest")
+        self.assertFalse(run._fault_asks_again(dict(refused, retry_at=None)))
+        self.assertFalse(run._fault_asks_again(dict(refused, infra_fail="x")))
+        self.assertFalse(run._fault_asks_again(None))
+
+    def test_the_window_waits_for_the_budgets_answer_once_the_fleet_is_at_target(self):
+        f = {"kind": "evict", "fired": False, "fired_count": 0, "refused_since": 100.0, "infra_fail": None}
+        at_target = 130.0
+        self.assertTrue(run._evict_admission_pending(f, at_target, at_target + run.LIFT_SETTLE_S - 1),
+                        "the budget admits only once the new pod is healthy; the window keeps asking past the stability wait")
+        self.assertFalse(run._evict_admission_pending(f, at_target, at_target + run.LIFT_SETTLE_S),
+                         "still refused then: the window closes and the finalizer fails the case")
+        self.assertFalse(run._evict_admission_pending(f, None, 200.0), "not at target yet: the drain gate owns the wait")
+        self.assertFalse(run._evict_admission_pending(dict(f, fired=True), at_target, at_target + 1), "admitted")
+        self.assertFalse(run._evict_admission_pending(dict(f, refused_since=None), at_target, at_target + 1), "never refused")
+        self.assertFalse(run._evict_admission_pending(dict(f, fired_count=1), at_target, at_target + 1),
+                         "a refused repetition is the repeat loop's retry window")
+        self.assertFalse(run._evict_admission_pending(dict(f, kind="podkill"), at_target, at_target + 1))
+        self.assertFalse(run._evict_admission_pending(dict(f, infra_fail="x"), at_target, at_target + 1))
+        self.assertFalse(run._evict_admission_pending(None, at_target, at_target + 1))

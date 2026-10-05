@@ -2518,8 +2518,12 @@ cell on the six shape families (the surge strategy, the env edit):
   reconcile counters are cluster-wide, so they are read on the webhook
   cases alone), the operation completed with each slot created once and
   nothing left held. The generated `isvcs/gen-conflict/` family crosses the
-  form and the target with the same operations and shapes; the writer is
-  per service, so these cases run in the concurrent pool.
+  form and the target with the same operations and shapes, except that the
+  delete window runs against the InferenceReplicas alone: the controller
+  removes the ISVC finalizer in the reconcile that sees the deletion, so a
+  write on the ISVC as the delete lands has no window (the ids of those
+  cells are kept empty, listed in `isvcs/MANIFEST.md`); the writer is per
+  service, so these cases run in the concurrent pool.
 - **A window at every hook.** Both window faults also open at
   `rotating` and `draining` under a push or a runtime edit
   (`mode=runtimerev`, `fault=<kind>:settling|rotating|draining`), as a

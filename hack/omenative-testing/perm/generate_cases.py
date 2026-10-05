@@ -7657,6 +7657,12 @@ WINDOW_STRAT = ("SurgeThenDrain", 1, 0)
 WEBHOOK_LIFTS = ["after-hold", "after-window"]
 CONFLICT_FORMS = ["once", "persist"]
 CONFLICT_TARGETS = ["isvc", "ir"]
+# The delete window runs against the InferenceReplicas alone; the ISVC cells
+# of that row are minted and kept empty so the ids after them keep their places.
+CONFLICT_DELETE_ISVC_WHY = ("a write on the ISVC as the delete lands has no window: the controller removes the ISVC "
+                            "finalizer in the reconcile that sees the deletion, so every write after it is refused "
+                            "NotFound; the InferenceReplicas outlive their pods under their own finalizer and are the "
+                            "only object a competing writer reaches during a teardown")
 WINDOW_SCALE_UP = 1
 # The hooks beyond the settled service, the push as it lands and the
 # scale-up: (operation, the hook the window opens at). The push at its
@@ -8067,9 +8073,10 @@ def _emit_more_windows(add, kind):
                             + (f" lift {knobs['lift']}" if kind == "webhook" else f" {knobs['form']} on {knobs['target']}"))
                     reason = (_more_webhook_reason(op, hook, knobs["lift"], topo, w, nr, strat) if kind == "webhook"
                               else _more_conflict_reason(op, hook, knobs["form"], knobs["target"], topo, w, nr))
+                    no_window = kind == "conflict" and op == "delete" and knobs["target"] == "isvc"
                     add(f"gen-{kind}", desc, kv, case_comps, reason, meta,
                         cell=(kind, op, hook, topo, w, nr, strat) + tuple(knobs[k] for k in sorted(knobs)),
-                        dedicated=(op == "runtime"))
+                        dedicated=(op == "runtime"), empty_why=CONFLICT_DELETE_ISVC_WHY if no_window else None)
 
 
 # ── gen-fault-edit: a fault during a runtime edit ────────────────────────────
@@ -8969,6 +8976,7 @@ def build_outputs():
     outputs = {}
     counters = {f: lo for f, (lo, _hi) in GEN_BLOCKS.items()}
     rows = []   # (folder, case id, kv, meta) for the manifest
+    kept_empty = []   # (folder, case id, description, why) of the ids minted with no case
     parked_used = set()
 
     def mint(folder):
@@ -8984,15 +8992,20 @@ def build_outputs():
         sys.exit(f"{folder}: id blocks exhausted at p{cid} (the last block ends before p{hi})")
 
     def add(folder, desc, kv, case_comps, reason, meta, cell, coord=None, body=None,
-            runtime=None, dedicated=False, edit_runtime=False):
+            runtime=None, dedicated=False, edit_runtime=False, empty_why=None):
         """body: the case body as a function of the minted name, for a family
         whose fixtures carry the case id; the plain render otherwise. A
         dedicated case ships its own runtime under a per-case name, so a
         runtime edit touches this case alone; edit_runtime ships the
         runtime-rev generator's ClusterServingRuntime for the case's topology
-        under that name, the one the runtime-edit verbs patch."""
+        under that name, the one the runtime-edit verbs patch. empty_why
+        names why a cell of the matrix is no case: its id is minted and kept
+        empty, so the ids after it keep their places."""
         cid = mint(folder)
         name = f"p{cid}"
+        if empty_why:
+            kept_empty.append((folder, name, desc[len(GEN_MARK) + 1:], empty_why))
+            return
         issue = inv_scope = None
         if cell in PARKED:
             parked_used.add(cell)
@@ -9073,7 +9086,7 @@ def build_outputs():
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
                  + "; ".join(repr(k) for k in sorted(stale)))
-    outputs[MANIFEST_REL] = manifest(rows)
+    outputs[MANIFEST_REL] = manifest(rows, kept_empty)
     return outputs, rows
 
 
@@ -9283,7 +9296,7 @@ def _emit_leftover_singles(add):
             coord=lib.canary_block(story_ladder("auto"), components=gate_group(topo)))
 
 
-def manifest(rows):
+def manifest(rows, kept_empty=()):
     def tally(key, where=lambda kv, m: True):
         t = {}
         for _f, _n, kv, meta in rows:
@@ -9390,6 +9403,11 @@ def manifest(rows):
         lines += ["### Parked cells (XFAIL on a tracked issue)", "",
                   "| case | folder | issue |", "|---|---|---|"]
         lines += [f"| {n} | {f} | #{i} |" for f, n, i in parked_rows]
+        lines += [""]
+    if kept_empty:
+        lines += ["### Ids kept empty (cells of the matrix that are no case)", "",
+                  "| id | folder | cell | reason |", "|---|---|---|---|"]
+        lines += [f"| {n} | {f} | {d} | {why} |" for f, n, d, why in kept_empty]
         lines += [""]
     lines += [
         "## Constraint ledger (tuples excluded during construction)",
@@ -10057,6 +10075,13 @@ def manifest(rows):
         " a delete can be aimed at it: what the operation then meets is a plain"
         " roll, which is the operation+operation overlap, and a new revision"
         " that stays broken is the persistent row.",
+        "- A competing write on the ISVC as a delete lands (gen-conflict, `delete`"
+        " on target=isvc) has no window: the controller removes the ISVC"
+        " finalizer in the reconcile that sees the deletion, so every write"
+        " after it is refused NotFound; the delete window runs against the"
+        " InferenceReplicas alone, which outlive their pods under their own"
+        " finalizer, and the ISVC cells' ids are kept empty (the table above)"
+        " so the ids after them keep their places.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **7004**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **6992**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -50,7 +50,7 @@ Total generated cases: **7004**. The whole-corpus per-PR cap (hand + generated) 
 | gen-packed-pool | 96 | p8600..p8695 |
 | gen-repeat | 192 | p8700..p8891 |
 | gen-webhook | 180 | p8900..p10419 |
-| gen-conflict | 276 | p8960..p10635 |
+| gen-conflict | 264 | p8960..p10635 |
 | gen-crash-once | 168 | p8400..p8567 |
 | gen-lift | 132 | p9250..p9381 |
 
@@ -58,16 +58,16 @@ Total generated cases: **7004**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| engine | 2094 |
-| engine-mn | 1946 |
-| pd | 1613 |
-| pd-mn | 1351 |
+| engine | 2090 |
+| engine-mn | 1942 |
+| pd | 1611 |
+| pd-mn | 1349 |
 
 ### By update strategy
 
 | value | cases |
 |---|---|
-| (dormant: nothing rolls) | 884 |
+| (dormant: nothing rolls) | 872 |
 | InPlaceIfPossible | 602 |
 | InPlaceOnly | 281 |
 | RecreatePod | 1261 |
@@ -117,7 +117,7 @@ Total generated cases: **7004**. The whole-corpus per-PR cap (hand + generated) 
 | conflict:idle | 24 |
 | conflict:migrating | 24 |
 | conflict:rotating | 24 |
-| conflict:settling | 168 |
+| conflict:settling | 156 |
 | cordon:after-hold | 8 |
 | cordon:never | 8 |
 | crashLoad@edited-runtime | 6 |
@@ -565,7 +565,7 @@ Total generated cases: **7004**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (unset — baseline) | 2419 |
+| (unset — baseline) | 2407 |
 | None | 2831 |
 | RecreateInstance | 1754 |
 
@@ -574,14 +574,14 @@ Total generated cases: **7004**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 6710 |
+| off | 6698 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 6824 |
+| (no pause around a repair) | 6812 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -590,7 +590,7 @@ Total generated cases: **7004**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 6824 |
+| (no pause around a repair) | 6812 |
 | fix | 90 |
 | none | 90 |
 
@@ -600,7 +600,7 @@ Total generated cases: **7004**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 54 |
 | canary | 30 |
-| none | 5978 |
+| none | 5966 |
 | ratio | 16 |
 | rolling | 892 |
 | seq | 34 |
@@ -746,7 +746,7 @@ Total generated cases: **7004**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 5092 |
+| (no break) | 5080 |
 | decoder | 166 |
 | engine | 1630 |
 | router | 116 |
@@ -787,7 +787,7 @@ Total generated cases: **7004**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | canary | 51 |
-| delete | 260 |
+| delete | 248 |
 | down1 | 124 |
 | down2 | 28 |
 | edit | 114 |
@@ -836,7 +836,7 @@ Total generated cases: **7004**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | conflict canary | 12 |
-| conflict delete | 24 |
+| conflict delete | 12 |
 | conflict edit | 24 |
 | conflict move | 24 |
 | conflict push | 24 |
@@ -904,15 +904,15 @@ Total generated cases: **7004**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| once | 138 |
-| persist | 138 |
+| once | 132 |
+| persist | 132 |
 
 ### By competing-writer target (conflict)
 
 | value | cases |
 |---|---|
 | ir | 132 |
-| isvc | 144 |
+| isvc | 132 |
 
 ### By percent budget (gen-budget)
 
@@ -930,7 +930,7 @@ Total generated cases: **7004**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | canary | 51 |
-| delete | 260 |
+| delete | 248 |
 | down1 | 124 |
 | down2 | 28 |
 | edit | 114 |
@@ -1070,6 +1070,23 @@ Total generated cases: **7004**. The whole-corpus per-PR cap (hand + generated) 
 | engine+router gang | 74 |
 | engine+router single | 114 |
 
+### Ids kept empty (cells of the matrix that are no case)
+
+| id | folder | cell | reason |
+|---|---|---|---|
+| p10460 | gen-conflict | conflict delete engine N=4 once on isvc | a write on the ISVC as the delete lands has no window: the controller removes the ISVC finalizer in the reconcile that sees the deletion, so every write after it is refused NotFound; the InferenceReplicas outlive their pods under their own finalizer and are the only object a competing writer reaches during a teardown |
+| p10461 | gen-conflict | conflict delete engine N=4 persist on isvc | a write on the ISVC as the delete lands has no window: the controller removes the ISVC finalizer in the reconcile that sees the deletion, so every write after it is refused NotFound; the InferenceReplicas outlive their pods under their own finalizer and are the only object a competing writer reaches during a teardown |
+| p10492 | gen-conflict | conflict delete engine-mn W1 N=2 once on isvc | a write on the ISVC as the delete lands has no window: the controller removes the ISVC finalizer in the reconcile that sees the deletion, so every write after it is refused NotFound; the InferenceReplicas outlive their pods under their own finalizer and are the only object a competing writer reaches during a teardown |
+| p10493 | gen-conflict | conflict delete engine-mn W1 N=2 persist on isvc | a write on the ISVC as the delete lands has no window: the controller removes the ISVC finalizer in the reconcile that sees the deletion, so every write after it is refused NotFound; the InferenceReplicas outlive their pods under their own finalizer and are the only object a competing writer reaches during a teardown |
+| p10524 | gen-conflict | conflict delete engine+router N=4 once on isvc | a write on the ISVC as the delete lands has no window: the controller removes the ISVC finalizer in the reconcile that sees the deletion, so every write after it is refused NotFound; the InferenceReplicas outlive their pods under their own finalizer and are the only object a competing writer reaches during a teardown |
+| p10525 | gen-conflict | conflict delete engine+router N=4 persist on isvc | a write on the ISVC as the delete lands has no window: the controller removes the ISVC finalizer in the reconcile that sees the deletion, so every write after it is refused NotFound; the InferenceReplicas outlive their pods under their own finalizer and are the only object a competing writer reaches during a teardown |
+| p10556 | gen-conflict | conflict delete engine-mn W1+router N=2 once on isvc | a write on the ISVC as the delete lands has no window: the controller removes the ISVC finalizer in the reconcile that sees the deletion, so every write after it is refused NotFound; the InferenceReplicas outlive their pods under their own finalizer and are the only object a competing writer reaches during a teardown |
+| p10557 | gen-conflict | conflict delete engine-mn W1+router N=2 persist on isvc | a write on the ISVC as the delete lands has no window: the controller removes the ISVC finalizer in the reconcile that sees the deletion, so every write after it is refused NotFound; the InferenceReplicas outlive their pods under their own finalizer and are the only object a competing writer reaches during a teardown |
+| p10588 | gen-conflict | conflict delete pd N=4 once on isvc | a write on the ISVC as the delete lands has no window: the controller removes the ISVC finalizer in the reconcile that sees the deletion, so every write after it is refused NotFound; the InferenceReplicas outlive their pods under their own finalizer and are the only object a competing writer reaches during a teardown |
+| p10589 | gen-conflict | conflict delete pd N=4 persist on isvc | a write on the ISVC as the delete lands has no window: the controller removes the ISVC finalizer in the reconcile that sees the deletion, so every write after it is refused NotFound; the InferenceReplicas outlive their pods under their own finalizer and are the only object a competing writer reaches during a teardown |
+| p10620 | gen-conflict | conflict delete pd-mn W1 N=2 once on isvc | a write on the ISVC as the delete lands has no window: the controller removes the ISVC finalizer in the reconcile that sees the deletion, so every write after it is refused NotFound; the InferenceReplicas outlive their pods under their own finalizer and are the only object a competing writer reaches during a teardown |
+| p10621 | gen-conflict | conflict delete pd-mn W1 N=2 persist on isvc | a write on the ISVC as the delete lands has no window: the controller removes the ISVC finalizer in the reconcile that sees the deletion, so every write after it is refused NotFound; the InferenceReplicas outlive their pods under their own finalizer and are the only object a competing writer reaches during a teardown |
+
 ## Constraint ledger (tuples excluded during construction)
 
 - `pause` multiplies `mode=kill` and the pause-and-repair family (`pauseat=`); run.py consumes the pause header nowhere else, and a rollout case that pauses without `pauseat=` is rejected as a dead knob.
@@ -1136,6 +1153,7 @@ Total generated cases: **7004**. The whole-corpus per-PR cap (hand + generated) 
 - The new-side rows at steady state (80): a fault on the new revision has no meaning under an operation that creates no new revision.
 - The metric-breach and analysis-source rows outside a canary (312): a metric breach and an unusable analysis source are read by a canary step's analysis gate alone; no other operation reads the health metric or the analysis source.
 - The one-shot new-side rows under a scale, a move and a delete (136): a one-shot fault on the new revision is over before a scale, a move or a delete can be aimed at it: what the operation then meets is a plain roll, which is the operation+operation overlap, and a new revision that stays broken is the persistent row.
+- A competing write on the ISVC as a delete lands (gen-conflict, `delete` on target=isvc) has no window: the controller removes the ISVC finalizer in the reconcile that sees the deletion, so every write after it is refused NotFound; the delete window runs against the InferenceReplicas alone, which outlive their pods under their own finalizer, and the ISVC cells' ids are kept empty (the table above) so the ids after them keep their places.
 - Kill-family cells pinned by hand-written restart/ cases are excluded:
 
   - p130: engine SurgeThenDrain rp=None

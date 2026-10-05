@@ -3881,16 +3881,30 @@ def _held_once_header(hdr, kind):
     return hdr2
 
 
+def _pod_withdrawn(obj, uid):
+    """True when the pod recorded under uid is not there to answer an exec:
+    gone, replaced under its name by another UID, being deleted, or its
+    main container not running."""
+    if obj is None:
+        return True
+    meta = obj.get("metadata") or {}
+    if meta.get("uid", "") != uid or meta.get("deletionTimestamp") is not None:
+        return True
+    for cs in (obj.get("status") or {}).get("containerStatuses") or []:
+        if cs.get("name") == MAIN_CONTAINER:
+            return not (cs.get("state") or {}).get("running")
+    return True
+
+
 def _held_once_lift(f):
     """Take a one-shot held-moment break's cause away once the rollback has
     fired: the image put back, the key put into the ConfigMap, the readiness
-    switch lifted; a victim pod the rollback has already removed took the
-    switch with it. (lifted, how)."""
+    switch lifted; a victim pod the rollback has removed, or is removing,
+    took the switch with it. (lifted, how)."""
     if _oneshot_new_lift(f):
         return True, "lifted"
     if f["kind"] == READINESS_FAULT:
-        live = _pod_main_state(f["crash_pod"]) if f.get("crash_pod") else None
-        if live is None or live[3] != f.get("crash_uid"):
+        if _pod_withdrawn(_get_pod(f["crash_pod"]) if f.get("crash_pod") else None, f.get("crash_uid")):
             f["switch_lifted"] = True
             return True, "gone with the withdrawn revision's pod"
     return False, ""
@@ -4526,18 +4540,33 @@ def _edit_fault_watch(ctx, done, budget):
     return "ROTATE_TIMEOUT"
 
 
+def _pod_reads_removed_key(name, p, f, cache):
+    """True when the pod's runner reads the key the break removed: a pod of
+    the Component the break hit, or one whose live spec names the key, read
+    once per pod."""
+    if p.get("comp") == f.get("crash_comp"):
+        return True
+    key = (name, p.get("uid", ""))
+    if key not in cache:
+        cache[key] = _configkey_ref(_get_pod(name)) == (f.get("cm_name"), f.get("cm_key"))
+    return cache[key]
+
+
 def _edit_fault_watch_hold(ctx, acting, hold, budget):
     """A push over a fleet whose key stays away: watch until the status says
     the roll holds on the new revision (a Failed row at the Instance ready
     timeout, an InstanceFailed event), noting whether any pod of that
-    revision served meanwhile. HELD, or NO_HOLD when the budget ends."""
+    revision whose runner reads the key served meanwhile (a Component that
+    reads no key rolls on). HELD, or NO_HOLD when the budget ends."""
     case_id, old, t0, last = ctx["case_id"], set(ctx["old_hashes"]), ctx["trigger_ts"], 0.0
+    f, reads_key = ctx.get("fault") or {}, {}
     while time.time() - t0 < budget and not ctx["closed"]:
         _read_one(ctx)
         now = time.time()
         if hold["served"] is None and any(
                 p and p["alive"] and p.get("ready") and p.get("serving") and p.get("comp") in acting
-                and _pod_on_new(p, old) for p in ctx["pod_state"].values()):
+                and _pod_on_new(p, old) and _pod_reads_removed_key(name, p, f, reads_key)
+                for name, p in ctx["pod_state"].items()):
             hold["served"] = now - t0
         if now - last < 2.0:
             continue
@@ -6226,14 +6255,17 @@ def _fault_repeats(f):
 
 
 def _repeat_pending(f):
-    """True while a repeating manager restart, or a repeating pod deletion
-    at a hook of an operation (the hook-op driver's), still owes
-    repetitions: the operation's window stays open for them, so a short
-    operation finishes under the first one and the later ones land on its
-    settled end, which must stay settled. Spent, gated off or failed as
-    apparatus, nothing is pending."""
+    """True while a repeating manager restart, a repeating pod deletion at
+    a hook of an operation (the hook-op driver's) or a repeating eviction
+    still owes repetitions: the operation's window stays open for them, so
+    a short operation finishes under the first one and the later ones land
+    on its settled end, which must stay settled. An eviction the budget is
+    refusing is the retry window's (_repeat_retrying), then the verdict's.
+    Spent, gated off or failed as apparatus, nothing is pending."""
     if not _fault_repeats(f) or not f.get("fired") or f.get("ctrl_gated") or f.get("infra_fail"):
         return False
+    if f.get("kind") == "evict":
+        return f.get("refused_since") is None and int(f.get("fired_count") or 0) < int(f["repeat"])
     if f.get("kind") != "ctrlrestart" and not (f.get("kind") == "podkill" and f.get("hook_op")):
         return False
     return int(f.get("fired_count") or 0) < int(f["repeat"])
@@ -6248,6 +6280,24 @@ def _repeat_retrying(f, now):
     if not _fault_repeats(f) or int(f.get("fired_count") or 0) >= int(f["repeat"]) or f.get("refused_since") is None:
         return False
     return now - f["refused_since"] < LIFT_SETTLE_S
+
+
+def _fault_asks_again(f):
+    """True while a fault is due again on its own cadence rather than on a
+    pod event: an eviction the disruption budget refused, or a press whose
+    aimed pod is not bound yet; a watch loop ticks it between events."""
+    return bool(f) and not f.get("fired") and f.get("retry_at") is not None and not f.get("infra_fail")
+
+
+def _evict_admission_pending(f, stable_since, now):
+    """True while a one-shot eviction the disruption budget refused still
+    owes the budget's answer with the fleet at its target: the budget admits
+    it only once the operation's new pods are healthy, so the window keeps
+    asking for LIFT_SETTLE_S past that moment before a refusal is final."""
+    if not f or f.get("kind") != "evict" or f.get("fired") or f.get("fired_count") or f.get("infra_fail") \
+            or f.get("refused_since") is None or stable_since is None:
+        return False
+    return now - stable_since < LIFT_SETTLE_S
 
 
 def _repeat_prefer(f):
@@ -9225,12 +9275,14 @@ def _fault_hook_due(f, ctx):
 
 # ── A fault that keeps repeating (repeat=<n>) ────────────────────────────────
 def _repeat_observe(f, pod_state):
-    """What the window has shown so far: the pods alive at its start, then
-    every pod UID and, per Component, every revision hash seen since."""
+    """What the window has shown so far: the pods present at its start,
+    alive or on their way out (a delete has every pod terminating before
+    the first tick), then every pod UID and, per Component, every revision
+    hash seen since."""
     if "base_uids" not in f:
-        alive = [p for p in pod_state.values() if p and p["alive"]]
-        f["base_uids"] = {p["uid"] for p in alive if p.get("uid")}
-        f["base_hashes"] = {p["hash"] for p in alive if p.get("hash")}
+        present = [p for p in pod_state.values() if p]
+        f["base_uids"] = {p["uid"] for p in present if p.get("uid")}
+        f["base_hashes"] = {p["hash"] for p in present if p.get("hash")}
         f["seen_uids"], f["seen_hashes"] = set(), defaultdict(set)
     for p in pod_state.values():
         if p and p.get("uid"):
@@ -13031,16 +13083,26 @@ def _preempt_apparatus_hit(f):
 
 
 def _preempt_victim(f, pod_state):
-    """The case pods the scheduler preempted: alive at the fire; gone,
-    deleting or back under the same name with another UID now, confirmed by
-    the scheduler's own record (a pod the roll drained has none). The first
-    one is the fault's victim. None, with the apparatus failure recorded,
-    once a control-plane pod went instead."""
+    """The case pods the scheduler preempted: alive at the fire or placed
+    after it (the roll's surge under the press; the scheduler takes the
+    youngest pod on the node); gone, deleting or back under the same name
+    with another UID now, confirmed by the scheduler's own record (a pod
+    the roll drained has none). The first one is the fault's victim. None,
+    with the apparatus failure recorded, once a control-plane pod went
+    instead."""
     if _preempt_apparatus_hit(f):
         return None
     if not f.get("pre_alive"):
         return f.get("crash_pod")
-    for name, was in sorted(f["pre_alive"].items()):
+    late = f.setdefault("late_alive", {})
+    for name, q in pod_state.items():
+        if not q or not q["alive"] or name in f["pre_alive"] or not q.get("uid"):
+            continue
+        was = late.get(name)
+        if was is None or was["uid"] != str(q["uid"]):
+            was = late[name] = {"comp": q.get("comp", ""), "inst": str(q.get("inst", "0")), "serving": False, "uid": str(q["uid"])}
+        was["serving"] = was["serving"] or bool(q.get("ready") and q.get("serving"))
+    for name, was in sorted(f["pre_alive"].items()) + sorted(late.items()):
         if name in f["preempted"] or name in f["not_victim"]:
             continue
         q = pod_state.get(name)
@@ -24581,6 +24643,14 @@ def _canary(case_id, yaml_file, desc, hdr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
+def _scale_at_target(agg, target, configured):
+    """True when every configured Component stands at its target in alive
+    Instances and in Ready ones: a pod lost as the scale lands drops the
+    Ready count to the target while its Instance and the tail still stand,
+    and the final tally reads the alive count."""
+    return all(agg.get(c, (0, 0, 0))[0] == target[c] and agg.get(c, (0, 0, 0))[1] == target[c] for c in configured)
+
+
 def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     """Trigger/check modes other than the default surge-budget rollout.
 
@@ -24722,9 +24792,10 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                 # checks only when caught up, so the multi-second kubectl gets never
                 # throttle event consumption (events processed every iteration below).
                 _inv_tick(inv, pod_state, pods_per_inst)
-                if state == "DRAINING" and _fault_repeats(fault):
+                if state == "DRAINING" and (_fault_repeats(fault) or _fault_asks_again(fault)):
                     # A repeating fault waits on the manager or a pod coming
-                    # back, which may raise no watch event: ticked here too.
+                    # back, and a refused eviction asks again on its cadence;
+                    # neither need raise a watch event: ticked here too.
                     _fault_tick({"fault": fault, "trigger_ts": trigger_ts, "old_hashes": None,
                                  "pod_state": pod_state, "pods_per_inst": pods_per_inst, "inv": inv})
                 if state == "DRAINING" and fault and fault["kind"] == "podkill":
@@ -24759,7 +24830,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                         print(f"\n  Phase 3: draining to targets (peak must stay ≤ {ce}/{cd}/{cr})")
                         state = "DRAINING"
                 if state == "DRAINING" and progressed and stable_since is not None and now - stable_since >= STABILITY_S \
-                        and not _repeat_retrying(fault, now) and not _repeat_pending(fault):
+                        and not _repeat_retrying(fault, now) and not _repeat_pending(fault) \
+                        and not _evict_admission_pending(fault, stable_since, now):
                     state = "CONVERGED"
                     converged_at = stable_since - trigger_ts
                     print(f"\n  ✓ CONVERGED (drained) at {converged_at:.1f}s post-trigger")
@@ -24854,7 +24926,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                             teardown_since.pop(key, None)
                     for key in [k for k in list(teardown_since) if k[0] == c and k[1] not in live_idx]:
                         teardown_since.pop(key, None)
-                if all(agg.get(c, (0, 0, 0))[1] == target[c] for c in configured):
+                if _scale_at_target(agg, target, configured):
                     if stable_since is None:
                         stable_since = now
                         print(f"  → all at target; waiting {STABILITY_S}s for stability")
