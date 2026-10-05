@@ -319,6 +319,7 @@ func executeActions(ctx context.Context, deps types.Deps, input types.ReconcileI
 				return res, false, err
 			}
 			if stop {
+				reportStandingHold(input, decision)
 				return res, false, nil
 			}
 
@@ -387,8 +388,12 @@ func executeActions(ctx context.Context, deps types.Deps, input types.ReconcileI
 // pass recorded clears; a roll waiting on the target's ladder with
 // nothing to run (Decision.LadderHold) reports the ladder hold there,
 // every pass, so the hold names what the ladder's attempt rebuilds as the
-// wait goes on. A pass that ends before the update position, on a scale
-// wave or a repair, never reaches it and leaves the hold standing.
+// wait goes on; a roll with nothing to run whose Instances on the target
+// crashed after promotion and hold its budget (Decision.StandingHold)
+// reports that hold there. A pass that ends before the update position,
+// on a scale wave or a repair, never reaches it and leaves the hold
+// standing, except the repair, which reports the standing hold itself
+// (reportStandingHold).
 func reportIdleUpdate(input types.ReconcileInput, decision Decision) {
 	if input.RecordRolloutHold == nil {
 		return
@@ -398,7 +403,31 @@ func reportIdleUpdate(input types.ReconcileInput, decision Decision) {
 		input.RecordRolloutHold(nil)
 	case decision.LadderHold != nil:
 		input.RecordRolloutHold(decision.LadderHold)
+	case decision.StandingHold != nil:
+		input.RecordRolloutHold(decision.StandingHold)
 	}
+}
+
+// reportStandingHold stands in for the update pass on a pass the restart
+// pass consumed: the repair owns the wake-up, but the Instances already
+// on the target that do not serve it hold the roll whether or not its
+// pass runs, so the hold they stand behind is reported where the update
+// pass would have reported it — the selection's when the pass had
+// Instances to run, the Decision's when it had none. When none stands
+// nothing is reported, and a hold a prior pass recorded waits for the
+// pass that reaches the update position to replace or clear it.
+func reportStandingHold(input types.ReconcileInput, decision Decision) {
+	if input.RecordRolloutHold == nil {
+		return
+	}
+	hold := decision.StandingHold
+	if selection := decision.updateSelection(); selection != nil {
+		hold = selection.StandingHold
+	}
+	if hold == nil {
+		return
+	}
+	input.RecordRolloutHold(hold)
 }
 
 // demoteUnbackedInstances applies the truth pass: the status-only

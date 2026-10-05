@@ -1,0 +1,81 @@
+# Two single-pod Instances under RecreatePod maxUnavailable 1 both move
+# onto a revision whose runner dies after promotion, under the single-pod
+# default restart policy. With no Instance left to start the budget is
+# never asked for a start, yet the Instance whose pushed pod restarted
+# since Ready holds the roll's budget on its own, so the pass that reads
+# the restart reports that hold, naming the Instance and the revision.
+scenario: ready-rolled-crash-hold
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-recreate
+  - T-drain-ready
+cells:
+  - instance/Ready/pod.containerRestart/before
+  - instance/Ready/gate.deny[Budget]/before
+intentional: >-
+  a roll with nothing left to start still reports the hold its parked
+  Instances stand behind, in the pass that reads the restart
+initial:
+  spec:
+    replicas: 2
+    strategy: RecreatePod
+    maxUnavailable: "1"
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start on v1 materializes both Instances
+  - tick: 2
+    note: both pods become Ready and enter rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+      - pod.ready[source]: {pod: {index: 1}}
+      - endpoint.rotationIn[source]: {pod: {index: 1}}
+  - tick: 3
+    note: the template moves to v2, the budget admits the first rebuild and holds the second behind it
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the first source leaves rotation, so its rebuild may start
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the first source is gone and Phase B rebuilds it at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the first rebuilt pod reports Ready and enters rotation, so the first Instance is Ready on v2
+    events:
+      - pod.ready[target]: {pod: {index: 0}}
+      - endpoint.rotationIn[target]: {pod: {index: 0}}
+  - tick: 7
+    note: with the first Instance serving the budget admits the second rebuild
+  - tick: 8
+    note: the second source leaves rotation, so its rebuild may start
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 9
+    note: the second source is gone and Phase B rebuilds it at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}
+  - tick: 10
+    note: the second rebuilt pod reports Ready and enters rotation, so every Instance is on v2 and the roll has nothing left to start
+    events:
+      - pod.ready[target]: {pod: {index: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 1}}
+  - tick: 11
+    note: half a minute of steady serving, so the restart that follows is after Ready and inside the crash window
+    events:
+      - clock.advance: 30s
+  - tick: 12
+    note: the first Instance's runner dies and comes back under the same pod, and with nothing left to start the pass still reports the budget that Instance holds, naming it and the revision
+    events:
+      - pod.containerRestart: {pod: {index: 0}, message: OOMKilled}

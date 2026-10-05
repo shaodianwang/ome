@@ -21,6 +21,10 @@ cells:
   - instance/Ready/spec.policyTuning[restartPolicy]/before
   - instance/Ready/pod.containerRestart/boundary@T-ready-surge
   - instance/Update/Surge/spec.revision/boundary@T-surge-target-ready
+intentional: >-
+  the pass that opens the repair on the crashed Instance is consumed by
+  the restart pass, and reports the hold the roll stands behind there,
+  where the update pass would have reported it
 initial:
   spec:
     replicas: 2

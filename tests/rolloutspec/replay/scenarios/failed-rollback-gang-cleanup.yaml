@@ -1,0 +1,82 @@
+# A RecreatePod roll of a leader+worker gang wedges on the target image and
+# is disposed with the gang's operation cleared and the revision it still
+# records as running unchanged. The roll is then pinned back to that
+# revision: the rebuilt pods are a superseded revision's leftovers, so the
+# wreckage cleanup deletes them, and while they terminate one at a time the
+# half-gone set opens no repair; the Create pass rebuilds the gang at the
+# pinned revision once they are gone.
+scenario: failed-rollback-gang-cleanup
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-recreate
+  - T-drain-stuck
+cells:
+  - instance/Failed/spec.rollbackTarget[set]/before
+  - instance/Failed/pod.deleted[target]/before
+intentional: >-
+  the superseded pods are the cleanup's until they are gone: the pass that
+  sees one of two left stamps no Restart, and the fresh start that follows
+  rebuilds the gang under the row's own incarnation
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds the gang in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation, so the rebuild may start
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 5
+    note: the old gang is gone and Phase B rebuilds both members at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 6
+    note: the rebuilt gang is still booting two minutes on, which is longer than the grace but proves nothing on its own
+    events:
+      - clock.advance: 2m
+  - tick: 7
+    note: the rebuilt leader wedges on the target image, and being older than the grace the attempt is disposed on the pass that reads the reason
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, runner: leader}, message: "manifest unknown"}
+  - tick: 8
+    note: the roll is pinned back to the revision the gang still records as running, so its rebuilt pods are superseded and the cleanup deletes them
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+  - tick: 9
+    note: the wedged leader is collected first, leaving the terminating worker as one of two, which is no loss of the gang's own and opens no repair
+    events:
+      - pod.deleted[target]: {pod: {index: 0, runner: leader}}
+  - tick: 10
+    note: the worker is collected, so the row is the Create pass's fresh start and both members are rebuilt at the pinned revision
+    events:
+      - pod.deleted[target]: {pod: {index: 0, runner: worker}}
+  - tick: 11
+    note: both rebuilt members report Ready and the leader enters rotation, so the Instance is Ready again on the pinned revision
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}

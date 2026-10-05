@@ -239,14 +239,16 @@ type ReconcileInput struct {
 	// RecordRolloutHold, when non-nil, is called at most once per Update
 	// pass with the pass's verdict: non-nil when a fresh start was denied
 	// — by the per-Component budget or UpdateGate at admission, or by the
-	// target's RetryBlock at the trigger stage — and nothing else
-	// progressed this pass, nil when the pass observed no denial or an
-	// Update was admitted (forward progress clears any prior hold). A
-	// roll with nothing left to do plans no Update pass and reports nil at
-	// the pass's position instead. When the pass is not reached at all,
-	// the adapter's status writer reads the same-target RetryBlock/Held
-	// state from persisted status and otherwise keeps the hold it last
-	// persisted.
+	// target's RetryBlock at the trigger stage — or when the Instances
+	// already on the target that do not serve it hold the roll, and
+	// nothing else progressed this pass; nil when the pass observed no
+	// denial or an Update was admitted (forward progress clears any prior
+	// hold). A roll with nothing left to do plans no Update pass and
+	// reports nil at the pass's position instead, and a pass the restart
+	// pass consumed reports the hold its parked Instances stand behind at
+	// that position. When the pass is not reached at all, the adapter's
+	// status writer reads the same-target RetryBlock/Held state from
+	// persisted status and otherwise keeps the hold it last persisted.
 	RecordRolloutHold func(hold *RolloutHold)
 
 	// MutateRetryBlock reads-modifies-writes the owner's persisted

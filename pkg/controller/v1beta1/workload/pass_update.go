@@ -39,6 +39,8 @@ func executeUpdatePass(ctx context.Context, deps types.Deps, input types.Reconci
 	// the pre-Update row — so the pass requeues instead and the next
 	// reconcile reads fresh state.
 	anyUpdateRan := false
+	// admitted marks a fresh start the admission let through this pass.
+	admitted := false
 	admission := newUpdateAdmission(input, selection, target)
 	// A surge source leaves rotation only while the Component is at its
 	// floor; below it every drain is withheld and the hold says why.
@@ -96,6 +98,7 @@ func executeUpdatePass(ctx context.Context, deps types.Deps, input types.Reconci
 		anyUpdateRan = true
 		if item.StartingFresh {
 			admission.charge(item)
+			admitted = true
 		}
 		if !done {
 			anyUpdating = true
@@ -106,6 +109,12 @@ func executeUpdatePass(ctx context.Context, deps types.Deps, input types.Reconci
 	// superseded by progress on the same terms as any other.
 	if firstDenial == nil && len(selection.RetryBlockDenied) > 0 {
 		firstDenial = selection.LadderHold
+	}
+	// The Instances already on the target that do not serve it hold the
+	// roll whether or not a start reached the admission: with nothing
+	// admitted, the hold they stand behind is the pass's verdict.
+	if firstDenial == nil && !admitted {
+		firstDenial = selection.StandingHold
 	}
 	if anyUpdateRan && len(selection.RolledNotServing) == 0 {
 		// Forward progress this pass: whatever was gated for a DIFFERENT
@@ -265,14 +274,20 @@ func (a *updateAdmission) mechanism(item UpdateItem) types.UpdateStrategyType {
 // its floor and no further source may leave it. Nil under a non-surge
 // strategy, an uncapped budget, or a floor that still holds.
 func (a *updateAdmission) drainWithheld() *types.RolloutHold {
-	rolled := int32(len(a.selection.RolledNotServing))
-	if !a.surge() || a.selection.UnavailBudget == escalation.BudgetNoLimit || rolled <= a.selection.UnavailBudget {
+	return floorHold(a.selection, a.target)
+}
+
+// floorHold is drainWithheld's reading of the selection: the hold under
+// which no surge source leaves rotation, nil when the floor holds.
+func floorHold(selection *UpdateSelection, target *appsv1.ControllerRevision) *types.RolloutHold {
+	rolled := int32(len(selection.RolledNotServing))
+	if selection.Strategy != types.UpdateStrategySurgeThenDrain || selection.UnavailBudget == escalation.BudgetNoLimit || rolled <= selection.UnavailBudget {
 		return nil
 	}
 	return &types.RolloutHold{
 		Gate:   types.RolloutHoldGateBudget,
-		Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted%s; no source leaves rotation", a.selection.UnavailBudget, rolledNotServingClause(a.selection.RolledNotServing, a.target.Name)),
-		Target: a.target.Name,
+		Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted%s; no source leaves rotation", selection.UnavailBudget, rolledNotServingClause(selection.RolledNotServing, target.Name)),
+		Target: target.Name,
 	}
 }
 
@@ -309,6 +324,42 @@ func ladderHold(input types.ReconcileInput, target *appsv1.ControllerRevision, r
 		Gate: gate,
 		Reason: fmt.Sprintf("update to %s %s after %d failed attempt(s): %s%s%s", b.TargetRevision, state, b.AttemptsStarted, b.Reason,
 			rolledNotServingClause(rolledNotServing, target.Name), ladderRebuildsClause(ladderRebuilds)),
+		Target: target.Name,
+	}
+}
+
+// standingHold is the hold the roll stands behind on account of the
+// Instances already on the target that do not serve it (UpdateSelection.
+// StandingHold), read as the update pass would report it with nothing
+// admitted: the ladder's when the target's block denies a fresh start,
+// which already names them; under SurgeThenDrain the floor's when they
+// exceed the unavailability budget and no source may leave rotation;
+// else the budget of the strategy's arm, projected as the admission
+// projects a start, when those Instances and the starts in flight leave
+// it no room. It stands only while one of them crashed after promotion;
+// nil otherwise, or when a further start would still be admitted: the
+// roll is then moving or complete, and holds nothing.
+func standingHold(selection *UpdateSelection, target *appsv1.ControllerRevision) *types.RolloutHold {
+	if len(selection.CrashedNotServing) == 0 {
+		return nil
+	}
+	if selection.LadderHold != nil {
+		return selection.LadderHold
+	}
+	if hold := floorHold(selection, target); hold != nil {
+		return hold
+	}
+	rolled := int32(len(selection.RolledNotServing))
+	arm, budget, prior := "unavailability", selection.UnavailBudget, selection.PriorUnavailInFlight+rolled
+	if selection.Strategy == types.UpdateStrategySurgeThenDrain {
+		arm, budget, prior = "surge", selection.SurgeBudget, selection.PriorSurgeInFlight+rolled+selection.ExtraPodSurge.Slots
+	}
+	if _, denied := escalation.BudgetDenies(budget, prior, 0); !denied {
+		return nil
+	}
+	return &types.RolloutHold{
+		Gate:   types.RolloutHoldGateBudget,
+		Reason: fmt.Sprintf("per-Component %s budget %d exhausted%s", arm, budget, rolledNotServingClause(selection.RolledNotServing, target.Name)),
 		Target: target.Name,
 	}
 }

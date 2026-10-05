@@ -900,6 +900,36 @@ func RolledInstanceNotServing(row *workload.InstanceStatus, target string, revis
 	return false, 0, ""
 }
 
+// RolledInstanceCrashed reports whether an Instance the roll moved onto
+// target holds a pod of that revision that crashed after the row entered
+// Ready: a runner restarted since Ready, in place or across the rebuild
+// answering the row's recorded failure (RebuiltAfterFailure). It is the
+// shape RolledInstanceNotServing holds the slot for, read on its own: a
+// rolled Instance short of serving for any other reason is a row another
+// pass repairs or parks and says so itself, so only this shape is what a
+// roll with nothing left to start reports as the hold it stands behind.
+func RolledInstanceCrashed(row *workload.InstanceStatus, target string, revisionBorn time.Time, pods []*corev1.Pod, window int32) bool {
+	if row == nil || target == "" || row.RunningRevision != target {
+		return false
+	}
+	if workload.UpdateContinuation(row) || isMigrateOwnedStatus(row) {
+		return false
+	}
+	targetRev := query.RevisionFromName(target)
+	for _, pod := range pods {
+		if pod == nil || pod.DeletionTimestamp != nil {
+			continue
+		}
+		if podRev := query.RevisionFromPod(pod); !podRev.IsZero() && !podRev.Same(targetRev) {
+			continue
+		}
+		if _, restarted := RunnerRestartedSinceReady(pod, row.ReadySince); restarted || RebuiltAfterFailure(pod, row.LastFailure, revisionBorn, window) {
+			return true
+		}
+	}
+	return false
+}
+
 // Wreckage is per-instance rollout debris keyed to a SUPERSEDED
 // revision: state that no revision-diff update trigger can ever reach,
 // because the trigger's predicate is "this instance must move to a
@@ -956,14 +986,17 @@ func failedGangSurgeContinuation(s *workload.InstanceStatus, targetName string) 
 		s.Operation.TargetRevision != targetName
 }
 
-// alienRevisionPods returns the instance's live pods labeled with a
-// revision that matches neither the instance's RunningRevision nor the
-// current roll target. Unlabeled pods are never selected (legacy pods
-// are the ordinal partition's business). An empty RunningRevision
-// yields no aliens: with no recorded baseline, alienness is
-// undecidable — that state is owned by the trigger's per-pod diff /
-// adoption path, and deleting an unproven-but-innocent pod there would
-// destroy the very pod adoption is waiting on.
+// alienRevisionPods returns the instance's pods labeled with a revision
+// that matches neither the instance's RunningRevision nor the current
+// roll target. A pod the cleanup has already deleted stays an alien
+// while it terminates: the row is the cleanup's until the object is
+// gone, so no other pass reads the half-gone set as a loss of its own.
+// Unlabeled pods are never selected (legacy pods are the ordinal
+// partition's business). An empty RunningRevision yields no aliens:
+// with no recorded baseline, alienness is undecidable — that state is
+// owned by the trigger's per-pod diff / adoption path, and deleting an
+// unproven-but-innocent pod there would destroy the very pod adoption is
+// waiting on.
 func alienRevisionPods(s *workload.InstanceStatus, targetName string, pods []*corev1.Pod) []*corev1.Pod {
 	if s.RunningRevision == "" {
 		return nil
@@ -972,7 +1005,7 @@ func alienRevisionPods(s *workload.InstanceStatus, targetName string, pods []*co
 	target := query.RevisionFromName(targetName)
 	var out []*corev1.Pod
 	for _, pod := range pods {
-		if pod == nil || pod.DeletionTimestamp != nil {
+		if pod == nil {
 			continue
 		}
 		hash, ok := pod.Labels[query.LabelRevisionHash]
@@ -1038,10 +1071,13 @@ func CleanupWreckage(ctx context.Context, deps workload.Deps, input workload.Rec
 // withdrawal, and a bare delete drops the connections it is carrying.
 // Deletes are counted on the expectations cache before they are issued, and
 // compensated when the apiserver refuses, so the next pass reads a pod set
-// it can trust.
+// it can trust. A pod already terminating is on its way out: it is neither
+// unrouted nor deleted again, and the one expectation its delete recorded
+// is the one its disappearance satisfies.
 //
 // done=false whenever there is still work here: outstanding expectations,
-// a pod just unrouted, or pods deleted that the next pass has to re-read.
+// a pod just unrouted, pods deleted that the next pass has to re-read, or
+// pods still terminating.
 func deleteSupersededRevisionPods(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, idx int32, pods []*corev1.Pod, targetName string) (bool, error) {
 	cache := deps.ExpectationsCache()
 	ns, owner, component := input.Key.Namespace, input.Key.OwnerName, input.Key.Component
@@ -1050,7 +1086,7 @@ func deleteSupersededRevisionPods(ctx context.Context, deps workload.Deps, input
 	}
 	unrouted := false
 	for _, pod := range pods {
-		if !podreadiness.IsServing(pod) {
+		if pod.DeletionTimestamp != nil || !podreadiness.IsServing(pod) {
 			continue
 		}
 		if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod,
@@ -1073,6 +1109,9 @@ func deleteSupersededRevisionPods(ctx context.Context, deps workload.Deps, input
 	}
 	deleted := 0
 	for _, pod := range pods {
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
 		cache.ExpectDeletes(ns, owner, component, idx, 1)
 		if err := deps.Client.Delete(ctx, pod); err != nil {
 			cache.ObservedDelete(ns, owner, component, idx)

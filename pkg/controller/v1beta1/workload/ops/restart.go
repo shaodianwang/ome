@@ -657,19 +657,30 @@ func rebuildRevision(s *workload.InstanceStatus) string {
 // that waits to take it. A row that records no revision, or a pass with
 // no target, has nothing to compare.
 //
+// A row whose pods are a superseded revision's leftovers (EvaluateWreckage)
+// is yielded whatever revision it records: the update pass's wreckage
+// cleanup removes those pods, and while its deletes land one at a time the
+// half-gone set reads as a loss that is not the row's own. The row is the
+// cleanup's until they are gone and the Create pass's fresh start after,
+// both of which rebuild it at the target. A pause withholds the cleanup,
+// so under one the repair stands.
+//
 // The roll the row is left to must be one that can start (rollTargetOpen):
 // an Instance kept dark for the length of a pause or a hold is worse than
 // one rebuilt at the revision the roll is held on. The roll takes the row
 // once the pause or the hold clears.
 func RepairYieldsToTarget(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, instancePods []*corev1.Pod) bool {
-	if !rollTargetOpen(input, plan, target) {
-		return false
-	}
 	s := input.ObservedState.Instance(inst.Index)
 	if s == nil || s.Phase == workload.InstancePhaseRestarting || isMigrateOwnedStatus(s) {
 		return false
 	}
 	if readCrashLoopEpisode(input, s, inst.TotalPods(), instancePods).step != crashLoopNothing {
+		return false
+	}
+	if !plan.Paused && EvaluateWreckage(s, target, instancePods) {
+		return true
+	}
+	if !rollTargetOpen(input, plan, target) {
 		return false
 	}
 	rev := rebuildRevision(s)
@@ -1042,9 +1053,12 @@ func rememberCrash(ctx context.Context, input workload.ReconcileInput, idx int32
 // crashRebuildWarranted reports whether a trigger of the restart pass
 // would rebuild the row's pod set for its crash: the pod set is wedged
 // past the stuck-pod grace, or the policy rebuilds on a runner restart.
-// A crash that warrants no rebuild is only counted.
+// A crash that warrants no rebuild is only counted. The crash is the
+// promoted set's on the revision the row runs, so its wedge is read
+// there: a roll promotes that revision ahead of the Component's current
+// one, and a pushed set rebuilds on its ladder as a current one does.
 func crashRebuildWarranted(input workload.ReconcileInput, plan workload.ComponentPlan, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) bool {
-	if pod, _, _ := evidence.CrashLoopWedgedPod(input, s, expected, pods); pod != nil {
+	if pod, _, _ := evidence.CrashLoopWedgedPodOn(input, s, expected, pods, s.RunningRevision); pod != nil {
 		return true
 	}
 	return plan.RestartPolicy == workload.RestartPolicyRecreateInstance && runnerRestartedSinceReady(pods, s.ReadySince)
@@ -1092,9 +1106,20 @@ type crashLoopLadder struct {
 // parked inside the grace is not a wedge yet, and the grace ending raises
 // no watch event, so the pass deposits the grace left and comes back when
 // the repair can open; a ladder whose backoff is not due deposits that
-// wait the same way.
+// wait the same way. A crash the ladder counts is the promoted set's on
+// the revision the row runs, and its wedge is read there; a wedge no
+// counted crash is behind is repaired on the Component's current revision
+// alone, and an off-current one is the escalation's.
 func readCrashLoopRepair(input workload.ReconcileInput, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) crashLoopRepair {
-	pod, reason, graceLeft := evidence.CrashLoopWedgedPod(input, s, expected, pods)
+	ladder := readCrashLadder(input, s, expected, pods)
+	var pod *corev1.Pod
+	var reason string
+	var graceLeft time.Duration
+	if ladder != nil {
+		pod, reason, graceLeft = evidence.CrashLoopWedgedPodOn(input, s, expected, pods, s.RunningRevision)
+	} else {
+		pod, reason, graceLeft = evidence.CrashLoopWedgedPod(input, s, expected, pods)
+	}
 	if pod == nil {
 		if graceLeft > 0 {
 			input.PassWake.Observe(graceLeft)
@@ -1102,7 +1127,7 @@ func readCrashLoopRepair(input workload.ReconcileInput, s *workload.InstanceStat
 		return crashLoopRepair{}
 	}
 	r := crashLoopRepair{pod: pod, reason: reason}
-	if ladder := readCrashLadder(input, s, expected, pods); ladder != nil {
+	if ladder != nil {
 		r.ladder = ladder
 		r.opens = ladder.open
 		r.fires = ladder.open || ladder.record || ladder.parks || ladder.remember

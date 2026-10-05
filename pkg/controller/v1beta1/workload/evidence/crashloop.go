@@ -46,6 +46,17 @@ func CrashLoopWedge(input types.ReconcileInput, s *types.InstanceStatus, expecte
 // its kubelet waiting reason instead of the repair's Reason: nil when the
 // row holds no wedge, with the grace left as CrashLoopWedge reports it.
 func CrashLoopWedgedPod(input types.ReconcileInput, s *types.InstanceStatus, expected int32, pods []*corev1.Pod) (*corev1.Pod, string, time.Duration) {
+	return CrashLoopWedgedPodOn(input, s, expected, pods, input.ObservedState.CurrentRevision)
+}
+
+// CrashLoopWedgedPodOn is CrashLoopWedgedPod read against rev instead of
+// the Component's current revision. A roll promotes a row onto the
+// revision it runs ahead of the current one, so a reader that already
+// knows the wedged set is that row's own — the retry ladder rebuilding a
+// crash it counted on the running revision — reads the wedge there; the
+// repair of a wedge no counted crash is behind stays on the current
+// revision, and an off-current wedge is the escalation's.
+func CrashLoopWedgedPodOn(input types.ReconcileInput, s *types.InstanceStatus, expected int32, pods []*corev1.Pod, rev string) (*corev1.Pod, string, time.Duration) {
 	if s == nil || s.Phase != types.InstancePhaseReady || s.Operation != nil {
 		return nil, "", 0
 	}
@@ -55,14 +66,14 @@ func CrashLoopWedgedPod(input types.ReconcileInput, s *types.InstanceStatus, exp
 	if query.PodSetFullyServing(pods, expected) {
 		return nil, "", 0
 	}
-	currentHash := query.RevisionFromName(input.ObservedState.CurrentRevision).Hash()
+	own := query.RevisionFromName(rev)
 	now := input.Now()
 	var graceLeft time.Duration
 	for _, pod := range pods {
 		if pod == nil || pod.DeletionTimestamp != nil {
 			continue
 		}
-		if !podOnCurrentRevision(pod, currentHash) {
+		if !podOnRevision(pod, own) {
 			continue
 		}
 		if reason, wedged := PodWedgedPastGrace(pod, now, input.StuckPodGrace); wedged {
@@ -135,14 +146,13 @@ func PodSetUnavailableOnParkedMember(pods []*corev1.Pod, desired int32) bool {
 	return parked && serving < desired
 }
 
-// podOnCurrentRevision reports whether a pod belongs to the Component's
-// current revision. An unknown hash on either side leaves the pod in
-// scope: the label is the only evidence of ownership, and without it
-// every pod of the Instance stays a candidate.
-func podOnCurrentRevision(pod *corev1.Pod, currentHash string) bool {
+// podOnRevision reports whether a pod belongs to rev. An unknown hash on
+// either side leaves the pod in scope: the label is the only evidence of
+// ownership, and without it every pod of the Instance stays a candidate.
+func podOnRevision(pod *corev1.Pod, rev query.RevisionID) bool {
 	podRev := query.RevisionFromPod(pod)
-	if currentHash == "" || podRev.IsZero() {
+	if rev.IsZero() || podRev.IsZero() {
 		return true
 	}
-	return podRev.Same(query.RevisionFromHash(currentHash))
+	return podRev.Same(rev)
 }

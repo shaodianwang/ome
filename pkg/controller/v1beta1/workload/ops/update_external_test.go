@@ -99,3 +99,49 @@ func TestCleanupWreckage_UnroutedAlienIsDeletedImmediately(t *testing.T) {
 		t.Errorf("an alien that was never in rotation has nothing to wait for; it must go in this pass")
 	}
 }
+
+// A superseded-revision pod the cleanup has already deleted is still its
+// wreckage while it terminates: the row stays the cleanup's, which
+// neither deletes nor expects the pod a second time and reports the work
+// unfinished until the object is gone.
+func TestCleanupWreckage_TerminatingAlienKeepsTheRowUntilItIsGone(t *testing.T) {
+	isvc, c, pod, target, events := alienFixture(t, false /* serving */)
+	plan := buildPlanSinglePodEngine(1)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	row := input.ObservedState.Instance(0)
+	if !ops.EvaluateWreckage(row, target, []*corev1.Pod{pod}) {
+		t.Fatalf("an alien pod is wreckage before the cleanup deletes it")
+	}
+	// Deleted behind a finalizer, so the fake client keeps the object
+	// with a deletionTimestamp, as a live List does before the apiserver
+	// collects it.
+	pod.Finalizers = append(pod.Finalizers, "ome.io/test-hold")
+	if err := c.Update(context.Background(), pod); err != nil {
+		t.Fatalf("pin the alien with a finalizer: %v", err)
+	}
+	if err := c.Delete(context.Background(), pod); err != nil {
+		t.Fatalf("delete the alien: %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), pod); err != nil || pod.DeletionTimestamp == nil {
+		t.Fatalf("the alien must be terminating; err=%v deletionTimestamp=%v", err, pod.DeletionTimestamp)
+	}
+	if !ops.EvaluateWreckage(row, target, []*corev1.Pod{pod}) {
+		t.Fatalf("a terminating alien is still the cleanup's wreckage; the row must stay its until the pod is gone")
+	}
+	done, err := ops.CleanupWreckage(context.Background(), workload.Deps{Client: c, Recorder: events},
+		input, plan, plan.Instances[0], target, []*corev1.Pod{pod})
+	if err != nil {
+		t.Fatalf("CleanupWreckage: %v", err)
+	}
+	if done {
+		t.Fatalf("a terminating alien is unfinished work; got done=true")
+	}
+	if !workload.DefaultExpectations.Satisfied(isvc.Namespace, isvc.Name, workload.ComponentEngine, 0) {
+		t.Fatalf("a pod already terminating must not be expected or deleted a second time")
+	}
+	select {
+	case event := <-events.Events:
+		t.Fatalf("no delete is issued for a pod already terminating; got event %q", event)
+	default:
+	}
+}

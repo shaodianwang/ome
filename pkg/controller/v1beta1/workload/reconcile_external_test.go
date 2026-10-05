@@ -6563,8 +6563,11 @@ func (h *recoveryHarness) lastHold() *workloadtypes.RolloutHold {
 // Instance still served finishes and nothing further starts. The
 // Component's status names the hold with the Instances behind it and the
 // revision: the Budget hold, or the ladder's once the revision's retry
-// ladder denies the starts before the budget is asked. No pod of that
-// revision is created once the hold is reported, and a corrected
+// ladder denies the starts before the budget is asked. Once the hold is
+// reported, pods of that revision are created only on the revision's
+// retry ladder: each further attempt it admits rebuilds one crashed
+// Instance's set, a rebuilt set that comes back serving may admit one
+// more start, and nothing is created once the ladder holds. A corrected
 // revision then lands on every Instance.
 //
 // Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Budget]/before, instance/Update/Surge/gate.deny[Budget]/before
@@ -6597,9 +6600,12 @@ func TestCrashAfterPromotion_RollHoldsAtTheBudget(t *testing.T) {
 			revCrash := h.crashRevision(tc.image)
 			seen := map[types.UID]struct{}{}
 			crashed, offAtCrash := false, 0
-			holdsSeen, podsAtHold := 0, -1
+			holdsSeen, podsAtHold, podsAtHeld := 0, -1, -1
 			h.runWithInvariant(40, func() bool { return false }, func() {
 				h.trackPodsOnImage(tc.image, seen)()
+				if podsAtHeld < 0 && h.heldOn(revCrash.Name) {
+					podsAtHeld = len(seen)
+				}
 				off := int(tc.replicas) - h.instancesServingOn(goodImage)
 				if off > tc.offAllowed {
 					h.dumpState("roll past the budget")
@@ -6623,17 +6629,31 @@ func TestCrashAfterPromotion_RollHoldsAtTheBudget(t *testing.T) {
 				h.dumpState("no crash")
 				t.Fatalf("the promoted revision never crashed; the story did not run")
 			}
+			// The ladder's hold is the RetryBlock gate while it paces the
+			// crashed set's rebuilds and the Held gate once it has given the
+			// revision up; either names the Instances behind it.
 			hold := h.lastHold()
-			if hold == nil || (hold.Gate != workloadtypes.RolloutHoldGateBudget && hold.Gate != workloadtypes.RolloutHoldGateRetryBlock) || hold.Target != revCrash.Name {
+			if hold == nil || (hold.Gate != workloadtypes.RolloutHoldGateBudget && hold.Gate != workloadtypes.RolloutHoldGateRetryBlock && hold.Gate != workloadtypes.RolloutHoldGateHeld) || hold.Target != revCrash.Name {
 				h.dumpState("hold")
-				t.Fatalf("the Component must report a Budget or RetryBlock hold on %s, got %+v", revCrash.Name, hold)
+				t.Fatalf("the Component must report a Budget, RetryBlock or Held hold on %s, got %+v", revCrash.Name, hold)
 			}
 			if !strings.Contains(hold.Reason, "not serving") || !strings.Contains(hold.Reason, revCrash.Name) {
 				t.Fatalf("the hold must name the Instances on the crashing revision that are not serving, got %q", hold.Reason)
 			}
-			if podsAtHold < 0 || len(seen) != podsAtHold {
+			if podsAtHold < 0 {
+				h.dumpState("no hold")
+				t.Fatalf("no hold was reported after the promoted revision crashed")
+			}
+			// After the hold only the ladder creates pods of the revision: one
+			// set per further attempt it admits, and one more start per rebuilt
+			// set that comes back serving; nothing once it holds.
+			if rebuilt, admits := len(seen)-podsAtHold, 2*int(h.retryPolicy.MaxAttempts-1)*len(h.desired.Runners); rebuilt > admits {
 				h.dumpState("attempt after the hold")
-				t.Fatalf("pods of the crashing revision were created after the hold was reported: %d at the hold, %d after", podsAtHold, len(seen))
+				t.Fatalf("pods of the crashing revision were created after the hold beyond the ladder's attempts: %d at the hold, %d after, at most %d admitted", podsAtHold, len(seen), admits)
+			}
+			if podsAtHeld >= 0 && len(seen) != podsAtHeld {
+				h.dumpState("attempt after the ladder held")
+				t.Fatalf("pods of the crashing revision were created after its ladder held: %d when it held, %d after", podsAtHeld, len(seen))
 			}
 			if floor := int(tc.replicas) - tc.offAllowed; h.instancesServingOn(goodImage) < floor {
 				h.dumpState("floor")
@@ -11003,4 +11023,83 @@ func namedRebuilds(reason string) []int32 {
 		}
 	}
 	return out
+}
+
+// A push of two leader+worker gangs under RecreatePod maxUnavailable 1
+// moves both gangs onto a revision whose leader dies after promotion and
+// comes back between crashes, under RecreateInstanceOnPodRestart. With no
+// Instance left to start the budget is never asked for a start, and the
+// policy's repair owns the passes it runs in; the hold the roll stands
+// behind is still reported within one cadence of the first crash after
+// Ready: a Budget hold on the crashing revision naming the gang whose
+// pushed pod restarted, so status says why the roll parked before the
+// ladder has counted anything.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/gate.deny[Budget]/before
+func TestCrashAfterPromotion_FullyRolledGangSaysWhyWithinACadence(t *testing.T) {
+	const replicas = 2
+	h := newRecoveryHarnessFor(t, true, constants.MainContainerName)
+	h.replicas = replicas
+	repair := workloadtypes.RestartPolicyRecreateInstance
+	h.lifecycle.RestartPolicy = &repair
+	// The leader serves long enough for the roll to move the second gang
+	// before it dies, only the leader dies, and it dies well inside the
+	// stuck-pod grace, so the loop is the ladder's story alone.
+	h.crashAfterServed = 4
+	h.crashLeaderOnly = true
+	h.stuckGrace = 10 * time.Minute
+	h.stepCap = recoveryStepFloor
+	h.useRollingBudget(workloadtypes.UpdateStrategyRecreatePod)
+	if !h.run(60, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+	}
+
+	revCrash := h.crashRevision(flapAfterServingImage)
+	crashedIndex := int32(-1)
+	// crashedGang is the index of the first gang promoted onto the
+	// crashing revision whose pod has crashed, -1 before any has.
+	crashedGang := func() int32 {
+		for _, s := range h.irStatuses() {
+			if s.RunningRevision != revCrash.Name {
+				continue
+			}
+			for _, pod := range h.podsOf(s.Index) {
+				if h.crashes[wedgeKey(pod)] > 0 {
+					return s.Index
+				}
+			}
+		}
+		return -1
+	}
+	namesTheCrashedGang := func(hold *workloadtypes.RolloutHold) bool {
+		return hold != nil && hold.Target == revCrash.Name && hold.Gate == workloadtypes.RolloutHoldGateBudget &&
+			strings.Contains(hold.Reason, "not serving") && strings.Contains(hold.Reason, fmt.Sprintf("Instance %d", crashedIndex))
+	}
+	holdsBeforeCrash, stepsSinceCrash, namedAfter := 0, -1, -1
+	h.runWithInvariant(120, func() bool { return namedAfter >= 0 }, func() {
+		if crashedIndex < 0 {
+			holdsBeforeCrash = len(h.holds)
+			if idx := crashedGang(); idx >= 0 {
+				crashedIndex, stepsSinceCrash = idx, 0
+			}
+		} else {
+			stepsSinceCrash++
+		}
+		if crashedIndex >= 0 && namedAfter < 0 && len(h.holds) > holdsBeforeCrash && namesTheCrashedGang(h.lastHold()) {
+			namedAfter = stepsSinceCrash
+		}
+	})
+	if crashedIndex < 0 {
+		h.dumpState("no crash")
+		t.Fatalf("no promoted gang crashed; the story did not run")
+	}
+	if namedAfter < 0 {
+		h.dumpState("silent")
+		t.Fatalf("status never said why the roll parked: no Budget hold on %s named gang %d, whose pushed leader restarted after Ready (holds=%v, failed warnings=%v)",
+			revCrash.Name, crashedIndex, h.holds, h.failedWarnings)
+	}
+	if namedAfter > 1 {
+		t.Fatalf("the hold named gang %d only %d cadences after its leader crashed; the roll's standing is owed within one", crashedIndex, namedAfter)
+	}
 }

@@ -1,9 +1,9 @@
 package evidence_test
 
 // The crash-loop wedge on a row no operation owns. The shape is narrow on
-// purpose: a Ready row with no operation, a pod on the Component's
-// current revision, wedged past the configured grace, and a pod set that
-// is not fully serving.
+// purpose: a Ready row with no operation, a pod on the revision the row
+// runs (the Component's current revision when it records none), wedged
+// past the configured grace, and a pod set that is not fully serving.
 
 import (
 	"testing"
@@ -364,5 +364,37 @@ func TestPodSetUnavailableOnParkedMember(t *testing.T) {
 				t.Fatalf("PodSetUnavailableOnParkedMember = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// A row the roll promoted onto the update revision runs that revision
+// ahead of the Component's current one. Read against the revision it
+// runs, a wedged pod of that revision is the row's own and a pod of the
+// revision the roll replaced, or of no known revision, is a leftover; the
+// plain reading stays on the current revision, so the same pushed pod is
+// no wedge to it.
+func TestCrashLoopWedgedPodOn_ReadsTheRowAgainstTheRevisionItRuns(t *testing.T) {
+	const pushed = "engine-def456"
+	row := &types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady, RunningRevision: pushed}
+	for _, tc := range []struct {
+		name string
+		hash string
+		want bool
+	}{
+		{name: "pod on the revision the row runs", hash: query.RevisionFromName(pushed).Hash(), want: true},
+		{name: "pod on the current revision the roll replaced", hash: query.RevisionFromName(clRevision).Hash()},
+		{name: "pod on a revision the Component does not know", hash: "other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := crashLoopPod("engine-0-default-0", 10*time.Minute, tc.hash)
+			got, _, _ := evidence.CrashLoopWedgedPodOn(crashLoopInput(time.Minute), row, 1, []*corev1.Pod{pod}, pushed)
+			if (got != nil) != tc.want {
+				t.Fatalf("wedge on the running revision = %v, want %v", got != nil, tc.want)
+			}
+		})
+	}
+	pushedPod := crashLoopPod("engine-0-default-0", 10*time.Minute, query.RevisionFromName(pushed).Hash())
+	if _, got, _ := evidence.CrashLoopWedge(crashLoopInput(time.Minute), row, 1, []*corev1.Pod{pushedPod}); got {
+		t.Fatalf("the plain reading stays on the current revision; a pushed pod's wedge with no counted crash behind it is the escalation's")
 	}
 }
