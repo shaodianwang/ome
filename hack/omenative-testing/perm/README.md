@@ -2473,7 +2473,10 @@ cell on the six shape families (the surge strategy, the env edit):
   `LIFT_SETTLE_S`), `lift=after-window` keeps the webhook unreachable across
   `IDLE_HOLD_S` first. The verdict: admission was refused (a server-side
   dry-run patch of the ISVC, read every `INV_TICK_S`; still answering is
-  `INFRA-FAIL`); under a push or a scale the status said why in the
+  `INFRA-FAIL`; a NotFound for an ISVC the operation deleted is an answer,
+  not a refusal, and from then on a server-side dry-run apply of the
+  case's manifest, the recreate's own create, is the probe); under a push
+  or a scale the status said why in the
   webhook's own words — an event on the ISVC or one of its
   InferenceReplicas, a Component's rollout hold, a row's recorded failure
   or wait, or an ISVC condition naming the webhook (an operation that
@@ -2494,10 +2497,14 @@ cell on the six shape families (the surge strategy, the env edit):
   created once (more is a double apply; the pods that appeared are counted
   against the slots the operation owns), the rows settled with no
   operation open, and no rollout hold, Held retry block or Failed row was
-  left. The generated `isvcs/gen-webhook/` family runs the steady state,
-  the push (surge and drain-first) and a scale-up by one on every shape
-  family of the coverage ledger. The outage is cluster-wide (every ISVC
-  write is refused while it holds), so `batch.py` runs these cases alone.
+  left. An operation that completed under the outage, on writes admission
+  does not gate (a delete's teardown), is read as such: "completed Ns into
+  the outage; nothing for the lift to release", and it must still be done
+  once the webhook is back. The generated `isvcs/gen-webhook/` family runs
+  the steady state, the push (surge and drain-first) and a scale-up by one
+  on every shape family of the coverage ledger. The outage is cluster-wide
+  (every ISVC write is refused while it holds), so `batch.py` runs these
+  cases alone.
 - **`fault=conflict:idle|settling` with `form=once|persist` and
   `target=isvc|ir`** (the same modes and phases) runs a competing writer:
   a merge patch of the `perm.test/conflict-writer` annotation on the ISVC

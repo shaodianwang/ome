@@ -2800,7 +2800,8 @@ WINDOW_WHAT = {"idle": "the steady service", "push": "the push", "rollback": "th
 # webhook: after-hold points the Service back once the status has said why
 # a write waits (or the reason wait has run out; at idle, after the settle
 # window); after-window keeps the webhook unreachable across the hold window
-# first. Both then require the operation to complete.
+# first. Both then require the operation to complete, unless it completed
+# under the outage on writes admission does not gate (a delete's teardown).
 WEBHOOK_LIFTS = {"after-hold", "after-window"}
 # conflict: once is a single competing write at the phase; persist keeps
 # writing at CONFLICT_RATE_HZ until the operation completes (at idle, across
@@ -5557,14 +5558,13 @@ FORCE_DELETE_SLACK_KEY = "overdueSlack"
 CTRL_READY_S = int(180 * TIMEOUT_MULT)
 
 
-def _wait_webhook_admits(case_id, budget_s):
-    """Block until the ISVC admission webhook answers again: a server-side
-    dry-run patch runs admission without changing the object."""
+def _wait_webhook_admits(case_id, budget_s, manifest=None):
+    """Block until the ISVC admission webhook answers again, by
+    _webhook_probe (with the case's manifest, for an ISVC the operation
+    deleted); False when the budget runs out."""
     deadline = time.time() + budget_s
-    probe = json.dumps({"metadata": {"annotations": {"perm.test/webhook-probe": "1"}}})
     while time.time() < deadline:
-        r = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge", "-p", probe, "--dry-run=server")
-        if r.returncode == 0:
+        if _webhook_probe(case_id, manifest)[0]:
             return True
         time.sleep(2)
     return False
@@ -13620,16 +13620,40 @@ def restore_webhook_configurations():
     return "; ".join(done)
 
 
-def _webhook_probe(case_id):
+def _isvc_gone(words, case_id):
+    """Whether the apiserver's answer is a NotFound for the case's ISVC (the
+    operation deleted it), as against a webhook refusal, whose text names
+    the outage Service as not found."""
+    return "(NotFound)" in words and f'"{case_id}" not found' in words
+
+
+def _webhook_probe_create(yaml_file):
+    """(admission answers, the apiserver's words when it does not) for a
+    create of the case's manifest: its apply as a server-side dry run, so
+    admission runs and nothing is created."""
+    r = kubectl("apply", "--validate=false", "-n", NS, "--dry-run=server", "-f", "-", input=render_case(yaml_file))
+    if r.returncode == 0:
+        return True, ""
+    lines = (r.stderr or "").strip().splitlines()
+    return False, (lines[-1] if lines else "refused")[:200]
+
+
+def _webhook_probe(case_id, manifest=None):
     """(admission answers, the apiserver's words when it does not): a
     server-side dry-run patch of the case's ISVC runs admission without
-    changing the object."""
+    changing the object. A NotFound for the ISVC is the apiserver answering,
+    not admission refusing: the operation deleted it. With the case's
+    manifest at hand the probe then asks about its create instead, the
+    write a same-name recreate makes."""
     probe = json.dumps({"metadata": {"annotations": {"perm.test/webhook-probe": "1"}}})
     r = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge", "-p", probe, "--dry-run=server")
     if r.returncode == 0:
         return True, ""
     lines = (r.stderr or "").strip().splitlines()
-    return False, (lines[-1] if lines else "refused")[:200]
+    words = (lines[-1] if lines else "refused")[:200]
+    if not _isvc_gone(words, case_id):
+        return False, words
+    return _webhook_probe_create(manifest) if manifest else (True, "")
 
 
 def _case_ir_names(case_id):
@@ -13904,7 +13928,7 @@ def _window_tick(ctx, f, win, now):
         return
     win["last_reason_poll"] = now
     if win["lifted_at"] is None and win["refused_at"] is None:
-        answers, words = _webhook_probe(ctx["case_id"])
+        answers, words = _webhook_probe(ctx["case_id"], ctx.get("yaml_file"))
         if not answers:
             win["refused_at"], win["refusal"] = now - win["fault_ts"], words
             print(f"    admission refused {win['refused_at']:.0f}s in: {words[:120]}")
@@ -13953,7 +13977,7 @@ def _window_close(ctx, f, win):
             f["infra_fail"] = "webhook: the webhook configurations could not be restored"
         else:
             win["lifted_at"] = time.time() - t0
-            if _wait_webhook_admits(ctx["case_id"], CTRL_READY_S):
+            if _wait_webhook_admits(ctx["case_id"], CTRL_READY_S, ctx.get("yaml_file")):
                 win["answered_at"] = time.time() - t0
             else:
                 f["infra_fail"] = f"webhook: admission did not answer within {CTRL_READY_S}s of the webhooks being pointed back"
@@ -14425,9 +14449,11 @@ def _window_op(case_id, yaml_file, desc, hdr):
     webhook outage the operation must wait with the reason in the webhook's
     own words while the floor holds and the rows keep following the pods in
     rotation; once the webhook is back (after-hold | after-window) it must
-    complete with each pod slot created once and nothing left held. Under
-    the competing writer it must complete the same way while its status
-    writes conflict."""
+    complete with each pod slot created once and nothing left held, unless
+    it completed under the outage on writes admission does not gate (a
+    delete's teardown), which the verdict reads as such. Under the
+    competing writer it must complete the same way while its status writes
+    conflict."""
     kind = str(hdr.get("fault", "")).partition(":")[0]
     reason = _fault_capability(kind)
     if reason:
@@ -14980,7 +15006,8 @@ def _window_checks(f, win, state, verdict, notes, checks):
     a scale; the rows followed every serving change within the stall budget;
     the manager's events (and, for a webhook case, its reconciles) stayed
     bounded; the lift; the operation completed with each pod slot created
-    once; the rows settled with nothing left held."""
+    once (a completion under the outage is read as such, nothing for the
+    lift to release); the rows settled with nothing left held."""
     kind, op = win["kind"], win["op"]
     label = f"{kind}:{f['param']}"
     what = WINDOW_WHAT[op]
@@ -15076,9 +15103,17 @@ def _window_checks(f, win, state, verdict, notes, checks):
         checks.append(f"  ✓ {label}: the writer stopped {win['lifted_at']:.0f}s in")
     if op != "idle":
         back = "the webhook returned" if kind == WEBHOOK_FAULT else "the writer started"
-        if state == "CONVERGED":
+        escaped = kind == WEBHOOK_FAULT and win["escaped_at"] is not None
+        if escaped and state == "CONVERGED":
+            checks.append(f"  ✓ {label}: {what} completed {win['escaped_at']:.0f}s into the outage; nothing for the lift to release")
+        elif state == "CONVERGED":
             after = win["converged_at"] - (win["lifted_at"] if kind == WEBHOOK_FAULT else 0.0)
             checks.append(f"  ✓ {label}: {what} completed {after:.0f}s after {back}")
+        elif escaped:
+            verdict = "FAIL"
+            notes.append(f"{label}: {what} completed under the outage but was not done once {back} ({state})")
+            checks.append(f"  ✗ {label}: {what} completed {win['escaped_at']:.0f}s into the outage but was not done once "
+                          f"{back} ({state})")
         else:
             verdict = "FAIL"
             notes.append(f"{label}: {what} did not complete after {back} ({state})")
@@ -17039,7 +17074,7 @@ def _setup_and_ready(case_id, yaml_file, hdr, tick=None):
         return None, ("APPLY_FAIL", msg[:200])
     info = get_spec_info(case_id)
     ctx = {
-        "case_id": case_id, "N": N, "configured": configured, "info": info, "hdr": hdr,
+        "case_id": case_id, "N": N, "configured": configured, "info": info, "hdr": hdr, "yaml_file": yaml_file,
         "pods_per_inst": {c: 1 + info["workers"].get(c, 0) for c in COMPS},
         "modes": {c: ("inplace" if info["strat"].get(c) in IN_PLACE_TYPES else "surge") for c in configured},
         "pod_state": {}, "peaks": {"engine": 0, "decoder": 0, "router": 0}, "agg": {},

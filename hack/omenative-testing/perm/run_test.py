@@ -2396,6 +2396,43 @@ class WebhookOutageVerbTest(unittest.TestCase):
         self.assertIn("--dry-run=server", probe[0], "the probe is a server-side dry run: admission runs, nothing changes")
         self.assertEqual(("-n", run.NS, "patch", "isvc", "p999"), probe[0][:5])
 
+    def test_a_notfound_answer_for_the_deleted_service_is_an_answer_not_a_refusal(self):
+        gone = 'Error from server (NotFound): inferenceservices.ome.io "p999" not found\n'
+        refusal = ('Error from server (InternalError): Internal error occurred: failed calling webhook '
+                   f'"inferenceservice.validator": failed to call webhook: Post "https://{AWAY}.{run.CTRL_NS}.svc:443/validate-isvc": '
+                   f'service "{AWAY}" not found\n')
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", gone)):
+            self.assertEqual((True, ""), run._webhook_probe("p999"),
+                             "the apiserver answered: the service the operation deleted is gone, admission refused nothing")
+            with mock.patch.object(run.time, "sleep", lambda s: None):
+                self.assertTrue(run._wait_webhook_admits("p999", 1), "the lift's wait is answered for a deleted service")
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", refusal)):
+            answers, words = run._webhook_probe("p999")
+        self.assertFalse(answers, "the outage's own words name a Service that is not found: that is the refusal")
+        self.assertIn("failed calling webhook", words)
+        # With the case's manifest at hand, a gone service turns the probe to
+        # the manifest's create: the recreate's own apply, as a dry run.
+        calls = []
+
+        def kubectl(*a, **k):
+            calls.append((a, k.get("input")))
+            if a[0] == "apply":
+                return subprocess.CompletedProcess(a, 1, "", refusal)
+            return subprocess.CompletedProcess(a, 1, "", gone)
+        with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "render_case", lambda y: "kind: InferenceService\n"):
+            answers, words = run._webhook_probe("p999", "case.yaml")
+        self.assertFalse(answers)
+        self.assertIn("failed calling webhook", words)
+        applies = [(a, body) for a, body in calls if a[0] == "apply"]
+        self.assertEqual(1, len(applies))
+        self.assertIn("--dry-run=server", applies[0][0])
+        self.assertEqual("kind: InferenceService\n", applies[0][1], "the rendered manifest, as the recreate applies it")
+        answered = lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "") if a[0] == "apply" else subprocess.CompletedProcess(a, 1, "", gone)
+        with mock.patch.object(run, "kubectl", answered), mock.patch.object(run, "render_case", lambda y: "x"):
+            self.assertEqual((True, ""), run._webhook_probe("p999", "case.yaml"))
+            with mock.patch.object(run.time, "sleep", lambda s: None):
+                self.assertTrue(run._wait_webhook_admits("p999", 1, "case.yaml"))
+
 
 class ConflictWriterTest(unittest.TestCase):
     """The competing writer patches its annotation on the ISVC or on every
@@ -2698,6 +2735,43 @@ class WindowVerdictTest(unittest.TestCase):
         f, win = _win(op="idle", said_at=7.0, said="failed calling webhook")
         _verdict, _notes, checks = self._run(f, win, state="HELD")
         self.assertTrue(any("the steady service reported a blocked write" in c for c in checks))
+
+    def test_a_delete_that_completed_under_the_outage_passes_with_nothing_for_the_lift(self):
+        f, win = _win(op="delete", said_at=None, escaped_at=5.0, lifted_at=91.0, answered_at=93.0, converged_at=96.0,
+                      expected_created={"engine": 0}, created={"engine": 0}, rows_settled=None, leftover_hold=None)
+        verdict, notes, checks = self._run(f, win)
+        self.assertEqual(("PASS", []), (verdict, notes), checks)
+        text = "\n".join(checks)
+        self.assertIn("the delete completed 5s into the outage; nothing for the lift to release", text)
+        self.assertNotIn("after the webhook returned", text, "the completion came before the lift")
+        self.assertIn("pointed back 91s in and answered 2s later", text)
+        # the same reading for any operation that completed under the outage
+        f, win = _win(op="push", said_at=None, escaped_at=30.0)
+        verdict, _notes, checks = self._run(f, win)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("the push completed 30s into the outage; nothing for the lift to release" in c for c in checks), checks)
+        # an operation that completed under the outage must still be done at the end
+        f, win = _win(op="delete", said_at=None, escaped_at=5.0, expected_created={"engine": 0}, created={"engine": 0},
+                      rows_settled=None, leftover_hold=None)
+        verdict, notes, checks = self._run(f, win, state="ROTATE_TIMEOUT")
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("the delete completed 5s into the outage but was not done once the webhook returned (ROTATE_TIMEOUT)" in c
+                            for c in checks), checks)
+
+    def test_an_operation_that_waited_on_the_webhook_must_complete_after_the_lift(self):
+        f, win = _win()   # the status said why; nothing completed under the outage
+        verdict, notes, checks = self._run(f, win, state="ROTATE_TIMEOUT")
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("the push did not complete within budget after the webhook returned (ROTATE_TIMEOUT)" in c for c in checks))
+        self.assertIn("webhook:settling: the push did not complete after the webhook returned (ROTATE_TIMEOUT)", notes)
+        f, win = _win(op="delete", expected_created={"engine": 0}, created={"engine": 0}, rows_settled=None, leftover_hold=None)
+        verdict, _notes, checks = self._run(f, win, state="ROTATE_TIMEOUT")
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("the delete did not complete within budget after the webhook returned (ROTATE_TIMEOUT)" in c for c in checks))
+        f, win = _win(op="delete", expected_created={"engine": 0}, created={"engine": 0}, rows_settled=None, leftover_hold=None)
+        verdict, _notes, checks = self._run(f, win)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("the delete completed 60s after the webhook returned" in c for c in checks))
 
     def test_pods_made_under_the_outage_are_reported_and_pods_moved_at_idle_fail(self):
         f, win = _win(created_in_window={"engine": 1})
@@ -3145,6 +3219,70 @@ class WindowTimingTest(unittest.TestCase):
             run._window_tick(ctx, f, win, 60.0)
             self.assertEqual(30.0, win["stall_worst"], "a caught-up status stops the clock")
         self.assertEqual({"engine": {"u-a", "u-b"}}, win["uids_seen"])
+
+
+class DeleteUnderTheOutageTest(unittest.TestCase):
+    """A delete runs its teardown on writes admission does not gate, so it
+    can complete under the outage: once its ISVC is gone the probe asks
+    admission about the manifest's create, the lift's wait is answered the
+    same way, and the case's context carries the manifest for both."""
+
+    GONE = 'Error from server (NotFound): inferenceservices.ome.io "p999" not found\n'
+    REFUSAL = ('Error from server (InternalError): Internal error occurred: failed calling webhook "inferenceservice.validator": '
+               f'failed to call webhook: Post "https://{AWAY}.{run.CTRL_NS}.svc:443/validate-isvc": service "{AWAY}" not found\n')
+
+    def _kubectl(self, calls, create_answers):
+        def kubectl(*a, **k):
+            calls.append(a)
+            if a[0] == "apply":
+                return (subprocess.CompletedProcess(a, 0, "", "") if create_answers
+                        else subprocess.CompletedProcess(a, 1, "", self.REFUSAL))
+            return subprocess.CompletedProcess(a, 1, "", self.GONE)
+        return kubectl
+
+    def test_the_tick_reads_the_outage_through_the_create_once_the_service_is_gone(self):
+        f, win = _win(op="delete")
+        win.update(fault_ts=0.0, lifted_at=None, refused_at=None, refusal="", said_at=None, last_rows_poll=0.0, last_reason_poll=-100.0,
+                   uids_seen={})
+        ctx = {"case_id": "p999", "pod_state": {}, "yaml_file": "case.yaml"}
+        calls = []
+        with mock.patch.object(run, "kubectl", self._kubectl(calls, False)), \
+                mock.patch.object(run, "render_case", lambda y: "kind: InferenceService\n"), \
+                mock.patch.object(run, "_ir_rows", lambda c: {}), mock.patch.object(run, "_write_blocked_reason", lambda *a: None), \
+                contextlib.redirect_stdout(io.StringIO()):
+            run._window_tick(ctx, f, win, 0.0)
+        self.assertEqual(0.0, win["refused_at"])
+        self.assertIn("failed calling webhook", win["refusal"], "the refusal is admission's, read through the create")
+        self.assertNotIn("NotFound", win["refusal"], "a NotFound for the deleted service is not the refusal")
+        self.assertTrue(any(a[0] == "apply" and "--dry-run=server" in a for a in calls), calls)
+
+    def test_the_lift_is_answered_through_the_create(self):
+        f, win = _win(op="delete")
+        win.update(fault_ts=0.0, lifted_at=None, answered_at=None, escaped_at=5.0, metrics_before=None, uids_seen={}, owned_uids=set())
+        ctx = {"case_id": "p999", "pod_state": {}, "yaml_file": "case.yaml", "old_uids": {"engine": set()}, "configured": {"engine"}}
+        calls = []
+        with mock.patch.object(run, "kubectl", self._kubectl(calls, True)), \
+                mock.patch.object(run, "render_case", lambda y: "kind: InferenceService\n"), \
+                mock.patch.object(run, "_webhook_outage_lift", lambda f_: True), \
+                mock.patch.object(run, "_controller_event_tally", lambda *a: (0, {})), \
+                mock.patch.object(run, "CTRL_READY_S", 1), mock.patch.object(run.time, "sleep", lambda s: None), \
+                contextlib.redirect_stdout(io.StringIO()):
+            run._window_close(ctx, f, win)
+        self.assertFalse(f["infra_fail"], f["infra_fail"])
+        self.assertIsNotNone(win["lifted_at"])
+        self.assertIsNotNone(win["answered_at"], "admission answered for the create the recreate is about to make")
+        self.assertTrue(any(a[0] == "apply" and "--dry-run=server" in a for a in calls), calls)
+
+    def test_the_context_carries_the_manifest(self):
+        info = {"workers": {}, "strat": {}, "policy": None}
+        with mock.patch.multiple(run, apply_runtime_fixtures=lambda: None,
+                                 apply_case=lambda y: subprocess.CompletedProcess((), 0, "", ""),
+                                 get_spec_info=lambda c: info, start_watcher=lambda c: None, _inv_new=lambda c, h: None,
+                                 _fault_new=lambda c, h: None, _once_start_tick=lambda f, s: None, _read_one=lambda c: {}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            ctx, err = run._setup_and_ready("p999", "case.yaml", {"Ne": 1}, tick=lambda c: "read as it stands")
+        self.assertIsNone(err)
+        self.assertEqual("case.yaml", ctx.get("yaml_file"))
 
 
 class GeneratedWindowFamiliesTest(unittest.TestCase):
