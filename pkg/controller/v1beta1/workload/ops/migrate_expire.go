@@ -389,15 +389,21 @@ func mirrorTerminalMigrationLedger(ctx context.Context, deps workload.Deps, inpu
 		HintTargetNodes: append([]string(nil), rec.HintTargetNodes...),
 		Reason:          rec.Reason,
 	}
-	surgeIdx := int32(-1)
-	if rec.SurgeInstance != nil {
-		surgeIdx = *rec.SurgeInstance
-	}
-	ledger.UpsertEntry(audit.NewTerminalEntry(*ledger.InFlightEntryOrSeed(rec.RequestUUID, req, surgeIdx), phase, outcome))
+	ledger.UpsertEntry(audit.NewTerminalEntry(*ledger.InFlightEntryOrSeed(rec.RequestUUID, req, ledgerSurgeIndex(rec)), phase, outcome))
 	if err := audit.PersistLedgerForOwner(ctx, deps.Client, ledgerOwnerObject(input), ledgerOwnerGVK(input), ledger); err != nil {
 		return fmt.Errorf("persist terminal ledger mirror (uuid=%s): %w", rec.RequestUUID, err)
 	}
 	return nil
+}
+
+// ledgerSurgeIndex is the surge index a terminal ledger row carries for
+// rec: the allocated index, or the accept pass's unallocated sentinel
+// (-1, since 0 is a valid Instance index) while no surge exists.
+func ledgerSurgeIndex(rec *workload.MigrationRecord) int32 {
+	if rec != nil && rec.SurgeInstance != nil {
+		return *rec.SurgeInstance
+	}
+	return -1
 }
 
 // migrationExpiryBlocker names what the migration was stuck on when its

@@ -452,6 +452,9 @@ type migFixture struct {
 	// against; the constructors set the stand-in for a chart-configured
 	// deployment. A test pinning the unconfigured path clears it.
 	migrationAudit *workload.MigrationAuditPolicy
+	// retryBlocks is the owner's per-revision retry ladder state the pass
+	// observes, as the adapter mirrors it.
+	retryBlocks []workload.RetryBlock
 	// conditions captures every Component condition the pass stamps, in
 	// write order, when a test wires the capture.
 	conditions *[]metav1.Condition
@@ -628,6 +631,7 @@ func (f *migFixture) input(t *testing.T) workload.ReconcileInput {
 	in.ForceDelete = f.forceDelete
 	in.StuckPodGrace = f.stuckPodGrace
 	in.MigrationAudit = f.migrationAudit
+	in.ObservedState.RetryBlocks = append([]workload.RetryBlock(nil), f.retryBlocks...)
 	if f.conditions != nil {
 		in.WriteAggregateCondition = func(_ context.Context, cond metav1.Condition) error {
 			*f.conditions = append(*f.conditions, cond)
@@ -2013,6 +2017,252 @@ func TestMigrate_DeferWithoutOwnership_LeavesRecordAccepted(t *testing.T) {
 	if rec.Phase != workload.MigrationPhaseAccepted || rec.SurgeInstance != nil {
 		t.Errorf("deferred record must stay Accepted with no surge; got %+v", *rec)
 	}
+}
+
+// seedSourceFailedOnUnstartedRevision leaves the source row as a
+// disposed attempt does: Failed, no operation, TargetRevision off the
+// running one, the failure on LastFailure. Returns that revision.
+func seedSourceFailedOnUnstartedRevision(t *testing.T, f *migFixture, idx int32, failureReason string) string {
+	t.Helper()
+	ir := f.getIR(t)
+	row := migrationStatusByIndex(t, ir, idx)
+	pushed := row.RunningRevision + "-next"
+	row.Phase = v1beta1.OMENativeInstanceFailed
+	row.Operation = nil
+	row.TargetRevision = pushed
+	row.LastFailure = &v1beta1.InstanceTermination{PodName: "engine-0-default-1", Reason: failureReason, Time: metav1.Now()}
+	if err := f.c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("seed Failed source: %v", err)
+	}
+	return pushed
+}
+
+// seedStartedLedgerRow persists the Started row the accept pass writes
+// for uuid, started at startedAt, with no surge allocated.
+func seedStartedLedgerRow(t *testing.T, f *migFixture, uuid, startedAt string) {
+	t.Helper()
+	req := migrationRequest(t, f, uuid)
+	req.RequestedAt = startedAt
+	ledger, err := audit.LoadLedgerForOwner(context.Background(), f.c, f.isvc)
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	ledger.UpsertEntry(audit.NewStartedEntry(req, uuid, -1))
+	if err := audit.PersistLedgerForOwner(context.Background(), f.c, f.isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService"), ledger); err != nil {
+		t.Fatalf("persist Started row: %v", err)
+	}
+}
+
+// ledgerRow returns the fixture ledger's row for uuid, failing the test
+// when there is none.
+func ledgerRow(t *testing.T, f *migFixture, uuid string) audit.Entry {
+	t.Helper()
+	ledger, err := audit.LoadLedgerForOwner(context.Background(), f.c, f.isvc)
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	for _, e := range ledger.Entries {
+		if e.RequestUUID == uuid {
+			return e
+		}
+	}
+	t.Fatalf("no ledger row for %s; got %+v", uuid, ledger.Entries)
+	return audit.Entry{}
+}
+
+// A move whose source is Failed on a revision it never started is
+// closed Failed in the pass that picks it, with the revision and its
+// ladder on the record and an event, whatever the ladder's state.
+// Cells: instance/Failed/spec.migrateRequest/before
+func TestMigrate_SourceFailedOnARevisionThatHasNotStarted_RejectedAtOnce(t *testing.T) {
+	cases := []struct {
+		name       string
+		block      *workload.RetryBlock
+		wantLadder string
+	}{
+		{
+			name:       "ladder held",
+			block:      &workload.RetryBlock{State: workload.RetryBlockHeld, AttemptsStarted: 3, Reason: "CreateContainerConfigError"},
+			wantLadder: "retry block Held after 3 failed attempt(s): CreateContainerConfigError",
+		},
+		{
+			name:       "ladder in backoff",
+			block:      &workload.RetryBlock{State: workload.RetryBlockBackoff, AttemptsStarted: 1, Reason: "ImagePullBackOff"},
+			wantLadder: "retry block Backoff after 1 failed attempt(s): ImagePullBackOff",
+		},
+		{
+			name:       "no ladder",
+			wantLadder: "no retry is scheduled: ImagePullBackOff",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSinglePodMigFixture(t)
+			f.recorder = record.NewFakeRecorder(16)
+			const uuid = "mig-source-failed"
+			f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+			pushed := seedSourceFailedOnUnstartedRevision(t, f, 0, "ImagePullBackOff")
+			if tc.block != nil {
+				b := *tc.block
+				b.TargetRevision = pushed
+				f.retryBlocks = []workload.RetryBlock{b}
+			}
+			startedAt := metav1.NewTime(time.Now().Add(-time.Hour)).UTC().Format(time.RFC3339)
+			seedStartedLedgerRow(t, f, uuid, startedAt)
+
+			done, accepted := f.pass(t, uuid)
+			if !done || !accepted {
+				t.Fatalf("the move must be answered in the pass: done=%v accepted=%v", done, accepted)
+			}
+			assertRecordFailed(t, f, uuid, "has not started")
+			rec := f.record(t, uuid)
+			for _, want := range []string{pushed, tc.wantLadder, "correct or release the revision, then request the move again"} {
+				if !strings.Contains(rec.Message, want) {
+					t.Errorf("record Message = %q, want substring %q", rec.Message, want)
+				}
+			}
+			for _, r := range f.records {
+				if r.Phase == workload.MigrationPhaseAccepted {
+					t.Errorf("no record may stay Accepted after the answer; got %+v", r)
+				}
+			}
+			events := migWedgeEvents(t, f)
+			if n := countEventsWithReason(events, workload.EventReasonMigrationRequestRejected); n != 1 {
+				t.Fatalf("want one %s event, got %d: %v", workload.EventReasonMigrationRequestRejected, n, events)
+			}
+			if !strings.Contains(events[0], rec.Message) {
+				t.Errorf("the event must carry the reason; event=%q message=%q", events[0], rec.Message)
+			}
+			src := findInstanceStatusOnIRForFixture(t, f, 0)
+			if src == nil || src.Phase != v1beta1.OMENativeInstanceFailed || src.Operation != nil || src.TargetRevision != pushed {
+				t.Errorf("the source row must be left as it was; got %+v", src)
+			}
+			row := ledgerRow(t, f, uuid)
+			if row.Phase != audit.PhaseFailed || row.Outcome != rec.Message || row.SourceInstance != 0 ||
+				row.Reason != "maintenance" || row.StartedAt != startedAt || row.CompletedAt == "" || row.SurgeInstance != -1 {
+				t.Errorf("the Failed row must close the Started row with the reason as its outcome; got %+v", row)
+			}
+		})
+	}
+}
+
+// A source mid-operation is another pass's to finish: the move defers
+// without ownership, writes and emits nothing, and waits Accepted.
+// Cells: instance/Update/InPlace/spec.migrateRequest/before
+func TestMigrate_SourceMidOperationOnAReadyRow_StillWaits(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	f.recorder = record.NewFakeRecorder(16)
+	const uuid = "mig-source-busy"
+	f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+
+	ir := f.getIR(t)
+	row := migrationStatusByIndex(t, ir, 0)
+	next := row.RunningRevision + "-next"
+	now := metav1.Now()
+	row.TargetRevision = next
+	row.Operation = legacyToV1beta1Op(&workload.InstanceOperation{
+		ID: "op-inplace", Type: workload.InstanceOperationUpdate, TargetRevision: next,
+		StartedAt: now, LastProgressAt: now, Deadline: metav1.NewTime(now.Add(f.plan.InstanceReadyTimeout)),
+	})
+	if err := f.c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("seed mid-operation source: %v", err)
+	}
+
+	done, accepted := f.pass(t, uuid)
+	if done || accepted {
+		t.Fatalf("a mid-operation source must defer without ownership: done=%v accepted=%v", done, accepted)
+	}
+	rec := f.record(t, uuid)
+	if rec.Phase != workload.MigrationPhaseAccepted || rec.SurgeInstance != nil || rec.Message != "" {
+		t.Errorf("deferred record must stay Accepted, unallocated and unannotated; got %+v", *rec)
+	}
+	if events := migWedgeEvents(t, f); len(events) != 0 {
+		t.Errorf("a defer emits nothing; got %v", events)
+	}
+	ledger, err := audit.LoadLedgerForOwner(context.Background(), f.c, f.isvc)
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	if ledger.HasCompletedOrFailedRequest(uuid) {
+		t.Errorf("a defer writes no terminal ledger row")
+	}
+}
+
+// The rejection is for a Failed row with no operation whose target
+// revision is not the one it runs; a parked repair at its running
+// revision, an open operation, or a row not Failed is another path's.
+func TestMigrationSourceRevisionNotStarted(t *testing.T) {
+	op := &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, TargetRevision: "rev-b"}
+	cases := []struct {
+		name string
+		row  *workload.InstanceStatus
+		want bool
+	}{
+		{"failed on a revision it never started", &workload.InstanceStatus{Phase: workload.InstancePhaseFailed, RunningRevision: "rev-a", TargetRevision: "rev-b"}, true},
+		{"failed on its first revision", &workload.InstanceStatus{Phase: workload.InstancePhaseFailed, TargetRevision: "rev-b"}, true},
+		{"failed at its running revision", &workload.InstanceStatus{Phase: workload.InstancePhaseFailed, RunningRevision: "rev-a", TargetRevision: "rev-a"}, false},
+		{"failed with no target recorded", &workload.InstanceStatus{Phase: workload.InstancePhaseFailed, RunningRevision: "rev-a"}, false},
+		{"failed with an operation still open", &workload.InstanceStatus{Phase: workload.InstancePhaseFailed, RunningRevision: "rev-a", TargetRevision: "rev-b", Operation: op}, false},
+		{"ready mid-update", &workload.InstanceStatus{Phase: workload.InstancePhaseReady, RunningRevision: "rev-a", TargetRevision: "rev-b", Operation: op}, false},
+		{"ready and steady", &workload.InstanceStatus{Phase: workload.InstancePhaseReady, RunningRevision: "rev-a"}, false},
+		{"no row", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := migrationSourceRevisionNotStarted(tc.row); got != tc.want {
+				t.Errorf("migrationSourceRevisionNotStarted(%+v) = %v, want %v", tc.row, got, tc.want)
+			}
+		})
+	}
+}
+
+// A rejection closes the ledger's Started row as a completion does: the
+// request's instance, reason, node and start time stay, the terminal
+// phase, outcome and completion time land; a lost row is seeded.
+func TestFailMigration_ClosesTheStartedRow(t *testing.T) {
+	const uuid = "mig-reject-shape"
+	hints := []string{"node-x", "node-y"}
+	newFixture := func(t *testing.T) *migFixture {
+		f := newSinglePodMigFixture(t)
+		rec := mkMigRecord(uuid, 7, "node-a")
+		rec.HintTargetNodes = hints
+		f.records = []workload.MigrationRecord{rec}
+		return f
+	}
+	assertClosedRow := func(t *testing.T, row audit.Entry, wantStartedAt string) {
+		t.Helper()
+		if row.Phase != audit.PhaseFailed || row.Outcome != "source InstanceStatus missing" || row.CompletedAt == "" {
+			t.Errorf("row must be closed Failed with the reason as its outcome; got %+v", row)
+		}
+		if row.SourceInstance != 7 || row.Reason != "maintenance" || row.FromNode != "node-a" ||
+			strings.Join(row.HintTargetNodes, ",") != strings.Join(hints, ",") || row.SurgeInstance != -1 {
+			t.Errorf("row must keep the request's identity; got %+v", row)
+		}
+		if wantStartedAt != "" && row.StartedAt != wantStartedAt {
+			t.Errorf("row StartedAt = %q, want the Started row's %q", row.StartedAt, wantStartedAt)
+		}
+		if row.StartedAt == "" {
+			t.Errorf("row must carry a StartedAt; got %+v", row)
+		}
+	}
+
+	t.Run("started row present", func(t *testing.T) {
+		f := newFixture(t)
+		startedAt := metav1.NewTime(time.Now().Add(-time.Hour)).UTC().Format(time.RFC3339)
+		seedStartedLedgerRow(t, f, uuid, startedAt)
+		if done, accepted := f.pass(t, uuid); !done || !accepted {
+			t.Fatalf("rejection must be terminal: done=%v accepted=%v", done, accepted)
+		}
+		assertClosedRow(t, ledgerRow(t, f, uuid), startedAt)
+	})
+
+	t.Run("started row lost", func(t *testing.T) {
+		f := newFixture(t)
+		if done, accepted := f.pass(t, uuid); !done || !accepted {
+			t.Fatalf("rejection must be terminal: done=%v accepted=%v", done, accepted)
+		}
+		assertClosedRow(t, ledgerRow(t, f, uuid), "")
+	})
 }
 
 // countEventsWithReason counts drained events carrying reason.

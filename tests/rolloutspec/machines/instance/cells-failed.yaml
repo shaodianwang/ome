@@ -400,12 +400,13 @@ cells:
     status: current
   - state: Failed
     event: spec.migrateRequest
-    outcome: defer
-    note: a fresh migration record refuses to stamp a source that is not steady Ready with a recorded revision; ownership is not taken, the record stays Accepted and the request re-answers on the next pass
+    outcome: reject
+    guard: the row carries no operation and its target revision is not the one it runs - a disposed Create or Update attempt whose revision never started
+    note: a fresh migration record on such a row is closed Failed in the pass that picks it, the revision and its retry ladder named on the record message and a MigrationRequestRejected event, since only a corrected or released revision moves the row and a defer would park the record silently until its deadline (ops/migrate.go migrationSourceRevisionNotStarted). A Failed row at its running revision - a parked repair - still defers without taking ownership, as every source that is not steady Ready does; the record stays Accepted and re-answers each pass until the repair brings the row back
     placement: perm
     coverage:
       perm: []
-      unit: [TestPlan_Migrate_SelectsOldestManualRecord]
+      unit: [TestPlan_Migrate_SelectsOldestManualRecord, TestMigrate_SourceFailedOnARevisionThatHasNotStarted_RejectedAtOnce, TestMigrationSourceRevisionNotStarted]
       kind: []
     status: current
   - state: Failed

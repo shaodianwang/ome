@@ -65,8 +65,9 @@ func ledgerOwnerGVK(input workload.ReconcileInput) schema.GroupVersionKind {
 // Sequence (surge-only):
 //
 //  1. Terminal record → done. Fresh record (SurgeInstance unset):
-//     run the fresh-request guards (steady-Ready source,
-//     resolveSourceNode, capacity over status.migrations, overlay
+//     run the fresh-request guards (steady-Ready source — a Failed
+//     source on a revision it never started is rejected, not waited
+//     on — resolveSourceNode, capacity over status.migrations, overlay
 //     pre-check); rejections mark the record Failed. The move binds to
 //     the Instance: a source rebuilt off the request's FromNode since
 //     the request leaves the node it runs on, and the record says so; a
@@ -208,6 +209,14 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		// stamp silently steamrolls the in-flight op.
 		if source == nil {
 			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, "source InstanceStatus missing")
+			return d, true, ferr
+		}
+		// Such a source waits on an operator, not on an in-flight op: a
+		// defer here would park the record silently until its deadline
+		// and then blame the surge, so the request is answered now.
+		if migrationSourceRevisionNotStarted(source) {
+			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID,
+				migrationSourceRevisionNotStartedReason(input, source))
 			return d, true, ferr
 		}
 		if !migrationSourceSteady(source) {
@@ -926,6 +935,33 @@ func migrationSourceSteady(source *workload.InstanceStatus) bool {
 		source.Operation == nil && source.RunningRevision != ""
 }
 
+// migrationSourceRevisionNotStarted reports a source Failed with no
+// operation on a revision it never started (a disposed Create or Update
+// attempt); only a corrected or released revision moves such a row.
+func migrationSourceRevisionNotStarted(source *workload.InstanceStatus) bool {
+	return source != nil && source.Phase == workload.InstancePhaseFailed &&
+		source.Operation == nil && source.TargetRevision != "" &&
+		source.TargetRevision != source.RunningRevision
+}
+
+// migrationSourceRevisionNotStartedReason words that rejection: the
+// revision that has not started and where its retry ladder stands, so
+// the operator knows what to correct or release before asking again.
+func migrationSourceRevisionNotStartedReason(input workload.ReconcileInput, source *workload.InstanceStatus) string {
+	ladder := "no retry is scheduled"
+	if source.LastFailure != nil && source.LastFailure.Reason != "" {
+		ladder += ": " + source.LastFailure.Reason
+	}
+	if b := workload.FindRetryBlock(input.ObservedState.RetryBlocks, source.TargetRevision); b != nil {
+		ladder = fmt.Sprintf("retry block %s after %d failed attempt(s)", b.State, b.AttemptsStarted)
+		if b.Reason != "" {
+			ladder += ": " + b.Reason
+		}
+	}
+	return fmt.Sprintf("source %s is Failed on revision %s, which has not started (%s); correct or release the revision, then request the move again",
+		workload.InstanceKey(input.Key.Component, source.Index), source.TargetRevision, ladder)
+}
+
 // handoffPinsIndex reports whether another row's operation names idx as
 // its replacement. A gang surge keeps that pin on its source until the
 // source is finalized and removed, past the point where the replacement
@@ -1376,29 +1412,20 @@ func writeMigrationCapacityCondition(ctx context.Context, input workload.Reconci
 	return input.WriteAggregateCondition(ctx, cond)
 }
 
-// failMigration terminates the request: a terminal Failed audit row
-// (history), then the migration record's Phase=Failed + Message +
-// CompletedAt (authority — the dispatcher stops picking it and the
-// capacity slot frees structurally). Ledger-first: if the record write
-// crashes, the still-non-terminal record retries next pass, hits the
-// same rejection, and the ledger upsert is idempotent. Returns
-// done=true so the reconciler stops. Emits a Warning event so
-// operators see the rejection in `kubectl describe`. The trigger
-// annotation is not touched here — the adapter consumes it at
-// accept/reject time (the executor never touches annotations).
+// failMigration terminates the request: the ledger's Started row closed
+// Failed with reason as its outcome (history, in the shape a completed
+// or expired row has), then the migration record's Phase=Failed +
+// Message + CompletedAt (authority — the dispatcher stops picking it and
+// the capacity slot frees structurally). Ledger-first: if the record
+// write crashes, the still-non-terminal record retries next pass, hits
+// the same rejection, and the ledger upsert is idempotent. Returns
+// done=true so the reconciler stops. Emits a Warning event so operators
+// see the rejection in `kubectl describe`. The trigger annotation is
+// not touched here — the adapter consumes it at accept/reject time (the
+// executor never touches annotations).
 func failMigration(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, ledger *audit.Ledger, req *audit.MigrationRequest, uuid, reason string) (bool, error) {
-	now := metav1.NewTime(deps.Now()).UTC().Format(time.RFC3339)
-	entry := audit.Entry{
-		RequestUUID:     uuid,
-		Phase:           audit.PhaseFailed,
-		Component:       req.Component,
-		FromNode:        req.FromNode,
-		HintTargetNodes: append([]string(nil), req.HintTargetNodes...),
-		StartedAt:       now,
-		CompletedAt:     now,
-		Outcome:         reason,
-	}
-	ledger.UpsertEntry(entry)
+	surgeIdx := ledgerSurgeIndex(workload.FindMigrationRecord(input.ObservedState.Migrations, uuid))
+	ledger.UpsertEntry(audit.NewTerminalEntry(*ledger.InFlightEntryOrSeed(uuid, req, surgeIdx), audit.PhaseFailed, reason))
 	if err := audit.PersistLedgerForOwner(ctx, deps.Client, ledgerOwnerObject(input), ledgerOwnerGVK(input), ledger); err != nil {
 		return false, fmt.Errorf("Migrate: persist Failed ledger (%s): %w", reason, err)
 	}
