@@ -50,6 +50,29 @@ if grep -Fq "docker image tag" "$derive_log" || grep -Fq "docker tag" "$derive_l
   fail "the case image must be derived, not aliased: an alias shares the source image id"
 fi
 
+# The webhook waits read the configuration until the chart's placeholder
+# bundle has been replaced, and the Service until it has endpoints, at the
+# script's own cadence.
+wait_count="${test_dir}/wait.count"
+cat >"${derive_bin}/kubectl" <<'FAKE'
+#!/usr/bin/env bash
+case " $* " in
+  *" get validatingwebhookconfiguration "*)
+    n=$(( $(cat "$WAIT_COUNT" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" >"$WAIT_COUNT"
+    if [ "$n" -ge 3 ]; then echo ZmFrZQ==; else echo Cg==; fi
+    ;;
+  *" get endpointslices "*) echo 10.0.0.1 ;;
+esac
+FAKE
+chmod +x "${derive_bin}/kubectl"
+wait_out="$(WAIT_COUNT="$wait_count" KCTX=kind-test OME_NS=ome WEBHOOK_WAIT_POLL_S=0 PATH="${derive_bin}:$PATH" \
+  wait_for_webhook_cabundle)"
+grep -Fq "caBundle injected" <<<"$wait_out" || fail "the caBundle wait did not report the injected bundle"
+[ "$(cat "$wait_count")" = 3 ] || fail "the caBundle wait did not poll until the placeholder was replaced"
+wait_out="$(KCTX=kind-test OME_NS=ome WEBHOOK_WAIT_POLL_S=0 PATH="${derive_bin}:$PATH" wait_for_webhook_endpoints)"
+grep -Fq "webhook endpoints ready" <<<"$wait_out" || fail "the endpoints wait did not report the endpoints"
+
 fake_bin="${test_dir}/bin"
 fake_log="${test_dir}/commands.log"
 mkdir -p "$fake_bin"
@@ -111,8 +134,8 @@ case "$tool" in
         fi
         ;;
       *" create namespace "*) echo 'apiVersion: v1' ;;
-      *" get validatingwebhookconfiguration "*) echo ZmFrZQ== ;;
-      *" get endpointslices "*) echo 10.0.0.1 ;;
+      *" get validatingwebhookconfiguration "*) printf 'kubectl %s\n' "$*" >>"$FAKE_LOG"; echo ZmFrZQ== ;;
+      *" get endpointslices "*) printf 'kubectl %s\n' "$*" >>"$FAKE_LOG"; echo 10.0.0.1 ;;
       *" get clusterbasemodel "*) echo Ready ;;
       *" get deployments -o name "*) printf 'deployment.apps/%s\n' ome-controller-manager ome-prometheus ;;
       *" patch deployment.apps/"*) printf 'kubectl %s\n' "$*" >>"$FAKE_LOG" ;;
@@ -170,5 +193,17 @@ for deploy in ome-controller-manager ome-prometheus; do
   grep -Fq -- "patch deployment.apps/${deploy} ${patch}" "$fake_log" ||
     fail "deployment ${deploy} was not stamped with the control-plane PriorityClass"
 done
+# Every chart pass re-asserts the placeholder caBundle, so the injected
+# bundle and the webhook endpoints are waited for after the converge pass
+# too, before anything is applied.
+[ "$(grep -c '^helm <upgrade> <--install> <ome> ' "$fake_log")" -eq 2 ] ||
+  fail "the controller chart was not installed in two passes"
+converge_line="$(grep -n '^helm <upgrade> <--install> <ome> ' "$fake_log" | tail -1 | cut -d: -f1)"
+bundle_line="$(grep -n 'get validatingwebhookconfiguration' "$fake_log" | tail -1 | cut -d: -f1)"
+endpoints_line="$(grep -n 'get endpointslices' "$fake_log" | tail -1 | cut -d: -f1)"
+[ -n "$bundle_line" ] && [ "$converge_line" -lt "$bundle_line" ] ||
+  fail "the webhook caBundle was not waited for after the converge pass"
+[ -n "$endpoints_line" ] && [ "$converge_line" -lt "$endpoints_line" ] ||
+  fail "the webhook endpoints were not waited for after the converge pass"
 
 echo "deploy-ome-kind tag tests passed."

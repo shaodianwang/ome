@@ -5960,6 +5960,40 @@ class IdleBreakFaultTest(unittest.TestCase):
             run._crashloop_pod_state = orig_state
             run._FAULT_CLEANUPS[:] = orig_cleanups
 
+    def test_the_one_shot_sibling_form_is_a_healed_load_kill_of_the_component_beside_the_ladder(self):
+        once = {"fault": "crashloop:canary-serving@1", "form": "load", "victimcomp": "decoder", "lift": "after-settle"}
+        self.assertTrue(run._sibling_kill_once(run._fault_new("p999", once)))
+        self.assertTrue(run._sibling_kill_once(run._fault_new("p999", dict(once, victim="canary"))))
+        self.assertTrue(run._sibling_kill_once(run._fault_new("p999", dict(once, fault="crashloop:idle"))))
+        for other in (dict(once, victimcomp=""), dict(once, lift=""), dict(once, form="start"),
+                      dict(once, fault="crashloop:old"), dict(once, during="settling"), dict(once, at="accept")):
+            f = run._fault_new("p999", {k: v for k, v in other.items() if v})
+            self.assertFalse(run._sibling_kill_once(f), other)
+        self.assertFalse(run._sibling_kill_once(None))
+
+    def test_a_one_shot_sibling_kill_lands_once_and_the_killer_stops(self):
+        f = run._fault_new("p999", {"fault": "crashloop:canary-serving@1", "form": "load", "victimcomp": "decoder",
+                                    "victim": "canary", "lift": "after-settle"})
+        pods = {"d1": {"alive": True, "hash": "new", "inst": "1", "comp": "decoder", "runner": "default", "uid": "u1"}}
+        execs, orig_cleanups = [], list(run._FAULT_CLEANUPS)
+        fake = lambda *a, **k: execs.append(a) or subprocess.CompletedProcess(a, 0, "", "")
+        try:
+            # The pod stays up under the same UID, as it does when the kubelet
+            # restarts the runner in place: a killer with no budget would go on.
+            with mock.patch.object(run, "_crashloop_pod_state", lambda name: (True, True, "new", True, "u1")), \
+                    mock.patch.object(run, "kubectl", fake), mock.patch.object(run, "CRASH_KILL_INTERVAL_S", 0.01):
+                run._break_named_pods(f, pods, ["d1"])
+                f["crash_thread"].join(timeout=2)
+                alive = f["crash_thread"].is_alive()
+                f["crash_stop"].set()
+                f["crash_thread"].join(timeout=5)
+        finally:
+            run._FAULT_CLEANUPS[:] = orig_cleanups
+        self.assertFalse(alive, "the killer stops once its one kill has landed")
+        self.assertEqual(1, f["kills"])
+        self.assertEqual(1, len(execs))
+        self.assertIn("killed once", f["notes"][-1])
+
     def test_idle_verdict_reads_repair_or_hold(self):
         f = {"kind": "crashloop", "crash_inst": "1", "crash_comp": "decoder"}
         repair = [("RestartTriggered", "OMENative component=decoder instance=1 restart triggered: pod d1 wedged")]
@@ -6045,6 +6079,33 @@ class IdleBreakFaultTest(unittest.TestCase):
             self.assertTrue(any("no RestartTriggered" in n for n in notes))
         finally:
             run._isvc_events_since = orig
+
+    def test_a_sibling_repair_recorded_before_the_push_counts_for_a_break_armed_at_idle(self):
+        f = {"kind": "crashloop", "fired": True, "fired_ts": 4.0, "infra_fail": None, "form": "start", "case_id": "p999",
+             "crash_inst": "1", "crash_comp": "decoder", "crash_hash": "old", "crash_uid": "u-old", "kills": 0}
+        rebuilt = {"d1": {"alive": True, "hash": "old", "inst": "1", "comp": "decoder", "ready": True, "serving": True, "uid": "u-new"}}
+        repair = [("RestartTriggered", "OMENative component=decoder instance=1 restart triggered: pod d1 wedged")]
+        windows = []
+
+        def events_since(case_id, since, **kw):
+            # The repair was recorded between the bite and the push.
+            windows.append((since, bool(kw.get("opened"))))
+            return list(repair) if since <= 4.0 else []
+        with mock.patch.object(run, "_isvc_events_since", events_since):
+            notes, checks = [], []
+            self.assertEqual("PASS", run._crashloop_checks(f, rebuilt, {"old"}, 10.0, "PASS", notes, checks, bumped={"engine"}), notes)
+            self.assertIn((4.0, False), windows, "the window of a break armed before the push opens at its firing")
+            self.assertIn((10.0, True), windows, "a repair of a bumped victim is still placed from the push")
+            notes, checks = [], []
+            self.assertEqual("FAIL", run._crashloop_checks(dict(f, fired_ts=12.0), rebuilt, {"old"}, 10.0, "PASS", notes, checks,
+                                                           bumped={"engine"}), "a break fired at a hook keeps the push's window")
+            self.assertTrue(any("no RestartTriggered" in n for n in notes), notes)
+            served = {"e1": {"alive": True, "hash": "new", "inst": "1", "comp": "engine", "ready": True, "serving": True, "uid": "u-new"}}
+            repair[:] = [("RestartTriggered", "OMENative component=engine instance=1 restart triggered: pod e1 wedged")]
+            notes, checks = [], []
+            self.assertEqual("PASS", run._crashloop_checks(dict(f, crash_comp="engine"), served, {"old"}, 10.0, "PASS", notes,
+                                                           checks, bumped={"engine"}),
+                             "a repair the product opened before the push is not one after the bump")
 
 
 class ConfigKeyFaultTest(unittest.TestCase):
@@ -11019,9 +11080,10 @@ class CrashloopNewLadderTest(unittest.TestCase):
                 **self._pod("e3", 3, "old", "o3", 0),
                 **self._pod("e0", 0, "crash", attempt_uid, attempt_at, ready=False)}
 
-    def _replay(self, script):
+    def _replay(self, script, form="start", hdr=None):
         """Run the watch over the script ({second: {"pods": …, "snapshot":
-        …, "events": …}}, each key holding until a later second sets it).
+        …, "events": …}}, each key holding until a later second sets it),
+        for a crash of the given form under the header's restart policy.
         Returns the hold record and the clock when the watch returned."""
         clock = [0.0]
         state = {"pods": {}, "snapshot": self._snapshot(), "events": []}
@@ -11035,8 +11097,8 @@ class CrashloopNewLadderTest(unittest.TestCase):
         waiting = {"status": {"containerStatuses": [{"name": run.MAIN_CONTAINER,
                                                      "state": {"waiting": {"reason": "CrashLoopBackOff"}}}]}}
         ctx = {"N": {"engine": 4, "decoder": 0, "router": 0}, "pods_per_inst": {"engine": 1}, "old_hashes": {"old"},
-               "configured": {"engine"}, "fault": {"form": "start"}, "case_id": "p999", "trigger_ts": 0.0,
-               "closed": False, "pod_state": {}, "agg": {}}
+               "configured": {"engine"}, "fault": {"form": form}, "case_id": "p999", "trigger_ts": 0.0,
+               "closed": False, "pod_state": {}, "agg": {}, "hdr": hdr or {}}
         with mock.patch.object(run.time, "time", lambda: clock[0]), mock.patch.object(run, "_read_one", read_one), \
                 mock.patch.object(run, "_ir_snapshot", lambda case_id: state["snapshot"]), \
                 mock.patch.object(run, "_isvc_events_since", lambda case_id, since, **kw: list(state["events"])), \
@@ -11190,6 +11252,48 @@ class CrashloopNewLadderTest(unittest.TestCase):
         hold, _ended = self._replay(script)
         self.assertEqual({"0", "1"}, hold["rebuilds"][124.0])
         self.assertEqual([], hold["attempts_unannounced"])
+
+    def _policy_script(self):
+        """A pushed pod that is Ready and then exits: the status says why
+        (the budget) before the restart policy's rebuild of the set lands,
+        outside the poll that saw the why; the ladder's attempts follow at
+        the announced times."""
+        budget = {"gate": run.BUDGET_GATE, "target": self.TARGET,
+                  "reason": "per-Component unavailability budget 1 exhausted (would become 2); Instance 0 on revision "
+                            f"{self.TARGET} not serving"}
+        return {
+            1: {"pods": {**self._fleet("u1", 1), **self._pod("e0", 0, "crash", "u1", 1, ready=True)}},
+            21: {"pods": self._fleet("u1", 1)},
+            36: {"snapshot": self._snapshot(hold=budget)},
+            42: {"pods": self._fleet("u2", 42)},
+            64: {"snapshot": self._snapshot(**self._backoff(1, 124)), "events": [self.FAILED_EVENT]},
+            124: {"pods": self._fleet("u3", 124), "snapshot": self._snapshot()},
+            185: {"snapshot": self._snapshot(**self._backoff(2, 305))},
+            305: {"pods": self._fleet("u4", 305), "snapshot": self._snapshot()},
+            365: {"snapshot": self._snapshot(**self._held(3)),
+                  "events": [self.FAILED_EVENT, ("RetryHeld", f"InferenceReplica sandbox/p999-engine component=engine "
+                                                              f"update to {self.TARGET} held after 3 failed attempt(s)")]},
+        }
+
+    def test_the_restart_policys_first_rebuild_of_the_pushed_set_is_not_an_attempt(self):
+        hold, _ended = self._replay(self._policy_script(), form="load", hdr={"restart": "RecreateInstance"})
+        self.assertAlmostEqual(36, hold["status_at"], delta=run.CRASH_NEW_POLL_S)
+        self.assertEqual(4, hold["attempts"], "the pushed pod, the policy's rebuild and the ladder's two attempts")
+        self.assertEqual([], hold["attempts_unannounced"],
+                         "the policy rebuilds the pushed set once after its first crash, before the ladder counts it")
+        hold, _ended = self._replay(self._policy_script(), form="load", hdr={"restart": "None"})
+        self.assertEqual(["u2"], hold["attempts_unannounced"],
+                         "under None the kubelet restarts the runner in place: a new pod is the roll going on")
+        hold, _ended = self._replay(self._policy_script(), form="start", hdr={"restart": "RecreateInstance"})
+        self.assertEqual(["u2"], hold["attempts_unannounced"],
+                         "a set that never passed readiness has no restart after Ready for the policy to answer")
+
+    def test_the_policys_rebuild_is_the_second_set_of_each_instance_whatever_its_timing(self):
+        created = {"a0": (0.0, "0"), "b0": (0.0, "0"), "c0": (50.0, "0"), "d0": (50.0, "0"), "e0": (200.0, "0"),
+                   "a1": (0.0, "1"), "b1": (0.0, "1"), "c1": (60.0, "1"), "d1": (60.0, "1")}
+        self.assertEqual(["c0", "d0", "c1", "d1", "e0"], run._crash_new_unannounced(created, [], {}, 40.0, None, 2))
+        self.assertEqual(["e0"], run._crash_new_unannounced(created, [], {}, 40.0, None, 2, policy_rebuild=True),
+                         "each Instance's two-pod set is rebuilt once by the policy; a third set is the roll going on")
 
 
 class RatioBandTest(unittest.TestCase):
@@ -16935,7 +17039,7 @@ class CanaryGateFaultTest(unittest.TestCase):
         self.assertIn("already replaced", gone["notes"][-1])
 
     def test_break_heal_tick_waits_for_the_bite_and_the_settle(self):
-        f = run._fault_new("p999", {"fault": "crashloop:canary-serving@1", "form": "load", "victimcomp": "router", "lift": "after-settle"})
+        f = run._fault_new("p999", {"fault": "crashloop:canary-serving@1", "form": "load", "lift": "after-settle"})
         f.update(fired=True, crash_pod="r1", crash_uid="u1", kills=0)
         pods = {"r1": {"alive": True, "ready": True}}
         ctx = {"fault": f, "pod_state": pods}
@@ -16955,6 +17059,20 @@ class CanaryGateFaultTest(unittest.TestCase):
         with mock.patch.object(run, "_break_heal", lambda fault: healed.append(fault)):
             run._break_heal_tick({"fault": plain, "pod_state": pods}, 500.0)
         self.assertEqual([f], healed, "a break without the lift is never healed")
+
+    def test_the_heal_tick_takes_a_one_shot_sibling_kill_away_at_the_bite(self):
+        f = run._fault_new("p999", {"fault": "crashloop:canary-serving@1", "form": "load", "victimcomp": "decoder",
+                                    "victim": "canary", "lift": "after-settle"})
+        f.update(fired=True, crash_pod="d1", crash_uid="u1", kills=0)
+        ctx = {"fault": f, "pod_state": {"d1": {"alive": True, "ready": True}}}
+        healed = []
+        with mock.patch.object(run, "_break_heal", lambda fault: healed.append(fault)):
+            run._break_heal_tick(ctx, 100.0)
+            self.assertEqual([], healed, "nothing to take away before the kill has landed")
+            f["kills"] = 1
+            run._break_heal_tick(ctx, 101.0)
+        self.assertEqual(101.0, f["bite_ts"])
+        self.assertEqual([f], healed, "a kill that lands once is over: no settle holds the heal for a second one")
 
     def test_healed_sibling_serves_again_in_place_or_rebuilt(self):
         f = run._fault_new("p999", {"fault": "crashloop:canary-serving@1", "form": "load", "victimcomp": "router", "lift": "after-settle"})
@@ -19434,15 +19552,15 @@ class CanaryKeptKeyTest(unittest.TestCase):
                 "ready_seen": set(), "uids": {"u1": 1.0}, "peak_crash": crash,
                 "phases_before_exit": set(phases), "crash_indices": {"3"} if reached else {"0"}}
 
-    def _run(self, track, rows=None):
+    def _run(self, track, rows=None, conditions=(), blocks=()):
         ctx = {"case_id": "p1", "N": {"engine": 8, "decoder": 0, "router": 0}}
-        saved = run._ir_rows
-        run._ir_rows = lambda case_id: rows or {}
-        try:
+        status = {"instanceStatuses": list((rows or {}).get("engine") or []), "conditions": list(conditions),
+                  "retryBlocks": list(blocks)}
+        items = {"engine": {"spec": {"component": "engine"}, "status": status}}
+        with mock.patch.object(run, "_ir_by_component", lambda case_id: items), \
+                mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "stubbed")):
             notes, checks = [], []
             verdict = run._canary_kept_key_checks(ctx, self._fault(), track, {"Pending", "Failed"}, "PASS", notes, checks)
-        finally:
-            run._ir_rows = saved
         return verdict, notes, checks
 
     def test_the_decided_exit_passes(self):
@@ -19462,6 +19580,35 @@ class CanaryKeptKeyTest(unittest.TestCase):
         verdict, notes, checks = self._run(self._track(reason="InstanceFailed"), rows=rows)
         self.assertEqual("PASS", verdict, notes)
         self.assertTrue(any("names the missing key: Instance 3 ConfigError key value missing" in c for c in checks), checks)
+
+    def test_a_gangs_abandoned_surge_leaves_the_key_on_a_ready_row(self):
+        rows = {"engine": [{"index": 1, "phase": "Ready", "runningRevision": "p1-engine-3268d7c4",
+                            "lastFailure": {"reason": "CreateContainerConfigError",
+                                            "message": "couldn't find key value in ConfigMap sandbox/p1-config",
+                                            "podName": "p1-engine-2-leader-0"}}]}
+        verdict, notes, checks = self._run(self._track(reason="CapacityTimeout"), rows=rows)
+        self.assertEqual("PASS", verdict, notes)
+        self.assertTrue(any("names the missing key: Instance 1 CreateContainerConfigError couldn't find key value" in c
+                            for c in checks), checks)
+
+    def test_the_stalled_condition_or_the_retry_block_may_name_the_key(self):
+        track = self._track(reason="CapacityTimeout")
+        stalled = [{"type": "RolloutStalled", "status": "True", "reason": "InstancesFailing",
+                    "message": "1/2 Instance(s) failing rollout to p1-engine-89cdf568 (CreateContainerConfigError x1)"}]
+        verdict, notes, checks = self._run(track, conditions=stalled)
+        self.assertEqual("PASS", verdict, notes)
+        self.assertTrue(any("names the missing key: RolloutStalled InstancesFailing 1/2 Instance(s) failing" in c
+                            for c in checks), checks)
+        blocks = [{"targetRevision": "p1-engine-89cdf568", "state": "Backoff", "attemptsStarted": 1,
+                   "reason": "couldn't find key value in ConfigMap sandbox/p1-config"}]
+        verdict, notes, checks = self._run(track, blocks=blocks)
+        self.assertEqual("PASS", verdict, notes)
+        self.assertTrue(any("names the missing key: retry block p1-engine-89cdf568 couldn't find key value" in c
+                            for c in checks), checks)
+        ready = [{"type": "Ready", "status": "False", "reason": "InstancesFailing", "message": "CreateContainerConfigError x1"}]
+        verdict, notes, _checks = self._run(track, conditions=ready)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("names no missing key" in n for n in notes), notes)
 
     def test_a_ladder_held_by_the_stable_break_fails(self):
         track = self._track()

@@ -72,8 +72,50 @@ derive_image() {
   docker rm -f "$container" >/dev/null
 }
 
-# Keep the content-derived tag and image helpers directly testable without
-# executing a cluster deployment when this file is sourced.
+# The webhook waits poll this many times, this many seconds apart.
+WEBHOOK_WAIT_POLLS=60
+WEBHOOK_WAIT_POLL_S=2
+
+# cert-manager's cainjector rewrites the chart's placeholder caBundle once the
+# Certificate is issued. Until it does, the apiserver cannot parse the bundle
+# and every intercepted create fails; every chart pass re-asserts the
+# placeholder, so the wait follows each one.
+wait_for_webhook_cabundle() {
+  local bundle
+  echo "--- wait for the webhook caBundle to be injected ---"
+  for _ in $(seq "$WEBHOOK_WAIT_POLLS"); do
+    bundle="$(kubectl --context "$KCTX" get validatingwebhookconfiguration \
+      inferenceservice.ome.io \
+      -o jsonpath='{.webhooks[0].clientConfig.caBundle}' 2>/dev/null || true)"
+    case "$bundle" in
+      ""|"Cg==") sleep "$WEBHOOK_WAIT_POLL_S" ;;
+      *) echo "caBundle injected"; return 0 ;;
+    esac
+  done
+  echo "caBundle still the placeholder after $((WEBHOOK_WAIT_POLLS * WEBHOOK_WAIT_POLL_S))s; continuing" >&2
+}
+
+# A Deployment reporting Available only means its pods pass readiness; the
+# apiserver can still fail an admission call until the webhook Service has
+# endpoints. The eval's very first action is an apply, and expect=reject cases
+# depend on the webhook actually answering, so gate on endpoints rather than
+# racing the first case.
+wait_for_webhook_endpoints() {
+  echo "--- wait for webhook endpoints ---"
+  for _ in $(seq "$WEBHOOK_WAIT_POLLS"); do
+    if kubectl --context "$KCTX" -n "$OME_NS" get endpointslices \
+         -l kubernetes.io/service-name=ome-webhook-server-service \
+         -o jsonpath='{.items[*].endpoints[*].addresses[*]}' 2>/dev/null | grep -q .; then
+      echo "webhook endpoints ready"
+      return 0
+    fi
+    sleep "$WEBHOOK_WAIT_POLL_S"
+  done
+  echo "webhook endpoints still absent after $((WEBHOOK_WAIT_POLLS * WEBHOOK_WAIT_POLL_S))s; continuing" >&2
+}
+
+# Keep the content-derived tag, image and webhook-wait helpers directly
+# testable without executing a cluster deployment when this file is sourced.
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
 fi
@@ -532,41 +574,15 @@ echo "--- wait for the controller to become available ---"
 kubectl --context "$KCTX" -n "$OME_NS" rollout status \
   deployment/ome-controller-manager --timeout=300s
 
-# cert-manager's cainjector rewrites the placeholder caBundle once the
-# Certificate is issued. Until it does, the apiserver cannot parse the bundle
-# and every intercepted create fails.
-echo "--- wait for the webhook caBundle to be injected ---"
-for _ in $(seq 60); do
-  bundle="$(kubectl --context "$KCTX" get validatingwebhookconfiguration \
-    inferenceservice.ome.io \
-    -o jsonpath='{.webhooks[0].clientConfig.caBundle}' 2>/dev/null || true)"
-  case "$bundle" in
-    ""|"Cg==") sleep 2 ;;
-    *) echo "caBundle injected"; break ;;
-  esac
-done
-
-# A Deployment reporting Available only means its pods pass readiness; the
-# apiserver can still fail an admission call until the webhook Service has
-# endpoints. The eval's very first action is an apply, and expect=reject cases
-# depend on the webhook actually answering, so gate on endpoints rather than
-# racing the first case.
-echo "--- wait for webhook endpoints ---"
-for _ in $(seq 60); do
-  if kubectl --context "$KCTX" -n "$OME_NS" get endpointslices \
-       -l kubernetes.io/service-name=ome-webhook-server-service \
-       -o jsonpath='{.items[*].endpoints[*].addresses[*]}' 2>/dev/null | grep -q .; then
-    echo "webhook endpoints ready"
-    break
-  fi
-  sleep 2
-done
+wait_for_webhook_cabundle
+wait_for_webhook_endpoints
 
 # cert-manager's cainjector owns .webhooks[*].clientConfig.caBundle by then, so
 # Helm's server-side apply reports a field-manager conflict on every webhook
 # configuration and the release fails. The injected bundle is the value we
-# want, and Helm re-asserting its placeholder over it would break admission —
-# --force-conflicts lets the apply proceed, after which cainjector rewrites it.
+# want, and Helm re-asserting its placeholder over it breaks admission until
+# cainjector rewrites it — --force-conflicts lets the apply proceed, and the
+# waits below hold the eval until the bundle is injected again.
 echo "--- install controller (pass 2: converge) ---"
 CONVERGE_ARGS=(--wait --timeout 300s)
 if helm upgrade --help 2>&1 | grep -q -- '--force-conflicts'; then
@@ -575,6 +591,8 @@ else
   echo "    helm has no --force-conflicts; using its default upgrade path"
 fi
 helm upgrade --install ome charts/ome-resources/ "${HELM_ARGS[@]}" "${CONVERGE_ARGS[@]}"
+wait_for_webhook_cabundle
+wait_for_webhook_endpoints
 
 # The fixtures are templates: the PVC, the seed Job and the ClusterBaseModel's
 # storageUri all have to name $NS, because a pod cannot mount a PVC from

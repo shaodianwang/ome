@@ -2461,6 +2461,10 @@ LADDER_REBUILDS_RE = re.compile(r"the attempt rebuilds Instances? ([0-9][0-9, ]*
 # form=load kills the runner this often while it is up; the kubelet's own
 # back-off then holds each restart longer than the last.
 CRASH_KILL_INTERVAL_S = float(os.environ.get("OME_TEST_CRASH_KILL_INTERVAL_S", "15"))
+# The one-shot sibling break is one kill: its killer stops after this many,
+# whatever the interval, since a second death of a serving canary pod parks
+# the ladder.
+CRASH_ONCE_KILLS = 1
 # The faults that break one live pod of the running revision and share the
 # crashloop victim rule and verdict: crashloop (the pod dies at every start,
 # or after Ready) and imagepull (the pod is pointed at an image that cannot
@@ -6488,13 +6492,24 @@ def _crashloop_pod_state(name):
             running, meta.get("uid", ""))
 
 
+def _sibling_kill_once(f):
+    """The canary gate's one-shot sibling break: a load kill of the Component
+    beside the engine ladder (victimcomp=), at a hook or at idle, that the
+    harness heals; the cell reads it as the runner killed once."""
+    if not f or f.get("kind") != "crashloop" or f.get("form") != "load" or f.get("lift") != HEAL_LIFT:
+        return False
+    hook = str(f.get("param") or "").partition("@")[0]
+    return bool(f.get("victimcomp")) and not f.get("during") and not f.get("at") \
+        and (hook in CANARY_HOOKS or hook == IDLE_FAULT_PHASE)
+
+
 def _crashloop_killer(f, stop):
     """form=load: kill the runner (PID 1 of the fixture container) every
     CRASH_KILL_INTERVAL_S while the victim pod is up, still on the old
     revision and still the pod the case broke. The name outlives a recreate,
     so the revision label and the UID are what say the pod is still that one;
     a pod patched or replaced onto the new revision, or rebuilt by a repair,
-    is left alone."""
+    is left alone. A record with a kill budget stops once it is spent."""
     while not stop.is_set():
         exists, alive, rev, running, uid = _crashloop_pod_state(f["crash_pod"])
         if not exists or not alive or rev != f["crash_hash"] or uid != f.get("crash_uid", uid):
@@ -6503,6 +6518,8 @@ def _crashloop_killer(f, stop):
             r = kubectl("-n", NS, "exec", f["crash_pod"], "-c", MAIN_CONTAINER, "--", "sh", "-c", "kill 1")
             if r.returncode == 0:
                 f["kills"] += 1
+                if f.get("kill_budget") and f["kills"] >= f["kill_budget"]:
+                    return
         stop.wait(CRASH_KILL_INTERVAL_S)
 
 
@@ -6558,10 +6575,13 @@ def _break_named_pods(f, pod_state, victims, inv=None):
         else:
             stop = threading.Event()
             rec["crash_stop"] = stop
+            if _sibling_kill_once(f):
+                rec["kill_budget"] = CRASH_ONCE_KILLS
             rec["crash_thread"] = threading.Thread(target=_crashloop_killer, args=(rec, stop), daemon=True)
             rec["crash_thread"].start()
             _FAULT_CLEANUPS.append(("crashloop", rec))
-            f["notes"].append(f"fault fired: crashloop form=load on {victim} (instance {rec['crash_inst']}, kill every {CRASH_KILL_INTERVAL_S:.0f}s)")
+            cadence = "killed once" if rec.get("kill_budget") else f"kill every {CRASH_KILL_INTERVAL_S:.0f}s"
+            f["notes"].append(f"fault fired: crashloop form=load on {victim} (instance {rec['crash_inst']}, {cadence})")
         print(f"    ⚡ {f['notes'][-1]}")
 
 
@@ -7806,11 +7826,15 @@ def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, chec
         # A break the push itself carries, of any kind the caller judges here,
         # has no victim on the running revision: the new-break checks own it.
         return verdict
-    since = trigger_ts or 0
+    bump = trigger_ts or 0
+    # A break armed on the idle service fired before the push: its window
+    # opens at the firing, so a repair recorded between the bite and the
+    # push is credited; `opened` still places repairs from the bump.
+    since = min(bump, f.get("fired_ts") or bump)
     events = _isvc_events_since(f["case_id"], since)
     for rec in _break_victims(f):
         chain, events = _victim_chain(f, rec, pod_state, since, events, surges)
-        opened = _isvc_events_since(f["case_id"], since, opened=True)
+        opened = _isvc_events_since(f["case_id"], bump, opened=True)
         verdict = _break_victim_checks(f, rec, pod_state, old_hashes, events, bumped, verdict, notes, checks, chain,
                                        opened=opened)
     return verdict
@@ -8027,16 +8051,17 @@ def _canary_break_heals(f):
 def _break_heal_tick(ctx, now):
     """Heal a self-healing break once it has bitten and held LIFT_SETTLE_S: a
     killer stops or a pod is pointed back at its image, the key is put back,
-    the readiness switch is lifted."""
+    the readiness switch is lifted. A one-shot sibling kill is over once it
+    has landed, so it is healed at the bite with no settle."""
     f = ctx.get("fault")
     if not (_canary_break_heals(f) or (f or {}).get("push_heal")) or not f.get("fired") or f.get("infra_fail") \
             or f.get("healed_at"):
         return
     if f.get("bite_ts") is None:
-        if _break_bitten(f, ctx["pod_state"]):
-            f["bite_ts"] = now
-        return
-    if now - f["bite_ts"] >= LIFT_SETTLE_S:
+        if not _break_bitten(f, ctx["pod_state"]):
+            return
+        f["bite_ts"] = now
+    if now - f["bite_ts"] >= LIFT_SETTLE_S or _sibling_kill_once(f):
         if f["kind"] in BREAK_FAULTS:
             _break_heal(f)
         else:
@@ -8863,17 +8888,30 @@ def _canary_kept_key(f):
     return bool(f) and f.get("kind") == "configkey" and f.get("param") != CRASHLOOP_NEW and f.get("lift") == KEPT_LIFT
 
 
+# The InferenceReplica's advisory condition that counts the Instances failing
+# a rollout and names the failure.
+ROLLOUT_STALLED_COND = "RolloutStalled"
+
+
 def _park_names_key(case_id, f, park, comp):
-    """The first status text at the park that names the missing key: the
-    run's failed reason or message, or a Failed row's recorded failure on
-    the victim Component, mentioning the kubelet's wait or the key itself.
-    "" when none does."""
+    """The first status text at the park that names the missing key, by the
+    kubelet's wait or the key itself: the run's failed reason or message,
+    the last failure recorded on any row of the victim Component (a gang's
+    abandoned surge leaves it on a row reset to Ready), the RolloutStalled
+    condition, or a retry block's reason. "" when none does."""
     wanted = {CONFIGKEY_WAITING, str(f.get("cm_key") or "")} - {""}
     texts = [park.get("reason") or "", park.get("message") or ""]
-    for row in (_ir_rows(case_id).get(comp) or []):
-        if str(row.get("phase") or "") == "Failed":
-            fail = row.get("lastFailure") or {}
+    item = _ir_by_component(case_id).get(comp) or {}
+    status = item.get("status") or {}
+    for row in _instance_rows(status):
+        fail = row.get("lastFailure") or {}
+        if fail:
             texts.append(f"Instance {row.get('index')} {fail.get('reason') or ''} {fail.get('message') or ''}".strip())
+    for c in status.get("conditions") or []:
+        if c.get("type") == ROLLOUT_STALLED_COND:
+            texts.append(f"{c['type']} {c.get('reason') or ''} {c.get('message') or ''}".strip())
+    for b in _retry_blocks(item):
+        texts.append(f"retry block {b.get('targetRevision') or ''} {b.get('reason') or ''}".strip())
     for text in texts:
         if any(w in text for w in wanted):
             return text[:160]
@@ -8915,7 +8953,8 @@ def _canary_kept_key_checks(ctx, f, track, phases, verdict, notes, checks):
     named = _park_names_key(ctx["case_id"], f, park, comp)
     ok(bool(named),
        f"{name}: the park names the missing key: {named}",
-       f"{name}: the park names no missing key (failed.reason={park['reason'] or 'none'}, no Failed {comp} row records it)")
+       f"{name}: the park names no missing key (failed.reason={park['reason'] or 'none'}; no {comp} row, stalled "
+       f"condition or retry block records it)")
     before = int(bite.get("traffic") or 0)
     ok(park["canary_traffic"] == before,
        f"{name}: no traffic reached the step whose pod never came up (canary at {park['canary_traffic']}% at the park, "
@@ -9897,7 +9936,7 @@ def _crash_new_note_ladder(hold, ladder, now, push_ts, moves):
     return at is not None and at > now
 
 
-def _crash_new_unannounced(created, windows, rebuilds, why_at, held_at, per_attempt):
+def _crash_new_unannounced(created, windows, rebuilds, why_at, held_at, per_attempt, policy_rebuild=False):
     """The crash-revision pods created after status first said why that no
     announced retry explains, oldest first. A backoff's next-retry time
     explains one attempt for each Instance the ladder named as the
@@ -9906,9 +9945,16 @@ def _crash_new_unannounced(created, windows, rebuilds, why_at, held_at, per_atte
     before the next announced one; nothing is explained once the ladder
     reached its bound. created is {pod uid: (creation epoch, Instance)},
     rebuilds is {retry time: the Instances named for it}; a pod in the
-    poll that saw the why predates it."""
-    out, used = [], defaultdict(int)
+    poll that saw the why predates it. With policy_rebuild, the restart
+    policy rebuilds each Instance's pushed set once after its first crash,
+    before the ladder counts it: that second set of per_attempt pods is
+    the policy's own, whenever it lands."""
+    out, used, sets = [], defaultdict(int), defaultdict(int)
     for uid, (at, inst) in sorted(created.items(), key=lambda kv: (kv[1][0], kv[0])):
+        ordinal = sets[inst]
+        sets[inst] += 1
+        if policy_rebuild and per_attempt <= ordinal < 2 * per_attempt:
+            continue
         if at <= why_at + CRASH_NEW_POLL_S:
             continue
         window = max((w for w in windows if w - CRASH_NEW_POLL_S <= at), default=None)
@@ -10016,8 +10062,12 @@ def _crash_new_watch_hold(ctx, victim, bumped, allowance, crash_hashes, uid_seen
     hold["attempts_unannounced"] = []
     if hold["status_at"] is not None:
         bound = None if hold["held_at"] is None else push_ts + hold["held_at"]
+        # RecreateInstanceOnPodRestart rebuilds a set once on a runner restart
+        # after Ready (form=load), before the ladder counts the set.
+        policy = form == "load" and _restart_policy(ctx.get("hdr"), ctx.get("info"), victim) == "RecreateInstance"
         hold["attempts_unannounced"] = _crash_new_unannounced(created, hold["windows"], hold["rebuilds"],
-                                                              push_ts + hold["status_at"], bound, max(1, ppi.get(victim, 1)))
+                                                              push_ts + hold["status_at"], bound, max(1, ppi.get(victim, 1)),
+                                                              policy_rebuild=policy)
     return hold
 
 
