@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -86,6 +87,11 @@ type SuiteState struct {
 	// + the suite's Scheme.
 	Client client.Client
 
+	// Clientset is a client-go clientset against RestConfig, for the
+	// subresources the controller-runtime client does not serve, such as
+	// pod logs.
+	Clientset kubernetes.Interface
+
 	// Manager is the in-process controller-runtime manager. nil when
 	// SuiteOpts.Setup was nil (smoke-test pattern), and nil between
 	// StopManager and StartManager, so specs must re-read Suite().Manager
@@ -131,12 +137,15 @@ func Suite() *SuiteState {
 //  4. Applies CRDs
 //  5. Installs OME (if Deployed is set)
 //  6. Starts the in-process controller manager (if Setup is set)
-//  7. Stores SuiteState so test code can call Suite()
-//  8. Tears down on TestMain exit (cluster delete honors KIND_KEEP_CLUSTER=1)
+//  7. Registers the Ginkgo failure diagnostics: a failed spec dumps its
+//     pending pods and their scheduling events, and under a Scheduler
+//     install the PodGroups and the scheduler pod's log tail as well
+//  8. Stores SuiteState so test code can call Suite()
+//  9. Tears down on TestMain exit (cluster delete honors KIND_KEEP_CLUSTER=1)
 //
 // Caller wires t.Run / ginkgo.RunSpecs themselves — RunKindSuite
-// only sets up shared state. Mirrors framework.RunSuite's contract
-// so the porting delta is minimal.
+// only sets up shared state, so it must run before RunSpecs. Mirrors
+// framework.RunSuite's contract so the porting delta is minimal.
 func RunKindSuite(t *testing.T, opts SuiteOpts) *SuiteState {
 	t.Helper()
 	if opts.ClusterName == "" {
@@ -196,11 +205,16 @@ func RunKindSuite(t *testing.T, opts SuiteOpts) *SuiteState {
 	if err != nil {
 		t.Fatalf("RunKindSuite: client.New: %v", err)
 	}
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		t.Fatalf("RunKindSuite: kubernetes.NewForConfig: %v", err)
+	}
 
 	state := &SuiteState{
 		Ctx:         ctx,
 		RestConfig:  cfg,
 		Client:      c,
+		Clientset:   clientset,
 		ClusterName: opts.ClusterName,
 	}
 
@@ -215,6 +229,8 @@ func RunKindSuite(t *testing.T, opts SuiteOpts) *SuiteState {
 		state.managerScheme = opts.Scheme
 		t.Cleanup(state.stopManager)
 	}
+
+	registerFailureDiagnostics(state, opts.Scheduler)
 
 	setActiveSuite(state)
 	t.Cleanup(func() { setActiveSuite(nil) })
