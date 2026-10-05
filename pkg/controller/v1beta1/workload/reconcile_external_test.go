@@ -8554,6 +8554,185 @@ func TestGangPush_UnpullableRevisionIsHeldWithinTheLadder(t *testing.T) {
 	}
 }
 
+// A push onto a revision whose pods cannot start is charged to the
+// revision's retry ladder the same way whatever the Instance's shape: a
+// single pod, a leader-plus-worker gang on an image neither member can
+// pull, or a gang whose leader cannot pull while its worker comes up. The
+// first attempt that parks past the stuck-pod grace leaves the row Failed
+// with the pull failure as its reason and no attempt in flight, records
+// one attempt on the block, and leaves the wedged pod set where it is
+// until the ladder's backoff is due; the next attempt opens as the
+// ladder's, and once the ladder is spent the push is Held with its reason
+// while the Instance the roll never reached keeps serving the running
+// revision through the very pods it served through before the push.
+
+// unpullablePushShape is one Instance shape the ladder is pinned on.
+type unpullablePushShape struct {
+	name     string
+	multiPod bool
+	// workerGood keeps the worker on the running image, so only the
+	// leader of the gang cannot pull while the worker comes up beside it.
+	workerGood bool
+}
+
+var unpullablePushShapes = []unpullablePushShape{
+	{name: "single pod"},
+	{name: "gang whose leader and worker cannot pull", multiPod: true},
+	{name: "gang whose leader cannot pull beside a worker that comes up", multiPod: true, workerGood: true},
+}
+
+// TestUnpullablePush_ChargesTheLadderWhateverTheInstanceShape pins the
+// ladder's contract across the shapes under RecreatePod with
+// maxUnavailable=1 on two Instances: after the first failed attempt the
+// operator reads a Failed row with the pull failure and a block with one
+// attempt, the wedged set is not rebuilt before the backoff is due, the
+// next attempt opens as the ladder's, the revision is Held at the bound
+// with the pull failure as its reason after exactly one pod set per
+// attempt, and the Instance the roll never reached serves throughout
+// through its original pods.
+//
+// Cells: instance/Update/Drain/pod.waiting[ImagePullBackOff]/before, instance/Failed/timer.retryAt/before
+func TestUnpullablePush_ChargesTheLadderWhateverTheInstanceShape(t *testing.T) {
+	for _, shape := range unpullablePushShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			h := newRecoveryHarness(t, shape.multiPod)
+			h.replicas = 2
+			h.retryPolicy = &workloadtypes.RetryPolicy{MaxAttempts: 3, InitialDelay: 90 * time.Second, MaxDelay: 30 * time.Minute, Multiplier: 2}
+			maxSurge, maxUnavailable := intstr.FromInt(0), intstr.FromInt(1)
+			h.lifecycle.UpdateStrategy = &workloadtypes.UpdateStrategy{
+				Type:          workloadtypes.UpdateStrategyRecreatePod,
+				RollingUpdate: &workloadtypes.RollingUpdate{MaxSurge: &maxSurge, MaxUnavailable: &maxUnavailable},
+			}
+			h.setTarget(h.revV1, goodImage)
+			if !h.run(40, func() bool { return h.settledOn(h.revV1, 2) }) {
+				h.dumpState("initial create")
+				t.Fatalf("two Instances never settled on v1")
+			}
+			podsPerInstance := len(h.desired.Runners)
+			survivor := map[types.UID]struct{}{}
+			for _, pod := range h.podsOf(1) {
+				survivor[pod.UID] = struct{}{}
+			}
+			if len(survivor) != podsPerInstance {
+				t.Fatalf("instance 1 serves through %d pods before the push, want %d", len(survivor), podsPerInstance)
+			}
+
+			h.setTarget(h.revBad, badImage)
+			badPodsPerAttempt := podsPerInstance
+			if shape.workerGood {
+				h.desired.WorkerPodSpec = h.podSpec(goodImage)
+				badPodsPerAttempt = 1
+			}
+			seen := map[types.UID]struct{}{}
+			keepServing := func() {
+				t.Helper()
+				h.trackPodsOnImage(badImage, seen)()
+				if got := len(h.servingPods()); got < podsPerInstance {
+					h.dumpState("serving lost")
+					t.Fatalf("serving pods dropped to %d; the Instance the roll never reached must keep serving while the other is retried", got)
+				}
+			}
+
+			// The first attempt: Failed with the pull failure, one attempt on
+			// the block, nothing in flight.
+			firstAttemptCharged := func() bool {
+				row, block := h.instance(0), h.findBlock(h.revBad.Name)
+				return row != nil && row.Phase == workloadtypes.InstancePhaseFailed && row.Operation == nil &&
+					row.LastFailure != nil && row.LastFailure.Reason == "ImagePullBackOff" &&
+					block != nil && block.State == workloadtypes.RetryBlockBackoff && block.AttemptsStarted == 1 && block.NextRetryAt != nil
+			}
+			if !h.runWithInvariant(40, firstAttemptCharged, keepServing) {
+				h.dumpState("first attempt")
+				t.Fatalf("the first attempt onto the unpullable revision was never charged: no Failed row with the pull failure and one attempt on the block")
+			}
+			if len(seen) != badPodsPerAttempt {
+				h.dumpState("first attempt")
+				t.Fatalf("%d pods were made on the unpullable revision during the first attempt, want %d: one pod set per attempt", len(seen), badPodsPerAttempt)
+			}
+
+			// The wedged set stays where it is until the backoff is due: the
+			// row keeps its Failed reading and no rebuild opens.
+			wedged := map[types.UID]struct{}{}
+			for _, pod := range h.podsOf(0) {
+				wedged[pod.UID] = struct{}{}
+			}
+			if len(wedged) != podsPerInstance {
+				h.dumpState("wedged set")
+				t.Fatalf("the failed attempt left %d pods on instance 0, want its %d", len(wedged), podsPerInstance)
+			}
+			due := h.findBlock(h.revBad.Name).NextRetryAt.Time
+			parkedPasses := 0
+			for h.clk.Now().Before(due) {
+				h.step()
+				parkedPasses++
+				keepServing()
+				if !firstAttemptCharged() {
+					h.dumpState("inside the backoff")
+					t.Fatalf("the row left its Failed reading before the backoff was due: %+v, block %+v", h.instance(0), h.findBlock(h.revBad.Name))
+				}
+				for _, pod := range h.podsOf(0) {
+					if _, same := wedged[pod.UID]; !same {
+						h.dumpState("inside the backoff")
+						t.Fatalf("instance 0 was rebuilt before the backoff was due: pod %s is not of the failed attempt", pod.Name)
+					}
+				}
+			}
+			if parkedPasses == 0 {
+				t.Fatalf("no pass ran inside the backoff; the story did not observe the park")
+			}
+
+			// The next attempt opens as the ladder's and replaces the wedged set.
+			reopened := func() bool {
+				row, block := h.instance(0), h.findBlock(h.revBad.Name)
+				return row != nil && row.Phase == workloadtypes.InstancePhaseUpdating &&
+					block != nil && block.State == workloadtypes.RetryBlockRetryInProgress && block.AttemptsStarted == 1
+			}
+			if !h.runWithInvariant(10, reopened, keepServing) {
+				h.dumpState("second attempt")
+				t.Fatalf("the ladder's next attempt never opened once the backoff was due")
+			}
+
+			// The ladder's end: Held at the bound with the pull failure, one
+			// pod set per attempt, the stuck row parked with no attempt in
+			// flight and the survivor untouched on v1.
+			if !h.runWithInvariant(80, func() bool { return h.heldOn(h.revBad.Name) }, keepServing) {
+				h.dumpState("never held")
+				t.Fatalf("the unpullable revision was never Held: the attempts are not counted on the ladder")
+			}
+			block := h.findBlock(h.revBad.Name)
+			if block.AttemptsStarted != h.retryPolicy.MaxAttempts || block.Reason != "ImagePullBackOff" {
+				t.Fatalf("held block: got (attempts=%d, reason=%q) want (%d, ImagePullBackOff)", block.AttemptsStarted, block.Reason, h.retryPolicy.MaxAttempts)
+			}
+			if len(h.heldWarnings) != 1 {
+				t.Fatalf("held warnings = %v, want the one the hold raised", h.heldWarnings)
+			}
+			h.settle(4)
+			keepServing()
+			if want := badPodsPerAttempt * int(h.retryPolicy.MaxAttempts); len(seen) != want {
+				h.dumpState("attempts")
+				t.Fatalf("%d pods were made on the unpullable revision, want %d: one pod set per attempt of the ladder and none after it was Held", len(seen), want)
+			}
+			row := h.instance(0)
+			if row == nil || row.Phase != workloadtypes.InstancePhaseFailed || row.Operation != nil ||
+				row.LastFailure == nil || row.LastFailure.Reason != "ImagePullBackOff" {
+				h.dumpState("held row")
+				t.Fatalf("the stuck Instance must park at Failed with no attempt in flight and the pull failure as its reason, got %+v", row)
+			}
+			peer := h.instance(1)
+			if peer == nil || peer.Phase != workloadtypes.InstancePhaseReady || peer.Operation != nil || peer.RunningRevision != h.revV1.Name {
+				h.dumpState("peer")
+				t.Fatalf("the Instance the roll never reached must still be Ready on v1, got %+v", peer)
+			}
+			for _, pod := range h.podsOf(1) {
+				if _, same := survivor[pod.UID]; !same || !podreadiness.IsServing(pod) {
+					h.dumpState("peer pods")
+					t.Fatalf("instance 1 must serve through the pods it served through before the push, got %s", pod.Name)
+				}
+			}
+		})
+	}
+}
+
 // endpointController is the EndpointSlice controller's model, run between
 // the kubelet and the pass once the routed model is on: one slice per
 // routed per-revision Service holding that revision's routable pods, and
