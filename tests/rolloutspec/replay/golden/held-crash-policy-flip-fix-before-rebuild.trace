@@ -86,63 +86,53 @@ tick=11 row=0 write no-op precondition=no-change
 tick=11 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-a3dc9719 activeOrdinal=1 readySince=t+0s op=op#5{type=Restart step=Drain reason=pod svc-a-engine-0-default-1 container ome-container restarted after Ready: Error (exit 1) started=t+30s lastProgressAt=t+30s deadline=t+30m30s} lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
 tick=11 pod create name=svc-a-engine-0-default-1 revision=a3dc9719 incarnation=2 ordinal=1
 tick=11 pass result=after:5s
-tick=12 note the rebuilt pod reports Ready, so the repair completes with the first Instance on the fix; the second Instance's drain stays withheld while the rebuilt set is Ready for less than the window
+tick=12 note the rebuilt pod reports Ready, so the repair completes with the first Instance on the fix; the second Instance's surge toward the broken revision is superseded, so its Ready replacement leaves rotation while the source keeps serving
 tick=12 apply pod.ready[target] pod=svc-a-engine-0-default-1 now=t+30s
 tick=12 row=0 write no-op precondition=no-change
 tick=12 pod status-patch name=svc-a-engine-0-default-1 serving=absent→True
 tick=12 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-a3dc9719 activeOrdinal=1 readySince=t+30s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
 tick=12 event Normal RestartCompleted OMENative component=engine instance=0 restart complete (incarnation=2)
-tick=12 row=1 write no-op precondition=no-change
-tick=12 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-a3dc9719 not serving; no source leaves rotation
+tick=12 pod status-patch name=svc-a-engine-1-default-1 serving=True→False
+tick=12 hold gate=Budget target=svc-a-engine-a3dc9719 reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-a3dc9719 not serving; no source leaves rotation
 tick=12 pass result=after:5s
-tick=13 note the rebuilt set has served for the window, so the second Instance's committed cycle drains the source toward the revision it was pinned to
-tick=13 apply clock.advance by=1m0s now=t+1m30s
-tick=13 row=1 write no-op precondition=no-change
-tick=13 row=1 write incarnation=1 phase=Updating runningRevision=svc-a-engine-8aa14b8b targetRevision=svc-a-engine-c500c9bc readySince=t+0s op=op#4{type=Update step=SurgeDrain target=svc-a-engine-c500c9bc strategy=SurgeThenDrain started=t+0s lastProgressAt=t+1m30s deadline=t+30m0s} precondition=ok
-tick=13 pod status-patch name=svc-a-engine-1-default-0 serving=True→False
-tick=13 hold cleared
+tick=13 note the unrouted replacement is deleted on its own grace
+tick=13 pod delete name=svc-a-engine-1-default-1 grace=default
+tick=13 hold gate=Budget target=svc-a-engine-a3dc9719 reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-a3dc9719 not serving; no source leaves rotation
 tick=13 pass result=after:5s
-tick=14 note the second source leaves rotation, so it is deleted
-tick=14 apply endpoint.rotationOut[source] pod=svc-a-engine-1-default-0 now=t+1m30s
-tick=14 row=1 write no-op precondition=no-change
-tick=14 row=1 write no-op precondition=no-change
-tick=14 pod delete name=svc-a-engine-1-default-0 grace=default
-tick=14 hold cleared
+tick=14 note the abandoned replacement is gone, so the second Instance is reset to Ready on the revision it never stopped running
+tick=14 apply pod.deleted[target] pod=svc-a-engine-1-default-1 now=t+30s
+tick=14 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-8aa14b8b readySince=t+30s op=nil precondition=ok
+tick=14 event Normal SurgeAbandoned OMENative component=engine instance=1 abandoned superseded surge to svc-a-engine-c500c9bc; re-surging toward svc-a-engine-a3dc9719
+tick=14 hold gate=Budget target=svc-a-engine-a3dc9719 reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-a3dc9719 not serving; no source leaves rotation
 tick=14 pass result=after:5s
-tick=15 note the second source is gone, so the second Instance promotes onto the pinned revision and now owes a roll to the fix
-tick=15 apply pod.deleted[source] pod=svc-a-engine-1-default-0 now=t+1m30s
-tick=15 row=1 write no-op precondition=no-change
-tick=15 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-c500c9bc activeOrdinal=1 readySince=t+1m30s op=nil precondition=ok
-tick=15 event Normal RecreateUpdateCompleted OMENative component=engine instance=1 surge to revision svc-a-engine-c500c9bc complete (activeOrdinal=1)
+tick=15 note the rebuilt set has served for the window, so the second Instance surges toward the fix
+tick=15 apply clock.advance by=1m0s now=t+1m30s
+tick=15 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=15 row=1 write incarnation=1 phase=Updating runningRevision=svc-a-engine-8aa14b8b targetRevision=svc-a-engine-a3dc9719 readySince=t+30s op=op#6{type=Update step=Surge target=svc-a-engine-a3dc9719 strategy=SurgeThenDrain started=t+1m30s lastProgressAt=t+1m30s deadline=t+31m30s} precondition=ok
+tick=15 event Normal RecreateUpdateStarted OMENative component=engine instance=1 surge to revision svc-a-engine-a3dc9719 (newOrdinal=1)
+tick=15 pod create name=svc-a-engine-1-default-1 revision=a3dc9719 incarnation=1 ordinal=1
 tick=15 hold cleared
-tick=15 pass result=requeue
-tick=16 note the surge budget is free, so the second Instance surges toward the fix
-tick=16 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
-tick=16 row=1 write incarnation=1 phase=Updating runningRevision=svc-a-engine-c500c9bc targetRevision=svc-a-engine-a3dc9719 activeOrdinal=1 readySince=t+1m30s op=op#6{type=Update step=Surge target=svc-a-engine-a3dc9719 strategy=SurgeThenDrain started=t+1m30s lastProgressAt=t+1m30s deadline=t+31m30s} precondition=ok
-tick=16 event Normal RecreateUpdateStarted OMENative component=engine instance=1 surge to revision svc-a-engine-a3dc9719 (newOrdinal=0)
-tick=16 pod create name=svc-a-engine-1-default-0 revision=a3dc9719 incarnation=1 ordinal=0
+tick=15 pass result=after:5s
+tick=16 note the replacement on the fix is serving and in rotation beside its source, so the source leaves the serving gate
+tick=16 apply pod.ready[target] pod=svc-a-engine-1-default-1 now=t+1m30s
+tick=16 apply endpoint.rotationIn[target] pod=svc-a-engine-1-default-1 now=t+1m30s
+tick=16 row=1 write no-op precondition=no-change
+tick=16 pod status-patch name=svc-a-engine-1-default-1 serving=absent→True
+tick=16 row=1 write incarnation=1 phase=Updating runningRevision=svc-a-engine-8aa14b8b targetRevision=svc-a-engine-a3dc9719 readySince=t+30s op=op#6{type=Update step=SurgeDrain target=svc-a-engine-a3dc9719 strategy=SurgeThenDrain started=t+1m30s lastProgressAt=t+1m30s deadline=t+31m30s} precondition=ok
+tick=16 pod status-patch name=svc-a-engine-1-default-0 serving=True→False
 tick=16 hold cleared
 tick=16 pass result=after:5s
-tick=17 note the replacement on the fix is serving and in rotation beside its source on the broken revision
-tick=17 apply pod.ready[target] pod=svc-a-engine-1-default-0 now=t+1m30s
-tick=17 apply endpoint.rotationIn[target] pod=svc-a-engine-1-default-0 now=t+1m30s
+tick=17 note the second source leaves rotation, so it is deleted
+tick=17 apply endpoint.rotationOut[source] pod=svc-a-engine-1-default-0 now=t+1m30s
 tick=17 row=1 write no-op precondition=no-change
-tick=17 pod status-patch name=svc-a-engine-1-default-0 serving=absent→True
-tick=17 row=1 write incarnation=1 phase=Updating runningRevision=svc-a-engine-c500c9bc targetRevision=svc-a-engine-a3dc9719 activeOrdinal=1 readySince=t+1m30s op=op#6{type=Update step=SurgeDrain target=svc-a-engine-a3dc9719 strategy=SurgeThenDrain started=t+1m30s lastProgressAt=t+1m30s deadline=t+31m30s} precondition=ok
-tick=17 pod status-patch name=svc-a-engine-1-default-1 serving=True→False
+tick=17 row=1 write no-op precondition=no-change
+tick=17 pod delete name=svc-a-engine-1-default-0 grace=default
 tick=17 hold cleared
 tick=17 pass result=after:5s
-tick=18 note the source on the broken revision leaves rotation, so it is deleted
-tick=18 apply endpoint.rotationOut[source] pod=svc-a-engine-1-default-1 now=t+1m30s
+tick=18 note the second source is gone and the fix has landed on every Instance
+tick=18 apply pod.deleted[source] pod=svc-a-engine-1-default-0 now=t+1m30s
 tick=18 row=1 write no-op precondition=no-change
-tick=18 row=1 write no-op precondition=no-change
-tick=18 pod delete name=svc-a-engine-1-default-1 grace=default
+tick=18 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-a3dc9719 activeOrdinal=1 readySince=t+1m30s op=nil precondition=ok
+tick=18 event Normal RecreateUpdateCompleted OMENative component=engine instance=1 surge to revision svc-a-engine-a3dc9719 complete (activeOrdinal=1)
 tick=18 hold cleared
-tick=18 pass result=after:5s
-tick=19 note the source is gone and the fix has landed on every Instance
-tick=19 apply pod.deleted[source] pod=svc-a-engine-1-default-1 now=t+1m30s
-tick=19 row=1 write no-op precondition=no-change
-tick=19 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-a3dc9719 readySince=t+1m30s op=nil precondition=ok
-tick=19 event Normal RecreateUpdateCompleted OMENative component=engine instance=1 surge to revision svc-a-engine-a3dc9719 complete (activeOrdinal=0)
-tick=19 hold cleared
-tick=19 pass result=requeue
+tick=18 pass result=requeue

@@ -61,11 +61,11 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		if surgeMarker == nil {
 			cleanup := startingSurge && src.Phase == workload.InstancePhaseFailed
 			if startingSurge && !cleanup && src.Operation.TargetRevision != target.Name {
-				surgePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, surgeIdx)
+				keep, err := supersededGangSurgeKeepsPin(ctx, deps, input, plan, inst, surgeIdx)
 				if err != nil {
-					return false, fmt.Errorf("list missing surge target pods (instance=%d): %w", surgeIdx, err)
+					return false, err
 				}
-				cleanup = int32(len(surgePods)) < inst.TotalPods() || !query.AllPodsRuntimeReady(surgePods)
+				cleanup = !keep
 			}
 			if cleanup && (input.ApplyInstanceMutationsWithRetryBlock != nil || input.FinalizeInstanceResources != nil) {
 				if _, err := restoreGangSurgeTargetCleanup(ctx, input, src, surgeIdx, surgeTargetName, plan.InstanceReadyTimeout); err != nil {
@@ -155,14 +155,15 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 			instanceFailureCause(src))
 	}
 
-	// Retire an incomplete replacement when the desired revision changes. A
-	// ready replacement finishes on its pinned revision first.
+	// Retire the replacement when the desired revision moves away from the
+	// pinned one while the source gang still stands; only a Ready
+	// replacement whose source is gone finishes on its pin.
 	if startingSurge && !promotedSurgeTarget && src.Operation.TargetRevision != target.Name {
-		surgePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, *src.Operation.SurgeIndex)
+		keep, err := supersededGangSurgeKeepsPin(ctx, deps, input, plan, inst, *src.Operation.SurgeIndex)
 		if err != nil {
-			return false, fmt.Errorf("list surge gang pods for supersede check (instance=%d): %w", *src.Operation.SurgeIndex, err)
+			return false, err
 		}
-		if int32(len(surgePods)) < inst.TotalPods() || !query.AllPodsRuntimeReady(surgePods) {
+		if !keep {
 			// A spec change is not a failure of the retired revision.
 			return abandonFailedGangSurge(ctx, deps, input, plan, sourceIdx, *src.Operation.SurgeIndex, src.RunningRevision, "", "", workload.CauseUnattributed)
 		}
@@ -430,6 +431,28 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 	return true, nil
 }
 
+// supersededGangSurgeKeepsPin reports whether a gang surge pinned to a
+// revision the desired state has withdrawn finishes on its pin instead of
+// being abandoned: only when the source gang is gone and the complete
+// replacement gang is runtime-ready, so the replacement is the Instance's
+// only pod set. While the source stands the surge is abandoned whether or
+// not the replacement is Ready, for the reasons surgeUpdate's redirect gives.
+func supersededGangSurgeKeepsPin(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, surgeIdx int32) (bool, error) {
+	ns, owner, comp := input.Key.Namespace, input.Key.OwnerName, plan.Component
+	sourcePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, inst.Index)
+	if err != nil {
+		return false, fmt.Errorf("list source gang pods for supersede check (instance=%d): %w", inst.Index, err)
+	}
+	if anyPodStanding(sourcePods) {
+		return false, nil
+	}
+	surgePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, surgeIdx)
+	if err != nil {
+		return false, fmt.Errorf("list surge gang pods for supersede check (instance=%d): %w", surgeIdx, err)
+	}
+	return int32(len(surgePods)) >= inst.TotalPods() && query.AllPodsRuntimeReady(surgePods), nil
+}
+
 func gangSurgeSourceOwnsRemoval(row *workload.InstanceStatus, surgeIdx int32) bool {
 	return gangSurgeSourceClaim(row) && *row.Operation.SurgeIndex == surgeIdx
 }
@@ -587,6 +610,12 @@ func abandonFailedGangSurge(ctx context.Context, deps workload.Deps, input workl
 	}
 	if len(surgePods) > 0 {
 		if !deps.ExpectationsCache().Satisfied(ns, owner, comp, surgeIdx) {
+			return false, nil
+		}
+		// A member in rotation leaves it a pass ahead of its deletion.
+		if unrouted, err := unrouteServingPods(ctx, deps, surgeIdx, surgePods); err != nil {
+			return false, fmt.Errorf("unroute abandoned surge gang member (instance=%d): %w", surgeIdx, err)
+		} else if unrouted {
 			return false, nil
 		}
 		for _, pod := range surgePods {

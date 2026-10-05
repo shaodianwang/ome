@@ -40,7 +40,7 @@ tick=5 pass result=after:5s
 tick=6 note the abandoned replacement is gone, so the resumed manager closes the surge and the row is Ready on the revision it never stopped running
 tick=6 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+0s
 tick=6 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
-tick=6 event Normal RecreateUpdateStarted OMENative component=engine instance=0 abandoned superseded surge to svc-a-engine-6f8b1e6c; re-surging toward svc-a-engine-882059bb
+tick=6 event Normal SurgeAbandoned OMENative component=engine instance=0 abandoned surge to withdrawn revision svc-a-engine-6f8b1e6c; the Instance stays on revision svc-a-engine-882059bb
 tick=6 hold cleared
 tick=6 pass result=after:5s
 tick=7 note every row runs the roll target with no operation open, so the pass has nothing to do

@@ -1196,6 +1196,40 @@ func CleanupWreckage(ctx context.Context, deps workload.Deps, input workload.Rec
 	return deleteSupersededRevisionPods(ctx, deps, input, inst.Index, aliens, target.Name)
 }
 
+// unrouteServingPods takes the pods of idx that are still in rotation out of
+// it, ahead of a deletion the caller issues on a later pass: deleting in the
+// pass that unrouted gives the endpoint controllers no window to act on the
+// withdrawal, and a bare delete drops the connections the pod carries. A pod
+// that has vanished, or come back under a new UID, is out of rotation by
+// other means already. Reports whether any pod left rotation this pass.
+func unrouteServingPods(ctx context.Context, deps workload.Deps, idx int32, pods []*corev1.Pod) (bool, error) {
+	unrouted := false
+	for _, pod := range pods {
+		if pod == nil || pod.DeletionTimestamp != nil || !podreadiness.IsServing(pod) {
+			continue
+		}
+		if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod,
+			podreadiness.WriterDeleteDrain, deleteDrainKey(idx)); err != nil {
+			if !apierrors.IsNotFound(err) && !errors.Is(err, podreadiness.ErrPodIdentityChanged) {
+				return false, fmt.Errorf("%s/%s: %w", pod.Namespace, pod.Name, err)
+			}
+			continue
+		}
+		unrouted = true
+	}
+	return unrouted, nil
+}
+
+// anyPodStanding reports whether any of pods is live and not terminating.
+func anyPodStanding(pods []*corev1.Pod) bool {
+	for _, pod := range pods {
+		if pod != nil && pod.DeletionTimestamp == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // deleteSupersededRevisionPods evicts an Instance's pods keyed to a revision
 // it is not converging to — the wreckage sweep's aliens, and the pods a
 // retired Create attempt still holds the names of. A pod that is still
@@ -1217,26 +1251,12 @@ func deleteSupersededRevisionPods(ctx context.Context, deps workload.Deps, input
 	if !cache.Satisfied(ns, owner, component, idx) {
 		return false, nil
 	}
-	unrouted := false
-	for _, pod := range pods {
-		if pod.DeletionTimestamp != nil || !podreadiness.IsServing(pod) {
-			continue
-		}
-		if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod,
-			podreadiness.WriterDeleteDrain, deleteDrainKey(idx)); err != nil {
-			// A pod that has vanished, or come back under a new UID, is out
-			// of rotation by other means already; the delete resolves it.
-			if !apierrors.IsNotFound(err) && !errors.Is(err, podreadiness.ErrPodIdentityChanged) {
-				return false, fmt.Errorf("unroute superseded-revision pod %s/%s: %w", pod.Namespace, pod.Name, err)
-			}
-			continue
-		}
-		unrouted = true
+	// A pod that was still carrying traffic goes on the next pass; one
+	// already out of rotation has nothing to wait for and goes now.
+	unrouted, err := unrouteServingPods(ctx, deps, idx, pods)
+	if err != nil {
+		return false, fmt.Errorf("unroute superseded-revision pod: %w", err)
 	}
-	// Deleting in the pass that unrouted gives the endpoint controllers no
-	// window to act on the withdrawal, so a pod that was still carrying
-	// traffic goes on the next pass. One that was already out of rotation
-	// has nothing to wait for and goes now.
 	if unrouted {
 		return false, nil
 	}

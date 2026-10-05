@@ -100,6 +100,13 @@ const (
 	EventReasonRecreateUpdateCompleted   EventReason = "RecreateUpdateCompleted"
 	EventReasonFailedSurgeTargetRecycled EventReason = "FailedSurgeTargetRecycled"
 
+	// EventReasonSurgeAbandoned fires when a single-pod surge is abandoned
+	// because the desired state has withdrawn the revision it is pinned
+	// to: the replacement is deleted and the source, still in
+	// rotation, is reset to Ready on its running revision. Normal, not a
+	// failure: the retired revision never got the chance to fail.
+	EventReasonSurgeAbandoned EventReason = "SurgeAbandoned"
+
 	// Restart (workload/ops/restart.go).
 	EventReasonRestartTriggered EventReason = "RestartTriggered"
 	EventReasonRestartCompleted EventReason = "RestartCompleted"

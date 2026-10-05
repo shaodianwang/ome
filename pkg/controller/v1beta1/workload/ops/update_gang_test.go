@@ -1834,7 +1834,8 @@ func TestAbandonFailedGangSurge_PersistsCleanupMarkerAcrossRemovalFailure(t *tes
 // source keeps its surge step, and so the budget, until the members are
 // gone: a member that never carried the serving gate goes on the
 // configured abandoned-replacement grace, one that has carried it keeps
-// the pod's own grace.
+// the pod's own grace, and one still in rotation leaves it a pass ahead
+// of its deletion.
 //
 // Cells: instance/Update/Surge/spec.revision/before
 func TestAbandonFailedGangSurge_AbandonGraceBoundsUnservedMembers(t *testing.T) {
@@ -1864,6 +1865,21 @@ func TestAbandonFailedGangSurge_AbandonGraceBoundsUnservedMembers(t *testing.T) 
 	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, 1, v1Name, v2Name, "", workload.CauseUnattributed)
 	if err != nil || done {
 		t.Fatalf("abandon pass: done=%v err=%v", done, err)
+	}
+	// The serving leader leaves rotation first; nothing is deleted yet.
+	if len(deletes) != 0 {
+		t.Fatalf("deletes = %+v, want none while the serving leader leaves rotation", deletes)
+	}
+	fresh := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(leader), fresh); err != nil {
+		t.Fatalf("re-read leader: %v", err)
+	}
+	if podreadiness.IsServing(fresh) {
+		t.Fatalf("the leader must leave rotation before it is deleted")
+	}
+	done, err = abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, 1, v1Name, v2Name, "", workload.CauseUnattributed)
+	if err != nil || done {
+		t.Fatalf("delete pass: done=%v err=%v", done, err)
 	}
 	if len(deletes) != 2 {
 		t.Fatalf("deletes = %+v, want both replacement members", deletes)

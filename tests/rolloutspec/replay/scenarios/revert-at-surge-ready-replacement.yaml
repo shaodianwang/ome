@@ -1,0 +1,56 @@
+# The operator reverts to the running revision while a SurgeThenDrain
+# replacement is Ready and in rotation but the source has not left it. The
+# replacement has nothing to promote to: it leaves rotation, is deleted on
+# its own grace, and the source is reset to Ready on the revision it never
+# stopped running, so no pod of the withdrawn revision remains and the
+# Instance settles with its original pod.
+scenario: revert-at-surge-ready-replacement
+arrows:
+  - T-ready-surge
+  - T-surge-abandon-superseded
+cells:
+  - instance/Update/Surge/spec.revision/boundary@T-surge-target-ready
+intentional: >-
+  a replacement whose pinned revision is withdrawn while its source still
+  stands is abandoned whether or not it is Ready: promoting it would need
+  the source's drain, which the floor withholds after a broken Instance,
+  and would move the Instance off the revision the desired state names
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    minReadySeconds: 30
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready, enters rotation and holds Ready for the availability window
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+      - clock.advance: 30s
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving beside the source and waits out the availability window before the source may leave rotation
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the window elapses as the target is reverted to the revision the source still runs, so the replacement leaves rotation instead of the source
+    events:
+      - clock.advance: 30s
+      - spec.revision: {image: registry.example.com/runtime:v1}
+  - tick: 6
+    note: the replacement is out of rotation and is deleted on its own grace
+  - tick: 7
+    note: the abandoned replacement is gone, so the source is reset to Ready on the revision it never stopped running
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}

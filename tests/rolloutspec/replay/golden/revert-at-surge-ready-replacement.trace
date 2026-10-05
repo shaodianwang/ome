@@ -1,0 +1,46 @@
+tick=1 note cold start
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the source becomes Ready, enters rotation and holds Ready for the availability window
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply clock.advance by=30s now=t+30s
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+30s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=2 pass result=none
+tick=3 note the pod template changes, so the rollout surges a replacement
+tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+30s
+tick=3 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=3 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+30s op=op#2{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+30s lastProgressAt=t+30s deadline=t+30m30s} precondition=ok
+tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c (newOrdinal=1)
+tick=3 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the replacement is serving beside the source and waits out the availability window before the source may leave rotation
+tick=4 apply pod.ready[target] pod=svc-a-engine-0-default-1 now=t+30s
+tick=4 apply endpoint.rotationIn[target] pod=svc-a-engine-0-default-1 now=t+30s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod status-patch name=svc-a-engine-0-default-1 serving=absent→True
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the window elapses as the target is reverted to the revision the source still runs, so the replacement leaves rotation instead of the source
+tick=5 apply clock.advance by=30s now=t+1m0s
+tick=5 apply spec.revision image=registry.example.com/runtime:v1 generation=2 now=t+1m0s
+tick=5 pod status-patch name=svc-a-engine-0-default-1 serving=True→False
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note the replacement is out of rotation and is deleted on its own grace
+tick=6 pod delete name=svc-a-engine-0-default-1 grace=default
+tick=6 hold cleared
+tick=6 pass result=after:5s
+tick=7 note the abandoned replacement is gone, so the source is reset to Ready on the revision it never stopped running
+tick=7 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+1m0s
+tick=7 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+1m0s op=nil precondition=ok
+tick=7 event Normal SurgeAbandoned OMENative component=engine instance=0 abandoned surge to withdrawn revision svc-a-engine-6f8b1e6c; the Instance stays on revision svc-a-engine-882059bb
+tick=7 hold cleared
+tick=7 pass result=after:5s

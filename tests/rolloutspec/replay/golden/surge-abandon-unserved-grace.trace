@@ -28,6 +28,6 @@ tick=4 pass result=after:5s
 tick=5 note the abandoned replacement is gone, so the source is reset to Ready on the revision it runs
 tick=5 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+0s
 tick=5 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
-tick=5 event Normal RecreateUpdateStarted OMENative component=engine instance=0 abandoned superseded surge to svc-a-engine-6f8b1e6c; re-surging toward svc-a-engine-2dd013c9
+tick=5 event Normal SurgeAbandoned OMENative component=engine instance=0 abandoned superseded surge to svc-a-engine-6f8b1e6c; re-surging toward svc-a-engine-2dd013c9
 tick=5 hold cleared
 tick=5 pass result=after:5s
