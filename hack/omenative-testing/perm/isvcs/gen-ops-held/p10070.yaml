@@ -1,5 +1,5 @@
 # p10070: [gen] stuck held crash-load delete engine-mn W1+router N=2 RecreatePod  mode=recreate Ne=2 Nd=0 Nr=2 ceil_e=2 ceil_d=0 ceil_r=2 co=none topo=engine-mn stuck=held break=crash-load
-# reason: the engine is pushed onto a revision whose runner carries the fixture runtime's exit switch, so its pods pass readiness, are promoted and exit a few seconds later, every time the kubelet starts them; every attempt of the retry ladder has failed and the push is held (only a new revision or a release lifts it); the Instance each attempt drained served briefly on the pushed revision and crash-loops there; then the service is deleted: every pod goes, broken ones included, no pod stays Terminating and no finalizer wedges, and the same name comes back clean on fresh pods with nothing of the push left; the router is neither pushed nor scaled and stays as it is; each Instance is a gang, counted whole
+# reason: the engine is pushed onto a revision whose runner carries the fixture runtime's exit switch, so its pods pass readiness, are promoted and exit a few seconds later, every time the kubelet starts them; every attempt of the retry ladder has failed and the push is held (only a new revision or a release lifts it); the Instance each attempt drained served briefly on the pushed revision and crash-loops there; the pushed Instance must hold Ready for 40s before the roll takes the next (a readiness soak past the 20s crash window), so each attempt crashes while the other Instance still serves the running revision; then the service is deleted: every pod goes, broken ones included, no pod stays Terminating and no finalizer wedges, and the same name comes back clean on fresh pods with nothing of the push left; the router is neither pushed nor scaled and stays as it is; each Instance is a gang, counted whole
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p10070 }
@@ -12,7 +12,7 @@ spec:
     annotations: { ome.io/deploymentMode: OMENative }
     leader: {}
     worker: { size: 1 }
-    lifecycle: { instanceReadyTimeout: "90s", updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+    lifecycle: { instanceReadyTimeout: "90s", minReadySeconds: 40, updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
   router:
     minReplicas: 2
     maxReplicas: 2

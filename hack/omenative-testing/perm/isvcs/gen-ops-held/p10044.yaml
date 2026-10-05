@@ -1,5 +1,5 @@
 # p10044: [gen] stuck held crash-load scale-up engine-mn W1 N=2 RecreatePod  mode=scaledown Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 co=none topo=engine-mn to_e=3 stuck=held break=crash-load
-# reason: the engine is pushed onto a revision whose runner carries the fixture runtime's exit switch, so its pods pass readiness, are promoted and exit a few seconds later, every time the kubelet starts them; every attempt of the retry ladder has failed and the push is held (only a new revision or a release lifts it); the Instance each attempt drained served briefly on the pushed revision and crash-loops there; then the engine is scaled up by one: while held nothing starts (the new index waits as an empty slot) and nothing is rendered from the running revision; the survivors stay as they were; the healthy survivors keep serving throughout and the status keeps reporting the push that has not landed, the hold itself; each Instance is a gang, counted whole
+# reason: the engine is pushed onto a revision whose runner carries the fixture runtime's exit switch, so its pods pass readiness, are promoted and exit a few seconds later, every time the kubelet starts them; every attempt of the retry ladder has failed and the push is held (only a new revision or a release lifts it); the Instance each attempt drained served briefly on the pushed revision and crash-loops there; the pushed Instance must hold Ready for 40s before the roll takes the next (a readiness soak past the 20s crash window), so each attempt crashes while the other Instance still serves the running revision; then the engine is scaled up by one: while held nothing starts (the new index waits as an empty slot) and nothing is rendered from the running revision; the survivors stay as they were; the healthy survivors keep serving throughout and the status keeps reporting the push that has not landed, the hold itself; each Instance is a gang, counted whole
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p10044 }
@@ -12,4 +12,4 @@ spec:
     annotations: { ome.io/deploymentMode: OMENative }
     leader: {}
     worker: { size: 1 }
-    lifecycle: { instanceReadyTimeout: "90s", updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+    lifecycle: { instanceReadyTimeout: "90s", minReadySeconds: 40, updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

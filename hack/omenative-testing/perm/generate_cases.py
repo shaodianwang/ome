@@ -4956,6 +4956,10 @@ OPS_HELD_CONFIG_SUFFIX = "-config"
 # The pushed member's Instance ready timeout under a break: a revision that
 # never comes up parks its row Failed within the stuck wait.
 OPS_HELD_BREAK_READY_TIMEOUT = READINESS_NEW_TIMEOUT
+# The crash after Ready on a gang of two: the first pushed Instance must hold
+# Ready past the crash window before the roll takes the second, so the crash
+# lands while the other Instance still serves the running revision.
+OPS_HELD_CRASH_LOAD_SOAK_S = 2 * CRASH_EXIT_AFTER_S
 OPS_HELD_BREAK_HOW = {"crash-start": "an image with no shell, so its pods crash at every start",
                       "crash-load": ("the fixture runtime's exit switch, so its pods pass readiness, are promoted and exit "
                                      "a few seconds later, every time the kubelet starts them"),
@@ -4970,7 +4974,7 @@ def _ops_held_sibling(topo, nr):
     return "decoder" if is_pd(topo) else ("router" if nr else None)
 
 
-def _ops_held_break_reason(kind, stuck, op, strat, topo, nr, victim):
+def _ops_held_break_reason(kind, stuck, op, strat, topo, nr, victim, soak=None):
     sibling = victim != "engine"
     how = (f"the {victim} is pushed onto a revision whose runner carries {OPS_HELD_BREAK_HOW[kind]}; " +
            ("its first attempt has failed (an Instance row reads Failed, the retry ladder is still running)"
@@ -4984,6 +4988,10 @@ def _ops_held_break_reason(kind, stuck, op, strat, topo, nr, victim):
         fleet = "the Instance each attempt drained served briefly on the pushed revision and crash-loops there"
     else:
         fleet = "the Instance each attempt drained is dark on the pushed revision"
+    if soak:
+        fleet += (f"; the pushed Instance must hold Ready for {soak}s before the roll takes the next (a readiness soak "
+                  f"past the {CRASH_EXIT_AFTER_S}s crash window), so each attempt crashes while the other Instance still "
+                  f"serves the running revision")
     if op == "delete":
         what = ("then the service is deleted: every pod goes, broken ones included, no pod stays Terminating and no "
                 "finalizer wedges, and the same name comes back clean on fresh pods with nothing of the push left")
@@ -5051,11 +5059,13 @@ def _emit_ops_held_breaks(add):
                     stuck=stuck, op=op, kind=kind, victim=victim)
         desc = (f"{GEN_MARK} stuck {stuck} {kind}" + (f" on {victim}" if sibling else "")
                 + f" {op} {shape_tag(topo, w, nr)} N={n} {strat}")
-        broken = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, ready_timeout=OPS_HELD_BREAK_READY_TIMEOUT)
+        soak = OPS_HELD_CRASH_LOAD_SOAK_S if kind == "crash-load" and is_mn(topo) else None
+        broken = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, ready_timeout=OPS_HELD_BREAK_READY_TIMEOUT,
+                               min_ready=soak)
         life = lib.lifecycle() if sibling else broken
         d_life = broken if victim == "decoder" else None
         r_life = broken if victim == "router" else None
-        reason = _ops_held_break_reason(kind, stuck, op, strat, topo, nr, victim)
+        reason = _ops_held_break_reason(kind, stuck, op, strat, topo, nr, victim, soak=soak)
         cell = ("ops-held-break", kind, stuck, op, topo, w, nr, victim)
         if kind == "configkey":
             add("gen-ops-held", desc, kv, None, reason, meta, cell=cell,

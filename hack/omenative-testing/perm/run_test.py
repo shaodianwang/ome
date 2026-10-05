@@ -10230,6 +10230,10 @@ class RollbackUnderBreakTest(unittest.TestCase):
         hb.update(kw)
         return hb
 
+    @staticmethod
+    def _late(pod, after, replaced_at=None, inst="0"):
+        return {"pod": pod, "comp": "engine", "inst": inst, "uid": f"{pod}-uid", "after": after, "replaced_at": replaced_at}
+
     def test_held_moment_verdict(self):
         notes, checks = [], []
         self.assertEqual("PASS", run._held_break_checks(self._hb(), "engine", "PASS", notes, checks))
@@ -10251,7 +10255,7 @@ class RollbackUnderBreakTest(unittest.TestCase):
         self.assertEqual("PASS", run._held_break_checks(self._hb(kind="crash-load", served=40.0), "engine", "PASS", [], checks),
                          "a crash after Ready serves before it exits")
         notes = []
-        self.assertEqual("FAIL", run._held_break_checks(self._hb(late_pods=["e7"]), "engine", "PASS", notes, []))
+        self.assertEqual("FAIL", run._held_break_checks(self._hb(late_pods=[self._late("e7", 90.0)]), "engine", "PASS", notes, []))
         self.assertTrue(any("created after the rollback" in n for n in notes))
         notes = []
         self.assertEqual("FAIL", run._held_break_checks(self._hb(late_repairs=["component=engine instance=0"]), "engine", "PASS", notes, []))
@@ -10261,6 +10265,79 @@ class RollbackUnderBreakTest(unittest.TestCase):
         checks = []
         self.assertEqual("PASS", run._held_break_checks(self._hb(fire_at=None), "engine", "PASS", [], checks))
         self.assertFalse(any("withdrawn revision" in c for c in checks), "nothing after a rollback that never fired")
+
+    def test_held_moment_tolerates_a_rebuild_that_raced_the_fire(self):
+        """A rebuild under way when the rollback fired finishes on the
+        withdrawn revision and the roll takes the row: a pod of that revision
+        created within the settle window of the fire whose Instance the roll
+        then replaced is not counted; one created later, or one the roll never
+        replaced, is."""
+        window = run.HELD_BREAK_REBUILD_RACE_S
+        raced = [self._late("e0-leader", 0.0, replaced_at=38.0), self._late("e0-worker", 0.0, replaced_at=38.0)]
+        notes, checks = [], []
+        self.assertEqual("PASS", run._held_break_checks(self._hb(kind="crash-load", late_pods=raced), "engine", "PASS", notes, checks))
+        self.assertEqual([], notes)
+        self.assertTrue(any("no pod of the withdrawn revision was created" in c for c in checks), checks)
+        self.assertTrue(any(c.lstrip().startswith("ⓘ") and "e0-leader" in c and "not counted" in c for c in checks), checks)
+        # the same race pod the roll never replaced
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._held_break_checks(self._hb(kind="crash-load", late_pods=[self._late("e0-leader", 0.0)]),
+                                                        "engine", "PASS", notes, checks))
+        self.assertTrue(any("1 pod(s) of the withdrawn revision created after the rollback" in n for n in notes), notes)
+        self.assertFalse(any(c.lstrip().startswith("ⓘ") and "not counted" in c for c in checks), checks)
+        # a pod created well after the fire counts even when the roll replaced it
+        notes, checks = [], []
+        late = [self._late("e0-leader", 2 * window, replaced_at=3 * window)]
+        self.assertEqual("FAIL", run._held_break_checks(self._hb(kind="crash-load", late_pods=late), "engine", "PASS", notes, checks))
+        self.assertTrue(any("created after the rollback" in n for n in notes), notes)
+        self.assertTrue(any(c.lstrip().startswith("✗") and "e0-leader" in c for c in checks), checks)
+        # a pod stamped a hair before the fire that the watch delivered after it is the race too
+        notes = []
+        self.assertEqual("PASS", run._held_break_checks(self._hb(late_pods=[self._late("e0-leader", -1.0, replaced_at=10.0)]),
+                                                        "engine", "PASS", notes, []))
+        self.assertEqual([], notes)
+        # a race pod beside a late one: the late one alone counts
+        notes, checks = [], []
+        mixed = [self._late("e0-leader", 0.0, replaced_at=38.0), self._late("e1-leader", 2 * window, replaced_at=3 * window, inst="1")]
+        self.assertEqual("FAIL", run._held_break_checks(self._hb(late_pods=mixed), "engine", "PASS", notes, checks))
+        self.assertTrue(any("1 pod(s) of the withdrawn revision created after the rollback" in n for n in notes), notes)
+        self.assertTrue(any(c.lstrip().startswith("✗") and "e1-leader" in c and "e0-leader" not in c for c in checks), checks)
+
+    def test_held_moment_dates_a_late_pod_and_reads_its_instance_replaced(self):
+        """The watch after the fire records each withdrawn-revision pod with
+        its creation offset from the fire (its first sight when it carries no
+        stamp), then marks it replaced once it is gone and its Instance runs
+        a full pod set on the starting revision."""
+        fire = 1000.0
+        stamp = datetime.datetime.fromtimestamp(fire, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        race = {"p-engine-0-leader-0": dict(self._pod("engine", 0, "b", "L2", ready=False, serving=False), created=stamp),
+                "p-engine-0-worker-0": dict(self._pod("engine", 0, "b", "W2", ready=False, serving=False), created=stamp)}
+        rec = run._held_break_late_pod("p-engine-0-leader-0", race["p-engine-0-leader-0"], fire + 2.0, fire)
+        self.assertEqual(("p-engine-0-leader-0", "engine", "0", "L2", 0.0, None),
+                         (rec["pod"], rec["comp"], rec["inst"], rec["uid"], rec["after"], rec["replaced_at"]))
+        self.assertEqual(7.0, run._held_break_late_pod("x", self._pod("engine", 1, "b", "L9"), fire + 7.0, fire)["after"],
+                         "no stamp: dated by the watch's first sight")
+        hb = {"fire_at": fire, "late_pods": [rec, run._held_break_late_pod("p-engine-0-worker-0", race["p-engine-0-worker-0"], fire + 2.0, fire)]}
+        old, ppi = {"a"}, {"engine": 2}
+        at = lambda: [r["replaced_at"] for r in hb["late_pods"]]
+        run._held_break_late_replaced(hb, dict(race), old, ppi, fire + 20.0)
+        self.assertEqual([None, None], at(), "the race set is alive")
+        state = {"p-engine-0-worker-0": race["p-engine-0-worker-0"], "p-engine-0-leader-0": None}
+        run._held_break_late_replaced(hb, state, old, ppi, fire + 30.0)
+        self.assertEqual([None, None], at(), "the worker still carries the withdrawn revision")
+        state = {"p-engine-0-leader-0": self._pod("engine", 0, "a", "L3")}
+        run._held_break_late_replaced(hb, state, old, ppi, fire + 36.0)
+        self.assertEqual([None, None], at(), "the Instance is one pod short of a set")
+        state["p-engine-0-worker-0"] = self._pod("engine", 0, "a", "W3")
+        run._held_break_late_replaced(hb, state, old, ppi, fire + 38.0)
+        self.assertEqual([38.0, 38.0], at(), "the full set on the starting revision")
+        run._held_break_late_replaced(hb, state, old, ppi, fire + 50.0)
+        self.assertEqual([38.0, 38.0], at(), "dated once")
+        rec = run._held_break_late_pod("p-engine-1-leader-0", self._pod("engine", 1, "b", "L8"), fire + 40.0, fire)
+        hb["late_pods"].append(rec)
+        state["p-engine-1-leader-0"] = self._pod("engine", 1, "a", "L9")
+        run._held_break_late_replaced(hb, state, old, ppi, fire + 60.0)
+        self.assertEqual([38.0, 38.0, None], at(), "a gone pod whose Instance is still a pod short is not replaced")
 
     def test_held_moment_symptom_reads_the_kubelet(self):
         pods = {"e0": self._pod("engine", 0, "a", "u0"), "e5": self._pod("engine", 5, "b", "u5", ready=False, serving=False),
@@ -13147,6 +13224,65 @@ class HandlerSmokeTest(unittest.TestCase):
         self.assertTrue(any("no pod of the withdrawn revision was created" in c for c in out["checks"]), out["checks"])
         self.assertFalse(any("one-shot" in n and "restart" in n for n in out["notes"]), "no crash-once verdict rides a pull failure")
 
+    def test_rollback_at_held_by_a_crash_under_load_tolerates_the_rebuild_racing_the_fire(self):
+        """The pushed gang exits after Ready, the roll parks on it and the
+        rollback fires while the crash is being answered: the rebuild under
+        way creates the gang's pods on the withdrawn revision as the rollback
+        lands, and the roll then takes the Instance onto the starting
+        revision — PASS, with the race on the record and not counted."""
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 2, "ceil_d": 0, "ceil_r": 0, "rollback": 1, "during": "held",
+               "break": "crash-load", "topo": "engine-mn"}
+        pods = {}
+        for i in (0, 1):
+            pods[f"p999-engine-{i}-0"] = _rec("engine", i, "old", runner="leader", uid=f"L{i}")
+            pods[f"p999-engine-{i}-1"] = _rec("engine", i, "old", runner="worker", uid=f"W{i}")
+        info = {"strat": {"engine": "RecreatePod"}, "max_unavail": {"engine": 1}, "workers": {"engine": 1},
+                "members": [], "policy": None}
+        ctx = _ctx_for(hdr, pods, info=info, workers=1)
+        fired = {}
+
+        def stamp():
+            return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+        def gang(ps, hash_, tag, ready):
+            for o, r in ((0, "leader"), (1, "worker")):
+                ps[f"p999-engine-0-{o}"] = _rec("engine", 0, hash_, runner=r, uid=f"{r}-{tag}", ready=ready, created=stamp())
+
+        def script(c, n):
+            ps = c["pod_state"]
+            if n == 3:                            # the roll takes Instance 0 onto the pushed revision
+                gang(ps, "new", "pushed", True)
+            if n == 6 and not fired:              # its leader exits after Ready
+                ps["p999-engine-0-0"].update(ready=False, serving=False)
+            if fired and n == fired["at"] + 1:    # the rebuild under way lands with the rollback
+                gang(ps, "new", "rebuilt", False)
+            if fired and n == fired["at"] + 5:    # the roll takes the Instance onto the starting revision
+                gang(ps, "old", "back", True)
+
+        def kubectl(*args, **kw):
+            if "--type=json" in args:
+                fired["at"] = fleet.calls
+            return subprocess.CompletedProcess(args, 0, "", "")
+        fleet = _FakeFleet(ctx, script)
+        why = "rolloutHold gate=Budget target=x reason=per-Component unavailability budget 1 exhausted"
+        out = self._run(run._rollback_held_break, ctx, fleet,
+                        {"kubectl": kubectl, "_isvc_spec": lambda cid: {"engine": {"runner": {"image": "x"}}},
+                         "_isvc_events_since": lambda *a, **kw: [], "_get_pod": lambda name, ns=None: {"status": {}},
+                         "_ir_snapshot": lambda cid: {}, "_crash_new_why": lambda *a: (why, ["rolloutHold gate=Budget on engine"]),
+                         "_broken_revision_hold": lambda *a: "", "_fetch_initial_ir_items": lambda cid: [],
+                         "_rollback_ir_settled": lambda *a: (True, "settled"), "_rollback_fault_rows": lambda *a: (True, ""),
+                         "HELD_BREAK_POLL_S": 0.0, "ROTATE_BASE_S": 6})
+        self.assertIn("at", fired, "the rollback fired")
+        self.assertEqual(("CONVERGED", "PASS"), (out["state"], out["verdict"]), out["checks"])
+        self.assertEqual([], out["notes"])
+        self.assertTrue(any("was Ready and then was not" in c for c in out["checks"]), out["checks"])
+        race = [c for c in out["checks"] if c.lstrip().startswith("ⓘ") and "not counted" in c]
+        self.assertEqual(1, len(race), out["checks"])
+        self.assertIn("2 pod(s) of the withdrawn revision were created within", race[0])
+        self.assertIn("p999-engine-0-0, p999-engine-0-1", race[0])
+        self.assertTrue(any("no pod of the withdrawn revision was created" in c for c in out["checks"]), out["checks"])
+        self.assertEqual(2, len(ctx["rb"]["busy_at_fire"]) + len(ctx["rb"]["on_start_at_fire"]))
+
 
 class GeneratedFaultFamiliesTest(unittest.TestCase):
     """The readiness, gang-member and tight families: their size, and that
@@ -13223,6 +13359,35 @@ class GeneratedFaultFamiliesTest(unittest.TestCase):
                 self.assertNotIn("kind: ConfigMap", text, name)
             self.assertIn("the status keeps reporting the push" if m["op"] != "delete" else "comes back clean", reason, name)
         self.assertEqual({"engine", "router", "decoder"}, {m["victim"] for _n, kv, m in rows if kv["topo"] in ("engine", "pd")})
+
+    def test_ops_held_crash_after_ready_gang_rows_soak_the_first_pushed_instance(self):
+        # The crash after Ready lands CRASH_EXIT_AFTER_S after the first pushed
+        # gang turns Ready; a gang of two whose roll takes the second Instance
+        # inside that window holds with no running-revision survivor. Those
+        # rows soak the first pushed Instance past the crash window; their
+        # single-pod and other-kind siblings carry no soak.
+        soak = generate_cases.OPS_HELD_CRASH_LOAD_SOAK_S
+        self.assertGreater(soak, generate_cases.CRASH_EXIT_AFTER_S)
+        rows = [(n, kv, m) for n, kv, m in self.by_folder["gen-ops-held"] if "break" in kv]
+        soaked = [(n, kv, m) for n, kv, m in rows if "minReadySeconds:" in self.outputs[f"gen-ops-held/{n}.yaml"]]
+        self.assertEqual(9, len(soaked))
+        self.assertEqual({("crash-load", "held", "RecreatePod", "engine", 2)},
+                         {(kv["break"], kv["stuck"], m["strat"], m["victim"], kv["Ne"]) for _n, kv, m in soaked})
+        self.assertEqual({("engine-mn", 0), ("engine-mn", gen_cases.NR), ("pd-mn", gen_cases.NR)},
+                         {(kv["topo"], kv["Nr"]) for _n, kv, _m in soaked})
+        self.assertEqual({"scale-down": 3, "delete": 3, "scale-up": 3}, dict(collections.Counter(m["op"] for _n, _kv, m in soaked)))
+        for name, kv, m in soaked:
+            text = self.outputs[f"gen-ops-held/{name}.yaml"]
+            self.assertEqual(1, text.count(f"minReadySeconds: {soak}"), name)   # the engine's lifecycle alone
+            self.assertIn(f"hold Ready for {soak}s", text.splitlines()[1], name)
+            self.assertIn(f'instanceReadyTimeout: "{generate_cases.OPS_HELD_BREAK_READY_TIMEOUT}"', text, name)
+        soaked_names = {n for n, _kv, _m in soaked}
+        for name, kv, m in rows:
+            if name not in soaked_names:
+                self.assertNotIn("minReadySeconds:", self.outputs[f"gen-ops-held/{name}.yaml"], name)
+                self.assertNotIn("hold Ready for", self.outputs[f"gen-ops-held/{name}.yaml"], name)
+        others = [f"{f}/{n}.yaml" for f, n, _kv, _m in self.rows if f != "gen-ops-held"]
+        self.assertFalse([x for x in others if "minReadySeconds:" in self.outputs[x]], "no other family carries a soak")
 
     def test_family_sizes_and_id_blocks(self):
         self.assertEqual(60, len(self.by_folder["gen-readiness"]))

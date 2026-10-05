@@ -1057,7 +1057,11 @@ why under a one-shot cause. The verdict reads the held reason first, then
 the rollback's end state, and adds that nothing of a revision that cannot
 start ever served (asked of a kept break), the one-shot cause was taken
 away, no pod of the withdrawn revision was created and no repair named a
-bumped Instance once the rollback fired. `once=1` and `lift=` do not
+bumped Instance once the rollback fired (a pod of it created within
+`HELD_BREAK_REBUILD_RACE_S` of the fire, as the rebuild under way at the
+fire creates one, whose Instance the roll then replaces, is reported and
+not counted: that rebuild finishes on its revision and the roll takes the
+row). `once=1` and `lift=` do not
 combine with a rollback otherwise; `expect=` is the idle break's
 vocabulary and does not apply.
 
@@ -1193,7 +1197,10 @@ gang shapes, and a rolling group on PD; its break rows add one case per
 ledger cell for the held moment's other kinds under a scale-down, a
 scale-up and a delete on the six shape families — each kind read at one
 stuck state under one strategy (the crash at start held under the surge
-strategy, the crash after Ready held under the drain-first one, the
+strategy, the crash after Ready held under the drain-first one — on the
+gang shapes under a readiness soak of `OPS_HELD_CRASH_LOAD_SOAK_S`, twice
+the crash window, so the first pushed Instance crashes before the roll
+takes the second and the hold keeps a running-revision survivor — the
 missing key failed under the drain-first one, the readiness switch failed
 under the surge one), so the rows meet both states under both strategies
 — and the sibling form with the crash at start on the router or the
@@ -3034,4 +3041,5 @@ once its KIND spec settles; until then it stays hand-tested.
   single-pod SurgeThenDrain shape (`minreadyseconds_kind_test.go`);
   gang surge, RecreatePod, and in-place under a window, and the
   cluster-wide `deploy.minReadySeconds` default, are not yet in the
-  matrix.
+  matrix. The ops-held crash-after-Ready gang rows carry a fixed window
+  as pacing (`OPS_HELD_CRASH_LOAD_SOAK_S`), not as a permuted axis.

@@ -1,5 +1,5 @@
 # p10084: [gen] stuck held crash-load scale-down pd-mn W1 N=2 RecreatePod  mode=scaledown Ne=2 Nd=2 Nr=2 ceil_e=2 ceil_d=2 ceil_r=2 co=none topo=pd-mn to_e=1 stuck=held break=crash-load
-# reason: the engine is pushed onto a revision whose runner carries the fixture runtime's exit switch, so its pods pass readiness, are promoted and exit a few seconds later, every time the kubelet starts them; every attempt of the retry ladder has failed and the push is held (only a new revision or a release lifts it); the Instance each attempt drained served briefly on the pushed revision and crash-loops there; then the engine is scaled down by one: the Instances that are not Ready go first, then the highest index, so a broken Instance is removed before a healthy one; the survivors keep their pods on the running revision; the healthy survivors keep serving throughout and the status keeps reporting the push that has not landed, the hold itself; decoder and router are neither pushed nor scaled and stay as they were; each Instance is a gang, counted whole
+# reason: the engine is pushed onto a revision whose runner carries the fixture runtime's exit switch, so its pods pass readiness, are promoted and exit a few seconds later, every time the kubelet starts them; every attempt of the retry ladder has failed and the push is held (only a new revision or a release lifts it); the Instance each attempt drained served briefly on the pushed revision and crash-loops there; the pushed Instance must hold Ready for 40s before the roll takes the next (a readiness soak past the 20s crash window), so each attempt crashes while the other Instance still serves the running revision; then the engine is scaled down by one: the Instances that are not Ready go first, then the highest index, so a broken Instance is removed before a healthy one; the survivors keep their pods on the running revision; the healthy survivors keep serving throughout and the status keeps reporting the push that has not landed, the hold itself; decoder and router are neither pushed nor scaled and stay as they were; each Instance is a gang, counted whole
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p10084 }
@@ -12,7 +12,7 @@ spec:
     annotations: { ome.io/deploymentMode: OMENative }
     leader: {}
     worker: { size: 1 }
-    lifecycle: { instanceReadyTimeout: "90s", updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+    lifecycle: { instanceReadyTimeout: "90s", minReadySeconds: 40, updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
   decoder:
     minReplicas: 2
     maxReplicas: 2

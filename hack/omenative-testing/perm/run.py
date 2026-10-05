@@ -3917,6 +3917,10 @@ HELD_BREAK_POLL_S = 2.0
 # having served: an in-place image patch leaves the old container Ready
 # for the moment before the kubelet replaces it.
 HELD_BREAK_SERVED_S = int(5 * TIMEOUT_MULT)
+# A rebuild under way at the fire finishes on its revision and the roll takes
+# the row at Ready: a withdrawn-revision pod created within this window of the
+# fire, whose Instance the roll then replaces, is that rebuild, not a retry.
+HELD_BREAK_REBUILD_RACE_S = INV_SETTLE_S
 
 
 def _rollback_fault_case(hdr):
@@ -4301,7 +4305,9 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
     break shows, and the cause is taken away once the rollback has fired.
     The verdict reads the held reason first, then the rollback's end state:
     nothing of the withdrawn revision left, no further pod of it created
-    and no repair opened for it once the rollback fired."""
+    (past a rebuild under way at the fire, which finishes on its revision
+    and whose Instance the roll then takes) and no repair opened for it
+    once the rollback fired."""
     kind, once = str(hdr.get("break")), bool(hdr.get("once"))
     victim = str(hdr.get("victimcomp") or BREAK_DEFAULT_COMP)
     crash = kind in ROLLBACK_CRASH_BREAKS
@@ -4418,7 +4424,8 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
                 for name, p in ctx["pod_state"].items():
                     if p and p.get("uid") and p.get("comp") in bumped and _pod_on_new(p, old) and p["uid"] not in new_uids:
                         new_uids[p["uid"]] = now
-                        hb["late_pods"].append(name)
+                        hb["late_pods"].append(_held_break_late_pod(name, p, now, hb["fire_at"]))
+                _held_break_late_replaced(hb, ctx["pod_state"], old, ppi, now)
                 if not _rollback_settled_pods(ctx["pod_state"], ctx["agg"], N, configured, bumped, old):
                     stable = None
                     continue
@@ -4458,13 +4465,50 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
+def _held_break_late_pod(name, p, now, fire_at):
+    """A withdrawn-revision pod first seen after the rollback fired: when it
+    was created relative to the fire (the watch's first sight of it when it
+    carries no stamp) and, once seen, when the roll replaced its Instance."""
+    return {"pod": name, "comp": p.get("comp", ""), "inst": str(p.get("inst", "0")), "uid": p.get("uid", ""),
+            "after": (_event_epoch(p.get("created")) or now) - fire_at, "replaced_at": None}
+
+
+def _held_break_late_replaced(hb, pod_state, old_hashes, pods_per_inst, now):
+    """Date each late pod that is gone while its Instance runs a full pod set
+    on the starting revision as replaced by the roll, at its first sight."""
+    by = None
+    for rec in hb["late_pods"]:
+        if rec["replaced_at"] is not None:
+            continue
+        q = pod_state.get(rec["pod"])
+        if q and q["alive"] and q.get("uid") == rec["uid"]:
+            continue
+        if by is None:
+            by = _instances_by_index(pod_state, {r["comp"] for r in hb["late_pods"]})
+        pods = by.get((rec["comp"], rec["inst"]), [])
+        if len(pods) >= max(1, pods_per_inst.get(rec["comp"], 1)) and not any(_pod_on_new(p, old_hashes) for p in pods):
+            rec["replaced_at"] = now - hb["fire_at"]
+
+
+def _held_break_late_split(late):
+    """(counted, raced): the late pods a retry of the withdrawn revision
+    created, and those a rebuild under way at the fire created within
+    HELD_BREAK_REBUILD_RACE_S of it whose Instance the roll then replaced."""
+    counted, raced = [], []
+    for rec in late:
+        race = rec["after"] <= HELD_BREAK_REBUILD_RACE_S and rec["replaced_at"] is not None
+        (raced if race else counted).append(rec)
+    return counted, raced
+
+
 def _held_break_checks(hb, victim, verdict, notes, checks):
     """The held moment's verdict before the rollback's: the pushed revision
     showed its break, the status said why the roll parked (asked of a kept
     break; a one-shot cause may be over before the status reacts), nothing of
     a revision that cannot start ever served, a one-shot cause taken away
     once the rollback fired, and once it fired no further pod of the
-    withdrawn revision was created and no repair named a bumped Instance."""
+    withdrawn revision was created (past the rebuild under way at the fire,
+    which finishes on its revision) and no repair named a bumped Instance."""
     kind, once = hb["kind"], hb["once"]
     label = f"held by {kind}" + (" once" if once else "")
     if hb["bite_at"] is None:
@@ -4491,11 +4535,17 @@ def _held_break_checks(hb, victim, verdict, notes, checks):
             checks.append(f"  ✓ {label}: nothing of the broken revision ever served")
     if hb["fire_at"] is None:
         return verdict
-    if hb["late_pods"]:
+    counted, raced = _held_break_late_split(hb["late_pods"])
+    if raced:
+        checks.append(f"  ⓘ {label}: {len(raced)} pod(s) of the withdrawn revision were created within "
+                      f"{HELD_BREAK_REBUILD_RACE_S:.0f}s of the fire ({', '.join(r['pod'] for r in raced[:4])}), as a rebuild "
+                      f"under way at the fire creates them, and the roll replaced their Instance "
+                      f"{max(r['replaced_at'] for r in raced):.0f}s after it — not counted")
+    if counted:
         verdict = "FAIL"
-        notes.append(f"{len(hb['late_pods'])} pod(s) of the withdrawn revision created after the rollback")
-        checks.append(f"  ✗ {label}: {len(hb['late_pods'])} pod(s) of the withdrawn revision were created after the rollback "
-                      f"fired ({', '.join(hb['late_pods'][:4])}) — the revision was retried after it was withdrawn")
+        notes.append(f"{len(counted)} pod(s) of the withdrawn revision created after the rollback")
+        checks.append(f"  ✗ {label}: {len(counted)} pod(s) of the withdrawn revision were created after the rollback "
+                      f"fired ({', '.join(r['pod'] for r in counted[:4])}) — the revision was retried after it was withdrawn")
     else:
         checks.append(f"  ✓ {label}: no pod of the withdrawn revision was created after the rollback fired")
     if hb["late_repairs"]:

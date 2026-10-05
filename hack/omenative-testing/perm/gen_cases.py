@@ -60,7 +60,7 @@ def flow(v):
 
 
 def lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, partition=None,
-              restart=None, ready=None, marknr=None, mig=None, ready_timeout=None):
+              restart=None, ready=None, marknr=None, mig=None, ready_timeout=None, min_ready=None):
     us = {"type": strat}
     ru = {}
     if surge is not None:
@@ -87,6 +87,8 @@ def lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, partition=None,
         life["migrationPolicy"] = mig
     if ready_timeout is not None:
         life["instanceReadyTimeout"] = ready_timeout
+    if min_ready is not None:
+        life["minReadySeconds"] = min_ready
     life["updateStrategy"] = us
     return flow(life)
 
