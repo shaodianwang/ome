@@ -488,12 +488,13 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     single-pod topology: an annotation-only diff is patched in place, so no
     pod of the starting revision ever drains and the hook never arrives (a
     gang falls back to a whole-gang recreate, which drains).
-  - A rollback's draining and last hooks are not emitted over the key kept
-    away on the running revision: the roll takes the broken Instance
-    first and its replacement cannot start without the key, so no
-    pod of the starting revision ever drains and neither hook arrives; the
-    kept-key row takes those two moments at rotating instead, under their
-    own strategy and group (ROLLBACK_KEPT_KEY_HOOKS).
+  - A rollback's draining and last hooks are not emitted over the missing
+    key on the running revision, kept away or put back once the rollback
+    has fired: the roll takes the broken Instance first and its replacement
+    cannot start without the key, so no pod of the starting revision ever
+    drains and neither hook arrives; both rows take those two moments at
+    rotating instead, under their own strategy and group
+    (ROLLBACK_KEPT_KEY_HOOKS).
   - crashloop:new arms the engine's new revision (victimcomp defaults to
     engine), so its group axis exists only where a sound member rolls beside
     it (pd, pd-mn: co=rolling); InPlaceOnly is left out, since form=load's
@@ -4074,17 +4075,19 @@ def _rollback_fault_kept(fault, form, lift):
     return (fault == "configkey:missing" and lift == "never") or (fault == "readiness:old" and form == "persist")
 
 
-# A key kept away parks the roll on its victim: the roll takes the broken
-# Instance first and its replacement cannot start without the key, so no pod of the starting revision ever drains and neither the
-# draining nor the last hook arrives. Those two moments of the kept-key
-# row fire at rotating instead, under their own strategy and group.
+# A missing key parks the roll on its victim: the roll takes the broken
+# Instance first and its replacement cannot start without the key, so no pod
+# of the starting revision ever drains and neither the draining nor the last
+# hook arrives. The key put back once the rollback has fired is away until
+# then just as the kept key is, so those two moments of both rows fire at
+# rotating instead, under their own strategy and group.
 ROLLBACK_KEPT_KEY_HOOKS = {"draining": "rotating", "last": "rotating"}
 
 
 def _rollback_fault_hook(fault, form, lift, hook):
     """The hook a running-revision break's rollback fires at: the moment's
-    own, or the reachable one a kept key leaves it (ROLLBACK_KEPT_KEY_HOOKS)."""
-    if fault == "configkey:missing" and lift == "never":
+    own, or the reachable one the missing key leaves it (ROLLBACK_KEPT_KEY_HOOKS)."""
+    if fault == "configkey:missing":
         return ROLLBACK_KEPT_KEY_HOOKS.get(hook, hook)
     return hook
 
@@ -6165,14 +6168,18 @@ def _evict_op_reason(op, form, topo, w, nr):
 
 def _preempt_op_reason(op, topo, w, nr):
     at = {"rollback": "as the rollback lands", "edit": "as the edit lands", "runtime": "as the edit lands",
-          "scaledown": "as the scale lands", "scaleup": "as the scale lands"}[op]
+          "scaledown": "once the scale has retired the Instance it takes", "scaleup": "as the scale lands"}[op]
     # A rollback at its first surge pod withdraws that pod and a scale-down
-    # takes an Instance: neither places a pod, so the press aims at a settled
-    # Instance the operation keeps and holds its repair.
+    # takes an Instance (a non-serving one first, whatever its index):
+    # neither places a pod, so the press aims at a settled Instance the
+    # operation keeps and holds its repair; a surge roll keeps only its
+    # replacements, so the press aims at a bound one.
+    surge = "the node of a bound pod of the new revision, which the roll keeps (the source it drains is no target)"
     aim = {"rollback": "the node of a settled pod of the starting revision, which the rollback keeps (the surge pod "
                        "it withdraws is no target)",
            "scaledown": "the node of a pod of the highest Instance the scale keeps (the Instance it takes is no "
-                        "target)"}.get(op, "the node of the aimed pod")
+                        "target)",
+           "edit": surge, "runtime": surge}.get(op, "the node of the aimed pod")
     out = (f"{_op_does(op, False, topo)} on {shape_words(topo, w, nr)}, and {at} fillers take the spare CPU of every "
            f"node, the pending taint closes every node to the case, and a higher-priority filler presses on {aim}, "
            f"so the scheduler preempts one pod of the case there; the Instance waits with reason "
@@ -6237,7 +6244,11 @@ def _emit_preempt_ops(add):
     """A preemption as a rollback, an edit, a runtime edit or a scale lands,
     the nodes opened again once the wait has held. The rollback's press is
     aimed at a settled pod of the starting revision: the surge pod the
-    rollback withdraws is the one pod it takes away."""
+    rollback withdraws is the one pod it takes away. The edit's and the
+    runtime edit's press is aimed at a bound replacement of the new revision
+    (victim=canary): the pods a surge roll keeps, while it drains every
+    source. The scale-down's press lands once the scale has retired the
+    Instance it takes."""
     for topo, n, w, nr in DISRUPT_SHAPES:
         for op in HOOK_PREEMPT_OPS:
             strat, surge, unavail = _op_strategy(op, False)
@@ -6245,6 +6256,8 @@ def _emit_preempt_ops(add):
                       co="none", topo=topo, lift="after-settle")
             if op == "rollback":
                 kv["victim"] = "stable"
+            elif op in ("edit", "runtime"):
+                kv["victim"] = "canary"
             if is_pd(topo):
                 kv["victimcomp"] = "engine"
             desc = (f"{GEN_MARK} preempt {op} {shape_tag(topo, w, nr)} N={n}"
@@ -9428,12 +9441,12 @@ def manifest(rows, kept_empty=()):
         " pod itself and its recreate trips the UID-stability check by harness"
         " design (a missing component-scoped victim hook, see below).",
         "- `fault=podkill:migrating` needs `mode=migrate` — out of scope here.",
-        "- A rollback over the key kept away on the running revision fires at"
-        " `settling` and `rotating` only: the roll takes the broken Instance first"
-        " and its replacement cannot start without the key, so no"
-        " pod of the starting revision ever drains and neither the draining nor"
-        " the last hook arrives; the kept-key row takes those two moments at"
-        " `rotating` under their own strategy and group.",
+        "- A rollback over the missing key on the running revision, kept away or"
+        " put back once the rollback has fired, fires at `settling` and `rotating`"
+        " only: the roll takes the broken Instance first and its replacement"
+        " cannot start without the key, so no pod of the starting revision ever"
+        " drains and neither the draining nor the last hook arrives; both rows"
+        " take those two moments at `rotating` under their own strategy and group.",
         "- A router in front of an engine fleet is a break victim under a canary"
         " alone: elsewhere the runner admits engine and decoder pods, so the"
         " sibling rows of the engine-behind-a-router shapes outside a canary"

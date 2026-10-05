@@ -1629,10 +1629,11 @@ class GangSchedulingInvariantTest(unittest.TestCase):
 
     EARLY, LATE = "2026-10-01T10:00:00Z", "2026-10-01T10:05:00Z"
 
-    def _member(self, name, *, node, ready, created, ready_since=None):
+    def _member(self, name, *, node, ready, created, ready_since=None, bound_since=None):
         return {"comp": "engine", "inst": "0", "runner": "leader" if "leader" in name else "worker", "alive": True,
                 "ready": ready, "serving": ready, "hash": "a1b2c3d4", "uid": f"uid-{name}", "created": created,
                 "ready_since": run._event_epoch(ready_since) if ready_since else None,
+                "bound_since": run._event_epoch(bound_since) if bound_since else None,
                 "sched": "ome-scheduler", "pg": "p1-engine-0", "node": node, "excl": []}
 
     def _inv(self):
@@ -1651,6 +1652,30 @@ class GangSchedulingInvariantTest(unittest.TestCase):
                 c["lastTransitionTime"] = self.EARLY
         self.assertEqual(run._event_epoch(self.EARLY), watcher_record(obj)["ready_since"])
         self.assertIsNone(watcher_record(pod_object("engine-0", "engine", 0, "a1b2c3d4", "img:1", "v1", ready=False))["ready_since"])
+
+    def test_the_record_carries_when_the_pod_was_bound(self):
+        obj = pod_object("engine-0", "engine", 0, "a1b2c3d4", "img:1", "v1", node="w1")
+        obj["status"]["conditions"].append({"type": "PodScheduled", "status": "True", "lastTransitionTime": self.EARLY})
+        self.assertEqual(run._event_epoch(self.EARLY), watcher_record(obj)["bound_since"])
+        obj["status"]["conditions"][-1]["status"] = "False"
+        self.assertIsNone(watcher_record(obj)["bound_since"])
+        self.assertIsNone(watcher_record(pod_object("engine-0", "engine", 0, "a1b2c3d4", "img:1", "v1"))["bound_since"])
+
+    def test_a_gang_that_bound_as_a_unit_and_lost_a_member_is_a_refill_not_a_partial_bind(self):
+        # The surviving worker was bound before the leader's replacement was created: the gang
+        # bound whole and lost its leader before it ever served, so the replacement is a refill.
+        inv = self._inv()
+        pods = {"p1-engine-0-leader-0": self._member("p1-engine-0-leader-0", node="", ready=False, created=self.LATE),
+                "p1-engine-0-worker-0": self._member("p1-engine-0-worker-0", node="w2", ready=False, created=self.EARLY,
+                                                     bound_since="2026-10-01T10:00:05Z")}
+        self._ticks(inv, pods, run.INV_SUSTAIN_D + 2)
+        self.assertEqual({}, inv["viol"])
+        self.assertTrue(inv["d_seen"])
+        # A member bound only after its sibling was created formed with it: still a partial bind.
+        inv = self._inv()
+        pods["p1-engine-0-worker-0"].update(bound_since=run._event_epoch("2026-10-01T10:05:20Z"))
+        self._ticks(inv, pods, run.INV_SUSTAIN_D)
+        self.assertEqual([("D", "partial-gang", "engine", "0")], list(inv["viol"]))
 
     def test_a_served_gang_short_a_member_is_a_repair_not_a_partial_bind(self):
         inv = self._inv()
@@ -2849,6 +2874,60 @@ class WindowVerdictTest(unittest.TestCase):
         _verdict, _notes, checks = self._run(f, win, state="ROTATE_TIMEOUT")
         self.assertFalse(any("Ready with no operation open" in c or "no hold" in c for c in checks),
                          "rows not read when the operation never completed")
+
+
+class PressAimWaitsTest(unittest.TestCase):
+    """The press of a hook-op case lands on a pod the operation keeps: on a
+    scale-down once the scale wave has retired the Instance it takes, and
+    under a surge roll (victim=canary) on a replacement of the new revision
+    once one is bound."""
+
+    def _ctx(self, pods):
+        return {"case_id": "p999", "pod_state": pods, "closed": False, "trigger_ts": time.time(), "old_hashes": {"h-old"}}
+
+    def test_the_scale_down_press_waits_for_the_scale_wave(self):
+        ctx = self._ctx({})
+        reads = []
+
+        def read(c, timeout=1.0):
+            reads.append(1)
+        with mock.patch.object(run, "_read_one", read):
+            self.assertEqual((True, ""), run._wait_scale_wave(ctx, lambda: len(reads) >= 2, 5))
+            self.assertEqual(2, len(reads))
+            self.assertEqual((True, ""), run._wait_scale_wave(ctx, lambda: True, 5))
+            reached, why = run._wait_scale_wave(ctx, lambda: False, 0.0)
+            self.assertFalse(reached)
+            self.assertIn("scale wave", why)
+
+    def test_the_canary_press_waits_for_a_bound_replacement(self):
+        old = dict(pod("engine", 0), hash="h-old", node="w1", uid="u-old")
+        ctx = self._ctx({"a": old})
+        reads = []
+
+        def read(c, timeout=1.0):
+            reads.append(1)
+            if len(reads) == 1:
+                c["pod_state"]["b"] = dict(pod("engine", 2, ready=False, serving=False), hash="h-new", node="", uid="u-new")
+            if len(reads) == 2:
+                c["pod_state"]["b"]["node"] = "w2"
+        with mock.patch.object(run, "_read_one", read):
+            self.assertEqual(("b", ""), run._wait_new_bound(ctx, {"engine"}, lambda: False, 5))
+            self.assertEqual(2, len(reads), "a replacement without a node is not yet a target")
+        with mock.patch.object(run, "_read_one", lambda c, timeout=1.0: None):
+            ctx["pod_state"]["b"]["comp"] = "router"
+            aim, why = run._wait_new_bound(ctx, {"engine"}, lambda: True, 5)
+            self.assertIsNone(aim)
+            self.assertIn("completed before", why)
+            aim, why = run._wait_new_bound(ctx, {"engine"}, lambda: False, 0.0)
+            self.assertIsNone(aim)
+            self.assertIn("bound within", why)
+
+    def test_the_hook_op_driver_waits_before_it_fires_the_press(self):
+        src = inspect.getsource(run._hook_op)
+        self.assertIn("_wait_scale_wave(ctx, done, budget)", src)
+        self.assertIn("_wait_new_bound(ctx, acting, done, budget)", src)
+        self.assertLess(src.index("_wait_scale_wave("), src.index("_fault_fire(f, ctx[\"pod_state\"]"))
+        self.assertLess(src.index("_wait_new_bound("), src.index("_fault_fire(f, ctx[\"pod_state\"]"))
 
 
 class WindowHooksTest(unittest.TestCase):
@@ -7617,6 +7696,39 @@ class NodeHookLiftAndVerdictTest(unittest.TestCase):
             restore.assert_called_once()
             self.assertEqual((135.0, 140.0, 140.0, 140.0), (f["relocated_at"], f["reaped_at"], f["recovered_at"], f["lifted_at"]))
 
+    def test_after_recover_reads_a_relocation_at_another_index_on_the_component(self):
+        # A surge roll in flight replaced the Instance the node held at another index and drained it:
+        # the Component is whole again away from the node, so the capacity was relocated.
+        f = self._fault("after-recover", bite_ts=120.0, node_poll_ts=0.0, hook_op_kind="runtime")
+        ctx = dict(self._ctx({}), N={"engine": 2}, pods_per_inst={"engine": 1})
+        live = lambda inst, node, uid, ready=True: {"comp": "engine", "inst": inst, "node": node, "ready": ready, "serving": ready,
+                                                     "uid": uid, "alive": True}
+        ctx["pod_state"] = {"e-3-old": {"comp": "engine", "inst": "3", "node": "worker-1", "ready": False, "serving": False,
+                                        "uid": "u-old", "alive": False},
+                            "e-0": live("0", "worker-2", "u-new"), "e-1": live("1", "worker-3", "u-1", ready=False)}
+        with mock.patch.object(run, "_node_ready", return_value=False), mock.patch.object(run, "_node_restore", return_value=True) as restore:
+            run._node_lift_tick(ctx, f, 130.0)
+            self.assertIsNone(f.get("relocated_at"), "one whole Instance of two: the Component is not whole yet")
+            ctx["pod_state"]["e-1"].update(ready=True, serving=True)
+            run._node_lift_tick(ctx, f, 135.0)
+            self.assertEqual((135.0, None), (f.get("relocated_at"), f.get("reaped_at")))
+            self.assertEqual("at another index", f.get("relocated_where"))
+            restore.assert_not_called()
+            del ctx["pod_state"]["e-3-old"]
+            run._node_lift_tick(ctx, f, 140.0)
+            restore.assert_called_once()
+            self.assertEqual((140.0, 140.0), (f["reaped_at"], f["lifted_at"]))
+        pods = ctx["pod_state"]
+        self.assertTrue(run._component_relocated(pods, "engine", 2, 1, {"u-old"}, "worker-1"))
+        self.assertFalse(run._component_relocated(pods, "engine", 3, 1, {"u-old"}, "worker-1"), "short of N whole Instances")
+        self.assertFalse(run._component_relocated(pods, "engine", 2, 1, {"u-new"}, "worker-1"), "a pod the node held must be replaced")
+        self.assertFalse(run._component_relocated(pods, "engine", 2, 1, {"u-old"}, "worker-2"), "no pod may sit on the stopped node")
+        self.assertFalse(run._component_relocated(pods, "engine", 2, 2, {"u-old"}, "worker-1"), "a gang short a member is not whole")
+        self.assertFalse(run._component_relocated(pods, "engine", 0, 1, {"u-old"}, "worker-1"), "no fleet size, no reading")
+        verdict, notes, text = self._verdict(dict(f, reset_used=False))
+        self.assertEqual(("PASS", []), (verdict, notes))
+        self.assertIn("back Ready and serving on other nodes 35s after the stop, replaced at another index", text)
+
     def test_under_a_delete_the_recovery_is_the_lost_pods_gone(self):
         f = self._fault("after-recover", bite_ts=120.0, node_poll_ts=0.0, hook_op_kind="delete")
         with mock.patch.object(run, "_node_ready", return_value=False), mock.patch.object(run, "_node_restore", return_value=True) as restore:
@@ -9690,6 +9802,16 @@ class PlainRollbackTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("not settled", why)
         self.assertFalse(run._rollback_ir_settled(None, N, configured, bumped, {"a"})[0])
+        # A gang surge promoted before the rollback leaves the fleet on rotated indexes: after a roll back only the count holds.
+        rotated = inference_replica("engine", 2)
+        for row in rotated["status"]["instanceStatuses"]:
+            row["index"] += 1
+        self.assertFalse(run._initial_ir_settled([rotated], N, configured)[0], "a fresh fleet sits at 0..N-1")
+        ok, why = run._rollback_ir_settled([rotated], N, configured, bumped, {"a"})
+        self.assertTrue(ok, why)
+        short = inference_replica("engine", 2)
+        del short["status"]["instanceStatuses"][0]
+        self.assertFalse(run._rollback_ir_settled([short], N, configured, bumped, {"a"})[0], "the count still holds")
 
     def test_grouped_run_must_close_as_superseded(self):
         orig = run._isvc_events_since
@@ -9702,19 +9824,57 @@ class PlainRollbackTest(unittest.TestCase):
             self.assertEqual("PASS", run._rollback_run_checks("p999", 1.0, True, "PASS", [], checks))
             self.assertTrue(any("no run opened" in c for c in checks))
             run._isvc_events_since = lambda cid, since, **kw: [
-                (run.RUN_OPENED_EVENT, "run r1 opened"),
-                (run.RUN_CLOSED_EVENT, "run r1 superseded by a new target revision; opening a fresh run"),
-                (run.RUN_OPENED_EVENT, "run r2 opened"), (run.RUN_CLOSED_EVENT, "run r2 closed: Completed")]
+                (10.0, run.RUN_OPENED_EVENT, "run r1 opened"),
+                (40.0, run.RUN_CLOSED_EVENT, "run r1 superseded by a new target revision; opening a fresh run"),
+                (40.0, run.RUN_OPENED_EVENT, "run r2 opened"), (80.0, run.RUN_CLOSED_EVENT, "run r2 closed: Completed")]
             checks = []
             self.assertEqual("PASS", run._rollback_run_checks("p999", 1.0, True, "PASS", [], checks))
             self.assertTrue(any("closed as superseded" in c for c in checks))
             run._isvc_events_since = lambda cid, since, **kw: [
-                (run.RUN_OPENED_EVENT, "run r1 opened"), (run.RUN_CLOSED_EVENT, "run r1 closed: Completed")]
+                (10.0, run.RUN_OPENED_EVENT, "run r1 opened"), (40.0, run.RUN_CLOSED_EVENT, "run r1 closed: Completed")]
             notes = []
             self.assertEqual("FAIL", run._rollback_run_checks("p999", 1.0, True, "PASS", notes, []))
             self.assertTrue(any("superseded" in n for n in notes))
         finally:
             run._isvc_events_since = orig
+
+    def test_a_run_completed_before_the_retarget_was_observed_leaves_nothing_to_supersede(self):
+        """On a lockstep group the last Instance can land in the second the
+        rollback fires: the push's run closes Completed and the retarget
+        opens a fresh run, stamped no earlier than that close."""
+        def events(*evs):
+            return lambda cid, since, **kw: list(evs)
+        same_second = events((10.0, run.RUN_OPENED_EVENT, "run r1 opened (abc)"),
+                             (40.0, run.RUN_CLOSED_EVENT, "run r1 closed: Completed"),
+                             (40.0, run.RUN_OPENED_EVENT, "run r2 opened (def)"),
+                             (80.0, run.RUN_CLOSED_EVENT, "run r2 closed: Completed"))
+        later = events((10.0, run.RUN_OPENED_EVENT, "run r1 opened (abc)"),
+                       (40.0, run.RUN_CLOSED_EVENT, "run r1 closed: Completed"),
+                       (42.0, run.RUN_OPENED_EVENT, "run r2 opened (def)"))
+        for reader in (same_second, later):
+            with mock.patch.object(run, "_isvc_events_since", reader):
+                notes, checks = [], []
+                self.assertEqual("PASS", run._rollback_run_checks("p999", 1.0, True, "PASS", notes, checks))
+            self.assertEqual([], notes)
+            self.assertTrue(any("completed before the retarget was observed" in c for c in checks), checks)
+        # The run's own opening in its closing second is no fresh run; a run opened before the
+        # close is not the retarget's; a run that did not complete left work to supersede.
+        for reader in (events((40.0, run.RUN_OPENED_EVENT, "run r1 opened (abc)"), (40.0, run.RUN_CLOSED_EVENT, "run r1 closed: Completed")),
+                       events((10.0, run.RUN_OPENED_EVENT, "run r1 opened (abc)"), (39.0, run.RUN_OPENED_EVENT, "run r2 opened (def)"),
+                              (40.0, run.RUN_CLOSED_EVENT, "run r1 closed: Completed")),
+                       events((10.0, run.RUN_OPENED_EVENT, "run r1 opened (abc)"), (40.0, run.RUN_CLOSED_EVENT, "run r1 closed: Failed"),
+                              (40.0, run.RUN_OPENED_EVENT, "run r2 opened (def)"))):
+            with mock.patch.object(run, "_isvc_events_since", reader):
+                self.assertEqual("FAIL", run._rollback_run_checks("p999", 1.0, True, "PASS", [], []))
+        # The stamped reader hands the check each event's second beside its reason and message.
+        items = {"items": [{"reason": run.RUN_CLOSED_EVENT, "lastTimestamp": "2026-01-01T00:00:40Z", "message": "run r1 closed: Completed"},
+                           {"reason": run.RUN_OPENED_EVENT, "lastTimestamp": "2026-01-01T00:00:10Z", "message": "run r1 opened (abc)"}]}
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=json.dumps(items), stderr="")):
+            self.assertEqual([(1767225610.0, run.RUN_OPENED_EVENT, "run r1 opened (abc)"),
+                              (1767225640.0, run.RUN_CLOSED_EVENT, "run r1 closed: Completed")],
+                             run._isvc_events_since("p999", 1767225600.0, stamped=True))
+            self.assertEqual([(run.RUN_OPENED_EVENT, "run r1 opened (abc)"), (run.RUN_CLOSED_EVENT, "run r1 closed: Completed")],
+                             run._isvc_events_since("p999", 1767225600.0))
 
     def test_verdict_is_the_operators_end_state(self):
         N, configured, bumped, ppi = {"engine": 2, "decoder": 0, "router": 0}, {"engine"}, {"engine"}, {"engine": 1}
@@ -12290,24 +12450,52 @@ class GangMemberVerdictTest(unittest.TestCase):
         f.update(kw)
         return f
 
-    def test_short_gang_counted_serving_is_a_finding(self):
+    def test_short_gang_counted_serving_on_two_samples_in_a_row_is_a_finding(self):
         f = self._fault()
         pods = {"e0-l": _rec("engine", 0, "new", runner="leader"), "e0-w": _rec("engine", 0, "new", runner="worker", ready=False)}
+        serving = iter([2, 1, 2, 2])
         with mock.patch.object(run, "GANG_SHORT_REPORT_S", 10), mock.patch.object(run, "INV_TICK_S", 5), \
-                mock.patch.object(run, "_ir_row", lambda *a: {"index": 0, "podCount": 2, "servingPodCount": 2}):
+                mock.patch.object(run, "_ir_row", lambda *a: {"index": 0, "podCount": 2, "servingPodCount": next(serving)}):
             run._gang_member_tick(f, "p1", pods, {"engine": 2}, 100.0)
             self.assertNotIn("short_samples", f)       # gap just opened: not sampled yet
             run._gang_member_tick(f, "p1", pods, {"engine": 2}, 111.0)
             self.assertEqual(1, f["short_samples"])
-            self.assertEqual(1, f["half_served"])
+            self.assertNotIn("half_served", f, "one whole reading may be a row a reconcile ahead of the pods")
+            run._gang_member_tick(f, "p1", pods, {"engine": 2}, 116.0)   # the row reports the loss
+            run._gang_member_tick(f, "p1", pods, {"engine": 2}, 121.0)
+            self.assertNotIn("half_served", f, "a whole reading after a short one starts the count afresh")
+            run._gang_member_tick(f, "p1", pods, {"engine": 2}, 126.0)
+            self.assertEqual((4, 1), (f["short_samples"], f["half_served"]))
+            self.assertIn("(and at the sample before it)", f["half_served_detail"])
             pods["e0-w"]["ready"] = True
-            run._gang_member_tick(f, "p1", pods, {"engine": 2}, 120.0)
+            run._gang_member_tick(f, "p1", pods, {"engine": 2}, 130.0)
             self.assertIsNone(f["short_since"])
         verdict, notes, checks = "PASS", [], []
         with mock.patch.object(run, "_isvc_events_since", lambda *a, **kw: []):
             verdict = run._gang_member_checks(f, pods, 1.0, {"restart": "None"}, verdict, notes, checks)
         self.assertEqual("FAIL", verdict)
         self.assertTrue(any("counted as serving while short" in c for c in checks))
+
+    def test_a_single_whole_reading_at_the_edge_of_the_gap_is_not_a_finding(self):
+        f = self._fault()
+        pods = {"e0-l": _rec("engine", 0, "new", runner="leader"), "e0-w": _rec("engine", 0, "new", runner="worker", ready=False)}
+        with mock.patch.object(run, "GANG_SHORT_REPORT_S", 10), mock.patch.object(run, "INV_TICK_S", 5), \
+                mock.patch.object(run, "_ir_row", lambda *a: {"index": 0, "podCount": 2, "servingPodCount": 2}):
+            run._gang_member_tick(f, "p1", pods, {"engine": 2}, 100.0)
+            run._gang_member_tick(f, "p1", pods, {"engine": 2}, 111.0)   # the row is a reconcile ahead of the watch
+            pods["e0-w"]["ready"] = True
+            run._gang_member_tick(f, "p1", pods, {"engine": 2}, 112.0)   # the watch catches up: the gap closes
+            self.assertIsNone(f["short_since"])
+            pods["e0-w"]["ready"] = False
+            run._gang_member_tick(f, "p1", pods, {"engine": 2}, 200.0)   # a later gap starts its own count
+            run._gang_member_tick(f, "p1", pods, {"engine": 2}, 211.0)
+        self.assertEqual((2, 2), (f["short_spans"], f["short_samples"]))
+        self.assertNotIn("half_served", f)
+        verdict, notes, checks = "PASS", [], []
+        with mock.patch.object(run, "_isvc_events_since", lambda *a, **kw: []):
+            verdict = run._gang_member_checks(f, pods, 1.0, {"restart": "None"}, verdict, notes, checks)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("never counted as serving" in c for c in checks), checks)
 
     def test_the_restart_policy_is_read_off_the_spec_when_the_header_names_none(self):
         live = {"restart": {"engine": "RecreateInstanceOnPodRestart", "decoder": ""}}
@@ -14045,12 +14233,17 @@ class GeneratedDisruptionFamiliesTest(unittest.TestCase):
             self.assertIn("reason Unschedulable", reason)
             self.assertIn("once the lift opens the nodes and drops the fillers", reason)
             # The rollback withdraws its surge pod and the scale-down takes an Instance:
-            # the press aims at a settled Instance each keeps.
-            self.assertEqual(m["op"] == "rollback", kv.get("victim") == "stable", name)
+            # the press aims at a settled Instance each keeps, the scale-down's once the
+            # scale has retired its Instance; a surge roll keeps only its replacements,
+            # so the edit's and the runtime edit's press aims at a bound one.
+            self.assertEqual({"rollback": "stable", "edit": "canary", "runtime": "canary"}.get(m["op"]), kv.get("victim"), name)
             if m["op"] == "rollback":
                 self.assertIn("which the rollback keeps (the surge pod it withdraws is no target)", reason)
             elif m["op"] == "scaledown":
+                self.assertIn("once the scale has retired the Instance it takes", reason)
                 self.assertIn("the highest Instance the scale keeps (the Instance it takes is no target)", reason)
+            elif m["op"] in ("edit", "runtime"):
+                self.assertIn("a bound pod of the new revision, which the roll keeps (the source it drains is no target)", reason)
             else:
                 self.assertIn("presses on the node of the aimed pod", reason)
         self._validates(outputs, "gen-preempt", ops)
@@ -15927,6 +16120,18 @@ class RepeatingFaultLoopTest(unittest.TestCase):
                                                           {"e0-l": gang["e0-l"]}, {"engine": 2}, 200.0), "half a gang is not whole")
         self.assertEqual((True, False), run._repeat_back({"kind": "podkill", "fleet": {"engine": 1}}, self._cycle(uid="dead"),
                                                          gang, {"engine": 2}, 200.0))
+
+    def test_a_retired_instance_is_back_once_the_component_is_at_its_scale_target(self):
+        hdr = {"fault": "podkill:settling", "mode": "scaledown", "Ne": 4, "Nd": 0, "Nr": 0, "to_e": 3, "repeat": 3}
+        f = run._fault_new("p1", hdr)
+        self.assertEqual({"engine": 3, "decoder": 0, "router": 0}, f["fleet"], "the fleet the case ends at is the scale target")
+        self.assertEqual({"engine": 4, "decoder": 0, "router": 0}, run._fault_new("p1", dict(hdr, mode="rollout", to_e=None))["fleet"])
+        # The scale retired the killed Instance: with the three survivors Ready the repetition is back, retired.
+        pods = {f"e{i}": _rec("engine", i, "old", uid=f"u{i}") for i in range(1, 4)}
+        self.assertEqual((True, True), run._repeat_back(f, self._cycle(uid="u0"), pods, {"engine": 1}, 200.0))
+        pods["e3"]["ready"] = False
+        self.assertEqual((False, True), run._repeat_back(f, self._cycle(uid="u0"), pods, {"engine": 1}, 200.0),
+                         "short of the scale target: not back yet")
 
     def test_manager_is_back_under_new_ready_names_only(self):
         f = {"kind": "ctrlrestart", "ctrl_pods": ["mgr-old"]}
@@ -20039,6 +20244,33 @@ class SurgeOrderAfterRollbackTest(unittest.TestCase):
         self.assertTrue(run._surge_order_open(None))
         self.assertTrue(run._surge_order_open({"fired": False}))
         self.assertFalse(run._surge_order_open({"fired": True}))
+        self.assertTrue(run._drain_counts(None, True))
+        self.assertFalse(run._drain_counts(None, False), "a source never Ready in the window carried no capacity")
+        self.assertFalse(run._drain_counts({"fired": True}, True))
+
+    def test_a_drain_of_a_source_never_ready_in_the_window_is_not_a_breach(self):
+        ctx = self._ctx({"fired": False})
+        self._settled(ctx)
+        run._apply_event(ctx, self._event("MODIFIED", "e3", 3, "a1", ready=False, deleting=True))   # the broken source's repair
+        run._apply_event(ctx, self._event("DELETED", "e3", 3, "a1", ready=False))
+        self.assertFalse(ctx.get("order_viol"), "the repair of a source that never served removes no capacity")
+        checks = []
+        self.assertEqual("PASS", run.surge_before_drain_checks(ctx, ["engine"], "PASS", [], checks))
+        self.assertTrue(any("surge-before-drain held" in c for c in checks), checks)
+        # A source Ready in the window counts even when the drain flipped its gate before the deletion showed.
+        run._apply_event(ctx, self._event("MODIFIED", "e0", 0, "a1", ready=False))
+        run._apply_event(ctx, self._event("MODIFIED", "e0", 0, "a1", ready=False, deleting=True))
+        self.assertEqual({"engine": 1}, ctx["order_viol"])
+        # A pod that came back under its name with another UID is judged on its own readings.
+        ctx = self._ctx({"fired": False})
+        self._settled(ctx)
+        reborn = self._event("ADDED", "e3", 3, "a1", ready=False)
+        reborn["object"]["metadata"]["uid"] = "uid-e3-reborn"
+        run._apply_event(ctx, reborn)
+        reborn = self._event("MODIFIED", "e3", 3, "a1", ready=False, deleting=True)
+        reborn["object"]["metadata"]["uid"] = "uid-e3-reborn"
+        run._apply_event(ctx, reborn)
+        self.assertFalse(ctx.get("order_viol"))
 
     def test_a_drain_after_the_rollback_fired_is_not_the_rolls_ordering(self):
         ctx = self._ctx({"fired": True})
@@ -20124,41 +20356,48 @@ class SurgeOrderUnderAMoveTest(unittest.TestCase):
 
 
 class RollbackKeptKeyHooksTest(unittest.TestCase):
-    """The key kept away on the running revision parks the roll on its
-    victim before any pod of the starting revision drains, so the draining
-    and last moments of that row fire at rotating, each under the strategy
-    and group its moment carries; every other row keeps all four hooks."""
+    """The missing key on the running revision parks the roll on its victim
+    before any pod of the starting revision drains, whether the key stays
+    away or is put back once the rollback has fired, so the draining and
+    last moments of both rows fire at rotating, each under the strategy and
+    group its moment carries; every other row keeps all four hooks."""
 
     @classmethod
     def setUpClass(cls):
         cls.outputs, cls.rows = generate_cases.build_outputs()
 
-    def test_the_hook_reader_moves_only_the_kept_keys_unreachable_moments(self):
+    def test_the_hook_reader_moves_only_the_missing_keys_unreachable_moments(self):
         hook = generate_cases._rollback_fault_hook
         self.assertEqual("rotating", hook("configkey:missing", "", "never", "draining"))
         self.assertEqual("rotating", hook("configkey:missing", "", "never", "last"))
         self.assertEqual("settling", hook("configkey:missing", "", "never", "settling"))
         self.assertEqual("rotating", hook("configkey:missing", "", "never", "rotating"))
-        self.assertEqual("draining", hook("configkey:missing", "", "after-settle", "draining"))
+        self.assertEqual("rotating", hook("configkey:missing", "", "after-settle", "draining"),
+                         "the key put back once the rollback has fired is away until then, as the kept key is")
+        self.assertEqual("rotating", hook("configkey:missing", "", "after-settle", "last"))
+        self.assertEqual("settling", hook("configkey:missing", "", "after-settle", "settling"))
         self.assertEqual("last", hook("readiness:old", "persist", "", "last"))
         self.assertEqual("draining", hook("crashloop:old", "start", "", "draining"))
+        self.assertEqual("last", hook("imagepull:old", "", "after-settle", "last"))
 
-    def test_the_kept_key_rolls_back_at_reachable_hooks_only(self):
+    def test_the_missing_key_rolls_back_at_reachable_hooks_only(self):
         fam = [(n, kv, m) for f, n, kv, m in self.rows
                if f == "gen-rollback" and m.get("fault") == "configkey:missing" and "victimcomp" not in kv]
         kept = [(n, kv, m) for n, kv, m in fam if m["lift"] == "never"]
         lifted = [(n, kv, m) for n, kv, m in fam if m["lift"] == "after-settle"]
         self.assertEqual({"settling", "rotating"}, {kv["during"] for _n, kv, _m in kept})
-        self.assertEqual({"settling", "rotating", "draining", "last"}, {kv["during"] for _n, kv, _m in lifted})
+        self.assertEqual({"settling", "rotating"}, {kv["during"] for _n, kv, _m in lifted},
+                         "the key put back once the rollback has fired is away until then: the same two moments")
         self.assertEqual(len(lifted), len(kept), "the row keeps one case per moment, so no id moves")
-        for shape in {(kv["topo"], kv["Nr"]) for _n, kv, _m in kept}:
-            cells = [(m["strat"], kv["co"]) for n, kv, m in kept if (kv["topo"], kv["Nr"]) == shape and kv["during"] == "rotating"]
-            self.assertEqual(3, len(cells), shape)
-            self.assertEqual(len(cells), len(set(cells)), "each moved moment keeps its own strategy and group")
-        for n, kv, m in kept:
+        for rows in (kept, lifted):
+            for shape in {(kv["topo"], kv["Nr"]) for _n, kv, _m in rows}:
+                cells = [(m["strat"], kv["co"]) for n, kv, m in rows if (kv["topo"], kv["Nr"]) == shape and kv["during"] == "rotating"]
+                self.assertEqual(3, len(cells), shape)
+                self.assertEqual(len(cells), len(set(cells)), "each moved moment keeps its own strategy and group")
+        for n, kv, m in kept + lifted:
             text = self.outputs[f"gen-rollback/{n}.yaml"]
             head, reason = text.splitlines()[:2]
-            self.assertIn(f"rollback at {kv['during']} over configkey never", head)
+            self.assertIn(f"rollback at {kv['during']} over configkey {m['lift']}", head)
             self.assertEqual(f"rollback:{kv['during']}:configkey:missing", m["verb"])
             self.assertIn(generate_cases.ROLLBACK_MOMENT[kv["during"]], reason)
             self.assertNotIn("draining", reason)

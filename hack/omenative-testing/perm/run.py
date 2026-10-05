@@ -838,6 +838,13 @@ def _surge_order_open(rb):
     return not (rb and rb.get("fired"))
 
 
+def _drain_counts(rb, served):
+    """Whether a source seen draining counts against the surge order: it was
+    Ready at some point since the window opened (the repair of a source that
+    never served there removes no capacity) and the rule is still open."""
+    return bool(served) and _surge_order_open(rb)
+
+
 def surge_before_drain_checks(ctx, comps, verdict, notes, checks):
     """Surge-before-drain ordering for the _read_one handlers: a source pod must
     not begin draining before its Ready surge replacement (drained-old must not
@@ -1042,6 +1049,16 @@ def _pod_ready_since(obj):
     return None
 
 
+def _pod_bound_since(obj):
+    """The epoch at which the pod's PodScheduled condition last turned True;
+    None while it has no node. Invariant D reads it to tell a gang that bound
+    as a unit and is short a member from a gang forming."""
+    for c in (obj.get("status", {}).get("conditions") or []):
+        if c.get("type") == "PodScheduled":
+            return _event_epoch(c.get("lastTransitionTime")) if c.get("status") == "True" else None
+    return None
+
+
 def _main_container_ready(obj):
     """True when the kubelet reports the main container ready. Diagnostics
     only: it is what the kubelet last wrote, Ready or not."""
@@ -1051,13 +1068,14 @@ def _main_container_ready(obj):
 
 def _pod_placement(obj, labels):
     """Scheduler-facing fields every watcher record carries, whichever loop
-    builds it: node binding, scheduler name, the pod-group label and the
-    nodes a required hostname NotIn term keeps the pod off. Invariant D
-    reads the first three, invariant K the last; a record without them is
-    never evaluated."""
+    builds it: node binding and its moment, scheduler name, the pod-group
+    label and the nodes a required hostname NotIn term keeps the pod off.
+    Invariant D reads the first four, invariant K the last; a record without
+    them is never evaluated."""
     spec = obj.get("spec") or {}
     return {
         "node": spec.get("nodeName", ""),
+        "bound_since": _pod_bound_since(obj),
         "sched": spec.get("schedulerName", ""),
         "pg": labels.get("scheduling.x-k8s.io/pod-group", ""),
         "excl": _hostname_exclusions(spec),
@@ -1864,6 +1882,20 @@ def _gang_served_before(served, members):
     return any(served.get(m.get("uid"), math.inf) < oldest for m in members if m.get("node"))
 
 
+def _gang_bound_before(members):
+    """True when a bound member of the gang was bound before the oldest
+    member without a node was created: the gang bound as a unit and is
+    short a member (lost to a preemption before it ever served), whose
+    replacement the scheduler holds alone by policy — a refill, not a gang
+    forming. Read off each pod's PodScheduled transition (bound_since)."""
+    born = [_event_epoch(m.get("created")) for m in members if not m.get("node")]
+    born = [b for b in born if b is not None]
+    if not born:
+        return False
+    oldest = min(born)
+    return any(m.get("node") and m.get("bound_since") is not None and m["bound_since"] < oldest for m in members)
+
+
 def _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now):
     """Invariant D, one tick, only when OME_EVAL_SCHEDULER names a scheduler:
     D1 every live case pod carries that schedulerName (the runtime's name
@@ -1871,9 +1903,10 @@ def _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now):
        one pod-group label whose PodGroup exists with minMember == pods per
        Instance; D3 a gang binds as a unit — once any member of a forming
        gang has a node, every existing member has one within INV_SUSTAIN_D
-       ticks; a gang that served whole and is short a member is a repair,
-       whose replacement waits alone by policy, and is not judged. Teardown
-       is not a gang event: pods being deleted are not counted."""
+       ticks; a gang that served whole, or bound as a unit, and is short a
+       member is a repair or a refill, whose replacement waits alone by
+       policy, and is not judged. Teardown is not a gang event: pods being
+       deleted are not counted."""
     live = [p for p in pod_state.values() if p and p["alive"]]
     untyped = [p for p in live if "sched" not in p or "pg" not in p or "node" not in p]
     if untyped:
@@ -1902,7 +1935,8 @@ def _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now):
     for (comp, inst), members in sorted(gangs.items()):
         want = pods_per_inst[comp]
         bound = [m for m in members if m.get("node")]
-        if bound and len(bound) < len(members) and not _gang_served_before(served, members):
+        if bound and len(bound) < len(members) and not _gang_served_before(served, members) \
+                and not _gang_bound_before(members):
             key = ("D", "partial-gang", comp, inst)
             _inv_hit(inv, hits, key, key, INV_SUSTAIN_D, now,
                      f"{comp}/{inst}: {len(bound)} of {len(members)} live gang pods bound to a node "
@@ -3562,6 +3596,7 @@ HELD_SETTLE_S = int(30 * TIMEOUT_MULT)
 # retarget mid-run closes it as superseded before a fresh run opens.
 RUN_OPENED_EVENT = "RolloutRunOpened"
 RUN_CLOSED_EVENT = "RolloutRunClosed"
+RUN_COMPLETED_OUTCOME = "Completed"   # the outcome a run's close event names once every member reached the target
 
 
 def _stuck_readiness():
@@ -3713,10 +3748,12 @@ def _revision_hash(name):
 
 
 def _rollback_ir_settled(items, N, configured, bumped, old_hashes):
-    """The controller's own view after the rollback: every row Ready with no
-    open operation, and the bumped members' current and update revisions
-    both the starting revision."""
-    ok, why = _initial_ir_settled(items or [], N, configured)
+    """The controller's own view after the rollback: N rows Ready with no
+    open operation at whichever indexes the roll back, and any gang surge
+    before it, left them (a rolled fleet keeps those indexes), and the
+    bumped members' current and update revisions both the starting
+    revision."""
+    ok, why = _rolled_ir_settled(items or [], N, configured)
     if not ok:
         return False, why
     for it in items or []:
@@ -3729,20 +3766,47 @@ def _rollback_ir_settled(items, N, configured, bumped, old_hashes):
     return True, "settled on the starting revision"
 
 
+def _run_id(message):
+    """The run a run event names: the token after "run" in its message."""
+    parts = str(message or "").split()
+    return parts[1] if len(parts) > 1 and parts[0] == "run" else ""
+
+
+def _run_completed_before_retarget(events):
+    """The close message of a run that closed Completed before the retarget
+    was observed: a fresh run opened no earlier than the second it closed
+    in (the stamps carry whole seconds), so the retarget found no run to
+    supersede. Empty when no run closed that way."""
+    opened = [(when, _run_id(m)) for when, r, m in events if r == RUN_OPENED_EVENT]
+    for when, r, m in events:
+        if r != RUN_CLOSED_EVENT or not m.endswith(f"closed: {RUN_COMPLETED_OUTCOME}"):
+            continue
+        if any(o_when >= when and o_id != _run_id(m) for o_when, o_id in opened):
+            return m
+    return ""
+
+
 def _rollback_run_checks(case_id, since, grouped, verdict, notes, checks):
     """On a grouped service the run that targeted the new revision must have
     closed as superseded (a retarget closes the run and opens a fresh one); a
-    rollback that lands before any run opened leaves nothing to close."""
+    rollback that lands before any run opened leaves nothing to close, and
+    neither does one whose run completed before the retarget was observed
+    (on a lockstep group the last Instance can land in the second the
+    rollback fires)."""
     if not grouped:
         checks.append("  ⓘ rollback: no rollout group, so no run to supersede")
         return verdict
-    events = _isvc_events_since(case_id, since or 0)
-    superseded = [m for r, m in events if r == RUN_CLOSED_EVENT and "superseded" in m]
-    opened = [m for r, m in events if r == RUN_OPENED_EVENT]
+    events = _isvc_events_since(case_id, since or 0, stamped=True)
+    superseded = [m for _when, r, m in events if r == RUN_CLOSED_EVENT and "superseded" in m]
+    opened = [m for _when, r, m in events if r == RUN_OPENED_EVENT]
+    completed = _run_completed_before_retarget(events)
     if superseded:
         checks.append(f"  ✓ rollback: the run that targeted the new revision closed as superseded: {superseded[0][:120]}")
     elif not opened:
         checks.append("  ⓘ rollback: no run opened before the rollback landed (nothing to supersede)")
+    elif completed:
+        checks.append(f"  ⓘ rollback: the run that targeted the new revision completed before the retarget was observed, "
+                      f"and a fresh run followed it (nothing to supersede): {completed[:120]}")
     else:
         verdict = "FAIL" if verdict != "INFRA-FAIL" else verdict
         notes.append("the run that targeted the new revision did not close as superseded")
@@ -5807,8 +5871,9 @@ def _fault_new(case_id, hdr):
             "at": str(hdr.get("at") or ""),
             "push_heal": _push_heal_hdr(hdr),
             "repeat": int(hdr.get("repeat") or 0), "fired_count": 0, "cycles": [], "victim_insts": set(),
-            "fleet": {"engine": int(hdr.get("Ne") or 0), "decoder": int(hdr.get("Nd") or 0),
-                      "router": int(hdr.get("Nr") or 0)},
+            # The fleet the case ends at: the scale target where the header names one, else the starting count.
+            "fleet": {c: int(hdr.get(TO_KEYS[c]) or hdr.get(k) or 0)
+                      for c, k in (("engine", "Ne"), ("decoder", "Nd"), ("router", "Nr"))},
             "fired": False, "infra_fail": None, "notes": []}
 
 
@@ -7454,6 +7519,17 @@ def _instance_relocated(pods, lost_uids, node):
                               and p.get("node") and p["node"] != node for _n, p in pods)
 
 
+def _component_relocated(pod_state, comp, want, ppi, lost_uids, node):
+    """True when the Component is whole again away from `node`: `want`
+    Instances (none when the fleet size is unknown) each Ready and serving
+    on other nodes with none of the pods the node held. A roll in flight
+    may rebuild the Instance the node held at another index, so relocation
+    is read on the Component as well as on the Instance's own index."""
+    whole = [pods for pods in _instances_by_index(pod_state, {comp}).values()
+             if len(pods) >= ppi and _instance_relocated([("", p) for p in pods], lost_uids, node)]
+    return want > 0 and len(whole) >= want
+
+
 def _uids_present(pod_state, uids):
     """True while any pod carrying one of `uids` is still in the API, alive
     or on its way out."""
@@ -7479,9 +7555,11 @@ def _node_lift_tick(ctx, f, now):
     NotReady with no pod of the victim Instance on it serving (read every
     other second). after-settle starts the kubelet again LIFT_SETTLE_S after
     the bite; after-recover once every pod the node held is gone from the
-    API and the Instance is Ready and serving on other nodes (under a
-    delete, once those pods are gone), which the force-delete policy brings
-    about while the node stays down. The bite, the relocation, the sweep and
+    API and the Instance is Ready and serving on other nodes, at its own
+    index or, under a roll that rebuilt it elsewhere, with its Component
+    whole again away from the node (under a delete, once those pods are
+    gone), which the force-delete policy brings about while the node stays
+    down. The bite, the relocation, the sweep and
     the lift are recorded on the fault; a kubelet that cannot be started is
     apparatus."""
     if not _node_hook_fault(f) or not f.get("fired") or not f.get("node") or f.get("infra_fail") or f.get("lifted_at"):
@@ -7502,8 +7580,12 @@ def _node_lift_tick(ctx, f, now):
         lost = f.get("lost_uids") or set()
         if f.get("reaped_at") is None and not _uids_present(ctx["pod_state"], lost):
             f["reaped_at"] = now
-        if f.get("relocated_at") is None and f.get("hook_op_kind") != "delete" and _instance_relocated(pods, lost, node):
-            f["relocated_at"] = now
+        if f.get("relocated_at") is None and f.get("hook_op_kind") != "delete":
+            if _instance_relocated(pods, lost, node):
+                f["relocated_at"], f["relocated_where"] = now, "at its own index"
+            elif _component_relocated(ctx["pod_state"], comp, (ctx.get("N") or {}).get(comp, 0),
+                                      (ctx.get("pods_per_inst") or {}).get(comp, 1), lost, node):
+                f["relocated_at"], f["relocated_where"] = now, "at another index"
         due = f.get("reaped_at") is not None and (f.get("hook_op_kind") == "delete" or f.get("relocated_at") is not None)
         if due:
             f["recovered_at"] = now
@@ -7588,8 +7670,9 @@ def _node_hook_checks(f, what, completed, state, verdict, notes, checks):
             checks.append(f"  ✗ {kind}: {comp} Instance {inst} never came back Ready and serving on other nodes while "
                           f"node {node} was down (relocation needs the force-delete policy)")
         elif relocates:
+            where = ", replaced at another index" if f.get("relocated_where") == "at another index" else ""
             checks.append(f"  ✓ {kind}: {comp} Instance {inst} back Ready and serving on other nodes {relocated - t0:.0f}s "
-                          f"after the stop, while the node was still down")
+                          f"after the stop{where}, while the node was still down")
         if swept is None:
             verdict = "FAIL"
             notes.append(f"{kind}: pods the node held were still in the API")
@@ -7630,7 +7713,7 @@ def _event_window_start(since_epoch):
     return math.floor(since_epoch)
 
 
-def _isvc_events_since(case_id, since_epoch, opened=False):
+def _isvc_events_since(case_id, since_epoch, opened=False, stamped=False):
     """(reason, message) of every event recorded on the case's
     InferenceService whose latest occurrence is at or after since_epoch,
     oldest first, a folded repeat listed once per occurrence. With opened,
@@ -7638,7 +7721,8 @@ def _isvc_events_since(case_id, since_epoch, opened=False):
     whole seconds, so an event stamped in the second the window opened in
     may have been recorded before the opening and is left out, as is one
     the product recorded before the window and recorded again inside it
-    (the same repair, folded onto its first record)."""
+    (the same repair, folded onto its first record). With stamped, each
+    entry is (epoch, reason, message), the epoch being the event's stamp."""
     r = kubectl("-n", NS, "get", "events", "--field-selector",
                 f"involvedObject.kind=InferenceService,involvedObject.name={case_id}", "-o", "json")
     if r.returncode != 0:
@@ -7673,7 +7757,7 @@ def _isvc_events_since(case_id, since_epoch, opened=False):
     # Oldest first: a chain of gang surges is followed in the order the
     # surges happened, and the list order is not that order.
     found.sort(key=lambda x: x[0])
-    return [ev for _when, evs in found for ev in evs]
+    return [(when, *ev) if stamped else ev for when, evs in found for ev in evs]
 
 
 # The events that name an Instance's replacement index on the ISVC: a gang
@@ -9186,8 +9270,10 @@ def _ratio_band_verdict(pair, ratio_tol, samples, worst, dev_max, verdict, notes
 def _gang_member_tick(f, case_id, pod_state, pods_per_inst, now):
     """While a podkill's gang is short a Ready member, sample its row every
     INV_TICK_S once the gap has lasted GANG_SHORT_REPORT_S: a row still
-    counting every pod as serving with one missing is a gang served
-    half-formed. Samples and findings land on the fault record."""
+    counting every pod as serving with one missing on two samples in a row
+    is a gang served half-formed (one sample at the edge of the gap can
+    read a row a reconcile ahead of the pods). Samples and findings land on
+    the fault record."""
     if not f or f.get("kind") != "podkill" or not f.get("fired") or not f.get("member") or not f.get("victim_inst"):
         return
     comp, inst = f["victim_comp"], f["victim_inst"]
@@ -9197,7 +9283,7 @@ def _gang_member_tick(f, case_id, pod_state, pods_per_inst, now):
     whole = [p for p in pod_state.values()
              if p and p["alive"] and p.get("ready") and p.get("comp") == comp and str(p.get("inst", "0")) == inst]
     if len(whole) >= ppi:
-        f["short_since"] = None
+        f["short_since"], f["half_seen"] = None, None
         return
     if f.get("short_since") is None:
         f["short_since"] = now
@@ -9213,10 +9299,16 @@ def _gang_member_tick(f, case_id, pod_state, pods_per_inst, now):
         serving = int(row.get("servingPodCount") or 0)
     except (TypeError, ValueError):
         return
-    if serving >= ppi:
-        f["half_served"] = f.get("half_served", 0) + 1
-        f["half_served_detail"] = (f"row {comp}/{inst} counts servingPodCount={serving} with {len(whole)}/{ppi} "
-                                   f"pods Ready, {now - f['short_since']:.0f}s into the gap")
+    if serving < ppi:
+        f["half_seen"] = None
+        return
+    text = (f"row {comp}/{inst} counts servingPodCount={serving} with {len(whole)}/{ppi} "
+            f"pods Ready, {now - f['short_since']:.0f}s into the gap")
+    if f.get("half_seen") is None:
+        f["half_seen"] = text
+        return
+    f["half_served"] = f.get("half_served", 0) + 1
+    f["half_served_detail"] = f"{text} (and at the sample before it)"
 
 
 def _restart_policy(hdr, info, comp):
@@ -9472,8 +9564,10 @@ def _repeat_back(f, cycle, pod_state, pods_per_inst, now):
     """(back, retired): whether what the repetition took has come back. A
     manager restart is back once the manager is Ready under new names. A
     pod fault is back once its Instance is whole, Ready and serving on new
-    pods, or retired — the roll surged it away or drained it (no pod of its
-    index left, none leaving) with its Component back at N Ready."""
+    pods, or retired — the roll surged it away or drained it, or the scale
+    took it (no pod of its index left, none leaving) with its Component
+    back at the fleet size the case ends at (fleet: the scale target where
+    the case scales)."""
     if f["kind"] == "ctrlrestart":
         return _ctrl_back(f, now), False
     comp, inst = cycle["comp"], cycle["inst"]
@@ -13349,6 +13443,32 @@ def _pending_done_premature(f, landed):
     return f.get("kind") == "preempt" and not f.get("crash_pod")
 
 
+def _wait_scale_wave(ctx, done, budget):
+    """Hold a scale-down's press until the scale has retired the Instances it
+    takes (done()): the scale retires a non-serving Instance first, whatever
+    its index, so a press landing with it would hand it the Instance it
+    takes. Returns (reached, why not) within the operation's budget."""
+    while not ctx["closed"] and time.time() - ctx["trigger_ts"] < budget:
+        if done():
+            return True, ""
+        _read_one(ctx)
+    return False, f"the scale wave did not finish within {budget}s"
+
+
+def _wait_new_bound(ctx, comps, done, budget):
+    """The first bound pod of the new revision among `comps`, the pod a press
+    under a surge roll lands on (the roll keeps only its replacements). None
+    with the reason when the roll completes first or the budget runs out."""
+    while not ctx["closed"] and time.time() - ctx["trigger_ts"] < budget:
+        for name, p in sorted(ctx["pod_state"].items()):
+            if p and p["alive"] and p.get("comp") in comps and p.get("node") and _pod_on_new(p, ctx.get("old_hashes")):
+                return name, ""
+        if done():
+            return None, "the roll completed before a replacement of the new revision was bound"
+        _read_one(ctx)
+    return None, f"no replacement of the new revision was bound within {budget}s"
+
+
 def _pending_watch(ctx, f, comps, lift, done, budget, inst=None, landed=None):
     """Watch an operation whose pod the cluster cannot place or admit: the
     wait the product reports on the Instance row, any row that reads Failed
@@ -15008,6 +15128,20 @@ def _hook_op(case_id, yaml_file, desc, hdr):
     if not reached:
         f["infra_fail"] = f"{kind}:{hook}: the hook was never reached — {why}"
         return _finish(case_id, desc, hdr, ctx, "HOOK_MISSED", "INFRA-FAIL", [why], [f"  ✗ {f['infra_fail']}"])
+    if kind == "preempt" and st["scale_down"]:
+        # The scale retires a non-serving Instance first, whatever its index: a
+        # press landing with the scale would hand it the Instance it takes.
+        reached, why = _wait_scale_wave(ctx, done, budget)
+        if not reached:
+            f["infra_fail"] = f"{kind}:{hook}: {why}"
+            return _finish(case_id, desc, hdr, ctx, "HOOK_MISSED", "INFRA-FAIL", [why], [f"  ✗ {f['infra_fail']}"])
+    if kind == "preempt" and f.get("victim") == "canary":
+        # A surge roll keeps only its replacements: the press lands on one once it is bound.
+        aim, why = _wait_new_bound(ctx, acting, done, budget)
+        if not aim:
+            f["infra_fail"] = f"{kind}:{hook}: {why}"
+            return _finish(case_id, desc, hdr, ctx, "HOOK_MISSED", "INFRA-FAIL", [why], [f"  ✗ {f['infra_fail']}"])
+        f["aim_pod"] = aim
     if mv is not None:
         # The pod the moment names: the moved Instance's (its source at
         # accept, its replacement after), a peer's or the sibling's.
@@ -16977,10 +17111,15 @@ def _apply_event(ctx, ev):
         is_new = bool(rev and rev not in ctx["old_hashes"])
         nr = ctx.setdefault("new_ready", defaultdict(set))
         od = ctx.setdefault("old_drained", defaultdict(set))
-        if ready and (is_new or _move_replacement(ctx, comp, labels.get("ome.io/instance-index", "0"), meta.get("uid", ""))):
+        # Pods seen Ready since the window opened, the state at the opening included.
+        seen = ctx.setdefault("ready_seen", set())
+        prev, uid = ctx["pod_state"].get(name), meta.get("uid", "")
+        if ready or (prev and prev.get("ready") and prev.get("uid") == uid):
+            seen.add((name, uid))
+        if ready and (is_new or _move_replacement(ctx, comp, labels.get("ome.io/instance-index", "0"), uid)):
             nr[comp].add(name)
         if (not is_new) and rev and (ev.get("type") == "DELETED" or deletion is not None) \
-                and _surge_order_open(ctx.get("rb")):
+                and _drain_counts(ctx.get("rb"), (name, uid) in seen):
             od[comp].add(name)
         mu_pods = resolve_max_unavailable(ctx["info"].get("max_unavail", {}).get(comp, 0),
                                           ctx["N"].get(comp, 0)) * ctx["pods_per_inst"].get(comp, 1)
@@ -25515,6 +25654,7 @@ def run_case(case_id):
     floor_sust = {}                  # comp → longest below-floor dip span observed (s)
     collide_worst = {}               # comp → worst (alive_inst - distinct_alive_idx) shortfall seen mid-roll
     old_drained = defaultdict(set)   # comp → set(old-rev pod names) observed draining (deletionTimestamp)
+    ready_seen = set()               # (name, uid) seen Ready since the trigger, the state at the trigger included
     new_ready = defaultdict(set)     # comp → set(new-rev pod names) observed Ready
     order_viol = {}                  # comp → worst (drained - ready - maxUnavail) surge-before-drain breach
     deadline_init = init_started + init_budget
@@ -25680,9 +25820,13 @@ def run_case(case_id):
             # OLD-rev pods observed draining and NEW-rev pods observed Ready.
             if trigger_ts is not None and old_hashes is not None and comp in bumped and info["strat"].get(comp) == "SurgeThenDrain":
                 is_new = bool(rev and rev not in old_hashes)
+                prev = pod_state.get(name)
+                if ready or (prev and prev.get("ready") and prev.get("uid") == uid):
+                    ready_seen.add((name, uid))
                 if is_new and ready:
                     new_ready[comp].add(name)
-                if (not is_new) and rev and (ev_type == "DELETED" or deletion is not None) and _surge_order_open(rb):
+                if (not is_new) and rev and (ev_type == "DELETED" or deletion is not None) \
+                        and _drain_counts(rb, (name, uid) in ready_seen):
                     old_drained[comp].add(name)
                 # Instances of headroom: SurgeThenDrain surges maxUnavailable=0, so
                 # drained pods must never lead ready-surge pods (per pods_per_inst).

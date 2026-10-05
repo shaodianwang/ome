@@ -509,7 +509,6 @@ Total generated cases: **6992**. The whole-corpus per-PR cap (hand + generated) 
 | resources@held | 4 |
 | resources@recreate | 2 |
 | rollback:draining | 22 |
-| rollback:draining:configkey:missing | 6 |
 | rollback:draining:crashloop:old | 24 |
 | rollback:draining:imagepull:old | 12 |
 | rollback:draining:readiness:old | 12 |
@@ -524,12 +523,11 @@ Total generated cases: **6992**. The whole-corpus per-PR cap (hand + generated) 
 | rollback:held:imagepull:once | 6 |
 | rollback:held:stuck:once | 6 |
 | rollback:last | 26 |
-| rollback:last:configkey:missing | 6 |
 | rollback:last:crashloop:old | 24 |
 | rollback:last:imagepull:old | 12 |
 | rollback:last:readiness:old | 12 |
 | rollback:rotating | 28 |
-| rollback:rotating:configkey:missing | 24 |
+| rollback:rotating:configkey:missing | 36 |
 | rollback:rotating:crashloop:old | 24 |
 | rollback:rotating:imagepull:old | 12 |
 | rollback:rotating:readiness:old | 12 |
@@ -1093,7 +1091,7 @@ Total generated cases: **6992**. The whole-corpus per-PR cap (hand + generated) 
 - `pause=freeze` pairs only with `RecreateInstanceOnPodRestart`: the freeze lift downgrades to a plain pause, which parks policy None's Create recovery — freeze+None could never repair while paused.
 - In-place strategies on single-pod engine-only topologies are excluded from gen-fault: the component-blind podkill victim is the in-place pod itself and its recreate trips the UID-stability check by harness design (a missing component-scoped victim hook, see below).
 - `fault=podkill:migrating` needs `mode=migrate` — out of scope here.
-- A rollback over the key kept away on the running revision fires at `settling` and `rotating` only: the roll takes the broken Instance first and its replacement cannot start without the key, so no pod of the starting revision ever drains and neither the draining nor the last hook arrives; the kept-key row takes those two moments at `rotating` under their own strategy and group.
+- A rollback over the missing key on the running revision, kept away or put back once the rollback has fired, fires at `settling` and `rotating` only: the roll takes the broken Instance first and its replacement cannot start without the key, so no pod of the starting revision ever drains and neither the draining nor the last hook arrives; both rows take those two moments at `rotating` under their own strategy and group.
 - A router in front of an engine fleet is a break victim under a canary alone: elsewhere the runner admits engine and decoder pods, so the sibling rows of the engine-behind-a-router shapes outside a canary (a move, a runtime edit, a push, the idle service) have no cell and the router is a negative control there.
 - Kill targets (`kill=leader|worker`) exist only on gang topologies.
 - Update budgets are dormant under a steady-state kill: the kill family permutes strategies at their canonical budget only.
