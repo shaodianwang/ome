@@ -6476,6 +6476,19 @@ def _break_victims(f):
     return [f] + list(f.get("extra_victims") or [])
 
 
+def _env_entry_word(entry):
+    """An env entry as a note words it: NAME=value for a literal; for a value
+    read through a reference, the ConfigMap key it reads, else the kind of
+    reference."""
+    if "valueFrom" not in entry:
+        return f"{entry['name']}={entry.get('value')}"
+    ref = entry["valueFrom"] or {}
+    cm = ref.get("configMapKeyRef") or {}
+    if cm:
+        return f"{entry['name']} reading ConfigMap key {cm.get('name')}/{cm.get('key')}"
+    return f"{entry['name']} from {next(iter(ref), 'a reference')}"
+
+
 def _crashloop_image():
     """The image a live pod is pointed at to crash at every start: the
     fixture's metrics image, which has no shell, so the runtime command the
@@ -8611,10 +8624,14 @@ def _canary_break_allowance(ctx, fault, new_break):
     """Under a canary, the Instances a break took are the fault's cost on
     either side, on the primary or on a sibling: the floor the healthy
     Instances must hold is lowered by that many, once, when the break has
-    fired. A break the push itself carries is costed by its crash watch."""
-    if fault and fault.get("kind") in CANARY_STABLE_FAULTS and fault.get("fired") and not new_break \
-            and fault.get("param") != CRASHLOOP_NEW and fault.get("crash_comp") and "floor_allowance" not in ctx:
-        ctx["floor_allowance"] = {fault["crash_comp"]: len(_break_victims(fault))}
+    fired. A break the push itself carries is costed by its crash watch; a
+    runner killed once after Ready on it is costed its one Instance."""
+    if not (fault and fault.get("kind") in CANARY_STABLE_FAULTS and fault.get("fired") and not new_break
+            and fault.get("crash_comp") and "floor_allowance" not in ctx):
+        return
+    if fault.get("param") == CRASHLOOP_NEW and not (_fault_once(fault) and fault.get("form") == "load"):
+        return
+    ctx["floor_allowance"] = {fault["crash_comp"]: len(_break_victims(fault))}
 
 
 def _sibling_park_track(ctx, parked, track, now):
@@ -8705,7 +8722,7 @@ def _new_break_armed(f, comp, image, env, push_ts):
     """Record the arm once the push has landed: the fault counts as fired
     from the push, on the member whose runner carries it."""
     f["fired"], f["fired_ts"], f["crash_comp"] = True, push_ts, comp
-    what = f"image {image}" if image else " ".join(f"{e['name']}={e['value']}" for e in (env or []))
+    what = f"image {image}" if image else " ".join(_env_entry_word(e) for e in (env or []))
     f["notes"].append(f"fault armed: {f['kind']}:{CRASHLOOP_NEW}"
                       + (f" form={f['form']}" if f.get("form") else "") + f" on {comp} ({what})")
     print(f"    ⚡ {f['notes'][-1]}")
@@ -18035,12 +18052,7 @@ def _runtime_break_ops(spec, kind, victim, env_entry=None):
         image = _crashloop_image() if kind == "crash-start" else _break_image("imagepull")
         return [{"op": "replace", "path": f"{path}/image", "value": image} for path in _runner_paths(spec, cfg)], f"image {image}"
     entry = dict(env_entry) if env_entry else {"name": CRASH_EXIT_ENV, "value": str(CRASH_EXIT_AFTER_S)}
-    if "valueFrom" in entry:
-        ref = (entry["valueFrom"] or {}).get("configMapKeyRef") or {}
-        what = f"{entry['name']} reading ConfigMap key {ref.get('name')}/{ref.get('key')}"
-    else:
-        what = f"{entry['name']}={entry.get('value')}"
-    return [{"op": "add", "path": f"{base}/-", "value": dict(entry)} for base in _runner_env_paths(spec, cfg)], what
+    return [{"op": "add", "path": f"{base}/-", "value": dict(entry)} for base in _runner_env_paths(spec, cfg)], _env_entry_word(entry)
 
 
 def _runtime_restore_ops(spec, kind, victim, image=None):

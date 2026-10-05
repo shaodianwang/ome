@@ -8678,6 +8678,18 @@ class CanaryStepBreakTest(unittest.TestCase):
         self.assertEqual((True, 5.0, "engine"), (load["fired"], load["fired_ts"], load["crash_comp"]))
         self.assertIn(f"{run.CRASH_EXIT_ENV}=10", load["notes"][0])
 
+    def test_the_arm_note_words_an_env_entry_read_through_a_reference(self):
+        f = run._fault_new("p999", {"fault": "configkey:new"})
+        env = [{"name": run.CRASH_EXIT_ENV, "value": "10"},
+               {"name": "MODEL_FLAG", "valueFrom": {"configMapKeyRef": {"name": "p999-cm", "key": "flag-missing"}}},
+               {"name": "TOKEN", "valueFrom": {"secretKeyRef": {"name": "p999-secret", "key": "token"}}}]
+        with contextlib.redirect_stdout(io.StringIO()):
+            run._new_break_armed(f, "engine", "", env, 5.0)
+        self.assertEqual((True, 5.0, "engine"), (f["fired"], f["fired_ts"], f["crash_comp"]))
+        self.assertIn(f"{run.CRASH_EXIT_ENV}=10", f["notes"][0])
+        self.assertIn("MODEL_FLAG reading ConfigMap key p999-cm/flag-missing", f["notes"][0])
+        self.assertIn("TOKEN from secretKeyRef", f["notes"][0])
+
     def test_no_hook_fires_a_break_the_push_or_the_idle_service_carries(self):
         fired = []
         with mock.patch.object(run, "_fault_fire", lambda *a, **k: fired.append(a)):
@@ -17353,6 +17365,29 @@ class CanaryGateFaultTest(unittest.TestCase):
         metric.update(fired=True, crash_comp="engine")
         run._canary_break_allowance(ctx, metric, False)
         self.assertNotIn("floor_allowance", ctx, "a gate fault takes no Instance")
+
+    def test_a_runner_killed_once_after_ready_on_the_pushed_revision_is_allowed_for(self):
+        def ctx(min_ready):
+            return {"N": {"engine": 4}, "info": {"max_unavail": {"engine": 0}}, "hdr": {},
+                    "min_ready": {"engine": min_ready}, "floor_sust": {"engine": 16.0}}
+        once = run._fault_new("p999", {"fault": "crashloop:new", "form": "load", "once": 1, "victimcomp": "engine"})
+        dip_one = ctx(3)
+        run._canary_break_allowance(dip_one, once, False)
+        self.assertNotIn("floor_allowance", dip_one, "nothing is allowed for before the kill has landed")
+        once.update(fired=True, crash_comp="engine", crash_inst="3", crash_pod="e3", kills=1)
+        run._canary_break_allowance(dip_one, once, False)
+        self.assertEqual({"engine": 1}, dip_one["floor_allowance"], "the victim's one Instance while the kubelet restarts it")
+        checks = []
+        self.assertEqual("PASS", run.min_ready_checks(dip_one, ["engine"], "PASS", [], checks))
+        self.assertTrue(any("min ready 3 ≥ N-maxUnavailable-1broken=3" in c for c in checks), checks)
+        dip_two, notes = ctx(2), []
+        run._canary_break_allowance(dip_two, once, False)
+        self.assertEqual({"engine": 1}, dip_two["floor_allowance"], "one Instance, however deep the dip")
+        self.assertEqual("FAIL", run.min_ready_checks(dip_two, ["engine"], "PASS", notes, []))
+        self.assertTrue(any("min ready 2 < N-maxUnavailable-1broken=3" in n for n in notes), notes)
+        before_ready = ctx(3)
+        run._canary_break_allowance(before_ready, dict(once, form="start"), False)
+        self.assertNotIn("floor_allowance", before_ready, "a kill at first start takes no Ready Instance")
 
     def test_a_gate_fault_that_never_fired_fails_the_case(self):
         notes = []
