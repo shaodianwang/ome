@@ -222,6 +222,12 @@ class OperationTest(unittest.TestCase):
         self.assertEqual("engine+router single", behind.shape_family)
         self.assertEqual([("webhook unavailable", "one-shot", "-")], behind.fault_rows())
 
+    def test_a_scale_up_beside_a_key_kept_away_is_a_scale_up_with_the_key_missing(self):
+        case = self.corpus.write(mode="scaledown", to_e=5, fault="configkey:missing", during="idle", inst=0, expect="waits",
+                                 topo="engine", **counts(4))
+        self.assertEqual(("scale up", "expect=waits", []), (case.operation, case.outcome, case.problems))
+        self.assertEqual([("config missing", "persistent", "running", "engine")], case.faults)
+
     def test_a_scale_or_a_delete_on_a_broken_instance_keeps_its_operation(self):
         """A break fired before a scale or a delete (during=idle in those modes)
         is the operation plus a fault on the running revision, landing at
@@ -390,6 +396,10 @@ class FaultTest(unittest.TestCase):
     def test_canary_breaks_of_the_new_revision(self):
         self.assertEqual([("image pull", "persistent", "new", "engine")],
                          self.fault(mode="canary", canary="auto", bump="engine", img="example.com/x:none", terminal="Failed", topo="engine"))
+        self.assertEqual([], self.fault(edit="image", img="${OME_EVAL_NGINX_ALT_IMAGE}", topo="engine"),
+                         "beside edit=image the override is the image the edit lands, no fault")
+        self.assertEqual([("image pull", "persistent", "new", "engine")], self.fault(fault="imagepull:new", lift="never", topo="engine"))
+        self.assertEqual([("image pull", "one-shot", "new", "engine")], self.fault(fault="imagepull:new", lift="after-settle", topo="engine"))
         self.assertEqual([("sibling broken", "persistent", "new", "decoder")],
                          self.fault(mode="canary", canary="auto", bump="engine,decoder", img="example.com/x:none",
                                     imgcomp="decoder", terminal="Failed", comps=pd(nr=0), topo="pd", **counts(2, 2, 0)))
@@ -626,9 +636,10 @@ class LedgerTest(unittest.TestCase):
         # hand-deleted pod on gangs, the four sibling rows on the two
         # engine-only families, then the pause and freeze columns, the new-side
         # rows at steady state, the gate rows outside a canary, and the
-        # one-shot new-side rows under a scale, a move and a delete
-        self.assertEqual(raw - 6 - 72 - 72 - 96 - 540 - 80 - 312 - 136, len(product))
-        self.assertEqual(3528 - 1314, len(product))
+        # one-shot new-side rows under a scale, a move and a delete, and the
+        # repeating pod losses under a delete
+        self.assertEqual(raw - 6 - 72 - 72 - 96 - 540 - 80 - 312 - 136 - 12, len(product))
+        self.assertEqual(3528 - 1326, len(product))
 
     def test_the_triage_removals_name_their_sentences_and_counts(self):
         sentences = {
@@ -641,11 +652,14 @@ class LedgerTest(unittest.TestCase):
             "a one-shot fault on the new revision is over before a scale, a move or a delete can be aimed at it: what the "
             "operation then meets is a plain roll, which is the operation+operation overlap, and a new revision that "
             "stays broken is the persistent row": 136,
+            "a repeating node loss during a delete has no state left to lose after the first loss: a pod deleted by hand, a "
+            "lost gang member, an eviction or a preemption repeats only once what it took has come back, and a delete brings "
+            "nothing back": 12,
         }
         removed = coverage.removed_by_reason()
         self.assertEqual(sentences, {reason: removed[reason] for reason in sentences})
-        self.assertEqual([reason for reason, _p in coverage.EXCLUDED_CELLS][-4:], list(sentences))
-        self.assertEqual(1314, sum(removed.values()))
+        self.assertEqual([reason for reason, _p in coverage.EXCLUDED_CELLS][-5:], list(sentences))
+        self.assertEqual(1326, sum(removed.values()))
         product = coverage.product_cells()
         # the pause and freeze columns keep only the kill family's own cells
         self.assertIn(("engine single", "pause", ("pod deleted by hand", "one-shot", "-")), product)
@@ -669,6 +683,13 @@ class LedgerTest(unittest.TestCase):
         self.assertIn(("engine single", "scale up", ("crash at start", "persistent", "new")), product)
         self.assertIn(("engine single", "push", ("crash at start", "one-shot", "new")), product)
         self.assertIn(("engine single", "rollback", ("crash at start", "one-shot", "new")), product)
+        # a repeating pod loss under a delete; the one-shot loss and the repeating loss elsewhere stay
+        self.assertNotIn(("engine single", "delete", ("pod deleted by hand", "persistent", "-")), product)
+        self.assertNotIn(("engine gang", "delete", ("gang member lost", "persistent", "-")), product)
+        self.assertNotIn(("engine+router gang", "delete", ("evicted or preempted", "persistent", "-")), product)
+        self.assertIn(("engine single", "delete", ("pod deleted by hand", "one-shot", "-")), product)
+        self.assertIn(("engine single", "delete", ("node", "persistent", "-")), product)
+        self.assertIn(("engine single", "scale up", ("evicted or preempted", "persistent", "-")), product)
 
     def test_check_fails_on_a_removed_cell_with_a_case_and_on_a_rule_removing_nothing(self):
         from unittest import mock

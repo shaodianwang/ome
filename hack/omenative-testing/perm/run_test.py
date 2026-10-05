@@ -3634,7 +3634,7 @@ class LeftoverSinglesTest(unittest.TestCase):
                          {(kv["topo"], kv["Nr"]) for f, _n, kv, _m in self.fam if f == "gen-canary-podkill"})
         self.assertEqual({"repaired", "relocated"}, {kv["expect"] for f, _n, kv, _m in self.fam if f == "gen-node"})
         for folder, name, kv, m in self.fam:
-            others = [int(x[1:]) for f, x, _kv, mm in self.rows if f == folder and not mm.get("single")]
+            others = [int(x[1:]) for f, x, _kv, mm in self.rows if f == folder and not mm.get("single") and not mm.get("tail")]
             self.assertGreater(int(name[1:]), max(others), f"{folder}/{name}: minted after the family's other rows")
             self.assertEqual("none", kv["co"], name)
             text = self.outputs[f"{folder}/{name}.yaml"]
@@ -3699,7 +3699,8 @@ class PlainOperationsTest(unittest.TestCase):
         self.assertEqual({("engine", 2)}, {(kv["topo"], kv["Nr"]) for f, _n, kv, _m in self.fam if f in ("gen-rollout", "gen-fault-scale")})
         self.assertEqual({3, 5}, {kv["to_e"] for f, _n, kv, _m in self.fam if f == "gen-fault-scale"})
         for folder, name, kv, m in self.fam:
-            others = [int(x[1:]) for f, x, _kv, mm in self.rows if f == folder and not mm.get("plain") and not mm.get("single")]
+            others = [int(x[1:]) for f, x, _kv, mm in self.rows
+                      if f == folder and not mm.get("plain") and not mm.get("single") and not mm.get("tail")]
             self.assertGreater(int(name[1:]), max(others), f"{folder}/{name}: minted after the family's other rows")
             for k in ("fault", "break", "stuck", "img", "lift", "once"):
                 self.assertNotIn(k, kv, name)
@@ -3731,6 +3732,158 @@ class PlainOperationsTest(unittest.TestCase):
                 path = Path(tmp) / f"{name}.yaml"
                 path.write_text(self.outputs[f"{folder}/{name}.yaml"])
                 self.assertEqual([], run.validate_case_file(path), name)
+
+
+class LedgerTailCellsTest(unittest.TestCase):
+    """The ledger's last cells, minted after every control row so no
+    earlier id moves: the router-only push parked by its own break, rolled
+    back and edited at the held moment and moved beside, on the
+    engine+router shapes."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.rows = rows
+        cls.tail = [(f, n, kv, m) for f, n, kv, m in rows if m.get("tail")]
+
+    def _cases(self, fam):
+        with tempfile.TemporaryDirectory() as tmp:
+            for folder, name, _kv, _m in fam:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(self.outputs[f"{folder}/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)
+                yield folder, name, coverage.read_case(path)
+
+    def test_every_tail_row_follows_every_other_row_of_its_family(self):
+        for folder, name, _kv, _m in self.tail:
+            others = [int(x[1:]) for f, x, _kv2, mm in self.rows if f == folder and not mm.get("tail")]
+            self.assertGreater(int(name[1:]), max(others), f"{folder}/{name}")
+            self.assertTrue(any(lo <= int(name[1:]) < hi for lo, hi in generate_cases.id_blocks(folder)), name)
+
+    def test_the_router_only_push_is_rolled_back_edited_and_moved_beside(self):
+        fam = [(f, n, kv, m) for f, n, kv, m in self.tail if kv.get("bump") == "router"]
+        self.assertEqual({"gen-rollback": 4, "gen-switch": 4, "gen-fault-move": 2},
+                         dict(collections.Counter(f for f, _n, _kv, _m in fam)))
+        self.assertEqual({("engine", 2), ("engine-mn", 2)}, {(kv["topo"], kv["Nr"]) for _f, _n, kv, _m in fam})
+        for folder, name, kv, m in fam:
+            self.assertEqual(("none", kv["Ne"], kv["Nr"] + 1), (kv["co"], kv["ceil_e"] - (1 if folder == "gen-fault-move" else 0), kv["ceil_r"]), name)
+            text = self.outputs[f"{folder}/{name}.yaml"]
+            reason = text.splitlines()[1]
+            engine = re.search(r"  engine:\n(?:    .*\n)+", text).group(0)
+            router = re.search(r"  router:\n(?:    .*\n)+", text).group(0)
+            self.assertNotIn("instanceReadyTimeout", engine, f"{name}: the engine is never bumped")
+            if folder == "gen-fault-move":
+                self.assertEqual(("held", generate_cases.runtime_fixtures.UNPULLABLE_IMAGE, "migrate"), (kv["stuck"], kv["img"], kv["mode"]), name)
+                self.assertEqual(("imagepull", "router"), run._stuck_break(kv, {"router"}), name)
+                self.assertIn("the router is pushed onto a revision whose runner carries an image that cannot be pulled", reason)
+                self.assertIn("the Components neither pushed nor moved keep their pods", reason)
+                continue
+            self.assertEqual(("router", "crash-start", "held"), (kv["victimcomp"], kv["break"], kv["during"]), name)
+            self.assertEqual(not kv.get("once"), "instanceReadyTimeout" in router, name)
+            self.assertIn("the push bumps the router alone, which rolls under its own strategy and its own retry ladder", reason)
+            self.assertIn("the engine is never rolled, every engine Instance keeps its pods and keeps serving", reason)
+            self.assertEqual(not kv.get("once"), "the status says why" in reason, name)
+            if folder == "gen-rollback":
+                self.assertEqual(1, kv["rollback"], name)
+                self.assertTrue(run._rollback_held_break_case(kv), name)
+                self.assertIn('perm.test/rev: "v1"', router, f"{name}: the bumped member carries the starting revision")
+            else:
+                self.assertEqual("strategy:RecreatePod", kv["edit"], name)
+                self.assertTrue(run._edit_held_break_case(kv), name)
+                self.assertIn("the edit lands on the router's own strategy", reason)
+        cells = {(c.shape_family, c.operation, coverage.fault_row_label(c.fault_rows()[0])) for _f, _n, c in self._cases(fam)}
+        want = set()
+        for family in ("engine+router single", "engine+router gang"):
+            for operation in ("rollback", "strategy or policy edit"):
+                for form in ("persistent", "one-shot"):
+                    want.add((family, operation, f"sibling broken, {form}, new"))
+            want.add((family, "migrate", "sibling broken, persistent, new"))
+        self.assertEqual(want, cells)
+
+    def test_the_source_node_stopped_once_at_a_move_reads_the_same_on_either_lane(self):
+        fam = [(f, n, kv, m) for f, n, kv, m in self.tail if kv.get("fault") == "node:notready"]
+        self.assertEqual(12, len(fam))
+        self.assertEqual({"gen-fault-move"}, {f for f, _n, _kv, _m in fam})
+        self.assertEqual({("engine", 0), ("pd", 2), ("engine-mn", 0), ("engine", 2), ("engine-mn", 2), ("pd-mn", 2)},
+                         {(kv["topo"], kv["Nr"]) for _f, _n, kv, _m in fam}, "the six shape families")
+        self.assertEqual({"accept": 6, "surge": 6}, dict(collections.Counter(kv["at"] for _f, _n, kv, _m in fam)))
+        for folder, name, kv, m in fam:
+            self.assertEqual(("after-settle", 1, "moved", "migrate", "Auto", 0), (kv["lift"], kv["floor_soft"], kv["victim"], kv["mode"], kv["mig"], kv["inst"]), name)
+            self.assertNotIn("needs", kv, f"{name}: no policy relocates anything")
+            self.assertEqual(kv["Ne"] + 1, kv["ceil_e"], name)
+            self.assertEqual(("None", "after-settle"), (m["rp"], m["lift"]), name)
+            text = self.outputs[f"{folder}/{name}.yaml"]
+            reason = text.splitlines()[1]
+            self.assertIn('restartPolicy: "None"', text, name)
+            for words in ("once that has held for the settle window the kubelet is started again",
+                          "the move finishes on a live node, or is abandoned with a reason its record carries",
+                          "off the stopped node when the move completed", "reads the same on either lane"):
+                self.assertIn(words, reason, name)
+            self.assertEqual(kv["topo"].endswith("-mn"), "moved whole" in reason, name)
+        cells = {(c.shape_family, c.operation, coverage.fault_row_label(c.fault_rows()[0]), c.timing) for _f, _n, c in self._cases(fam)}
+        self.assertEqual({(family, "migrate", "node, one-shot", "migrating") for family in coverage.SHAPE_FAMILIES}, cells)
+        sys.path.insert(0, str(HERE.parents[2] / ".buildkite"))
+        try:
+            import generate_pipeline as gp
+        finally:
+            sys.path.pop(0)
+        lanes = {(topology, variant): cases for feature, topology, variant, _env, cases in gp._eval_lanes() if feature == "gen-fault-move"}
+        for topology, want in (("engine", 4), ("pd", 2), ("engine-mn", 4), ("pd-mn", 2)):
+            plain = [c for c in lanes[(topology, "")] if gp._eval_case_header_fields(c).get("fault") == "node:notready"]
+            self.assertEqual(want, len(plain), f"{topology}: the transient node rows run on the plain lane")
+            self.assertTrue(all(gp._eval_case_header_fields(c).get("lift") == "after-settle" for c in plain), topology)
+
+    def test_the_pushed_pull_failure_kept_fills_the_six_families(self):
+        fam = [(f, n, kv, m) for f, n, kv, m in self.tail if kv.get("fault") == "imagepull:new"]
+        self.assertEqual(6, len(fam))
+        self.assertEqual({"gen-lift"}, {f for f, _n, _kv, _m in fam})
+        self.assertEqual(6, len({(kv["topo"], kv["Nd"] > 0, kv["Nr"] > 0) for _f, _n, kv, _m in fam}), "six shape families")
+        for folder, name, kv, m in fam:
+            self.assertEqual(("never", "None", "none", kv["Ne"] + 1), (kv["lift"], kv["restart"], kv["co"], kv["ceil_e"]), name)
+            for k in ("during", "expect", "img", "once"):
+                self.assertNotIn(k, kv, name)
+            self.assertEqual(("SurgeThenDrain", generate_cases.LIFT_ROW_IMAGEPULL_NEW_KEPT), (m["strat"], m["liftrow"]), name)
+            text = self.outputs[f"{folder}/{name}.yaml"]
+            reason = text.splitlines()[1]
+            self.assertIn(f'instanceReadyTimeout: "{generate_cases.READINESS_NEW_TIMEOUT}"', text, name)
+            for words in ("is parked in ImagePullBackOff from its creation and is never Ready",
+                          "the roll holds at the Instance ready timeout with the new Instance Failed and the reason recorded",
+                          "the old revision keeps serving at the floor and the broken revision never serves",
+                          "a fix push that drops the image then lands on every Instance"):
+                self.assertIn(words, reason, name)
+        cells = {(c.shape_family, c.operation, coverage.fault_row_label(c.fault_rows()[0])) for _f, _n, c in self._cases(fam)}
+        self.assertEqual({(family, "push", "image pull, persistent, new") for family in coverage.SHAPE_FAMILIES}, cells)
+
+    def test_the_key_kept_away_under_a_scale_up_fills_the_six_families(self):
+        fam = [(f, n, kv, m) for f, n, kv, m in self.tail if kv.get("expect") == "waits"]
+        self.assertEqual(6, len(fam))
+        self.assertEqual({"gen-fault-scale"}, {f for f, _n, _kv, _m in fam})
+        self.assertEqual({("engine", 0), ("pd", 2), ("engine-mn", 0), ("engine", 2), ("engine-mn", 2), ("pd-mn", 2)},
+                         {(kv["topo"], kv["Nr"]) for _f, _n, kv, _m in fam}, "the six shape families")
+        for folder, name, kv, m in fam:
+            self.assertEqual(("scaledown", "configkey:missing", "idle", 0, kv["Ne"] + 1, kv["Ne"] + 1),
+                             (kv["mode"], kv["fault"], kv["during"], kv["inst"], kv["to_e"], kv["ceil_e"]), name)
+            self.assertNotIn("lift", kv, f"{name}: the key is kept")
+            self.assertEqual(("up1", "None"), (m["op"], m["rp"]), name)
+            text = self.outputs[f"{folder}/{name}.yaml"]
+            self.assertIn("kind: ConfigMap", text, name)
+            self.assertIn("configMapKeyRef", text, name)
+            reason = text.splitlines()[1]
+            for words in ("the scale-up is admitted and its new Instance", "waits on the same missing key with CreateContainerConfigError",
+                          "neither waiting Instance serves across the hold window", "reported, not judged",
+                          "the key returns only with the case's teardown"):
+                self.assertIn(words, reason, name)
+            self.assertTrue(any(12100 <= int(name[1:]) < 12200 for _ in [0]), f"{name}: the family's third continuation block")
+        cells = {(c.shape_family, c.operation, coverage.fault_row_label(c.fault_rows()[0]), c.outcome) for _f, _n, c in self._cases(fam)}
+        self.assertEqual({(family, "scale up", "config missing, persistent, running", "expect=waits") for family in coverage.SHAPE_FAMILIES}, cells)
+
+    def test_the_manifest_counts_the_tail_rows_with_their_families(self):
+        manifest = self.outputs[generate_cases.MANIFEST_REL]
+        self.assertIn("| configkey@up1:waits | 6 |", manifest)
+        self.assertIn("| image pull, persistent, new | 6 |", manifest)
+        self.assertIn("| crash-start on the router alone on the pushed revision | 2 |", manifest)
+        self.assertIn("| crash-start once on the router alone on the pushed revision | 2 |", manifest)
+        self.assertIn("| push:held:imagepull:router+move | 2 |", manifest)
 
 
 class CanaryWindowTest(unittest.TestCase):
@@ -7177,7 +7330,7 @@ class StrategySwitchUnderBreakFamilyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.outputs, rows = generate_cases.build_outputs()
-        fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-switch"]
+        fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-switch" and not m.get("tail")]
         cls.running = [(n, kv, m) for n, kv, m in fam if "fault" in m]
         cls.held = [(n, kv, m) for n, kv, m in fam if "held_break" in m]
         cls.plain = [(n, kv, m) for n, kv, m in fam if "fault" not in m and "held_break" not in m]
@@ -9960,7 +10113,7 @@ class PlainRollbackTest(unittest.TestCase):
 
     def test_breaks_beside_the_rollback_cross_the_six_shapes(self):
         outputs, rows = generate_cases.build_outputs()
-        fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-rollback"]
+        fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-rollback" and not m.get("tail")]
         self.assertEqual(484, len(fam), "the family's rows, the two plain rollbacks and the two held rollbacks on the router shapes")
         fam = [(n, kv, m) for n, kv, m in fam if not m.get("plain") and not m.get("single")]
         running = [(n, kv, m) for n, kv, m in fam if "fault" in m]
@@ -10059,6 +10212,38 @@ class RollbackUnderBreakTest(unittest.TestCase):
     def _pod(comp, inst, hash_, uid, ready=True, serving=True):
         return {"alive": True, "comp": comp, "inst": str(inst), "hash": hash_, "uid": uid,
                 "ready": ready, "serving": serving, "runner": "default"}
+
+    ERR = "# p999: x mode=rollout Ne=4 Nd=0 Nr=2 ceil_e=4 ceil_d=0 ceil_r=3 co=none topo=engine"
+
+    def test_a_router_only_push_carries_the_held_break_on_the_router(self):
+        for once in ("", " once=1"):
+            self.assertEqual([], self._errs(self.ERR + " rollback=1 during=held break=crash-start bump=router victimcomp=router" + once))
+        has = lambda frag, h: self.assertTrue(any(frag in e for e in self._errs(h)), (frag, h))
+        has("the router of a router-only push", self.ERR + " rollback=1 during=held break=crash-start victimcomp=router")
+        has("the router of a router-only push", self.ERR + " rollback=1 during=held break=crash-start bump=engine victimcomp=router")
+        has("the router of a router-only push", self.E1 + " rollback=1 during=held break=crash-start bump=router victimcomp=router")
+        has("the decoder of a prefill/decode service under a group", self.PD.replace("co=rolling", "co=none")
+            + " rollback=1 during=held break=crash-start victimcomp=decoder")
+        self.assertEqual([], self._errs(self.PD + " rollback=1 during=held break=crash-start victimcomp=decoder"))
+        self.assertEqual("", run._held_break_sibling_error({"victimcomp": "engine"}))
+        self.assertEqual("", run._held_break_sibling_error({"victimcomp": "router", "Nr": 2, "bump": "engine,router"}))
+        self.assertIn("bump=router", run._held_break_sibling_error({"victimcomp": "router", "Nr": 2}))
+        self.assertTrue(run._rollback_held_break_case({"rollback": 1, "during": "held", "break": "crash-start",
+                                                       "bump": "router", "victimcomp": "router"}))
+
+    def test_the_components_a_push_does_not_bump_keep_their_pods(self):
+        ctx = {"configured": {"engine", "router"}, "old_uids": {"engine": {"e0", "e1"}, "router": {"r0"}},
+               "pod_state": {"e0": self._pod("engine", 0, "old", "e0"), "e1": self._pod("engine", 1, "old", "e1"),
+                             "r0n": self._pod("router", 0, "new", "r0n")}}
+        notes, checks = [], []
+        self.assertEqual("PASS", run._bystander_checks(ctx, {"router"}, "PASS", notes, checks))
+        self.assertEqual(["  ✓ engine (not bumped) kept its pods throughout"], checks)
+        ctx["pod_state"]["e1"] = self._pod("engine", 1, "old", "e1b")
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._bystander_checks(ctx, {"router"}, "PASS", notes, checks))
+        self.assertIn("engine was not bumped but changed pods", checks[0])
+        self.assertEqual("INFRA-FAIL", run._bystander_checks(ctx, {"router"}, "INFRA-FAIL", [], []), "apparatus wins")
+        self.assertEqual("PASS", run._bystander_checks(ctx, {"engine", "router"}, "PASS", [], []), "nothing stands by")
 
     def test_running_revision_break_forms_beside_a_rollback(self):
         for extra in (" fault=crashloop:old form=start", " fault=crashloop:old form=load lift=after-settle",
@@ -10408,6 +10593,17 @@ class EditUnderBreakTest(unittest.TestCase):
     def _pod(comp, inst, hash_, uid, ready=True, serving=True):
         return {"alive": True, "comp": comp, "inst": str(inst), "hash": hash_, "uid": uid,
                 "ready": ready, "serving": serving, "runner": "default"}
+
+    ERR = "# p999: x mode=rollout Ne=4 Nd=0 Nr=2 ceil_e=4 ceil_d=0 ceil_r=3 co=none topo=engine"
+
+    def test_a_router_only_push_carries_the_held_break_on_the_router(self):
+        for once in ("", " once=1"):
+            self.assertEqual([], self._errs(self.ERR + self.EDIT + " during=held break=crash-start bump=router victimcomp=router" + once))
+        self._has("the router of a router-only push", self.ERR + self.EDIT + " during=held break=crash-start victimcomp=router")
+        self._has("the router of a router-only push", self.ERR + self.EDIT + " during=held break=crash-start bump=engine victimcomp=router")
+        self._has("the router of a router-only push", self.E1 + self.EDIT + " during=held break=crash-start bump=router victimcomp=router")
+        self.assertTrue(run._edit_held_break_case({"edit": "strategy:RecreatePod", "during": "held", "break": "crash-start",
+                                                   "bump": "router", "victimcomp": "router"}))
 
     def test_running_revision_break_forms_beside_an_edit(self):
         rows = (" fault=crashloop:idle form=start", " fault=crashloop:idle form=start lift=after-settle",
@@ -14758,6 +14954,41 @@ class BrokenOperationTest(unittest.TestCase):
         ctx["pod_state"]["e4"].update(serving=True, hash="new")
         self.assertEqual({"4": (True, False)}, run._broken_new_instances(ctx, "engine", {"0", "1", "2", "3"}))
 
+    def test_a_scale_up_beside_a_key_kept_away_states_that_both_instances_wait(self):
+        key = " fault=configkey:missing during=idle inst=0"
+        self.assertEqual([], self._errs(self.UP + key + " expect=waits"))
+        has = lambda frag, h: self.assertTrue(any(frag in e for e in self._errs(h)), (frag, h))
+        has("states expect=waits", self.UP + key + " expect=left")
+        has("states expect=waits", self.UP + key + " expect=repaired")
+        has("reads a scale-up whose new Instance waits on the key kept away", self.UP + " fault=crashloop:old form=start during=idle inst=0 expect=waits")
+        has("(expect=heals)", self.UP + key + " lift=after-settle expect=waits")
+        has("no outcome is stated", self.DOWN + key + " expect=waits")
+        ctx = self._ctx(5, 3, new_pods=[("e4", {"alive": True, "ready": False, "serving": False, "hash": "old", "inst": "4",
+                                                "comp": "engine", "uid": "u4"})])
+        fresh = {"4": (False, True)}
+        self.assertTrue(run._broken_up_converged(ctx, "engine", {"engine": 5}, "waits", fresh, True, waiting={"4"}))
+        self.assertFalse(run._broken_up_converged(ctx, "engine", {"engine": 5}, "waits", fresh, True, waiting=set()),
+                         "the new Instance must be waiting on the key")
+        self.assertFalse(run._broken_up_converged(ctx, "engine", {"engine": 5}, "waits", {}, True, waiting={"4"}), "no new Instance yet")
+        self.assertFalse(run._broken_up_converged(self._ctx(5, 2), "engine", {"engine": 5}, "waits", fresh, True, waiting={"4"}),
+                         "the healthy Instances keep serving")
+        with mock.patch.object(run, "_get_pod", lambda name: {"name": name}), \
+                mock.patch.object(run, "_pod_waiting_reason", lambda obj: run.CONFIGKEY_WAITING if obj["name"] == "e4" else None):
+            self.assertEqual({"4"}, run._broken_waiting_instances(ctx, "engine", {"0", "1", "2", "3"}))
+            self.assertEqual(set(), run._broken_waiting_instances(ctx, "engine", {"0", "1", "2", "3", "4"}))
+        f = {"crash_comp": "engine", "crash_inst": "0", "kind": "configkey"}
+        named = [("RestartTriggered", "OMENative component=engine instance=0 crash-loop repair: pod e0 wedged")]
+        notes, checks = [], []
+        self.assertEqual("PASS", run._broken_fate_checks(f, "waits", {"u0b"}, {"u0"}, 12.0, named, "PASS", notes, checks, serving=False))
+        self.assertIn("waits on the key kept away across the scale-up and the hold, never serving (rebuilt by the repair", checks[0])
+        self.assertIn("reported, not judged", checks[1])
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._broken_fate_checks(f, "waits", {"u0"}, {"u0"}, None, [], "PASS", notes, checks, serving=True))
+        self.assertIn("served while the key was kept away", checks[0])
+        src = inspect.getsource(run._broken_scale)
+        self.assertIn("_broken_waiting_instances(", src)
+        self.assertIn("waits_served_at is not None", src)
+
     def test_the_broken_instances_fate_is_judged_as_the_header_states(self):
         f = {"crash_comp": "engine", "crash_inst": "0", "kind": "crashloop"}
         named = [("RestartTriggered", "OMENative component=engine instance=0 crash-loop repair: pod e0 wedged")]
@@ -15113,6 +15344,67 @@ class MoveMomentFaultTest(unittest.TestCase):
         pods["e1"] = self._pod("engine", 1, "rebuilt")
         self.assertTrue(self._end(pods, fault, set(), False, idx="0")[0])
 
+    def test_a_transient_node_loss_at_a_move_is_lifted_once_the_bite_has_held(self):
+        f = {"kind": "node", "at": "accept", "lift": "after-settle", "fired": True, "fired_ts": 100.0, "node": "n0",
+             "crash_comp": "engine", "crash_inst": "0", "notes": []}
+        self.assertTrue(run._move_node_once(f))
+        self.assertFalse(run._move_node_once(dict(f, lift="after-recover")), "the kept form is relocated by the policy")
+        self.assertFalse(run._move_node_once(dict(f, at=None)), "a node loss at a hook has its own lift")
+        self.assertFalse(run._move_node_once(None))
+        pods = self._fleet()
+        ctx, mv, restored = {"pod_state": pods}, {"fired": True}, []
+        restore = lambda rec: restored.append(rec["node"]) or True
+        with mock.patch.object(run, "_node_ready", return_value=True), mock.patch.object(run, "_node_restore", restore):
+            run._move_node_lift_tick(ctx, f, mv, 110.0)
+            self.assertIsNone(f.get("bite_ts"), "a node still Ready has not bitten")
+        pods["e0"]["ready"] = pods["e0"]["serving"] = False
+        with mock.patch.object(run, "_node_ready", return_value=False), mock.patch.object(run, "_node_restore", restore):
+            run._move_node_lift_tick(ctx, f, mv, 111.0)
+            self.assertIsNone(f.get("bite_ts"), "read every other second")
+            run._move_node_lift_tick(ctx, f, mv, 120.0)
+            self.assertEqual(120.0, f["bite_ts"])
+            self.assertIn("read NotReady with no pod of engine Instance 0 serving there", f["notes"][-1])
+            run._move_node_lift_tick(ctx, f, mv, 120.0 + run.LIFT_SETTLE_S - 1)
+            self.assertEqual(([], None), (restored, f.get("lifted_at")), "the settle window has not passed")
+            run._move_node_lift_tick(ctx, f, mv, 120.0 + run.LIFT_SETTLE_S + 2)
+            self.assertEqual(["n0"], restored)
+            self.assertEqual(120.0 + run.LIFT_SETTLE_S + 2, f["lifted_at"])
+            self.assertIn("kubelet started again", f["notes"][-1])
+            run._move_node_lift_tick(ctx, f, mv, 400.0)
+            self.assertEqual(["n0"], restored, "lifted once")
+            unfired = dict(f, bite_ts=None, lifted_at=None, node_poll_ts=0.0)
+            run._move_node_lift_tick(ctx, unfired, {"fired": False}, 500.0)
+            self.assertIsNone(unfired["bite_ts"], "nothing is read before the move has fired the fault")
+        with mock.patch.object(run, "_node_ready", return_value=False), mock.patch.object(run, "_node_restore", return_value=False):
+            failed = dict(f, lifted_at=None, bite_ts=50.0, node_poll_ts=0.0)
+            run._move_node_lift_tick(ctx, failed, mv, 600.0)
+            self.assertIn("starting the kubelet of n0 again failed", failed["infra_fail"])
+
+    def test_the_transient_node_loss_verdict_reads_the_lift_and_the_end_nodes(self):
+        base = {"kind": "node", "at": "accept", "lift": "after-settle", "node": "n0", "fired_ts": 100.0}
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._move_node_lift_checks(dict(base), {"end_nodes": ["n2"]}, True, "PASS", notes, checks))
+        self.assertIn("the kubelet was never started again", checks[0])
+        notes, checks = [], []
+        self.assertEqual("PASS", run._move_node_lift_checks(dict(base, lifted_at=160.0), {"end_nodes": ["n2"]}, True, "PASS", notes, checks))
+        self.assertIn("started again 60s after the stop, once the bite had held", checks[0])
+        self.assertIn("ended off the stopped node n0", checks[1])
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._move_node_lift_checks(dict(base, lifted_at=160.0), {"end_nodes": ["n0"]}, True, "PASS", notes, checks))
+        self.assertIn("still has a pod on the stopped node n0", checks[1])
+        notes, checks = [], []
+        self.assertEqual("PASS", run._move_node_lift_checks(dict(base, lifted_at=160.0), {"end_nodes": ["n0"]}, False, "PASS", notes, checks),
+                         "an abandoned move leaves the Instance where it was")
+        self.assertEqual(1, len(checks))
+        notes, checks = [], []
+        kept = dict(base, lift="after-recover", kubelet_restored=True)
+        self.assertEqual("PASS", run._move_node_lift_checks(kept, {"end_nodes": ["n0"]}, True, "PASS", notes, checks))
+        self.assertIn("ⓘ node n0: kubelet started again after the move settled", checks[0])
+        self.assertEqual("INFRA-FAIL", run._move_node_lift_checks(dict(base), {}, True, "INFRA-FAIL", [], []), "apparatus wins")
+        src = inspect.getsource(run._move_fault_checks) + inspect.getsource(run._move_wait_end) + inspect.getsource(run._migrate)
+        self.assertIn("_move_node_lift_checks(", src)
+        self.assertEqual(2, src.count("_move_node_lift_tick("), "the lift is read while the move runs and while it settles")
+
     def _errs(self, header):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "p999.yaml"
@@ -15128,6 +15420,13 @@ class MoveMomentFaultTest(unittest.TestCase):
         self.assertEqual([], self._errs(ok(fault="fault=imagepull:old", at="drain", victim="sibling", nd=4, nr=2, topo="pd")))
         node = ok(fault="fault=node:notready lift=after-recover needs=forcedelete floor_soft=1", at="accept")
         self.assertEqual([], self._errs(node))
+        self.assertEqual([], self._errs(ok(fault="fault=node:notready lift=after-settle floor_soft=1", at="surge")))
+        self.assertTrue(any("holds on either lane and names no needs=" in e
+                            for e in self._errs(ok(fault="fault=node:notready lift=after-settle needs=forcedelete", at="accept"))))
+        self.assertTrue(any("freed only by the force-delete policy" in e
+                            for e in self._errs(ok(fault="fault=node:notready lift=after-recover", at="accept"))))
+        self.assertTrue(any("lifted once the bite has held" in e
+                            for e in self._errs(ok(fault="fault=node:notready lift=after-failed", at="accept"))))
         self.assertTrue(any("needs Nd>0, or Nr>0 for the router" in e for e in self._errs(ok(victim="sibling"))))
         self.assertEqual([], self._errs(ok(fault="fault=imagepull:old victimcomp=router", at="accept", victim="sibling", nr=2)))
         self.assertEqual([], self._errs(ok(fault="fault=crashloop:old form=load victimcomp=router", at="drain", victim="sibling", nr=2, topo="engine-mn")))
@@ -15412,7 +15711,7 @@ class GeneratedFaultMoveFamilyTest(unittest.TestCase):
     def _rows(self):
         outputs, rows = generate_cases.build_outputs()
         return outputs, [(n, kv, m) for folder, n, kv, m in rows
-                         if folder == "gen-fault-move" and not generate_cases.is_move_more_row(kv)]
+                         if folder == "gen-fault-move" and not generate_cases.is_move_more_row(kv) and not m.get("tail")]
 
     def test_generated_family_crosses_every_axis(self):
         outputs, fam = self._rows()
@@ -15476,7 +15775,7 @@ class GeneratedFaultMoveFamilyTest(unittest.TestCase):
     def _more_rows(self):
         outputs, rows = generate_cases.build_outputs()
         return outputs, [(n, kv, m) for folder, n, kv, m in rows
-                         if folder == "gen-fault-move" and generate_cases.is_move_more_row(kv)]
+                         if folder == "gen-fault-move" and generate_cases.is_move_more_row(kv) and not m.get("tail")]
 
     def test_the_move_under_every_fault_crosses_the_six_shapes(self):
         outputs, fam = self._more_rows()
@@ -18639,6 +18938,22 @@ class LiftFamilyTest(unittest.TestCase):
         run._lift_checks(f, "failed", "never", self._kept(bitten_at=None), {}, "PASS", [], [])
         self.assertIn("never showed", f["infra_fail"])
 
+    def test_the_pushed_pull_failure_kept_holds_the_roll_until_the_fix_push(self):
+        base = "# p999: x mode=rollout Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 co=none topo=engine fault=imagepull:new"
+        self.assertEqual([], self._errs(base + " lift=never"))
+        self.assertEqual([], self._errs(base + " lift=after-settle"))
+        has = lambda frag, h: self.assertTrue(any(frag in e for e in self._errs(h)), (frag, h))
+        has("is the push itself (no during=)", base + " lift=never during=settling")
+        has("does not combine with fault=imagepull:new lift=never (the roll holds; a fix push follows)", base + " lift=never img=x")
+        has("breaks the stable side", base)
+        has("lift=after-failed", base + " lift=after-failed")
+        src = inspect.getsource(run._imagepull_new_kept_roll)
+        for piece in ("_break_image(\"imagepull\")", "_broken_push_hold_then_fix(", "_readiness_new_checks(", 'image=""', "_broken_push_finish("):
+            self.assertIn(piece, src, piece)
+        route = inspect.getsource(run.run_case)
+        self.assertIn("_imagepull_new_kept_roll(", route)
+        self.assertLess(route.index("_imagepull_new_once_roll("), route.index("_imagepull_new_kept_roll("), "the lift picks the driver")
+
     def test_generated_family_fills_the_kept_config_row(self):
         outputs, rows = generate_cases.build_outputs()
         fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift"]
@@ -19182,7 +19497,8 @@ class LiftPushedPullTest(unittest.TestCase):
 
     def test_header_is_the_push_with_the_lift(self):
         self.assertEqual([], self._errs(self.BASE + " fault=imagepull:new lift=after-settle"))
-        for bad in (" fault=imagepull:new", " fault=imagepull:new lift=never",
+        self.assertEqual([], self._errs(self.BASE + " fault=imagepull:new lift=never"), "the kept form holds the roll")
+        for bad in (" fault=imagepull:new", " fault=imagepull:new lift=after-failed",
                     " fault=imagepull:new lift=after-settle during=settling",
                     " fault=imagepull:new lift=after-settle img=example.com/x:none",
                     " fault=imagepull:new lift=after-settle expect=heals",
@@ -19251,7 +19567,7 @@ class LiftPushedPullTest(unittest.TestCase):
 
     def test_generated_family_fills_the_pushed_pull_row(self):
         outputs, rows = generate_cases.build_outputs()
-        fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift" and kv["fault"] == "imagepull:new"]
+        fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift" and kv["fault"] == "imagepull:new" and not m.get("tail")]
         self.assertEqual(12, len(fam))
         self.assertEqual({generate_cases.LIFT_ROW_IMAGEPULL_NEW_LIFTED}, {m["liftrow"] for _n, _kv, m in fam})
         self.assertEqual(6, len({(kv["topo"], kv["Nd"] > 0, kv["Nr"] > 0) for _n, kv, _m in fam}), "six shape families")
@@ -19264,18 +19580,23 @@ class LiftPushedPullTest(unittest.TestCase):
                 path = Path(tmp) / f"{name}.yaml"
                 path.write_text(outputs[f"gen-lift/{name}.yaml"])
                 self.assertEqual([], run.validate_case_file(path), name)
-        whole = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift"]
+        whole = [(n, kv, m) for f, n, kv, m in rows if f == "gen-lift" and not m.get("tail")]
         self.assertEqual(132, len(whole))
         self.assertEqual(11, len({m["liftrow"] for _n, _kv, m in whole}),
                          "the six idle and pushed-revision rows and the five push rows of the running revision, one family")
 
     def test_ledger_reads_the_pushed_pull_as_one_shot_new(self):
         import coverage
-        cases = [c for c in coverage.load_cases(coverage.ISVCS / "gen-lift") if c.header.get("fault") == "imagepull:new"]
+        pushed = [c for c in coverage.load_cases(coverage.ISVCS / "gen-lift") if c.header.get("fault") == "imagepull:new"]
+        cases = [c for c in pushed if c.header.get("lift") == "after-settle"]
         self.assertEqual(12, len(cases))
         for case in cases:
             self.assertEqual(("image pull", "one-shot", "new"), case.fault_rows()[0], case.id)
             self.assertEqual("push", case.operation, case.id)
+        kept = [c for c in pushed if c.header.get("lift") == "never"]
+        self.assertEqual(6, len(kept))
+        for case in kept:
+            self.assertEqual((("image pull", "persistent", "new"), "push"), (case.fault_rows()[0], case.operation), case.id)
 
 
 class HookOperationTest(unittest.TestCase):

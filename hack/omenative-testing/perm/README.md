@@ -944,8 +944,11 @@ On the pushed revision `break=crash-start|crash-load|imagepull|configkey|stuck`
 the edit at `during=held` (once the roll is parked on the broken pod with
 the status saying why, waited for up to `HOLD_REASON_WAIT_S` after the
 break shows) or `during=rotating` (the first pushed pod); `victimcomp=decoder`
-puts the break on the grouped decoder of a prefill/decode service. After
-the edit the fix push, the runner override dropped (the victim runner put
+puts the break on the grouped decoder of a prefill/decode service, and
+`bump=router victimcomp=router` on the router of a router-only push on the
+engine+router shapes, where the engine is never rolled and the edit lands on
+the router's own strategy. The Components the push does not bump must keep
+their pods. After the edit the fix push, the runner override dropped (the victim runner put
 back onto its present key for `configkey`), must land under the edited
 spec on every bumped Instance, nothing of the broken revision may be
 created again or left, no hold may be left, no repair may name a bumped
@@ -1038,7 +1041,10 @@ when it ends on the starting revision without serving, its Component one
 short, and its row reads other than Ready. On the pushed revision,
 `during=held break=crash-start|crash-load|imagepull|configkey` (beside
 `break=stuck`) arms the bumped runner (`victimcomp=decoder` under a group
-on a prefill/decode service) so the roll parks on its first pod: the
+on a prefill/decode service; `bump=router victimcomp=router` for a
+router-only push on the engine+router shapes, where the engine is never
+rolled and the router alone comes back) so the roll parks on its first pod,
+the Components the push does not bump keeping their pods: the
 kubelet shows the break, the status says why (a rolloutHold gate from the
 retry ladder or the budget, a Failed row, a RetryHeld or InstanceFailed
 event; waited for up to `HOLD_REASON_WAIT_S` after the break shows), and
@@ -1348,7 +1354,13 @@ the broken Instance is what the operator acts on there, so the operation
 meets the Instance broken; a scale that does not take it then expects
 `expect=heals`: Ready and serving again on its running revision once the
 cause is gone, the same pod started again or rebuilt by a repair recorded
-at most once.
+at most once. The key kept away under a scale-up (`fault=configkey:missing`
+with no `lift=` and a target above the count) is read by the new Instance
+too, so that scale-up states `expect=waits`: the new Instance waits on the
+same missing key with `CreateContainerConfigError` on its pod and a row that
+never reads Ready, as the broken Instance does, across the scale-up and the
+hold window; the healthy Instances keep serving, nothing surges above the
+target, and a repair that rebuilds a waiting pod is reported, not judged.
 
 A pending cause is armed on the settled service before the operation
 instead of a break: `fault=taint:all` or `fault=quota:<n>` with
@@ -1497,10 +1509,19 @@ its Instance whole and serving at its source index. `fault=taint:all
 lift=after-settle|never` is the pending form: the taint is armed before the
 request, the replacement waits with `Unschedulable` on its row, nothing
 settled is taken down, and the move completes after the lift or the wait
-holds across the hold window. `stuck=held|failed` under `mode=migrate`
+holds across the hold window. `fault=node:notready at=accept|surge
+lift=after-settle` is the transient node loss: the source node's kubelet is
+stopped at the moment and started again once the node has read NotReady
+with no pod of the moved Instance serving on it for `LIFT_SETTLE_S`, so the
+move settles on the kubelet's return (no policy relocates anything and the
+cell reads the same on either lane); the verdict adds that the kubelet was
+started again once the bite had held and that a move that completed left
+the moved Instance off the stopped node, beside the move's own checks. `stuck=held|failed` under `mode=migrate`
 (with `img=`, or `break=crash-start|crash-load|configkey|stuck`; `bump=`
 names the member the push bumps, `victimcomp=` the one whose runner carries
-the break) requests the move once the push has reached the named state:
+the break; `bump=router` with `img=` is the router's own push parked beside
+the engine's move on the engine+router shapes) requests the move once the
+push has reached the named state:
 the move finishes or is abandoned with a reason within budget, recorded
 once; the moved Instance ends whole and serving at the index the record
 names (the revision its replacement runs is reported, not judged); the
@@ -2043,6 +2064,14 @@ cell on the six shape families (the surge strategy, the env edit):
   (the switch landed late), a pod restarted or replaced while it only failed
   readiness fails the case.
 
+- **`fault=imagepull:new` with `lift=never`** is the pushed revision's pull
+  failure kept: the bumped engine runs the unpullable reference, so the
+  push's first pod is parked in `ImagePullBackOff` and never Ready; the roll
+  must hold at the Instance ready timeout with the reason recorded while the
+  old revision keeps serving and the broken one never serves, then a fix
+  push that drops the image override must land on every Instance with
+  nothing of the broken revision left (the kept key's verdict, read on the
+  image). The generated `isvcs/gen-lift/` family runs it on the six shapes.
 - **`fault=imagepull:old` with `during=idle lift=after-settle expect=heals`**
   and **`fault=imagepull:new` with `lift=after-settle`** are the one-shot
   forms of the image pull. At idle the running revision's victim is pointed
@@ -2938,7 +2967,12 @@ has a case; the single cells the shape axis left on the engine-behind-a-router
 shapes (a node lost at steady state, the key put back, a pull failure at
 steady state and under a push, a pod or a gang leader deleted under a push
 and once at a canary step, a rollback at the held moment) are generated the
-same way in the family that owns each verb.
+same way in the family that owns each verb. The ledger's last cells (a
+router-only push parked by its own break, rolled back and edited at the held
+moment and moved beside, on the engine+router shapes; the source node stopped
+once at a moment of a move, the pushed revision's pull failure kept, and the
+running revision's key kept away under a scale-up, on the six shapes) are
+minted after every control row of every family, so no earlier id moves.
 
 ```bash
 python3 coverage.py            # the Markdown ledger on stdout
@@ -2975,8 +3009,10 @@ The ledger's cell is (shape family, operation, fault row):
   `cordon:source` are `node`, `quota:<n>` is `quota`, `ctrlrestart` is
   `controller restart`; `mode=kill`, `podkill` and `pkill=1` are `pod
   deleted by hand` on a single-pod service and `gang member lost` on a gang;
-  a canary's `img=` is `image pull` on the new revision, or `sibling broken`
-  when `imgcomp=` names the decoder or the router; `break=stuck` is
+  a canary's or a stuck push's `img=` is `image pull` on the new revision,
+  or `sibling broken` when `imgcomp=` names the decoder or the router (beside
+  `edit=image` it is the image the edit lands, no fault), as is
+  `imagepull:new` kept (`lift=never`); `break=stuck` is
   `readiness never passes`; a runtime-rev `expect=recover` is `image pull`
   on the new revision; `analysis=breach` is `metric breach` (one-shot when
   `health=breach` decays under `analysis=pass`), as is `fault=metric:*` (the
@@ -3010,7 +3046,11 @@ creates no new revision (steady state); a metric breach and an unusable
 analysis source are read by a canary step's analysis gate alone; a one-shot
 fault on the new revision is over before a scale, a move or a delete can be
 aimed at it, so only the persistent row stays under those (what the
-operation meets is a plain roll, the operation+operation overlap). The
+operation meets is a plain roll, the operation+operation overlap); a
+repeating node loss during a delete has no state left to lose after the
+first loss (a pod deleted by hand, a lost gang member, an eviction or a
+preemption repeats only once what it took has come back, and a delete
+brings nothing back), so only the one-shot loss stays under a delete. The
 ledger prints the cells each reason removes; `--check` fails on a removed
 cell that has a case and on a rule that removes nothing. The
 report lists the empty cells biggest holes first (the fault rows,

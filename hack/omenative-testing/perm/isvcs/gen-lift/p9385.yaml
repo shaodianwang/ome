@@ -1,0 +1,20 @@
+# p9385: [gen] imagepull new kept engine-mn W1+router N=2 SurgeThenDrain s1 rp None  Ne=2 Nd=0 Nr=2 ceil_e=3 ceil_d=0 ceil_r=2 restart=None fault=imagepull:new co=none topo=engine-mn lift=never
+# reason: the push points the engine runner at an image that cannot be pulled, so the pushed revision's first engine leader pod, the surge Instance's pod (nothing drains; floor N), is parked in ImagePullBackOff from its creation and is never Ready; the image is not put back: the roll holds at the Instance ready timeout with the new Instance Failed and the reason recorded (a RetryHeld or InstanceFailed event), the old revision keeps serving at the floor and the broken revision never serves; a fix push that drops the image then lands on every Instance with nothing of the broken revision left; the router stays as it was
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9385 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", instanceReadyTimeout: "90s", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

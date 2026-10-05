@@ -142,6 +142,8 @@ NOT_DERIVABLE = [
 # names the cells it removes, and a cell counts under the first rule that
 # matches. `--check` fails on a removed cell that has a case.
 GATE_FAULTS = ("metric breach", "analysis source unusable")
+# The pod losses whose persistent form is the loss applied again once what it took has come back.
+REPEATING_LOSS_FAULTS = ("pod deleted by hand", "gang member lost", "evicted or preempted")
 # The only cases the pause and freeze columns hold: the kill family's
 # (`mode=kill pause=`), a pod deleted by hand on a single-pod Instance or a
 # gang member lost, once, then paused, on the shapes that family runs.
@@ -178,6 +180,11 @@ EXCLUDED_CELLS = [
      "stays broken is the persistent row",
      lambda family, operation, row: operation in ("scale up", "scale down", "migrate", "delete")
      and row[1] == "one-shot" and row[2] == "new"),
+    # the repeating form of a pod loss under a delete: nothing comes back for the repeat to take
+    ("a repeating node loss during a delete has no state left to lose after the first loss: a pod deleted by hand, a "
+     "lost gang member, an eviction or a preemption repeats only once what it took has come back, and a delete brings "
+     "nothing back",
+     lambda family, operation, row: operation == "delete" and row[0] in REPEATING_LOSS_FAULTS and row[1] == "persistent"),
 ]
 
 
@@ -197,8 +204,9 @@ RESTART_POLICY_NAMES = {"None", "RecreateInstanceOnPodRestart"}
 ROLLOUT_EDITS = {"image", "env", "resources", "probe"}
 IDLE_EXPECTS = {"repaired", "held", "heals", "parked", "relocated", "failed"}
 # What a scale that does not take a broken Instance leaves it at: repaired,
-# left as the fault left it, or healed once a one-shot cause is gone.
-BROKEN_UP_EXPECTS = {"repaired", "left", "heals"}
+# left as the fault left it, healed once a one-shot cause is gone, or
+# waiting on the key kept away, the new Instance with it.
+BROKEN_UP_EXPECTS = {"repaired", "left", "heals", "waits"}
 
 HEADER_VALUES = {
     "mode": {"rollout", "scaledown", "partition", "rebump", "migrate", "kill", "canary", "runtimerev",
@@ -769,7 +777,9 @@ def classify_faults(h, mode, pods, strategy, verbs):
         # one competing write, or writes until the operation completes
         faults.append(("apiserver conflict", "persistent" if h.get("form") == "persist" else "one-shot", "-",
                        f"competing writer on the {h.get('target', 'isvc')}"))
-    if h.get("img"):
+    # img= names the unpullable image a canary or a stuck push carries; beside
+    # edit=image it is the image the edit lands, and no fault.
+    if h.get("img") and h.get("edit") != "image":
         component = str(h.get("imgcomp") or h.get("bump", "engine"))
         sibling = component in ("decoder", "router")
         faults.append(("sibling broken" if sibling else "image pull", "persistent", "new", component))

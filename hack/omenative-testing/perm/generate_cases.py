@@ -730,7 +730,7 @@ GEN_BLOCKS = {
 # A folder mints from its block until the block is full, then from its
 # continuation block; a folder owns an id that lies in either.
 GEN_CONTINUATIONS = {
-    "gen-fault-scale": [(9400, 9500), (10100, 10200)],
+    "gen-fault-scale": [(9400, 9500), (10100, 10200), (12100, 12200)],
     "gen-fault-delete": (10200, 10300),
     "gen-evict": (9500, 9600),
     "gen-preempt": (9600, 9700),
@@ -1872,7 +1872,7 @@ def _switch_fault_reason(fault, form, lift, hook, field, from_, to, co, topo, ro
     return out
 
 
-def _switch_held_reason(kind, once, hook, field, from_, to, co, topo, router, victim, surge, unavail):
+def _switch_held_reason(kind, once, hook, field, from_, to, co, topo, router, victim, surge, unavail, alone=False):
     pod = "leader pod" if is_mn(topo) else "pod"
     edit = _switch_edit_words(field, from_, to)
     when = "as the break shows" if hook == "held" else "at the first pushed pod"
@@ -1899,7 +1899,11 @@ def _switch_held_reason(kind, once, hook, field, from_, to, co, topo, router, vi
         out += f"; the budget (maxSurge {surge}, maxUnavailable {unavail}) is valid under both strategies"
     else:
         out += f"; the roll runs under {SWITCH_POLICY_STRAT} (maxSurge {surge}, maxUnavailable {unavail}) and the policy decides what a pod restart rebuilds"
-    if victim != "engine":
+    if victim != "engine" and alone:
+        out += (f"; the push bumps the {victim} alone, which rolls under its own strategy and its own retry ladder: the "
+                f"engine is never rolled, every engine Instance keeps its pods and keeps serving on its running revision "
+                f"throughout, and the edit lands on the {victim}'s own strategy")
+    elif victim != "engine":
         out += f"; the engine's own roll converges or holds meanwhile and the fix lands on it too"
     if co != "none":
         out += "; the group paces engine and decoder together and both carry the edit"
@@ -4169,7 +4173,7 @@ def _rollback_fault_reason(fault, form, lift, hook, strat, co, topo, router, vic
     return out
 
 
-def _rollback_held_reason(kind, once, strat, co, topo, router, victim):
+def _rollback_held_reason(kind, once, strat, co, topo, router, victim, alone=False):
     pod = "leader pod" if is_mn(topo) else "pod"
     if once and kind in ROLLBACK_HELD_ONCE_WORDS:
         broken, lifted = ROLLBACK_HELD_ONCE_WORDS[kind]
@@ -4195,7 +4199,11 @@ def _rollback_held_reason(kind, once, strat, co, topo, router, victim):
         out += "; the first Instance drained is rebuilt on the broken revision and comes back drain-first within the unavailable budget"
     else:
         out += "; the broken surge Instance never joins rotation and is withdrawn under the surge budget"
-    if victim != "engine":
+    if victim != "engine" and alone:
+        out += (f"; the push bumps the {victim} alone, which rolls under its own strategy and its own retry ladder: the "
+                f"engine is never rolled, every engine Instance keeps its pods and keeps serving on its running revision "
+                f"throughout, and the {victim} alone comes back")
+    elif victim != "engine":
         out += f"; the engine's own roll converges or holds meanwhile and comes back with the {victim}"
     if co != "none":
         out += "; the run that targeted the new revision closes as superseded and a fresh run brings the group back"
@@ -9110,6 +9118,7 @@ def build_outputs():
     emit_lift(add)
     _emit_plain_ops(add)
     _emit_leftover_singles(add)
+    _emit_tail_cells(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -10324,6 +10333,183 @@ def write(outputs, root=ISVCS):
         path = Path(root) / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
+
+
+# ── the ledger's last cells ──────────────────────────────────────────────────
+# Rows added to a family after its control rows were minted follow them in
+# the family's block, so every earlier id keeps its case; each is one case
+# per ledger cell. The router-only push parked by its own break on the
+# engine+router shapes: rolled back and edited at the held moment, kept and
+# once, and a move requested beside it.
+ROUTER_PUSH_SHAPES = SINGLE_ROUTER_SHAPES
+ROUTER_PUSH_BREAK = "crash-start"
+ROUTER_PUSH_STRAT = PLAIN_STRAT
+ROUTER_PUSH_EDIT = SWITCH_HELD_MOMENTS[0]
+
+
+def _router_push_comps(topo, n, w, nr, r_life, ann=None):
+    """The fleet of a router-only push: the engine, never bumped, on its
+    dormant canonical lifecycle; the router on the lifecycle the push rolls
+    it under."""
+    return [lib.comp("engine", n, w if is_mn(topo) else 0, lib.lifecycle()),
+            lib.comp("router", nr, 0, r_life, ann=ann)]
+
+
+def _emit_router_push_breaks(add):
+    kind = ROUTER_PUSH_BREAK
+    strat, surge, unavail = ROUTER_PUSH_STRAT
+    hook, field, from_, to = ROUTER_PUSH_EDIT
+    for topo, n, w, nr in ROUTER_PUSH_SHAPES:
+        tag = f"{shape_tag(topo, w, nr)} N={n}"
+        base = dict(**counts(topo, n, nr), ceil_e=n, ceil_d=0, ceil_r=nr + surge, co="none", topo=topo,
+                    bump="router", victimcomp="router")
+        for once in (False, True):
+            words = kind + (" once" if once else "") + " on the router alone"
+            kv = dict(base, rollback=1, during="held")
+            kv["break"] = kind
+            if once:
+                kv["once"] = 1
+            r_life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail,
+                                   ready_timeout=(None if once else ROLLBACK_HELD_READY_TIMEOUT))
+            meta = dict(strat=strat, verb=f"rollback:held:{kind}:router" + (":once" if once else ""), hook="held",
+                        held_break=kind, once=once, tail=True)
+            add("gen-rollback", f"{GEN_MARK} rollback at held by {words} {tag} {strat} {budget_tag(strat, surge, unavail)} co none",
+                kv, _router_push_comps(topo, n, w, nr, r_life, ann=ROLLBACK_START_ANN),
+                _rollback_held_reason(kind, once, strat, "none", topo, True, "router", alone=True), meta,
+                cell=("tail", "rollback-held", kind, once, topo, w, nr))
+            life, esurge, eunavail = _switch_moment_life(field, from_, to,
+                                                         ready_timeout=(None if once else SWITCH_HELD_READY_TIMEOUT))
+            kv = dict(base, ceil_r=nr + esurge, edit=_switch_edit_value(field, to), during=hook)
+            kv["break"] = kind
+            if once:
+                kv["once"] = 1
+            meta = dict(strat=from_, verb=f"edit:{hook}+break:{kind}:router" + (":once" if once else ""), hook=hook,
+                        held_break=kind, once=once, edit=f"{field} {from_} to {to} at {hook} by {words}",
+                        switchbreak=f"{words} on the pushed revision", tail=True)
+            add("gen-switch", f"{GEN_MARK} switch {hook} by {words} {tag} {field} {from_} to {to} co none", kv,
+                _router_push_comps(topo, n, w, nr, life),
+                _switch_held_reason(kind, once, hook, field, from_, to, "none", topo, True, "router", esurge, eunavail, alone=True),
+                meta, cell=("tail", "switch-held", kind, once, topo, w, nr))
+        kv = dict(mode="migrate", **counts(topo, n, nr), ceil_e=n + 1, ceil_d=0, ceil_r=nr + surge, co="none", topo=topo,
+                  bump="router", img=runtime_fixtures.UNPULLABLE_IMAGE, mig="Auto", inst=0, stuck="held")
+        meta = dict(strat=strat, verb="push:held:imagepull:router+move", rp="None", stuck="held", victim="router",
+                    at="accept", who="sibling", tail=True)
+        add("gen-fault-move", f"{GEN_MARK} fault-move stuck held imagepull on router alone {tag} {strat} {budget_tag(strat, surge, unavail)}",
+            kv, _router_push_comps(topo, n, w, nr, lib.lifecycle(strat=strat, surge=surge, unavail=unavail)),
+            _move_stuck_reason("imagepull", "held", topo, w, nr, "router"), meta,
+            cell=("tail", "fault-move-stuck", "imagepull", "held", "router", topo, w, nr))
+
+
+# The source node stopped once at a moment of the move: the kubelet is
+# started again once the bite has held (lift=after-settle), so the move
+# settles on the kubelet's return and no policy relocates anything; read on
+# either lane, at the moments the source is still needed.
+MOVE_NODE_ONCE_RP = "None"
+
+
+def _move_node_once_reason(at, topo, w, nr):
+    out = (f"{_move_request_words(topo, w, nr)} and the kubelet of the node under the moved Instance's source pod is "
+           f"stopped {MOVE_WHEN[at]}; the node reads NotReady and the source serves nothing while the move's replacement "
+           f"surges elsewhere; once that has held for the settle window the kubelet is started again, so a source already "
+           f"on its way out leaves with it and the pods the node ran that the move did not take come back on their own: "
+           f"the move finishes on a live node, or is abandoned with a reason its record carries, within budget and is "
+           f"recorded once; the Instance ends whole, Ready and serving on one pod set, off the stopped node when the move "
+           f"completed, the engine holds N whole Instances on distinct indices and every row settles; the floor is "
+           f"waived: the dead node takes every pod on it, peers and siblings included, until the kubelet is back; nothing "
+           f"is relocated by policy, so the cell reads the same on either lane")
+    if is_mn(topo):
+        out += "; each Instance is a gang, moved whole, and its members on live nodes may keep their pods"
+    return out
+
+
+def _emit_move_node_once(add):
+    rp = MOVE_NODE_ONCE_RP
+    for topo, n, w, nr in MOVE_SHAPES:
+        base = dict(mode="migrate", **counts(topo, n, nr), ceil_e=n + 1, ceil_d=(n if is_pd(topo) else 0),
+                    ceil_r=router_count(topo, nr))
+        for at in MOVE_NODE_MOMENTS:
+            kv = dict(base, fault=f"node:{NODE_PARAM}", floor_soft=1, co="none", topo=topo,
+                      victim="moved", mig="Auto", inst=0, at=at, lift="after-settle")
+            meta = dict(strat="SurgeThenDrain", verb=f"node@move-{at}:after-settle", rp=rp, victim="engine", at=at,
+                        who="moved", lift="after-settle", tail=True)
+            desc = f"{GEN_MARK} fault-move node once at {at} on moved {shape_tag(topo, w, nr)} N={n} rp {rp}"
+            life = lib.lifecycle(restart=RP_FULL[rp])
+            d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+            add("gen-fault-move", desc, kv, comps(topo, n, w, life, d_life=d_life, nr=nr),
+                _move_node_once_reason(at, topo, w, nr), meta,
+                cell=("tail", "fault-move", "node", "after-settle", at, topo, w, nr))
+
+
+# The pushed revision's pull failure kept to the fix push, on the six shapes
+# under the surge strategy: the roll holds with its reason, the old revision
+# keeps serving, and the fix push that drops the image lands.
+LIFT_ROW_IMAGEPULL_NEW_KEPT = "image pull, persistent, new"
+
+
+def _lift_imagepull_new_kept_reason(strat, topo, router):
+    pod = "leader pod" if is_mn(topo) else "pod"
+    out = (f"the push points the engine runner at an image that cannot be pulled, so the pushed revision's first engine "
+           f"{pod}, {_lift_first_pod(strat)}, is parked in ImagePullBackOff from its creation and is never Ready; the "
+           f"image is not put back: the roll holds at the Instance ready timeout with the new Instance Failed and the "
+           f"reason recorded (a RetryHeld or InstanceFailed event), the old revision keeps serving at the floor and the "
+           f"broken revision never serves; a fix push that drops the image then lands on every Instance with nothing of "
+           f"the broken revision left")
+    untouched = _lift_untouched(topo, router)
+    return out + (f"; {untouched}" if untouched else "")
+
+
+def _emit_pull_kept_pushes(add):
+    strat, surge, unavail = LIFT_IDLE_STRAT
+    rp = LIFT_PUSH_RP
+    for topo, n, w, router in LIFT_SHAPES:
+        shape = _lift_shape(topo, w, router)
+        kv = dict(**_crash_once_counts(topo, n, router), **_crash_once_ceilings(topo, n, router, strat, surge),
+                  restart=rp, fault="imagepull:new", co="none", topo=topo, lift="never")
+        meta = dict(strat=strat, verb="imagepull:new:never", rp=rp, liftrow=LIFT_ROW_IMAGEPULL_NEW_KEPT, tail=True)
+        desc = f"{GEN_MARK} imagepull new kept {shape} N={n} {strat} {budget_tag(strat, surge, unavail)} rp {rp}"
+        life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp], ready_timeout=READINESS_NEW_TIMEOUT)
+        add("gen-lift", desc, kv, _crash_once_comps(topo, n, w, router, life, rp),
+            _lift_imagepull_new_kept_reason(strat, topo, router), meta,
+            cell=("tail", "lift", "imagepull", "never", "new", topo, w, router))
+
+
+# The running revision's key kept away under a scale-up on the six shapes:
+# the new Instance is rendered from the same runner, so it waits on the same
+# key beside the broken Instance, with its reason, and neither serves until
+# the key returns with the teardown.
+BROKEN_WAIT_OP = "up1"
+
+
+def _broken_configkey_up_reason(topo, n, target, nr):
+    how = _broken_more_how("configkey", None, topo)
+    return (f"{how}; the crash-loop repair opens as soon as the wait is seen and rebuilds the pod, which waits on the same key, "
+            f"so the Instance serves nothing while the key is away; once the status reports Instance {BROKEN_INST} broken "
+            f"{_broken_more_op_words(n, target)}: the scale-up is admitted and its new Instance {n}, rendered from the same "
+            f"runner, waits on the same missing key with CreateContainerConfigError on its pod and a row that never reads "
+            f"Ready, as the broken Instance does; the healthy Instances keep their pods and keep serving throughout (never "
+            f"below {n - 1} Ready), nothing surges above {target}, neither waiting Instance serves across the hold window, "
+            f"and a repair that rebuilds a waiting pod is reported, not judged; the key returns only with the case's teardown"
+            + _broken_tail(topo, "none", nr=nr))
+
+
+def _emit_key_kept_scale_up(add):
+    rp, op = BROKEN_MORE_RP, BROKEN_WAIT_OP
+    for topo, n, w, nr in BROKEN_SHAPES:
+        target = dict(BROKEN_MORE_OPS[n])[op]
+        kv = dict(_broken_more_kv("scaledown", topo, n, "configkey", None, target, nr, op, target), expect="waits")
+        meta = dict(strat="(dormant: nothing rolls)", verb=f"configkey@{op}:waits", rp=rp, op=op, victim="engine", tail=True)
+        add("gen-fault-scale", f"{GEN_MARK} broken configkey waits {op} {shape_tag(topo, w, nr)} N={n} rp {rp}", kv, None,
+            _broken_configkey_up_reason(topo, n, target, nr), meta,
+            cell=("tail", "broken-more", "configkey", "waits", topo, w, op, nr),
+            body=functools.partial(_broken_configkey_body, topo=topo, n=n, w=w, nr=nr))
+
+
+def _emit_tail_cells(add):
+    _emit_router_push_breaks(add)
+    _emit_move_node_once(add)
+    _emit_pull_kept_pushes(add)
+    _emit_key_kept_scale_up(add)
+
 
 
 def main():

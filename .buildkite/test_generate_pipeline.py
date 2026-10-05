@@ -1561,9 +1561,10 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-fault-scale", "pd-mn", "")], 6)
         for topology, shards in (("engine", 5), ("engine-mn", 5), ("pd", 3), ("pd-mn", 3)):
             self.assertEqual(shard_counts[("gen-fault-delete", topology, "")], shards)
-        # The move beside the remaining faults rides the plain lanes; the
+        # The move beside the remaining faults rides the plain lanes, the
+        # transient node loss and the router's held push with them; the
         # exclusive taint and preemption cells shard on their own minutes.
-        for topology, plain, policy in (("engine", 11, 4), ("engine-mn", 11, 4), ("pd", 6, 2), ("pd-mn", 7, 2)):
+        for topology, plain, policy in (("engine", 13, 4), ("engine-mn", 13, 4), ("pd", 7, 2), ("pd-mn", 8, 2)):
             self.assertEqual(shard_counts[("gen-fault-move", topology, "")], plain)
             self.assertEqual(shard_counts[("gen-fault-move", topology, gp.EVAL_FORCE_DELETE_SLUG)], policy)
         self.assertEqual(shard_counts[("gen-fault-edit", "engine", "")], 6)
@@ -1608,7 +1609,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-lift", "engine-mn", "")], 3)
         self.assertEqual(shard_counts[("gen-lift", "pd", "")], 2)
         self.assertEqual(shard_counts[("gen-lift", "pd-mn", "")], 2)
-        self.assertEqual(job_count, 1137)
+        self.assertEqual(job_count, 1143)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin
@@ -2193,7 +2194,7 @@ class TestEvalTargeted(PipelineTestCase):
         self.assertEqual(gp._top_level_keys(batches[-1]), ["chart-ome-release"])
         # The fixture round, 5% sampled under the pinned commit: the pin
         # moves with the corpus like the full and smoke totals.
-        self.assertEqual(sum(gp._job_count(document) for document in batches), 423)
+        self.assertEqual(sum(gp._job_count(document) for document in batches), 420)
 
 
 class TestEvalVerdicts(unittest.TestCase):
@@ -3082,9 +3083,9 @@ class TestEvalMode(PipelineTestCase):
         committed = sorted(case for _, _, cases in self.groups for case in cases)
         default = sorted(case for child in self.runner_jobs(self.full, scheduler="") for case in self.cases_of(child))
         self.assertEqual(default, committed)
-        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 1137)
-        self.assertEqual(len(self.runner_jobs(self.full)), 2600)
-        self.assertEqual(len(self.full), 2614)
+        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 1143)
+        self.assertEqual(len(self.runner_jobs(self.full)), 2613)
+        self.assertEqual(len(self.full), 2627)
         self.assertEqual(len(self.smoke), 203)
         self.assertEqual(len(self.smoke_batches), 3)
         self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 312)
@@ -3256,7 +3257,7 @@ class TestPipelineUploads(PipelineTestCase):
     def test_todays_corpus_uploads_within_the_limit_and_the_total_is_pinned(self):
         self.assert_uploads_are_well_formed(self.batches, self.children)
         self.assertGreater(len(self.batches), 2)
-        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2724)
+        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2737)
 
     def test_the_full_round_records_its_verdicts_after_every_eval_group(self):
         last = self.batches[-1]
