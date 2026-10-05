@@ -2193,7 +2193,7 @@ class TestEvalTargeted(PipelineTestCase):
         self.assertEqual(gp._top_level_keys(batches[-1]), ["chart-ome-release"])
         # The fixture round, 5% sampled under the pinned commit: the pin
         # moves with the corpus like the full and smoke totals.
-        self.assertEqual(sum(gp._job_count(document) for document in batches), 416)
+        self.assertEqual(sum(gp._job_count(document) for document in batches), 423)
 
 
 class TestEvalVerdicts(unittest.TestCase):
@@ -3083,8 +3083,8 @@ class TestEvalMode(PipelineTestCase):
         default = sorted(case for child in self.runner_jobs(self.full, scheduler="") for case in self.cases_of(child))
         self.assertEqual(default, committed)
         self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 1137)
-        self.assertEqual(len(self.runner_jobs(self.full)), 2601)
-        self.assertEqual(len(self.full), 2615)
+        self.assertEqual(len(self.runner_jobs(self.full)), 2600)
+        self.assertEqual(len(self.full), 2614)
         self.assertEqual(len(self.smoke), 203)
         self.assertEqual(len(self.smoke_batches), 3)
         self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 312)
@@ -3256,7 +3256,7 @@ class TestPipelineUploads(PipelineTestCase):
     def test_todays_corpus_uploads_within_the_limit_and_the_total_is_pinned(self):
         self.assert_uploads_are_well_formed(self.batches, self.children)
         self.assertGreater(len(self.batches), 2)
-        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2725)
+        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2724)
 
     def test_the_full_round_records_its_verdicts_after_every_eval_group(self):
         last = self.batches[-1]
