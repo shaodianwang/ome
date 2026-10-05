@@ -446,19 +446,16 @@ func TestAllUnknownRuntimeRetainsDesiredAuthority(t *testing.T) {
 	}
 }
 
-// TestAllUnreadableObservationKeepsAcknowledgedCandidate settles two serving
-// homes, then fails one home's inventory read for a single pass. That pass
-// reports the gap through the observation flag alone: the home keeps its
-// acknowledged plan, endpoint and admission, every decision holds, and the
-// next readable pass restores the known observation.
-func TestAllUnreadableObservationKeepsAcknowledgedCandidate(t *testing.T) {
-	const replicas = 3
+// settleAllServingHomes converges two serving homes on an All source and
+// returns the fixture with its settled status.
+func settleAllServingHomes(t *testing.T, replicas int32) (*backendFixture, *v1beta1.InferenceService) {
+	t.Helper()
 	names := []string{"member-a", "member-b"}
 	f := newBackendFixture(t, v1beta1.PlacementModeAll)
 	if err := f.reconciler.Get(t.Context(), client.ObjectKeyFromObject(f.source), f.source); err != nil {
 		t.Fatal(err)
 	}
-	f.source.Spec.Engine.MinReplicas = ptr.To(replicas)
+	f.source.Spec.Engine.MinReplicas = ptr.To(int(replicas))
 	if err := f.reconciler.Update(t.Context(), f.source); err != nil {
 		t.Fatal(err)
 	}
@@ -482,6 +479,17 @@ func TestAllUnreadableObservationKeepsAcknowledgedCandidate(t *testing.T) {
 	if condition := settled.Status.GetCondition(v1beta1.PlacementConverged); condition == nil || condition.Status != corev1.ConditionTrue {
 		t.Fatalf("serving homes did not settle: %+v", condition)
 	}
+	return f, settled
+}
+
+// TestAllUnreadableObservationKeepsAcknowledgedCandidate settles two serving
+// homes, then fails one home's inventory read for a single pass. That pass
+// reports the gap through the observation flag alone: the home keeps its
+// acknowledged plan, endpoint and admission, every decision holds, and the
+// next readable pass restores the known observation.
+func TestAllUnreadableObservationKeepsAcknowledgedCandidate(t *testing.T) {
+	const replicas = 3
+	f, settled := settleAllServingHomes(t, replicas)
 	before := candidateOf(t, settled, "member-a")
 	if !before.ObservationKnown || before.AppliedPlanID != settled.Status.Placement.Plan.ID || before.ReadyReplicas != replicas || before.Endpoint == nil {
 		t.Fatalf("settled home is not serving its acknowledged plan: %+v", before)
@@ -531,5 +539,40 @@ func TestAllUnreadableObservationKeepsAcknowledgedCandidate(t *testing.T) {
 	}
 	if condition := recovered.Status.GetCondition(v1beta1.PlacementConverged); condition == nil || condition.Status != corev1.ConditionTrue {
 		t.Fatalf("readable observation did not reconverge: %+v", condition)
+	}
+}
+
+// TestAllAbsentMemberWithUnreadableInventoryIsUnknown settles two serving
+// homes, then removes one home's member copy while its component inventory
+// cannot be listed. The standing read is conclusively absent and the planned
+// read is unknown: the pass keeps the home's acknowledged plan behind an
+// unknown observation instead of carrying the flag of the last readable pass.
+func TestAllAbsentMemberWithUnreadableInventoryIsUnknown(t *testing.T) {
+	f, settled := settleAllServingHomes(t, 3)
+	before := candidateOf(t, settled, "member-a")
+	if !before.ObservationKnown || before.AppliedPlanID != settled.Status.Placement.Plan.ID {
+		t.Fatalf("settled home has not acknowledged the accepted plan: %+v", before)
+	}
+	member, present := allMemberOn(t, f, "member-a")
+	if !present {
+		t.Fatal("settled home has no member")
+	}
+	if err := f.workers["member-a"].Delete(t.Context(), member); err != nil {
+		t.Fatal(err)
+	}
+	f.connections.m["member-a"] = unreadableAllMember(f, "member-a")
+	unknown := f.reconcile(t)
+	if diff := cmp.Diff(settled.Status.Placement.Plan, unknown.Status.Placement.Plan); diff != "" {
+		t.Fatalf("unknown pass changed the accepted plan (-want +got):\n%s", diff)
+	}
+	got := candidateOf(t, unknown, "member-a")
+	if diff := cmp.Diff(before.AppliedPlanID, got.AppliedPlanID); diff != "" {
+		t.Fatalf("unknown pass blanked the acknowledged plan (-want +got):\n%s", diff)
+	}
+	if got.ObservationKnown {
+		t.Fatalf("absent member with unreadable inventory reported a current observation: %+v", got)
+	}
+	if condition := unknown.Status.GetCondition(v1beta1.PlacementSatisfied); condition == nil || condition.Status == corev1.ConditionTrue {
+		t.Fatalf("retained evidence satisfied the plan: %+v", condition)
 	}
 }

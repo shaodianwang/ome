@@ -230,9 +230,12 @@ func terminalHome(cluster string, member *v1beta1.InferenceService) homeObservat
 	}
 }
 
+// retainedUnknownCandidate carries a home's last known state behind an unknown
+// observation. Ready capacity is withheld because it is the routing weight.
 func retainedUnknownCandidate(isvc *v1beta1.InferenceService, previous v1beta1.CandidatePlacement) v1beta1.CandidatePlacement {
 	candidate := *previous.DeepCopy()
 	candidate = normalizeCandidatePhase(candidate)
+	candidate.ObservationKnown = false
 	candidate.ReadyReplicas = 0
 	if !hasPolicyRefs(isvc) {
 		candidate.Autoscaling = nil

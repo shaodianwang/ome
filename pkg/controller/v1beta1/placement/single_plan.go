@@ -291,16 +291,23 @@ func (r *Reconciler) singlePlanStatus(ctx context.Context, source *v1beta1.Infer
 		if candidate.Cluster == "" {
 			candidate = identityCandidate(name)
 		}
+		var stored v1beta1.CandidatePlacement
 		if source.Status.Placement != nil {
 			for _, previous := range source.Status.Placement.Candidates {
 				if previous.Cluster == name {
+					stored = previous
 					candidate.Allocation = previous.Allocation.DeepCopy()
 					break
 				}
 			}
 		}
 		candidate.ObservationKnown = home.state != homeUnknown
+		// A pass that cannot read the home keeps the plan it last acknowledged;
+		// a conclusively absent home acknowledges nothing.
 		candidate.AppliedPlanID = ""
+		if candidate.Allocation != nil && home.state != homeAbsent {
+			candidate.AppliedPlanID = stored.AppliedPlanID
+		}
 		if candidate.Allocation != nil {
 			cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
 			observed, err := r.observePlannedHome(cctx, source, candidate, declaredComponents(source))
@@ -311,7 +318,8 @@ func (r *Reconciler) singlePlanStatus(ctx context.Context, source *v1beta1.Infer
 			if candidate.Allocation.RaceCandidate && (err != nil || !observed.Home.Absent) {
 				cleanupPending = true
 			}
-			if name == winner && candidate.AppliedPlanID == source.Status.Placement.Plan.ID {
+			// The winner-applied decision reads this pass, never a kept value.
+			if err == nil && name == winner && candidate.AppliedPlanID == source.Status.Placement.Plan.ID {
 				winnerApplied = true
 				winnerIdle = observed.IdleZeroFloor
 			}
