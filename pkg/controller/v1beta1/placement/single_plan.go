@@ -35,6 +35,7 @@ func (r *Reconciler) reconcileSinglePlanned(ctx context.Context, source *v1beta1
 		}
 		retainZero, err := r.retainZeroFloorWinner(ctx, source, winner)
 		if err != nil {
+			r.Log.Error(err, "planned member observation failed", "cluster", winner)
 			return r.writeSinglePlanStatus(ctx, source, observations, "AwaitingMemberConvergence")
 		}
 		if home.state == homeAbsent || (home.candidate.Phase != v1beta1.CandidatePhaseAdmitted && !retainZero) {
@@ -271,7 +272,7 @@ func (r *Reconciler) writeSinglePlanStatus(ctx context.Context, source *v1beta1.
 func (r *Reconciler) singlePlanStatus(ctx context.Context, source *v1beta1.InferenceService, observations *placementObservations, reason string) placementResult {
 	winner := winnerCluster(source)
 	res := placementResult{winner: winner, phase: v1beta1.PlacementPhasePending}
-	cleanupPending, winnerApplied, winnerIdle := false, false, false
+	cleanupPending, winnerApplied, winnerIdle, winnerKeptPlaced := false, false, false, false
 	names := observations.standing
 	if source.Status.Placement != nil && source.Status.Placement.Plan != nil {
 		names = nil
@@ -312,7 +313,9 @@ func (r *Reconciler) singlePlanStatus(ctx context.Context, source *v1beta1.Infer
 			cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
 			observed, err := r.observePlannedHome(cctx, source, candidate, declaredComponents(source))
 			cancel()
-			if err == nil {
+			if err != nil {
+				r.Log.Error(err, "planned member observation failed", "cluster", name)
+			} else {
 				candidate.AppliedPlanID = observed.Candidate.AppliedPlanID
 			}
 			if candidate.Allocation.RaceCandidate && (err != nil || !observed.Home.Absent) {
@@ -322,6 +325,12 @@ func (r *Reconciler) singlePlanStatus(ctx context.Context, source *v1beta1.Infer
 			if err == nil && name == winner && candidate.AppliedPlanID == source.Status.Placement.Plan.ID {
 				winnerApplied = true
 				winnerIdle = observed.IdleZeroFloor
+			}
+			// An idle home proves Placed only through a readable observation. An
+			// unreadable pass keeps the Placed verdict the last readable pass reached
+			// for this same plan instead of retracting evidence it did not disprove.
+			if err != nil && name == winner && candidate.AppliedPlanID == source.Status.Placement.Plan.ID && zeroHomeFloor(candidate.Allocation.CurrentHome) {
+				winnerKeptPlaced = source.Status.Placement.Phase == v1beta1.PlacementPhasePlaced
 			}
 		}
 		if candidate.Allocation != nil || (home.state != homeAbsent && !sourceHasPendingWinnerIdentity(source)) {
@@ -346,7 +355,7 @@ func (r *Reconciler) singlePlanStatus(ctx context.Context, source *v1beta1.Infer
 			res.phase = source.Status.Placement.Phase
 			res.readinessUnknown = true
 			res.url = candidate.Endpoint
-		case candidate.Phase == v1beta1.CandidatePhaseAdmitted || winnerIdle:
+		case candidate.Phase == v1beta1.CandidatePhaseAdmitted || winnerIdle || winnerKeptPlaced:
 			res.phase = v1beta1.PlacementPhasePlaced
 			res.ready = home.serving
 			res.url = candidate.Endpoint

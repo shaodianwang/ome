@@ -421,7 +421,12 @@ func (r *Reconciler) writeSplitObservations(ctx context.Context, source *v1beta1
 		if (previous.Allocation.CurrentReplicas > 0 || previous.Allocation.CurrentHome != nil) && res.phase == v1beta1.PlacementPhasePending {
 			res.phase = v1beta1.PlacementPhaseAdmitting
 		}
-		if candidate.AdmittedReplicas > 0 || observed.IdleZeroFloor {
+		// An idle home proves Placed only through a readable observation. An
+		// unreadable pass keeps the Placed verdict the last readable pass reached
+		// for this same plan instead of retracting evidence it did not disprove.
+		keptPlaced := !candidate.ObservationKnown && zeroHomeFloor(previous.Allocation.CurrentHome) &&
+			candidate.AppliedPlanID == source.Status.Placement.Plan.ID && source.Status.Placement.Phase == v1beta1.PlacementPhasePlaced
+		if candidate.AdmittedReplicas > 0 || observed.IdleZeroFloor || keptPlaced {
 			res.phase = v1beta1.PlacementPhasePlaced
 		}
 		res.ready = res.ready || (candidate.ObservationKnown && candidate.ReadyReplicas > 0 && candidate.Endpoint != nil)
