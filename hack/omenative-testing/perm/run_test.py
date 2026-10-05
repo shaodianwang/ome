@@ -14638,6 +14638,90 @@ class MoveMomentFaultTest(unittest.TestCase):
         self.assertEqual((True, "whole, Ready and serving"), settled("sibling"))
         self.assertEqual((True, "whole, Ready and serving"), settled("peer"))
 
+    def test_a_kept_cause_leaves_its_peer_alive_and_not_serving_beside_the_moved_instance(self):
+        pods = self._fleet()
+        del pods["e0"]
+        pods["e3"] = self._pod("engine", 3, "fresh", node="n3")
+        pods["e1"]["ready"] = pods["e1"]["serving"] = False
+        fault = {"kind": "readiness", "form": "persist", "crash_comp": "engine", "crash_inst": "1", "crash_uid": "u1", "crash_pod": "e1"}
+        ctx = {"case_id": "p999", "N": {"engine": 3, "decoder": 2, "router": 0}, "pods_per_inst": {"engine": 1, "decoder": 1, "router": 1},
+               "pod_state": pods}
+        kept = {"victim": "peer", "at": "accept", "path": "kept"}
+        with mock.patch.object(run, "_broken_row", return_value={"phase": "Failed", "index": "1"}):
+            ok, why = run._move_fault_settled(ctx, fault, kept, "engine", "3", {"u0"}, True)
+            self.assertTrue(ok, why)
+            self.assertIn("serves nothing", why)
+            ok, why = run._move_fault_settled(ctx, fault, dict(kept, path="settle"), "engine", "3", {"u0"}, True)
+            self.assertFalse(ok, "a cause that heals still waits for the pod it hit")
+            self.assertIn("still there and not serving", why)
+            pods["e1"]["ready"] = pods["e1"]["serving"] = True
+            ok, why = run._move_fault_settled(ctx, fault, kept, "engine", "3", {"u0"}, True)
+            self.assertFalse(ok)
+            self.assertIn("still serves on e1", why)
+            pods["e1"]["ready"] = pods["e1"]["serving"] = False
+            del pods["e1"]
+            ok, why = run._move_fault_settled(ctx, fault, kept, "engine", "3", {"u0"}, True)
+            self.assertFalse(ok)
+            self.assertIn("over 2 index(es), want 3", why)
+
+    def test_a_gangs_serving_state_is_read_from_its_leader(self):
+        ctx = {"case_id": "p999", "pod_state": {
+            "e2-l": {"comp": "engine", "inst": "2", "runner": "leader", "alive": True, "ready": False, "serving": True},
+            "e2-w": {"comp": "engine", "inst": "2", "runner": "worker", "alive": True, "ready": True, "serving": True}}}
+        f = {"crash_comp": "engine", "crash_inst": "2"}
+        with mock.patch.object(run, "_broken_row", return_value={"phase": "Ready", "index": "2", "podCount": 2, "servingPodCount": 1}):
+            ok, why = run._move_break_unserving(ctx, f)
+            self.assertTrue(ok, why)
+            self.assertIn("serves nothing", why)
+            ctx["pod_state"]["e2-l"]["ready"] = True
+            ok, why = run._move_break_unserving(ctx, f)
+            self.assertFalse(ok)
+            self.assertEqual("engine Instance 2 still serves on e2-l", why)
+
+    def test_a_configkey_or_readiness_fault_at_a_move_moment_waits_for_the_main_container_to_run(self):
+        fired = []
+        pods = self._fleet()
+        pods["e3"] = self._pod("engine", 3, "fresh", ready=False, serving=False)
+        ctx = {"pod_state": pods, "old_hashes": self.OLD}
+        for kind, fire in (("readiness", "_fault_readiness_fire"), ("configkey", "_fault_configkey_fire")):
+            f = {"kind": kind, "fired": False}
+            mv = {"pod": "e3"}
+            states = iter([None, (False, False, 0, "fresh"), (True, False, 0, "fresh")])
+            with mock.patch.object(run, "_pod_main_state", lambda name: next(states)), mock.patch.object(run, "ONCE_POLL_S", 0.0), \
+                    mock.patch.object(run, fire, lambda rec, *_a: fired.append((kind, rec["aim_pod"]))):
+                run._move_fire(f, mv, ctx)
+                self.assertEqual((False, []), (f["fired"], fired), "the pod is not readable yet")
+                run._move_fire(f, mv, ctx)
+                self.assertEqual((False, []), (f["fired"], fired), "the main container is not running yet")
+                run._move_fire(f, mv, ctx)
+                self.assertEqual((True, [(kind, "e3")]), (f["fired"], fired))
+            fired.clear()
+        f = {"kind": "readiness", "fired": False, "main_poll": time.time()}
+        with mock.patch.object(run, "_pod_main_state", lambda name: self.fail("read no faster than ONCE_POLL_S")), \
+                mock.patch.object(run, "_fault_readiness_fire", lambda *a: self.fail("not fired before the container runs")):
+            run._move_fire(f, {"pod": "e3"}, ctx)
+        self.assertFalse(f["fired"])
+
+    def test_a_move_moment_whose_pod_never_runs_its_container_within_the_grace_is_missed(self):
+        ctx = {"case_id": "p999", "pod_state": self._fleet(), "old_hashes": self.OLD, "trigger_ts": 0.0}
+        f = {"kind": "readiness", "fired": False, "skip": None, "infra_fail": None}
+        mv = {"at": "surge", "victim": "moved", "fired": False, "missed": None, "due_at": None, "pod": None,
+              "seen": ({"phase": "SurgePending"}, None, True), "last_poll": 1e12, "fired_at": None, "fired_phase": None}
+        reqs = {"0": ("uuid-1", "key", "n0")}
+        args = ("engine", "0", reqs, {"u0"}, {"u0", "u1", "u2"})
+        with mock.patch.object(run, "_move_moment_due", return_value=True), mock.patch.object(run, "_move_victim", return_value="e3"), \
+                mock.patch.object(run, "_move_fire", lambda rec, *_a: rec.update(fired=False)):
+            run._move_tick(ctx, f, mv, 100.0, *args)
+            self.assertEqual((100.0, None, False), (mv["due_at"], mv["missed"], mv["fired"]))
+            run._move_tick(ctx, f, mv, 100.0 + run.MOVE_VICTIM_GRACE_S - 1, *args)
+            self.assertIsNone(mv["missed"])
+            run._move_tick(ctx, f, mv, 100.0 + run.MOVE_VICTIM_GRACE_S, *args)
+            self.assertIn("main container of the moved pod e3 did not run within", mv["missed"])
+            once = {"kind": "crashloop", "once": 1, "fired": False, "skip": None, "infra_fail": None}
+            mv.update(missed=None)
+            run._move_tick(ctx, once, mv, 100.0 + 2 * run.MOVE_VICTIM_GRACE_S, *args)
+        self.assertIsNone(mv["missed"], "a one-shot kill keeps waiting for the form's state")
+
     def test_ledger_moves_leave_out_the_force_delete_sweeps_rows(self):
         rows = [{"requestUUID": "uuid-1", "phase": "Completed"},
                 {"requestUUID": "pod-uid", "phase": "Completed", "reason": run.FORCE_DELETE_REASON},
@@ -14850,16 +14934,104 @@ class MoveUnderEveryFaultTest(unittest.TestCase):
         pods = {"e0": {"comp": "engine", "inst": "0", "alive": True, "ready": True, "serving": True, "uid": "u0"},
                 "e1": {"comp": "engine", "inst": "1", "alive": True, "ready": True, "serving": True, "uid": "u1"}}
         mv = {"comp": "engine", "inst": "0", "src_uids": {"u0"}, "seen": (None, None, True),
-              "entry": {"phase": "Failed", "reason": "SourceEvicted"}}
+              "entry": {"phase": "Failed", "reason": "perm-test", "outcome": "source pod evicted"}}
         self.assertFalse(run._window_move_done(self._ctx(pods), None, dict(mv)))
         accepted = dict(mv, accept_abandoned=True)
         self.assertTrue(run._window_move_done(self._ctx(pods), None, accepted))
-        self.assertEqual("SourceEvicted", accepted["abandoned"])
+        self.assertEqual("source pod evicted", accepted["abandoned"])
         self.assertEqual("0", accepted["end"][2])
         silent = dict(mv, accept_abandoned=True, entry={"phase": "Failed"})
         self.assertFalse(run._window_move_done(self._ctx(pods), None, silent))
         pods["e0"]["serving"] = False
         self.assertFalse(run._window_move_done(self._ctx(pods), None, dict(mv, accept_abandoned=True)))
+
+
+    def test_an_abandoned_move_on_a_held_push_leaves_the_held_pod_beside_the_source(self):
+        pods = {"e0": {"comp": "engine", "inst": "0", "alive": True, "ready": True, "serving": True, "uid": "u0", "hash": "old"},
+                "e0h": {"comp": "engine", "inst": "0", "alive": True, "ready": False, "serving": False, "uid": "u0h", "hash": "held"},
+                "e1": {"comp": "engine", "inst": "1", "alive": True, "ready": True, "serving": True, "uid": "u1", "hash": "old"}}
+        why = "deadline exceeded in phase Accepted: surge never allocated"
+        mv = {"comp": "engine", "inst": "0", "src_uids": {"u0"}, "seen": ({"phase": "Failed", "message": why}, None, True),
+              "entry": {"phase": "Failed", "reason": "perm-test", "outcome": why}, "accept_abandoned": True}
+        ctx = dict(self._ctx(pods), old_hashes={"old"})
+        self.assertTrue(run._window_move_done(ctx, None, mv))
+        self.assertEqual((why, (True, "whole, Ready and serving", "0")), (mv["abandoned"], mv["end"]))
+        bare = dict(mv)
+        self.assertFalse(run._window_move_done(self._ctx(pods), None, bare), "with no running revision named every pod counts")
+        self.assertIn("Instance 0 has 2/1 pod(s)", bare["end"][1])
+        pods["e0"]["serving"] = False
+        self.assertFalse(run._window_move_done(ctx, None, dict(mv)), "the running pod itself must serve")
+        del pods["e0"]
+        gone = dict(mv)
+        self.assertFalse(run._window_move_done(ctx, None, gone))
+        self.assertIn("Instance 0 has 0/1 pod(s)", gone["end"][1])
+
+    def test_an_abandoned_moves_reason_is_the_records_message_or_the_rows_outcome(self):
+        pods = {"e0": {"comp": "engine", "inst": "0", "alive": True, "ready": True, "serving": True, "uid": "u0"},
+                "e1": {"comp": "engine", "inst": "1", "alive": True, "ready": True, "serving": True, "uid": "u1"}}
+        mv = {"comp": "engine", "inst": "0", "src_uids": {"u0"}, "seen": (None, None, True), "accept_abandoned": True,
+              "entry": {"phase": "Failed", "reason": "perm-test", "outcome": "source InstanceStatus missing"}}
+        self.assertTrue(run._window_move_done(self._ctx(pods), None, mv))
+        self.assertEqual("source InstanceStatus missing", mv["abandoned"])
+        told = dict(mv, seen=({"phase": "Failed", "message": "deadline exceeded in phase Accepted: surge never allocated"}, None, True))
+        self.assertTrue(run._window_move_done(self._ctx(pods), None, told))
+        self.assertEqual("deadline exceeded in phase Accepted: surge never allocated", told["abandoned"], "the record's own words first")
+        silent = dict(mv, entry={"phase": "Failed", "reason": "perm-test"})
+        self.assertFalse(run._window_move_done(self._ctx(pods), None, silent), "the request's reason never says why the move ended")
+        self.assertEqual("", run._move_abandon_reason({"reason": "AutoRecover"}, {"reason": "perm-test"}))
+        self.assertEqual("source InstanceStatus missing", run._move_abandon_reason(None, {"outcome": "source InstanceStatus missing"}))
+        self.assertIn("_move_abandon_reason(", inspect.getsource(run._move_fault_checks), "the move-moment verdict reads the same words")
+
+    def test_the_move_is_filed_against_the_index_the_gang_roll_moved_the_instance_to(self):
+        pods = {"e1-l": {"comp": "engine", "inst": "1", "alive": True, "ready": True, "serving": True, "uid": "u1", "node": "n1"},
+                "e2-l": {"comp": "engine", "inst": "2", "alive": True, "ready": False, "serving": False, "uid": "u2", "node": "n2"},
+                "e0-l": {"comp": "engine", "inst": "0", "alive": True, "ready": False, "serving": False, "uid": "s0", "node": "n0"}}
+        rows = {("engine", "1"): {"index": 1, "phase": "Ready"}, ("engine", "2"): {"index": 2, "phase": "Failed"}}
+        events = [("RecreateUpdateStarted", "OMENative component=engine instance=0 gang surge to revision p999-engine-aaaa (surge-index=2)"),
+                  ("RecreateUpdateStarted", "OMENative component=engine instance=1 gang surge to revision p999-engine-aaaa (surge-index=0)"),
+                  ("GangSurgeAbandoned", "OMENative component=engine instance=1 abandoned failed gang surge (surge-index=0); resetting")]
+        ctx = dict(self._ctx(pods), old_nodes={}, trigger_ts=5.0)
+        kubectl = _kubectl_with([])
+        with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_ir_rows_by_index", return_value=rows), \
+                mock.patch.object(run, "_isvc_events_since", return_value=events):
+            mv = run._window_move_request(ctx, {"inst": 0})
+        self.assertEqual(("2", "n2", {"u2"}), (mv["inst"], mv["from"], mv["src_uids"]))
+        body = json.loads(json.loads(kubectl.calls[-1][-1])["metadata"]["annotations"][mv["key"]])
+        self.assertEqual((2, "n2"), (body["instance"], body["from_node"]))
+        self.assertIs(mv, ctx["mv"], "the move's record is published to the event reader")
+        with mock.patch.object(run, "kubectl", _kubectl_with([])), mock.patch.object(run, "_isvc_events_since", return_value=events), \
+                mock.patch.object(run, "_ir_rows_by_index", return_value={("engine", "0"): {}, ("engine", "1"): {}}):
+            self.assertEqual("0", run._window_move_request(ctx, {"inst": 0})["inst"], "the header's index while a row stands there")
+        with mock.patch.object(run, "kubectl", _kubectl_with([])), mock.patch.object(run, "_ir_rows_by_index", return_value={}), \
+                mock.patch.object(run, "_isvc_events_since", lambda *a: self.fail("no rows read, nothing to follow")):
+            self.assertEqual("0", run._window_move_request(ctx, {"inst": 0})["inst"])
+
+
+class QuotaBlockedMoveTest(unittest.TestCase):
+    """A move whose replacement the quota refuses: the product waits for
+    capacity until the record deadline with the row naming the wait, so
+    the bounded-failure contract accepts that wait inside the deadline."""
+
+    def test_the_wait_is_read_inside_the_deadline_only(self):
+        record = {"phase": "SurgePending", "deadline": "2026-01-01T00:10:00Z"}
+        at = run._event_epoch("2026-01-01T00:05:00Z")
+        hold = ("QuotaExceeded", "engine Instance 4: exceeded quota: requests.cpu")
+        with mock.patch.object(run.time, "time", return_value=at), mock.patch.object(run, "_capacity_hold", return_value=hold):
+            left, why = run._move_quota_wait("p1", "engine", record, 0.0)
+            self.assertAlmostEqual(300.0, left)
+            self.assertEqual("QuotaExceeded: engine Instance 4: exceeded quota: requests.cpu", why)
+        with mock.patch.object(run.time, "time", return_value=at), mock.patch.object(run, "_capacity_hold", return_value=None):
+            self.assertIsNone(run._move_quota_wait("p1", "engine", record, 0.0), "nothing names the wait")
+        with mock.patch.object(run.time, "time", return_value=at + 600), mock.patch.object(run, "_capacity_hold", return_value=hold):
+            self.assertIsNone(run._move_quota_wait("p1", "engine", record, 0.0), "past the deadline only a terminal record will do")
+        with mock.patch.object(run, "_capacity_hold", return_value=hold):
+            self.assertIsNone(run._move_quota_wait("p1", "engine", {"phase": "Accepted"}, 0.0), "no deadline, no bounded wait")
+            self.assertIsNone(run._move_quota_wait("p1", "engine", None, 0.0))
+
+    def test_the_bounded_failure_contract_consults_the_wait(self):
+        src = inspect.getsource(run._migrate)
+        self.assertIn("_move_quota_wait(", src)
+        self.assertIn("the same request is watched to completion", src)
 
 
 class GeneratedFaultMoveFamilyTest(unittest.TestCase):
@@ -14980,6 +15152,19 @@ class GeneratedFaultMoveFamilyTest(unittest.TestCase):
                 self.assertEqual(("migrating", "moved"), (kv["fault"].partition(":")[2], kv["victim"]), name)
             if kv.get("once"):
                 self.assertEqual("moved", kv["victim"], name)
+
+    def test_the_quota_cells_bound_the_wait_by_the_instance_ready_timeout(self):
+        outputs, fam = self._more_rows()
+        quota = [(n, kv, m) for n, kv, m in fam if kv.get("fault") == "quota:0"]
+        self.assertEqual(generate_cases.MOVE_STUCK_READY_TIMEOUT, generate_cases.MOVE_QUOTA_READY_TIMEOUT, "the stuck cells' knob")
+        for name, kv, _m in quota:
+            text = outputs[f"gen-fault-move/{name}.yaml"]
+            engine = re.search(r"  engine:\n(?:    .*\n)+", text).group(0)
+            self.assertIn(f'instanceReadyTimeout: "{generate_cases.MOVE_QUOTA_READY_TIMEOUT}"', engine, name)
+            self.assertEqual(1, text.count("instanceReadyTimeout"), f"{name}: the moved Component alone carries the bound")
+            reason = text.splitlines()[1]
+            self.assertIn("waits on the quota with its row naming the wait", reason, name)
+            self.assertIn("at its record deadline (the Instance ready timeout)", reason, name)
 
     def test_every_new_cell_validates_and_lands_on_the_ledger_rows_it_names(self):
         outputs, fam = self._more_rows()
@@ -15748,12 +15933,14 @@ class RepeatingFaultLoopTest(unittest.TestCase):
         cycle = self._cycle()
         with mock.patch.object(run, "_ir_row", lambda *_a: {"index": 0, "phase": "Creating", "podCount": 1, "servingPodCount": 0}):
             run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0)
+            run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0 + run.INV_TICK_S)
         self.assertEqual((True, None, 1), (cycle["reported"], cycle["lie"], cycle["samples"]))
         cycle = self._cycle()
         whole_row = {"index": 0, "phase": "Ready", "podCount": 1, "servingPodCount": 1}
         t1, t2 = 100.0 + run.GANG_SHORT_REPORT_S + run.INV_TICK_S, 100.0 + run.GANG_SHORT_REPORT_S + 2 * run.INV_TICK_S
         with mock.patch.object(run, "_ir_row", lambda *_a: whole_row):
             run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0)
+            run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0 + run.INV_TICK_S)
             self.assertIsNone(cycle["lie"], "one reconcile of lag is not a lie")
             run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, t1)
             self.assertIsNone(cycle["lie"], "one sample can read a row a reconcile ahead of the pods at the edge of the gap")
@@ -15764,6 +15951,7 @@ class RepeatingFaultLoopTest(unittest.TestCase):
         cycle = self._cycle()
         rows = iter([whole_row, {"index": 0, "phase": "Restarting", "podCount": 1, "servingPodCount": 0}, whole_row])
         with mock.patch.object(run, "_ir_row", lambda *_a: next(rows)):
+            run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0)
             for k in range(3):
                 run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, t1 + k * run.INV_TICK_S)
         self.assertEqual((True, None), (cycle["reported"], cycle["lie"]), "a reporting sample between two whole readings clears the first")
@@ -15772,6 +15960,7 @@ class RepeatingFaultLoopTest(unittest.TestCase):
                 "e0-w": _rec("engine", 0, "old", runner="worker", uid="w0", ready=False)}
         cycle = self._cycle()
         with mock.patch.object(run, "_ir_row", lambda *_a: {"index": 0, "phase": "Ready", "podCount": 1, "servingPodCount": 1}):
+            run._repeat_sample_row("p1", cycle, gang, {"engine": 2}, 100.0)
             run._repeat_sample_row("p1", cycle, gang, {"engine": 2}, t1)
         self.assertEqual((True, None, None), (cycle["reported"], cycle["lie"], cycle.get("lie_seen")),
                          "one serving pod of a two-pod gang is the loss reported, not the gang counted whole")
@@ -15783,6 +15972,26 @@ class RepeatingFaultLoopTest(unittest.TestCase):
         with mock.patch.object(run, "_ir_row", lambda *_a: self.fail("a whole Instance is not sampled")):
             run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0)
         self.assertEqual(0, cycle["samples"])
+
+    def test_the_first_row_sample_waits_a_tick_so_the_controller_has_had_a_pass(self):
+        pods = {"e0": _rec("engine", 0, "old", uid="u0b", ready=False), "e1": _rec("engine", 1, "old", uid="u1")}
+        cycle = self._cycle()
+        reads = []
+        whole_row = {"index": 0, "phase": "Ready", "podCount": 1, "servingPodCount": 1}
+        with mock.patch.object(run, "_ir_row", lambda *a: reads.append(a) or whole_row):
+            run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0)
+            self.assertEqual(([], 0, 100.0), (reads, cycle["samples"], cycle["short_since"]),
+                             "a sample at the edge of the gap reads a row the controller has not yet written")
+            run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0 + run.INV_TICK_S / 2)
+            self.assertEqual(0, cycle["samples"])
+            run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0 + run.INV_TICK_S)
+        self.assertEqual((1, False), (cycle["samples"], cycle["reported"]))
+        self.assertEqual([f"{run.INV_TICK_S:.0f}s: Ready serving 1/1"], cycle["reads"])
+        self.assertAlmostEqual(run.INV_TICK_S, cycle["gap_s"])
+        pods["e0"] = _rec("engine", 0, "old", uid="u0b")
+        run._repeat_sample_row("p1", cycle, pods, {"engine": 1}, 100.0 + run.INV_TICK_S + 1)
+        self.assertIsNone(cycle["short_since"])
+        self.assertAlmostEqual(run.INV_TICK_S, cycle["gap_s"], msg="the gap's length is kept once it closes")
 
     def test_tick_fires_again_once_back_and_stops_when_the_repetitions_are_spent(self):
         fired = []
@@ -15852,7 +16061,8 @@ class RepeatingFaultVerdictTest(unittest.TestCase):
 
     def _rec(self, **kw):
         cycles = [{"fired_at": 10.0 * k, "comp": "engine", "inst": "0", "uid": f"u{k}", "reported": True, "lie": None,
-                   "retired": False, "back_at": 10.0 * k + 5, "short_since": None, "sampled_at": 0.0, "samples": 2}
+                   "retired": False, "back_at": 10.0 * k + 5, "short_since": None, "sampled_at": 0.0, "samples": 2,
+                   "gap_s": run.GANG_SHORT_REPORT_S + 1.0, "reads": ["5s: Creating serving 0/1", "10s: Creating serving 0/1"]}
                   for k in range(3)]
         rec = {"case_id": "p1", "kind": "podkill", "repeat": 3, "fired_count": 3, "cycles": cycles, "infra_fail": None,
                "victim_insts": {("engine", "0")}, "base_uids": {"a", "b"}, "seen_uids": {"a", "b", "r1", "r2", "r3"},
@@ -15941,6 +16151,20 @@ class RepeatingFaultVerdictTest(unittest.TestCase):
         verdict, _n, checks = self._judge(rec)
         self.assertEqual("PASS", verdict, "a loss that came back before a sample is reported, not failed")
         self.assertIn("came back before a row sample was read", checks)
+
+    def test_a_loss_inside_the_status_lag_budget_is_reported_not_judged(self):
+        rec = self._rec()
+        rec["cycles"][1].update(reported=False, gap_s=run.GANG_SHORT_REPORT_S - 1.0, reads=["5s: Ready serving 1/1"])
+        verdict, _n, checks = self._judge(rec)
+        self.assertEqual("PASS", verdict, checks)
+        self.assertIn(f"repetition(s) 2 came back inside the status's lag budget ({run.GANG_SHORT_REPORT_S}s)", checks)
+        self.assertIn("5s: Ready serving 1/1", checks)
+        rec = self._rec()
+        rec["cycles"][1].update(reported=False, reads=["5s: Ready serving 1/1", "10s: Ready serving 1/1"])
+        verdict, notes, checks = self._judge(rec)
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("never reported the loss in repetition(s) 2", notes[0])
+        self.assertIn("repetition 2 read 5s: Ready serving 1/1, 10s: Ready serving 1/1", checks)
 
     def test_a_repair_for_an_untouched_instance_or_one_too_many_fails(self):
         foreign = [("RestartTriggered", "component=engine instance=1 restarting")]
@@ -19808,6 +20032,60 @@ class SurgeOrderAfterRollbackTest(unittest.TestCase):
     def test_the_rollback_record_is_where_the_event_reader_looks(self):
         src = inspect.getsource(run._op_launch) + inspect.getsource(run._rollback_held_break)
         self.assertEqual(2, src.count('ctx["rb"]'), "both rollback drivers publish their record to the event reader")
+
+
+class SurgeOrderUnderAMoveTest(unittest.TestCase):
+    """The surge-before-drain rule under a move: the replacement runs the
+    source's revision, so it is credited by identity and by the index the
+    move's record names, and the source's drain after it is in order."""
+
+    def _ctx(self, mv):
+        ctx = {"pod_state": {}, "info": {"strat": {"engine": "SurgeThenDrain"}, "max_unavail": {"engine": 0}},
+               "N": {"engine": 4}, "pods_per_inst": {"engine": 1}, "trigger_ts": 1.0, "old_hashes": {"a1"}}
+        if mv is not None:
+            ctx["mv"] = mv
+        return ctx
+
+    @staticmethod
+    def _event(kind, name, index, ready=True, deleting=False):
+        obj = pod_object(name, "engine", index, "a1", "img", "", ready=ready, serving=ready)
+        if deleting:
+            obj["metadata"]["deletionTimestamp"] = "2026-01-01T00:00:00Z"
+        return {"type": kind, "object": obj}
+
+    def _moved(self, ctx):
+        for i in range(4):
+            run._apply_event(ctx, self._event("ADDED", f"e{i}", i))
+        run._apply_event(ctx, self._event("ADDED", "e4", 4, ready=False))
+        run._apply_event(ctx, self._event("MODIFIED", "e4", 4))
+        run._apply_event(ctx, self._event("MODIFIED", "e0", 0, deleting=True))
+
+    def test_a_ready_replacement_of_the_move_is_a_surge_whatever_its_revision(self):
+        mv = {"comp": "engine", "orig_uids": {f"uid-e{i}" for i in range(4)}, "seen": (None, None, True),
+              "entry": {"phase": "SurgePending", "surgeInstance": 4}}
+        ctx = self._ctx(mv)
+        self._moved(ctx)
+        self.assertFalse(ctx.get("order_viol"), ctx.get("order_viol"))
+        checks = []
+        self.assertEqual("PASS", run.surge_before_drain_checks(ctx, ["engine"], "PASS", [], checks))
+        self.assertTrue(any("surge-before-drain held" in c for c in checks), checks)
+        ctx = self._ctx(dict(mv, entry=None, seen=({"phase": "SurgePending", "surgeInstance": 4}, None, True)))
+        self._moved(ctx)
+        self.assertFalse(ctx.get("order_viol"), "the controller's record names the index as well as the ledger row")
+
+    def test_the_credit_needs_the_records_index_and_a_fresh_pod(self):
+        base = {"comp": "engine", "orig_uids": {f"uid-e{i}" for i in range(4)}, "seen": (None, None, True)}
+        for mv, why in ((None, "no move in flight"),
+                        (dict(base, entry={"phase": "SurgePending", "surgeInstance": 3}), "another index"),
+                        (dict(base, entry={"phase": "Accepted", "surgeInstance": -1}), "no index allocated yet"),
+                        (dict(base, comp="decoder", entry={"phase": "SurgePending", "surgeInstance": 4}), "another Component"),
+                        (dict(base, orig_uids={"uid-e4"}, entry={"phase": "SurgePending", "surgeInstance": 4}), "a pod the fleet had")):
+            ctx = self._ctx(mv)
+            self._moved(ctx)
+            self.assertEqual({"engine": 1}, ctx["order_viol"], why)
+
+    def test_the_moves_record_is_where_the_event_reader_looks(self):
+        self.assertIn('ctx["mv"]', inspect.getsource(run._window_move_request))
 
 
 class RollbackKeptKeyHooksTest(unittest.TestCase):

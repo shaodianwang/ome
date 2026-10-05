@@ -7592,26 +7592,31 @@ def _emit_fault_move_more(add):
 
 # ── a quota under the move ──────────────────────────────────────────────────
 # The request meets a quota with room for no further pod: the replacement
-# cannot be admitted, so the move ends Failed within its bound with the
-# source still serving (kept), and once the quota is lifted a fresh request
-# completes (lifted). The shapes the hand-written fault cases do not run,
-# as (topology, routers on an engine-only shape); minted after the family's
-# other rows.
+# cannot be admitted, so the move waits on the quota and ends Failed at its
+# record deadline with the source still serving (kept), and once the quota
+# is lifted the Instance is moved (lifted). The product bounds that wait by
+# the Instance ready timeout, so the cells set it to the stuck cells' knob
+# and the deadline fires inside the harness budget. The shapes the
+# hand-written fault cases do not run, as (topology, routers on an
+# engine-only shape); minted after the family's other rows.
 MOVE_QUOTA_KEPT = [("pd-mn", 0), ("engine-mn", lib.NR), ("engine", lib.NR)]
 MOVE_QUOTA_LIFTED = [("pd-mn", 0), ("pd", 0), ("engine-mn", lib.NR), ("engine", lib.NR)]
+MOVE_QUOTA_READY_TIMEOUT = MOVE_STUCK_READY_TIMEOUT
 
 
 def _move_quota_reason(lifted, topo, w, nr):
     gang = ", a gang that moves whole, so the quota keeps its replacement gang from forming" if w else ""
     out = (f"{_move_request_words(topo, w, nr)} with a quota with room for no further pod in place{gang}: the replacement "
-           f"cannot be admitted, so the move ends Failed within its bound with the source Instance still Ready and "
+           f"cannot be admitted, so the move waits on the quota with its row naming the wait and ends Failed within its "
+           f"bound, at its record deadline (the Instance ready timeout), with the source Instance still Ready and "
            f"serving, the request annotation consumed and its ledger entry terminal (the slot freed); nothing exceeds "
            f"N+1 alive and nothing settled is taken down to make room")
     if not lifted:
         out += "; the quota stays to the end, so the source keeps serving and no further move is attempted"
     else:
-        out += ("; then the quota is lifted and a fresh request moves the Instance: it completes, the source drains and "
-                "the Instance ends whole on its replacement, still within N+1 alive")
+        out += ("; then the quota is lifted and a fresh request moves the Instance (the waiting one, if the lift lands "
+                "first): it completes, the source drains and the Instance ends whole on its replacement, still within "
+                "N+1 alive")
     if is_pd(topo):
         out += "; decoder and router are negative controls (co=none)"
     elif nr:
@@ -7631,7 +7636,7 @@ def _emit_fault_move_quota(add):
             label = "lifted" if lifted else "kept"
             meta = dict(strat="SurgeThenDrain", verb=f"quota@move:{label}", rp="None", victim="engine", at="accept", who="moved")
             desc = f"{GEN_MARK} fault-move quota {label} {shape_tag(topo, w, nr)} N={n}"
-            life = lib.lifecycle()
+            life = lib.lifecycle(ready_timeout=MOVE_QUOTA_READY_TIMEOUT)
             add("gen-fault-move", desc, kv, comps(topo, n, w, life, d_life=(lib.lifecycle() if is_pd(topo) else None), nr=nr),
                 _move_quota_reason(lifted, topo, w, nr), meta, cell=("fault-move-quota", label, topo, w, nr))
 

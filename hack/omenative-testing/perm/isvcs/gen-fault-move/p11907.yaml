@@ -1,5 +1,5 @@
 # p11907: [gen] fault-move quota kept engine+router N=4  mode=migrate Ne=4 Nd=0 Nr=2 ceil_e=5 ceil_d=0 ceil_r=2 fault=quota:0 co=none topo=engine mig=Auto inst=0 expect=fail
-# reason: a move of engine Instance 0 is requested on engine behind a router, single-pod with a quota with room for no further pod in place: the replacement cannot be admitted, so the move ends Failed within its bound with the source Instance still Ready and serving, the request annotation consumed and its ledger entry terminal (the slot freed); nothing exceeds N+1 alive and nothing settled is taken down to make room; the quota stays to the end, so the source keeps serving and no further move is attempted; the router is a negative control (co=none)
+# reason: a move of engine Instance 0 is requested on engine behind a router, single-pod with a quota with room for no further pod in place: the replacement cannot be admitted, so the move waits on the quota with its row naming the wait and ends Failed within its bound, at its record deadline (the Instance ready timeout), with the source Instance still Ready and serving, the request annotation consumed and its ledger entry terminal (the slot freed); nothing exceeds N+1 alive and nothing settled is taken down to make room; the quota stays to the end, so the source keeps serving and no further move is attempted; the router is a negative control (co=none)
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p11907 }
@@ -10,7 +10,7 @@ spec:
     minReplicas: 4
     maxReplicas: 4
     annotations: { ome.io/deploymentMode: OMENative }
-    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+    lifecycle: { instanceReadyTimeout: "90s", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   router:
     minReplicas: 2
     maxReplicas: 2

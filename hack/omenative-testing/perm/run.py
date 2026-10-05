@@ -5666,6 +5666,21 @@ def _lift_quota(case_id):
     return r.returncode == 0
 
 
+def _move_quota_wait(case_id, mcomp, record, since):
+    """(seconds left to the record's deadline, what names the wait) while a
+    move whose replacement the quota refuses waits for capacity inside its
+    deadline with the status saying so: the product bounds that wait by the
+    Instance ready timeout rather than failing at once. None once the
+    deadline has passed or nothing names the wait."""
+    deadline = _event_epoch((record or {}).get("deadline"))
+    if deadline is None or deadline <= time.time():
+        return None
+    hold = _capacity_hold(case_id, {mcomp}, since)
+    if hold is None:
+        return None
+    return deadline - time.time(), f"{hold[0]}: {hold[1]}"
+
+
 CHURN_SETTLE_S = 20.0   # blocked=1 probe: two pod snapshots this far apart must match
 
 
@@ -6321,7 +6336,8 @@ def _repeat_record_fire(f):
         f.setdefault("cycles", []).append({
             "fired_at": f.get("fired_ts") or time.time(), "comp": f.get("victim_comp", "") if f["kind"] != "ctrlrestart" else "",
             "inst": str(f.get("victim_inst", "")), "uid": f.get("victim_uid", ""), "reported": False, "lie": None,
-            "retired": False, "back_at": None, "short_since": None, "sampled_at": 0.0, "samples": 0})
+            "retired": False, "back_at": None, "short_since": None, "sampled_at": 0.0, "samples": 0,
+            "gap_s": 0.0, "reads": []})
 
 
 def _fault_fire(f, pod_state, pods_per_inst, old_hashes, inv=None):
@@ -9459,11 +9475,13 @@ def _repeat_back(f, cycle, pod_state, pods_per_inst, now):
 
 def _repeat_sample_row(case_id, cycle, pod_state, pods_per_inst, now):
     """While the Instance a repetition took is short a Ready pod, read its
-    row every INV_TICK_S: the status must report the loss (a phase other
-    than Ready, or fewer serving pods than pods or than the gang's width),
-    and once the gap has lasted GANG_SHORT_REPORT_S it must not count the
-    Instance whole on two samples in a row (one sample at the edge of the
-    gap can read a row a reconcile ahead of the pods)."""
+    row every INV_TICK_S, the first one a tick after the gap opened so the
+    controller has had a pass since the loss: the status must report the
+    loss (a phase other than Ready, or fewer serving pods than pods or than
+    the gang's width), and once the gap has lasted GANG_SHORT_REPORT_S it
+    must not count the Instance whole on two samples in a row (one sample at
+    the edge of the gap can read a row a reconcile ahead of the pods). Each
+    sample is printed and kept (reads), with the gap's length (gap_s)."""
     comp, inst = cycle["comp"], cycle["inst"]
     if not comp or cycle["back_at"] is not None:
         return
@@ -9472,7 +9490,10 @@ def _repeat_sample_row(case_id, cycle, pod_state, pods_per_inst, now):
     if len(whole) >= ppi:
         cycle["short_since"] = None
         return
-    cycle["short_since"] = cycle["short_since"] or now
+    if cycle["short_since"] is None:
+        cycle["short_since"], cycle["sampled_at"] = now, now
+    into = now - cycle["short_since"]
+    cycle["gap_s"] = max(cycle.get("gap_s") or 0.0, into)
     if now - cycle["sampled_at"] < INV_TICK_S:
         return
     cycle["sampled_at"] = now
@@ -9480,6 +9501,9 @@ def _repeat_sample_row(case_id, cycle, pod_state, pods_per_inst, now):
     if row is None:
         return
     cycle["samples"] += 1
+    cycle.setdefault("reads", []).append(f"{into:.0f}s: {row.get('phase')} serving {row.get('servingPodCount')}/{row.get('podCount')}")
+    print(f"    ⟳ repeat: row {comp}/{inst} reads {row.get('phase')} with servingPodCount={row.get('servingPodCount')}"
+          f"/{row.get('podCount')} while {len(whole)}/{ppi} pod(s) are Ready, {into:.0f}s into the gap")
     if _row_serving_short(row, ppi):
         cycle["reported"] = True
         cycle["lie_seen"] = None
@@ -9571,16 +9595,27 @@ def _repeat_checks(f, pods_per_inst, bumped, op_pods, window_start, verdict, not
         checks.append(f"  ✓ repeat={n}: the fault fired {n} times, each once {what} had come back"
                       + (f" ({'; '.join(read)})" if read else ""))
     if f["kind"] != "ctrlrestart" and cycles:
-        unreported = [i + 1 for i, c in enumerate(cycles) if not c["reported"] and not c["retired"] and c["samples"]]
+        # A loss repaired inside the status's lag budget was never owed a
+        # report: the allowance the lie check gives the row.
+        owed = [(i + 1, c) for i, c in enumerate(cycles) if not c["reported"] and not c["retired"] and c["samples"]]
+        unreported = [i for i, c in owed if (c.get("gap_s") or 0.0) >= GANG_SHORT_REPORT_S]
+        brief = [i for i, c in owed if (c.get("gap_s") or 0.0) < GANG_SHORT_REPORT_S]
         unsampled = [i + 1 for i, c in enumerate(cycles) if not c["reported"] and not c["retired"] and not c["samples"]]
         retired = [i + 1 for i, c in enumerate(cycles) if c["retired"]]
         lies = [(i + 1, c["lie"]) for i, c in enumerate(cycles) if c["lie"]]
+
+        def reads(idxs):
+            return "; ".join(f"repetition {i} read {', '.join(cycles[i - 1].get('reads') or []) or 'nothing'}" for i in idxs)
+
         if unreported:
             fail(f"repeat: the status never reported the loss in repetition(s) {', '.join(map(str, unreported))}",
                  f"  ✗ repeat: the Instance's row never reported the loss (phase or serving count) in repetition(s) "
-                 f"{', '.join(map(str, unreported))} — every wait has a reason")
+                 f"{', '.join(map(str, unreported))} — every wait has a reason ({reads(unreported)})")
         elif any(c["reported"] for c in cycles):
             checks.append(f"  ✓ repeat: the status reported each loss it was sampled on ({sum(1 for c in cycles if c['reported'])} repetition(s))")
+        if brief:
+            checks.append(f"  ⓘ repeat: repetition(s) {', '.join(map(str, brief))} came back inside the status's lag budget "
+                          f"({GANG_SHORT_REPORT_S}s) before a row sample reported the loss ({reads(brief)})")
         if unsampled:
             checks.append(f"  ⓘ repeat: repetition(s) {', '.join(map(str, unsampled))} came back before a row sample was read")
         if retired:
@@ -14248,12 +14283,29 @@ def _window_expected(ctx, op, acting, target, mcomp):
     return out
 
 
+def _window_move_source(ctx, mcomp, inst):
+    """The index the move is filed against: the header's while a status row
+    stands there, else the index the roll's gang surges moved that Instance
+    to (a gang under a surge push is rebuilt at a fresh index and its old
+    index freed for another gang's surge). The rows are read live before
+    filing; with none readable the header's index stands."""
+    rows = _ir_rows_by_index(ctx["case_id"], [mcomp])
+    if not rows or (mcomp, inst) in rows:
+        return inst
+    events = _isvc_events_since(ctx["case_id"], ctx.get("trigger_ts") or 0)
+    chain = _follow_gang_surges(inst, _gang_surge_replacements(events, mcomp))
+    live = [i for i in chain if (mcomp, i) in rows]
+    return live[-1] if live else inst
+
+
 def _window_move_request(ctx, hdr):
     """File one migration request for the Instance the header names (the
-    moved Component is the engine where one is configured). Returns the
-    move's bookkeeping, or None when the patch failed (ctx carries why)."""
+    moved Component is the engine where one is configured), at the index it
+    stands at now (_window_move_source); the move's record is published as
+    ctx["mv"] for the event reader. Returns the move's bookkeeping, or None
+    when the patch failed (ctx carries why)."""
     mcomp = "engine" if "engine" in ctx["configured"] else sorted(ctx["configured"])[0]
-    inst = str(hdr.get("inst", 0)).split(",")[0].strip() or "0"
+    inst = _window_move_source(ctx, mcomp, str(hdr.get("inst", 0)).split(",")[0].strip() or "0")
     pods = [p for p in ctx["pod_state"].values() if p and p["alive"] and p["comp"] == mcomp]
     from_node = next((p.get("node", "") for p in pods if str(p.get("inst")) == inst and p.get("node")),
                      ctx["old_nodes"].get((mcomp, inst), ""))
@@ -14266,10 +14318,12 @@ def _window_move_request(ctx, hdr):
     if rr.returncode != 0:
         ctx["trigger_error"] = (rr.stderr.strip().splitlines() or ["patch failed"])[-1][:200]
         return None
-    return {"uuid": ru, "key": key, "from": from_node, "comp": mcomp, "inst": inst, "at": str(hdr.get("at") or ""),
-            "src_uids": {p["uid"] for p in pods if str(p.get("inst")) == inst and p.get("uid")},
-            "orig_uids": {p["uid"] for p in pods if p.get("uid")},
-            "seen": (None, None, False), "last_poll": 0.0, "entry": None, "end": None}
+    mv = {"uuid": ru, "key": key, "from": from_node, "comp": mcomp, "inst": inst, "at": str(hdr.get("at") or ""),
+          "src_uids": {p["uid"] for p in pods if str(p.get("inst")) == inst and p.get("uid")},
+          "orig_uids": {p["uid"] for p in pods if p.get("uid")},
+          "seen": (None, None, False), "last_poll": 0.0, "entry": None, "end": None}
+    ctx["mv"] = mv
+    return mv
 
 
 def _window_move_poll(mv, case_id, now, every=OVERLAP_POLL_S):
@@ -14283,19 +14337,27 @@ def _window_move_poll(mv, case_id, now, every=OVERLAP_POLL_S):
     mv["seen"] = (_migration_record(case_id, mv["comp"], mv["uuid"]), entry, mv["key"] not in _isvc_annotations(case_id))
 
 
+def _move_abandon_reason(record, entry):
+    """Why a move ended Failed, as the controller tells it: the record's
+    message, else the ledger row's outcome. The row's reason is the
+    request's own and never says why the move ended."""
+    return str((record or {}).get("message") or (entry or {}).get("outcome") or "")
+
+
 def _window_move_done(ctx, f, mv):
     """The move is over: its ledger row reads Completed, the request
     annotation is consumed, no source pod is alive and the moved Component
     holds N whole serving Instances on distinct indices. Where the caller
     accepts an abandoned move (accept_abandoned: a pod taken at a moment of
     the move, a move on a stuck push), a row that reads Failed with a reason
-    closes it too, the Instance whole and serving at its source index."""
+    closes it too, the Instance whole and serving at its source index on the
+    running revision (a held push's pod may stand beside it)."""
     entry = mv.get("entry") or {}
     if entry.get("phase") == "Failed" and mv.get("accept_abandoned") and mv["seen"][2]:
-        reason = str(entry.get("reason") or entry.get("message") or "")
+        reason = _move_abandon_reason(mv["seen"][0], entry)
         if not reason:
             return False
-        ok, why = _move_end_state(ctx, f, mv["comp"], mv["inst"], set(), False)
+        ok, why = _move_end_state(ctx, f, mv["comp"], mv["inst"], set(), False, running=ctx.get("old_hashes"))
         mv["end"], mv["abandoned"] = (ok, why, mv["inst"]), reason
         return ok
     if entry.get("phase") != "Completed" or not mv["seen"][2]:
@@ -16864,6 +16926,20 @@ def _stop_watcher(ctx):
         w.kill()
 
 
+def _move_replacement(ctx, comp, inst, uid):
+    """True for a fresh pod at the index the move's record names for its
+    replacement (ctx["mv"], published by _window_move_request): it runs the
+    source's revision, so the surge-before-drain bookkeeping credits it by
+    identity and index, never by revision hash."""
+    mv = ctx.get("mv")
+    if not mv or comp != mv.get("comp") or not uid or uid in (mv.get("orig_uids") or set()):
+        return False
+    idx = _surge_index_allocated(mv.get("entry"))
+    if idx is None:
+        idx = _surge_index_allocated((mv.get("seen") or (None,))[0])
+    return idx is not None and str(inst) == str(idx)
+
+
 def _apply_event(ctx, ev):
     obj = ev.get("object", {})
     meta = obj.get("metadata", {})
@@ -16884,7 +16960,7 @@ def _apply_event(ctx, ev):
         is_new = bool(rev and rev not in ctx["old_hashes"])
         nr = ctx.setdefault("new_ready", defaultdict(set))
         od = ctx.setdefault("old_drained", defaultdict(set))
-        if is_new and ready:
+        if ready and (is_new or _move_replacement(ctx, comp, labels.get("ome.io/instance-index", "0"), meta.get("uid", ""))):
             nr[comp].add(name)
         if (not is_new) and rev and (ev.get("type") == "DELETED" or deletion is not None) \
                 and _surge_order_open(ctx.get("rb")):
@@ -19054,6 +19130,19 @@ def _move_victim(victim, at, kind, pod_state, old_hashes, mcomp, inst, orig_uids
     return _crashloop_pick_pod(pods, old_hashes, mcomp)
 
 
+def _move_main_running(f, name):
+    """True once the main container of the pod a configkey or a readiness
+    fault is aimed at runs, read live at most every ONCE_POLL_S: the exec
+    they land with needs a running container, and the replacement at the
+    surge moment has only just been created."""
+    now = time.time()
+    if now - f.get("main_poll", 0.0) < ONCE_POLL_S:
+        return False
+    f["main_poll"] = now
+    state = _pod_main_state(name)
+    return bool(state and state[0])
+
+
 def _move_fire(f, mv, ctx):
     """Fire the fault on the resolved victim pod: a break patches or kills
     it; a node loss stops the kubelet under it (an ineligible node is a skip,
@@ -19062,10 +19151,13 @@ def _move_fire(f, mv, ctx):
     f["fired"], f["fired_ts"] = True, time.time()
     if f["kind"] in ("configkey", READINESS_FAULT) or _fault_once(f):
         # The kind's own fire, aimed at the moment's pod: a one-shot kill
-        # waits until that pod is in the state its form needs.
+        # waits until that pod is in the state its form needs, an exec until
+        # the pod's main container runs.
         f["aim_pod"] = name
         if _fault_once(f):
             _once_fire(f, pod_state, ctx["old_hashes"])
+        elif not _move_main_running(f, name):
+            f["fired"] = False
         elif f["kind"] == "configkey":
             _fault_configkey_fire(f, pod_state, ctx["old_hashes"])
         else:
@@ -19108,7 +19200,12 @@ def _move_tick(ctx, f, mv, now, mcomp, inst, reqs, src_uids, orig_uids):
     if f.get("skip") or f.get("infra_fail"):
         return
     if not f["fired"]:
-        return   # a one-shot kill waits for its pod to be in the form's state; asked again next tick
+        # A one-shot kill waits for its pod to be in the form's state, an exec
+        # for the pod's main container to run; asked again next tick.
+        if f["kind"] in ("configkey", READINESS_FAULT) and now - mv["due_at"] >= MOVE_VICTIM_GRACE_S:
+            mv["missed"] = (f"the main container of the {mv['victim']} pod {mv['pod']} did not run within "
+                            f"{MOVE_VICTIM_GRACE_S}s of the moment")
+        return
     mv["fired"], mv["fired_at"] = True, time.time()
     mv["path"] = _move_break_path(f, mv, mcomp)
     if f["kind"] in MOVE_BREAK_KINDS:
@@ -19155,11 +19252,12 @@ def _move_break_path(f, mv, mcomp):
 
 def _move_break_unserving(ctx, f):
     """(True, why) when the Instance a kept break hit reads not serving with
-    the status saying so: no pod of it is Ready and serving, and its row is
-    not Ready or reports fewer serving pods than it has."""
+    the status saying so: no routable pod of it (its pod, or a gang's leader;
+    workers are never routed) is Ready and serving, and its row is not Ready
+    or reports fewer serving pods than it has."""
     comp, inst = f.get("crash_comp"), f.get("crash_inst")
     pods = _instance_pods(ctx["pod_state"], comp, inst)
-    serving = [n for n, p in pods if p.get("ready") and p.get("serving")]
+    serving = [n for n, p in pods if p.get("runner", "default") in ("default", "leader") and p.get("ready") and p.get("serving")]
     if serving:
         return False, f"{comp} Instance {inst} still serves on {', '.join(serving)}"
     row = _broken_row(ctx["case_id"], comp, inst)
@@ -19185,13 +19283,22 @@ def _move_wait_reason(ctx, mcomp, record, entry):
     return ""
 
 
-def _move_end_state(ctx, f, mcomp, idx, src_uids, completed):
+def _move_end_state(ctx, f, mcomp, idx, src_uids, completed, kept_inst=None, running=None):
     """(ok, why) of the moved Component now: the Instance at idx is whole
     (every pod slot filled), Ready and serving; no source pod survives a
     completed move; no pod a break hit survives unserving; and the Component
-    holds N whole serving Instances on N distinct indices."""
+    holds N whole serving Instances on N distinct indices. kept_inst is the
+    (Component, index) whose cause is kept for the case: its pod stays alive
+    and not serving by design (_move_break_unserving judges it) and its index
+    counts as held, not whole. running is the running revision's hashes: a
+    pod of another revision at an index is a held push's attempt, left
+    beside the Instance's own pods and not judged."""
     n, ppi = ctx["N"][mcomp], max(1, ctx["pods_per_inst"].get(mcomp, 1))
-    pods = _instance_pods(ctx["pod_state"], mcomp, idx)
+
+    def own(ps):
+        return [p for p in ps if running is None or not p.get("hash") or p["hash"] in running]
+
+    pods = [(name, p) for name, p in _instance_pods(ctx["pod_state"], mcomp, idx) if own([p])]
     if len(pods) != ppi:
         return False, f"Instance {idx} has {len(pods)}/{ppi} pod(s)"
     down = [name for name, p in pods if not (p.get("ready") and p.get("serving"))]
@@ -19201,10 +19308,12 @@ def _move_end_state(ctx, f, mcomp, idx, src_uids, completed):
     if completed and src_uids & set(live):
         return False, "a source pod is still alive after the move completed"
     hit = live.get((f or {}).get("crash_uid"))
-    if (f or {}).get("kind") in MOVE_BREAK_KINDS and hit is not None and not (hit.get("ready") and hit.get("serving")):
+    if (kept_inst is None and (f or {}).get("kind") in MOVE_BREAK_KINDS and hit is not None
+            and not (hit.get("ready") and hit.get("serving"))):
         return False, f"the pod the fault hit ({f.get('crash_pod')}) is still there and not serving"
-    by = _instances_by_index(ctx["pod_state"], {mcomp})
-    whole = [i for i, ps in by.items() if len(ps) == ppi and all(p.get("ready") and p.get("serving") for p in ps)]
+    by = {key: own(ps) for key, ps in _instances_by_index(ctx["pod_state"], {mcomp}).items()}
+    whole = [key for key, ps in by.items()
+             if key == kept_inst or (len(ps) == ppi and all(p.get("ready") and p.get("serving") for p in ps))]
     if len(by) != n or len(whole) != n:
         return False, f"{mcomp} holds {len(whole)} whole serving Instance(s) over {len(by)} index(es), want {n}"
     return True, "whole, Ready and serving"
@@ -19221,7 +19330,8 @@ def _move_fault_settled(ctx, f, mv, mcomp, idx, src_uids, completed):
         ok, why = _move_break_unserving(ctx, f)
         return ok, why
     if path == "kept":
-        ok, why = _move_end_state(ctx, f, mcomp, idx, src_uids, completed)
+        kept = (f.get("crash_comp"), str(f.get("crash_inst")))
+        ok, why = _move_end_state(ctx, f, mcomp, idx, src_uids, completed, kept_inst=kept)
         if not ok:
             return ok, why
         return _move_break_unserving(ctx, f)
@@ -19296,7 +19406,7 @@ def _move_fault_checks(ctx, f, mv, mcomp, inst, reqs, entries, ir_entries, verdi
     entry = entries.get(inst) or {}
     record = next((m for m in ir_entries or [] if m.get("requestUUID") == req_uuid), None) or {}
     ph = record.get("phase") or entry.get("phase")
-    reason = str(record.get("reason") or entry.get("reason") or record.get("message") or entry.get("message") or "")
+    reason = _move_abandon_reason(record, entry)
     on_peer = mv["victim"] in ("peer", "sibling")
     path = mv.get("path") or "settle"
     must_finish = (on_peer and path != "wait") or path in ("kept", "drain-kept")
@@ -19732,16 +19842,25 @@ def _migrate(case_id, yaml_file, desc, hdr):
                               f"({'missing' if not (ir_ent or entry) else f'phase={eph}'}) — the policy rejection must be recorded")
     elif hdr.get("expect") == "fail":
         # Bounded-failure contract (fault cases): the armed fault holds the
-        # surge, so the request must end terminal Failed WITHIN the budget while
-        # the source keeps serving, the request annotation is consumed, and the
-        # migration slot frees (terminal IR entry). lift=1 then proves the
-        # bound is recoverable: lift the quota → a fresh request completes.
+        # surge, so the request must end terminal Failed within its record
+        # deadline while the source keeps serving, the request annotation is
+        # consumed, and the migration slot frees (terminal IR entry). A quota
+        # refusal is a wait the product bounds by that deadline, so until it
+        # passes a row naming the wait stands in for the Failed. lift=1 then
+        # proves the bound is recoverable: lift the quota → the move completes.
+        record = _migration_record(case_id, mcomp, reqs[inst][0]) or {}
+        waiting = None if ph == "Failed" else _move_quota_wait(case_id, mcomp, record, ctx["trigger_ts"])
         if ph == "Failed":
-            checks.append(f"  ✓ ledger terminal Failed within budget (bounded; state={state})")
+            why = _move_abandon_reason(record, entry)
+            checks.append(f"  ✓ ledger terminal Failed within budget (bounded; state={state}" + (f"; {why[:120]}" if why else "") + ")")
+        elif waiting:
+            checks.append(f"  ✓ the move waits on the quota inside its record deadline ({waiting[0]:.0f}s left) "
+                          f"with the status saying why: {waiting[1][:160]}")
         else:
             verdict = "FAIL"
             notes.append(f"expected bounded terminal Failed, got phase={ph} (state={state})")
-            checks.append(f"  ✗ expected a bounded terminal Failed entry, got phase={ph} (state={state}) — the fault did not bound the migration")
+            checks.append(f"  ✗ expected a bounded terminal Failed entry, got phase={ph} (state={state}) — the fault did not "
+                          f"bound the migration and no row names a quota wait inside the record deadline")
         src_ready = all(
             any(p and p["alive"] and p["ready"] and p["comp"] == mcomp and p["inst"] == i
                 for p in ctx["pod_state"].values())
@@ -19779,23 +19898,33 @@ def _migrate(case_id, yaml_file, desc, hdr):
                 eph = (ent or {}).get("phase")
                 if eph == "Failed":
                     checks.append(f"  ✓ IR status.migrations[{ru[:8]}] terminal Failed (slot freed)")
+                elif waiting and ent is not None:
+                    checks.append(f"  ⓘ IR status.migrations[{ru[:8]}] {eph}: the slot is held while the move waits inside its deadline")
                 else:
                     verdict = "FAIL"
                     notes.append(f"IR migrations entry {ru[:8]} {'missing' if ent is None else f'phase={eph}'} (want terminal Failed)")
                     checks.append(f"  ✗ IR status.migrations entry {ru[:8]} {'missing' if ent is None else f'has phase={eph}'} — want terminal Failed (a live entry means the slot never freed)")
         if hdr.get("lift") and verdict == "PASS":
             _lift_quota(case_id)
-            print("    ⚡ fault quota lifted — follow-up migration request")
-            checks.append("  ⓘ quota lifted after the bounded failure — follow-up migration")
-            ru2 = str(uuid.uuid4())
-            ak2 = f"ome.io/migration-request-v1-{ru2}"
-            fn2 = next((p.get("node", "") for p in ctx["pod_state"].values()
-                        if p and p["alive"] and p["comp"] == mcomp and p["inst"] == inst), "")
-            body2 = json.dumps({"schemaVersion": "v1", "component": mcomp, "instance": int(inst),
-                                "from_node": fn2, "reason": "perm-test-lift"})
-            rr2 = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
-                          "-p", json.dumps({"metadata": {"annotations": {ak2: body2}}}))
-            if rr2.returncode != 0:
+            what = "the waiting move" if waiting else "the follow-up migration"
+            if waiting:
+                # The waiting request owns the slot: once the quota is gone its
+                # surge is placed, so the same request is watched to completion.
+                ru2, rr2 = reqs[inst][0], None
+                print("    ⚡ fault quota lifted — the waiting move should complete")
+                checks.append("  ⓘ quota lifted while the move waits inside its deadline — the same request is watched to completion")
+            else:
+                print("    ⚡ fault quota lifted — follow-up migration request")
+                checks.append("  ⓘ quota lifted after the bounded failure — follow-up migration")
+                ru2 = str(uuid.uuid4())
+                ak2 = f"ome.io/migration-request-v1-{ru2}"
+                fn2 = next((p.get("node", "") for p in ctx["pod_state"].values()
+                            if p and p["alive"] and p["comp"] == mcomp and p["inst"] == inst), "")
+                body2 = json.dumps({"schemaVersion": "v1", "component": mcomp, "instance": int(inst),
+                                    "from_node": fn2, "reason": "perm-test-lift"})
+                rr2 = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
+                              "-p", json.dumps({"metadata": {"annotations": {ak2: body2}}}))
+            if rr2 is not None and rr2.returncode != 0:
                 verdict = "FAIL"
                 notes.append("follow-up migration patch failed")
                 checks.append(f"  ✗ follow-up migration request patch failed: {rr2.stderr[:120]}")
@@ -19809,22 +19938,22 @@ def _migrate(case_id, yaml_file, desc, hdr):
                         if ph2 in ("Completed", "Failed"):
                             break
                 if ph2 == "Completed":
-                    checks.append(f"  ✓ follow-up migration Completed after the quota lift ({time.time() - t2:.0f}s)")
+                    checks.append(f"  ✓ {what} Completed after the quota lift ({time.time() - t2:.0f}s)")
                     sd = time.time() + migrate_settle_budget(1)
                     gone = _src_gone()
                     while not gone and time.time() < sd and not ctx["closed"]:
                         _read_one(ctx)
                         gone = _src_gone()
                     if gone:
-                        checks.append(f"  ✓ follow-up drained source Instance {inst}")
+                        checks.append(f"  ✓ {what} drained source Instance {inst}")
                     else:
                         verdict = "FAIL"
-                        notes.append("follow-up completed but source never drained")
-                        checks.append(f"  ✗ follow-up Completed but source Instance {inst} never drained")
+                        notes.append(f"{what} completed but source never drained")
+                        checks.append(f"  ✗ {what} Completed but source Instance {inst} never drained")
                 else:
                     verdict = "FAIL"
-                    notes.append(f"follow-up migration did not complete (phase={ph2})")
-                    checks.append(f"  ✗ follow-up migration never reached Completed after the quota lift (phase={ph2}) — slot/headroom not actually freed")
+                    notes.append(f"{what} did not complete (phase={ph2})")
+                    checks.append(f"  ✗ {what} never reached Completed after the quota lift (phase={ph2}) — slot/headroom not actually freed")
             # The follow-up surge happens AFTER the main peak gate ran above —
             # re-assert the ceiling over the whole case (fan-out would show here).
             for c in COMPS:
@@ -20487,7 +20616,7 @@ def _stuck_move(case_id, yaml_file, desc, hdr):
         verdict = "FAIL"
         notes.append("the move was abandoned without a reason, or left its Instance short" if not mv.get("abandoned")
                      else f"the move was abandoned but its Instance did not settle: {end[1] if end else 'not read'}")
-        checks.append(f"  ✗ the move was abandoned ({str(entry.get('reason') or entry.get('message') or 'no reason recorded')[:120]}) "
+        checks.append(f"  ✗ the move was abandoned ({(_move_abandon_reason(mv['seen'][0], entry) or 'no reason recorded')[:120]}) "
                       f"and the moved Instance did not end whole and serving at its source index: {end[1] if end else 'not read'}")
     else:
         verdict = "FAIL"
