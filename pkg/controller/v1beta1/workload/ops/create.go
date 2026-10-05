@@ -188,7 +188,9 @@ type createStartAction struct {
 	missing  []podTarget
 	// terminal holds the dead pods still occupying missing targets' names;
 	// they are recycled before the targets can be created.
-	terminal       []*corev1.Pod
+	terminal []*corev1.Pod
+	// revision is the one every pod of the attempt renders and stamps.
+	revision       string
 	firstCreate    bool
 	statusChanges  bool
 	transition     statusTransition
@@ -310,7 +312,8 @@ func createFilteredBatched(
 			continue
 		}
 		if len(missing) > 0 {
-			allowed, treatedReady, retryAfter := allowCreateForMissingInstance(input, plan, inst, existing, target)
+			rev := createRevision(input, inst.Index, existing, target)
+			allowed, treatedReady, retryAfter := allowCreateForMissingInstance(input, plan, inst, existing, rev)
 			if retryAfter > 0 && (retryBlockWait == 0 || retryAfter < retryBlockWait) {
 				retryBlockWait = retryAfter
 			}
@@ -328,11 +331,7 @@ func createFilteredBatched(
 				continue
 			}
 			now := metav1.NewTime(input.Now())
-			targetRevision := ""
-			if target != nil {
-				targetRevision = target.Name
-			}
-			mutation := status.CreatingMutation(inst.Index, inst.Incarnation, plan.InstanceReadyTimeout, targetRevision, now)
+			mutation := status.CreatingMutation(inst.Index, inst.Incarnation, plan.InstanceReadyTimeout, rev, now)
 			observed := input.ObservedState.Instance(inst.Index)
 			probe := workload.InstanceStatus{Index: inst.Index}
 			if observed != nil {
@@ -342,6 +341,7 @@ func createFilteredBatched(
 				instance:      inst,
 				missing:       missing,
 				terminal:      terminalTargetPods(existing, missing),
+				revision:      rev,
 				firstCreate:   observed == nil,
 				statusChanges: mutation.Mutate(&probe),
 				transition:    statusTransition{index: inst.Index},
@@ -431,16 +431,18 @@ func createFilteredBatched(
 	}
 
 	readyStatusBatchingAvailable := input.ApplyInstanceMutations != nil || input.ApplyInstanceMutationsWithRetryBlock != nil
-	// A revision-targeted start also transitions its RetryBlock. Group it only
-	// when the adapter can commit both changes atomically.
-	startStatusBatchingAvailable := input.ApplyInstanceMutationsWithRetryBlock != nil ||
-		(target == nil && input.ApplyInstanceMutations != nil)
 	for i := 0; i < len(actions); {
 		j := i + 1
 		if actions[i].start != nil {
-			starts := []*createStartAction{actions[i].start}
+			lead := actions[i].start
+			// A revision-targeted start also transitions its RetryBlock. Group
+			// it only with starts at the same revision, and only when the
+			// adapter can commit both changes atomically.
+			startStatusBatchingAvailable := input.ApplyInstanceMutationsWithRetryBlock != nil ||
+				(lead.revision == "" && input.ApplyInstanceMutations != nil)
+			starts := []*createStartAction{lead}
 			for startStatusBatchingAvailable && j < len(actions) && actions[j].start != nil &&
-				actions[j].start.statusChanges == actions[i].start.statusChanges {
+				actions[j].start.statusChanges == lead.statusChanges && actions[j].start.revision == lead.revision {
 				starts = append(starts, actions[j].start)
 				j++
 			}
@@ -497,11 +499,16 @@ func processStartActions(
 	target *appsv1.ControllerRevision,
 	actions []*createStartAction,
 ) (bool, error) {
+	rev := actions[0].revision
+	tmpl, found, err := createTemplate(ctx, deps.Reader(), input, plan, target, rev)
+	if err != nil {
+		return true, fmt.Errorf("resolve create template (revision=%s): %w", rev, err)
+	}
 	mutations := make([]workload.InstanceMutation, 0, len(actions))
 	for _, action := range actions {
 		mutations = append(mutations, action.statusMutation)
 	}
-	ownerPresent, err := applyCreateIntentMutations(ctx, input, mutations, target)
+	ownerPresent, err := applyCreateIntentMutations(ctx, input, mutations, rev)
 	if err != nil {
 		return true, fmt.Errorf("batch patch status Creating: %w", err)
 	}
@@ -532,7 +539,14 @@ func processStartActions(
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, action.instance.Index) {
 			continue
 		}
-		if _, err := createMissingPods(ctx, deps, input, plan, action.instance, action.instance.Index, action.missing, desiredTemplate(input, plan, query.RevisionOf(target))); err != nil {
+		if !found {
+			if err := announceRevisionGone(ctx, deps, input, action.instance.Index, rev); err != nil {
+				rollbackErr := rollbackStartActions(ctx, input, actions[i+1:])
+				return true, errors.Join(err, rollbackErr)
+			}
+			continue
+		}
+		if _, err := createMissingPods(ctx, deps, input, plan, action.instance, action.instance.Index, action.missing, tmpl); err != nil {
 			rejection, classified := asPodRejection(err)
 			switch {
 			case classified && rejection.rejection.Class == workload.APIRejectionThrottled:
@@ -766,18 +780,18 @@ func applyInstanceMutationsWithOutcome(ctx context.Context, input workload.Recon
 	return true, applyInstanceMutations(ctx, input, mutations)
 }
 
-func applyCreateIntentMutations(ctx context.Context, input workload.ReconcileInput, mutations []workload.InstanceMutation, target *appsv1.ControllerRevision) (bool, error) {
+// applyCreateIntentMutations commits the Creating intents of one group of
+// starts pinned to rev, with the attempt start on rev's RetryBlock.
+func applyCreateIntentMutations(ctx context.Context, input workload.ReconcileInput, mutations []workload.InstanceMutation, rev string) (bool, error) {
 	if len(mutations) == 0 {
 		return true, nil
 	}
 	if input.ApplyInstanceMutationsWithRetryBlock != nil {
-		var targetRevision string
 		var mutateRetryBlock func(*workload.RetryBlock) workload.RetryBlockDisposition
-		if target != nil {
-			targetRevision = target.Name
+		if rev != "" {
 			mutateRetryBlock = status.RetryBlockStartAttempt
 		}
-		err := input.ApplyInstanceMutationsWithRetryBlock(ctx, mutations, targetRevision, mutateRetryBlock)
+		err := input.ApplyInstanceMutationsWithRetryBlock(ctx, mutations, rev, mutateRetryBlock)
 		if errors.Is(err, workload.ErrStatusOwnerGone) {
 			return false, nil
 		}
@@ -786,10 +800,10 @@ func applyCreateIntentMutations(ctx context.Context, input workload.ReconcileInp
 	if err := applyInstanceMutations(ctx, input, mutations); err != nil {
 		return true, err
 	}
-	if target == nil {
+	if rev == "" {
 		return true, nil
 	}
-	return true, status.RetryBlockAttemptStarted(ctx, input, target.Name)
+	return true, status.RetryBlockAttemptStarted(ctx, input, rev)
 }
 
 // missingPodTargets diffs the desired pod names against the live pods. A
@@ -811,26 +825,26 @@ func missingPodTargets(input workload.ReconcileInput, plan workload.ComponentPla
 // intent. A denied revision is intentionally skipped rather than reported as
 // an unready create.
 //
-// Every pod the pass would create carries the target revision, so every one
-// of them answers to that revision's RetryBlock: a Held block denies the
-// whole revision, not merely the first attempt at it, and a row rebuilding a
-// member it lost waits on the record exactly as a fresh start does. The
-// milder states are asked of a fresh start only, because they govern OPENING
-// an attempt — a backoff still running, and the one-attempt-at-a-time
-// authorization — and asking them of a row already materializing would deny
-// the very attempt they authorized.
+// Every pod the pass would create carries rev, the revision the attempt
+// renders (createRevision), so every one of them answers to that revision's
+// RetryBlock: a Held block denies the whole revision, not merely the first
+// attempt at it, and a row rebuilding a member it lost waits on the record
+// exactly as a fresh start does. The milder states are asked of a fresh
+// start only, because they govern OPENING an attempt — a backoff still
+// running, and the one-attempt-at-a-time authorization — and asking them of
+// a row already materializing would deny the very attempt they authorized.
 //
 // A denied fresh start is settled: it holds no pods and runs no deadline, so
 // the pass reports it ready and waits on the block's own wake-up. A denied
 // rebuild is not — it is short of its pod set, and while it carries an
 // attempt that attempt's deadline is the backstop that ends the wait — so the
 // pass keeps its cadence for it.
-func allowCreateForMissingInstance(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, existing []*corev1.Pod, target *appsv1.ControllerRevision) (allowed, treatedReady bool, retryAfter time.Duration) {
-	if target != nil {
+func allowCreateForMissingInstance(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, existing []*corev1.Pod, rev string) (allowed, treatedReady bool, retryAfter time.Duration) {
+	if rev != "" {
 		s := input.ObservedState.Instance(inst.Index)
-		if block := workload.FindRetryBlock(input.ObservedState.RetryBlocks, target.Name); block != nil {
+		if block := workload.FindRetryBlock(input.ObservedState.RetryBlocks, rev); block != nil {
 			if createFreshStart(s) {
-				attemptInFlight := anyInFlightUpdateAt(input.ObservedState.InstanceStatuses, target.Name) ||
+				attemptInFlight := anyInFlightUpdateAt(input.ObservedState.InstanceStatuses, rev) ||
 					anyInFlightCreateAttempt(input, allInstances)
 				if denied, wait := evaluateRetryBlockGate(block, input.Now(), attemptInFlight); denied {
 					return false, true, wait
@@ -862,6 +876,26 @@ func allowCreateForMissingInstance(input workload.ReconcileInput, plan workload.
 // other row is rebuilding — it holds pods, an attempt, or both.
 func createFreshStart(s *workload.InstanceStatus) bool {
 	return s == nil || (s.Phase == workload.InstancePhaseFailed && s.Operation == nil)
+}
+
+// createRevision names the revision a Create attempt on Instance idx renders
+// and pins: a committed attempt's pin; else the running revision, for a refill
+// beside live pods of it; else the roll target. Empty when none names one.
+func createRevision(input workload.ReconcileInput, idx int32, existing []*corev1.Pod, target *appsv1.ControllerRevision) string {
+	s := input.ObservedState.Instance(idx)
+	if s != nil && s.Operation != nil && s.Operation.Type == workload.InstanceOperationCreate && s.Operation.TargetRevision != "" {
+		return s.Operation.TargetRevision
+	}
+	// A refilled member joins the set it repairs: rolling that set to the
+	// target is the update pass's job, done as a unit, never one member at a
+	// time. An Instance with no live pod left is rebuilt at the target.
+	if s != nil && s.RunningRevision != "" && len(query.ExcludeTerminalPods(existing)) > 0 {
+		return s.RunningRevision
+	}
+	if target != nil {
+		return target.Name
+	}
+	return ""
 }
 
 // createAttemptOwnsPods reports whether an Instance's pods belong to a Create

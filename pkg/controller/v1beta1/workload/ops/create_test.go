@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/record"
 	clocktesting "k8s.io/utils/clock/testing"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -24,6 +25,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -1763,5 +1765,316 @@ func TestCreate_ConflictingSelectorCreatesNothing(t *testing.T) {
 	}
 	if pods := createGatePods(t, c, isvc.Namespace); len(pods) != 0 {
 		t.Fatalf("no pod may be created: got %d", len(pods))
+	}
+}
+
+// The revision a Create attempt renders is the one its pods stamp. A member
+// refilled into an Instance that still has live pods of its running revision
+// joins that revision, whatever the roll target is; an Instance with no live
+// pod left, and a first materialization, render the target.
+
+// runningRevisionName is the stored revision the refill fixtures' Instance
+// runs. Its hash differs from the roll target's, as does its template.
+const runningRevisionName = "llama-70b-engine-0000000a"
+
+// refillFixture is a gang Instance recorded on runningRevisionName while the
+// roll target is the current template, with the stored revision's
+// ControllerRevision seeded unless a test withholds it.
+type refillFixture struct {
+	input   *workload.ReconcileInput
+	plan    workload.ComponentPlan
+	target  *appsv1.ControllerRevision
+	running *appsv1.ControllerRevision
+	calls   *[]retryBlockCall
+	client  client.Client
+	isvc    *v1beta1.InferenceService
+}
+
+func newRefillFixture(t *testing.T, t0 time.Time, row v1beta1.OMENativeInstanceStatus, storeRunning bool) *refillFixture {
+	t.Helper()
+	row.RunningRevision = runningRevisionName
+	input, _, target, calls, c, isvc := createGateFixture(t, t0, row)
+	running := storedPayloadRevision(t, runningRevisionName, revision.DataPayload{
+		PodSpec:         legacyTargetSpecImage("test:v0"),
+		WorkerPodSpec:   legacyTargetSpecImage("test:v0-worker"),
+		PairingProtocol: ptr.To("proto-v0"),
+	})
+	if storeRunning {
+		if err := c.Create(context.Background(), running); err != nil {
+			t.Fatalf("seed the running revision: %v", err)
+		}
+	}
+	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
+	plan.PairingProtocol = "proto-v1"
+	return &refillFixture{input: input, plan: plan, target: target, running: running, calls: calls, client: c, isvc: isvc}
+}
+
+// seedLeader leaves the gang's leader alive at the running revision.
+func (f *refillFixture) seedLeader(t *testing.T) {
+	t.Helper()
+	createGateGangPod(t, f.client, f.isvc, 0, "leader", 0)
+	pinPodRevision(t, f.client, f.isvc, f.podName("leader"), f.running)
+}
+
+// seedDeadWorker leaves the gang's worker on its stable name, exited
+// Succeeded at the running revision.
+func (f *refillFixture) seedDeadWorker(t *testing.T) {
+	t.Helper()
+	createGateGangPod(t, f.client, f.isvc, 0, "worker", 0)
+	pinPodRevision(t, f.client, f.isvc, f.podName("worker"), f.running)
+	pod := f.pod(t, f.podName("worker"))
+	pod.Status.Phase = corev1.PodSucceeded
+	if err := f.client.Status().Update(context.Background(), pod); err != nil {
+		t.Fatalf("kill the worker: %v", err)
+	}
+}
+
+func (f *refillFixture) podName(runner string) string {
+	return query.PodName(f.isvc.Name, workload.ComponentEngine, 0, runner, 0)
+}
+
+func (f *refillFixture) pod(t *testing.T, name string) *corev1.Pod {
+	t.Helper()
+	pod := &corev1.Pod{}
+	if err := f.client.Get(context.Background(), client.ObjectKey{Namespace: f.isvc.Namespace, Name: name}, pod); err != nil {
+		t.Fatalf("get pod %s: %v", name, err)
+	}
+	return pod
+}
+
+func (f *refillFixture) run(t *testing.T, deps workload.Deps) ctrl.Result {
+	t.Helper()
+	res, err := Create(context.Background(), deps, *f.input, f.plan, f.target)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	return res
+}
+
+// reobserve starts the next pass from the persisted status, as the
+// dispatcher does.
+func (f *refillFixture) reobserve(t *testing.T) {
+	t.Helper()
+	legacyResetExpectations(t)
+	f.input.ObservedState.InstanceStatuses = legacyInstanceStatuses(f.client, f.isvc, workload.ComponentEngine)
+}
+
+func (f *refillFixture) row(t *testing.T) v1beta1.OMENativeInstanceStatus {
+	t.Helper()
+	rows := legacyInstanceStatusesOnIR(f.client, f.isvc, workload.ComponentEngine)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v, want exactly one", rows)
+	}
+	return rows[0]
+}
+
+// requireRenderedAt asserts pod is a render of rev's template: its revision
+// label, its image and its pairing protocol are all that revision's.
+func requireRenderedAt(t *testing.T, pod *corev1.Pod, rev *appsv1.ControllerRevision, image, protocol string) {
+	t.Helper()
+	if got := pod.Labels[query.LabelRevisionHash]; got != query.RevisionOf(rev).Hash() {
+		t.Errorf("pod %s revision label = %q, want %s", pod.Name, got, query.RevisionOf(rev).Hash())
+	}
+	if got := pod.Spec.Containers[0].Image; got != image {
+		t.Errorf("pod %s image = %q, want %q", pod.Name, got, image)
+	}
+	if got := pod.Labels[query.LabelPairingProtocol]; got != protocol {
+		t.Errorf("pod %s pairing protocol = %q, want %q", pod.Name, got, protocol)
+	}
+}
+
+// A Ready gang running one revision that lost its worker while the roll
+// target is another: the refilled worker is the running revision's worker
+// template, stamped with that revision, so the Instance never holds two
+// revisions. The attempt pins the revision it renders and starts on that
+// revision's RetryBlock, and the row keeps the revision it runs.
+//
+// Cells: instance/Ready/pod.deleted[source]/before
+func TestCreate_MemberRefillKeepsTheRunningRevision(t *testing.T) {
+	f := newRefillFixture(t, time.Now(), v1beta1.OMENativeInstanceStatus{
+		Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+	}, true)
+	f.seedLeader(t)
+
+	f.run(t, legacyTestDeps(f.client))
+
+	if pods := createGatePods(t, f.client, f.isvc.Namespace); len(pods) != 2 {
+		t.Fatalf("the lost worker must be refilled: got %d pod(s) want 2", len(pods))
+	}
+	requireRenderedAt(t, f.pod(t, f.podName("worker")), f.running, "test:v0-worker", "proto-v0")
+	row := f.row(t)
+	if row.Phase != v1beta1.OMENativeInstanceCreating || row.Operation == nil ||
+		row.Operation.Type != v1beta1.InstanceOperationCreate || row.Operation.TargetRevision != runningRevisionName {
+		t.Errorf("the refill must open a Create attempt pinned to the running revision, got %+v", row)
+	}
+	if row.RunningRevision != runningRevisionName {
+		t.Errorf("RunningRevision = %q, want %s kept", row.RunningRevision, runningRevisionName)
+	}
+	for _, call := range *f.calls {
+		if call.rev != runningRevisionName {
+			t.Errorf("the attempt start touched the block of %s, want only %s", call.rev, runningRevisionName)
+		}
+	}
+	if len(*f.calls) == 0 {
+		t.Errorf("the attempt start must be recorded on the running revision's block")
+	}
+}
+
+// The worker exited Succeeded on its stable name. The first pass recycles
+// the dead pod and commits the attempt pinned to the running revision; the
+// next pass, reading that pin, renders the worker at the running revision
+// although the roll target has not changed.
+//
+// Cells: instance/Ready/pod.phaseTerminal[Succeeded]/before, instance/Create/CreatePods/pod.phaseTerminal[Succeeded]/after@T-create-recycle-terminal
+func TestCreate_MemberRefillAfterTheRecycleKeepsTheRunningRevision(t *testing.T) {
+	f := newRefillFixture(t, time.Now(), v1beta1.OMENativeInstanceStatus{
+		Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+	}, true)
+	f.seedLeader(t)
+	f.seedDeadWorker(t)
+	deps := legacyTestDeps(f.client)
+
+	f.run(t, deps)
+	pods := createGatePods(t, f.client, f.isvc.Namespace)
+	if len(pods) != 1 || pods[0].Name != f.podName("leader") {
+		t.Fatalf("the first pass must recycle the dead worker and create nothing yet, got %d pod(s)", len(pods))
+	}
+	if row := f.row(t); row.Operation == nil || row.Operation.TargetRevision != runningRevisionName {
+		t.Fatalf("the recycle pass must commit the attempt pinned to the running revision, got %+v", row)
+	}
+
+	f.reobserve(t)
+	f.run(t, deps)
+	if pods := createGatePods(t, f.client, f.isvc.Namespace); len(pods) != 2 {
+		t.Fatalf("the second pass must rebuild the worker: got %d pod(s) want 2", len(pods))
+	}
+	requireRenderedAt(t, f.pod(t, f.podName("worker")), f.running, "test:v0-worker", "proto-v0")
+}
+
+// A roll target whose RetryBlock is Held denies pods at that revision, not a
+// member refilled at the revision the Instance runs. A Held block on the
+// running revision does deny the refill: the pod would be one more at a
+// revision the block holds, and the row is left unstamped.
+//
+// Cells: instance/Ready/gate.deny[Held]/before
+func TestCreate_MemberRefillAnswersToTheRunningRevisionsBlock(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		held    func(f *refillFixture) string
+		created int
+	}{
+		{name: "held target", held: func(f *refillFixture) string { return f.target.Name }, created: 2},
+		{name: "held running revision", held: func(f *refillFixture) string { return runningRevisionName }, created: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRefillFixture(t, time.Now(), v1beta1.OMENativeInstanceStatus{
+				Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+			}, true)
+			f.seedLeader(t)
+			f.input.ObservedState.RetryBlocks = []workload.RetryBlock{
+				{TargetRevision: tc.held(f), State: workload.RetryBlockHeld, AttemptsStarted: 1, Reason: "ImagePullBackOff"},
+			}
+
+			f.run(t, legacyTestDeps(f.client))
+
+			if pods := createGatePods(t, f.client, f.isvc.Namespace); len(pods) != tc.created {
+				t.Fatalf("got %d pod(s) want %d", len(pods), tc.created)
+			}
+			row := f.row(t)
+			if tc.created == 2 {
+				requireRenderedAt(t, f.pod(t, f.podName("worker")), f.running, "test:v0-worker", "proto-v0")
+				return
+			}
+			if row.Phase != v1beta1.OMENativeInstanceReady || row.Operation != nil {
+				t.Errorf("a denied refill must not stamp an attempt, got %+v", row)
+			}
+			if len(*f.calls) != 0 {
+				t.Errorf("a denied refill must not touch any block: %d call(s)", len(*f.calls))
+			}
+		})
+	}
+}
+
+// A refill whose running revision has no ControllerRevision left creates
+// nothing: rendering the current template under that revision's label would
+// put a pod of the target inside an Instance of the running revision. The
+// attempt stays open on the pin and the row says why.
+//
+// Cells: instance/Ready/api.notFound/before
+func TestCreate_MemberRefillHoldsWhenTheRunningRevisionIsGone(t *testing.T) {
+	f := newRefillFixture(t, time.Now(), v1beta1.OMENativeInstanceStatus{
+		Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+	}, false)
+	f.seedLeader(t)
+	rec := record.NewFakeRecorder(8)
+
+	f.run(t, workload.Deps{Client: f.client, Recorder: rec})
+
+	if pods := createGatePods(t, f.client, f.isvc.Namespace); len(pods) != 1 {
+		t.Fatalf("nothing may be rendered for a gone revision: got %d pod(s) want the 1 survivor", len(pods))
+	}
+	row := f.row(t)
+	if row.Phase != v1beta1.OMENativeInstanceCreating || row.Operation == nil || row.Operation.TargetRevision != runningRevisionName {
+		t.Errorf("the attempt must stay open on the running revision, got %+v", row)
+	}
+	var warnings []string
+	for len(rec.Events) > 0 {
+		if e := <-rec.Events; strings.Contains(e, string(workload.EventReasonRepairRevisionGone)) {
+			warnings = append(warnings, e)
+		}
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], runningRevisionName) || !strings.HasPrefix(warnings[0], "Warning ") {
+		t.Fatalf("%s events = %v, want one Warning naming %s", workload.EventReasonRepairRevisionGone, warnings, runningRevisionName)
+	}
+}
+
+// An Instance with no row at all renders the roll target: a first
+// materialization has no revision of its own to keep.
+//
+// Cells: instance/Empty/spec.replicasUp/before
+func TestCreate_FirstMaterializationRendersTheTarget(t *testing.T) {
+	input, _, target, _, c, isvc := createGateFixture(t, time.Now())
+	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
+	plan.PairingProtocol = "proto-v1"
+
+	if _, err := Create(context.Background(), legacyTestDeps(c), *input, plan, target); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	pods := createGatePods(t, c, isvc.Namespace)
+	if len(pods) != 2 {
+		t.Fatalf("got %d pod(s) want the whole gang", len(pods))
+	}
+	for i := range pods {
+		requireRenderedAt(t, &pods[i], target, "test:v1", "proto-v1")
+	}
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if s.Operation == nil || s.Operation.TargetRevision != target.Name {
+		t.Errorf("a first materialization pins the target, got %+v", s.Operation)
+	}
+}
+
+// A row demoted for losing every pod still records the revision it ran, but
+// serves nothing: its rebuild renders the roll target as a unit, with no pod
+// set torn down for it, and the row keeps its record until the promote.
+//
+// Cells: instance/Pending/spec.revision/before
+func TestCreate_PodlessDemotedRowRendersTheTarget(t *testing.T) {
+	f := newRefillFixture(t, time.Now(), v1beta1.OMENativeInstanceStatus{
+		Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstancePending,
+	}, true)
+
+	f.run(t, legacyTestDeps(f.client))
+
+	pods := createGatePods(t, f.client, f.isvc.Namespace)
+	if len(pods) != 2 {
+		t.Fatalf("got %d pod(s) want the whole gang", len(pods))
+	}
+	for i := range pods {
+		requireRenderedAt(t, &pods[i], f.target, "test:v1", "proto-v1")
+	}
+	row := f.row(t)
+	if row.Operation == nil || row.Operation.TargetRevision != f.target.Name || row.RunningRevision != runningRevisionName {
+		t.Errorf("a podless rebuild pins the target and keeps the recorded revision, got %+v", row)
 	}
 }

@@ -854,6 +854,14 @@ func TestReconcile_PausedFinishesACreateItWouldNotRetire(t *testing.T) {
 		// The gang-member-loss repair owns a partial set under the
 		// recreate policy; this is about the Create pass finishing its own.
 		f.plan.RestartPolicy = ""
+		if runningRevision == "" {
+			// The attempt renders the revision it pins, so that revision's
+			// stored template is what the set is finished from.
+			stored := revisionWithPodSpec(t, pinned, f.isvc.Namespace, f.input.DesiredSpec.PodSpec)
+			if err := f.client.Create(context.Background(), stored); err != nil {
+				t.Fatalf("seed the pinned revision: %v", err)
+			}
+		}
 		return f
 	}
 
@@ -890,6 +898,8 @@ func TestReconcile_PausedFinishesACreateItWouldNotRetire(t *testing.T) {
 	})
 
 	t.Run("no target to retarget to", func(t *testing.T) {
+		// With no target the attempt cannot be retired, so the set is
+		// finished at the revision the attempt pins.
 		f := build(t, "")
 		if _, err := workload.Reconcile(context.Background(), workloadtypes.Deps{
 			Client: f.client, APIReader: f.client, Expectations: workloadtypes.NewExpectations(),
@@ -898,6 +908,13 @@ func TestReconcile_PausedFinishesACreateItWouldNotRetire(t *testing.T) {
 		}
 		if names := podNameSet(t, f.client, f.isvc.Namespace); !names[missing] {
 			t.Errorf("paused reconcile with no target left the set half-built; pods = %v", names)
+		}
+		pod := &corev1.Pod{}
+		if err := f.client.Get(context.Background(), client.ObjectKey{Namespace: f.isvc.Namespace, Name: missing}, pod); err != nil {
+			t.Fatalf("get the finished member: %v", err)
+		}
+		if got := pod.Labels[query.LabelRevisionHash]; got != query.RevisionHashFromControllerRevisionName(pinned) {
+			t.Errorf("the finished member carries revision %q, want the attempt's pin %s", got, pinned)
 		}
 	})
 }
