@@ -3246,3 +3246,85 @@ func TestRolledInstanceNotServing_RestartedRunnerServesOnceItHoldsReadyForTheWin
 		})
 	}
 }
+
+// TestRolledInstanceCrashed_RememberedCrashReadsThroughTheRebuild pins the
+// row's own record as a reading of the crash: a failure of a container of
+// the promoted set dated after the row entered Ready keeps the Instance
+// reading crashed while the rebuild answering it has torn the pods down,
+// and a record older than the row's Ready, or one naming no container,
+// leaves the reading to the pods.
+func TestRolledInstanceCrashed_RememberedCrashReadsThroughTheRebuild(t *testing.T) {
+	const target = "llama-70b-engine-v2hash"
+	readySince := metav1.NewTime(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
+	afterReady := metav1.NewTime(readySince.Add(20 * time.Second))
+	beforeReady := metav1.NewTime(readySince.Add(-time.Minute))
+	restart := &workload.InstanceOperation{Type: workload.InstanceOperationRestart, Step: workload.RestartStepDrain}
+	cases := []struct {
+		name string
+		row  *workload.InstanceStatus
+		want bool
+	}{
+		{name: "a Restarting row remembering its set's crash", want: true, row: &workload.InstanceStatus{
+			Phase: workload.InstancePhaseRestarting, RunningRevision: target, ReadySince: &readySince, Operation: restart,
+			LastFailure: &workload.InstanceTermination{PodName: "p", ContainerName: "main", Reason: "Error", Time: afterReady}}},
+		{name: "a Ready row remembering its set's crash with no pod left to read", want: true, row: &workload.InstanceStatus{
+			Phase: workload.InstancePhaseReady, RunningRevision: target, ReadySince: &readySince,
+			LastFailure: &workload.InstanceTermination{PodName: "p", ContainerName: "main", Reason: "Error", Time: afterReady}}},
+		{name: "a record older than the row's Ready is a prior set's", want: false, row: &workload.InstanceStatus{
+			Phase: workload.InstancePhaseRestarting, RunningRevision: target, ReadySince: &readySince, Operation: restart,
+			LastFailure: &workload.InstanceTermination{PodName: "p", ContainerName: "main", Reason: "Error", Time: beforeReady}}},
+		{name: "a record naming no container is a wait, not a crash", want: false, row: &workload.InstanceStatus{
+			Phase: workload.InstancePhaseRestarting, RunningRevision: target, ReadySince: &readySince, Operation: restart,
+			LastFailure: &workload.InstanceTermination{PodName: "p", Reason: "Unschedulable", Time: afterReady}}},
+		{name: "a row off the target is not the roll's", want: false, row: &workload.InstanceStatus{
+			Phase: workload.InstancePhaseRestarting, RunningRevision: "llama-70b-engine-v1hash", ReadySince: &readySince, Operation: restart,
+			LastFailure: &workload.InstanceTermination{PodName: "p", ContainerName: "main", Reason: "Error", Time: afterReady}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RolledInstanceCrashed(tc.row, target, time.Time{}, nil, 30); got != tc.want {
+				t.Fatalf("RolledInstanceCrashed = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRetryBlockOfCrashedAttempt pins which block states read as the
+// ladder's attempt being the rebuild of crashed rows: a Backoff that has
+// come due and RetryInProgress; a Held block and a Backoff not yet due
+// are the trigger gate's denials, read elsewhere.
+func TestRetryBlockOfCrashedAttempt(t *testing.T) {
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-v2hash"}}
+	later := metav1.NewTime(t0.Add(time.Minute))
+	earlier := metav1.NewTime(t0.Add(-time.Minute))
+	cases := []struct {
+		name  string
+		block *workload.RetryBlock
+		want  bool
+	}{
+		{name: "no block", want: false},
+		{name: "RetryInProgress", block: &workload.RetryBlock{State: workload.RetryBlockRetryInProgress}, want: true},
+		{name: "Backoff that has come due", block: &workload.RetryBlock{State: workload.RetryBlockBackoff, NextRetryAt: &earlier}, want: true},
+		{name: "Backoff with no retry time is due", block: &workload.RetryBlock{State: workload.RetryBlockBackoff}, want: true},
+		{name: "Backoff not yet due", block: &workload.RetryBlock{State: workload.RetryBlockBackoff, NextRetryAt: &later}, want: false},
+		{name: "Held", block: &workload.RetryBlock{State: workload.RetryBlockHeld}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := workload.ReconcileInput{Clock: clocktesting.NewFakeClock(t0)}
+			if tc.block != nil {
+				b := *tc.block
+				b.TargetRevision = target.Name
+				input.ObservedState.RetryBlocks = []workload.RetryBlock{b}
+			}
+			got := RetryBlockOfCrashedAttempt(input, target)
+			if (got != nil) != tc.want {
+				t.Fatalf("RetryBlockOfCrashedAttempt = %+v, want present=%v", got, tc.want)
+			}
+			if RetryBlockOfCrashedAttempt(input, nil) != nil {
+				t.Fatalf("no target has no block")
+			}
+		})
+	}
+}

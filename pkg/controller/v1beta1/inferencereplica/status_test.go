@@ -1963,10 +1963,10 @@ func TestComputeRetryBlockRolloutHold(t *testing.T) {
 }
 
 // TestEffectiveRolloutHold pins the top-level decision effectiveRolloutHold
-// makes each reconcile: no rollout / converged always clears regardless of
-// a stale signal; an observed Update-pass verdict is authoritative when
-// the Update pass ran; the persisted RetryBlock/Held state is the fallback
-// when it did not.
+// makes each reconcile: no update revision always clears regardless of a
+// stale signal; an observed Update-pass verdict is authoritative when the
+// Update pass ran, on a converged subject as on one mid-roll; the
+// persisted RetryBlock/Held state is the fallback when it did not.
 func TestEffectiveRolloutHold(t *testing.T) {
 	now := time.Unix(9000, 0)
 
@@ -1976,10 +1976,26 @@ func TestEffectiveRolloutHold(t *testing.T) {
 		t.Errorf("no UpdateRevision must clear regardless of exec verdict: got %+v", h)
 	}
 
-	// Converged (CurrentRevision == UpdateRevision): nothing to hold.
+	// Converged (CurrentRevision == UpdateRevision): the verdict the Update
+	// pass reports stands, a hold for promoted sets that crash after the
+	// roll completed as much as the nil a roll with nothing left reports.
 	converged := &v1beta1.InferenceReplicaStatus{CurrentRevision: "rev-a", UpdateRevision: "rev-a"}
-	if h := effectiveRolloutHold(true, &workloadtypes.RolloutHold{Gate: workloadtypes.RolloutHoldGateBudget, Reason: "x", Target: "rev-a"}, converged, now); h != nil {
-		t.Errorf("converged rollout must clear regardless of exec verdict: got %+v", h)
+	crashedAfterTheRoll := &workloadtypes.RolloutHold{Gate: workloadtypes.RolloutHoldGateRetryBlock, Reason: "update to rev-a retrying one attempt at a time after 1 failed attempt(s): Error; Instance 0 on revision rev-a not serving", Target: "rev-a"}
+	if h := effectiveRolloutHold(true, crashedAfterTheRoll, converged, now); h == nil || h.Gate != v1beta1.RolloutHoldGateRetryBlock || h.Reason != crashedAfterTheRoll.Reason || h.Target != "rev-a" {
+		t.Errorf("a converged subject must surface the observed hold its promoted sets stand behind: got %+v", h)
+	}
+	if h := effectiveRolloutHold(true, nil, converged, now); h != nil {
+		t.Errorf("a converged subject whose Update pass reported nothing to hold must clear: got %+v", h)
+	}
+	// Converged with no verdict this pass: the persisted hold stands, and a
+	// same-target block the ladder still holds stands ahead of it.
+	converged.RolloutHold = &v1beta1.RolloutHold{Gate: v1beta1.RolloutHoldGateBudget, Reason: "per-Component unavailability budget 1 exhausted; Instance 0 on revision rev-a not serving", Target: "rev-a", Since: metav1.NewTime(now.Add(-time.Minute))}
+	if h := effectiveRolloutHold(false, nil, converged, now); h == nil || h.Gate != v1beta1.RolloutHoldGateBudget || !h.Since.Equal(&converged.RolloutHold.Since) {
+		t.Errorf("a converged subject with no verdict this pass must keep the persisted hold as written: got %+v", h)
+	}
+	converged.RetryBlocks = []v1beta1.RetryBlock{{TargetRevision: "rev-a", State: v1beta1.RetryBlockHeld, AttemptsStarted: 3, Reason: "Error"}}
+	if h := effectiveRolloutHold(false, nil, converged, now); h == nil || h.Gate != v1beta1.RolloutHoldGateHeld {
+		t.Errorf("a converged subject whose ladder holds the revision must report the Held block when the Update pass did not run: got %+v", h)
 	}
 
 	inFlight := &v1beta1.InferenceReplicaStatus{CurrentRevision: "rev-a", UpdateRevision: "rev-b"}
@@ -2219,6 +2235,69 @@ func TestAggregateAndWriteStatus_RolloutHold_PausedRetryBlockFallbackChurnSafe(t
 			"paused reconcile %d must not fabricate a fresh Since", i+2)
 		live = next
 	}
+}
+
+// TestAggregateAndWriteStatus_RolloutHold_ConvergedSubjectPublishesTheHoldItsSetsStandBehind
+// pins the hold on a subject whose current revision is its update
+// revision: a roll that completed before its promoted sets crashed still
+// stands behind the ladder that counts the crashes, and the Update pass's
+// verdict is written as it is for a roll in flight. A pass that reports
+// no verdict keeps it as written, and the pass that reports nothing to
+// hold clears it.
+//
+// Cells: instance/Ready/gate.deny[RetryBlock]/before
+func TestAggregateAndWriteStatus_RolloutHold_ConvergedSubjectPublishesTheHoldItsSetsStandBehind(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "rev-target"}}
+	ir.Status.CurrentRevision = target.Name
+	ir.Status.UpdateRevision = target.Name
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: target.Name},
+	}
+	pod0 := podForIR(ir, 0, "default", 0, true, true)
+	slice0 := sliceForIRPod(ir, pod0, true)
+	r, c := newReconciler(t, ir, pod0, slice0)
+
+	plan := workloadtypes.ComponentPlan{
+		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
+		Replicas:  1,
+		Instances: []workloadtypes.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
+		},
+	}
+	key := client.ObjectKeyFromObject(ir)
+	ladderHold := &workloadtypes.RolloutHold{
+		Gate:   workloadtypes.RolloutHoldGateRetryBlock,
+		Reason: "update to rev-target retrying one attempt at a time after 1 failed attempt(s): Error; Instance 0 on revision rev-target not serving; the attempt rebuilds Instance 0",
+		Target: target.Name,
+	}
+
+	// The Update pass reported the ladder as the hold the roll stands behind.
+	g.Expect(writeStatus(r, ir, plan, target, true, ladderHold)).To(gomega.Succeed())
+	held := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, held)).To(gomega.Succeed())
+	g.Expect(held.Status.CurrentRevision).To(gomega.Equal(held.Status.UpdateRevision), "the subject is converged")
+	g.Expect(held.Status.RolloutHold).NotTo(gomega.BeNil(), "a converged subject must publish the hold its crashed sets stand behind")
+	g.Expect(held.Status.RolloutHold.Gate).To(gomega.Equal(v1beta1.RolloutHoldGateRetryBlock))
+	g.Expect(held.Status.RolloutHold.Reason).To(gomega.Equal(ladderHold.Reason))
+	g.Expect(held.Status.RolloutHold.Target).To(gomega.Equal(target.Name))
+	since := held.Status.RolloutHold.Since
+	g.Expect(since.IsZero()).To(gomega.BeFalse())
+
+	// A pass the repair consumed reports no verdict: the hold stands as written.
+	g.Expect(writeStatus(r, held.DeepCopy(), plan, target, false, nil)).To(gomega.Succeed())
+	standing := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, standing)).To(gomega.Succeed())
+	g.Expect(standing.Status.RolloutHold).NotTo(gomega.BeNil(), "a pass without the Update pass must not clear the hold")
+	g.Expect(standing.Status.RolloutHold.Reason).To(gomega.Equal(ladderHold.Reason))
+	g.Expect(standing.Status.RolloutHold.Since.Equal(&since)).To(gomega.BeTrue(), "a standing hold must not move Since")
+
+	// The pass that finds nothing to hold clears it.
+	g.Expect(writeStatus(r, standing.DeepCopy(), plan, target, true, nil)).To(gomega.Succeed())
+	cleared := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), key, cleared)).To(gomega.Succeed())
+	g.Expect(cleared.Status.RolloutHold).To(gomega.BeNil(), "a nil verdict must clear the hold on a converged subject")
 }
 
 // TestAggregateAndWriteStatus_RolloutHold_StandsAcrossAPassWithoutTheUpdatePass

@@ -757,6 +757,33 @@ func RetryBlockDenyingFreshStart(input workload.ReconcileInput, target *appsv1.C
 	return b
 }
 
+// RetryBlockOfCrashedAttempt returns the target's RetryBlock while its
+// attempt is the rebuild of rows that crashed after promotion: a Backoff
+// that has come due, whose attempt the restart pass opens, or
+// RetryInProgress, whose attempt is a Restart under way or a rebuilt set
+// not yet proven. No Update is in flight at such a block, so
+// RetryBlockDenyingFreshStart reads it as admitting a start; the hold
+// that names the ladder for those rows reads the attempt that is. Nil
+// otherwise.
+func RetryBlockOfCrashedAttempt(input workload.ReconcileInput, target *appsv1.ControllerRevision) *workload.RetryBlock {
+	if target == nil {
+		return nil
+	}
+	b := workload.FindRetryBlock(input.ObservedState.RetryBlocks, target.Name)
+	if b == nil {
+		return nil
+	}
+	switch b.State {
+	case workload.RetryBlockRetryInProgress:
+		return b
+	case workload.RetryBlockBackoff:
+		if b.NextRetryAt == nil || !input.Now().Before(b.NextRetryAt.Time) {
+			return b
+		}
+	}
+	return nil
+}
+
 // anyInFlightUpdateAt reports whether any Instance carries an in-flight
 // Update Operation targeting rev. Used by the retry gate to distinguish
 // a live RetryInProgress authorization from one leaked by a superseded
@@ -910,12 +937,20 @@ func RolledInstanceNotServing(row *workload.InstanceStatus, target string, revis
 // rolled Instance short of serving for any other reason is a row another
 // pass repairs or parks and says so itself, so only this shape is what a
 // roll with nothing left to start reports as the hold it stands behind.
+//
+// The row's own record reads the same way: a container failure of its
+// promoted set dated after it entered Ready (types.RemembersCrash)
+// outlives the pods the rebuild tears down, so the Instance reads
+// crashed through the rebuild until the rebuilt set enters Ready anew.
 func RolledInstanceCrashed(row *workload.InstanceStatus, target string, revisionBorn time.Time, pods []*corev1.Pod, window int32) bool {
 	if row == nil || target == "" || row.RunningRevision != target {
 		return false
 	}
 	if workload.UpdateContinuation(row) || isMigrateOwnedStatus(row) {
 		return false
+	}
+	if workload.RemembersCrash(row) && row.LastFailure.ContainerName != "" {
+		return true
 	}
 	targetRev := query.RevisionFromName(target)
 	for _, pod := range pods {

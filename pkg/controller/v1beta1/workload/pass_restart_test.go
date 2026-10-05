@@ -2180,6 +2180,145 @@ func TestReconcile_OpenRepair_TargetMovesAfterThePodsExist(t *testing.T) {
 	}
 }
 
+// TestReconcile_PushedGangCrashesAfterPromotion_RollbackLandsOnItsRepair:
+// two leader+worker gangs are pushed under InPlaceIfPossible maxUnavailable
+// 1 (a gang's in-place update is a recreate) under the gang's default
+// restart policy, and both promote onto the pushed revision before the
+// first gang's leader dies once after promotion. The policy's repair opens
+// and deletes the set, and the push is rolled back to the starting
+// revision while the repair is open: before the rebuild has created a
+// pod, or once its pods exist. Either way no pod of the withdrawn revision
+// is created after the rollback and both gangs settle on the starting
+// revision with the one repair on record. Before the first create the
+// rebuild itself renders the starting revision and records it on the
+// row; once the pods exist the repair finishes on the revision they carry
+// and the roll replaces the gang from Ready.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Restart/Drain/spec.revision/before
+func TestReconcile_PushedGangCrashesAfterPromotion_RollbackLandsOnItsRepair(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		podsExist bool
+	}{
+		{name: "before the rebuild creates a pod"},
+		{name: "once the rebuild's pods exist", podsExist: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const replicas = int32(2)
+			h := newRecoveryHarnessFor(t, true, constants.MainContainerName)
+			h.recorder = record.NewFakeRecorder(256)
+			h.replicas = replicas
+			// Only the leader dies, once, after serving long enough for the
+			// roll to land the second gang first and well inside the crash
+			// window.
+			h.crashLeaderOnly = true
+			h.crashAfterServed = 6
+			h.stuckGrace = 10 * time.Minute
+			h.stepFloor = 5 * time.Second
+			h.stepCap = h.stepFloor
+			h.kubeletLag = time.Second
+			maxSurge, maxUnavailable := intstr.FromInt32(0), intstr.FromInt32(1)
+			h.lifecycle.UpdateStrategy = &workloadtypes.UpdateStrategy{
+				Type:          workloadtypes.UpdateStrategyInPlaceIfPossible,
+				RollingUpdate: &workloadtypes.RollingUpdate{MaxSurge: &maxSurge, MaxUnavailable: &maxUnavailable},
+			}
+			h.setTarget(h.revV1, goodImage)
+			if !h.run(60, func() bool { return h.settledOn(h.revV1, replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled on v1 for %d gangs", replicas)
+			}
+
+			revPushed := h.crashRevision(crashOnceAfterServingImage)
+			if !h.run(80, func() bool { return h.settledOn(revPushed, replicas) }) {
+				h.dumpState("push")
+				t.Fatalf("the push never landed on both gangs")
+			}
+			if len(h.crashedInstances) > 0 {
+				h.dumpState("early crash")
+				t.Fatalf("a promoted leader died before the roll completed; the story needs a completed roll")
+			}
+			incarnationAtPush := map[int32]int64{}
+			for _, s := range h.irStatuses() {
+				incarnationAtPush[s.Index] = s.Incarnation
+			}
+			h.events = nil
+
+			victim := int32(-1)
+			repairOpen := func() bool {
+				for _, s := range h.irStatuses() {
+					if s.Phase == workloadtypes.InstancePhaseRestarting && s.RunningRevision == revPushed.Name {
+						victim = s.Index
+						return true
+					}
+				}
+				return false
+			}
+			moment := func() bool {
+				if !repairOpen() {
+					return false
+				}
+				if tc.podsExist {
+					return len(h.podsOf(victim)) == len(h.desired.Runners)
+				}
+				return len(h.podsOf(victim)) == 0
+			}
+			if !h.run(60, moment) {
+				h.dumpState("repair")
+				t.Fatalf("no repair of a promoted gang whose leader died reached the moment the story rolls back at")
+			}
+			pushedHash := query.RevisionOf(revPushed).Hash()
+			alive := map[types.UID]struct{}{}
+			for _, pod := range h.livePods() {
+				if pod.Labels[query.LabelRevisionHash] == pushedHash {
+					alive[pod.UID] = struct{}{}
+				}
+			}
+
+			h.setTarget(h.revV1, goodImage)
+			noWithdrawnPodAfter := func() {
+				for _, pod := range h.livePods() {
+					if pod.Labels[query.LabelRevisionHash] != pushedHash {
+						continue
+					}
+					if _, ok := alive[pod.UID]; !ok {
+						h.dumpState("withdrawn revision rebuilt")
+						t.Fatalf("pod %s was created on the withdrawn revision after the rollback", pod.Name)
+					}
+				}
+			}
+			if tc.podsExist {
+				if !h.runWithInvariant(20, func() bool { return h.repairedAbove(victim, incarnationAtPush[victim]) }, noWithdrawnPodAfter) {
+					h.dumpState("open repair after the rollback")
+					t.Fatalf("the repair did not finish on the pods it had created")
+				}
+				if s := h.instance(victim); s.RunningRevision != revPushed.Name {
+					t.Fatalf("repaired row records %q, want %s: the repair finishes on the revision its pods carry", s.RunningRevision, revPushed.Name)
+				}
+			} else {
+				rebuilt := func() bool { return len(h.podsOf(victim)) == len(h.desired.Runners) }
+				if !h.runWithInvariant(20, rebuilt, noWithdrawnPodAfter) {
+					h.dumpState("rebuild after the rollback")
+					t.Fatalf("the rebuild never created the gang's pods after the rollback")
+				}
+				if s := h.instance(victim); s.RunningRevision != h.revV1.Name {
+					t.Fatalf("rebuilding row records %q, want %s: a rebuild that created no pod yet renders the roll target", s.RunningRevision, h.revV1.Name)
+				}
+				h.requirePodsRender(victim, h.revV1, goodImage)
+			}
+			if !h.runWithInvariant(120, func() bool { return h.settledOn(h.revV1, replicas) }, noWithdrawnPodAfter) {
+				h.dumpState("after the rollback")
+				t.Fatalf("the gangs never settled back on the starting revision")
+			}
+			for _, s := range h.irStatuses() {
+				h.requirePodsRender(s.Index, h.revV1, goodImage)
+			}
+			if n := h.restartsRecorded(); n != 1 {
+				t.Fatalf("restarts recorded = %d, want exactly the repair that was already open: %v", n, h.events)
+			}
+		})
+	}
+}
+
 // TestReconcile_OpenRepair_PeersStayInRotationWhileTheTargetMoves: three
 // Instances, the repair of one has rebuilt its pod set and that set is still
 // starting when the target moves. The open repair owns the Component's

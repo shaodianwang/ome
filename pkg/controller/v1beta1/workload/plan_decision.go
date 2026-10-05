@@ -864,18 +864,18 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		"rolledNotServing", selection.RolledNotServing,
 		"crashedNotServing", selection.CrashedNotServing,
 		"retryBlockDenied", selection.RetryBlockDenied)
-	selection.LadderHold = ladderHold(input, target, selection.RolledNotServing, ladderRebuilds(input, plan, target, updateByInstance))
+	selection.LadderHold = ladderHold(input, target, selection.RolledNotServing, selection.CrashedNotServing, ladderRebuilds(input, plan, target, updateByInstance))
 	selection.StandingHold = standingHold(&selection, target)
 	return selection, retryBlockWait, nil
 }
 
 // ladderRebuilds lists, in plan order, the Instances whose crashed set
 // the target's retry ladder rebuilds in its attempt
-// (workloadops.LadderPacesRebuild), for the ladder hold to name.
+// (workloadops.LadderAttemptRebuilds), for the ladder hold to name.
 func ladderRebuilds(input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, byInstance map[int32][]*corev1.Pod) []int32 {
 	var rebuilds []int32
 	for _, inst := range plan.Instances {
-		if workloadops.LadderPacesRebuild(input, plan, inst, target.Name, byInstance[inst.Index]) {
+		if workloadops.LadderAttemptRebuilds(input, plan, inst, target.Name, byInstance[inst.Index]) {
 			rebuilds = append(rebuilds, inst.Index)
 		}
 	}

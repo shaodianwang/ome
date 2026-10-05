@@ -296,7 +296,12 @@ func floorHold(selection *UpdateSelection, target *appsv1.ControllerRevision) *t
 // RetryBlock gate for an attempt already in flight (the ladder admits
 // one at a time) or a Backoff not yet due. Nil when the target carries
 // no block in a denying state, by the trigger gate's own reading
-// (workloadops.RetryBlockDenyingFreshStart). Plan computes it once per
+// (workloadops.RetryBlockDenyingFreshStart), unless Instances already on
+// the target crashed after promotion (crashedNotServing): the block
+// counts their crash and its attempt is their rebuild, so while that
+// attempt is due or under way (workloadops.RetryBlockOfCrashedAttempt)
+// the ladder stays the hold the roll stands behind, through the rebuild
+// and while the rebuilt set proves itself. Plan computes it once per
 // pass: the update pass reports it for a start the trigger denied, and
 // the idle verdict yields to it. The wording is the status layer's own
 // reading of the block, with the Instances the roll waits on named and
@@ -304,8 +309,12 @@ func floorHold(selection *UpdateSelection, target *appsv1.ControllerRevision) *t
 // (ladderRebuilds), so the operator reads one story whichever layer
 // reports it and a reader pacing on the block's nextRetryAt knows every
 // rebuild the attempt admits.
-func ladderHold(input types.ReconcileInput, target *appsv1.ControllerRevision, rolledNotServing, ladderRebuilds []int32) *types.RolloutHold {
+func ladderHold(input types.ReconcileInput, target *appsv1.ControllerRevision, rolledNotServing, crashedNotServing, ladderRebuilds []int32) *types.RolloutHold {
 	b := workloadops.RetryBlockDenyingFreshStart(input, target)
+	attemptOfCrashed := false
+	if b == nil && len(crashedNotServing) > 0 {
+		b, attemptOfCrashed = workloadops.RetryBlockOfCrashedAttempt(input, target), true
+	}
 	if b == nil {
 		return nil
 	}
@@ -317,6 +326,9 @@ func ladderHold(input types.ReconcileInput, target *appsv1.ControllerRevision, r
 		state = "retrying one attempt at a time"
 	case types.RetryBlockBackoff:
 		state = "in backoff"
+		if attemptOfCrashed {
+			state = "retrying one attempt at a time"
+		}
 	default:
 		return nil
 	}

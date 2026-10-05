@@ -680,8 +680,14 @@ func summarizeFailureReasons(reasons map[string]int) string {
 // fresh start and is the hold that stands; otherwise the persisted hold
 // stands as written until a pass that runs the Update pass replaces or
 // clears it.
+//
+// A converged subject is read the same way: a roll with nothing left to
+// do clears the hold with a nil verdict, while one whose promoted sets
+// crash after it completed still stands behind the ladder or the budget
+// and its verdict says so. Only a subject with no update revision has
+// nothing to hold.
 func effectiveRolloutHold(holdObserved bool, hold *workloadtypes.RolloutHold, status *v1beta1.InferenceReplicaStatus, now time.Time) *v1beta1.RolloutHold {
-	if status.UpdateRevision == "" || status.CurrentRevision == status.UpdateRevision {
+	if status.UpdateRevision == "" {
 		return nil
 	}
 	if holdObserved {

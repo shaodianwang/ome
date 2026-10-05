@@ -1323,20 +1323,28 @@ func RestartOpensLadderAttempt(input workload.ReconcileInput, plan workload.Comp
 	return ""
 }
 
-// LadderPacesRebuild reports whether rev's retry ladder paces a rebuild
-// of this row's crashed set: the row runs rev, its crash counts on the
-// ladder, a trigger of the restart pass would rebuild the set, and the
-// ladder has not admitted the rebuild — its backoff is not due, or
-// another attempt at rev is in flight. The rebuild is part of the
-// ladder's attempt when it opens, so the hold that announces the attempt
-// names every such row.
-func LadderPacesRebuild(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, rev string, instancePods []*corev1.Pod) bool {
+// LadderAttemptRebuilds reports whether the attempt of rev's retry
+// ladder rebuilds this row's crashed set: the row runs rev, its crash
+// counts on the ladder, a trigger of the restart pass would rebuild the
+// set, and the ladder has not held — the rebuild waits on the backoff or
+// on another attempt at rev, or the ladder admits it this pass — or the
+// row's own rebuild is the attempt under way (a Restart rendering rev
+// while rev's block is RetryInProgress). Every such rebuild is part of
+// the ladder's attempt, so the hold that names the attempt names the row.
+func LadderAttemptRebuilds(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, rev string, instancePods []*corev1.Pod) bool {
 	s := input.ObservedState.Instance(inst.Index)
-	if s == nil || rev == "" || s.RunningRevision != rev {
+	if s == nil || rev == "" {
+		return false
+	}
+	if s.Phase == workload.InstancePhaseRestarting {
+		block := workload.FindRetryBlock(input.ObservedState.RetryBlocks, rev)
+		return rebuildRevision(s) == rev && block != nil && block.State == workload.RetryBlockRetryInProgress
+	}
+	if s.RunningRevision != rev {
 		return false
 	}
 	l := readCrashLadder(input, s, inst.TotalPods(), instancePods)
-	return l != nil && !l.held && !l.open && crashRebuildWarranted(input, plan, s, inst.TotalPods(), instancePods)
+	return l != nil && !l.held && crashRebuildWarranted(input, plan, s, inst.TotalPods(), instancePods)
 }
 
 // RestartOpensUnavailability reports whether a restart selection for

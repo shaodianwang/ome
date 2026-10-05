@@ -3345,3 +3345,42 @@ func TestRepairYieldsToTarget_LeavesASupersededGangSetToItsCleanup(t *testing.T)
 		})
 	}
 }
+
+// TestLadderAttemptRebuilds_NamesTheRestartThatIsTheAttempt pins the
+// Restarting half of the reading: a Restart rendering the revision whose
+// block is RetryInProgress is the ladder's attempt under way and is named
+// as such; one at another revision, or under a block in any other state,
+// is not the attempt's.
+func TestLadderAttemptRebuilds_NamesTheRestartThatIsTheAttempt(t *testing.T) {
+	const rev = "llama-70b-engine-" + testRevisionHash
+	inst := workload.InstancePlan{Index: 0, Incarnation: 2, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}}
+	restarting := func(running string) workload.InstanceStatus {
+		return workload.InstanceStatus{Index: 0, Phase: workload.InstancePhaseRestarting, RunningRevision: running,
+			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationRestart, Step: workload.RestartStepDrain}}
+	}
+	cases := []struct {
+		name  string
+		row   workload.InstanceStatus
+		state workload.RetryBlockState
+		want  bool
+	}{
+		{name: "a Restart at the revision under RetryInProgress is the attempt", row: restarting(rev), state: workload.RetryBlockRetryInProgress, want: true},
+		{name: "a Restart at the revision under Backoff is not the attempt yet", row: restarting(rev), state: workload.RetryBlockBackoff, want: false},
+		{name: "a Restart at the revision under Held rebuilds nothing of the ladder's", row: restarting(rev), state: workload.RetryBlockHeld, want: false},
+		{name: "a Restart at another revision is another ladder's", row: restarting("llama-70b-engine-0000next"), state: workload.RetryBlockRetryInProgress, want: false},
+		{name: "a Restart with no block is the policy's plain rebuild", row: restarting(rev), want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := workload.ReconcileInput{}
+			input.ObservedState.InstanceStatuses = []workload.InstanceStatus{tc.row}
+			if tc.state != "" {
+				input.ObservedState.RetryBlocks = []workload.RetryBlock{{TargetRevision: rev, State: tc.state}}
+			}
+			plan := workload.ComponentPlan{Component: workload.ComponentEngine, RestartPolicy: workload.RestartPolicyRecreateInstance}
+			if got := ops.LadderAttemptRebuilds(input, plan, inst, rev, nil); got != tc.want {
+				t.Fatalf("LadderAttemptRebuilds = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -80,6 +80,7 @@ tick=10 note the crashed pod is gone, so the repair rebuilds the set at the bump
 tick=10 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+30s
 tick=10 row=0 write no-op precondition=no-change
 tick=10 pod create name=svc-a-engine-0-default-1 revision=c500c9bc incarnation=2 ordinal=1
+tick=10 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving; no source leaves rotation
 tick=10 pass result=after:5s
 tick=11 note the fix is pushed while the rebuilt set is still coming up; the repair finishes on the revision its pod carries and nothing of the broken revision is created from here on
 tick=11 apply spec.revision image=registry.example.com/runtime:v3 generation=3 now=t+30s
