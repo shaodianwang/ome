@@ -2676,3 +2676,106 @@ func TestPlan_Update_CoordGateExempt_GangWithParkedMember(t *testing.T) {
 		})
 	}
 }
+
+// unreadyEnginePod is an engine pod that was promoted and then stopped
+// passing readiness unreadyFor ago: still Running, the serving gate True,
+// ContainersReady and Ready False since then.
+func unreadyEnginePod(idx int32, unreadyFor time.Duration) *corev1.Pod {
+	pod := servingEnginePod(idx)
+	pod.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour))
+	pod.Status.ContainerStatuses[0].Ready = false
+	since := metav1.NewTime(time.Now().Add(-unreadyFor))
+	for i := range pod.Status.Conditions {
+		switch pod.Status.Conditions[i].Type {
+		case corev1.ContainersReady, corev1.PodReady:
+			pod.Status.Conditions[i].Status = corev1.ConditionFalse
+			pod.Status.Conditions[i].LastTransitionTime = since
+		}
+	}
+	return pod
+}
+
+// TestPlan_Update_CoordGateExempt_ReadyRowUnreadyPastTheWindow: a fresh
+// update start on a Ready row whose promoted pod has failed readiness for
+// longer than the stuck-pod grace replaces an Instance that serves
+// nothing: it skips the coordination gate consult on a drain-first
+// strategy, as a parked pod does, and is listed as a dark start under
+// every strategy. Inside the grace, with no grace configured, or on a pod
+// that never served, the start is consulted and charged like any other.
+// A gang reads the same way through its routed leader, and a worker
+// unready past the grace skips the consult as a parked worker does.
+//
+// Cells: instance/Ready/pod.runningNotReady[source]/boundary@T-ready-recreate, instance/Ready/pod.runningNotReady[source]/boundary@T-ready-inplace, instance/Ready/pod.runningNotReady[source]/boundary@T-ready-surge, instance/Ready/pod.containersNotReady[source]/boundary@T-ready-recreate
+func TestPlan_Update_CoordGateExempt_ReadyRowUnreadyPastTheWindow(t *testing.T) {
+	target := updateTarget()
+	member := func(pod *corev1.Pod, runner string) *corev1.Pod {
+		pod.Name += "-" + runner
+		pod.Labels[query.LabelRunner] = runner
+		return pod
+	}
+	gang := []types.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}
+	single := []types.RunnerPlan{{Name: "default", Size: 1}}
+	never := enginePod("llama-70b", "prod", 0)
+	never.Status.Phase = corev1.PodRunning
+	never.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: constants.MainContainerName, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}}
+	for _, tc := range []struct {
+		name     string
+		strategy types.UpdateStrategyType
+		grace    time.Duration
+		runners  []types.RunnerPlan
+		pods     []*corev1.Pod
+		serving  int32
+		exempt   bool
+		dark     bool
+	}{
+		{name: "past the window, recreate", strategy: types.UpdateStrategyRecreatePod, grace: time.Minute, runners: single,
+			pods: []*corev1.Pod{unreadyEnginePod(0, 2*time.Minute)}, exempt: true, dark: true},
+		{name: "past the window, in-place", strategy: types.UpdateStrategyInPlaceIfPossible, grace: time.Minute, runners: single,
+			pods: []*corev1.Pod{unreadyEnginePod(0, 2*time.Minute)}, exempt: true, dark: true},
+		{name: "past the window, surge", strategy: types.UpdateStrategySurgeThenDrain, grace: time.Minute, runners: single,
+			pods: []*corev1.Pod{unreadyEnginePod(0, 2*time.Minute)}, dark: true},
+		{name: "inside the window, recreate", strategy: types.UpdateStrategyRecreatePod, grace: time.Minute, runners: single,
+			pods: []*corev1.Pod{unreadyEnginePod(0, 10*time.Second)}},
+		{name: "no window configured, recreate", strategy: types.UpdateStrategyRecreatePod, runners: single,
+			pods: []*corev1.Pod{unreadyEnginePod(0, 2*time.Hour)}},
+		{name: "never promoted, recreate", strategy: types.UpdateStrategyRecreatePod, grace: time.Minute, runners: single,
+			pods: []*corev1.Pod{never}},
+		{name: "leader past the window beside a serving worker, recreate", strategy: types.UpdateStrategyRecreatePod, grace: time.Minute, runners: gang,
+			pods: []*corev1.Pod{member(unreadyEnginePod(0, 2*time.Minute), "leader"), member(servingEnginePod(0), "worker")}, serving: 1, exempt: true, dark: true},
+		{name: "worker past the window beside a serving leader, recreate", strategy: types.UpdateStrategyRecreatePod, grace: time.Minute, runners: gang,
+			pods: []*corev1.Pod{member(servingEnginePod(0), "leader"), member(unreadyEnginePod(0, 2*time.Minute), "worker")}, serving: 1, exempt: true},
+		{name: "worker inside the window beside a serving leader, recreate", strategy: types.UpdateStrategyRecreatePod, grace: time.Minute, runners: gang,
+			pods: []*corev1.Pod{member(servingEnginePod(0), "leader"), member(unreadyEnginePod(0, 10*time.Second), "worker")}, serving: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := minimalInput(t)
+			forbidMutations(t, &in)
+			in.StuckPodGrace = tc.grace
+			in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: int32(len(tc.runners)), ServingPodCount: tc.serving, RunningRevision: crashLoopRepairRevision},
+			}
+			plan := types.ComponentPlan{
+				Component:      types.ComponentEngine,
+				Replicas:       1,
+				UpdateStrategy: types.UpdateStrategy{Type: tc.strategy},
+				Instances:      []types.InstancePlan{{Index: 0, Incarnation: 1, Runners: tc.runners}},
+			}
+			// The running revision's template differs from the desired one by
+			// its image alone, the diff an in-place strategy keeps in place.
+			running := in.DesiredSpec.PodSpec.DeepCopy()
+			running.Containers[0].Image = "test:v0"
+			d := planTargetOrFail(t, in, plan, target, planSnapshotWithRevisions(in,
+				map[int32][]*corev1.Pod{0: tc.pods}, map[string]*corev1.PodSpec{crashLoopRepairRevision: running}))
+			ua := findAction(d, workload.ActionUpdate)
+			if ua == nil || len(ua.Update.Items) != 1 || !ua.Update.Items[0].StartingFresh {
+				t.Fatalf("the off-target row must be a fresh update start; actions = %v", actionKinds(d))
+			}
+			item := ua.Update.Items[0]
+			if item.CoordGateExempt != tc.exempt || item.ReplacesDarkPodSet != tc.dark {
+				t.Fatalf("CoordGateExempt = %v, ReplacesDarkPodSet = %v, want %v and %v", item.CoordGateExempt, item.ReplacesDarkPodSet, tc.exempt, tc.dark)
+			}
+		})
+	}
+}

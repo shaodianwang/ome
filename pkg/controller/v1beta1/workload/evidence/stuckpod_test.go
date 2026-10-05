@@ -393,3 +393,74 @@ func TestAttemptStuckPods_RestartIsJudgedOnItsOwnIncarnation(t *testing.T) {
 		t.Errorf("a settled row is judged on %v, want every pod", got)
 	}
 }
+
+// TestPodUnreadyPastGrace: a promoted pod whose containers have stopped
+// passing readiness for at least the grace is unready past it. Inside the
+// grace, with no grace configured, before the pod ever served, under a
+// node that stopped reporting (Ready withdrawn while the kubelet's own
+// ContainersReady still says True), while serving, deleting or terminal,
+// it is not.
+func TestPodUnreadyPastGrace(t *testing.T) {
+	grace := time.Minute
+	past := unreadyAfterServingPod("engine-0-default-0", tNow.Add(-2*time.Minute))
+	inside := unreadyAfterServingPod("engine-0-default-0", tNow.Add(-30*time.Second))
+	nodeLost := servingPod("engine-0-default-0")
+	for i := range nodeLost.Status.Conditions {
+		if nodeLost.Status.Conditions[i].Type == corev1.PodReady {
+			nodeLost.Status.Conditions[i].Status = corev1.ConditionFalse
+			nodeLost.Status.Conditions[i].LastTransitionTime = metav1.NewTime(tNow.Add(-2 * time.Minute))
+		}
+	}
+	deleting := unreadyAfterServingPod("engine-0-default-0", tNow.Add(-2*time.Minute))
+	ts := metav1.NewTime(tNow)
+	deleting.DeletionTimestamp = &ts
+	terminal := unreadyAfterServingPod("engine-0-default-0", tNow.Add(-2*time.Minute))
+	terminal.Status.Phase = corev1.PodFailed
+
+	for _, tc := range []struct {
+		name  string
+		pod   *corev1.Pod
+		grace time.Duration
+		want  bool
+	}{
+		{name: "unready past the grace", pod: past, grace: grace, want: true},
+		{name: "unready inside the grace", pod: inside, grace: grace},
+		{name: "no grace configured", pod: past},
+		{name: "never promoted", pod: runningNotReadyPod("engine-0-default-0", tNow.Add(-2*time.Minute)), grace: grace},
+		{name: "node stopped reporting", pod: nodeLost, grace: grace},
+		{name: "serving", pod: servingPod("engine-0-default-0"), grace: grace},
+		{name: "deleting", pod: deleting, grace: grace},
+		{name: "terminal", pod: terminal, grace: grace},
+		{name: "nil", pod: nil, grace: grace},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := evidence.PodUnreadyPastGrace(tc.pod, tNow, tc.grace); got != tc.want {
+				t.Fatalf("PodUnreadyPastGrace = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUnreadyGraceLeft pins the per-pod wait: the grace left counts from
+// the containers' last transition out of readiness, is zero once past,
+// and needs a promoted pod that is unready.
+func TestUnreadyGraceLeft(t *testing.T) {
+	grace := time.Minute
+	for _, tc := range []struct {
+		name string
+		pod  *corev1.Pod
+		want time.Duration
+	}{
+		{name: "ten seconds into a minute", pod: unreadyAfterServingPod("engine-0-default-0", tNow.Add(-10*time.Second)), want: 50 * time.Second},
+		{name: "past the grace", pod: unreadyAfterServingPod("engine-0-default-0", tNow.Add(-2*time.Minute))},
+		{name: "never promoted", pod: runningNotReadyPod("engine-0-default-0", tNow.Add(-10*time.Second))},
+		{name: "serving", pod: servingPod("engine-0-default-0")},
+		{name: "nil", pod: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := evidence.UnreadyGraceLeft(tc.pod, tNow, grace); got != tc.want {
+				t.Fatalf("UnreadyGraceLeft = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}

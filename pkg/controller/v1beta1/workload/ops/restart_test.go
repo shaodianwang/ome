@@ -19,6 +19,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -1988,7 +1989,7 @@ func TestDetectRestartTrigger_GangWedgedOnOneMemberOpensOneRepair(t *testing.T) 
 	if !strings.Contains(reason, wedged.Name) {
 		t.Errorf("the repair must name the wedged member; got %q", reason)
 	}
-	if !ops.RestartOpensUnavailability(input, plan.Instances[0], pods) {
+	if !ops.RestartOpensUnavailability(input, plan, plan.Instances[0], pods) {
 		t.Error("the gang repair takes the Instance offline, so it must be admitted like any fresh attempt")
 	}
 }
@@ -3450,6 +3451,93 @@ func TestLadderAttemptRebuilds_NamesTheRestartThatIsTheAttempt(t *testing.T) {
 			plan := workload.ComponentPlan{Component: workload.ComponentEngine, RestartPolicy: workload.RestartPolicyRecreateInstance}
 			if got := ops.LadderAttemptRebuilds(input, plan, inst, rev, nil); got != tc.want {
 				t.Fatalf("LadderAttemptRebuilds = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// unreadyAfterServingInput wires a Ready, operation-free row on
+// crashLoopRevision whose promoted pod stopped passing readiness
+// unreadyFor ago, under the named restart policy and a one-minute
+// stuck-pod grace.
+func unreadyAfterServingInput(t *testing.T, policy workload.RestartPolicy, unreadyFor time.Duration) (workload.ReconcileInput, workload.ComponentPlan, *corev1.Pod) {
+	t.Helper()
+	resetExpectations(t)
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0].RunningRevision = crashLoopRevision
+	pod := podForInstance(isvc, 0, true /* ready */, true /* serving */)
+	pod.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour))
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  constants.MainContainerName,
+		Ready: false,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}}
+	since := metav1.NewTime(time.Now().Add(-unreadyFor))
+	for i := range pod.Status.Conditions {
+		if pod.Status.Conditions[i].Type == corev1.ContainersReady {
+			pod.Status.Conditions[i].Status = corev1.ConditionFalse
+			pod.Status.Conditions[i].LastTransitionTime = since
+		}
+	}
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionFalse, LastTransitionTime: since})
+	c := newFakeClient(t, isvc, ir, pod)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	input.StuckPodGrace = time.Minute
+	input.ObservedState.CurrentRevision = crashLoopRevision
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
+	plan.RestartPolicy = policy
+	return input, plan, pod
+}
+
+// A promoted pod unready past the stuck-pod grace is rebuilt under
+// RecreateInstanceOnPodRestart the way a wedged pod is: the trigger opens
+// a repair naming the pod and the kubelet's reason, and the repair of a
+// set that serves nothing is charged to no budget.
+//
+// Cells: instance/Ready/pod.runningNotReady[source]/before
+func TestDetectRestartTrigger_UnreadyPastGraceRepairsUnderRecreateInstance(t *testing.T) {
+	input, plan, pod := unreadyAfterServingInput(t, workload.RestartPolicyRecreateInstance, 2*time.Minute)
+	pods := []*corev1.Pod{pod}
+
+	needs, reason := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], pods)
+	if !needs {
+		t.Fatalf("expected a repair of a promoted pod unready past the grace under RecreateInstanceOnPodRestart")
+	}
+	if !strings.Contains(reason, pod.Name) || !strings.Contains(reason, evidence.ReasonContainersNotReady) {
+		t.Errorf("reason must name the pod and the kubelet's reason; got %q", reason)
+	}
+	if !ops.RestartOpensRepair(input, plan, plan.Instances[0], pods) {
+		t.Error("the rebuild is a fresh repair, bounded by the repair batch")
+	}
+	if ops.RestartOpensUnavailability(input, plan, plan.Instances[0], pods) {
+		t.Error("the set serves nothing, so its rebuild removes no serving capacity and is not charged")
+	}
+}
+
+// Under RestartPolicy=None a promoted pod that stops passing readiness is
+// left alone however long it stays unready: readiness is the runtime's
+// own out-of-rotation signal, so only a roll replaces the pod.
+//
+// Cells: instance/Ready/pod.runningNotReady[source]/before
+func TestDetectRestartTrigger_UnreadyPastGraceStaysSilentUnderPolicyNone(t *testing.T) {
+	input, plan, pod := unreadyAfterServingInput(t, workload.RestartPolicyNone, 2*time.Hour)
+
+	if needs, reason := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], []*corev1.Pod{pod}); needs {
+		t.Fatalf("policy None rebuilds nothing for a pod that stopped passing readiness; got reason %q", reason)
+	}
+}
+
+// Inside the grace nothing changes: a readiness failure the probe may
+// still recover from opens no repair under either policy.
+//
+// Cells: instance/Ready/pod.containersNotReady[source]/before
+func TestDetectRestartTrigger_UnreadyInsideGraceStaysSilent(t *testing.T) {
+	for _, policy := range []workload.RestartPolicy{workload.RestartPolicyNone, workload.RestartPolicyRecreateInstance} {
+		t.Run(string(policy), func(t *testing.T) {
+			input, plan, pod := unreadyAfterServingInput(t, policy, 10*time.Second)
+			if needs, reason := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], []*corev1.Pod{pod}); needs {
+				t.Fatalf("a readiness failure inside the grace must not trigger; got reason %q", reason)
 			}
 		})
 	}

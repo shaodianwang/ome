@@ -2352,7 +2352,7 @@ func TestReconcile_OpenRepair_PeersStayInRotationWhileTheTargetMoves(t *testing.
 				}
 				// The rebuilt pod stays in its startup window for as long as
 				// the story needs: the readiness it is held on is lifted below.
-				rebuilt := h.podsOf(victim)[0].Name
+				rebuilt := h.podsOf(victim)[0].UID
 				h.readinessFails[rebuilt] = true
 
 				h.setTarget(h.revFixed, fixedImage)

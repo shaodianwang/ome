@@ -596,8 +596,8 @@ func planRestartSelections(ctx context.Context, input types.ReconcileInput, plan
 		restarts = append(restarts, RestartSelection{
 			Instance:            inst,
 			Reason:              reason,
-			OpensRepair:         workloadops.RestartOpensRepair(input, inst, liveByInstance[inst.Index]),
-			OpensUnavailability: workloadops.RestartOpensUnavailability(input, inst, liveByInstance[inst.Index]),
+			OpensRepair:         workloadops.RestartOpensRepair(input, plan, inst, liveByInstance[inst.Index]),
+			OpensUnavailability: workloadops.RestartOpensUnavailability(input, plan, inst, liveByInstance[inst.Index]),
 			LadderRevision:      workloadops.RestartOpensLadderAttempt(input, plan, inst, liveByInstance[inst.Index]),
 		})
 	}
@@ -821,8 +821,8 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		gateExempt := types.RecreateOfDarkRow(row, mechanism) ||
 			(startingFresh && mechanism != types.UpdateStrategySurgeThenDrain &&
 				row != nil && row.Phase == types.InstancePhaseReady &&
-				(evidence.PodSetServesNothing(pods) || evidence.PodSetUnavailableOnParkedMember(pods, inst.TotalPods())))
-		dark := startingFresh && replacesDarkPodSet(row, pods)
+				(evidence.PodSetServesNothing(pods, input.Now(), input.StuckPodGrace) || evidence.PodSetUnavailableOnParkedMember(pods, inst.TotalPods(), input.Now(), input.StuckPodGrace)))
+		dark := startingFresh && replacesDarkPodSet(input, row, pods)
 		logf.FromContext(ctx).V(1).Info("update selected",
 			"component", plan.Component, "instance", inst.Index, "target", target.Name,
 			"startingFresh", startingFresh, "coordGateExempt", gateExempt, "recreateFallback", recreateFallback,
@@ -909,11 +909,11 @@ func anyFreshStart(items []UpdateItem) bool {
 // counter types.RecreateOfDarkRow reads), or a pod set provably out of
 // service (evidence.PodSetServesNothing, the reading a Ready row is dark
 // on). Replacing such an Instance takes no capacity out of rotation.
-func replacesDarkPodSet(row *types.InstanceStatus, pods []*corev1.Pod) bool {
+func replacesDarkPodSet(input types.ReconcileInput, row *types.InstanceStatus, pods []*corev1.Pod) bool {
 	if row != nil && row.Phase == types.InstancePhaseFailed && row.ServingPodCount == 0 {
 		return true
 	}
-	return evidence.PodSetServesNothing(pods)
+	return evidence.PodSetServesNothing(pods, input.Now(), input.StuckPodGrace)
 }
 
 // planMigrationDrive selects the migrate pass's work in dispatch order:

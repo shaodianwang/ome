@@ -122,8 +122,10 @@ func DetectRestartTriggerWithPods(input workload.ReconcileInput, plan workload.C
 	}
 	// A pod wedged in a terminal kubelet waiting reason cannot recover on
 	// its own and no other pass owns an operation-free Ready row, so the
-	// repair starts regardless of the restart policy.
-	if reason, wedged := crashLoopRepairReason(input, s, expected, instancePods); wedged {
+	// repair starts regardless of the restart policy; a promoted pod
+	// unready past the grace is repaired under RecreateInstanceOnPodRestart
+	// alone (rebuildsUnready).
+	if reason, wedged := crashLoopRepairReason(input, plan, s, expected, instancePods); wedged {
 		return true, reason
 	}
 	// A crash of the promoted pod set inside its window is remembered on
@@ -807,12 +809,19 @@ func RunnerRestartedAgainSinceReady(pod *corev1.Pod, readySince *metav1.Time) bo
 // wedge with no such restart answers to the RetryBlock as a repair of a
 // never-Ready Instance does.
 
+// rebuildsUnready reports whether the restart policy rebuilds a promoted pod
+// unready past the stuck-pod grace as it rebuilds a wedged one. Readiness is the
+// runtime's own out-of-rotation signal, so None leaves such a pod to the roll.
+func rebuildsUnready(plan workload.ComponentPlan) bool {
+	return plan.RestartPolicy == workload.RestartPolicyRecreateInstance
+}
+
 // crashLoopRepairReason reports whether this row holds a crash-loop
 // wedge the restart pass acts on: the wedge itself is
 // evidence.CrashLoopWedge, and the running revision's retry ladder says
 // whether the rebuild opens, waits, or the row parks (readCrashLoopRepair).
-func crashLoopRepairReason(input workload.ReconcileInput, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) (string, bool) {
-	r := readCrashLoopRepair(input, s, expected, pods)
+func crashLoopRepairReason(input workload.ReconcileInput, plan workload.ComponentPlan, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) (string, bool) {
+	r := readCrashLoopRepair(input, plan, s, expected, pods)
 	if !r.fires {
 		return "", false
 	}
@@ -834,7 +843,7 @@ type crashLoopRepair struct {
 }
 
 func (r crashLoopRepair) restartReason() string {
-	return fmt.Sprintf("pod %s wedged in %s past the stuck-pod grace", r.pod.Name, r.reason)
+	return evidence.WedgeReason(r.pod, r.reason)
 }
 
 // runnerCrash is the crash of a promoted pod set: a pod carrying the
@@ -1060,7 +1069,7 @@ func rememberCrash(ctx context.Context, input workload.ReconcileInput, idx int32
 // there: a roll promotes that revision ahead of the Component's current
 // one, and a pushed set rebuilds on its ladder as a current one does.
 func crashRebuildWarranted(input workload.ReconcileInput, plan workload.ComponentPlan, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) bool {
-	if pod, _, _ := evidence.CrashLoopWedgedPodOn(input, s, expected, pods, s.RunningRevision); pod != nil {
+	if pod, _, _ := evidence.CrashLoopWedgedPodOn(input, s, expected, pods, s.RunningRevision, rebuildsUnready(plan)); pod != nil {
 		return true
 	}
 	return plan.RestartPolicy == workload.RestartPolicyRecreateInstance && runnerRestartedSinceReady(pods, s.ReadySince)
@@ -1112,15 +1121,15 @@ type crashLoopLadder struct {
 // the revision the row runs, and its wedge is read there; a wedge no
 // counted crash is behind is repaired on the Component's current revision
 // alone, and an off-current one is the escalation's.
-func readCrashLoopRepair(input workload.ReconcileInput, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) crashLoopRepair {
+func readCrashLoopRepair(input workload.ReconcileInput, plan workload.ComponentPlan, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) crashLoopRepair {
 	ladder := readCrashLadder(input, s, expected, pods)
 	var pod *corev1.Pod
 	var reason string
 	var graceLeft time.Duration
 	if ladder != nil {
-		pod, reason, graceLeft = evidence.CrashLoopWedgedPodOn(input, s, expected, pods, s.RunningRevision)
+		pod, reason, graceLeft = evidence.CrashLoopWedgedPodOn(input, s, expected, pods, s.RunningRevision, rebuildsUnready(plan))
 	} else {
-		pod, reason, graceLeft = evidence.CrashLoopWedgedPod(input, s, expected, pods)
+		pod, reason, graceLeft = evidence.CrashLoopWedgedPod(input, s, expected, pods, rebuildsUnready(plan))
 	}
 	if pod == nil {
 		if graceLeft > 0 {
@@ -1308,8 +1317,8 @@ func countCrashOnLadder(ctx context.Context, input workload.ReconcileInput, plan
 // Restart already in flight must be driven to completion, and the
 // pod-loss and lost-member triggers repair an outage rather than causing
 // one. Only a fresh open counts against the per-pass repair batch.
-func RestartOpensRepair(input workload.ReconcileInput, inst workload.InstancePlan, instancePods []*corev1.Pod) bool {
-	return readCrashLoopRepair(input, input.ObservedState.Instance(inst.Index), inst.TotalPods(), instancePods).opens
+func RestartOpensRepair(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, instancePods []*corev1.Pod) bool {
+	return readCrashLoopRepair(input, plan, input.ObservedState.Instance(inst.Index), inst.TotalPods(), instancePods).opens
 }
 
 // RestartOpensLadderAttempt names the revision whose retry ladder admits
@@ -1356,8 +1365,8 @@ func LadderAttemptRebuilds(input workload.ReconcileInput, plan workload.Componen
 // (evidence.PodSetServesNothing, the reading the update pass makes for a
 // dark row) removes no serving capacity, so its rebuild is neither
 // admitted nor charged.
-func RestartOpensUnavailability(input workload.ReconcileInput, inst workload.InstancePlan, instancePods []*corev1.Pod) bool {
-	return RestartOpensRepair(input, inst, instancePods) && !evidence.PodSetServesNothing(instancePods)
+func RestartOpensUnavailability(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, instancePods []*corev1.Pod) bool {
+	return RestartOpensRepair(input, plan, inst, instancePods) && !evidence.PodSetServesNothing(instancePods, input.Now(), input.StuckPodGrace)
 }
 
 // A crash-loop park follows its pod set: Failed while the set is out of

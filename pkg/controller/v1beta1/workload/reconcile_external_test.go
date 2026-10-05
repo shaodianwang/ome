@@ -1345,10 +1345,12 @@ type recoveryHarness struct {
 	nodeNames []string
 	deadNodes map[string]bool
 
-	// readinessFails names the pods whose readiness probe fails from now
-	// on: the kubelet model keeps their container running and takes the
-	// pod out of rotation.
-	readinessFails map[string]bool
+	// readinessFails names, by UID, the pods whose readiness probe fails
+	// from now on: the kubelet model keeps their container running and
+	// takes the pod out of rotation. The fault lives in that container, so
+	// a pod rebuilt under the same name, or a container restarted in place
+	// by an image patch, starts sound.
+	readinessFails map[types.UID]bool
 	// atomicStatus wires the owner-aware atomic status adapter the
 	// scale-down wave requires; off, the passes take the one-row write
 	// path.
@@ -1494,7 +1496,7 @@ func newComponentRecoveryHarness(t *testing.T, multiPod bool, container string, 
 		lastRunStart:     map[string]metav1.Time{},
 		servedPasses:     map[string]int{},
 		retryPolicy:      &workloadtypes.RetryPolicy{MaxAttempts: 2, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2},
-		readinessFails:   map[string]bool{},
+		readinessFails:   map[types.UID]bool{},
 		kubeletGone:      map[string]bool{},
 		startedImage:     map[string]string{},
 		crashAfterServed: 2,
@@ -1748,7 +1750,13 @@ func (h *recoveryHarness) kubelet() {
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionTrue, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, h.servingGate(pod), h.clk.Now())
-		case h.readinessFails[pod.Name] || probesNeverReadyPath(pod):
+		case h.imageChangedInPlace(pod):
+			// The kubelet replaces a running container whose spec image
+			// changed: the old process is killed, the restart count rises,
+			// and the new container runs under the same pod UID without
+			// having passed its readiness probe yet.
+			h.restartContainerInPlace(pod)
+		case h.readinessFails[pod.UID] || probesNeverReadyPath(pod):
 			// The readiness probe fails, by fault or because the runner
 			// probes a path this node never serves: the container keeps
 			// running, and the kubelet clears ContainersReady and Ready
@@ -1762,12 +1770,6 @@ func (h *recoveryHarness) kubelet() {
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
-		case h.imageChangedInPlace(pod):
-			// The kubelet replaces a running container whose spec image
-			// changed: the old process is killed, the restart count rises,
-			// and the new container runs under the same pod UID without
-			// having passed its readiness probe yet.
-			h.restartContainerInPlace(pod)
 		default:
 			prior := priorContainerStatus(pod)
 			pod.Status.Phase = corev1.PodRunning
@@ -1859,8 +1861,10 @@ func (h *recoveryHarness) runtimeImageName(image string) string {
 // container with the pod's new spec image: the old process ends with the
 // kill signal's exit code, the restart count rises, and the new container
 // is running but not yet Ready, so the pod leaves ContainersReady and
-// PodReady for this pass.
+// PodReady for this pass. A readiness fault lived in the old container
+// and goes with it.
 func (h *recoveryHarness) restartContainerInPlace(pod *corev1.Pod) {
+	delete(h.readinessFails, pod.UID)
 	prior := priorContainerStatus(pod)
 	now := metav1.NewTime(h.clk.Now())
 	pod.Status.Phase = corev1.PodRunning
@@ -1984,7 +1988,7 @@ func (h *recoveryHarness) failReadiness(idx int32, runner string) {
 		if runner != "" && pod.Labels[query.LabelRunner] != runner {
 			continue
 		}
-		h.readinessFails[pod.Name] = true
+		h.readinessFails[pod.UID] = true
 		failed++
 	}
 	if failed == 0 {
@@ -11578,6 +11582,133 @@ func TestCrashAfterPromotion_FullyRolledGangLadderSaysWhyFromItsFirstRebuild(t *
 			}
 			if b := h.findBlock(revCrash.Name); b.AttemptsStarted != attempts {
 				t.Fatalf("the held ladder must record %d attempts, got %+v", attempts, b)
+			}
+		})
+	}
+}
+
+// unreadyVictimHarness converges replicas single-pod Instances on v1 under
+// the named strategy and budget with restart policy None, fails the
+// readiness probe of the highest Instance's pod, and lets the kubelet
+// report it: the row stays Ready with its pod out of rotation. The
+// stuck-pod grace outlasts a step, so the fault is read inside its
+// window first.
+func unreadyVictimHarness(t *testing.T, strategy workloadtypes.UpdateStrategyType, surge, unavail, replicas int32) (*recoveryHarness, int32) {
+	t.Helper()
+	h := offTargetCrashHarness(t, false, strategy, surge, unavail, workloadtypes.RestartPolicyNone, replicas)
+	h.stuckGrace = 5 * time.Minute
+	victim := replicas - 1
+	h.failReadiness(victim, "")
+	h.step()
+	row := h.instance(victim)
+	if row == nil || row.Phase != workloadtypes.InstancePhaseReady || row.Operation != nil || row.ServingPodCount >= row.PodCount {
+		h.dumpState("after the fault")
+		t.Fatalf("instance %d after the fault = %+v, want a Ready row with its pod out of rotation", victim, row)
+	}
+	return h, victim
+}
+
+// TestReconcile_UnreadyVictimPastTheWindow_DrainFirstRollTakesItFirst:
+// four Instances serve v1 under a drain-first strategy with
+// maxUnavailable 1, listed alone in a rollout group, and the highest
+// Instance's pod stops passing readiness while its row stays Ready. A
+// push inside the stuck-pod grace starts nothing: the unready pod spends
+// the group's one unavailable slot and the gate denies every start. Once
+// the pod has been unready for the grace it is dark: its start skips the
+// gate consult, lands the fix first at no cost in capacity, and the peers
+// roll after it within the budget; no repair opens under policy None.
+// RecreatePod and InPlaceIfPossible.
+//
+// Cells: instance/Ready/pod.runningNotReady[source]/boundary@T-ready-recreate, instance/Ready/pod.runningNotReady[source]/boundary@T-ready-inplace, instance/Ready/pod.containersNotReady[source]/before, instance/Ready/spec.revision/before
+func TestReconcile_UnreadyVictimPastTheWindow_DrainFirstRollTakesItFirst(t *testing.T) {
+	const replicas = 4
+	for _, sc := range offTargetStrategies[1:3] {
+		t.Run(string(sc.strategy), func(t *testing.T) {
+			h, victim := unreadyVictimHarness(t, sc.strategy, sc.surge, sc.unavail, replicas)
+			consults := 0
+			h.gate = coordinationUnavailabilityGate(h, replicas, sc.unavail, &consults)
+			h.events = nil
+			h.setTarget(h.revFixed, fixedImage)
+
+			// Inside the window nothing changes: the push is held at the gate.
+			for i := 0; i < 3; i++ {
+				h.step()
+				for idx := int32(0); idx < replicas; idx++ {
+					if !h.untouchedOn(idx, h.revV1) {
+						h.dumpState("inside the window")
+						t.Fatalf("instance %d moved while the unready pod was inside its window", idx)
+					}
+				}
+			}
+			if h.verdict == nil || h.verdict.Gate != workloadtypes.RolloutHoldGateBudget {
+				t.Fatalf("hold inside the window = %+v, want the gate's budget denial", h.verdict)
+			}
+
+			h.clk.Step(h.stuckGrace)
+			requireDarkInstanceRollsFirst(t, h, victim, []int32{0, 1, 2}, nil, sc.strategy, sc.surge, sc.unavail,
+				func() bool { return h.settledOn(h.revFixed, replicas) })
+			if n := h.servingInstances(); n != replicas {
+				h.dumpState("after the roll")
+				t.Fatalf("%d Instances serve after the roll, want %d: the roll replaced the unready pod", n, replicas)
+			}
+		})
+	}
+}
+
+// TestRollback_OverAnUnreadyVictimPastTheWindow_SettlesOnTheStartingRevision:
+// four Instances serve v1 under SurgeThenDrain with maxSurge 1, and the
+// highest Instance's pod has been unready past the stuck-pod grace while
+// its row stays Ready. A push surges the dark Instance first; once the
+// first Instance has landed the new revision, v1 is re-applied. The
+// rollback settles with every row Ready on v1 and no operation open: the
+// starting revision is never held behind the unready pod, no pod of the
+// new revision remains, the capacity floor the fault lowered holds
+// throughout, and the Instance the roll replaced serves again. No repair
+// opens under policy None. Standalone and listed in a rollout group.
+//
+// Cells: instance/Ready/pod.runningNotReady[source]/boundary@T-ready-surge, instance/Update/Surge/spec.revision/before, instance/Ready/spec.revision/before
+func TestRollback_OverAnUnreadyVictimPastTheWindow_SettlesOnTheStartingRevision(t *testing.T) {
+	const replicas = 4
+	for _, roll := range rollShapes {
+		t.Run(roll.name, func(t *testing.T) {
+			h, victim := unreadyVictimHarness(t, workloadtypes.UpdateStrategySurgeThenDrain, 1, 0, replicas)
+			if roll.gated {
+				consults := 0
+				h.gate = rollingGroupGate(h, replicas, 1, 0, &consults)
+			}
+			h.clk.Step(h.stuckGrace)
+			h.events = nil
+			h.setTarget(h.revFixed, fixedImage)
+
+			floorHolds := func() {
+				if h.repairInFlight() || h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+					h.dumpState("repair")
+					t.Fatalf("a repair opened on the unready Instance under policy None: %v", h.events)
+				}
+				if n := h.servingInstances(); n < replicas-1 {
+					h.dumpState("floor")
+					t.Fatalf("%d Instances in rotation, floor %d", n, replicas-1)
+				}
+			}
+			if !h.runWithInvariant(40, func() bool { return len(h.landedOn(h.revFixed)) > 0 }, floorHolds) {
+				h.dumpState("push")
+				t.Fatalf("no Instance landed the new revision")
+			}
+			if landed := h.landedOn(h.revFixed); landed[0] != victim {
+				t.Fatalf("instances on the new revision = %v, want the dark instance %d to land first", landed, victim)
+			}
+
+			h.setTarget(h.revV1, goodImage)
+			if !h.runWithInvariant(80, func() bool { return h.settledOn(h.revV1, replicas) }, floorHolds) {
+				h.dumpState("after the rollback")
+				t.Fatalf("the rollback did not settle on %s: %d of %d Instances Ready on it", h.revV1.Name, len(h.landedOn(h.revV1)), replicas)
+			}
+			if h.livePodOnImage(fixedImage) {
+				t.Fatalf("a pod of the rolled-back revision is still alive after the rollback settled")
+			}
+			if n := h.servingInstances(); n != replicas {
+				h.dumpState("after the rollback")
+				t.Fatalf("%d Instances serve after the rollback, want %d: the roll replaced the unready pod", n, replicas)
 			}
 		})
 	}

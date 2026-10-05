@@ -5,6 +5,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
@@ -77,6 +78,57 @@ func TerminalWaitingGraceLeft(pod *corev1.Pod, now time.Time, grace time.Duratio
 		return left
 	}
 	return 0
+}
+
+// PodUnreadyPastGrace reports whether a promoted pod has failed its readiness
+// for at least grace (unreadySince): out of its Service for longer than a pod
+// gets to come up, it is dark. No grace configured means no such window.
+func PodUnreadyPastGrace(pod *corev1.Pod, now time.Time, grace time.Duration) bool {
+	if grace <= 0 {
+		return false
+	}
+	since, unready := unreadySince(pod)
+	return unready && now.Sub(since) >= grace
+}
+
+// UnreadyGraceLeft is how much of grace a promoted unready pod has left before
+// PodUnreadyPastGrace reads it as dark, zero once past or for any other pod.
+// The grace ending raises no event, so a pass that read it owes itself the wait.
+func UnreadyGraceLeft(pod *corev1.Pod, now time.Time, grace time.Duration) time.Duration {
+	if grace <= 0 {
+		return 0
+	}
+	since, unready := unreadySince(pod)
+	if !unready {
+		return 0
+	}
+	if left := grace - now.Sub(since); left > 0 {
+		return left
+	}
+	return 0
+}
+
+// unreadySince is when a live Running pod's containers last stopped being
+// ready, and whether it served first: the serving gate written at promotion is
+// True while the kubelet's own ContainersReady is False (a withdrawn Ready alone
+// is the node-loss shape, not this one).
+func unreadySince(pod *corev1.Pod) (time.Time, bool) {
+	if pod == nil || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+		return time.Time{}, false
+	}
+	if !podreadiness.IsServing(pod) || podreadiness.IsPodReady(pod) {
+		return time.Time{}, false
+	}
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type != corev1.ContainersReady {
+			continue
+		}
+		if cond.Status == corev1.ConditionTrue || cond.LastTransitionTime.IsZero() {
+			return time.Time{}, false
+		}
+		return cond.LastTransitionTime.Time, true
+	}
+	return time.Time{}, false
 }
 
 // WaitingEpisodeStart is when the pod's current waiting episode began,

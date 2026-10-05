@@ -6,6 +6,7 @@ package evidence_test
 // past the configured grace, and a pod set that is not fully serving.
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -258,7 +259,7 @@ func TestPodSetServesNothing(t *testing.T) {
 		{name: "no pods", pods: nil, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := evidence.PodSetServesNothing(tc.pods); got != tc.want {
+			if got := evidence.PodSetServesNothing(tc.pods, tNow, time.Minute); got != tc.want {
 				t.Fatalf("PodSetServesNothing = %v, want %v", got, tc.want)
 			}
 		})
@@ -303,7 +304,7 @@ func TestPodSetServesNothing_GangServesThroughItsLeader(t *testing.T) {
 		{name: "only the worker is left", pods: []*corev1.Pod{servingWorker}, want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := evidence.PodSetServesNothing(tc.pods); got != tc.want {
+			if got := evidence.PodSetServesNothing(tc.pods, tNow, time.Minute); got != tc.want {
 				t.Fatalf("PodSetServesNothing = %v, want %v", got, tc.want)
 			}
 		})
@@ -360,7 +361,7 @@ func TestPodSetUnavailableOnParkedMember(t *testing.T) {
 		{name: "no pods", pods: nil, desired: 2, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := evidence.PodSetUnavailableOnParkedMember(tc.pods, tc.desired); got != tc.want {
+			if got := evidence.PodSetUnavailableOnParkedMember(tc.pods, tc.desired, tNow, time.Minute); got != tc.want {
 				t.Fatalf("PodSetUnavailableOnParkedMember = %v, want %v", got, tc.want)
 			}
 		})
@@ -387,7 +388,7 @@ func TestCrashLoopWedgedPodOn_ReadsTheRowAgainstTheRevisionItRuns(t *testing.T) 
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := crashLoopPod("engine-0-default-0", 10*time.Minute, tc.hash)
-			got, _, _ := evidence.CrashLoopWedgedPodOn(crashLoopInput(time.Minute), row, 1, []*corev1.Pod{pod}, pushed)
+			got, _, _ := evidence.CrashLoopWedgedPodOn(crashLoopInput(time.Minute), row, 1, []*corev1.Pod{pod}, pushed, true)
 			if (got != nil) != tc.want {
 				t.Fatalf("wedge on the running revision = %v, want %v", got != nil, tc.want)
 			}
@@ -396,5 +397,100 @@ func TestCrashLoopWedgedPodOn_ReadsTheRowAgainstTheRevisionItRuns(t *testing.T) 
 	pushedPod := crashLoopPod("engine-0-default-0", 10*time.Minute, query.RevisionFromName(pushed).Hash())
 	if _, got, _ := evidence.CrashLoopWedge(crashLoopInput(time.Minute), row, 1, []*corev1.Pod{pushedPod}); got {
 		t.Fatalf("the plain reading stays on the current revision; a pushed pod's wedge with no counted crash behind it is the escalation's")
+	}
+}
+
+// A promoted pod that has failed readiness past the grace is out of
+// service: a set of such pods serves nothing, and a gang whose routed
+// leader is one does too. Inside the grace, or on a pod that never
+// served, the set keeps today's reading: its wait may still resolve.
+func TestPodSetServesNothing_UnreadyPastTheGraceIsDark(t *testing.T) {
+	hash := query.RevisionFromName(clRevision).Hash()
+	runner := func(pod *corev1.Pod, name string) *corev1.Pod {
+		pod.Labels = map[string]string{query.LabelRevisionHash: hash, query.LabelRunner: name}
+		return pod
+	}
+	past := unreadyAfterServingPod("engine-0-default-0", tNow.Add(-2*time.Minute))
+	inside := unreadyAfterServingPod("engine-0-default-0", tNow.Add(-30*time.Second))
+	never := runningNotReadyPod("engine-0-default-0", tNow.Add(-2*time.Minute))
+
+	for _, tc := range []struct {
+		name string
+		pods []*corev1.Pod
+		want bool
+	}{
+		{name: "unready past the grace", pods: []*corev1.Pod{past}, want: true},
+		{name: "unready inside the grace", pods: []*corev1.Pod{inside}},
+		{name: "never promoted", pods: []*corev1.Pod{never}},
+		{name: "unready past the grace beside a serving pod", pods: []*corev1.Pod{past, servingPod("engine-0-default-1")}},
+		{name: "leader unready past the grace beside a serving worker", pods: []*corev1.Pod{runner(unreadyAfterServingPod("engine-0-leader-0", tNow.Add(-2*time.Minute)), "leader"), runner(servingPod("engine-0-worker-0"), "worker")}, want: true},
+		{name: "worker unready past the grace beside a serving leader", pods: []*corev1.Pod{runner(servingPod("engine-0-leader-0"), "leader"), runner(unreadyAfterServingPod("engine-0-worker-0", tNow.Add(-2*time.Minute)), "worker")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := evidence.PodSetServesNothing(tc.pods, tNow, time.Minute); got != tc.want {
+				t.Fatalf("PodSetServesNothing = %v, want %v", got, tc.want)
+			}
+			if got := evidence.PodSetServesNothing(tc.pods, tNow, 0); got {
+				t.Fatalf("PodSetServesNothing = true with no grace configured: the window does not exist")
+			}
+		})
+	}
+}
+
+// A member unready past the grace takes its set out of the gate's
+// serving count exactly as a parked member does; inside the grace it is
+// a member still booting.
+func TestPodSetUnavailableOnParkedMember_UnreadyMemberPastTheGrace(t *testing.T) {
+	hash := query.RevisionFromName(clRevision).Hash()
+	runner := func(pod *corev1.Pod, name string) *corev1.Pod {
+		pod.Labels = map[string]string{query.LabelRevisionHash: hash, query.LabelRunner: name}
+		return pod
+	}
+	leader := runner(servingPod("engine-0-leader-0"), "leader")
+	for _, tc := range []struct {
+		name string
+		pods []*corev1.Pod
+		want bool
+	}{
+		{name: "worker unready past the grace", pods: []*corev1.Pod{leader, runner(unreadyAfterServingPod("engine-0-worker-0", tNow.Add(-2*time.Minute)), "worker")}, want: true},
+		{name: "worker unready inside the grace", pods: []*corev1.Pod{leader, runner(unreadyAfterServingPod("engine-0-worker-0", tNow.Add(-30*time.Second)), "worker")}},
+		{name: "worker never promoted", pods: []*corev1.Pod{leader, runner(runningNotReadyPod("engine-0-worker-0", tNow.Add(-2*time.Minute)), "worker")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := evidence.PodSetUnavailableOnParkedMember(tc.pods, 2, tNow, time.Minute); got != tc.want {
+				t.Fatalf("PodSetUnavailableOnParkedMember = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A promoted pod of the row's revision that has failed readiness past
+// the grace is a wedge of the row, named by the kubelet's own reason;
+// inside the grace the reading says how long until it is one, and a pod
+// that never served is no wedge at any age.
+func TestCrashLoopWedge_UnreadyPastTheGraceIsAWedge(t *testing.T) {
+	hash := query.RevisionFromName(clRevision).Hash()
+	own := func(pod *corev1.Pod) *corev1.Pod {
+		pod.Labels = map[string]string{query.LabelRevisionHash: hash}
+		return pod
+	}
+	row := &types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady}
+	input := crashLoopInput(time.Minute)
+
+	reason, wedged, left := evidence.CrashLoopWedge(input, row, 1, []*corev1.Pod{own(unreadyAfterServingPod("engine-0-default-0", tNow.Add(-2*time.Minute)))})
+	if !wedged || left != 0 {
+		t.Fatalf("unready past the grace: wedged = %v, grace left = %s, want a wedge", wedged, left)
+	}
+	if !strings.Contains(reason, "engine-0-default-0") || !strings.Contains(reason, evidence.ReasonContainersNotReady) {
+		t.Fatalf("reason %q must name the pod and the kubelet's reason", reason)
+	}
+	if _, wedged, left := evidence.CrashLoopWedge(input, row, 1, []*corev1.Pod{own(unreadyAfterServingPod("engine-0-default-0", tNow.Add(-10*time.Second)))}); wedged || left != 50*time.Second {
+		t.Fatalf("unready inside the grace: wedged = %v, grace left = %s, want no wedge with 50s left", wedged, left)
+	}
+	if _, wedged, left := evidence.CrashLoopWedge(input, row, 1, []*corev1.Pod{own(runningNotReadyPod("engine-0-default-0", tNow.Add(-2*time.Minute)))}); wedged || left != 0 {
+		t.Fatalf("never promoted: wedged = %v, grace left = %s, want neither", wedged, left)
+	}
+	if _, wedged, _ := evidence.CrashLoopWedge(input, row, 1, []*corev1.Pod{unreadyAfterServingPod("engine-0-default-0", tNow.Add(-2*time.Minute))}); !wedged {
+		t.Fatalf("a pod with no revision label stays in scope and reads as the row's own wedge; got none")
 	}
 }
