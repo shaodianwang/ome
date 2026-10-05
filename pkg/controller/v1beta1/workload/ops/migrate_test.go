@@ -2291,6 +2291,7 @@ func assertMigrationWaitsNaming(t *testing.T, f *migFixture, uuid string, wants 
 // Cells: instance/Failed/spec.migrateRequest/before
 func TestMigrate_SourceFailedAtItsRunningRevision_WaitsNamingTheParkedRepair(t *testing.T) {
 	ladder := &workload.RetryPolicy{MaxAttempts: 3, InitialDelay: time.Minute, MaxDelay: time.Hour, Multiplier: 2}
+	nextRetry := metav1.NewTime(time.Now().Add(time.Hour))
 	cases := []struct {
 		name       string
 		repair     bool
@@ -2300,11 +2301,11 @@ func TestMigrate_SourceFailedAtItsRunningRevision_WaitsNamingTheParkedRepair(t *
 		want       []string
 	}{
 		{
-			name:   "repair parked under a held ladder",
+			name:   "repair parked under a ladder still in backoff",
 			repair: true,
-			block:  &workload.RetryBlock{State: workload.RetryBlockHeld, AttemptsStarted: 3, Reason: "CrashLoopBackOff"},
+			block:  &workload.RetryBlock{State: workload.RetryBlockBackoff, AttemptsStarted: 1, Reason: "CrashLoopBackOff", NextRetryAt: &nextRetry},
 			policy: ladder,
-			want:   []string{"retry block Held after 3 failed attempt(s): CrashLoopBackOff", "release the revision or reset the Instance"},
+			want:   []string{"its rebuild waits on the revision's retry block Backoff after 1 failed attempt(s): CrashLoopBackOff"},
 		},
 		{
 			name:   "repair parked with no ladder configured",
@@ -2361,6 +2362,147 @@ func TestMigrate_SourceFailedAtItsRunningRevision_WaitsNamingTheParkedRepair(t *
 			}
 			if rec := f.record(t, uuid); !rec.SurgeAllocated() || rec.Phase != workload.MigrationPhaseSurgePending {
 				t.Fatalf("record must be SurgePending with a surge index; got %+v", *rec)
+			}
+		})
+	}
+}
+
+// A move whose source runs a revision the retry ladder holds is closed
+// Failed in the pass that picks it, whatever phase the crash loop shows
+// the row in: the held revision, its ladder and the operator action go
+// on the record and a MigrationRequestRejected event, no surge is
+// allocated, and the row and its pods are left as they were.
+// Cells: instance/Ready/spec.migrateRequest/before, instance/Failed/spec.migrateRequest/before
+func TestMigrate_SourceRunsAHeldRevision_RejectedAtOnce(t *testing.T) {
+	ladder := &workload.RetryPolicy{MaxAttempts: 3, InitialDelay: time.Minute, MaxDelay: time.Hour, Multiplier: 2}
+	cases := []struct {
+		name string
+		seed func(t *testing.T, f *migFixture)
+	}{
+		{
+			name: "read Ready between crashes",
+			seed: func(*testing.T, *migFixture) {},
+		},
+		{
+			name: "read Failed with no repair open",
+			seed: func(t *testing.T, f *migFixture) {
+				seedSourceFailedAtRunningRevision(t, f, 0, "CrashLoopBackOff", false, 0)
+			},
+		},
+		{
+			name: "read Failed under a parked repair",
+			seed: func(t *testing.T, f *migFixture) {
+				f.retryPolicy = ladder
+				seedSourceFailedAtRunningRevision(t, f, 0, "CrashLoopBackOff", true, 0)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSinglePodMigFixture(t)
+			f.recorder = record.NewFakeRecorder(16)
+			const uuid = "mig-source-held"
+			f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+			tc.seed(t, f)
+			before := *findInstanceStatusOnIRForFixture(t, f, 0)
+			rev := before.RunningRevision
+			f.retryBlocks = []workload.RetryBlock{{TargetRevision: rev, State: workload.RetryBlockHeld, AttemptsStarted: 3, Reason: "CrashLoopBackOff"}}
+			startedAt := metav1.NewTime(time.Now().Add(-time.Hour)).UTC().Format(time.RFC3339)
+			seedStartedLedgerRow(t, f, uuid, startedAt)
+			beforePods := f.listPods(t)
+
+			done, accepted := f.pass(t, uuid)
+			if !done || !accepted {
+				t.Fatalf("the move must be answered in the pass: done=%v accepted=%v", done, accepted)
+			}
+			assertRecordFailed(t, f, uuid, "held after its attempts")
+			rec := f.record(t, uuid)
+			for _, want := range []string{
+				workload.InstanceKey(f.component, 0), rev,
+				"retry block Held after 3 failed attempt(s): CrashLoopBackOff",
+				"would rebuild that revision elsewhere",
+				"correct or release the revision, then request the move again",
+			} {
+				if !strings.Contains(rec.Message, want) {
+					t.Errorf("record Message = %q, want substring %q", rec.Message, want)
+				}
+			}
+			if rec.SurgeInstance != nil {
+				t.Errorf("a rejected move allocates no surge; got %+v", *rec)
+			}
+			for _, r := range f.records {
+				if r.Phase == workload.MigrationPhaseAccepted {
+					t.Errorf("no record may stay Accepted after the answer; got %+v", r)
+				}
+			}
+			events := migWedgeEvents(t, f)
+			if len(events) != 1 || countEventsWithReason(events, workload.EventReasonMigrationRequestRejected) != 1 {
+				t.Fatalf("want exactly one %s event, got %v", workload.EventReasonMigrationRequestRejected, events)
+			}
+			if !strings.Contains(events[0], rec.Message) {
+				t.Errorf("the event must carry the reason; event=%q message=%q", events[0], rec.Message)
+			}
+			if diff := cmp.Diff(before, *findInstanceStatusOnIRForFixture(t, f, 0)); diff != "" {
+				t.Errorf("the source row must be left as it was (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(beforePods, f.listPods(t)); diff != "" {
+				t.Errorf("pods changed on a rejected move (-want +got):\n%s", diff)
+			}
+			row := ledgerRow(t, f, uuid)
+			if row.Phase != audit.PhaseFailed || row.Outcome != rec.Message || row.SourceInstance != 0 ||
+				row.StartedAt != startedAt || row.CompletedAt == "" || row.SurgeInstance != -1 {
+				t.Errorf("the Failed row must close the Started row with the reason as its outcome; got %+v", row)
+			}
+		})
+	}
+}
+
+// A source running a revision whose ladder still paces it - a block in
+// Backoff or RetryInProgress - is the ladder's to pace, not a reason to
+// reject: the move allocates, stamps the pair and renders the surge as
+// it does for any steady source.
+// Cells: instance/Ready/spec.migrateRequest/before
+func TestMigrate_SourceRunsARevisionTheLadderStillPaces_Proceeds(t *testing.T) {
+	nextRetry := metav1.NewTime(time.Now().Add(time.Hour))
+	cases := []struct {
+		name  string
+		block workload.RetryBlock
+	}{
+		{
+			name:  "ladder in backoff",
+			block: workload.RetryBlock{State: workload.RetryBlockBackoff, AttemptsStarted: 1, Reason: "CrashLoopBackOff", NextRetryAt: &nextRetry},
+		},
+		{
+			name:  "ladder retrying",
+			block: workload.RetryBlock{State: workload.RetryBlockRetryInProgress, AttemptsStarted: 2, Reason: "CrashLoopBackOff"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSinglePodMigFixture(t)
+			f.recorder = record.NewFakeRecorder(16)
+			const uuid = "mig-source-paced"
+			f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+			b := tc.block
+			b.TargetRevision = findInstanceStatusOnIRForFixture(t, f, 0).RunningRevision
+			f.retryBlocks = []workload.RetryBlock{b}
+
+			done, accepted := f.pass(t, uuid)
+			if done || !accepted {
+				t.Fatalf("the move must allocate: done=%v accepted=%v", done, accepted)
+			}
+			rec := f.record(t, uuid)
+			if !rec.SurgeAllocated() || rec.Phase != workload.MigrationPhaseSurgePending {
+				t.Fatalf("record must be SurgePending with a surge index; got %+v", *rec)
+			}
+			if src := findInstanceStatusOnIRForFixture(t, f, 0); src == nil || src.Phase != v1beta1.OMENativeInstanceMigrating {
+				t.Errorf("source must be stamped Migrating; got %+v", src)
+			}
+			if pods := migPodsForInstance(t, f, *rec.SurgeInstance); len(pods) != 1 {
+				t.Errorf("the surge pod must be rendered at index %d; got %d pod(s)", *rec.SurgeInstance, len(pods))
+			}
+			if n := countEventsWithReason(migWedgeEvents(t, f), workload.EventReasonMigrationRequestRejected); n != 0 {
+				t.Errorf("a paced ladder rejects nothing; got %d rejection event(s)", n)
 			}
 		})
 	}

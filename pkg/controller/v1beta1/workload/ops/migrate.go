@@ -66,18 +66,19 @@ func ledgerOwnerGVK(input workload.ReconcileInput) schema.GroupVersionKind {
 //
 //  1. Terminal record → done. Fresh record (SurgeInstance unset):
 //     run the fresh-request guards (steady-Ready source — a Failed
-//     source on a revision it never started is rejected, not waited
-//     on — resolveSourceNode, capacity over status.migrations, overlay
-//     pre-check); rejections mark the record Failed. A wait that no
-//     operation in flight ends by itself — the Component pausing new
-//     surges, a source Failed at its running revision with its repair
-//     parked — is named on the record (deferMigration), which stays
-//     Accepted and proceeds once the cause clears. The move binds to
-//     the Instance: a source rebuilt off the request's FromNode since
-//     the request leaves the node it runs on, and the record says so; a
-//     source a gang roll rebuilt under another index is followed there
-//     by the record (followHandoffForPendingMigrations) and waits while
-//     that index is still the roll's (handoffPinsIndex).
+//     source on a revision it never started, or one running a revision
+//     whose ladder holds, is rejected, not waited on — resolveSourceNode,
+//     capacity over status.migrations, overlay pre-check); rejections
+//     mark the record Failed. A wait that no operation in flight ends
+//     by itself — the Component pausing new surges, a source Failed at
+//     its running revision with its repair parked — is named on the
+//     record (deferMigration), which stays Accepted and proceeds once
+//     the cause clears. The move binds to the Instance: a source rebuilt
+//     off the request's FromNode since the request leaves the node it
+//     runs on, and the record says so; a source a gang roll rebuilt
+//     under another index is followed there by the record
+//     (followHandoffForPendingMigrations) and waits while that index is
+//     still the roll's (handoffPinsIndex).
 //  2. Allocate surge index = lowest unused; write it back to the
 //     record (SurgeInstance + Phase=SurgePending) FIRST, then stamp
 //     source Phase=Migrating + surge Phase=Creating and update the
@@ -226,6 +227,14 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		if migrationSourceRevisionNotStarted(source) {
 			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID,
 				migrationSourceRevisionNotStartedReason(input, source))
+			return d, true, ferr
+		}
+		// The surge is rendered on the source's running revision; one the
+		// ladder has given up on is answered now, whatever phase its crash
+		// loop shows this pass, rather than accepted on a Ready flap.
+		if migrationSourceRevisionHeld(input, source) {
+			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID,
+				migrationSourceRevisionHeldReason(input, source))
 			return d, true, ferr
 		}
 		if !migrationSourceSteady(source) {
@@ -968,9 +977,30 @@ func migrationSourceRevisionNotStartedReason(input workload.ReconcileInput, sour
 	if source.LastFailure != nil {
 		failureReason = source.LastFailure.Reason
 	}
-	return fmt.Sprintf("source %s is Failed on revision %s, which has not started (%s); correct or release the revision, then request the move again",
+	return fmt.Sprintf("source %s is Failed on revision %s, which has not started (%s); %s",
 		workload.InstanceKey(input.Key.Component, source.Index), source.TargetRevision,
-		migrationRevisionLadder(input, source.TargetRevision, failureReason))
+		migrationRevisionLadder(input, source.TargetRevision, failureReason), migrationRevisionAction)
+}
+
+// migrationRevisionAction closes a rejection that only a change of
+// revision answers: the operator corrects or releases it and asks again.
+const migrationRevisionAction = "correct or release the revision, then request the move again"
+
+// migrationSourceRevisionHeld reports a source whose running revision
+// the retry ladder holds, with no operation in flight to move it off that
+// revision (a repair parked on the row is spent, not in flight).
+func migrationSourceRevisionHeld(input workload.ReconcileInput, source *workload.InstanceStatus) bool {
+	return source != nil && source.RunningRevision != "" &&
+		(source.Operation == nil || SpentRepair(source)) &&
+		revisionHeld(input, source.RunningRevision)
+}
+
+// migrationSourceRevisionHeldReason words that rejection: the running
+// revision and its ladder, and that the move would only rebuild it.
+func migrationSourceRevisionHeldReason(input workload.ReconcileInput, source *workload.InstanceStatus) string {
+	return fmt.Sprintf("source %s runs revision %s, which is held after its attempts (%s); the move would rebuild that revision elsewhere; %s",
+		workload.InstanceKey(input.Key.Component, source.Index), source.RunningRevision,
+		migrationRevisionLadder(input, source.RunningRevision, ""), migrationRevisionAction)
 }
 
 // migrationRevisionLadder words where rev's retry ladder stands for a
@@ -1012,19 +1042,15 @@ func migrationSourceRepairParked(input workload.ReconcileInput, source *workload
 
 // migrationSourceRepairStanding words what holds a Failed source's
 // repair, in the order the restart pass decides a parked repair's exits:
-// the running revision's retry block, the repair's own ladder, or no
-// repair open at all. Where nothing automatic releases the hold, the
-// operator action that does is named.
+// the running revision's retry block (one the ladder still paces; a held
+// one rejects the move instead), the repair's own ladder, or no repair
+// open at all. Where nothing automatic releases the hold, the operator
+// action that does is named.
 func migrationSourceRepairStanding(input workload.ReconcileInput, source *workload.InstanceStatus) string {
-	const release = "; release the revision or reset the Instance"
 	const reset = "; reset the Instance or publish a corrected revision"
 	switch {
 	case rebuildRetryBlockDenies(input, source):
-		standing := "its rebuild waits on the revision's " + migrationRevisionLadder(input, source.RunningRevision, "")
-		if revisionHeld(input, source.RunningRevision) {
-			standing += release
-		}
-		return standing
+		return "its rebuild waits on the revision's " + migrationRevisionLadder(input, source.RunningRevision, "")
 	case !SpentRepair(source):
 		return "no repair is open on it"
 	case workload.RepairWaitsOnWorkload(source):
