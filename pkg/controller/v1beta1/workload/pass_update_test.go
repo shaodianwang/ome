@@ -14,6 +14,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
@@ -219,7 +220,7 @@ func TestHeldByPartition(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := escalation.HeldByPartition(tc.partition, tc.rank); got != tc.held {
+			if got := workloadops.HeldByPartition(tc.partition, tc.rank); got != tc.held {
 				t.Errorf("HeldByPartition(rank=%d) = %v, want %v", tc.rank, got, tc.held)
 			}
 		})
@@ -247,7 +248,7 @@ func TestEffectivePartition(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := escalation.EffectivePartition(tc.pacing, tc.ru)
+			got := workloadops.EffectivePartition(tc.pacing, tc.ru)
 			switch {
 			case got == nil && tc.want == nil:
 			case got == nil || tc.want == nil || *got != *tc.want:

@@ -2710,6 +2710,76 @@ func TestRestart_RebuildWithNoPodYetFollowsTheTarget(t *testing.T) {
 	}
 }
 
+// A repair that has created no pod yet keeps the revision its row records
+// while the canary step holds the Instance: the step's stable side is
+// promoted by the step machine alone, so the rebuild follows the roll target
+// only once the step releases the Instance.
+//
+// Cells: instance/Restart/Drain/spec.revision/before, instance/Restart/Drain/spec.partition/before
+func TestRestart_RebuildWithNoPodYetKeepsTheRevisionTheCanaryStepHolds(t *testing.T) {
+	const (
+		runningImage = "registry.example.com/runtime:v1"
+		movedImage   = "registry.example.com/runtime:v2"
+	)
+	for _, tc := range []struct {
+		name      string
+		partition int32
+		follows   bool
+	}{
+		{name: "held by the step", partition: 1},
+		{name: "released by the step", partition: 0, follows: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetExpectations(t)
+			isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+			c := newFakeClient(t, isvc, ir)
+			spec := func(image string) *corev1.PodSpec {
+				return &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: image}}}
+			}
+			running := mintEngineRevision(t, c, isvc, spec(runningImage), nil)
+			target := mintEngineRevision(t, c, isvc, spec(movedImage), nil)
+			restartingRow(t, c, isvc, running.Name)
+
+			input := buildTestInput(isvc, c, workload.ComponentEngine)
+			input.DesiredSpec.PodSpec = spec(movedImage)
+			input.DesiredSpec.Pacing = &workload.WorkloadPacing{Partition: ptr.To(tc.partition)}
+			input.ObservedState.UpdateRevision = target.Name
+			plan := buildPlanSinglePodEngineForRestart(c, isvc)
+
+			done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], target, "pod count 0 below desired 1")
+			if err != nil {
+				t.Fatalf("Restart: %v", err)
+			}
+			if done {
+				t.Fatalf("expected done=false while the rebuilt pod is not yet Ready")
+			}
+
+			wantRevision, wantImage := running, runningImage
+			if tc.follows {
+				wantRevision, wantImage = target, movedImage
+			}
+			pods := &corev1.PodList{}
+			if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+				t.Fatalf("list pods: %v", err)
+			}
+			if len(pods.Items) != 1 {
+				t.Fatalf("pods: got %d want 1", len(pods.Items))
+			}
+			pod := pods.Items[0]
+			if got := pod.Labels[query.LabelRevisionHash]; got != query.RevisionOf(wantRevision).Hash() {
+				t.Errorf("pod %s revision label = %q, want %s", pod.Name, got, wantRevision.Name)
+			}
+			if got := pod.Spec.Containers[0].Image; got != wantImage {
+				t.Errorf("pod %s image = %q, want %q", pod.Name, got, wantImage)
+			}
+			row := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+			if row == nil || row.Phase != v1beta1.OMENativeInstanceRestarting || row.RunningRevision != wantRevision.Name {
+				t.Fatalf("row = %+v, want Restarting recording %s", row, wantRevision.Name)
+			}
+		})
+	}
+}
+
 // TestRestart_HoldsWhenTheStampedRevisionIsGone: a rebuild whose stamped
 // revision has no ControllerRevision left creates nothing rather than
 // rendering the current template under that revision's label. It says so

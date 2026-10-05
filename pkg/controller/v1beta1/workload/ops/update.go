@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"time"
 
@@ -533,6 +534,101 @@ type UpdateTriggerDecision struct {
 	// take the fast path. The stamp is an EFFECT; the evaluation only
 	// selects it.
 	AdoptRevision bool
+}
+
+// EffectivePartition returns the partition the update pass holds at.
+// The projected Pacing.Partition wins when set — it is the rollout-
+// control value the composer (a canary step, a plan-gate hold) owns,
+// and an explicit 0 there releases every Instance even when the user's
+// strategy carries a partition. Otherwise the user's
+// RollingUpdate.Partition applies. nil when neither is set.
+func EffectivePartition(pacing *workload.WorkloadPacing, ru *workload.RollingUpdate) *int32 {
+	if pacing != nil && pacing.Partition != nil {
+		return pacing.Partition
+	}
+	if ru == nil {
+		return nil
+	}
+	return ru.Partition
+}
+
+// HeldByPartition reports whether the hold candidate at `rank` (its
+// position in PartitionHeldIndices' ascending candidate order) is held
+// by the effective partition (the StatefulSet-style canary): the first
+// `partition` candidates are held. A nil partition or partition <= 0
+// holds nothing.
+func HeldByPartition(partition *int32, rank int32) bool {
+	if partition == nil || *partition <= 0 {
+		return false
+	}
+	return rank < *partition
+}
+
+// PartitionHeldIndices returns the set of Instance indices the
+// effective partition holds on their current revision this pass.
+// Partition counts Instances to hold, not index values — migration and
+// lowest-unused surge allocation leave sparse index sets (e.g. {1,2}
+// for replicas=2), so a raw index<Partition compare holds the wrong
+// count. The hold is keyed to revision membership, not position in the
+// index set: gang surge places TARGET-revision replacements at freed
+// (often lower) indices, so a positional hold would let a replacement
+// steal a held slot mid-roll and un-hold a still-old Instance — ending
+// the roll with zero old-revision Instances and the desired staged
+// shape (ReachedDesiredShape) permanently unsatisfiable.
+//
+// Hold candidates are planned Instances observed OFF the target
+// revision (unset RunningRevision included — ReachedDesiredShape
+// counts those as held too, and the two must agree on membership).
+// Excluded from candidacy, so they are never held:
+//   - unobserved Instances (nothing running to hold);
+//   - Instances already converging to target — Phase=Updating and any
+//     preserved Update operation (gang-surge target markers, Failed
+//     continuations). An in-flight update must finish: holding it
+//     strands its surge pod, which is never promoted to serving and
+//     permanently consumes the surge budget, deadlocking the roll on
+//     the non-held Instances. The hold falls to the next-lowest old-
+//     revision Instance instead, preserving the count;
+//   - transient migration surge Instances (Op.Type=Migrate on a
+//     non-Migrating phase) — the pair's source carries the steady
+//     capacity.
+//
+// The lowest-indexed `partition` candidates are held.
+func PartitionHeldIndices(partition *int32, input workload.ReconcileInput, planned []workload.InstancePlan, targetRevName string) map[int32]bool {
+	held := make(map[int32]bool)
+	if partition == nil || *partition <= 0 {
+		return held
+	}
+	tgt := query.RevisionFromName(targetRevName)
+	candidates := make([]int32, 0, len(planned))
+	for _, inst := range planned {
+		s := input.ObservedState.Instance(inst.Index)
+		if s == nil {
+			continue
+		}
+		if query.RevisionFromName(s.RunningRevision).Same(tgt) {
+			continue
+		}
+		if s.Phase == workload.InstancePhaseUpdating {
+			continue
+		}
+		if s.Operation != nil {
+			if s.Operation.Type == workload.InstanceOperationUpdate {
+				continue
+			}
+			if s.Operation.Type == workload.InstanceOperationMigrate && s.Phase != workload.InstancePhaseMigrating {
+				continue
+			}
+		}
+		candidates = append(candidates, inst.Index)
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i] < candidates[j] })
+	for i, idx := range candidates {
+		if !HeldByPartition(partition, int32(i)) {
+			break
+		}
+		held[idx] = true
+	}
+	return held
 }
 
 // EvaluateUpdateTrigger is the pure update-trigger evaluation: no

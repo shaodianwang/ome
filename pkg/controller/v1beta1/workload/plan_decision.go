@@ -719,8 +719,8 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 	}
 	// The hold reads the projected pacing partition first (a canary step
 	// or plan-gate hold), then the user's rollingUpdate partition.
-	partition := escalation.EffectivePartition(input.DesiredSpec.Pacing, rollingUpdate)
-	heldIndices := escalation.PartitionHeldIndices(partition, input, plan.Instances, target.Name)
+	partition := workloadops.EffectivePartition(input.DesiredSpec.Pacing, rollingUpdate)
+	heldIndices := workloadops.PartitionHeldIndices(partition, input, plan.Instances, target.Name)
 	// The window a promoted pod that restarted must serve again before
 	// the roll reads it as serving: minReadySeconds floored by the
 	// stuck-pod grace.

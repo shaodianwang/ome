@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -1086,7 +1086,7 @@ func TestPartitionHeldIndices(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := escalation.PartitionHeldIndices(tc.partition, types.ReconcileInput{ObservedState: types.WorkloadObservedState{InstanceStatuses: tc.observed}}, tc.planned, target)
+			got := workloadops.PartitionHeldIndices(tc.partition, types.ReconcileInput{ObservedState: types.WorkloadObservedState{InstanceStatuses: tc.observed}}, tc.planned, target)
 			if len(got) != len(tc.want) {
 				t.Fatalf("held = %v, want %v", got, tc.want)
 			}

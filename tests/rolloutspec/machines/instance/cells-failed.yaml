@@ -446,13 +446,13 @@ cells:
   - state: Failed
     event: spec.partition
     outcome: defer
-    note: a Failed row with no preserved Update operation is an ordinary partition candidate and is simply not selected while held, with no RolloutHold recorded; widening the partition lets the next pass pick it up, and the Create pass is not partitioned at all
+    note: a Failed row with no preserved Update operation is an ordinary partition candidate and is simply not selected while held, with no RolloutHold recorded; widening the partition lets the next pass pick it up. The Create pass is not partitioned either, except that a Failed row with no pod left and a recorded running revision that the canary step's projected partition holds is rebuilt at that revision rather than the target, so the step keeps its planned size; one that never ran a revision renders the target
     placement: unit
     coverage:
       perm: []
-      unit: [TestPlan_Update_HeldByPartition, TestPlan_Update_PartitionHoldsCountOnSparseIndices]
+      unit: [TestPlan_Update_HeldByPartition, TestPlan_Update_PartitionHoldsCountOnSparseIndices, TestCreate_PodlessStableRowUnderACanaryKeepsItsRevision, TestCreate_FirstMaterializationUnderACanaryRendersTheTarget]
       kind: []
-    status: current
+    status: decided
   - state: Failed
     event: gate.allow
     outcome: ignore

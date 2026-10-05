@@ -272,6 +272,7 @@ func createFilteredBatched(
 	// does not fit, it leads the next wave instead of being bypassed by smaller
 	// later Instances.
 	selectionClosed := false
+	heldByStep := canaryStepHeldIndices(input, plan, target)
 
 	for _, inst := range plan.Instances {
 		if !keep(inst.Index) {
@@ -312,7 +313,7 @@ func createFilteredBatched(
 			continue
 		}
 		if len(missing) > 0 {
-			rev := createRevision(input, inst.Index, existing, target)
+			rev := createRevision(input, inst.Index, existing, target, heldByStep[inst.Index])
 			allowed, treatedReady, retryAfter := allowCreateForMissingInstance(input, plan, inst, existing, rev)
 			if retryAfter > 0 && (retryBlockWait == 0 || retryAfter < retryBlockWait) {
 				retryBlockWait = retryAfter
@@ -880,22 +881,33 @@ func createFreshStart(s *workload.InstanceStatus) bool {
 
 // createRevision names the revision a Create attempt on Instance idx renders
 // and pins: a committed attempt's pin; else the running revision, for a refill
-// beside live pods of it; else the roll target. Empty when none names one.
-func createRevision(input workload.ReconcileInput, idx int32, existing []*corev1.Pod, target *appsv1.ControllerRevision) string {
+// beside live pods of it or an Instance the canary step holds; else the target.
+func createRevision(input workload.ReconcileInput, idx int32, existing []*corev1.Pod, target *appsv1.ControllerRevision, heldByStep bool) string {
 	s := input.ObservedState.Instance(idx)
 	if s != nil && s.Operation != nil && s.Operation.Type == workload.InstanceOperationCreate && s.Operation.TargetRevision != "" {
 		return s.Operation.TargetRevision
 	}
-	// A refilled member joins the set it repairs: rolling that set to the
-	// target is the update pass's job, done as a unit, never one member at a
-	// time. An Instance with no live pod left is rebuilt at the target.
-	if s != nil && s.RunningRevision != "" && len(query.ExcludeTerminalPods(existing)) > 0 {
+	// A refilled member joins the set it repairs, and an Instance the canary
+	// step holds stays on the step's stable side: rolling either is the update
+	// pass's job. Any other Instance with no live pod left is rebuilt at the target.
+	if s != nil && s.RunningRevision != "" && (heldByStep || len(query.ExcludeTerminalPods(existing)) > 0) {
 		return s.RunningRevision
 	}
 	if target != nil {
 		return target.Name
 	}
 	return ""
+}
+
+// canaryStepHeldIndices is the set of Instances the canary step's projected
+// partition holds on the revision they run, the step's stable side. Empty
+// when no canary governs the Component or the pass has no roll target.
+func canaryStepHeldIndices(input workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision) map[int32]bool {
+	pacing := input.DesiredSpec.Pacing
+	if target == nil || pacing == nil || pacing.Partition == nil {
+		return nil
+	}
+	return PartitionHeldIndices(pacing.Partition, input, plan.Instances, target.Name)
 }
 
 // createAttemptOwnsPods reports whether an Instance's pods belong to a Create

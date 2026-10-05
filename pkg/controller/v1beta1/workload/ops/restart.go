@@ -708,17 +708,19 @@ func rollTargetOpen(input workload.ReconcileInput, plan workload.ComponentPlan, 
 
 // rebuildFollowsTarget reports whether the rebuild of an open repair
 // renders the roll target instead of the revision its row records: no pod
-// of the rebuild exists yet and the row is off a target the roll could
-// start on. The Instance serves nothing, so the rebuild is the pass that
-// puts it on the target and no pod set is torn down for it. A rebuild
-// whose pods exist finishes on the revision they carry: replacing a
-// starting pod set is the roll's job, under its budget.
+// of the rebuild exists yet, the row is off a target the roll could start
+// on, and the canary step does not hold the Instance. The Instance serves
+// nothing, so the rebuild is the pass that puts it on the target and no pod
+// set is torn down for it; a held Instance is the step's stable side, which
+// the step machine alone promotes. A rebuild whose pods exist finishes on
+// the revision they carry: replacing a starting pod set is the roll's job,
+// under its budget.
 func rebuildFollowsTarget(input workload.ReconcileInput, plan workload.ComponentPlan, idx int32, target *appsv1.ControllerRevision, rebuiltPods []*corev1.Pod) bool {
 	if len(query.ExcludeTerminalPods(rebuiltPods)) > 0 || !rollTargetOpen(input, plan, target) {
 		return false
 	}
 	rev := rebuildRevision(input.ObservedState.Instance(idx))
-	return rev != "" && rev != target.Name
+	return rev != "" && rev != target.Name && !canaryStepHeldIndices(input, plan, target)[idx]
 }
 
 // RunnerRestartedSinceReady reports whether pod's runner container carries

@@ -1,0 +1,23 @@
+# Provenance for the instance-machine cells decided when an owner settled
+# how an Instance the canary step holds is rebuilt from nothing. The step's
+# projected partition names the stable side of the split, and a stable
+# Instance that lost every pod, or whose open repair has created no pod
+# yet, comes back on the revision it ran rather than on the roll target:
+# rebuilding it at the target would grow the canary by one Instance beyond
+# the step the operator set, and promoting Instances is the step machine's
+# alone. Outside a canary the rebuild still follows the target, and a
+# first materialization renders the target under any hold.
+#
+# Selectors match the cells files exactly: an empty variants, windows or
+# transition matches all of them.
+history:
+  # --- cells-noop.yaml ---
+  - {state: Pending, event: spec.revision, variants: [], windows: [], transition: "", decision: "canary step hold rule: a stable Instance rebuilt from nothing keeps the revision it ran"}
+  - {state: Pending, event: spec.partition, variants: [], windows: [], transition: "", decision: "canary step hold rule: a stable Instance rebuilt from nothing keeps the revision it ran"}
+
+  # --- cells-failed.yaml ---
+  - {state: Failed, event: spec.partition, variants: [], windows: [], transition: "", decision: "canary step hold rule: a stable Instance rebuilt from nothing keeps the revision it ran"}
+
+  # --- cells-restart.yaml ---
+  - {state: Restart/Drain, event: spec.revision, variants: [], windows: [], transition: "", decision: "canary step hold rule: an open repair that has created no pod yet keeps the revision its row records while the step holds the Instance"}
+  - {state: Restart/Drain, event: spec.partition, variants: [], windows: [], transition: "", decision: "canary step hold rule: an open repair that has created no pod yet keeps the revision its row records while the step holds the Instance"}
