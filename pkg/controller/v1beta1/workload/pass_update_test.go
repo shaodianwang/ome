@@ -1756,3 +1756,136 @@ func TestReconcile_TerminatingMigrationSourceDoesNotHoldTheRoll(t *testing.T) {
 		t.Fatalf("no hold may stand on a migration source's own pod, got %+v", hold)
 	}
 }
+
+// servingSince marks pod Running, ContainersReady and PodReady since at,
+// with the serving gate on: in rotation, as the kubelet reports it.
+func servingSince(pod *corev1.Pod, at time.Time) {
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(at)},
+		{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(at)},
+		{Type: query.ServingConditionType, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(at)},
+	}
+}
+
+// healedEnginePod is the pod of Instance idx on revision rev whose runner
+// restarted twice after readySince and has been Ready again, and serving,
+// since readyAgain: the kubelet's record carries the last termination, of
+// a run that itself began after the row entered Ready.
+func healedEnginePod(idx int32, rev string, readySince, readyAgain time.Time) *corev1.Pod {
+	pod := liveEnginePod("llama-70b", "prod", idx, 0, rev, readySince.Add(-time.Minute))
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: constants.MainContainerName, Ready: true, RestartCount: 2,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(readyAgain.Add(-time.Second))}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			ExitCode: 137, Reason: "Error",
+			StartedAt:  metav1.NewTime(readySince.Add(time.Minute)),
+			FinishedAt: metav1.NewTime(readyAgain.Add(-2 * time.Second)),
+		}},
+	}}
+	servingSince(pod, readyAgain)
+	return pod
+}
+
+// TestReconcile_HealedRunnerStopsHoldingTheFloor pins the floor's release
+// under SurgeThenDrain maxUnavailable 0: Instance 0 is on the target with a
+// pod whose runner restarted twice after the row entered Ready and serves
+// again on the same row, so its anchor never moves; Instance 1 is at
+// Step=Surge with its replacement past the promote bar. While the pod has
+// been Ready again for less than the window the Instance holds its slot,
+// the Component is below its floor, the drain gate is not asked, the
+// source keeps serving and the Budget hold names the Instance. Once the
+// pod has held Ready for the window it serves: the gate is consulted with
+// the source, the source leaves rotation and no hold stands.
+//
+// Cells: instance/Update/Surge/gate.deny[Budget]/before
+func TestReconcile_HealedRunnerStopsHoldingTheFloor(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	const window = time.Minute
+	cases := []struct {
+		name       string
+		readyAgain time.Time
+		held       bool
+	}{
+		{name: "Ready again for less than the window, the floor holds", readyAgain: now.Add(-window / 2), held: true},
+		{name: "Ready again for the window, the source leaves rotation", readyAgain: now.Add(-window)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			readySince := now.Add(-10 * time.Minute)
+			rows := []types.InstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "llama-70b-engine-newtarget",
+					ReadySince: &metav1.Time{Time: readySince}, PodCount: 1, ServingPodCount: 1},
+				{Index: 1, Incarnation: 1, Phase: types.InstancePhaseUpdating, RunningRevision: "llama-70b-engine-priorrev",
+					TargetRevision: "llama-70b-engine-newtarget", PodCount: 2, ServingPodCount: 1,
+					Operation: &types.InstanceOperation{
+						ID: "update-1", Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurge,
+						TargetRevision: "llama-70b-engine-newtarget", Strategy: types.UpdateStrategySurgeThenDrain,
+						StartedAt: metav1.NewTime(now.Add(-5 * time.Minute)), LastProgressAt: metav1.NewTime(now.Add(-5 * time.Minute)),
+						Deadline: metav1.NewTime(now.Add(30 * time.Minute)),
+					}},
+			}
+			healed := healedEnginePod(0, "newtarget", readySince, tc.readyAgain)
+			replacement := liveEnginePod("llama-70b", "prod", 1, 1, "newtarget", now.Add(-5*time.Minute))
+			replacement.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name: constants.MainContainerName, Ready: true,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(now.Add(-5 * time.Minute))}},
+			}}
+			servingSince(replacement, now.Add(-4*time.Minute))
+			f := newTerminatingSurgeFixture(t, rows, []int32{0, 1}, []int32{1}, healed, replacement)
+			f.in.StuckPodGrace = window
+			f.in.DrainHolds = &types.DrainHolds{}
+			f.plan.RestartPolicy = types.RestartPolicyNone
+			var asked [][]string
+			f.in.DrainGate = func(sourcePods []string) (bool, types.RolloutHoldGate, string) {
+				asked = append(asked, sourcePods)
+				return true, "", ""
+			}
+			source := servingEnginePod(1)
+			sourceServing := func() bool {
+				fresh := &corev1.Pod{}
+				err := f.c.Get(context.Background(), client.ObjectKeyFromObject(source), fresh)
+				if apierrors.IsNotFound(err) {
+					return false
+				}
+				if err != nil {
+					t.Fatalf("read the source: %v", err)
+				}
+				return podreadiness.IsServing(fresh)
+			}
+
+			f.pass()
+
+			row := f.in.ObservedState.Instance(1)
+			if tc.held {
+				if len(asked) != 0 {
+					t.Fatalf("the drain gate was consulted while the Component was below its floor: %v", asked)
+				}
+				hold := f.lastHold()
+				if hold == nil || hold.Gate != types.RolloutHoldGateBudget || hold.Target != f.target.Name ||
+					!strings.Contains(hold.Reason, "no source leaves rotation") || !holdNamesInstance(hold, 0) {
+					t.Fatalf("the Component must report the floor's Budget hold naming Instance 0, got %+v", hold)
+				}
+				if row == nil || row.Operation == nil || row.Operation.Step != types.UpdateStepSurge {
+					t.Fatalf("a withheld drain must keep Instance 1 at Step=Surge, got %+v", row)
+				}
+				if !sourceServing() {
+					t.Fatalf("a withheld drain must leave the source in rotation")
+				}
+				return
+			}
+			if len(asked) != 1 || len(asked[0]) != 1 || asked[0][0] != source.Name {
+				t.Fatalf("the drain gate must be consulted once with the source pod, got %v", asked)
+			}
+			if hold := f.lastHold(); hold != nil {
+				t.Fatalf("an Instance that serves again holds nothing, got %+v", hold)
+			}
+			if row == nil || row.Operation == nil || row.Operation.Step != types.UpdateStepSurgeDrain {
+				t.Fatalf("an admitted drain must move Instance 1 to Step=SurgeDrain, got %+v", row)
+			}
+			if sourceServing() {
+				t.Fatalf("an admitted drain must take the source out of rotation")
+			}
+		})
+	}
+}

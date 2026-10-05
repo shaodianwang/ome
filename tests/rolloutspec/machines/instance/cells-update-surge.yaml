@@ -106,7 +106,7 @@ cells:
     placement: unit
     coverage:
       perm: []
-      unit: [TestCrashAfterPromotion_RollHoldsAtTheBudget]
+      unit: [TestCrashAfterPromotion_RollHoldsAtTheBudget, TestReconcile_HealedRunnerStopsHoldingTheFloor, TestRunnerKilledTwiceAfterPromotion_ServesTheWindowAndTheRollResumes]
       kind: []
     status: decided
   - {state: Update/Surge, event: pod.ready, variants: [target], windows: [after], transition: T-surge-abandon-superseded, outcome: ignore, note: "the abandon already deleted the replacement and reset the source to Ready; a readiness event from the deleted generation is dropped", placement: perm, coverage: {perm: [], unit: [], kind: []}, status: current}

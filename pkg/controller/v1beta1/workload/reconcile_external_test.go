@@ -9741,6 +9741,133 @@ func TestRunnerKilledOnceAfterReady_IsNeverACrashOfTheRevision(t *testing.T) {
 	}
 }
 
+// TestRunnerKilledTwiceAfterPromotion_ServesTheWindowAndTheRollResumes
+// pins the floor's release for a promoted runner killed more than once
+// under restart policy None: the row never leaves Ready, so its anchor
+// stays where promotion set it and the kubelet's record reads the runner
+// as restarted again from the second kill on. The Instance holds its slot
+// while the pod is down and while it is Ready again for less than the
+// window, so no further source leaves rotation; once the pod has held
+// Ready for the window it serves, the floor lifts and the roll lands the
+// revision on every Instance. The pod keeps its identity throughout.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Update/Surge/gate.deny[Budget]/before
+func TestRunnerKilledTwiceAfterPromotion_ServesTheWindowAndTheRollResumes(t *testing.T) {
+	const replicas = int32(4)
+	// No minReadySeconds: the stuck-pod grace alone is the window.
+	const window = 90 * time.Second
+	h := newRecoveryHarnessFor(t, false, constants.MainContainerName)
+	h.replicas = replicas
+	noRepair := workloadtypes.RestartPolicyNone
+	h.lifecycle.RestartPolicy = &noRepair
+	h.stuckGrace = window
+	h.useRollingBudget(workloadtypes.UpdateStrategySurgeThenDrain)
+	if !h.run(80, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+	}
+
+	h.setTarget(h.revFixed, fixedImage)
+	hash := query.RevisionOf(h.revFixed).Hash()
+	var victimUID types.UID
+	victimIndex := int32(-1)
+	kills, heldInsideWindow := 0, false
+	var healedAt time.Time
+	// passStart is the clock the pass under inspection ran at: the
+	// invariant runs after the step moved the clock on.
+	passStart := h.clk.Now()
+	holds := h.notServingHolds()
+	h.runWithInvariant(200, func() bool { return h.settledOn(h.revFixed, replicas) }, func() {
+		defer func() {
+			holds = h.notServingHolds()
+			passStart = h.clk.Now()
+		}()
+		var victim *corev1.Pod
+		for _, pod := range h.livePods() {
+			if victimUID != "" {
+				if pod.UID == victimUID {
+					victim = pod
+				}
+				continue
+			}
+			// The kills land on the first pod promoted onto the pushed
+			// revision.
+			if idx, ok := query.InstanceIdxFromLabels(pod); ok && pod.Labels[query.LabelRevisionHash] == hash && h.promotedOn(pod) {
+				victimUID, victimIndex, victim = pod.UID, idx, pod
+			}
+		}
+		if victimUID == "" {
+			return
+		}
+		if victim == nil {
+			h.dumpState("victim gone")
+			t.Fatalf("the killed pod %s must keep its identity under restart policy None", victimUID)
+		}
+		// The first kill lands once another Instance's surge is in flight,
+		// so the drain it owes is what the floor withholds; the second once
+		// the runner is Ready again after the first.
+		surgeInFlight := false
+		for _, s := range h.irStatuses() {
+			if s.Index != victimIndex && s.Operation != nil && s.Operation.Type == workloadtypes.InstanceOperationUpdate && s.Operation.Step == workloadtypes.UpdateStepSurge {
+				surgeInFlight = true
+			}
+		}
+		ready := podConditionTrue(victim, corev1.PodReady)
+		switch {
+		case kills == 0 && ready && surgeInFlight, kills == 1 && h.crashes[wedgeKey(victim)] == 1 && ready:
+			h.killRunnerOnce(victim)
+			kills++
+		case kills == 2 && h.crashes[wedgeKey(victim)] == 2 && ready && healedAt.IsZero():
+			healedAt = podReadyTransition(victim)
+		}
+		if h.notServingHolds() == holds {
+			return
+		}
+		hold := h.lastHold()
+		if !holdNamesInstance(hold, victimIndex) {
+			return
+		}
+		if !healedAt.IsZero() && !passStart.Before(healedAt.Add(window)) {
+			h.dumpState("held while serving")
+			t.Fatalf("the roll was held on Instance %d, Ready again since %s, at %s: a pod Ready for the window serves and releases its slot: %q",
+				victimIndex, healedAt.Format(time.RFC3339), passStart.Format(time.RFC3339), hold.Reason)
+		}
+		if kills > 0 && strings.Contains(hold.Reason, "no source leaves rotation") {
+			heldInsideWindow = true
+		}
+	})
+	if kills < 2 || healedAt.IsZero() {
+		h.dumpState("no comeback")
+		t.Fatalf("the promoted runner was killed %d time(s) and came back at %v; the story did not run", kills, healedAt)
+	}
+	if !heldInsideWindow {
+		h.dumpState("no hold")
+		t.Fatalf("no pass withheld the drain on Instance %d while its killed runner was inside the window", victimIndex)
+	}
+	if !h.settledOn(h.revFixed, replicas) {
+		h.dumpState("roll stalled")
+		t.Fatalf("the roll did not land %s on every Instance after Instance %d served the window; last hold %+v", h.revFixed.Name, victimIndex, h.lastHold())
+	}
+	for _, s := range h.irStatuses() {
+		if s.Phase == workloadtypes.InstancePhaseFailed {
+			h.dumpState("failed row")
+			t.Fatalf("Instance %d reads Failed for a runner the kubelet restarted", s.Index)
+		}
+	}
+	if got := h.restartsRecorded(); got != 0 {
+		t.Fatalf("restart policy None opened %d repair(s) for a runner killed twice (events=%v)", got, h.events)
+	}
+	alive := false
+	for _, pod := range h.livePods() {
+		if pod.UID == victimUID {
+			alive = true
+		}
+	}
+	if !alive {
+		t.Fatalf("the killed pod %s must keep its identity under restart policy None", victimUID)
+	}
+}
+
 // A pushed revision whose runner dies once on every set after it is
 // Ready, under RecreateInstanceOnPodRestart: the policy rebuilds the
 // first set at once, and from the rebuilt set's death on the running

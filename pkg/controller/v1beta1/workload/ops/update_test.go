@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
@@ -3161,5 +3162,87 @@ func TestUpdateWithPods_RecreateFallbackRetargetedToTheRunningRevisionStaysARecr
 		t.Fatalf("get the rebuilt pod: %v", err)
 	case after.Labels[query.LabelRevisionHash] != query.RevisionOf(probedCR).Hash():
 		t.Errorf("the superseded pod was relabeled to %q; a pod rendered from %s never carries another revision", after.Labels[query.LabelRevisionHash], probedCR.Name)
+	}
+}
+
+// restartedRunnerPod is a serving single-pod set whose runner restarted
+// after readySince: once, the run that died being the promoted one, or
+// again, the run that died having itself begun after Ready. The new run
+// is Ready again since readyAgain; down leaves it not Ready yet.
+func restartedRunnerPod(readySince, readyAgain time.Time, again, down bool) *corev1.Pod {
+	died := corev1.ContainerStateTerminated{
+		ExitCode: 1, Reason: "Error",
+		StartedAt:  metav1.NewTime(readySince.Add(-5 * time.Minute)),
+		FinishedAt: metav1.NewTime(readySince.Add(20 * time.Second)),
+	}
+	restarts := int32(1)
+	if again {
+		died.StartedAt = metav1.NewTime(readySince.Add(21 * time.Second))
+		died.FinishedAt = metav1.NewTime(readySince.Add(40 * time.Second))
+		restarts = 2
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-0-0", Namespace: "prod"}}
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: constants.MainContainerName, Ready: !down, RestartCount: restarts,
+		State:                corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(died.FinishedAt.Add(time.Second))}},
+		LastTerminationState: corev1.ContainerState{Terminated: &died},
+	}}
+	ready := corev1.ConditionTrue
+	if down {
+		ready = corev1.ConditionFalse
+	}
+	pod.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: ready, LastTransitionTime: metav1.NewTime(readyAgain)},
+		{Type: corev1.PodReady, Status: ready, LastTransitionTime: metav1.NewTime(readyAgain)},
+		{Type: query.ServingConditionType, Status: corev1.ConditionTrue},
+	}
+	return pod
+}
+
+// TestRolledInstanceNotServing_RestartedRunnerServesOnceItHoldsReadyForTheWindow
+// pins the serving bar for a promoted pod whose runner restarted after the
+// row entered Ready, once or more than once. The row's anchor moves only
+// on an entry into Ready, so the pod is proven by its current run alone:
+// it holds the slot while it is down and while it is Ready again for less
+// than the window, and serves once it has held Ready for the window,
+// however many restarts its record carries. With no window configured,
+// Ready again is serving.
+func TestRolledInstanceNotServing_RestartedRunnerServesOnceItHoldsReadyForTheWindow(t *testing.T) {
+	const target = "llama-70b-engine-v2hash"
+	readySince := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	readyAgain := readySince.Add(45 * time.Second)
+	row := &workload.InstanceStatus{Index: 0, Phase: workload.InstancePhaseReady, RunningRevision: target, ReadySince: &metav1.Time{Time: readySince}}
+	cases := []struct {
+		name   string
+		again  bool
+		down   bool
+		window int32
+		now    time.Time
+		held   bool
+		wait   time.Duration
+		reason string
+	}{
+		{name: "restarted once, Ready again for less than the window", window: 30, now: readyAgain.Add(15 * time.Second),
+			held: true, wait: 15 * time.Second, reason: "restarted since Ready, Ready again for less than the 30s window"},
+		{name: "restarted once, Ready again for the window", window: 30, now: readyAgain.Add(30 * time.Second)},
+		{name: "restarted again, the new run not Ready yet", again: true, down: true, window: 30, now: readyAgain.Add(15 * time.Second),
+			held: true, reason: "restarted again since Ready"},
+		{name: "restarted again, Ready again for less than the window", again: true, window: 30, now: readyAgain.Add(15 * time.Second),
+			held: true, wait: 15 * time.Second, reason: "restarted again since Ready, Ready again for less than the 30s window"},
+		{name: "restarted again, Ready again for the window", again: true, window: 30, now: readyAgain.Add(30 * time.Second)},
+		{name: "restarted again, no window configured", again: true, now: readyAgain.Add(time.Second)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := restartedRunnerPod(readySince, readyAgain, tc.again, tc.down)
+			held, wait, reason := RolledInstanceNotServing(row, target, time.Time{}, []*corev1.Pod{pod}, 1, tc.window, tc.now)
+			if held != tc.held || wait != tc.wait {
+				t.Fatalf("RolledInstanceNotServing = (%v, %s, %q), want held=%v wait=%s", held, wait, reason, tc.held, tc.wait)
+			}
+			if !strings.Contains(reason, tc.reason) {
+				t.Fatalf("the reason must name %q, got %q", tc.reason, reason)
+			}
+		})
 	}
 }

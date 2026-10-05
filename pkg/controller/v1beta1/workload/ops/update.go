@@ -849,12 +849,14 @@ func RebuiltAfterFailure(pod *corev1.Pod, failure *workload.InstanceTermination,
 // a superseded revision never holds the new roll, so a corrected push
 // lands as a fresh roll. A pod that never restarted since Ready and
 // answers no such failure is read off its serving state alone:
-// minReadySeconds already paced its promotion. A container that has
-// restarted more than once since Ready (RunnerRestartedAgainSinceReady)
-// keeps restarting: it is up only between its crashes, so it keeps the
-// slot through those windows whatever their length, and the roll never
-// creeps forward on them. The reason names what holds the slot, for the
-// pass to log; it is empty when nothing does.
+// minReadySeconds already paced its promotion. A container that restarted
+// more than once since Ready (RunnerRestartedAgainSinceReady) is proven
+// the same way: the anchor moves only on an entry into Ready, so a pod
+// that serves on after its restarts is read off its current run, and a
+// set that is up only between its crashes never holds Ready for the
+// window; a loop is the crash-loop repair's to rebuild or park. The reason
+// names what holds the slot, for the pass to log; it is empty when nothing
+// does.
 func RolledInstanceNotServing(row *workload.InstanceStatus, target string, revisionBorn time.Time, pods []*corev1.Pod, desired, window int32, now time.Time) (bool, time.Duration, string) {
 	if row == nil || target == "" || row.RunningRevision != target {
 		return false, 0, ""
@@ -877,10 +879,10 @@ func RolledInstanceNotServing(row *workload.InstanceStatus, target string, revis
 			comeback = fmt.Sprintf("pod %s rebuilt after the failure recorded at %s", pod.Name, row.LastFailure.Time.UTC().Format(time.RFC3339))
 		}
 		if _, restarted := RunnerRestartedSinceReady(pod, row.ReadySince); restarted {
-			if RunnerRestartedAgainSinceReady(pod, row.ReadySince) {
-				return true, 0, fmt.Sprintf("pod %s restarted again since Ready", pod.Name)
-			}
 			comeback = fmt.Sprintf("pod %s restarted since Ready", pod.Name)
+			if RunnerRestartedAgainSinceReady(pod, row.ReadySince) {
+				comeback = fmt.Sprintf("pod %s restarted again since Ready", pod.Name)
+			}
 		}
 		if comeback != "" {
 			if available, remaining := podreadiness.IsPodAvailable(pod, window, now); !available {
