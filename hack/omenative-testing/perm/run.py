@@ -7752,8 +7752,10 @@ def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, chec
         return verdict
     if _fault_once(f):
         return verdict   # a crash that happens once is judged by _once_checks
-    if _fault_on_new(f):
-        return verdict   # a break on the pushed revision is judged by _new_break_checks
+    if f.get("param") == CRASHLOOP_NEW:
+        # A break the push itself carries, of any kind the caller judges here,
+        # has no victim on the running revision: the new-break checks own it.
+        return verdict
     since = trigger_ts or 0
     events = _isvc_events_since(f["case_id"], since)
     for rec in _break_victims(f):
@@ -23646,10 +23648,6 @@ def _canary(case_id, yaml_file, desc, hdr):
     pending = fault if fault and fault.get("kind") == "taint" else None
     pend = {"bitten_at": None, "token": "", "row": None, "message": "", "failed": [], "lifted_at": None,
             "since": None, "last_poll": 0.0, "park_at": None}
-    # A window opened at a grid state: the webhook outage or the competing
-    # writer over the ladder, judged by the window verdict beside the ladder's.
-    window = fault if _canary_window_fault(fault) else None
-    win = _canary_window_new(ctx, fault, hdr, group) if window else None
     lift = str(hdr.get("lift") or "")
     newbreak = {"bite": None, "park": None, "ready_seen": set(), "uids": {}, "peak_crash": 0,
                 "phases_before_exit": set(), "deaths": [], "ready_prev": set()}
@@ -23689,6 +23687,11 @@ def _canary(case_id, yaml_file, desc, hdr):
         # alone re-mints both, whatever the group lists.
         group = {"engine", "decoder"} & ctx["configured"]
     ctx["bumped"] = group
+    # A window opened at a grid state: the webhook outage or the competing
+    # writer over the ladder, judged by the window verdict beside the ladder's.
+    # The window reads the bumped group, so it is built once the group is.
+    window = fault if _canary_window_fault(fault) else None
+    win = _canary_window_new(ctx, fault, hdr, group) if window else None
     # A bumped member outside the canary unit whose revision cannot start
     # (imgcomp= names it) parks on its own; the ladder is judged without it.
     unit_members = set(cinfo.get("members") or []) & ctx["configured"]

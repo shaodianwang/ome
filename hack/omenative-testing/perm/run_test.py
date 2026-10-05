@@ -4384,6 +4384,37 @@ class CanaryHandlerBindingsTest(unittest.TestCase):
                  for tgt in n.targets if isinstance(tgt, ast.Name) and tgt.id == "want"]
         self.assertEqual(1, len(binds), f"`want` rebound inside _canary at lines {binds}")
 
+    def test_group_is_bound_before_the_canary_handler_reads_it(self):
+        """The window at a grid state reads the bumped group, so every read
+        of `group` in _canary follows its first binding."""
+        import ast
+        tree = ast.parse((HERE / "run.py").read_text())
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_canary")
+        stores = [n.lineno for n in ast.walk(fn)
+                  if isinstance(n, ast.Name) and n.id == "group" and isinstance(n.ctx, ast.Store)]
+        loads = [n.lineno for n in ast.walk(fn)
+                 if isinstance(n, ast.Name) and n.id == "group" and isinstance(n.ctx, ast.Load)]
+        self.assertTrue(stores and loads)
+        self.assertLess(min(stores), min(loads),
+                        f"`group` is read at line {min(loads)} before its first binding at line {min(stores)}")
+
+
+class NewBreakOwnsThePushedRevisionTest(unittest.TestCase):
+    """A break the push itself carries has no victim on the running revision:
+    the crash-loop checks hand the verdict back untouched for every kind they
+    are asked to judge, including a readiness fault whose record names no
+    Instance, instead of following a victim chain that does not exist."""
+
+    def test_a_readiness_break_on_the_pushed_revision_is_not_followed(self):
+        f = {"kind": run.READINESS_FAULT, "param": run.CRASHLOOP_NEW, "fired": True, "case_id": "p999",
+             "notes": []}
+
+        def never(*args, **kwargs):
+            raise AssertionError("the victim chain was read for a break on the pushed revision")
+        with mock.patch.object(run, "_isvc_events_since", never):
+            for kinds in (run.CANARY_STABLE_FAULTS, run.BREAK_FAULTS):
+                self.assertEqual("PASS", run._crashloop_checks(f, {}, {}, 10.0, "PASS", [], [], kinds=kinds))
+
 
 class RunCaseBindingsTest(unittest.TestCase):
     """`rb` in run_case is the rollback state for the whole run (a dict, or
