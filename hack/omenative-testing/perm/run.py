@@ -4078,14 +4078,26 @@ def _rollback_fault_rows(items, N, configured, bumped, old_hashes, kept):
     return True, f"settled with the kept victim's row at {victim.get('phase')}"
 
 
+def _rollback_victim_index(chain, pod_state, comp, old):
+    """The chain index the victim stands at after the rollback: the last one holding
+    live pods on the starting revision (a surge the rollback withdrew leaves its index
+    empty, the victim rebuilt at an earlier one); the chain's end when none holds any."""
+    for idx in reversed(chain):
+        pods = _instance_pods(pod_state, comp, idx)
+        if pods and all(p.get("hash") in old for _n, p in pods):
+            return idx
+    return chain[-1]
+
+
 def _rollback_victim_checks(f, ctx, acting, kept, verdict, notes, checks):
-    """The break victim after the rollback, read at the index its gang
-    surges left it at: on the starting revision and serving (rebuilt by a
-    repair or the roll back, or healed in place), or with a kept cause on
-    the starting revision without serving, the status saying so. The
-    repairs that named it are reported, not judged: a repair of the
-    starting revision is the policy at work once that revision is the
-    target again."""
+    """The break victim after the rollback, read at the index of its gang
+    surge chain that holds its pods on the starting revision (a surge the
+    rollback withdrew is skipped): on the starting revision and serving
+    (rebuilt by a repair or the roll back, or healed in place), or with a
+    kept cause on the starting revision without serving, the status
+    saying so. The repairs that named it are reported, not judged: a
+    repair of the starting revision is the policy at work once that
+    revision is the target again."""
     if not f or not f.get("fired") or f.get("infra_fail"):
         return verdict
     pod_state, old = ctx["pod_state"], ctx["old_hashes"] or set()
@@ -4094,7 +4106,7 @@ def _rollback_victim_checks(f, ctx, acting, kept, verdict, notes, checks):
     for rec in _break_victims(f):
         comp, inst = rec["crash_comp"], rec["crash_inst"]
         chain = _victim_index_chain(comp, inst, (ctx.get("inv") or {}).get("surges"), events)
-        final = chain[-1]
+        final = _rollback_victim_index(chain, pod_state, comp, old)
         where = f"{comp} Instance {inst}" + (f" (replaced at Instance {final} by its gang surge)" if final != inst else "")
         side = "" if comp in acting else " (a sibling nobody bumped)"
         pods = _instance_pods(pod_state, comp, final)
@@ -6378,10 +6390,19 @@ def _evict_pod(name):
     return False, ("disruption budget" in msg or "TooManyRequests" in msg), msg[:160]
 
 
+def _evict_gone(msg):
+    """True when the Eviction API answered that the pod or its disruption
+    budget is already gone (a NotFound on either object)."""
+    return "not found" in msg.lower() and ("poddisruptionbudget" in msg or "pods " in msg)
+
+
 def _fault_evict_fire(f, pod_state, pods_per_inst, old_hashes):
     """Evict the podkill victim. A budget refusal leaves the fault unfired
     and due again after FAULT_RETRY_S, the way a drain keeps asking; the
-    victim is picked again each time, since the roll moves on meanwhile."""
+    victim is picked again each time, since the roll moves on meanwhile.
+    Under a delete, a pod or budget the Eviction API cannot find is one
+    the teardown is already retiring: the eviction is overtaken, and the
+    case is judged on the delete's own end state."""
     victim = _aimed_pod(f, pod_state) or _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=f.get("victim"),
                                                          comp=f.get("victimcomp") or None, prefer_inst=_repeat_prefer(f))
     if not victim:
@@ -6397,6 +6418,12 @@ def _fault_evict_fire(f, pod_state, pods_per_inst, old_hashes):
         if f["denials"] == 1:
             f["notes"].append(f"eviction of {victim} refused by the disruption budget; asking again every {FAULT_RETRY_S:.0f}s")
             print(f"    ⓘ {f['notes'][-1]}")
+        return
+    if not admitted and f.get("hook_op_kind") == "delete" and _evict_gone(msg):
+        f["fired"] = False
+        f["overtaken"] = msg
+        f["notes"].append(f"eviction of {victim} overtaken by the delete ({msg}); the teardown retires the pod")
+        print(f"    ⓘ {f['notes'][-1]}")
         return
     if not admitted:
         f["infra_fail"] = f"evict: evicting {victim} failed: {msg}"
@@ -9898,12 +9925,13 @@ def _fault_finalize(f, verdict, notes, checks):
         notes.append(x)
         checks.append(f"  ⓘ {x}")
     fired_before = bool(f.get("fired_count"))   # a repetition that fired keeps the record fired
-    if f["kind"] == "evict" and not f["fired"] and f.get("denials") and not fired_before:
+    overtaken = bool(f.get("overtaken"))   # an eviction the delete got to first took nothing and owes nothing
+    if f["kind"] == "evict" and not f["fired"] and f.get("denials") and not fired_before and not overtaken:
         verdict = "FAIL"
         notes.append(f"eviction never admitted ({f['denials']} budget refusal(s))")
         checks.append(f"  ✗ evict: the disruption budget refused the eviction {f['denials']} time(s) and never "
                       f"admitted it while the roll ran — a drain of that node would never finish")
-    elif f["kind"] not in ARMED_FAULTS and not f["fired"] and not fired_before:
+    elif f["kind"] not in ARMED_FAULTS and not f["fired"] and not fired_before and not overtaken:
         checks.append(f"  ⓘ fault {f['kind']}:{f['param']} never reached its phase hook (not fired)")
     if f["infra_fail"]:
         verdict = "INFRA-FAIL"
@@ -13399,12 +13427,13 @@ def _preempt_apparatus_hit(f):
 
 def _preempt_victim(f, pod_state):
     """The case pods the scheduler preempted: alive at the fire or placed
-    after it (the roll's surge under the press; the scheduler takes the
-    youngest pod on the node); gone, deleting or back under the same name
-    with another UID now, confirmed by the scheduler's own record (a pod
-    the roll drained has none). The first one is the fault's victim. None,
-    with the apparatus failure recorded, once a control-plane pod went
-    instead."""
+    after it (the roll's surge under the press; the scheduler picks its
+    own victim among the case's pods on the node, not always the aimed
+    one); gone, deleting or back under the same name with another UID
+    now, confirmed by the scheduler's own record (a pod the roll drained
+    has none). The first one is the fault's victim, its serving state
+    recorded. None, with the apparatus failure recorded, once a
+    control-plane pod went instead."""
     if _preempt_apparatus_hit(f):
         return None
     if not f.get("pre_alive"):
@@ -13596,17 +13625,28 @@ def _pending_watch(ctx, f, comps, lift, done, budget, inst=None, landed=None):
     done() before any wait, or after one with the cause still in place, means
     the cause never bound — once a done reading can mean that: not while the
     landed rollback or edit (`landed`) has not fired, nor before a press has
-    taken a pod. Returns (state, observations)."""
+    taken a pod. The ready readings up to the lift (ready_reads, per
+    Component) are the window the press floor is judged over; a serving
+    Instance the press took lowers the capacity floor from the moment it
+    is known, as an evicted one does. Returns (state, observations)."""
     case_id, t0 = ctx["case_id"], ctx["trigger_ts"]
     tokens = PENDING_TOKENS[f["kind"]]
     out = {"bitten_at": None, "token": "", "row": None, "message": "", "failed": [], "lifted_at": None,
-           "done_at": None, "held_s": None, "waiting_at_end": False, "escaped_at": None, "unbound_at": None}
+           "done_at": None, "held_s": None, "waiting_at_end": False, "escaped_at": None, "unbound_at": None,
+           "ready_reads": {}}
     bitten_since, last_poll, stable, lifted_ts, state = None, 0.0, None, None, "WATCHING"
     while time.time() - t0 < budget and not ctx["closed"]:
         _read_one(ctx)
         now = time.time()
+        if lifted_ts is None and ctx.get("agg") is not None:
+            for c in comps:
+                out["ready_reads"].setdefault(c, []).append((now - t0, ctx["agg"].get(c, (0, 0, 0))[1]))
         if f["kind"] == "preempt" and f.get("fire_ts") and not f.get("crash_pod"):
             _preempt_victim(f, ctx["pod_state"])
+        if f["kind"] == "preempt" and f.get("crash_pod") and f.get("victim_was_serving") and not f.get("floor_granted"):
+            f["floor_granted"] = True
+            allowance = ctx.setdefault("floor_allowance", {})
+            allowance[f["crash_comp"]] = allowance.get(f["crash_comp"], 0) + 1   # the press took a serving Instance
         if now - last_poll >= ROW_POLL_S:
             last_poll = now
             if f["kind"] == "preempt":
@@ -13662,13 +13702,31 @@ def _pending_watch(ctx, f, comps, lift, done, budget, inst=None, landed=None):
     return state, out
 
 
+def _floor_dip(reads, floor):
+    """The lowest reading of a (t, ready) series and the longest span its
+    readings stayed below floor, measured as the capacity floor measures a
+    dip: from a run's first below-floor reading to its last."""
+    low, since, worst = None, None, 0.0
+    for t, rd in reads:
+        low = rd if low is None or rd < low else low
+        if rd < floor:
+            since = t if since is None else since
+            worst = max(worst, t - since)
+        else:
+            since = None
+    return low, worst
+
+
 def _pending_checks(f, lift, state, out, ctx, comps, allowance, verdict, notes, checks):
     """The pending verdict. The product must name the wait on the Instance
     row; while the cause holds no row may read Failed and no Component may
     drop below N minus its allowance (the budget's and the fault's own
-    Instance) — nothing is taken down to make room. Then lift=after-settle
-    needs the cause gone and the operation done; lift=never needs the wait
-    still reported at the end of the hold."""
+    Instance) — nothing is taken down to make room. The drop is read over
+    the window's own readings up to the lift with the capacity floor's
+    debounce (a shorter dip is a flap); with no readings the case-wide
+    minimum stands. Then lift=after-settle needs the cause gone and the
+    operation done; lift=never needs the wait still reported at the end of
+    the hold."""
     kind, cause, tokens = f["kind"], f.get("cause") or "the cause", sorted(PENDING_TOKENS[f["kind"]])
     if f.get("infra_fail"):
         return verdict   # the apparatus broke; _fault_finalize records it as INFRA-FAIL
@@ -13701,19 +13759,26 @@ def _pending_checks(f, lift, state, out, ctx, comps, allowance, verdict, notes, 
                       f"a failure inside the configured grace")
     else:
         checks.append(f"  ✓ {kind}: no Instance read Failed while {cause} held")
-    min_ready = ctx.get("min_ready") or {}
+    min_ready, reads = ctx.get("min_ready") or {}, out.get("ready_reads") or {}
     for c in comps:
         n = ctx["N"].get(c, 0)
         if not n:
             continue
-        floor, mr = n - allowance.get(c, 0), min_ready.get(c, n)
-        if mr < floor:
+        floor = n - allowance.get(c, 0)
+        low, sust = _floor_dip(reads.get(c) or [], floor)
+        windowed = low is not None
+        mr = low if windowed else min_ready.get(c, n)
+        if mr >= floor:
+            checks.append(f"  ✓ {kind}: {c} kept {mr} serving Instance(s) while {cause} held (floor {floor})")
+        elif not windowed or sust >= FLOOR_SUSTAIN_S:
             verdict = "FAIL"
+            held = f", dip held {sust:.0f}s ≥ {FLOOR_SUSTAIN_S:.0f}s" if windowed else ""
             notes.append(f"{c} dropped to {mr} serving while the wait held (floor {floor})")
-            checks.append(f"  ✗ {kind}: {c} dropped to {mr} serving Instance(s) while {cause} held (floor {floor}) — "
+            checks.append(f"  ✗ {kind}: {c} dropped to {mr} serving Instance(s) while {cause} held (floor {floor}){held} — "
                           f"something was taken down to make room")
         else:
-            checks.append(f"  ✓ {kind}: {c} kept {mr} serving Instance(s) while {cause} held (floor {floor})")
+            checks.append(f"  ⚠ {kind}: {c} dipped to {mr} serving Instance(s) (floor {floor}) for <{FLOOR_SUSTAIN_S:.0f}s "
+                          f"while {cause} held — debounced as a readiness flap")
     if lift == "after-settle":
         if out["lifted_at"] is None:
             f["infra_fail"] = f"{kind}: {cause} was never lifted ({state})"
@@ -15125,6 +15190,33 @@ def _ctrl_hook_checks(f, what, hook, completed, state, converged_at, verdict, no
     return verdict
 
 
+def _evict_hook_checks(f, what, hook, completed, state, converged_at, verdict, notes, checks):
+    """The verdict of an eviction at a hook of an operation: admitted after any budget
+    refusals, and the operation complete within its budget. Never admitted is red (a drain
+    that would never finish); overtaken by a delete is a note; an apparatus failure is the finalize's."""
+    refused = int(f.get("denials") or 0)
+    if f.get("infra_fail"):
+        pass
+    elif f.get("overtaken"):
+        checks.append(f"  ⓘ evict: the eviction at {hook} of {what} was overtaken by the delete ({f['overtaken']}); "
+                      f"the teardown retires the pod and the case is judged on its end state")
+    elif not f.get("fired_count"):
+        verdict = "FAIL"
+        notes.append(f"the eviction was never admitted ({refused} refusal(s))")
+        checks.append(f"  ✗ evict: no eviction was admitted at {hook} of {what} ({refused} refusal(s) by the "
+                      f"disruption budget) — a drain the budget never admits")
+    else:
+        checks.append(f"  ✓ evict: the eviction fired at {hook} of {what}"
+                      + (f" after {refused} budget refusal(s)" if refused else ""))
+    if completed:
+        checks.append(f"  ✓ {what} completed {converged_at or 0:.0f}s after the trigger with the eviction in its window")
+    elif state != "INFRA-FAIL":
+        verdict = "FAIL"
+        notes.append(f"{what} did not complete after the eviction ({state})")
+        checks.append(f"  ✗ {what} did not complete within budget after the eviction ({state})")
+    return verdict
+
+
 def _podkill_hook_tick(ctx, f):
     """Per read under a pod deleted at a hook: the pod that replaces the
     first victim (label truth) and the gang's row while it is short a
@@ -15317,23 +15409,7 @@ def _hook_op(case_id, yaml_file, desc, hdr):
         print(f"  Phase 3: watching {what} complete after the eviction (≤{budget}s)")
         state = _hook_op_watch(ctx, f, done, budget)
         completed = state == "CONVERGED"
-        refused = int(f.get("denials") or 0)
-        if f.get("infra_fail"):
-            pass
-        elif not f.get("fired_count"):
-            verdict = "FAIL"
-            notes.append(f"the eviction was never admitted ({refused} refusal(s))")
-            checks.append(f"  ✗ evict: no eviction was admitted at {hook} of {what} ({refused} refusal(s) by the "
-                          f"disruption budget) — a drain the budget never admits")
-        else:
-            checks.append(f"  ✓ evict: the eviction fired at {hook} of {what}"
-                          + (f" after {refused} budget refusal(s)" if refused else ""))
-        if completed:
-            checks.append(f"  ✓ {what} completed {ctx['converged_at']:.0f}s after the trigger with the eviction in its window")
-        elif state != "INFRA-FAIL":
-            verdict = "FAIL"
-            notes.append(f"{what} did not complete after the eviction ({state})")
-            checks.append(f"  ✗ {what} did not complete within budget after the eviction ({state})")
+        verdict = _evict_hook_checks(f, what, hook, completed, state, ctx.get("converged_at"), verdict, notes, checks)
     verdict = _ceiling_checks(ctx, verdict, notes, checks)
     if op != "delete":
         verdict = min_ready_checks(ctx, sorted(configured if op == "scale" else acting), verdict, notes, checks)
@@ -21408,6 +21484,18 @@ def _broken_removals(rows, remove_count):
     return [str(r[0]) for r in (broken + healthy)[:max(0, remove_count)]]
 
 
+def _broken_removal_plans(rows, remove_count, healed_inst=None):
+    """The removal orders a scale-down may follow: the (index, healthy, phase) rows as they
+    stood at the scale and, with a one-shot cause lifted as the scale lands (healed_inst), the
+    same rows with that Instance whole again, as the product ranks them when it plans."""
+    plans = {"at the scale": _broken_removals([(i, h) for i, h, _ph in rows], remove_count)}
+    if healed_inst is not None:
+        healed = _broken_removals([(i, True if str(i) == str(healed_inst) else h) for i, h, _ph in rows], remove_count)
+        if healed != plans["at the scale"]:
+            plans["once the cause was lifted"] = healed
+    return plans
+
+
 def _broken_plan_followed(plans, pre_indices, rows_now, pod_indices_now):
     """Which removal plan the scale followed: the rows that existed at the
     scale and are still present are exactly that plan's kept set, and no
@@ -21708,7 +21796,8 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
     pre_pods = {c: _pods_by_instance(ctx, c) for c in configured}
     pre_indices = _broken_pre_indices(pre_pods[scomp], rows_at_op[scomp], inst if scomp == comp else None) - {"None"}
     pre_ready = {c: ctx["agg"].get(c, (0, 0, 0))[1] for c in configured}
-    plans = {c: {"at the scale": _broken_removals([(i, h) for i, h, _ph in rows_at_op[c]], N[c] - target[c])}
+    plans = {c: _broken_removal_plans(rows_at_op[c], N[c] - target[c],
+                                      healed_inst=inst if c == comp and _broken_one_shot(f) else None)
              for c in scaled if not up}
     # The healthy Instances keep serving throughout: on a scale-down the
     # kept ones (the broken Instance being among the removed), otherwise
@@ -21717,7 +21806,10 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
     floor = {c: (target[c] if c == comp and takes_broken else N[c] - 1 if c == comp else min(N[c], target[c]))
              for c in configured}
     print(f"  Phase 4: scale {' '.join(f'{c} {N[c]}→{target[c]}' for c in sorted(scaled))} while {comp} Instance {inst} is broken"
-          + (f" (expected to go, in order: {plans[scomp]['at the scale']})" if plans else ""))
+          + (f" (expected to go, in order: {plans[scomp]['at the scale']}" if plans else "")
+          + (f", or {plans[scomp]['once the cause was lifted']} once the cause is lifted before the plan"
+             if plans and "once the cause was lifted" in plans[scomp] else "")
+          + (")" if plans else ""))
     ok, msg = _scale_patch(case_id, {c: target[c] for c in scaled})
     if not ok:
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", f"scale patch failed: {msg[:160]}")
@@ -21843,8 +21935,8 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
                                  f"; the broken Instance {inst} read healthy by then and stayed" if c == comp else
                                  f"; the broken {comp} Instance {inst} was not the scale's to take"))
                 if not broken_went and c == comp:
-                    checks.append(f"  ⓘ {c}: the broken Instance {inst} was healthy again when the scale landed, so the "
-                                  f"removal followed the index order alone")
+                    checks.append(f"  ⓘ {c}: the broken Instance {inst} was healthy again when the scale was planned, so "
+                                  f"the removal followed the index order alone")
             if extra_rows:
                 checks.append(f"  ⓘ {c}: row(s) {extra_rows} did not exist at the scale and are not judged")
             changed = _survivor_pods_changed({i: v for i, v in pre_pods[c].items() if i in kept}, now_pods[c])

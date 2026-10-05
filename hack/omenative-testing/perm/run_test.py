@@ -10408,6 +10408,43 @@ class RollbackUnderBreakTest(unittest.TestCase):
         finally:
             run._isvc_events_since, run._victim_index_chain = orig_ev, orig_chain
 
+    def test_victim_is_read_where_its_pods_stand_after_a_withdrawn_surge(self):
+        f = {"case_id": "p999", "kind": "imagepull", "form": "start", "lift": "", "fired": True, "fired_ts": 1.0,
+             "infra_fail": None, "crash_comp": "engine", "crash_inst": "1", "crash_uid": "u1", "kills": None}
+        orig_ev, orig_chain = run._isvc_events_since, run._victim_index_chain
+        try:
+            run._isvc_events_since = lambda cid, since, **kw: []
+            run._victim_index_chain = lambda comp, inst, surges, events: ["1", "2"]   # the push's gang surge claimed index 2
+            # The rollback withdrew the surge and rebuilt the victim at its own index.
+            pods = {"e0": self._pod("engine", 0, "a", "u0"), "e1": self._pod("engine", 1, "a", "u1-rebuilt")}
+            notes, checks = [], []
+            self.assertEqual("PASS", run._rollback_victim_checks(f, self._victim_ctx(pods), {"engine"}, None, "PASS", notes, checks))
+            self.assertTrue(any("engine Instance 1 ends Ready and serving on the starting revision, rebuilt" in c for c in checks), checks)
+            # The surge stood on the starting revision and the source index was retired.
+            pods = {"e0": self._pod("engine", 0, "a", "u0"), "e2": self._pod("engine", 2, "a", "u2")}
+            checks = []
+            self.assertEqual("PASS", run._rollback_victim_checks(f, self._victim_ctx(pods), {"engine"}, None, "PASS", [], checks))
+            self.assertTrue(any("(replaced at Instance 2 by its gang surge)" in c and "rebuilt" in c for c in checks), checks)
+            # Neither index holds the victim: the chain's end names the gap.
+            pods = {"e0": self._pod("engine", 0, "a", "u0")}
+            notes = []
+            self.assertEqual("FAIL", run._rollback_victim_checks(f, self._victim_ctx(pods), {"engine"}, None, "PASS", notes, []))
+            self.assertTrue(any("engine/1 is not serving on the starting revision" in n and "pods=0" in n for n in notes), notes)
+            # The victim stands at its own index on the starting revision while the surge still holds a
+            # pushed-revision pod: the victim is whole; the leftover is the fleet checks' finding.
+            pods = {"e1": self._pod("engine", 1, "a", "u1-rebuilt"), "e2": self._pod("engine", 2, "b", "u2b")}
+            checks = []
+            self.assertEqual("PASS", run._rollback_victim_checks(f, self._victim_ctx(pods), {"engine"}, None, "PASS", [], checks))
+            self.assertTrue(any("engine Instance 1 ends Ready" in c for c in checks), checks)
+            # A kept cause: the victim rebuilt at its own index on the starting revision, not serving.
+            g = dict(f, kind="configkey", lift="never", cause="ConfigMap key cm/value")
+            pods = {"e1": self._pod("engine", 1, "a", "u1-rebuilt", ready=False, serving=False)}
+            checks = []
+            self.assertEqual("PASS", run._rollback_victim_checks(g, self._victim_ctx(pods), {"engine"}, ("engine", "1"), "PASS", [], checks))
+            self.assertTrue(any("engine Instance 1 ends on the starting revision without serving" in c for c in checks), checks)
+        finally:
+            run._isvc_events_since, run._victim_index_chain = orig_ev, orig_chain
+
     def _hb(self, **kw):
         hb = {"kind": "crash-start", "once": False, "armed": "image x", "bite_at": 12.0, "bite": "e5 waits in CrashLoopBackOff",
               "why_at": 30.0, "why": "rolloutHold gate=RetryBlock", "event": "", "served": None, "fire_at": 100.0,
@@ -13769,6 +13806,68 @@ class EvictFaultTest(unittest.TestCase):
         self.assertEqual("PASS", run._fault_finalize(unfired, "PASS", [], checks))
         self.assertTrue(any("never reached its phase hook" in c for c in checks))
 
+    def test_a_delete_overtakes_the_eviction_it_races(self):
+        budget_gone = 'Error from server (NotFound): poddisruptionbudgets.policy "p999-decoder" not found'
+        pod_gone = 'Error from server (NotFound): pods "e0" not found'
+        for stderr in (budget_gone, pod_gone):
+            f = run._fault_new("p999", {"fault": "evict:settling"})
+            f.update(hook_op=True, hook_op_kind="delete", fired=True)
+            with mock.patch.object(run, "_fault_pick_pod", lambda *a, **k: "e0"), \
+                    mock.patch.object(run, "kubectl", self._kubectl([], rc=1, stderr=stderr)):
+                run._fault_evict_fire(f, self.PODS, {"engine": 1}, {"old"})
+            self.assertIsNone(f["infra_fail"], stderr)
+            self.assertFalse(f["fired"], "nothing was taken: the delete retires the pod")
+            self.assertTrue(f.get("overtaken"))
+            self.assertTrue(any("overtaken by the delete" in n for n in f["notes"]), f["notes"])
+            notes, checks = [], []
+            self.assertEqual("PASS", run._fault_finalize(f, "PASS", notes, checks))
+            self.assertFalse(any("never admitted" in n for n in notes), notes)
+            self.assertFalse(any("never reached its phase hook" in c for c in checks), checks)
+            self.assertTrue(any("overtaken by the delete" in c for c in checks), checks)
+            notes, checks = [], []
+            self.assertEqual("PASS", run._evict_hook_checks(f, "the delete", "settling", True, "CONVERGED", 12.0,
+                                                            "PASS", notes, checks))
+            self.assertEqual([], notes)
+            self.assertFalse(any("no eviction was admitted" in c for c in checks), checks)
+            self.assertTrue(any("overtaken" in c for c in checks), checks)
+            self.assertTrue(any("the delete completed 12s" in c for c in checks), checks)
+        # Under any other operation the same answer is an apparatus failure.
+        f = run._fault_new("p999", {"fault": "evict:settling"})
+        f.update(hook_op=True, hook_op_kind="rollback", fired=True)
+        with mock.patch.object(run, "_fault_pick_pod", lambda *a, **k: "e0"), \
+                mock.patch.object(run, "kubectl", self._kubectl([], rc=1, stderr=budget_gone)):
+            run._fault_evict_fire(f, self.PODS, {"engine": 1}, {"old"})
+        self.assertIn("NotFound", f["infra_fail"] or "")
+        self.assertFalse(f.get("overtaken"))
+        # And an answer that names neither the pod nor the budget stays one under a delete.
+        f = run._fault_new("p999", {"fault": "evict:settling"})
+        f.update(hook_op=True, hook_op_kind="delete", fired=True)
+        forbidden = "Error from server (Forbidden): pods \"e0\" is forbidden"
+        with mock.patch.object(run, "_fault_pick_pod", lambda *a, **k: "e0"), \
+                mock.patch.object(run, "kubectl", self._kubectl([], rc=1, stderr=forbidden)):
+            run._fault_evict_fire(f, self.PODS, {"engine": 1}, {"old"})
+        self.assertIn("Forbidden", f["infra_fail"] or "")
+
+    def test_evict_hook_checks_judge_the_admitted_and_the_never_admitted_eviction(self):
+        f = run._fault_new("p999", {"fault": "evict:rotating"})
+        f.update(hook_op=True, hook_op_kind="rollback", fired=True, fired_count=1, denials=2)
+        notes, checks = [], []
+        self.assertEqual("PASS", run._evict_hook_checks(f, "the rollback", "rotating", True, "CONVERGED", 30.0,
+                                                        "PASS", notes, checks))
+        self.assertTrue(any("the eviction fired at rotating of the rollback after 2 budget refusal(s)" in c for c in checks), checks)
+        self.assertTrue(any("the rollback completed 30s after the trigger with the eviction in its window" in c for c in checks), checks)
+        never = run._fault_new("p999", {"fault": "evict:rotating"})
+        never.update(hook_op=True, hook_op_kind="rollback", fired=False, denials=5)
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._evict_hook_checks(never, "the rollback", "rotating", False, "ROTATE_TIMEOUT", None,
+                                                        "PASS", notes, checks))
+        self.assertTrue(any("never admitted (5 refusal(s))" in n for n in notes), notes)
+        self.assertTrue(any("did not complete after the eviction (ROTATE_TIMEOUT)" in n for n in notes), notes)
+        broken = run._fault_new("p999", {"fault": "evict:rotating"})
+        broken.update(hook_op=True, hook_op_kind="rollback", infra_fail="evict: evicting e0 failed: boom")
+        self.assertEqual("PASS", run._evict_hook_checks(broken, "the rollback", "rotating", False, "INFRA-FAIL", None,
+                                                        "PASS", [], []), "the apparatus failure is the finalize's verdict")
+
     def test_kill_removal_follows_via(self):
         calls = []
         with mock.patch.object(run, "kubectl", self._kubectl(calls)):
@@ -14218,6 +14317,38 @@ class PendingHoldTest(unittest.TestCase):
                                                      self._ctx({"engine": 2}), ["engine"], allow, "PASS", notes, []))
         self.assertTrue(any("dropped to 2 serving" in n for n in notes))
 
+    def test_the_press_floor_is_judged_over_the_window_with_the_debounce(self):
+        # The case-wide minimum carries the handoff blip after the lift; the
+        # window's own readings never dipped.
+        allow, ctx = {"engine": 1}, self._ctx({"engine": 2})
+        whole = self._out(waiting_at_end=True, ready_reads={"engine": [(1.0, 4), (2.0, 3), (3.0, 4), (9.0, 3)]})
+        notes, checks = [], []
+        self.assertEqual("PASS", run._pending_checks(self._f("never"), "never", "HELD", whole, ctx, ["engine"], allow,
+                                                     "PASS", notes, checks))
+        self.assertEqual([], notes)
+        self.assertTrue(any("kept 3 serving" in c for c in checks), checks)
+        # A dip inside the window shorter than the capacity floor's debounce is a flap.
+        flap = self._out(waiting_at_end=True, ready_reads={"engine": [(0.0, 4), (1.0, 2), (1.0 + run.FLOOR_SUSTAIN_S / 2, 2),
+                                                                      (2.0 + run.FLOOR_SUSTAIN_S / 2, 4)]})
+        notes, checks = [], []
+        self.assertEqual("PASS", run._pending_checks(self._f("never"), "never", "HELD", flap, ctx, ["engine"], allow,
+                                                     "PASS", notes, checks))
+        self.assertEqual([], notes)
+        self.assertTrue(any("dipped to 2 serving" in c and "debounced" in c for c in checks), checks)
+        # One that held for the debounce is capacity taken to make room.
+        held = self._out(waiting_at_end=True, ready_reads={"engine": [(0.0, 4), (1.0, 2), (1.0 + run.FLOOR_SUSTAIN_S, 2),
+                                                                      (2.0 + run.FLOOR_SUSTAIN_S, 4)]})
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._pending_checks(self._f("never"), "never", "HELD", held, ctx, ["engine"], allow,
+                                                     "PASS", notes, checks))
+        self.assertTrue(any("dropped to 2 serving while the wait held (floor 3)" in n for n in notes), notes)
+        self.assertTrue(any(f"dip held {run.FLOOR_SUSTAIN_S:.0f}s" in c for c in checks), checks)
+        # With no readings of its own the window falls back to the case-wide minimum.
+        notes = []
+        self.assertEqual("FAIL", run._pending_checks(self._f("never"), "never", "HELD", self._out(waiting_at_end=True), ctx,
+                                                     ["engine"], allow, "PASS", notes, []))
+        self.assertTrue(any("dropped to 2 serving" in n for n in notes), notes)
+
     def _watch_ctx(self):
         return {"case_id": "p999", "trigger_ts": time.time(), "closed": False, "pod_state": {}, "N": {"engine": 2}}
 
@@ -14246,6 +14377,55 @@ class PendingHoldTest(unittest.TestCase):
         self.assertIsNotNone(out["lifted_at"])
         self.assertIsNotNone(out["done_at"])
         self.assertIn("converged_at", ctx)
+
+    def test_watch_keeps_the_ready_readings_up_to_the_lift(self):
+        f = self._f("after-settle")
+        waiting = {"on": True}
+
+        def rows(case_id, comps):
+            if not waiting["on"]:
+                return {("engine", "1"): {"phase": "Ready"}}
+            return {("engine", "1"): {"phase": "Creating", "operation": {"waiting": "Unschedulable"}}}
+
+        def read_one(c, timeout=1.0):
+            c["agg"] = {"engine": (2, 2 if waiting["on"] else 1, 0)}   # the handoff blip comes after the lift
+
+        def lift(ff):
+            waiting["on"] = False
+            return True
+        ctx = self._watch_ctx()
+        with mock.patch.object(run, "_read_one", read_one), mock.patch.object(run, "_ir_rows_by_index", rows), \
+                mock.patch.object(run, "_pending_lift", lift), mock.patch.object(run, "LIFT_SETTLE_S", 0), \
+                mock.patch.object(run, "STABILITY_S", 0), mock.patch.object(run, "ROW_POLL_S", 0):
+            state, out = run._pending_watch(ctx, f, ["engine"], "after-settle", lambda: not waiting["on"], 30)
+        self.assertEqual("DONE", state)
+        reads = out["ready_reads"]["engine"]
+        self.assertTrue(reads, "the window keeps its own readings")
+        self.assertEqual({2}, {rd for _t, rd in reads}, "a reading after the lift is not the window's")
+        self.assertTrue(all(reads[i][0] <= reads[i + 1][0] for i in range(len(reads) - 1)))
+
+    def test_a_serving_victim_lowers_the_capacity_floor_too(self):
+        waiting_rows = {("engine", "1"): {"phase": "Creating", "operation": {"waiting": "Unschedulable"}}}
+
+        def bite(serving):
+            def victim(ff, pod_state):
+                ff.update(crash_pod="p999-engine-1-default-0", crash_comp="engine", crash_inst="1", victim_comp="engine",
+                          victim_was_serving=serving)
+                return ff["crash_pod"]
+            return victim
+        for serving, want in ((True, {"engine": 1}), (False, {})):
+            f = self._f("never")
+            f.pop("crash_pod")
+            f["fire_ts"] = 1.0
+            ctx = self._watch_ctx()
+            with mock.patch.object(run, "_read_one", lambda c, timeout=1.0: None), \
+                    mock.patch.object(run, "_ir_rows_by_index", lambda a, b: waiting_rows), \
+                    mock.patch.object(run, "_preempt_victim", bite(serving)), \
+                    mock.patch.object(run, "IDLE_HOLD_S", 0), mock.patch.object(run, "ROW_POLL_S", 0):
+                state, out = run._pending_watch(ctx, f, ["engine"], "never", lambda: False, 30)
+            self.assertEqual("HELD", state)
+            self.assertEqual(want, ctx.get("floor_allowance") or {}, f"serving={serving}")
+            self.assertEqual(want.get("engine", 0), run._floor_allowance(ctx, "engine"))
 
     def test_watch_holds_to_the_end_and_reads_a_cause_that_never_bound(self):
         f = self._f("never")
@@ -14911,6 +15091,19 @@ class BrokenOperationTest(unittest.TestCase):
                          "a pod left on a removed index is not a removal")
         self.assertEqual(("at the scale", ["4"]), run._broken_plan_followed(plans, pre, {"1", "2", "3", "4"}, {"1", "2", "3", "4"}),
                          "a row that did not exist at the scale is reported, not judged")
+
+    def test_a_one_shot_cause_adds_the_plain_rank_as_a_second_plan(self):
+        rows = [("0", False, "Ready"), ("1", True, "Ready"), ("2", True, "Ready"), ("3", True, "Ready")]
+        self.assertEqual({"at the scale": ["0"]}, run._broken_removal_plans(rows, 1))
+        self.assertEqual({"at the scale": ["0"], "once the cause was lifted": ["3"]}, run._broken_removal_plans(rows, 1, healed_inst="0"))
+        self.assertEqual({"at the scale": ["0", "3"], "once the cause was lifted": ["3", "2"]},
+                         run._broken_removal_plans(rows, 2, healed_inst="0"))
+        # The broken Instance at the top of the index order: both plans agree and one is kept.
+        top = [("0", True, "Ready"), ("1", True, "Ready"), ("2", True, "Ready"), ("3", False, "Ready")]
+        self.assertEqual({"at the scale": ["3"]}, run._broken_removal_plans(top, 1, healed_inst="3"))
+        # Another row's health is read as it was; only the lifted cause's Instance is healed.
+        two = [("0", False, "Ready"), ("1", False, "Restarting"), ("2", True, "Ready")]
+        self.assertEqual({"at the scale": ["1"]}, run._broken_removal_plans(two, 1, healed_inst="0"))
 
     def test_survivors_whose_pod_set_changed_are_named(self):
         pre = {"1": {"a"}, "2": {"b"}, "3": {"c", "cw"}}
@@ -18367,7 +18560,7 @@ class BrokenScaleOnTheWindowTest(unittest.TestCase):
         with mock.patch.multiple(run, _setup_and_ready=lambda *a: (ctx, None), _broken_fire_and_report=fire,
                                  _broken_rows=rows, _scale_patch=lambda *a: (True, ""), _read_one=read_one,
                                  _wait_broken_rows_settled=settle, _isvc_events_since=lambda *a, **kw: list(events),
-                                 _finish=finish, STABILITY_S=0):
+                                 _broken_lift=lambda f: True, _finish=finish, STABILITY_S=0):
             run._broken_scale("p1", "p1.yaml", "desc", hdr)
         return out
 
@@ -18430,6 +18623,52 @@ class BrokenScaleOnTheWindowTest(unittest.TestCase):
         self.assertEqual("PASS", out["verdict"], out["notes"])
         self.assertTrue(any("Instances ['0', '3'] went" in c and "['1', '2'] stayed" in c for c in out["checks"]), out["checks"])
         self.assertTrue(any("every Instance row settled" in c for c in out["checks"]), out["checks"])
+
+    def _readiness_breaks(self, ctx):
+        """The readiness switch bites Instance 0: its pod stays alive and
+        stops serving; the row reports it short."""
+        ctx["fault"].update(kind="readiness", form="recover", crash_comp="engine", crash_inst="0", crash_uid="u0", crash_pod="e0")
+        ctx["pod_state"]["e0"].update(ready=False, serving=False)
+        ctx["agg"]["engine"] = (4, 3, 0)
+        ctx["trigger_ts"] = time.time()
+        return {"bitten_at": 1.0, "reported_at": 1.0, "acted_on": "its row reports serving 0/1", "row": None}
+
+    SHORT_ROWS = [("0", False, "Ready"), ("1", True, "Ready"), ("2", True, "Ready"), ("3", True, "Ready")]
+
+    def _one_shot_down(self, product_removes):
+        hdr = {"mode": "scaledown", "to_e": 3, "ceil_e": 4, "inst": 0, "during": "idle"}
+        ctx = self._ctx()
+        settled = []
+
+        def read_one(ctx):
+            # The lift restores readiness within the product's planning hop;
+            # the product then retires the Instance its rank names.
+            ctx["pod_state"]["e0"].update(ready=True, serving=True)
+            ctx["pod_state"][f"e{product_removes}"]["alive"] = False
+            ctx["agg"]["engine"] = (3, 3, 0)
+            ctx["measures"]["engine"] = (3, 0, 0)
+
+        def rows(case_id, c):
+            if settled:
+                return [(i, True, "Ready") for i in ("0", "1", "2", "3") if i != product_removes]
+            return self.SHORT_ROWS
+
+        def settle(*a):
+            settled.append(1)
+            return True, "settled"
+        return self._drive(hdr, ctx, lambda ctx, hdr: self._readiness_breaks(ctx), read_one, rows, settle)
+
+    def test_a_one_shot_cause_lifted_at_the_scale_lets_the_product_rank_a_whole_fleet(self):
+        out = self._one_shot_down(product_removes="3")
+        self.assertEqual("PASS", out["verdict"], out["notes"])
+        self.assertTrue(any("Instances ['3'] went (as the rows read once the cause was lifted) and ['0', '1', '2'] stayed"
+                            in c and "read healthy by then and stayed" in c for c in out["checks"]), out["checks"])
+        self.assertTrue(any("every surviving Instance kept its pods" in c for c in out["checks"]), out["checks"])
+        # Planned while the break still stood, the broken Instance is the first to go.
+        out = self._one_shot_down(product_removes="0")
+        self.assertEqual("PASS", out["verdict"], out["notes"])
+        self.assertTrue(any("Instances ['0'] went (as the rows read at the scale)" in c and "was the first to go" in c
+                            for c in out["checks"]), out["checks"])
 
     def test_the_instances_at_the_scale_include_the_broken_one_between_its_pods(self):
         rows = self.RESTARTING_ROWS
