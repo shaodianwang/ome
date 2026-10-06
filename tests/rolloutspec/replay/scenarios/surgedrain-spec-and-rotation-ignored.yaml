@@ -1,0 +1,73 @@
+# With the source draining, the controller ticks and restarts, knobs outside
+# the template move, and both pods' endpoints are observed; the step reads
+# only the source's convergence and deletes it behind an unrouted replacement.
+scenario: surgedrain-spec-and-rotation-ignored
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/SurgeDrain/ctrl.resync/before
+  - instance/Update/SurgeDrain/ctrl.crash/before
+  - instance/Update/SurgeDrain/spec.policyTuning[restartPolicy]/before
+  - instance/Update/SurgeDrain/spec.replicasUp/before
+  - instance/Update/SurgeDrain/endpoint.rotationIn[source]/before
+  - instance/Update/SurgeDrain/endpoint.rotationIn[target]/before
+  - instance/Update/SurgeDrain/endpoint.rotationOut[target]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation, so the step advances and the source's serving gate is flipped off
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: a pass with nothing changed re-reads the drain and writes nothing
+  - tick: 6
+    note: the controller restarts; the step is durable and the drain is re-driven idempotently
+    events:
+      - ctrl.crash: {}
+  - tick: 7
+    note: the restart policy changes mid-drain; nothing on this path reads it
+    events:
+      - spec.policyTuning[restartPolicy]: {value: RecreateInstanceOnPodRestart}
+  - tick: 8
+    note: the replica count grows mid-drain; the new index is the Create pass's and the draining row is untouched
+    events:
+      - spec.replicasUp: {to: 2}
+  - tick: 9
+    note: both endpoints are re-observed in rotation; the source still routable is the step's normal waiting condition
+    events:
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 10
+    note: the replacement leaves the routed Service; the step reads only the source's convergence, so the drain is not held
+    events:
+      - endpoint.rotationOut[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 11
+    note: the source leaves rotation, so it is deleted behind an unrouted replacement
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 12
+    note: the drained source is gone and the surge promotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

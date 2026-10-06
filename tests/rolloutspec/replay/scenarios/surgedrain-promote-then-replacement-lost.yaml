@@ -1,0 +1,48 @@
+# The promoted replacement is lost on the pass after the promote: the row
+# is Ready at its ordinal, so the loss belongs to the Instance's own pod
+# set and the Create pass heals it.
+scenario: surgedrain-promote-then-replacement-lost
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/SurgeDrain/pod.deleted[target]/after@T-surgedrain-promote
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation, so the step advances and the source's serving gate is flipped off
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the source leaves rotation, so the drain has converged
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 6
+    note: the drained source is gone and the surge promotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the promoted pod is lost; the row is Ready at that ordinal, so the loss is the Instance's own and the Create pass rebuilds it
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}

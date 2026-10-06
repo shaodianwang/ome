@@ -1,0 +1,43 @@
+# The replacement's pull wedges on a pod already older than the grace, but
+# the same pass sees it recover into rotation: a fully serving set is never
+# escalated, so the surge stays alive and advances.
+scenario: surge-stuck-late-ready
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+cells:
+  - instance/Update/Surge/pod.ready[target]/boundary@T-surge-stuck
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is still booting two minutes on, which is longer than the grace but proves nothing on its own
+    events:
+      - clock.advance: 2m
+  - tick: 5
+    note: the pull wedges and the replacement recovers into rotation before the pass reads it, so no stamp lands and the step advances
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, ordinal: 1}, message: "manifest unknown"}
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 6
+    note: the row is on the drain step and nothing escalates it

@@ -1,0 +1,47 @@
+# The controller restarts on the pass the stuck-pod grace elapses on a
+# wedged replacement and again once the row is Failed; the grace elapsing
+# again is consumed without a second stamp.
+scenario: surge-stuckgrace-crash
+arrows:
+  - T-ready-surge
+  - T-surge-stuckgrace
+cells:
+  - instance/Update/Surge/ctrl.crash/boundary@T-surge-stuckgrace
+  - instance/Update/Surge/ctrl.crash/after@T-surge-stuckgrace
+  - instance/Update/Surge/timer.stuckPodGrace/after@T-surge-stuckgrace
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 5m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pull wedges immediately, but the replacement is younger than the grace, so the surge keeps polling
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, ordinal: 1}, message: "manifest unknown"}
+  - tick: 5
+    note: the grace elapses on the wedged replacement as the controller restarts; the evidence lives on the pod and the stamp lands
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+      - ctrl.crash: {}
+  - tick: 6
+    note: the controller restarts again and the grace is read as elapsed again; the row stays Failed with the revision held and nothing is stamped twice
+    events:
+      - ctrl.crash: {}
+      - timer.stuckPodGrace: {slack: 1s}

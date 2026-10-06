@@ -1,0 +1,72 @@
+# The PodGroup of a parked set is deleted and later held Terminating; the
+# PodGroup pass keeps the group and a row nobody owns is held by no gang
+# reading.
+scenario: parked-gang-podgroup-events
+arrows:
+  - T-empty-create
+  - T-ready-recreate
+  - T-drain-deadline
+  - T-failed-parked-serves
+cells:
+  - instance/Update/Parked/gang.podGroup[Deleted]/before
+  - instance/Update/Parked/gang.podGroup[Terminating]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1h, maxDelay: 2h, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes, so the roll drains the gang for a recreate
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation and the drained members are deleted, so the roll recreates them at the new revision
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 5
+    note: the rebuilt leader reports ContainersReady and is gated serving while the worker is still booting, so the set is short of serving
+    events:
+      - pod.containersReady[target]: {pod: {index: 0, runner: leader}}
+  - tick: 6
+    note: the deadline elapses on the live set; the ladder counts the wave and the attempt is parked with the row Failed
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 7
+    note: the worker comes up and both members carry the serving gate, so the parked set serves in full and the row reads as the roll in progress with the attempt still parked
+    events:
+      - pod.containersReady[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 8
+    note: the parked set's PodGroup is deleted; the PodGroup pass recreates it and the row is untouched
+    events:
+      - gang.podGroup[Deleted]: {instance: 0}
+  - tick: 9
+    note: a further pass finds the recreated group and the row where its set put it
+  - tick: 10
+    note: the group is held Terminating; a row nobody owns records no gang hold
+    events:
+      - gang.podGroup[Terminating]: {instance: 0}
+  - tick: 11
+    note: a further pass finds the group still Terminating and the row where its set put it

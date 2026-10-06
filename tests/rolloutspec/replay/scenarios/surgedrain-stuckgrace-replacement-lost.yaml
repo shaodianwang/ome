@@ -1,0 +1,60 @@
+# A gang source drains while one member of its replacement gang wedges on
+# its image; the stuck-pod grace elapses as another member is lost, and
+# elapses again afterwards, without a second stamp.
+scenario: surgedrain-stuckgrace-replacement-lost
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-surgedrain-stuckgrace
+cells:
+  - instance/Update/SurgeDrain/pod.deleted[target]/boundary@T-surgedrain-stuckgrace
+  - instance/Update/SurgeDrain/timer.stuckPodGrace/boundary@T-surgedrain-stuckgrace
+  - instance/Update/SurgeDrain/timer.stuckPodGrace/after@T-surgedrain-stuckgrace
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 5m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement gang reports Ready, so the source advances to the drain and leaves rotation
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 6
+    note: the replacement worker wedges on its image while it is still younger than the grace, so the drain keeps polling
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 1, runner: worker}, message: "manifest unknown"}
+  - tick: 7
+    note: the grace elapses twice over as the replacement leader is lost; the stamp lands once on both rows and the source keeps its operation
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 8
+    note: the grace is read as elapsed again on the Failed rows and nothing is stamped twice
+    events:
+      - timer.stuckPodGrace: {slack: 1s}

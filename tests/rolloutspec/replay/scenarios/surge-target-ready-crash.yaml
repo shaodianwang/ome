@@ -1,0 +1,50 @@
+# The controller restarts on the pass the replacement first reports Ready
+# and again once the drain step is persisted; the step is re-derived from
+# status and the pods, and the drain is re-driven idempotently.
+scenario: surge-target-ready-crash
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/Surge/ctrl.crash/boundary@T-surge-target-ready
+  - instance/Update/Surge/ctrl.crash/after@T-surge-target-ready
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation as the controller restarts; the step advances and the source's gate flips off on this pass
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+      - ctrl.crash: {}
+  - tick: 5
+    note: the controller restarts on the drain step; the gate flip and the drain check are re-driven and the source is still routed
+    events:
+      - ctrl.crash: {}
+  - tick: 6
+    note: the source leaves rotation, so the drain has converged
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the drained source is gone and the surge promotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

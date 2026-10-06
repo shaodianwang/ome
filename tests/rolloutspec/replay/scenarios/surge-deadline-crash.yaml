@@ -1,0 +1,46 @@
+# The controller restarts on the pass the operation deadline elapses and
+# again on the next; the deadline lives on the operation, so the stamp
+# lands once and a second elapse is consumed without another.
+scenario: surge-deadline-crash
+arrows:
+  - T-ready-surge
+  - T-surge-deadline
+cells:
+  - instance/Update/Surge/ctrl.crash/boundary@T-surge-deadline
+  - instance/Update/Surge/timer.operationDeadline/boundary@T-surge-deadline
+  - instance/Update/Surge/ctrl.crash/after@T-surge-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is bound but reports no readiness
+    events:
+      - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the deadline elapses twice over and the controller restarts on the same pass; the evidence survives the restart and the attempt is disposed once
+    events:
+      - timer.operationDeadline: {slack: 1s}
+      - ctrl.crash: {}
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: the controller restarts again; Failed is persisted and the disposed attempt has no operation left
+    events:
+      - ctrl.crash: {}

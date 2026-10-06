@@ -1,0 +1,58 @@
+# A gang source drains while one member of its replacement gang wedges on
+# its image and another is lost; the escalation reads the wedged pod as
+# observed, so the loss neither retracts nor adds to the stamp.
+scenario: surgedrain-stuck-replacement-lost
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-surgedrain-stuck
+cells:
+  - instance/Update/SurgeDrain/pod.deleted[target]/boundary@T-surgedrain-stuck
+  - instance/Update/SurgeDrain/pod.deleted[target]/after@T-surgedrain-stuck
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement gang reports Ready, so the source advances to the drain and leaves rotation
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 6
+    note: the replacement worker wedges on its image; it served before, so the grace runs from the regression and nothing is disposed yet
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 1, runner: worker}, message: "manifest unknown"}
+  - tick: 7
+    note: the wedge has outlasted the grace as the replacement leader is lost; the stamp lands on both rows and the source keeps its operation
+    events:
+      - clock.advance: 2m
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+  - tick: 8
+    note: the wedged replacement worker is lost too; the source is Failed with its operation kept, so the missing replacement is owned from there
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

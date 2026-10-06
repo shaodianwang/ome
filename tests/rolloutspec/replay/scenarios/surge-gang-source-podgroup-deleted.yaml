@@ -1,0 +1,61 @@
+# A gang source's own PodGroup is deleted while it surges and again while
+# it drains; the PodGroup pass recreates the group from the plan ahead of
+# the dispatcher and the running gang is unaffected either time.
+scenario: surge-gang-source-podgroup-deleted
+arrows:
+  - T-empty-gang-surge-target
+  - T-surgedrain-gang-complete
+  - T-gangtarget-ready
+cells:
+  - instance/Update/Surge/gang.podGroup[Deleted]/before
+  - instance/Update/SurgeDrain/gang.podGroup[Deleted]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the source's own PodGroup is deleted mid-surge; the PodGroup pass recreates it from the plan and the surge is untouched
+    events:
+      - gang.podGroup[Deleted]: {instance: 0}
+  - tick: 6
+    note: the replacement gang reports Ready, so the source advances to the drain and leaves rotation
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the source's PodGroup is deleted again mid-drain; it is recreated and the draining gang is unaffected
+    events:
+      - gang.podGroup[Deleted]: {instance: 0}
+  - tick: 8
+    note: the leader's endpoint goes not-ready, which is the guard the drain waits on, so the whole source gang is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 9
+    note: the source's pods are gone, so its row is finalized and removed and the replacement index is the Instance
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

@@ -1,0 +1,57 @@
+# The replica count drops on the pass the template moves again: the retired
+# index stops being selected by the update pass and only the survivor takes
+# the newer target; a further edit while the retired index drains misses it.
+scenario: surge-scaledown-superseded
+arrows:
+  - T-ready-surge
+  - T-surge-scaledown
+  - T-surge-abandon-superseded
+  - T-delete-done
+cells:
+  - instance/Update/Surge/spec.revision/boundary@T-surge-scaledown
+  - instance/Update/Surge/spec.revision/after@T-surge-scaledown
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+    - {index: 1, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the pod template changes, so both Instances surge a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 2
+    note: the operator halves the replica count as the template moves again; the retired index is stamped Deleting and only the survivor's surge is abandoned for the newer target
+    events:
+      - spec.replicasDown: {to: 1}
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 3
+    note: the template moves once more; the retired index is on its delete and no edit reaches it
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v4}
+  - tick: 4
+    note: the retired source leaves rotation, which is the drain the delete waits on
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1, ordinal: 0}}
+  - tick: 5
+    note: both of the retired index's slots are gone, so the row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 1, ordinal: 0}}
+      - pod.deleted[target]: {pod: {index: 1, ordinal: 1}}
+  - tick: 6
+    note: with the wave done the survivor is read again; its surge is pinned to a withdrawn revision, so its replacement is abandoned
+  - tick: 7
+    note: the abandoned replacement is gone, so the survivor resets to Ready, to re-surge toward the newest target
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}

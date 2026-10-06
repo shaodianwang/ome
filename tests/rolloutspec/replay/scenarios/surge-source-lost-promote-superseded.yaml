@@ -1,0 +1,38 @@
+# The source is lost and the replacement is Ready on the pass a newer
+# target lands: the abandon guard excludes a runtime-ready replacement, so
+# the promote lands on the pinned revision and the newer target rolls next.
+scenario: surge-source-lost-promote-superseded
+arrows:
+  - T-ready-surge
+  - T-surge-source-lost-promote
+cells:
+  - instance/Update/Surge/spec.revision/boundary@T-surge-source-lost-promote
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the source is gone as the replacement reports Ready and the template moves again; the promote lands on the pinned revision
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 5
+    note: the row is Ready on the pinned revision, so the newer target shows up as drift and a fresh surge opens

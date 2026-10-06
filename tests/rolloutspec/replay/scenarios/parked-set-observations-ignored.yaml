@@ -1,0 +1,106 @@
+# A gang recreate parks after its deadline and its own set comes to serve;
+# binding, readiness, gates, endpoints, a runner restart, controller ticks
+# and restarts and the availability window all leave the reading unmoved.
+scenario: parked-set-observations-ignored
+arrows:
+  - T-empty-create
+  - T-ready-recreate
+  - T-drain-deadline
+  - T-failed-parked-serves
+cells:
+  - instance/Update/Parked/pod.scheduled[source]/before
+  - instance/Update/Parked/pod.containersReady[source]/before
+  - instance/Update/Parked/pod.ready[source]/before
+  - instance/Update/Parked/pod.servingOn[source]/before
+  - instance/Update/Parked/pod.servingOff[source]/before
+  - instance/Update/Parked/endpoint.rotationOut[source]/before
+  - instance/Update/Parked/endpoint.rotationIn[source]/before
+  - instance/Update/Parked/pod.containerRestart/before
+  - instance/Update/Parked/ctrl.resync/before
+  - instance/Update/Parked/ctrl.crash/before
+  - instance/Update/Parked/timer.minReady/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    minReadySeconds: 30
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1h, maxDelay: 2h, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation and the availability window elapses, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+      - clock.advance: 30s
+  - tick: 3
+    note: the pod template changes, so the roll drains the gang for a recreate
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation and the drained members are deleted, so the roll recreates them at the new revision
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 5
+    note: the rebuilt leader reports ContainersReady and is gated serving while the worker is still booting, so the set is short of serving
+    events:
+      - pod.containersReady[target]: {pod: {index: 0, runner: leader}}
+  - tick: 6
+    note: the deadline elapses on the live set; the ladder counts the wave and the attempt is parked with the row Failed
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 7
+    note: the worker comes up and both members carry the serving gate, so the parked set serves in full and the row reads as the roll in progress with the attempt still parked
+    events:
+      - pod.containersReady[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 8
+    note: the parked members' binding and readiness are re-observed, and the leader reports PodReady; no pass keys on them
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}}
+      - pod.containersReady[source]: {pod: {index: 0, runner: worker}}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 9
+    note: the worker's gate is withdrawn; the leader still serves, so the reading is unchanged
+    events:
+      - pod.servingOff[source]: {pod: {index: 0, runner: worker}}
+  - tick: 10
+    note: the worker's gate is restored and the leader's endpoint leaves the routed Service; rotation moves counters, not the reading
+    events:
+      - pod.servingOn[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 11
+    note: the leader's endpoint is back; the reading is the gate and readiness
+    events:
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 12
+    note: the leader's runner restarts in place and is back in rotation inside the grace, which moves nothing
+    events:
+      - pod.containerRestart: {pod: {index: 0, runner: leader}, message: OOMKilled}
+  - tick: 13
+    note: a pass with nothing changed re-derives the same reading and writes nothing
+  - tick: 14
+    note: the controller restarts; everything the parked attempt is lives in status and the set is followed again
+    events:
+      - ctrl.crash: {}
+  - tick: 15
+    note: the availability window elapses on the set; no promote waits on a parked attempt
+    events:
+      - clock.advance: 30s

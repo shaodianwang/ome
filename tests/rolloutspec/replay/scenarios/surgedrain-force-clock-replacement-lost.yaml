@@ -1,0 +1,58 @@
+# The force-delete sweep clears a drained source wedged on a dead node on
+# the pass the replacement is lost: the sweep writes nothing to the row and
+# the mode that runs after it recreates the replacement, which then promotes.
+scenario: surgedrain-force-clock-replacement-lost
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-force-clock
+  - T-surgedrain-promote
+cells:
+  - instance/Update/SurgeDrain/pod.deleted[target]/boundary@T-surgedrain-force-clock
+  - instance/Update/SurgeDrain/timer.forceDelete[overdueSlack]/boundary@T-surgedrain-force-clock
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source is bound to node-0, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, ordinal: 0}}
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation, so the step advances and the source's serving gate is flipped off
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the source leaves the routed Service, so the drain converges and the source is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 6
+    note: node-0's kubelet stops acknowledging the deletion, so the source the promote is waiting on stays with nothing holding it
+    events:
+      - pod.stuckTerminating: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the overdue clock lands twice over as the replacement is lost; the sweep force-deletes the source once and the mode after it recreates the replacement
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 8
+    note: the recreated replacement reports Ready; with no source left it is promoted
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}

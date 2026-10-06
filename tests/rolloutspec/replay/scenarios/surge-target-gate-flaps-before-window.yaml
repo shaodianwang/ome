@@ -1,0 +1,68 @@
+# The replacement reaches ContainersReady and then PodReady while the
+# availability window still holds the step at Surge; its gate flapping and
+# its endpoint leaving the routed Service are read by nothing on the step.
+scenario: surge-target-gate-flaps-before-window
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/Surge/pod.servingOn[target]/before
+  - instance/Update/Surge/pod.servingOff[target]/before
+  - instance/Update/Surge/endpoint.rotationOut[target]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    minReadySeconds: 30
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready, enters rotation and holds Ready for the availability window
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+      - clock.advance: 30s
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement reports ContainersReady, which permits the pass to write its serving gate
+    events:
+      - pod.containersReady[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: a foreign writer drops the replacement's gate; the pass re-asserts it on the next pass
+    events:
+      - pod.servingOff[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 6
+    note: the gate the pass wrote is re-observed; PodReady is what the step waits on
+    events:
+      - pod.servingOn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 7
+    note: the replacement reports PodReady and enters rotation, and the step waits out the availability window with the source still serving
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 8
+    note: the replacement leaves the routed Service; the step gates on pod conditions, so the wait is unchanged
+    events:
+      - endpoint.rotationOut[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 9
+    note: the window elapses and the step advances with nothing routed on the replacement
+    events:
+      - clock.advance: 30s
+  - tick: 10
+    note: the source leaves rotation, so the drain has converged
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 11
+    note: the drained source is gone and the surge promotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

@@ -1,0 +1,48 @@
+# The replacement exits cleanly while the source drains: a terminal pod
+# fails the runtime-readiness check ahead of the drain block, so the source
+# is not deleted even once unrouted and the step holds to the deadline.
+scenario: surgedrain-replacement-succeeded
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-deadline
+cells:
+  - instance/Update/SurgeDrain/pod.phaseTerminal[Succeeded]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation, so the step advances and the source's serving gate is flipped off
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the replacement's containers exit with success; the pass returns before the drain block and the step holds
+    events:
+      - pod.phaseTerminal[Succeeded]: {pod: {index: 0, ordinal: 1}}
+  - tick: 6
+    note: the source leaves rotation, but the drain block is not reached and the source is not deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the operation deadline elapses on the held drain and the attempt is disposed
+    events:
+      - timer.operationDeadline: {slack: 1s}

@@ -1,0 +1,52 @@
+# The force-delete sweep clears a source wedged on a dead node as the
+# controller restarts; the sweep is pod-level, so when the replacement then
+# reports Ready the step progresses on the source's absence and promotes.
+scenario: surge-force-clock-crash
+arrows:
+  - T-ready-surge
+  - T-surge-force-clock
+  - T-surge-source-lost-promote
+cells:
+  - instance/Update/Surge/timer.forceDelete[overdueSlack]/boundary@T-surge-force-clock
+  - instance/Update/Surge/ctrl.crash/boundary@T-surge-force-clock
+  - instance/Update/Surge/ctrl.crash/after@T-surge-force-clock
+  - instance/Update/Surge/pod.ready[target]/after@T-surge-force-clock
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source is bound to node-0, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, ordinal: 0}}
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: node-0 goes away under the source and its kubelet never confirms the deletion, so the source is left Terminating with nothing holding it
+    events:
+      - pod.terminating: {pod: {index: 0, ordinal: 0}}
+      - pod.stuckTerminating: {pod: {index: 0, ordinal: 0}}
+  - tick: 5
+    note: the overdue clock lands twice over as the controller restarts; the sweep force-deletes the source once and the step is left where it was
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+      - ctrl.crash: {}
+  - tick: 6
+    note: the controller restarts again as the replacement reports Ready; the sweep is neither armed nor retracted by it, and with no source left the replacement is promoted
+    events:
+      - ctrl.crash: {}
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}

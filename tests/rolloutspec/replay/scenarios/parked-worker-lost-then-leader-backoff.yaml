@@ -1,0 +1,84 @@
+# A parked set's worker is deleted and wedged Terminating while the leader
+# still serves, so the reading holds; the leader then parks in the kubelet's
+# back-off and the row reads Failed from there whatever else the set loses.
+scenario: parked-worker-lost-then-leader-backoff
+arrows:
+  - T-empty-create
+  - T-ready-recreate
+  - T-drain-deadline
+  - T-failed-parked-serves
+  - T-parked-backoff
+cells:
+  - instance/Update/Parked/pod.terminating[source]/before
+  - instance/Update/Parked/pod.stuckTerminating/before
+  - instance/Update/Parked/pod.waiting[CrashLoopBackOff]/after@T-parked-backoff
+  - instance/Update/Parked/pod.deleted[source]/after@T-parked-backoff
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1h, maxDelay: 2h, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes, so the roll drains the gang for a recreate
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation and the drained members are deleted, so the roll recreates them at the new revision
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 5
+    note: the rebuilt leader reports ContainersReady and is gated serving while the worker is still booting, so the set is short of serving
+    events:
+      - pod.containersReady[target]: {pod: {index: 0, runner: leader}}
+  - tick: 6
+    note: the deadline elapses on the live set; the ladder counts the wave and the attempt is parked with the row Failed
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 7
+    note: the worker comes up and both members carry the serving gate, so the parked set serves in full and the row reads as the roll in progress with the attempt still parked
+    events:
+      - pod.containersReady[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 8
+    note: the worker is bound and then deleted by another hand; on its way out it is live until it is gone and the reading holds
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}}
+      - pod.terminating[source]: {pod: {index: 0, runner: worker}}
+  - tick: 9
+    note: the worker's kubelet stops acknowledging the deletion; with no force-delete policy nothing frees the name and the row reads the set as it is
+    events:
+      - pod.stuckTerminating: {pod: {index: 0, runner: worker}}
+  - tick: 10
+    note: the leader parks in the kubelet's back-off; the set serves nothing at once and the row reads Failed with the attempt kept
+    events:
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0, runner: leader}, message: "back-off restarting failed container"}
+  - tick: 11
+    note: the reason is re-observed; it is read once per pass and the row stays Failed
+    events:
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0, runner: leader}, message: "back-off restarting failed container"}
+  - tick: 12
+    note: the leader is gone; the row is Failed already and the Create pass's fresh start waits on the ladder
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}

@@ -1,0 +1,44 @@
+# A superseded surge is abandoned and the source reset to Ready; a
+# controller restart and yet another edit on the next pass re-enter through
+# the ordinary trigger toward whatever the desired state now asks for.
+scenario: surge-abandon-then-resume
+arrows:
+  - T-ready-surge
+  - T-surge-abandon-superseded
+cells:
+  - instance/Update/Surge/ctrl.crash/after@T-surge-abandon-superseded
+  - instance/Update/Surge/spec.revision/after@T-surge-abandon-superseded
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: a further edit supersedes the pinned target while the replacement is not yet runtime-ready, so the surge is abandoned
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 5
+    note: the abandoned replacement is gone, so the source is reset to Ready on the revision it runs
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 6
+    note: the controller restarts and the template moves once more; the Ready row re-enters through the trigger and the gate toward the newest target
+    events:
+      - ctrl.crash: {}
+      - spec.revision: {image: registry.example.com/runtime:v4}

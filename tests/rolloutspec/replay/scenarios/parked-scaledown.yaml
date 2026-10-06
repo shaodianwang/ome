@@ -1,0 +1,88 @@
+# The replica count drops below a parked row's index: the scale-down wave
+# retires it as it retires a Failed row, and the count re-applied changes
+# nothing on the wave.
+scenario: parked-scaledown
+arrows:
+  - T-empty-create
+  - T-ready-recreate
+  - T-drain-deadline
+  - T-failed-parked-serves
+  - T-parked-scaledown
+  - T-delete-done
+cells:
+  - instance/Update/Parked/spec.replicasDown/before
+  - instance/Update/Parked/spec.replicasDown/after@T-parked-scaledown
+initial:
+  spec:
+    replicas: 2
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    maxUnavailable: "2"
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    scaleDownRequeueInterval: 30s
+    updateRetry: {maxAttempts: 3, initialDelay: 1h, maxDelay: 2h, multiplier: 2}
+timeline:
+  - tick: 1
+    note: both gangs' PodGroups are announced before their first members, and the Create pass materializes both
+  - tick: 2
+    note: every member reports Ready and both leaders enter rotation, so both Instances promote
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 1, runner: leader}}
+      - pod.ready[source]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 1, runner: leader}}
+  - tick: 3
+    note: the pod template changes, and the budget lets both gangs drain for a recreate at once
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: both leaders leave rotation and the drained members are deleted, so the roll recreates them at the new revision
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationOut[source]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 1, runner: worker}}
+  - tick: 5
+    note: both rebuilt leaders report ContainersReady while the workers are still booting, so neither set serves in full
+    events:
+      - pod.containersReady[target]: {pod: {index: 0, runner: leader}}
+      - pod.containersReady[target]: {pod: {index: 1, runner: leader}}
+  - tick: 6
+    note: the deadline elapses on both live sets; the ladder counts the wave and both attempts are parked with their rows Failed
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 7
+    note: both workers come up and every member carries the serving gate, so both rows read as the roll in progress with their attempts still parked
+    events:
+      - pod.containersReady[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: leader}}
+      - pod.containersReady[source]: {pod: {index: 1, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 1, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 1, runner: leader}}
+  - tick: 8
+    note: the replica count drops to one, so the second parked row leaves the plan and the wave stamps Deleting over its parked operation
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 9
+    note: the same count is re-applied and the retired leader leaves rotation; the wave owns the row
+    events:
+      - spec.replicasDown: {to: 1}
+      - endpoint.rotationOut[source]: {pod: {index: 1, runner: leader}}
+  - tick: 10
+    note: the retired set is gone, so its row is removed and the first row stays parked
+    events:
+      - pod.deleted[source]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 1, runner: worker}}
