@@ -1,0 +1,76 @@
+# A gang source fails on its deadline at the drain step with a replacement
+# member short of readiness, and the per-Instance worker count then grows.
+# A width change mints no revision, and the continuation's build reads the
+# plan's live Runner list on every pass: the replacement's PodGroup is
+# widened and the missing member is created at the pinned revision, and
+# the drain's delete of the source and the hand-over wait for the whole
+# widened replacement to be runtime-ready.
+scenario: gang-draindeadline-width-grow-widens-the-replacement
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-surgedrain-deadline
+  - T-failedgangtarget-ready
+  - T-failedgangsurgedrain-complete
+cells:
+  - instance/Failed/GangSurgeDrain/spec.gangWidth[grow]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: both replacement members report Ready and the leader enters rotation, so the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 6
+    note: the replacement worker's readiness regresses while the source is still published, so the pair is no longer fully serving
+    events:
+      - pod.containersNotReady[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the deadline elapses with the replacement short, so the source is stamped Failed at its drain step and the marker Failed too, both operations kept
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 8
+    note: the width grows to two workers; the edit mints no revision, and the continuation's build reads the live Runner list, so the replacement's PodGroup is widened and the missing member is created at the pinned revision
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+  - tick: 9
+    note: the first replacement worker comes back Ready, but the replacement is still short of the member the width added, so the source's delete waits
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: worker, ordinal: 0}}
+  - tick: 10
+    note: the added member reports Ready and the source leader leaves the routed Service, so the whole widened replacement is runtime-ready and the drain deletes the source pods
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: worker, ordinal: 1}}
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 11
+    note: the source pods are gone, so the widened replacement is promoted Ready on the pinned revision and the source row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

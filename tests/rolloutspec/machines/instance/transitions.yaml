@@ -95,6 +95,13 @@ transitions:
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go
     lane: adapter
     why: below Ready the rebuild trigger compares live pods against the row's recorded PodCount, which only the adapter's status publication writes
+  - id: T-pending-recycle-evicted
+    from: Pending
+    event: pod.evicted
+    guard: the evicted pod is terminal, so its name reads as free to the missing-pod diff, and the restart pass does not take the row - a policy other than RecreateInstanceOnPodRestart, or no running revision recorded
+    to: Create/CreatePods
+    effects: [Phase Creating with a Create CreatePods operation committed ahead of any pod write, the dead occupant deleted with the recycle counted on the operation and its diagnostics on LastFailure, TerminalPodRecycled warning, the target recreated once the delete is observed]
+    decided_in: pkg/controller/v1beta1/workload/ops/terminal_recycle.go
   - id: T-pending-scaledown
     from: Pending
     event: spec.replicasDown
@@ -471,6 +478,13 @@ transitions:
     guard: a pod in a terminal phase occupies one of the attempt's target names, the attempt's own deadline has not elapsed, and its outstanding expectations are satisfied
     to: Create/CreatePods
     effects: [the dead occupant deleted with the expectation recorded before the delete, the recycle counted on the operation and paced by the same-target retry ladder, the dead pod's diagnostics captured onto LastFailure, TerminalPodRecycled warning, the target recreated on a later pass once the delete is observed]
+    decided_in: pkg/controller/v1beta1/workload/ops/terminal_recycle.go
+  - id: T-create-recycle-evicted
+    from: Create/CreatePods
+    event: pod.evicted
+    guard: an evicted pod, terminal, occupies one of the attempt's target names, the attempt's own deadline has not elapsed, and its outstanding expectations are satisfied
+    to: Create/CreatePods
+    effects: [the dead occupant deleted with the expectation recorded before the delete, the recycle counted on the operation and paced by the same-target retry ladder, the kubelet's eviction message captured onto LastFailure, TerminalPodRecycled warning, the target recreated on a later pass once the delete is observed]
     decided_in: pkg/controller/v1beta1/workload/ops/terminal_recycle.go
   - id: T-create-scaledown
     from: Create/CreatePods
@@ -940,6 +954,27 @@ transitions:
     to: Failed
     effects: [Phase Failed with the parked operation kept, as T-parked-gone leaves it; the Create pass rebuilds the row as a fresh start once no pod is left and its ladder admits]
     decided_in: pkg/controller/v1beta1/workload/escalation/parked.go
+  - id: T-parked-terminal
+    from: Update/Parked
+    event: pod.phaseTerminal
+    guard: the dead pod is the member the parked attempt's own set serves through - a gang's leader, or the single pod - so the set serves nothing; a dead worker beside a serving leader moves nothing until the set reads short
+    to: Failed
+    effects: [Phase Failed with the parked operation kept, as T-parked-gone leaves it; the Create pass recycles the dead occupant and rebuilds the row as a fresh start once its ladder admits]
+    decided_in: pkg/controller/v1beta1/workload/escalation/parked.go
+  - id: T-parked-refused
+    from: Update/Parked
+    event: pod.admissionRejected
+    guard: the refused pod, phase Failed, is the member the parked attempt's own set serves through - a gang's leader, or the single pod - so the set serves nothing; a refused worker beside a serving leader moves nothing until the set reads short
+    to: Failed
+    effects: [Phase Failed with the parked operation kept, as T-parked-gone leaves it; the Create pass recycles the refused occupant and rebuilds the row as a fresh start once its ladder admits]
+    decided_in: pkg/controller/v1beta1/workload/escalation/parked.go
+  - id: T-parked-evicted
+    from: Update/Parked
+    event: pod.evicted
+    guard: the evicted pod, terminal, is the member the parked attempt's own set serves through - a gang's leader, or the single pod - so the set serves nothing; an evicted worker beside a serving leader moves nothing until the set reads short
+    to: Failed
+    effects: [Phase Failed with the parked operation kept, as T-parked-gone leaves it; the Create pass recycles the evicted occupant and rebuilds the row as a fresh start once its ladder admits]
+    decided_in: pkg/controller/v1beta1/workload/escalation/parked.go
   - id: T-parked-member-lost
     from: Update/Parked
     event: pod.deleted
@@ -1267,7 +1302,7 @@ transitions:
   - id: T-failedparked-recycle-rebuild
     from: Failed/Parked
     event: pod.phaseTerminal
-    guard: every remaining pod of the parked set is in a terminal phase, so the missing-pod diff reads their names as free and the Create pass claims the row as a fresh start
+    guard: every remaining pod of the parked set is in a terminal phase, so the missing-pod diff reads their names as free and the Create pass claims the row as a fresh start; reached only when the roll may not take the row, since the update pass runs ahead of the Create pass and re-opens a parked row by its running revision, dead pods or not, whenever its ladder, budget and gate admit (T-failedparked-retry)
     to: Create/CreatePods
     effects: [the dead occupants deleted with expectations recorded first and a TerminalPodRecycled warning, the targets recreated on a later pass under a fresh Create CreatePods operation that replaces the parked one]
     decided_in: pkg/controller/v1beta1/workload/ops/terminal_recycle.go
@@ -1328,6 +1363,13 @@ transitions:
     to: Restart/Drain
     effects: [Incarnation bumped, Phase Restarting with the gang-member-lost reason recorded and the RetryCount continued, the survivors drained and the gang rebuilt as a whole]
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-failedrepair-member-evicted
+    from: Failed/Repair
+    event: pod.evicted
+    guard: policy RecreateInstanceOnPodRestart, a multi-pod Instance with at least one survivor once the evicted member is excluded as terminal, no RetryBlock denying the rebuild, and the revision the rebuild would land on still the roll target
+    to: Restart/Drain
+    effects: [Incarnation bumped, Phase Restarting with the gang-member-lost reason recorded and the RetryCount continued, the survivors drained and the evicted pod deleted with them, the gang rebuilt as a whole]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
   - id: T-failedrepair-close
     from: Failed/Repair
     event: pod.deleted
@@ -1340,6 +1382,13 @@ transitions:
     from: Failed/Repair
     event: pod.phaseTerminal
     guard: every remaining pod of the set is in a terminal phase, which the repair's exits read as no live pod left
+    to: Failed
+    effects: [the spent operation cleared with Phase, Incarnation and LastFailure kept, RepairClosed event; the Create pass recycles the dead occupants and rebuilds the row on the pass after]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-failedrepair-close-evicted
+    from: Failed/Repair
+    event: pod.evicted
+    guard: every remaining pod of the set is evicted or otherwise terminal, which the repair's exits read as no live pod left
     to: Failed
     effects: [the spent operation cleared with Phase, Incarnation and LastFailure kept, RepairClosed event; the Create pass recycles the dead occupants and rebuilds the row on the pass after]
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go
@@ -1664,7 +1713,7 @@ transitions:
   - id: T-failedmigratetarget-terminal
     from: Failed/MigrateTarget
     event: pod.waiting
-    guard: a pod of this surge holds a terminal waiting reason past the stuck-pod grace, which the record consumes as early failure evidence
+    guard: a pod of this surge holds a terminal waiting reason past the stuck-pod grace, which the record consumes as early failure evidence; not reached from a Failed surge row, since the drive's pair confirmation requires the surge to read Creating and runs ahead of the wedge check, so a surge the scheduler grace already failed stands until the record's deadline
     to: Delete/Drain
     effects: [the record closed Failed and the pin cleared, so the unpinned index leaves the plan and the scale-down pipeline tears it down; the paired source is restored through the record rather than stamped here]
     decided_in: pkg/controller/v1beta1/workload/ops/migrate.go

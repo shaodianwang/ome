@@ -1,0 +1,43 @@
+# A demoted Instance whose leftover pod is evicted under node pressure, under
+# a restart policy that never rebuilds it. An evicted pod is terminal, so
+# the Create pass reads its name as free: it commits the Create attempt
+# ahead of any pod write, recycles the dead occupant on the same pass with
+# the kubelet's reason on LastFailure, and recreates the pod once the
+# delete is observed.
+scenario: idle-pending-pod-evicted-recycled
+arrows:
+  - T-pending-recycle-evicted
+  - T-create-ready
+cells:
+  - instance/Pending/pod.evicted/before
+  - instance/Pending/pod.evicted/boundary@T-pending-recycle-evicted
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+timeline:
+  - tick: 1
+    note: the demoted row sits with its pod present, so the Create pass creates nothing
+  - tick: 2
+    note: the pod is evicted under memory pressure; it is terminal, so the Create pass commits its attempt, recycles the dead occupant with the kubelet's reason on LastFailure, and waits for the delete to be observed
+    events:
+      - pod.evicted: {pod: {index: 0}, message: "The node was low on resource: memory."}
+  - tick: 3
+    note: the evicted pod is gone, so the attempt recreates it
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the recreated pod reports Ready and enters rotation, so the Instance promotes on its running revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}

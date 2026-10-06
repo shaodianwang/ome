@@ -1,0 +1,74 @@
+# A gang's repair parks at Failed with its operation kept when the rebuilt
+# worker crash-loops past the grace, and the wedged worker is then evicted
+# under node pressure. An evicted member is a terminal pod, which the
+# lost-member count reads as lost at once, so the repair re-arms over the
+# spent attempt on the tick the eviction is observed: the RetryCount is
+# continued, the live leader is drained and deleted with the evicted
+# worker, and the gang is rebuilt whole once both names are free.
+scenario: restart-parked-repair-member-evicted-rearms
+arrows:
+  - T-ready-restart
+  - T-restart-stuck
+  - T-failedrepair-member-evicted
+  - T-restart-ready
+cells:
+  - instance/Failed/Repair/pod.evicted/before
+  - instance/Failed/Repair/pod.evicted/boundary@T-failedrepair-member-evicted
+  - instance/Failed/Repair/pod.evicted/after@T-failedrepair-member-evicted
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, runner: leader, ready: true, serving: true, routed: true}
+    - {index: 0, runner: worker, ready: true, serving: true}
+timeline:
+  - tick: 1
+    note: the Ready gang is steady on its two serving members
+  - tick: 2
+    note: the worker is deleted out from under the Instance, so the repair opens a Restart over the gang and takes the leader out of serving
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 3
+    note: the leader leaves rotation, so the drain deletes it
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 4
+    note: the old leader is gone, so both members are rebuilt at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+  - tick: 5
+    note: the rebuilt leader comes up while the rebuilt worker crash-loops past the grace, so the repair parks at Failed with its operation preserved
+    events:
+      - clock.advance: 2m
+      - pod.containersReady[source]: {pod: {index: 0, runner: leader}}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0, runner: worker}, message: "back-off restarting failed container"}
+  - tick: 6
+    note: the wedged worker is bound and evicted under memory pressure; an evicted member is terminal, so the lost-member count reads it as lost at once and the repair re-arms over the spent attempt with the RetryCount continued, draining the leader and deleting both members
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-1}
+      - pod.evicted: {pod: {index: 0, runner: worker}, message: "The node was low on resource: memory."}
+  - tick: 7
+    note: both members are gone, so the gang is rebuilt whole at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 8
+    note: both rebuilt members report Ready and the leader enters rotation, so the repair completes
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}

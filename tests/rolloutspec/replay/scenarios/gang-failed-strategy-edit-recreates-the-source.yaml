@@ -1,0 +1,78 @@
+# The update strategy is edited to a recreate while a gang surge sits
+# Failed at its Surge step with its replacement never promoted. A Failed
+# source holds no attempt to the owner table, so the edit is read at once:
+# a fresh recreate replaces the kept continuation on the pass that reads it,
+# no abandon runs and the failed wave is not charged to the ladder, and the
+# marker, referenced by no operation, leaves the plan and is reaped by the
+# scale-down wave with its pods before the recreate drains and rebuilds the
+# source at the target.
+scenario: gang-failed-strategy-edit-recreates-the-source
+arrows:
+  - T-ready-surge
+  - T-empty-gang-surge-target
+  - T-surge-deadline
+  - T-gangtarget-deadline
+  - T-drain-ready
+cells:
+  - instance/Failed/GangSurge/spec.strategy/before
+  - instance/Failed/GangSurgeTarget/spec.strategy/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the deadline elapses with the replacement never ready, so the source is stamped Failed at its Surge step and the marker Failed too, both operations kept
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: the strategy is edited to a recreate; the Failed source holds no attempt to the owner table, so the edit is read at once and a fresh recreate replaces the kept gang surge, taking the source's serving gates down; no abandon runs and nothing is charged to the ladder
+    events:
+      - spec.strategy: {strategy: RecreatePod}
+  - tick: 7
+    note: the marker is referenced by no operation and leaves the plan, so the scale-down wave stamps it Deleting and the pass ends on the wave
+  - tick: 8
+    note: the source leader leaves rotation; the wave drains the marker, whose replacement was never routed, and deletes its pods, while the recreate's own drain waits behind the wave
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 9
+    note: the replacement pods are gone, so the wave removes the marker row
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 10
+    note: with no wave in flight the update pass runs the recreate, whose Phase A deletes the drained source pods
+  - tick: 11
+    note: the source pods are gone, so Phase B rebuilds the gang at the bumped incarnation on the target
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 12
+    note: both rebuilt members report Ready and the leader enters rotation, so the Instance promotes on the target
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}

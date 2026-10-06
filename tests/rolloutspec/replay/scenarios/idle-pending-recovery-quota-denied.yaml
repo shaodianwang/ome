@@ -1,0 +1,35 @@
+# A demoted Instance's recovery create is refused by the quota. The
+# recovery create commits its attempt before the pod create, so the
+# refusal is recorded on that attempt - the quota wait named, the deadline
+# parked - and the row reads Creating from the stamp on; the create lands
+# on the requeue once the quota admits it.
+scenario: idle-pending-recovery-quota-denied
+arrows:
+  - T-pending-create
+  - T-create-ready
+cells:
+  - instance/Pending/api.quotaDenied/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+timeline:
+  - tick: 1
+    note: the quota refuses the recovery create; the attempt is committed first, so the refusal is recorded on it with the quota wait named and the deadline parked, and the row reads Creating
+    events:
+      - api.quotaDenied: {}
+  - tick: 2
+    note: the quota admits the create on the requeue, so the attempt materializes its pod
+  - tick: 3
+    note: the pod reports Ready and enters rotation, so the Instance promotes on its running revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}

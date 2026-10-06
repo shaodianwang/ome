@@ -1,0 +1,65 @@
+# The roll is pinned back to the running revision while a gang's recreate
+# stands ended by the gang verdict with the Update operation kept. At zero
+# revision distance the re-drive cannot fire, so the wreckage scan takes
+# the ended attempt's pods out and deletes them; the kept operation stays
+# on the Failed row until no pod is left, when the Create pass's
+# write-ahead stamp replaces it with a fresh Create at the running revision.
+scenario: recreate-gang-conflict-failed-rollback-pin-cleans-wreckage
+arrows:
+  - T-ready-recreate
+cells:
+  - instance/Failed/Drain/spec.rollbackTarget[set]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members are bound to node-0 and report Ready, and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds the gang in place of surging, so Phase A takes the serving gates down
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation, so Phase A deletes both members
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 5
+    note: both members are gone, so Phase B rebuilds the gang at the bumped incarnation behind its existing PodGroup
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 6
+    note: the group's controller reference is rewritten to another owner, which is a name this controller may not write, so the gang verdict stamps the Instance Failed with the recreate kept rather than parked
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 7
+    note: the roll is pinned back to the stored running revision; at zero revision distance the re-drive cannot fire, so the wreckage scan deletes the ended attempt's pods and the kept operation stays on the Failed row
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+  - tick: 8
+    note: the ended attempt's pods are still Terminating, so the kept operation stays where it is
+  - tick: 9
+    note: no pod is left, so the Create pass's write-ahead stamp replaces the kept operation with a fresh Create at the running revision; its members are withheld for as long as the gang name belongs to another controller
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 10
+    note: the name still belongs to another controller, so the gang verdict fails the fresh Create attempt with its operation kept

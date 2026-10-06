@@ -191,10 +191,12 @@ cells:
 
   - state: Create/CreatePods
     event: pod.evicted
-    outcome: ignore
-    note: eviction resolves into the same two shapes as a plain deletion — once the object is gone the freed name is re-created inside the same attempt, and a gang that keeps a survivor hands off to the restart pass; while the evicted object lingers it holds its slot and the attempt waits
+    outcome: transition
+    to: Create/CreatePods
+    guard: an evicted pod, terminal, occupies one of the attempt's target names, the attempt's own deadline has not elapsed, and its outstanding expectations are satisfied
+    note: an eviction is a terminal pod on one of the attempt's names, recycled at once like any dead occupant (T-create-recycle-evicted) - the recycle counted on the operation and paced by the same-target retry ladder, the kubelet's message onto LastFailure, TerminalPodRecycled - and the name is recreated inside the same attempt once the delete is observed; a gang that keeps a survivor under RecreateInstanceOnPodRestart hands off to the restart pass instead
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-gang-member-evicted-recycled]}
     status: current
 
   - state: Create/CreatePods

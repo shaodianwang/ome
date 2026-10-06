@@ -1,0 +1,46 @@
+# A two-pod gang is created under a restart policy that never re-arms it,
+# and its worker is evicted under node pressure before the promote. An
+# eviction is a terminal pod on one of the attempt's names, so it is
+# recycled at once like any dead occupant: the recycle is counted on the
+# operation with the kubelet's message on LastFailure, and the name is
+# recreated inside the same attempt once the delete is observed.
+scenario: create-gang-member-evicted-recycled
+arrows:
+  - T-empty-create
+  - T-create-recycle-evicted
+  - T-create-ready
+cells:
+  - instance/Create/CreatePods/pod.evicted/before
+  - instance/Create/CreatePods/pod.evicted/boundary@T-create-recycle-evicted
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the leader comes up while the worker is bound and evicted under memory pressure; the evicted worker is terminal, so the attempt recycles it at once with the kubelet's message on LastFailure
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-1}
+      - pod.evicted: {pod: {index: 0, runner: worker}, message: "The node was low on resource: memory."}
+  - tick: 3
+    note: the evicted worker is gone, so its name is recreated inside the same attempt
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 4
+    note: the recreated worker reports Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}

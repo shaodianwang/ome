@@ -1,0 +1,78 @@
+tick=1 note the index is planned and no row exists, so the Create pass opens the attempt
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-8aa14b8b started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=8aa14b8b incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-default-0 node=node-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 pass result=after:30s
+tick=3 note the availability window elapses, so the Instance promotes on its running revision
+tick=3 apply clock.advance by=1m0s now=t+1m0s
+tick=3 hold cleared
+tick=3 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-8aa14b8b readySince=t+1m0s op=nil precondition=ok
+tick=3 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=3 pass result=none
+tick=4 note a minute into steady Ready the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+tick=4 apply clock.advance by=1m0s now=t+2m0s
+tick=4 apply spec.migrateRequest uuid=uid#2 instance=0 fromNode=node-0 now=t+2m0s
+tick=4 condition type=MigrationPolicyUnconfigured status=False reason=MigrationCapacityConfigured message=Migration capacity policy is configured
+tick=4 migration uuid=uid#2 write phase=Accepted→SurgePending surge=nil→1 message=nil→surge allocated; waiting for surge pods allocatedAt=nil→t+2m0s
+tick=4 row=0 write incarnation=1 phase=Migrating runningRevision=svc-a-engine-8aa14b8b readySince=t+1m0s op=op#2{type=Migrate step=CreateSurge surgeIndex=1 started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} precondition=ok
+tick=4 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#3{type=Migrate step=CreateSurge surgeIndex=0 started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} precondition=ok
+tick=4 event Normal MigrationRequestAccepted OMENative component=engine instance=0 migration accepted (uuid=uid#2, source-node=node-0, surge-index=1)
+tick=4 pod create name=svc-a-engine-1-default-0 revision=8aa14b8b incarnation=1 ordinal=0
+tick=4 pass result=after:5s
+tick=5 note the scheduler finds the surge no node off node-0, so the scheduler hold is recorded on the surge row and both pair deadlines park
+tick=5 apply pod.unschedulable[target] pod=svc-a-engine-1-default-0 now=t+2m0s
+tick=5 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#3{type=Migrate step=CreateSurge waiting=Unschedulable surgeIndex=0 started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} lastFailure={pod=svc-a-engine-1-default-0 reason=Unschedulable} precondition=ok
+tick=5 row=0 write no-op precondition=no-change
+tick=5 row=1 write no-op precondition=no-change
+tick=5 pass result=after:5s
+tick=5 row=0 write incarnation=1 phase=Migrating runningRevision=svc-a-engine-8aa14b8b readySince=t+1m0s op=op#2{type=Migrate step=CreateSurge surgeIndex=1 started=t+2m0s lastProgressAt=t+2m0s deadline=nil} precondition=ok
+tick=5 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#3{type=Migrate step=CreateSurge waiting=Unschedulable surgeIndex=0 started=t+2m0s lastProgressAt=t+2m0s deadline=nil} lastFailure={pod=svc-a-engine-1-default-0 reason=Unschedulable} precondition=ok
+tick=6 note the hold outlasts the configured grace, so the escalation stamps the surge row Failed with its Migrate pin kept while the source keeps serving under its own pin
+tick=6 apply clock.advance by=11m0s now=t+13m0s
+tick=6 row=1 write no-op precondition=no-change
+tick=6 row=0 write no-op precondition=no-change
+tick=6 row=1 write no-op precondition=no-change
+tick=6 row=1 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=op#3{type=Migrate step=CreateSurge waiting=Unschedulable surgeIndex=0 started=t+2m0s lastProgressAt=t+2m0s deadline=nil} lastFailure={pod=svc-a-engine-1-default-0 reason=Unschedulable message=Unschedulable} precondition=ok
+tick=6 warn instanceFailed index=1 pod=svc-a-engine-1-default-0 reason=Unschedulable
+tick=6 pass result=after:5s
+tick=7 note a tick with nothing changed finds the record's deadline ahead, and no pass drives a pair whose surge reads Failed
+tick=7 pass result=after:5s
+tick=8 note the surge pod finds a node after all, which nothing reads on a row the pair write cannot promote
+tick=8 apply pod.scheduled[target] pod=svc-a-engine-1-default-0 node=node-1 now=t+13m0s
+tick=8 pass result=after:5s
+tick=9 note the surge pod wedges on its image past the stuck-pod grace; the drive's wedge check sits behind a pair confirmation the Failed surge cannot pass, so nothing closes the record early
+tick=9 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-1-default-0 reason=ImagePullBackOff now=t+13m0s
+tick=9 pass result=after:5s
+tick=10 note the stuck-pod grace is read as elapsed on the wedged pod; the fast escalator skips a row already stamped Failed, so the grace ends nothing
+tick=10 apply timer.stuckPodGrace already-elapsed now=t+13m0s
+tick=10 pass result=after:5s
+tick=11 note the node refuses the surge pod, which goes Failed; no drive write reaches a pair whose surge reads Failed, so the refused pod is neither recycled nor re-created
+tick=11 apply pod.admissionRejected[OutOfResource] pod=svc-a-engine-1-default-0 reason=OutOfnvidia.com/gpu now=t+13m0s
+tick=11 pass result=after:5s
+tick=12 note the refused pod is gone; the index stands empty, since the drive makes no write for a pair whose surge reads Failed
+tick=12 apply pod.deleted[target] pod=svc-a-engine-1-default-0 now=t+13m0s
+tick=12 pass result=after:5s
+tick=13 note the operator asks for a second Instance; nothing is materialized while the pin stands
+tick=13 apply spec.replicasUp replicas=2 generation=1 now=t+13m0s
+tick=13 pass result=after:5s
+tick=14 note the record's deadline elapses, so the expiry clears the pin from the Failed surge row, closes the record and restores the source to Ready on its running revision
+tick=14 apply timer.migrationDeadline to=t+32m1s now=t+32m1s
+tick=14 row=1 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=nil lastFailure={pod=svc-a-engine-1-default-0 reason=Unschedulable message=Unschedulable} precondition=ok
+tick=14 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-8aa14b8b readySince=t+1m0s op=nil precondition=ok
+tick=14 migration uuid=uid#2 write phase=SurgePending→Failed message=surge allocated; waiting for surge pods→deadline exceeded in phase SurgePending: surge pods never became ready completedAt=nil→t+32m1s
+tick=14 event Warning MigrationExpired OMENative migration uuid=uid#2 expired: deadline exceeded in phase SurgePending: surge pods never became ready; tearing down surge instance=1
+tick=14 pass result=requeue
+tick=15 note the unpinned index is inside the desired set now and holds no pod, so the Create pass opens a fresh start on it at the running revision rather than tearing it down
+tick=15 hold cleared
+tick=15 row=0 write no-op precondition=no-change
+tick=15 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#4{type=Create step=CreatePods target=svc-a-engine-8aa14b8b started=t+32m1s lastProgressAt=t+32m1s deadline=t+1h2m1s} lastFailure={pod=svc-a-engine-1-default-0 reason=Unschedulable message=Unschedulable} precondition=ok
+tick=15 pod create name=svc-a-engine-1-default-0 revision=8aa14b8b incarnation=1 ordinal=0
+tick=15 pass result=after:5s

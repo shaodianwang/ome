@@ -1,0 +1,57 @@
+# A single-pod surge whose replacement reports a container terminated with
+# the DeadlineExceeded reason past the stuck-pod grace. The reason is
+# outside the terminal waiting set the stuck-pod classifier reads, so it is
+# not escalation evidence: the attempt waits, and when the replacement
+# comes up after all the surge drains the source and promotes as usual.
+scenario: surge-replacement-deadline-exceeded-reason-waits
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/Surge/pod.waiting[DeadlineExceeded]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is still booting two minutes on, longer than the grace, which proves nothing on its own
+    events:
+      - clock.advance: 2m
+  - tick: 5
+    note: the replacement reports DeadlineExceeded on a pod older than the grace; the reason is outside the terminal waiting set, so nothing is escalated and the attempt waits
+    events:
+      - pod.waiting[DeadlineExceeded]: {pod: {index: 0, ordinal: 1}, message: "Pod was active on the node longer than the specified deadline"}
+  - tick: 6
+    note: a further pass finds the same reason and still writes nothing
+  - tick: 7
+    note: the replacement comes up and enters rotation after all, so the source leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 8
+    note: the source leaves rotation, so it is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 9
+    note: the source is gone, so the Instance promotes onto the new revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

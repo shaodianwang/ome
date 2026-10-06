@@ -1,0 +1,78 @@
+# A gang source fails on its deadline at the drain step with a replacement
+# member short of readiness, and a replacement member is then deleted from
+# outside while it still reports ContainersReady. A member on its way out
+# still passes the runtime-ready gate, so the drain deletes the source
+# behind it once the source has left rotation; the continuation rebuilds
+# the member once its name is free, and the hand-over finishes when the
+# rebuilt member comes up.
+scenario: gang-draindeadline-replacement-member-leaving-rebuilt
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-surgedrain-deadline
+  - T-failedgangtarget-ready
+  - T-failedgangsurgedrain-complete
+cells:
+  - instance/Failed/GangSurgeDrain/pod.terminating[target]/before
+  - instance/Failed/GangSurgeDrain/pod.deleted[target]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: both replacement members report Ready and the leader enters rotation, so the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 6
+    note: the replacement worker's readiness regresses while the source is still published, so the pair is no longer fully serving
+    events:
+      - pod.containersNotReady[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the deadline elapses with the replacement short, so the source is stamped Failed at its drain step and the marker Failed too, both operations kept
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 8
+    note: the replacement worker comes back Ready and is then deleted from outside; a member on its way out still reports ContainersReady and passes the runtime-ready gate, so the continuation reads the replacement as whole
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - pod.terminating[target]: {pod: {index: 1, runner: worker}}
+  - tick: 9
+    note: the source leader leaves the routed Service, so the drain deletes the source pods behind the leaving member
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 10
+    note: the terminating member is gone, so the continuation rebuilds it under the same name at the pinned revision; the pair is short a member until it comes up
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 11
+    note: the source pods are gone and the rebuilt member reports Ready, so the replacement is promoted Ready on the pinned revision and the source row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}

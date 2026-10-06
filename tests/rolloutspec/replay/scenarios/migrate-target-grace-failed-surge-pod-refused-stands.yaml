@@ -1,0 +1,94 @@
+# A migration surge the scheduler could not place within the grace sits
+# Failed with its Migrate pin kept, and its pod is then bound after all,
+# wedges on its image, is refused by its node and is gone; the operator
+# also asks for a second Instance. The drive makes no write for a pair whose
+# surge reads Failed, so none of it moves either row: the wedge closes
+# nothing early, the refused pod is neither recycled nor re-created, the
+# scale-up materializes nothing, and the record's deadline is what ends the
+# move, after which the leftover index inside the desired set is rebuilt
+# by the Create pass rather than torn down.
+scenario: migrate-target-grace-failed-surge-pod-refused-stands
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-failedmigratetarget-expired
+  - T-migrate-deadline-restore
+cells:
+  - instance/Failed/MigrateTarget/pod.waiting[ImagePullBackOff]/before
+  - instance/Failed/MigrateTarget/timer.stuckPodGrace/before
+  - instance/Failed/MigrateTarget/pod.admissionRejected[OutOfResource]/before
+  - instance/Failed/MigrateTarget/pod.deleted[target]/before
+  - instance/Failed/MigrateTarget/spec.replicasUp/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    minReadySeconds: 30
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    unschedulableGrace: 10m
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the availability window elapses, so the Instance promotes on its running revision
+    events:
+      - clock.advance: 1m
+  - tick: 4
+    note: a minute into steady Ready the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - clock.advance: 1m
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 5
+    note: the scheduler finds the surge no node off node-0, so the scheduler hold is recorded on the surge row and both pair deadlines park
+    events:
+      - pod.unschedulable[target]: {pod: {index: 1}}
+  - tick: 6
+    note: the hold outlasts the configured grace, so the escalation stamps the surge row Failed with its Migrate pin kept while the source keeps serving under its own pin
+    events:
+      - clock.advance: 11m
+  - tick: 7
+    note: a tick with nothing changed finds the record's deadline ahead, and no pass drives a pair whose surge reads Failed
+  - tick: 8
+    note: the surge pod finds a node after all, which nothing reads on a row the pair write cannot promote
+    events:
+      - pod.scheduled[target]: {pod: {index: 1}, message: node-1}
+  - tick: 9
+    note: the surge pod wedges on its image past the stuck-pod grace; the drive's wedge check sits behind a pair confirmation the Failed surge cannot pass, so nothing closes the record early
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 1}, message: "Back-off pulling image"}
+  - tick: 10
+    note: the stuck-pod grace is read as elapsed on the wedged pod; the fast escalator skips a row already stamped Failed, so the grace ends nothing
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 11
+    note: the node refuses the surge pod, which goes Failed; no drive write reaches a pair whose surge reads Failed, so the refused pod is neither recycled nor re-created
+    events:
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 1}, resource: nvidia.com/gpu, message: "Node didn't have enough resource: nvidia.com/gpu, requested: 1, used: 8, capacity: 8"}
+  - tick: 12
+    note: the refused pod is gone; the index stands empty, since the drive makes no write for a pair whose surge reads Failed
+    events:
+      - pod.deleted[target]: {pod: {index: 1}}
+  - tick: 13
+    note: the operator asks for a second Instance; nothing is materialized while the pin stands
+    events:
+      - spec.replicasUp: {to: 2}
+  - tick: 14
+    note: the record's deadline elapses, so the expiry clears the pin from the Failed surge row, closes the record and restores the source to Ready on its running revision
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 15
+    note: the unpinned index is inside the desired set now and holds no pod, so the Create pass opens a fresh start on it at the running revision rather than tearing it down

@@ -1,0 +1,93 @@
+# Two Instances roll one surge at a time under restart policy None. The
+# first promotes onto the new revision and crash-loops inside its crash
+# window, which counts one failed attempt on the revision's ladder. The
+# second Instance's surge, opened before that failure, is re-stamped on
+# every pass and leaves the block in Backoff; when its own replacement
+# crash-loops the wave is folded into the one the block already counts;
+# and when the block comes due the fresh start it admits, the second
+# Instance's re-surge, is what flips it to RetryInProgress.
+scenario: ladder-backoff-survives-sibling-restamps
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+  - T-surge-stuck
+  - T-failed-retry-surge
+cells:
+  - instance/Ready/pod.containerRestart/before
+  - instance/Ready/pod.waiting[CrashLoopBackOff]/before
+  - instance/Update/Surge/pod.waiting[CrashLoopBackOff]/before
+  - instance/Failed/timer.retryAt/before
+  - instance/Failed/timer.retryAt/boundary@T-failed-retry-surge
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    maxSurge: "1"
+    maxUnavailable: "1"
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: cold start materializes both Instances on the starting revision
+  - tick: 2
+    note: both sources become Ready and enter rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+      - pod.ready[source]: {pod: {index: 1, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 1, ordinal: 0}}
+  - tick: 3
+    note: a new revision is pushed, so the first Instance surges a replacement and the second waits on the surge budget
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the first replacement is serving and in rotation beside its source, so the source leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the first source leaves rotation, so the drain has converged and the source is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 6
+    note: the first source is gone, so the first Instance promotes onto the new revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the surge budget frees, so the second Instance opens its surge, an attempt in flight from here on
+  - tick: 8
+    note: twenty seconds later the promoted runner restarts under the same pod; one restart is not a crash of the revision, so the ladder records nothing
+    events:
+      - clock.advance: 20s
+      - pod.containerRestart: {pod: {index: 0, ordinal: 1}, message: Error}
+  - tick: 9
+    note: the restarted runner dies again and the kubelet backs off, so the crash loop counts one failed attempt on the revision's ladder and the block enters Backoff; the second Instance's attempt, opened before this failure, is re-stamped on the same pass and leaves the block in Backoff
+    events:
+      - pod.containersNotReady: {pod: {index: 0, ordinal: 1}}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0, ordinal: 1}, message: "back-off restarting failed container"}
+  - tick: 10
+    note: ten seconds later a further pass re-stamps the attempt in flight again and the block stays in Backoff, its wave recorded
+    events:
+      - clock.advance: 10s
+  - tick: 11
+    note: a minute later the second replacement crash-loops past the stuck-pod grace; the attempt is disposed, and its wave is folded into the one the Backoff block already counts rather than counted again
+    events:
+      - clock.advance: 1m
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 1, ordinal: 1}, message: "back-off restarting failed container"}
+  - tick: 12
+    note: the kubelet starts the first Instance's runner again and the same pod serves and re-enters rotation, so no rebuild is owed to its set
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 13
+    note: the block comes due, so the fresh start it admits, the second Instance's re-surge at the same target, flips it to RetryInProgress and adopts the replacement that is still crash-looping
+    events:
+      - timer.retryAt: {slack: 1s}

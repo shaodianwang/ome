@@ -1,0 +1,71 @@
+# A repair's drain deletes the old pod and the node under it dies: the pod
+# stays Terminating with no kubelet to finish it, and Phase A waits on the
+# live old-pod check. A force-delete policy configured after the wedge is
+# read by the Component sweep that runs ahead of every verb pass; the
+# overdue clock alone frees nothing while the node's unreachable taint is
+# under the threshold, and at the node-death clock the sweep force-deletes
+# the pod and Phase B rebuilds the set in the same pass, so the repair
+# finishes once the rebuilt pod serves.
+scenario: restart-drain-stuck-pod-swept-at-node-death
+arrows:
+  - T-ready-restart-crash
+  - T-restart-ready
+cells:
+  - instance/Restart/Drain/pod.nodeLost[UnreachableTaint]/before
+  - instance/Restart/Drain/pod.stuckTerminating/before
+  - instance/Restart/Drain/config.changed[forceDelete]/before
+  - instance/Restart/Drain/timer.forceDelete[overdueSlack]/before
+  - instance/Restart/Drain/timer.forceDelete[nodeUnreachable]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, node: node-0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: after a minute of steady serving the runner restarts, so the repair opens a Restart and takes the pod out of serving
+    events:
+      - clock.advance: 1m
+      - pod.containerRestart: {pod: {index: 0}, message: OOMKilled}
+  - tick: 3
+    note: the old pod leaves rotation, so the drain deletes it
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the node under the Terminating pod stops reporting; the pod stays Terminating and Phase A waits on the live old-pod check
+    events:
+      - pod.nodeLost[UnreachableTaint]: {pod: {index: 0}}
+  - tick: 5
+    note: the kubelet never acknowledges the deletion, so the object stays behind with no finalizer on it; with no force-delete policy configured nothing frees the name
+    events:
+      - pod.stuckTerminating: {pod: {index: 0}}
+  - tick: 6
+    note: a force-delete policy is configured; the next pass's sweep reads it, and nothing on the row changes on the edit itself
+    events:
+      - config.changed[forceDelete]: {config: {forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}}}
+  - tick: 7
+    note: the overdue clock elapses on the wedged pod, but its node's unreachable taint is still under the threshold, so the sweep has no node-death evidence and frees nothing
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+  - tick: 8
+    note: the node has been unreachable past the threshold, so the sweep force-deletes the wedged pod with grace zero and Phase B rebuilds the set at the bumped incarnation in the same pass
+    events:
+      - timer.forceDelete[nodeUnreachable]: {slack: 1s}
+  - tick: 9
+    note: the rebuilt pod reports Ready and enters rotation, so the repair completes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}

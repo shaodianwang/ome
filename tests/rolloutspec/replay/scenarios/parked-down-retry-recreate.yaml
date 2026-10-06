@@ -14,6 +14,7 @@ cells:
   - instance/Failed/Parked/api.alreadyExists/before
   - instance/Failed/Parked/timer.retryAt/boundary@T-failedparked-retry
   - instance/Failed/Parked/timer.retryAt/after@T-failedparked-retry
+  - instance/Failed/Parked/gate.allow/before
 initial:
   spec:
     replicas: 1

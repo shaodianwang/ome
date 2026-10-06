@@ -11,6 +11,7 @@ arrows:
 cells:
   - instance/Failed/Repair/spec.revision/boundary@T-failedrepair-corrective
   - instance/Failed/Repair/spec.revision/after@T-failedrepair-corrective
+  - instance/Failed/Repair/gate.allow/before
 initial:
   spec:
     replicas: 1

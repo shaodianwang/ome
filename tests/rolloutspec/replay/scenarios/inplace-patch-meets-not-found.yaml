@@ -1,0 +1,46 @@
+# An in-place update whose image patch meets a not-found answer: the pod
+# is gone by the time the patch is written. The pass fails once, with the
+# error as its requeue, and the next pass re-derives the pod set, finds
+# the roll's only pod gone and re-resolves the mode to a recreate, which
+# renders the replacement at the target and promotes on it.
+scenario: inplace-patch-meets-not-found
+arrows:
+  - T-ready-inplace
+  - T-inplace-podlost-recreate
+  - T-drain-ready
+cells:
+  - instance/Update/InPlace/api.notFound/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation and its gate reads False, and the image patch meets a not-found answer because the pod is gone; the pass fails once with the error as its requeue
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.servingOff[source]: {pod: {index: 0}}
+      - api.notFound: {verb: patch, resource: pods}
+  - tick: 5
+    note: the next pass re-derives the pod set, finds the roll's only pod gone and re-resolves the mode to a recreate, which renders the replacement at the target
+  - tick: 6
+    note: the replacement reports Ready and enters rotation, so the Instance promotes onto the target
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}

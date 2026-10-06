@@ -1,0 +1,74 @@
+# The replacement gang's PodGroup is taken over by another controller, so
+# the gang verdict fails the marker alone with its operation kept; the
+# group is then deleted from outside and restored by the PodGroup pass, and
+# the per-Instance worker count grows. A width change mints no revision,
+# and the source's build reads the plan's live Runner list on every pass:
+# the replacement's PodGroup is widened and the missing member is created
+# at the pinned revision, and the hand-over waits for the whole widened
+# replacement before the source drains and the Failed marker is promoted.
+scenario: gang-target-failed-verdict-width-grow-widens-the-replacement
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-failedgangtarget-ready
+cells:
+  - instance/Failed/GangSurgeTarget/spec.gangWidth[grow]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement group's controller reference is rewritten to another owner; the gang verdict ends the marker alone, Failed with its operation kept, while the source stays Updating and keeps driving the surge
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 1}
+  - tick: 6
+    note: the foreign group is deleted from outside; the surge index is pinned in the plan, so the PodGroup pass restores the group and the names are no longer withheld
+    events:
+      - gang.podGroup[Deleted]: {instance: 1}
+  - tick: 7
+    note: the width grows to two workers; the edit mints no revision, and the source's build reads the live Runner list, so both PodGroups are widened and the missing replacement member is created at the pinned revision
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+  - tick: 8
+    note: both original replacement members report Ready and the leader enters rotation; the replacement is still short of the member the width added, so the source stays at the Surge step
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker, ordinal: 0}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 9
+    note: the added member reports Ready, so the whole widened replacement is runtime-ready and the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: worker, ordinal: 1}}
+  - tick: 10
+    note: the source leader leaves the routed Service, so the drain has converged and the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 11
+    note: the source pods are gone, so the Failed marker is promoted Ready on the pinned revision at the new width and the source row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

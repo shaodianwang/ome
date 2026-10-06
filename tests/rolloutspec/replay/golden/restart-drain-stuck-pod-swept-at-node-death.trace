@@ -1,0 +1,50 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note after a minute of steady serving the runner restarts, so the repair opens a Restart and takes the pod out of serving
+tick=2 apply clock.advance by=1m0s now=t+1m0s
+tick=2 apply pod.containerRestart pod=svc-a-engine-0-default-0 container=ome-container reason=OOMKilled now=t+1m0s
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-8aa14b8b readySince=t+0s op=op#1{type=Restart step=Drain reason=pod svc-a-engine-0-default-0 container ome-container restarted after Ready: OOMKilled (exit 1) started=t+1m0s lastProgressAt=t+1m0s deadline=t+31m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=OOMKilled container=ome-container exitCode=1} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod svc-a-engine-0-default-0 container ome-container restarted after Ready: OOMKilled (exit 1) (incarnation=2)
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=2 pass result=after:5s
+tick=3 note the old pod leaves rotation, so the drain deletes it
+tick=3 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+1m0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=3 pass result=after:5s
+tick=4 note the node under the Terminating pod stops reporting; the pod stays Terminating and Phase A waits on the live old-pod check
+tick=4 apply pod.nodeLost[UnreachableTaint] pod=svc-a-engine-0-default-0 node=node-0 evidence=UnreachableTaint since=t+1m0s now=t+1m0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pass result=after:5s
+tick=5 note the kubelet never acknowledges the deletion, so the object stays behind with no finalizer on it; with no force-delete policy configured nothing frees the name
+tick=5 apply pod.stuckTerminating pod=svc-a-engine-0-default-0 deletionDeadline=t+1m0s now=t+1m0s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pass result=after:5s
+tick=6 note a force-delete policy is configured; the next pass's sweep reads it, and nothing on the row changes on the edit itself
+tick=6 apply config.changed[forceDelete] forceDelete={overdueSlack=1m nodeUnreachableThreshold=5m} now=t+1m0s
+tick=6 row=0 write no-op precondition=no-change
+tick=6 pass result=after:5s
+tick=7 note the overdue clock elapses on the wedged pod, but its node's unreachable taint is still under the threshold, so the sweep has no node-death evidence and frees nothing
+tick=7 apply timer.forceDelete[overdueSlack] to=t+2m1s now=t+2m1s
+tick=7 row=0 write no-op precondition=no-change
+tick=7 pass result=after:5s
+tick=8 note the node has been unreachable past the threshold, so the sweep force-deletes the wedged pod with grace zero and Phase B rebuilds the set at the bumped incarnation in the same pass
+tick=8 apply timer.forceDelete[nodeUnreachable] to=t+6m1s now=t+6m1s
+tick=8 pod delete name=svc-a-engine-0-default-0 grace=0 uidPrecondition=set
+tick=8 event Warning PodForceDeleted OMENative component=engine instance=0: force-deleted stuck-Terminating pod svc-a-engine-0-default-0 on node node-0 (evidence=node-unreachable-taint, 5m1s past the pod's own deletion deadline)
+tick=8 row=0 write no-op precondition=no-change
+tick=8 pod create name=svc-a-engine-0-default-0 revision=8aa14b8b incarnation=2 ordinal=0
+tick=8 pass result=after:5s
+tick=9 note the rebuilt pod reports Ready and enters rotation, so the repair completes
+tick=9 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+6m1s
+tick=9 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+6m1s
+tick=9 row=0 write no-op precondition=no-change
+tick=9 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=9 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-8aa14b8b readySince=t+6m1s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=OOMKilled container=ome-container exitCode=1} precondition=ok
+tick=9 event Normal RestartCompleted OMENative component=engine instance=0 restart complete (incarnation=2)
+tick=9 hold cleared
+tick=9 row=0 write no-op precondition=no-change
+tick=9 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=9 pass result=none

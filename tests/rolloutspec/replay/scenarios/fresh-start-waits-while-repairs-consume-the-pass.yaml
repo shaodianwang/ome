@@ -1,0 +1,126 @@
+# Three gangs roll by recreate under an unavailability budget of one; a
+# partition keeps the first on its revision while the other two roll onto
+# the new one. The second gang then loses its worker and a plain repair
+# opens and stays open, and the third gang's worker crash-loops while its
+# leader serves. The strategy is switched to a surge whose budget admits
+# every start and the partition is lifted while the repair is open: the
+# first gang's fresh start waits on the passes the open repair consumes,
+# including the pass on which the third gang's crash-loop repair, which
+# would take a serving set offline, is denied by the unavailability
+# budget the open repair exhausts and the row is parked Failed naming the
+# crash. The start opens on the pass the open repair completes, when
+# nothing is left for a repair to consume.
+scenario: fresh-start-waits-while-repairs-consume-the-pass
+arrows:
+  - T-ready-recreate
+  - T-drain-ready
+  - T-ready-restart
+  - T-restart-ready
+  - T-ready-surge
+  - T-empty-gang-surge-target
+cells:
+  - instance/Ready/spec.revision/before
+  - instance/Ready/pod.waiting[CrashLoopBackOff]/before
+  - instance/Ready/pod.deleted[source]/boundary@T-ready-restart
+  - instance/Ready/spec.partition/before
+initial:
+  spec:
+    replicas: 3
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    maxSurge: "3"
+    maxUnavailable: "1"
+    partition: 1
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the three gangs' PodGroups are announced before their first members, and the Create pass materializes every member
+  - tick: 2
+    note: every member reports Ready and every leader enters rotation, so the three gangs promote
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 1, runner: leader}}
+      - pod.ready[source]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 1, runner: leader}}
+      - pod.ready[source]: {pod: {index: 2, runner: leader}}
+      - pod.ready[source]: {pod: {index: 2, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 2, runner: leader}}
+  - tick: 3
+    note: a new revision is pushed; the partition keeps the first gang on its revision, and the unavailability budget admits one recreate, so the second gang's gates go down and the third waits on the budget
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the second gang's leader leaves rotation, so Phase A deletes both members
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1, runner: leader}}
+  - tick: 5
+    note: both members are gone, so Phase B rebuilds the gang at the new revision
+    events:
+      - pod.deleted[source]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 1, runner: worker}}
+  - tick: 6
+    note: both rebuilt members report Ready and the leader enters rotation, so the second gang promotes onto the new revision
+    events:
+      - pod.ready[source]: {pod: {index: 1, runner: leader}}
+      - pod.ready[source]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 1, runner: leader}}
+  - tick: 7
+    note: the budget frees, so the third gang's recreate opens and its gates go down
+  - tick: 8
+    note: the third gang's leader leaves rotation, so Phase A deletes both members
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 2, runner: leader}}
+  - tick: 9
+    note: both members are gone, so Phase B rebuilds the gang at the new revision
+    events:
+      - pod.deleted[source]: {pod: {index: 2, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 2, runner: worker}}
+  - tick: 10
+    note: both rebuilt members report Ready and the leader enters rotation, so the third gang promotes onto the new revision
+    events:
+      - pod.ready[source]: {pod: {index: 2, runner: leader}}
+      - pod.ready[source]: {pod: {index: 2, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 2, runner: leader}}
+  - tick: 11
+    note: two minutes on the second gang's worker is deleted out from under it, so the repair opens a Restart over the gang and takes the leader out of serving
+    events:
+      - clock.advance: 2m
+      - pod.deleted[source]: {pod: {index: 1, runner: worker}}
+  - tick: 12
+    note: the second gang's leader leaves rotation, so the drain deletes it
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1, runner: leader}}
+  - tick: 13
+    note: the old leader is gone, so both members are rebuilt at the bumped incarnation, and the rebuilt members stay Pending for a long while
+    events:
+      - pod.deleted[source]: {pod: {index: 1, runner: leader}}
+  - tick: 14
+    note: the third gang's worker loses readiness and crash-loops while its leader serves; inside the stuck-pod grace the wedge is not yet evidence, so nothing is selected
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 2, runner: worker}}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 2, runner: worker}, message: "back-off restarting failed container"}
+  - tick: 15
+    note: two minutes on the wedge is past the grace, so the third gang's repair is selected; it would take a serving set offline, and the unavailability budget the open repair exhausts denies it, so no repair opens and the escalation parks the gang Failed naming the crash. The strategy is switched to a surge whose budget admits every start and the partition is lifted, so the first gang is a fresh start the budget admits; the pass is the repairs', so the start waits
+    events:
+      - clock.advance: 2m
+      - spec.strategy: {strategy: SurgeThenDrain}
+      - spec.partition: {to: 0}
+  - tick: 16
+    note: the second gang's rebuilt members report Ready and the leader enters rotation, so its repair completes; nothing is left for a repair to consume, so the update pass runs on the same pass and the first gang's fresh start opens its surge, claiming a replacement index
+    events:
+      - pod.ready[source]: {pod: {index: 1, runner: leader}}
+      - pod.ready[source]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 1, runner: leader}}
+  - tick: 17
+    note: the replacement gang's PodGroup is announced before its first member, and both members are created

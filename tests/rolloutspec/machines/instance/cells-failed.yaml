@@ -557,26 +557,27 @@ cells:
     outcome: transition
     to: Create/CreatePods
     guard: the Backoff block for the same target is due and no authorized attempt at that revision is in flight
-    note: a due block only stops denying; the row then re-enters through whichever path its strategy resolves — the Create pass when no pod remains, otherwise Surge, Drain or InPlace, except that an Instance never promoted has no serving source for a surge to keep and re-enters as a recreate under every strategy — and the block flips to RetryInProgress at attempt-stamp time, after the budget and coordination gates admit the start. An attempt parked after its disposition re-enters the same way as a fresh start - the entry stamps never continue a parked attempt, so a new operation with its own identity and deadline replaces it and the parked set becomes the one a recreate drains
+    note: a due block only stops denying; the row then re-enters through whichever path its strategy resolves — the Create pass when no pod remains, otherwise Surge, Drain or InPlace, except that an Instance never promoted has no serving source for a surge to keep and re-enters as a recreate under every strategy — and the block flips to RetryInProgress at attempt-stamp time, after the budget and coordination gates admit the start. An attempt parked after its disposition re-enters the same way as a fresh start - the entry stamps never continue a parked attempt, so a new operation with its own identity and deadline replaces it and the parked set becomes the one a recreate drains. The flip belongs to the attempt the due block admitted - one opened at or after the block's next retry time; the entry stamps run again on every pass of an attempt, and a re-stamp of a sibling attempt opened before that time, in flight since before the failure the block counts, writes no flip, so the block stays in Backoff with its wave recorded while such attempts run
     invariants: [retryblock.gates.fresh.attempts, one.operation.per.instance]
     placement: perm
     coverage:
       perm: []
-      unit: [TestDetectUpdate_RetryBlockDue_AllowsWithoutFlip, TestDetectUpdate_RetryBlockDueBoundaryExact, TestCreate_RetryBlockBackoffDue_AllowsAndFlips, TestPatchSurgingForUpdate_FlipsBackoffOnAttemptStart, TestEvaluateUpdateTrigger_ParkedAttemptIsGatedByItsLadder, TestUpdateEntryStamps_OpenANewAttemptOverAParkedOne, TestCrashBeforePromotion_DisposedRollAttemptFollowsItsPods]
-      replay: [T-failed-retry, failed-retry-inplace, failed-retry-recreate, failed-retry-surge, surge-crashloop-bound]
+      unit: [TestDetectUpdate_RetryBlockDue_AllowsWithoutFlip, TestDetectUpdate_RetryBlockDueBoundaryExact, TestCreate_RetryBlockBackoffDue_AllowsAndFlips, TestPatchSurgingForUpdate_FlipsBackoffOnAttemptStart, TestEvaluateUpdateTrigger_ParkedAttemptIsGatedByItsLadder, TestUpdateEntryStamps_OpenANewAttemptOverAParkedOne, TestCrashBeforePromotion_DisposedRollAttemptFollowsItsPods, TestEntryStamps_LadderFlipFollowsTheAttempt]
+      replay: [T-failed-retry, failed-retry-inplace, failed-retry-recreate, failed-retry-surge, surge-crashloop-bound, ladder-backoff-survives-sibling-restamps]
       kind: []
     status: current
   - state: Failed
     event: timer.retryAt
     windows: [boundary, after]
     outcome: ignore
-    note: the due block admits exactly one attempt; the RetryInProgress flip written with the attempt stamp is what keeps the next pass from starting a second one
-    placement: perm
+    note: the due block admits exactly one attempt, and the RetryInProgress flip written with that attempt's stamp is what keeps the next pass from starting a second one. The flip follows the attempt, not the pass - the entry stamps run again on every pass of every attempt at the revision, and only an attempt opened at or after the block's next retry time flips it, on its opening pass or a later one that still owes the flip; a re-stamp of a sibling opened before the block was due writes nothing, so a block whose only attempts in flight predate its failure stays in Backoff, keeps the wave it counted, folds the sibling's later failure into that wave instead of counting it, and admits the fresh start that is due
+    placement: unit
     coverage:
       perm: []
-      unit: [TestDetectUpdate_RetryBlockInProgress_DeniesSecondAttempt]
+      unit: [TestDetectUpdate_RetryBlockInProgress_DeniesSecondAttempt, TestEntryStamps_LadderFlipFollowsTheAttempt]
       kind: []
-    status: current
+      replay: [ladder-backoff-survives-sibling-restamps]
+    status: decided
   - state: Failed
     event: timer.expectationsTTL
     outcome: ignore
