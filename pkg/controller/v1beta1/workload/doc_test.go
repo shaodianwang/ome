@@ -12,9 +12,13 @@ package workload_test
 //     escalation, disposition, deadline parking, migrate).
 //   - The component-level revision pair — CurrentRevision /
 //     UpdateRevision — is specTarget-scoped and written ONLY by the IR
-//     controller: CurrentRevision in buildPromoteCurrentRevision,
-//     UpdateRevision in aggregateAndWriteStatus, plus their in-memory
-//     mirror sites. The pair is semantically inseparable (coordination
+//     controller: CurrentRevision in buildPromoteCurrentRevision and,
+//     beside a moving UpdateRevision, in buildRecordUpdateRevision;
+//     UpdateRevision in aggregateAndWriteStatus and
+//     buildRecordUpdateRevision, plus their in-memory mirror sites. The
+//     pair is written as one pair wherever UpdateRevision moves, so no
+//     stored status reads current equal to update while an Instance is
+//     off that revision. The pair is semantically inseparable (coordination
 //     reads RolloutInFlight from their skew; canary rollback load-bears
 //     on CurrentRevision naming the last revision fully rolled forward
 //     onto), so the workload package must never touch either half.
@@ -96,10 +100,17 @@ var transitionWriteAllowlist = []allowedTransitionWrite{
 	},
 	{
 		file: "inferencereplica/convert.go", fn: "buildPromoteCurrentRevision", field: "CurrentRevision", count: 2,
-		why: "the ONE rollup decision site: stamps CurrentRevision from status.CurrentRevisionFor " +
+		why: "the per-pass rollup site: stamps CurrentRevision from status.CurrentRevisionFor " +
 			"(the spec target once every Instance is Ready on it, withdrawn while an Instance still " +
 			"runs another revision; persisted write), then mirrors the committed value onto the " +
 			"caller's in-memory IR (second assignment) so the deferred aggregator observes it",
+	},
+	{
+		file: "inferencereplica/convert.go", fn: "buildRecordUpdateRevision", field: "CurrentRevision", count: 2,
+		why: "the same rollup, status.CurrentRevisionFor over the fresh rows, written in the one " +
+			"status update that moves UpdateRevision, so the stored pair never reads current equal " +
+			"to update while an Instance is pinned to, or runs, another revision (persisted write), " +
+			"then mirrored onto the caller's in-memory IR (second assignment)",
 	},
 	{
 		file: "inferencereplica/convert.go", fn: "buildRecordUpdateRevision", field: "UpdateRevision", count: 2,

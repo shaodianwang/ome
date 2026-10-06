@@ -4439,3 +4439,319 @@ func TestReconcile_TargetRevisionFollowsTheSpecBackToThePriorRevision(t *testing
 		t.Fatalf("%d pod(s) of the withdrawn revision %s remain after the rollback settled", n, next)
 	}
 }
+
+// cutAfterTheTargetRecord wraps base so a pass dies right after the status
+// write that moves the recorded target to revisionName lands: that write
+// goes through, and every later write of the pass fails with a canceled
+// context, as the writes of a manager killed mid-pass do. Reads are
+// untouched, so the pass keeps observing the stored state until it dies.
+func cutAfterTheTargetRecord(base client.WithWatch, revisionName string) client.WithWatch {
+	cut := false
+	deny := func() error {
+		if cut {
+			return context.Canceled
+		}
+		return nil
+	}
+	return interceptor.NewClient(base, interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if err := deny(); err != nil {
+				return err
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if err := deny(); err != nil {
+				return err
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if err := deny(); err != nil {
+				return err
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if err := deny(); err != nil {
+				return err
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if err := deny(); err != nil {
+				return err
+			}
+			return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+		},
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if err := deny(); err != nil {
+				return err
+			}
+			stored, isIR := obj.(*v1beta1.InferenceReplica)
+			movesTheTarget := isIR && stored.Status.UpdateRevision == revisionName
+			if err := c.SubResource(subResourceName).Update(ctx, obj, opts...); err != nil {
+				return err
+			}
+			if movesTheTarget {
+				cut = true
+			}
+			return nil
+		},
+	})
+}
+
+// rollingGangIR is one leader+worker gang Ready on the revision of its
+// stored spec, with the spec then edited to a second image so the next
+// pass opens a SurgeThenDrain gang surge at a fresh index. Returns the IR,
+// the objects backing its Instance, and the prior and next revision names.
+func rollingGangIR(t *testing.T) (*v1beta1.InferenceReplica, []client.Object, string, string) {
+	t.Helper()
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Spec.Runners = []v1beta1.Runner{
+		{Name: v1beta1.RunnerNameLeader, Size: 1, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "ome-container", Image: "sgl:1.0"}},
+		}}},
+		{Name: v1beta1.RunnerNameWorker, Size: 1, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "ome-container", Image: "sgl:1.0"}},
+		}}},
+	}
+	ir.Spec.Lifecycle = &v1beta1.LifecycleSpec{UpdateStrategy: &v1beta1.UpdateStrategy{
+		Type:          v1beta1.UpdateStrategySurgeThenDrain,
+		RollingUpdate: &v1beta1.RollingUpdate{MaxSurge: ptr.To(intstr.FromInt32(1))},
+	}}
+	prior := targetRevisionNameFor(t, ir)
+	for i := range ir.Spec.Runners {
+		ir.Spec.Runners[i].Template.Spec.Containers[0].Image = "sgl:2.0"
+	}
+	ir.Generation = 2
+	next := targetRevisionNameFor(t, ir)
+	if next == prior {
+		t.Fatalf("the image edit must cut a new revision; both resolve to %s", prior)
+	}
+	ir.Status.CurrentRevision = prior
+	ir.Status.UpdateRevision = prior
+	ir.Status.ObservedGeneration = 1
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+		RunningRevision: prior, PodCount: 2, ServingPodCount: 2,
+	}}
+	leader := podForIR(ir, 0, string(v1beta1.RunnerNameLeader), 0, true, true)
+	worker := podForIR(ir, 0, string(v1beta1.RunnerNameWorker), 0, true, true)
+	for _, pod := range []*corev1.Pod{leader, worker} {
+		pod.Labels[query.LabelRevisionHash] = query.RevisionFromName(prior).Hash()
+	}
+	return ir, []client.Object{leader, sliceForIRPod(ir, leader, true), worker, sliceForIRPod(ir, worker, true)}, prior, next
+}
+
+// rollBackTheSpec puts the stored spec back on the first image at a new
+// generation, the way an operator's rollback edit lands.
+func rollBackTheSpec(t *testing.T, c client.Client, ir *v1beta1.InferenceReplica) {
+	t.Helper()
+	live := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), live); err != nil {
+		t.Fatalf("get IR before the rollback: %v", err)
+	}
+	for i := range live.Spec.Runners {
+		live.Spec.Runners[i].Template.Spec.Containers[0].Image = "sgl:1.0"
+	}
+	live.Generation = 3
+	if err := c.Update(context.Background(), live); err != nil {
+		t.Fatalf("roll the spec back: %v", err)
+	}
+}
+
+// pinnedTo reports whether the row's update operation is pinned to
+// revisionName.
+func pinnedTo(row *v1beta1.OMENativeInstanceStatus, revisionName string) bool {
+	return row != nil && row.Operation != nil && row.Operation.Type == v1beta1.InstanceOperationUpdate &&
+		row.Operation.TargetRevision == revisionName
+}
+
+// rowAt returns the stored row at index, or nil.
+func rowAt(ir *v1beta1.InferenceReplica, index int32) *v1beta1.OMENativeInstanceStatus {
+	for i := range ir.Status.InstanceStatuses {
+		if ir.Status.InstanceStatuses[i].Index == index {
+			return &ir.Status.InstanceStatuses[i]
+		}
+	}
+	return nil
+}
+
+// TestReconcile_RollbackPassCutAfterTheTargetRecordLeavesTheRolloutReadingInFlight
+// is the revision pair at rest. The rollback pass is cut right after the
+// write that moves the recorded target back to the prior revision, the way
+// a manager killed as the rollback lands cuts it: the surge pinned to the
+// withdrawn revision still stands, its replacement pod still exists, and
+// nothing runs until a fresh manager takes over. That stored status must
+// read the rollout as open, so the current revision is withdrawn in the
+// same write that moves the target. The fresh manager then closes the
+// abandoned surge in two passes.
+//
+// Cells: instance/Update/Surge/spec.revision/before, instance/Update/Surge/ctrl.crash/boundary@T-surge-abandon-superseded
+func TestReconcile_RollbackPassCutAfterTheTargetRecordLeavesTheRolloutReadingInFlight(t *testing.T) {
+	ir, objs, prior, next := rollingSingletonIR(t)
+	r, c := newReconciler(t, append([]client.Object{ir}, objs...)...)
+	r.Recorder = record.NewFakeRecorder(64)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+	for pass := 0; pass < 6 && podsOnRevision(t, c, ir.Namespace, next) == 0; pass++ {
+		if _, err := r.Reconcile(context.Background(), request); err != nil {
+			t.Fatalf("roll pass %d: %v", pass, err)
+		}
+	}
+	if podsOnRevision(t, c, ir.Namespace, next) == 0 {
+		t.Fatalf("the spec edit never opened a roll: no pod of %s exists", next)
+	}
+	rolling := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), rolling); err != nil {
+		t.Fatalf("get IR: %v", err)
+	}
+	if rolling.Status.CurrentRevision != prior || rolling.Status.UpdateRevision != next || !pinnedTo(rowAt(rolling, 0), next) {
+		t.Fatalf("an open roll must read current=%s update=%s with Instance 0 pinned to %s, got current=%q update=%q row=%+v",
+			prior, next, next, rolling.Status.CurrentRevision, rolling.Status.UpdateRevision, rowAt(rolling, 0))
+	}
+
+	// The rollback lands and the manager dies right after recording it.
+	rollBackTheSpec(t, c, ir)
+	r.Expectations = workloadtypes.NewExpectations()
+	r.Client = cutAfterTheTargetRecord(c.(client.WithWatch), prior)
+	if _, err := r.Reconcile(context.Background(), request); err == nil {
+		t.Fatalf("the pass completed; it must die after the write that moves the recorded target")
+	}
+	stored := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), stored); err != nil {
+		t.Fatalf("get IR after the cut: %v", err)
+	}
+	if stored.Status.UpdateRevision != prior {
+		t.Fatalf("the cut landed before the record: updateRevision=%q want %s", stored.Status.UpdateRevision, prior)
+	}
+	if !pinnedTo(rowAt(stored, 0), next) || podsOnRevision(t, c, ir.Namespace, next) == 0 {
+		t.Fatalf("the cut landed after the abandon began: row=%+v pods of %s=%d; the pin and the replacement must both outlive the cut",
+			rowAt(stored, 0), next, podsOnRevision(t, c, ir.Namespace, next))
+	}
+	if stored.Status.CurrentRevision != "" {
+		t.Fatalf("currentRevision=%q beside updateRevision=%s while Instance 0 is still pinned to %s and its replacement exists: the stored status reads a rollout as done that is not",
+			stored.Status.CurrentRevision, prior, next)
+	}
+
+	// A fresh manager has nothing in memory: the stored status and the pods
+	// alone. Its expectations are satisfied by watch events a fake client
+	// never sends, so each pass starts with a fresh cache.
+	r.Client = c
+	after := stored
+	for pass := 1; pass <= 2; pass++ {
+		r.Expectations = workloadtypes.NewExpectations()
+		if _, err := r.Reconcile(context.Background(), request); err != nil {
+			t.Fatalf("fresh manager pass %d: %v", pass, err)
+		}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), after); err != nil {
+			t.Fatalf("get IR after fresh manager pass %d: %v", pass, err)
+		}
+	}
+	if after.Status.CurrentRevision != prior || after.Status.UpdateRevision != prior {
+		t.Fatalf("two passes of a fresh manager must land the rollback: current=%q update=%q want both %s",
+			after.Status.CurrentRevision, after.Status.UpdateRevision, prior)
+	}
+	if row := rowAt(after, 0); row == nil || row.Phase != v1beta1.OMENativeInstanceReady || row.RunningRevision != prior || row.Operation != nil {
+		t.Fatalf("Instance 0 must be Ready on %s with no operation once the abandon settled, got %+v", prior, row)
+	}
+	if n := podsOnRevision(t, c, ir.Namespace, next); n != 0 {
+		t.Fatalf("%d pod(s) of the withdrawn revision %s remain after the rollback settled", n, next)
+	}
+}
+
+// TestReconcile_GangRollbackPassCutAfterTheTargetRecordLeavesTheRolloutReadingInFlight
+// is the gang twin: the replacement is a whole gang at a fresh index with
+// its marker row, and the pass is cut right after the write that moves the
+// recorded target back. The stored status must read the rollout as open
+// while the source is pinned and the marker claims the withdrawn revision;
+// a fresh manager then abandons the replacement gang in two passes.
+//
+// Cells: instance/Update/Surge/spec.revision/before, instance/Update/GangSurgeTarget/spec.revision/before, instance/Update/Surge/ctrl.crash/boundary@T-surge-abandon-superseded, instance/Update/GangSurgeTarget/ctrl.crash/before
+func TestReconcile_GangRollbackPassCutAfterTheTargetRecordLeavesTheRolloutReadingInFlight(t *testing.T) {
+	ir, objs, prior, next := rollingGangIR(t)
+	r, c := newReconciler(t, append([]client.Object{ir}, objs...)...)
+	r.Recorder = record.NewFakeRecorder(64)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+	markerOf := func(stored *v1beta1.InferenceReplica) *v1beta1.OMENativeInstanceStatus {
+		for i := range stored.Status.InstanceStatuses {
+			row := &stored.Status.InstanceStatuses[i]
+			if row.Operation != nil && row.Operation.Type == v1beta1.InstanceOperationUpdate &&
+				(row.Operation.Step == workloadtypes.UpdateStepGangSurgeTarget || row.Operation.Step == workloadtypes.UpdateStepGangSurgeTargetCleanup) {
+				return row
+			}
+		}
+		return nil
+	}
+	rolling := &v1beta1.InferenceReplica{}
+	for pass := 0; pass < 8 && (podsOnRevision(t, c, ir.Namespace, next) < 2 || markerOf(rolling) == nil); pass++ {
+		if _, err := r.Reconcile(context.Background(), request); err != nil {
+			t.Fatalf("roll pass %d: %v", pass, err)
+		}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), rolling); err != nil {
+			t.Fatalf("get IR during the roll: %v", err)
+		}
+	}
+	if podsOnRevision(t, c, ir.Namespace, next) < 2 || markerOf(rolling) == nil {
+		t.Fatalf("the spec edit never opened a gang surge: pods of %s=%d rows=%+v", next, podsOnRevision(t, c, ir.Namespace, next), rolling.Status.InstanceStatuses)
+	}
+	if rolling.Status.CurrentRevision != prior || rolling.Status.UpdateRevision != next || !pinnedTo(rowAt(rolling, 0), next) {
+		t.Fatalf("an open gang surge must read current=%s update=%s with the source pinned to %s, got current=%q update=%q row=%+v",
+			prior, next, next, rolling.Status.CurrentRevision, rolling.Status.UpdateRevision, rowAt(rolling, 0))
+	}
+
+	// The rollback lands and the manager dies right after recording it.
+	rollBackTheSpec(t, c, ir)
+	r.Expectations = workloadtypes.NewExpectations()
+	r.Client = cutAfterTheTargetRecord(c.(client.WithWatch), prior)
+	if _, err := r.Reconcile(context.Background(), request); err == nil {
+		t.Fatalf("the pass completed; it must die after the write that moves the recorded target")
+	}
+	stored := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), stored); err != nil {
+		t.Fatalf("get IR after the cut: %v", err)
+	}
+	if stored.Status.UpdateRevision != prior {
+		t.Fatalf("the cut landed before the record: updateRevision=%q want %s", stored.Status.UpdateRevision, prior)
+	}
+	marker := markerOf(stored)
+	if !pinnedTo(rowAt(stored, 0), next) || marker == nil || marker.Operation.Step != workloadtypes.UpdateStepGangSurgeTarget ||
+		podsOnRevision(t, c, ir.Namespace, next) < 2 {
+		t.Fatalf("the cut landed after the abandon began: source=%+v marker=%+v pods of %s=%d; the pin, the marker and the replacement gang must all outlive the cut",
+			rowAt(stored, 0), marker, next, podsOnRevision(t, c, ir.Namespace, next))
+	}
+	if stored.Status.CurrentRevision != "" {
+		t.Fatalf("currentRevision=%q beside updateRevision=%s while the source is pinned to %s and its replacement gang exists: the stored status reads a rollout as done that is not",
+			stored.Status.CurrentRevision, prior, next)
+	}
+
+	// A fresh manager has nothing in memory: the stored status and the pods
+	// alone. Its expectations are satisfied by watch events a fake client
+	// never sends, so each pass starts with a fresh cache.
+	r.Client = c
+	after := stored
+	for pass := 1; pass <= 2; pass++ {
+		r.Expectations = workloadtypes.NewExpectations()
+		if _, err := r.Reconcile(context.Background(), request); err != nil {
+			t.Fatalf("fresh manager pass %d: %v", pass, err)
+		}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), after); err != nil {
+			t.Fatalf("get IR after fresh manager pass %d: %v", pass, err)
+		}
+	}
+	if after.Status.CurrentRevision != prior || after.Status.UpdateRevision != prior {
+		t.Fatalf("two passes of a fresh manager must land the rollback: current=%q update=%q want both %s",
+			after.Status.CurrentRevision, after.Status.UpdateRevision, prior)
+	}
+	if row := rowAt(after, 0); row == nil || row.Phase != v1beta1.OMENativeInstanceReady || row.RunningRevision != prior || row.Operation != nil {
+		t.Fatalf("the source must be Ready on %s with no operation once the abandon settled, got %+v", prior, row)
+	}
+	if marker := markerOf(after); marker != nil {
+		t.Fatalf("the replacement gang's marker row outlived the abandon: %+v", marker)
+	}
+	if n := podsOnRevision(t, c, ir.Namespace, next); n != 0 {
+		t.Fatalf("%d pod(s) of the withdrawn revision %s remain after the rollback settled", n, next)
+	}
+}

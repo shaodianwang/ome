@@ -488,10 +488,10 @@ cells:
   - state: Update/GangSurgeTarget
     event: ctrl.crash
     outcome: ignore
-    note: the durable anchor is the pair — the source's SurgeIndex plus this marker row — so a restart resumes the surge; a marker lost between the two writes is re-established before any pod effect, and a marker restored over an incomplete replacement is restored straight into the cleanup claim; the Component's revision rollup is recomputed from the pair on the first pass after the restart, so a rollback over the surge keeps reading in flight until the pair is closed
-    invariants: [rollup.open.while.pinned]
+    note: the durable anchor is the pair — the source's SurgeIndex plus this marker row — so a restart resumes the surge; a marker lost between the two writes is re-established before any pod effect, and a marker restored over an incomplete replacement is restored straight into the cleanup claim; the Component's revision rollup is recomputed from the pair on the first pass after the restart, so a rollback over the surge keeps reading in flight until the pair is closed, and the revision pair is consistent at rest because the write that moves the recorded target back recomputes the current revision over the source's pin and this marker, so the status reads in flight across the restart itself
+    invariants: [rollup.open.while.pinned, pair.consistent.at.rest]
     placement: kind
-    coverage: {perm: [], unit: [TestGangSurge_RestoresMissingTargetMarkerBeforeEffects, TestGangSurge_RestartAfterTargetStampFailureRestoresCleanupBeforeRedirects, TestRollbackOverGangSurge_ResumedManagerKeepsTheRolloutOpenUntilTheReplacementIsGone], kind: [], replay: [gang-surge-resumed-from-status]}
+    coverage: {perm: [], unit: [TestGangSurge_RestoresMissingTargetMarkerBeforeEffects, TestGangSurge_RestartAfterTargetStampFailureRestoresCleanupBeforeRedirects, TestRollbackOverGangSurge_ResumedManagerKeepsTheRolloutOpenUntilTheReplacementIsGone, TestReconcile_GangRollbackPassCutAfterTheTargetRecordLeavesTheRolloutReadingInFlight], kind: [], replay: [gang-surge-resumed-from-status]}
     status: decided
   - state: Update/GangSurgeTarget
     event: ctrl.staleRead

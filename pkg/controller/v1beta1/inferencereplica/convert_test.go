@@ -2440,6 +2440,86 @@ func TestPromoteCurrentRevision_GenerationChangeAborts(t *testing.T) {
 	g.Expect(persisted.Status.CurrentRevision).To(gomega.Equal(promotePriorRev))
 }
 
+// TestRecordUpdateRevision_WritesTheRevisionPairAsOnePair pins the record
+// write of the spec target as a writer of both halves of the revision pair:
+// the current revision is recomputed from the fresh rows in the same write,
+// so no status at rest reads current equal to update while an Instance is
+// pinned to, or runs, another revision. A forward roll keeps the recorded
+// current; a rollback onto it over a pinned surge withdraws it; a rollback
+// no Instance ever left keeps it; a target already recorded writes nothing.
+func TestRecordUpdateRevision_WritesTheRevisionPairAsOnePair(t *testing.T) {
+	pinnedSource := func(target string) v1beta1.OMENativeInstanceStatus {
+		return v1beta1.OMENativeInstanceStatus{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating, RunningRevision: promotePriorRev,
+			Operation: &v1beta1.InstanceOperation{ID: "surge-0", Type: v1beta1.InstanceOperationUpdate, Step: workloadtypes.UpdateStepSurge, TargetRevision: target}}
+	}
+	readyOn := func(index int32, rev string) v1beta1.OMENativeInstanceStatus {
+		return v1beta1.OMENativeInstanceStatus{Index: index, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: rev}
+	}
+	withPair := func(current, update string, rows ...v1beta1.OMENativeInstanceStatus) *v1beta1.InferenceReplica {
+		ir := baselineIR("llama-engine", "prod", 2)
+		ir.Status.CurrentRevision = current
+		ir.Status.UpdateRevision = update
+		ir.Status.InstanceStatuses = rows
+		return ir
+	}
+	expectPair := func(t *testing.T, r *Reconciler, ir *v1beta1.InferenceReplica, current, update string) {
+		t.Helper()
+		g := gomega.NewWithT(t)
+		fresh := getFreshIR(t, r, ir)
+		g.Expect(fresh.Status.UpdateRevision).To(gomega.Equal(update), "the stored update revision")
+		g.Expect(fresh.Status.CurrentRevision).To(gomega.Equal(current), "the stored current revision")
+		g.Expect(ir.Status.UpdateRevision).To(gomega.Equal(update), "the in-memory update revision")
+		g.Expect(ir.Status.CurrentRevision).To(gomega.Equal(current), "the in-memory current revision")
+	}
+
+	t.Run("a rollback onto the current revision over a pinned surge withdraws it in the same write", func(t *testing.T) {
+		ir := withPair(promotePriorRev, promoteTargetRev, pinnedSource(promoteTargetRev), readyOn(1, promotePriorRev))
+		r, _ := newReconciler(t, ir)
+		record := buildRecordUpdateRevision(r.statusWriter(), r.Client, ir)
+		gomega.NewWithT(t).Expect(record(context.Background(), promotePriorRev)).To(gomega.Succeed())
+		expectPair(t, r, ir, "", promotePriorRev)
+	})
+
+	t.Run("a rollback over a pinned gang surge withdraws it in the same write", func(t *testing.T) {
+		surgeIdx := int32(2)
+		source := pinnedSource(promoteTargetRev)
+		source.Operation.SurgeIndex = &surgeIdx
+		marker := v1beta1.OMENativeInstanceStatus{Index: surgeIdx, Phase: v1beta1.OMENativeInstanceCreating, TargetRevision: promoteTargetRev,
+			Operation: &v1beta1.InstanceOperation{ID: "gangsurgetarget-2", Type: v1beta1.InstanceOperationUpdate, Step: workloadtypes.UpdateStepGangSurgeTarget, TargetRevision: promoteTargetRev}}
+		ir := withPair(promotePriorRev, promoteTargetRev, source, readyOn(1, promotePriorRev), marker)
+		r, _ := newReconciler(t, ir)
+		record := buildRecordUpdateRevision(r.statusWriter(), r.Client, ir)
+		gomega.NewWithT(t).Expect(record(context.Background(), promotePriorRev)).To(gomega.Succeed())
+		expectPair(t, r, ir, "", promotePriorRev)
+	})
+
+	t.Run("a forward roll keeps the recorded current revision", func(t *testing.T) {
+		ir := withPair(promotePriorRev, promotePriorRev, readyOn(0, promotePriorRev), readyOn(1, promotePriorRev))
+		r, _ := newReconciler(t, ir)
+		record := buildRecordUpdateRevision(r.statusWriter(), r.Client, ir)
+		gomega.NewWithT(t).Expect(record(context.Background(), promoteTargetRev)).To(gomega.Succeed())
+		expectPair(t, r, ir, promotePriorRev, promoteTargetRev)
+	})
+
+	t.Run("a rollback no Instance ever left keeps the current revision", func(t *testing.T) {
+		ir := withPair(promotePriorRev, promoteTargetRev, readyOn(0, promotePriorRev), readyOn(1, promotePriorRev))
+		r, _ := newReconciler(t, ir)
+		record := buildRecordUpdateRevision(r.statusWriter(), r.Client, ir)
+		gomega.NewWithT(t).Expect(record(context.Background(), promotePriorRev)).To(gomega.Succeed())
+		expectPair(t, r, ir, promotePriorRev, promotePriorRev)
+	})
+
+	t.Run("a target already recorded writes nothing", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		ir := withPair(promotePriorRev, promotePriorRev, pinnedSource(promoteTargetRev), readyOn(1, promotePriorRev))
+		r, _ := newReconciler(t, ir)
+		before := getFreshIR(t, r, ir).ResourceVersion
+		record := buildRecordUpdateRevision(r.statusWriter(), r.Client, ir)
+		g.Expect(record(context.Background(), promotePriorRev)).To(gomega.Succeed())
+		g.Expect(getFreshIR(t, r, ir).ResourceVersion).To(gomega.Equal(before), "the record is not the per-pass rollup; an unchanged target writes nothing")
+	})
+}
+
 // TestBuildMutateRetryBlock_PersistCreatesBlock pins the Persist path:
 // the closure creates the status entry for a previously-absent target
 // revision, the write lands on the apiserver (proven by a re-read from

@@ -670,7 +670,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// pass that ends between creating a pod and the deferred publication
 	// then leaves pods of the new revision beside a status that already
 	// names it, never beside one still reporting the previous revision as
-	// current and done.
+	// current and done. The record moves the pair as one pair, so a
+	// rollback onto the current revision reads open from this write on.
 	if specTarget != nil && ir.Status.UpdateRevision != specTarget.Name {
 		if rerr := buildRecordUpdateRevision(r.statusWriter(), r.liveReader(), ir)(ctx, specTarget.Name); rerr != nil {
 			if errors.Is(rerr, workloadtypes.ErrStatusOwnerGone) {

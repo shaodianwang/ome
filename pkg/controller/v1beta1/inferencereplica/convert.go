@@ -1105,8 +1105,12 @@ func buildPromoteCurrentRevision(writer statusWriter, reads client.Reader, ir *v
 // buildRecordUpdateRevision writes status.updateRevision ahead of the pass
 // that first renders a revision: re-read under retry.RetryOnConflict,
 // refuse a generation the pass did not plan against, write, and mirror the
-// committed name onto the caller's in-memory IR. The publication at the end
+// committed names onto the caller's in-memory IR. The publication at the end
 // of the pass restates the same name beside the counters.
+//
+// The pair is written as one pair: the same write sets status.currentRevision
+// from status.CurrentRevisionFor over the fresh rows, so no stored status reads
+// current equal to update while an Instance runs, or is pinned to, another revision.
 func buildRecordUpdateRevision(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, targetName string) error {
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
@@ -1115,7 +1119,10 @@ func buildRecordUpdateRevision(writer statusWriter, reads client.Reader, ir *v1b
 		if targetName == "" {
 			return nil
 		}
+		var committedCurrent string
+		wrote := false
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			committedCurrent, wrote = "", false
 			fresh := &v1beta1.InferenceReplica{}
 			source, err := irstatus.GetDecoded(ctx, reads, key, fresh)
 			if err != nil {
@@ -1133,13 +1140,17 @@ func buildRecordUpdateRevision(writer statusWriter, reads client.Reader, ir *v1b
 			if fresh.Status.UpdateRevision == targetName {
 				return nil
 			}
+			insts := v1beta1convert.InstanceStatusSliceToWorkload(fresh.Status.InstanceStatuses)
+			current := workloadstatus.CurrentRevisionFor(insts, fresh.Status.CurrentRevision, targetName, retryBlocksFromIR(fresh))
 			fresh.Status.UpdateRevision = targetName
+			fresh.Status.CurrentRevision = current
 			if err := updateInferenceReplicaStatus(ctx, writer, fresh, source); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("update IR status: %w", err)
 			}
+			committedCurrent, wrote = current, true
 			return nil
 		})
 		if err != nil {
@@ -1147,6 +1158,9 @@ func buildRecordUpdateRevision(writer statusWriter, reads client.Reader, ir *v1b
 		}
 		if ir != nil {
 			ir.Status.UpdateRevision = targetName
+			if wrote {
+				ir.Status.CurrentRevision = committedCurrent
+			}
 		}
 		return nil
 	}
