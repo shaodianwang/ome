@@ -1,0 +1,48 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod count 0 below desired 1 (incarnation=2)
+tick=2 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=2 ordinal=0
+tick=2 pass result=after:5s
+tick=3 note the rebuilt pod reappears under a new UID at the bumped incarnation; the pass addresses the recreate by name and label, so the same-name pod satisfies it
+tick=3 apply pod.uidRotated pod=svc-a-engine-0-default-0 uid=uid#2→uid#3 now=t+0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=after:5s
+tick=4 note the queue label moves; the edit is outside the revision hash and the repair reads only the running revision
+tick=4 apply spec.annotationOnly labels=[kueue.x-k8s.io/queue-name:queue-b] generation=1 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pass result=after:5s
+tick=5 note the readiness timeout is shortened; the Restart's deadline was stamped once at entry and is preserved
+tick=5 apply spec.policyTuning[instanceReadyTimeout] instanceReadyTimeout=10m generation=2 now=t+0s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pass result=after:5s
+tick=6 note the mark-not-ready knob flips; it is consulted on the in-place path only
+tick=6 apply spec.policyTuning[markNotReady] markNotReady=true generation=3 now=t+0s
+tick=6 row=0 write no-op precondition=no-change
+tick=6 pass result=after:5s
+tick=7 note the migration mode changes; a Restart attempt is never disposed, so the repair never reaches the relocation branch
+tick=7 apply spec.policyTuning[migrationPolicy] migrationPolicy=Auto generation=4 now=t+0s
+tick=7 row=0 write no-op precondition=no-change
+tick=7 pass result=after:5s
+tick=8 note the retry ladder is re-tuned; the retry gate is consulted before an attempt starts, never on the repair path
+tick=8 apply config.changed[updateRetry] updateRetry={maxAttempts=3 initialDelay=5m maxDelay=10m multiplier=2} now=t+0s
+tick=8 row=0 write no-op precondition=no-change
+tick=8 pass result=after:5s
+tick=9 note a teardown deadline is configured; it re-times a release that becomes reachable only once the owner is deleted
+tick=9 apply config.changed[teardownDeadline] teardownDeadline=10m now=t+0s
+tick=9 row=0 write no-op precondition=no-change
+tick=9 pass result=after:5s
+tick=10 note the rebuilt pod reports Ready, so the repair promotes the row on the same revision
+tick=10 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=10 row=0 write no-op precondition=no-change
+tick=10 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=10 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=10 event Normal RestartCompleted OMENative component=engine instance=0 restart complete (incarnation=2)
+tick=10 hold cleared
+tick=10 row=0 write no-op precondition=no-change
+tick=10 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=10 pass result=none

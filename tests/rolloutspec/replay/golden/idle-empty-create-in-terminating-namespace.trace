@@ -1,0 +1,20 @@
+tick=1 note the Ready row is steady on its one serving pod and the second index is not planned
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the replica count grows while the namespace is being deleted; the stamp lands first, so the refusal is classified and disposed on the Creating attempt
+tick=2 apply spec.replicasUp replicas=2 generation=1 now=t+0s
+tick=2 apply api.namespaceTerminating verb=create resource=pods count=2 now=t+0s
+tick=2 hold cleared
+tick=2 row=0 write no-op precondition=no-change
+tick=2 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Normal InstanceCreated OMENative component=engine instance=1 materialized; 1 pod(s) requested
+tick=2 pod create-rejected name=svc-a-engine-1-default-0 rejection=api.namespaceTerminating
+tick=2 row=1 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=nil lastFailure={pod= reason=NamespaceTerminating message=pods "svc-a" is forbidden: unable to create new content in namespace because it is being terminated} precondition=ok
+tick=2 event Warning InstanceRejected OMENative component=engine instance=1: apiserver rejected pod svc-a-engine-1-default-0 (NamespaceTerminating: pods "svc-a" is forbidden: unable to create new content in namespace because it is being terminated); no revision is blamed
+tick=2 pass result=after:5s
+tick=3 note namespace GC deletes the owner, so the next pass runs teardown instead of another create
+tick=3 apply spec.teardown[deleted] teardown=true now=t+0s
+tick=3 row=1 write incarnation=1 phase=Deleting runningRevision=nil readySince=nil op=op#2{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=NamespaceTerminating message=pods "svc-a" is forbidden: unable to create new content in namespace because it is being terminated} precondition=ok
+tick=3 row=0 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#3{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 pass result=requeue

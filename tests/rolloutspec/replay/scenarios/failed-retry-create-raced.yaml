@@ -1,0 +1,50 @@
+# An Instance failed on a stuck create, in Backoff. A re-tuned ladder never
+# re-dates the live block, and an already-exists answer armed while the row
+# sits Failed is consumed by nobody, since nothing in the row's own path
+# creates a pod: the block coming due opens the Create attempt, whose
+# marker lands first, and that attempt's create meets the answer and adopts
+# the object that holds the name.
+scenario: failed-retry-create-raced
+arrows:
+  - T-empty-create
+  - T-create-stuckgrace
+  - T-failed-retry
+cells:
+  - instance/Failed/config.changed[updateRetry]/before
+  - instance/Failed/api.alreadyExists/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pull wedges immediately, but the pod is younger than the grace, so the attempt keeps polling
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}
+  - tick: 3
+    note: the grace elapses, and with a retry budget the revision goes into Backoff instead of being held
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 4
+    note: the wedged pod is recycled, so nothing of the failed attempt remains
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 5
+    note: the ladder is re-tuned and an already-exists answer is armed; the live block keeps its date and nothing in a Failed row's own path creates a pod
+    events:
+      - config.changed[updateRetry]: {config: {updateRetry: {maxAttempts: 3, initialDelay: 5m, maxDelay: 10m, multiplier: 2}}}
+      - api.alreadyExists: {}
+  - tick: 6
+    note: the block comes due; the Create pass commits its marker first and its create meets the armed answer, adopting the object that already holds the name
+    events:
+      - timer.retryAt: {slack: 1s}

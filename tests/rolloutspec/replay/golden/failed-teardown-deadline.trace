@@ -1,0 +1,12 @@
+tick=1 note the Instance is parked at Failed with its pod still present
+tick=1 hold cleared
+tick=1 pass result=after:5s
+tick=2 note the owner was deleted and its teardown deadline has elapsed before this pass observes either, so the deadline check releases the owner ahead of any teardown wave and the Failed row goes with it
+tick=2 apply spec.teardown[deleted] teardown=true now=t+0s
+tick=2 apply timer.teardownDeadline to=t+10m1s now=t+10m1s
+tick=2 event Warning TeardownDeadlineExceeded teardown deadline 10m exceeded (1 owned pod(s) observed; selector: parent="svc-a", component="engine"); releasing the teardown finalizer to background GC
+tick=2 owner deleted rows=1
+tick=2 pass result=none
+tick=3 note a late pass finds no owner left to act on
+tick=3 owner gone; nothing reconciles
+tick=3 pass result=none

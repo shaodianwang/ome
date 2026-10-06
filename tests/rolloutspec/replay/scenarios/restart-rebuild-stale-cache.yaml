@@ -1,0 +1,51 @@
+# The repair's old pod is gone, and the pass that observes it reads its
+# cache one event behind: the cached list still holds the Terminating pod,
+# so Phase A waits on it and the pass ends before the rebuild. The lag
+# costs one pass; the live completion check never creates against an
+# object the apiserver still holds, and once the cache catches up the
+# rebuild lands.
+scenario: restart-rebuild-stale-cache
+arrows:
+  - T-ready-restart-crash
+  - T-restart-ready
+cells:
+  - instance/Restart/Drain/ctrl.staleRead/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    containerName: ome-container
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: after a minute of steady serving the runner restarts, so the repair opens a Restart and takes the pod out of serving
+    events:
+      - clock.advance: 1m
+      - pod.containerRestart: {pod: {index: 0}, message: OOMKilled}
+  - tick: 3
+    note: the old pod leaves rotation, so the drain deletes it
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the old pod is gone while the cache still lists it Terminating, so Phase A waits on the cached pod and the pass ends before the rebuild
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+      - ctrl.staleRead: {}
+  - tick: 5
+    note: the cache has caught up and the live completion check agrees, so the rebuild lands at the bumped incarnation
+  - tick: 6
+    note: the rebuilt pod reports Ready, so the repair promotes the row on the same revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

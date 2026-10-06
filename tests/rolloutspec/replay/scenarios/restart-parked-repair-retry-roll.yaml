@@ -1,0 +1,50 @@
+# A repair parked at Failed on a revision that is no longer the roll
+# target, resumed from status beside a Backoff block on the target: the
+# roll that would replace the row waits on the ladder. The block coming
+# due admits exactly one fresh recreate attempt over the parked repair, and
+# the block read as due again admits nothing more.
+scenario: restart-parked-repair-retry-roll
+arrows:
+  - T-failedrepair-retry
+cells:
+  - instance/Failed/Repair/timer.retryAt/boundary@T-failedrepair-retry
+  - instance/Failed/Repair/timer.retryAt/after@T-failedrepair-retry
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v2
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+  currentRevision: registry.example.com/runtime:v1
+  rows:
+    - index: 0
+      incarnation: 2
+      phase: Failed
+      runningRevision: registry.example.com/runtime:v1
+      readySince: 0s
+      operation: {type: Restart, step: Drain, reason: pod count 0 below desired 1}
+  pods:
+    - {index: 0, incarnation: 2, previousImage: registry.example.com/runtime:v1}
+  retryBlocks:
+    - {revision: current, state: Backoff, attemptsStarted: 1, nextRetryAt: 2m, reason: DeadlineExceeded}
+timeline:
+  - tick: 1
+    note: the parked repair sits off the roll target while the target's block runs, so the roll waits on the ladder and the repair's exits find nothing to do
+  - tick: 2
+    note: the block comes due, so the roll replaces the parked repair with a fresh recreate attempt and drains the rebuilt pod
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 3
+    note: the block is read as due again; it admitted exactly one attempt and the drain goes on
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 4
+    note: the drained pod is gone, so the fresh attempt rebuilds the index on the target
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

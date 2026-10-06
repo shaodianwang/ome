@@ -1,0 +1,21 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod count 0 below desired 1 (incarnation=2)
+tick=2 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=2 ordinal=0
+tick=2 pass result=after:5s
+tick=3 note the owner was deleted and its teardown deadline has elapsed before this pass observes either, so the deadline check releases the owner ahead of any teardown wave and the Restart row goes with it, whatever readiness the rebuilt pod reports
+tick=3 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=3 apply spec.teardown[deleted] teardown=true now=t+0s
+tick=3 apply timer.teardownDeadline to=t+10m1s now=t+10m1s
+tick=3 event Warning TeardownDeadlineExceeded teardown deadline 10m exceeded (1 owned pod(s) observed; selector: parent="svc-a", component="engine"); releasing the teardown finalizer to background GC
+tick=3 owner deleted rows=1
+tick=3 pass result=none
+tick=4 note a late pass finds no owner left to act on, whatever the surviving pod reports
+tick=4 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+10m1s
+tick=4 owner gone; nothing reconciles
+tick=4 pass result=none

@@ -1,0 +1,37 @@
+# A Ready gang narrowed by a worker. The create diff only adds missing
+# names and no pass deletes an unexpected ordinal of a live Instance, so
+# the surplus worker survives; the PodGroup alone is re-reconciled.
+scenario: idle-ready-gang-shrink-keeps-surplus
+arrows:
+
+cells:
+  - instance/Ready/spec.gangWidth[shrink]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 2
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, runner: leader, ready: true, serving: true, routed: true}
+    - {index: 0, runner: worker, ordinal: 0, ready: true, serving: true}
+    - {index: 0, runner: worker, ordinal: 1, ready: true, serving: true}
+timeline:
+  - tick: 1
+    note: the Ready gang is steady on its three serving members
+  - tick: 2
+    note: the gang narrows by a worker; the create diff adds only missing names and nothing deletes the surplus member, so it survives
+    events:
+      - spec.gangWidth[shrink]: {to: 1}
+  - tick: 3
+    note: a further pass finds the surplus worker still standing

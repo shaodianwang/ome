@@ -1,0 +1,62 @@
+# A migration surge row left Creating with no operation, its leftover pod
+# deleted by another hand. A pod on its way out holds its name until it is
+# gone, and a kubelet that stops acknowledging the deletion changes nothing
+# without a force-delete policy: the wave admits the unplanned index and
+# waits for the object to disappear.
+scenario: idle-creating-left-pod-leaving
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-migrate-deadline-restore
+  - T-migratetarget-expired
+  - T-creating-reap
+  - T-delete-done
+cells:
+  - instance/Creating/pod.terminating[source]/before
+  - instance/Creating/pod.stuckTerminating/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the surge pod is bound and comes up on its node while the migration waits on its promote
+    events:
+      - pod.scheduled[target]: {pod: {index: 1}, message: node-1}
+      - pod.containersReady[target]: {pod: {index: 1}}
+  - tick: 5
+    note: the record's deadline elapses with the source healthy, so expiry restores the source and unpins the surge, whose row is left Creating with no operation beyond the desired set
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 6
+    note: the leftover pod is deleted by another hand; on its way out it holds its name, and the wave reaps the unplanned index and waits on the object
+    events:
+      - pod.terminating[source]: {pod: {index: 1}}
+  - tick: 7
+    note: the pod's kubelet stops acknowledging the deletion; with no force-delete policy nothing frees the name and the wave keeps waiting
+    events:
+      - pod.stuckTerminating: {pod: {index: 1}}
+  - tick: 8
+    note: the object is gone, so the row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}

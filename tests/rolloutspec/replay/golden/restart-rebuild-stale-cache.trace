@@ -1,0 +1,35 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note after a minute of steady serving the runner restarts, so the repair opens a Restart and takes the pod out of serving
+tick=2 apply clock.advance by=1m0s now=t+1m0s
+tick=2 apply pod.containerRestart pod=svc-a-engine-0-default-0 container=ome-container reason=OOMKilled now=t+1m0s
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-8aa14b8b readySince=t+0s op=op#1{type=Restart step=Drain reason=pod svc-a-engine-0-default-0 container ome-container restarted after Ready: OOMKilled (exit 1) started=t+1m0s lastProgressAt=t+1m0s deadline=t+31m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=OOMKilled container=ome-container exitCode=1} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod svc-a-engine-0-default-0 container ome-container restarted after Ready: OOMKilled (exit 1) (incarnation=2)
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=2 pass result=after:5s
+tick=3 note the old pod leaves rotation, so the drain deletes it
+tick=3 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+1m0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=3 pass result=after:5s
+tick=4 note the old pod is gone while the cache still lists it Terminating, so Phase A waits on the cached pod and the pass ends before the rebuild
+tick=4 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+1m0s
+tick=4 apply ctrl.staleRead cache=end-of-tick-3 now=t+1m0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pass result=after:5s
+tick=5 note the cache has caught up and the live completion check agrees, so the rebuild lands at the bumped incarnation
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod create name=svc-a-engine-0-default-0 revision=8aa14b8b incarnation=2 ordinal=0
+tick=5 pass result=after:5s
+tick=6 note the rebuilt pod reports Ready, so the repair promotes the row on the same revision
+tick=6 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+1m0s
+tick=6 row=0 write no-op precondition=no-change
+tick=6 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=6 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-8aa14b8b readySince=t+1m0s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=OOMKilled container=ome-container exitCode=1} precondition=ok
+tick=6 event Normal RestartCompleted OMENative component=engine instance=0 restart complete (incarnation=2)
+tick=6 hold cleared
+tick=6 row=0 write no-op precondition=no-change
+tick=6 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=6 pass result=after:1m0s

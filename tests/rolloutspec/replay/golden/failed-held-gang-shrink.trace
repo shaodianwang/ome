@@ -1,0 +1,15 @@
+tick=1 note the gang is parked at Failed behind a Held target with its three members still present
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 hold gate=Held target=svc-a-engine-3363fef6 reason=update to svc-a-engine-3363fef6 held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-3363fef6 not serving
+tick=1 pass result=after:5s
+tick=2 note the gang narrows by a worker; the PodGroup is re-reconciled and the surplus member stands
+tick=2 apply spec.gangWidth[shrink] workers=1 generation=1 now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 podgroup update name=svc-a-engine-0
+tick=2 hold gate=Held target=svc-a-engine-3363fef6 reason=update to svc-a-engine-3363fef6 held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-3363fef6 not serving
+tick=2 pass result=after:5s
+tick=3 note a further pass finds the surplus worker still standing
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 hold gate=Held target=svc-a-engine-3363fef6 reason=update to svc-a-engine-3363fef6 held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-3363fef6 not serving
+tick=3 pass result=after:5s

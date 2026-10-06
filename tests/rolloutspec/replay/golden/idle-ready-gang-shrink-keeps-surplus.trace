@@ -1,0 +1,18 @@
+tick=1 note the Ready gang is steady on its three serving members
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the gang narrows by a worker; the create diff adds only missing names and nothing deletes the surplus member, so it survives
+tick=2 apply spec.gangWidth[shrink] workers=1 generation=1 now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 podgroup update name=svc-a-engine-0
+tick=2 hold cleared
+tick=2 row=0 write no-op precondition=no-change
+tick=2 pass result=none
+tick=3 note a further pass finds the surplus worker still standing
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 hold cleared
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=none

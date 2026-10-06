@@ -1,0 +1,94 @@
+# An Instance parked at Failed with no operation, its target Held and its
+# leftover pod still standing. A queue gate and its admission, a late
+# binding, the node going NotReady, the pod reappearing under a new UID and
+# a kubelet that stops reporting are read by no path out of Failed; a
+# lagging cache, a readiness-timeout edit and re-tuned force-delete,
+# teardown, scale-down and auto-migrate knobs write nothing; and a shorter
+# stuck-pod grace cannot re-charge a row the escalation already skips.
+scenario: failed-held-pod-observations
+arrows:
+
+cells:
+  - instance/Failed/pod.schedulingGated/before
+  - instance/Failed/pod.admitted/before
+  - instance/Failed/pod.scheduled[source]/before
+  - instance/Failed/pod.nodeLost[NodeNotReady]/before
+  - instance/Failed/pod.uidRotated/before
+  - instance/Failed/pod.phaseTerminal[Unknown]/before
+  - instance/Failed/ctrl.staleRead/before
+  - instance/Failed/spec.policyTuning[instanceReadyTimeout]/before
+  - instance/Failed/config.changed[forceDelete]/before
+  - instance/Failed/config.changed[teardownDeadline]/before
+  - instance/Failed/config.changed[scaleDownInterval]/before
+  - instance/Failed/config.changed[autoMigrateBudget]/before
+  - instance/Failed/config.changed[stuckPodGrace]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+  rows:
+    - {index: 0, phase: Failed, runningRevision: current}
+  pods:
+    - {index: 0}
+  retryBlocks:
+    - {revision: current, state: Held, attemptsStarted: 1, reason: ImagePullBackOff}
+timeline:
+  - tick: 1
+    note: the Instance is parked at Failed behind a Held target with its pod still present, so no fresh start is admitted
+  - tick: 2
+    note: a queue admission gates the pod and admits it again; a Failed row has no deadline to park or re-arm
+    events:
+      - pod.schedulingGated: {pod: {index: 0}}
+      - pod.admitted: {pod: {index: 0}}
+  - tick: 3
+    note: the pod is bound; binding is observation only
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-1}
+  - tick: 4
+    note: the pod's node goes NotReady; node-death evidence is read at disposition time and by the delete pass, never again from a Failed row
+    events:
+      - pod.nodeLost[NodeNotReady]: {pod: {index: 0}}
+  - tick: 5
+    note: the pod reappears under a new UID; no attempt is in flight to invalidate and the incarnation label decides ownership
+    events:
+      - pod.uidRotated: {pod: {index: 0}}
+  - tick: 6
+    note: the pod goes Unknown, which the recycle predicate does not read as terminal; it is neither counted as lost nor cleaned
+    events:
+      - pod.phaseTerminal[Unknown]: {pod: {index: 0}}
+  - tick: 7
+    note: the cache lags one event behind for this pass; every mutation out of Failed re-reads the row, so nothing is written
+    events:
+      - ctrl.staleRead: {}
+  - tick: 8
+    note: the readiness timeout changes; it is not re-read for a row that already failed
+    events:
+      - spec.policyTuning[instanceReadyTimeout]: {value: 10m}
+  - tick: 9
+    note: a force-delete policy is configured; the edit itself writes nothing to a Failed row
+    events:
+      - config.changed[forceDelete]: {config: {forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}}}
+  - tick: 10
+    note: a teardown deadline is configured; it re-dates a release that needs a Terminating owner
+    events:
+      - config.changed[teardownDeadline]: {config: {teardownDeadline: 10m}}
+  - tick: 11
+    note: the scale-down cadence changes; no destructive wave is in flight for it to move
+    events:
+      - config.changed[scaleDownInterval]: {config: {scaleDownRequeueInterval: 1m}}
+  - tick: 12
+    note: the auto-migrate budget changes; a Failed row is never a relocation candidate whatever the budget says
+    events:
+      - config.changed[autoMigrateBudget]: {config: {autoMigrateBudget: 2}}
+  - tick: 13
+    note: the pod crash-loops and the stuck-pod grace is shortened below its age; the escalation skips an already-Failed row, so nothing is re-charged
+    events:
+      - clock.advance: 2m
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0}, message: "back-off restarting failed container"}
+      - config.changed[stuckPodGrace]: {config: {stuckPodGrace: 10s}}

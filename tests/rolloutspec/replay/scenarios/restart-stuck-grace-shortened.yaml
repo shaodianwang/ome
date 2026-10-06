@@ -1,0 +1,43 @@
+# The repair's rebuilt pod wedges on its image under a stuck-pod grace long
+# enough that nothing escalates. The operator then shortens the grace. The
+# knob is re-read on every pass and bounds the stuck-pod evidence, so the
+# edit itself writes nothing and the very next pass fails the row, with
+# the Restart operation preserved, on a wedge already older than the new
+# grace.
+scenario: restart-stuck-grace-shortened
+arrows:
+  - T-ready-restart
+  - T-restart-stuck
+cells:
+  - instance/Restart/Drain/config.changed[stuckPodGrace]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1h
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pull wedges two minutes into the rebuilt pod's life, well inside the hour of grace, so the repair keeps waiting
+    events:
+      - clock.advance: 2m
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}
+  - tick: 4
+    note: the operator shortens the grace to a minute; the next pass reads the new bound and fails the row on the wedge that is already older than it, with the operation preserved
+    events:
+      - config.changed[stuckPodGrace]: {config: {stuckPodGrace: 1m}}

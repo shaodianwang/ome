@@ -1,0 +1,42 @@
+# A demoted Instance under a standard pause whose leftover pod reappears
+# under a new UID and loses its node. An Instance is keyed by index and
+# incarnation, not by pod UID, and a Pending row has nothing serving for
+# the loss to reach; the paused Create pass writes nothing, and a changed
+# operator configuration is read by the next decision alone.
+scenario: idle-pending-pod-churn-ignored
+arrows:
+
+cells:
+  - instance/Pending/pod.uidRotated/before
+  - instance/Pending/pod.nodeLost[NodeGone]/before
+  - instance/Pending/config.changed[stuckPodGrace]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    paused: true
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+timeline:
+  - tick: 1
+    note: the demoted row sits under the pause with its pod present
+  - tick: 2
+    note: the pod's node is deleted; a Pending row has nothing serving for the loss to reach
+    events:
+      - pod.nodeLost[NodeGone]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod reappears under a new UID; the same-name pod is observed as the same member
+    events:
+      - pod.uidRotated: {pod: {index: 0}}
+  - tick: 4
+    note: the stuck-pod grace changes; nothing about it is persisted on the row
+    events:
+      - config.changed[stuckPodGrace]: {config: {stuckPodGrace: 1m}}

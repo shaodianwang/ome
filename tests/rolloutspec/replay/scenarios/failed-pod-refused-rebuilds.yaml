@@ -1,0 +1,42 @@
+# An Instance parked at Failed with no operation, its target neither held
+# nor in backoff, whose bound pod is refused by its node. A rejection is
+# phase Failed, so the occupant reads as absent and the Create pass's fresh
+# start recycles it with the kubelet's reason on LastFailure; the refusal
+# re-observed on the recycled object changes nothing, and the index is
+# re-materialized under the fresh Create once the delete is observed.
+scenario: failed-pod-refused-rebuilds
+arrows:
+  - T-failed-recycle-rebuild
+cells:
+  - instance/Failed/pod.admissionRejected[OutOfResource]/before
+  - instance/Failed/pod.admissionRejected[OutOfResource]/boundary@T-failed-recycle-rebuild
+  - instance/Failed/pod.admissionRejected[OutOfResource]/after@T-failed-recycle-rebuild
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+  rows:
+    - {index: 0, phase: Failed, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+timeline:
+  - tick: 1
+    note: the Instance is parked at Failed with its pod still present and nothing denying its revision
+  - tick: 2
+    note: the node refuses the pod; the occupant reads as absent, so the fresh start recycles it with the kubelet's reason on LastFailure
+    events:
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 0}, resource: nvidia.com/gpu, message: "Node didn't have enough resource: nvidia.com/gpu, requested: 1, used: 8, capacity: 8"}
+  - tick: 3
+    note: the refusal is re-observed on the recycled object; the attempt owns the index and the recycle writes no phase
+    events:
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 0}, resource: nvidia.com/gpu, message: "Node didn't have enough resource: nvidia.com/gpu, requested: 1, used: 8, capacity: 8"}
+  - tick: 4
+    note: the refused pod is gone, so the fresh Create rebuilds the index
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

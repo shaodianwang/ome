@@ -1,0 +1,110 @@
+# A parked attempt whose gang set is down: the leader is up, the worker
+# still boots. Binding, rotation, PodReady on one member, the gate leaving
+# a member, a readiness regression and an in-place runner restart are all
+# read through the set, which stays short, so no pass writes the row; a
+# tick with nothing changed, a controller restart, a lagging cache and the
+# availability window elapsing change nothing either.
+scenario: parked-down-set-observations
+arrows:
+  - T-empty-create
+  - T-ready-recreate
+  - T-drain-deadline
+cells:
+  - instance/Failed/Parked/pod.scheduled[source]/before
+  - instance/Failed/Parked/endpoint.rotationIn[source]/before
+  - instance/Failed/Parked/pod.ready[source]/before
+  - instance/Failed/Parked/pod.servingOff[source]/before
+  - instance/Failed/Parked/endpoint.rotationOut[source]/before
+  - instance/Failed/Parked/pod.containersNotReady[source]/before
+  - instance/Failed/Parked/pod.containerRestart/before
+  - instance/Failed/Parked/ctrl.resync/before
+  - instance/Failed/Parked/ctrl.crash/before
+  - instance/Failed/Parked/ctrl.staleRead/before
+  - instance/Failed/Parked/timer.minReady/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    containerName: ome-container
+    minReadySeconds: 30
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1h, maxDelay: 2h, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation and the availability window elapses, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+      - clock.advance: 30s
+  - tick: 3
+    note: the pod template changes, so the roll drains the gang for a recreate
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation and the drained members are deleted, so the roll recreates them at the new revision
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 5
+    note: the rebuilt leader reports ContainersReady while the worker is still booting, so the set is short of serving
+    events:
+      - pod.containersReady[target]: {pod: {index: 0, runner: leader}}
+  - tick: 6
+    note: the deadline elapses on the live set; the ladder counts the wave and the attempt is parked with the row Failed
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 7
+    note: the leader is bound; binding is observation only and the set still reads short
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}}
+  - tick: 8
+    note: the leader's endpoint enters the routed Service; rotation moves counters, not the reading
+    events:
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 9
+    note: the leader reports PodReady while the worker still boots; PodReady adds nothing the reading does not take from ContainersReady and the gate
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+  - tick: 10
+    note: the leader's gate is withdrawn; the set is out of the rotation the row reads already
+    events:
+      - pod.servingOff[source]: {pod: {index: 0, runner: leader}}
+  - tick: 11
+    note: the leader's endpoint leaves the routed Service; rotation moves counters, not the reading
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 12
+    note: the leader loses ContainersReady; a further member losing readiness confirms the reading and writes nothing
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 0, runner: leader}}
+  - tick: 13
+    note: the leader's runner restarts in place; restart evidence is read for a Ready row only and the row follows the set
+    events:
+      - pod.containerRestart: {pod: {index: 0, runner: leader}, message: OOMKilled}
+  - tick: 14
+    note: a tick with nothing changed re-derives the same reading and writes nothing
+  - tick: 15
+    note: the controller restarts; everything the parked attempt is lives in status and the set is followed again
+    events:
+      - ctrl.crash: {}
+  - tick: 16
+    note: the cache lags one event behind for this pass; the reading is re-taken from the set and nothing is written
+    events:
+      - ctrl.staleRead: {}
+  - tick: 17
+    note: the availability window elapses; no promote waits on a parked attempt
+    events:
+      - clock.advance: 30s

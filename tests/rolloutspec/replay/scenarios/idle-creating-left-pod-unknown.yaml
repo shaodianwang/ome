@@ -1,0 +1,56 @@
+# A migration surge row left Creating with no operation whose leftover pod
+# goes Unknown: a kubelet that will never report again. The wave reaps the
+# unplanned index and issues its delete, but the object is freed only by
+# the force-delete sweep on proven node death, and without a policy it
+# holds the row open.
+scenario: idle-creating-left-pod-unknown
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-migrate-deadline-restore
+  - T-migratetarget-expired
+  - T-creating-reap
+cells:
+  - instance/Creating/pod.phaseTerminal[Unknown]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the surge pod is bound and comes up on its node while the migration waits on its promote
+    events:
+      - pod.scheduled[target]: {pod: {index: 1}, message: node-1}
+      - pod.containersReady[target]: {pod: {index: 1}}
+  - tick: 5
+    note: the record's deadline elapses with the source healthy, so expiry restores the source and unpins the surge, whose row is left Creating with no operation beyond the desired set
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 6
+    note: the leftover pod goes Unknown; the wave reaps the unplanned index regardless
+    events:
+      - pod.phaseTerminal[Unknown]: {pod: {index: 1}}
+  - tick: 7
+    note: the wave deletes the pod, whose kubelet will never acknowledge it
+  - tick: 8
+    note: a further pass finds the object still there and the row held open

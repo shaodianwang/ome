@@ -185,7 +185,7 @@ cells:
     outcome: ignore
     note: "a gated pod is trivially drained, since nothing routes to it, and is deleted like any other member. The deadline parking that protects gated pods elsewhere is moot here because no deadline is consumed for a Delete-owned row"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-gated-pod-drained]}
     status: current
 
   - state: Delete/Drain
@@ -194,7 +194,7 @@ cells:
     note: "an eviction removes the pod through the same delete path the wave would have taken. The wave counts the disappearance as progress and a redundant UID-preconditioned delete is tolerated as NotFound"
     invariants: [delete.by.observed.uid]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-retired-pod-evicted]}
     status: current
 
   - state: Delete/Drain
@@ -211,7 +211,7 @@ cells:
     outcome: ignore
     note: "an excluded annotation or label edit does not change the rendered hash and cannot put the index back into the desired set, so it is invisible to a draining row"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-gated-pod-drained]}
     status: current
 
   - state: Delete/Drain
@@ -349,7 +349,7 @@ cells:
     outcome: ignore
     note: "a partition bound narrows which indices the update selection may roll and has no effect on a Delete operation, which is selected before that pass and is not revision-scoped"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-gated-pod-drained]}
     status: current
 
   - state: Delete/Drain
@@ -384,7 +384,7 @@ cells:
     outcome: ignore
     note: "the scale-down pass reads through the live API reader for the pod set, the EndpointSlices behind the drain check and the Node behind the force-delete evidence, precisely because a lagging cache could otherwise declare a drain done or hold a recovered node dead"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-drain-observations]}
     status: current
 
   - state: Delete/Drain
@@ -435,7 +435,7 @@ cells:
     outcome: ignore
     note: "a readiness regression is not an input to the drain; delete_batch.go gates on EndpointSlice convergence for the pod's per-revision Service, never on ContainersReady, and a regression only makes the endpoint rotate out sooner"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-drain-observations]}
     status: current
 
   - state: Delete/Drain
@@ -462,7 +462,7 @@ cells:
     outcome: ignore
     note: "gate exit writes nothing for a draining index: ReconcileGatedDeadlines in escalation/deadline.go parks and restarts the clock only for transient phases, and Deleting is not one, so the admitted pod is simply drained and deleted"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-gated-pod-drained]}
     status: current
 
   - state: Delete/Drain
@@ -538,7 +538,7 @@ cells:
     outcome: ignore
     note: "both are re-resolved through the TTL config cache on every pass (resolveForceDeletePolicy and resolveTeardownDeadline in inferencereplica/reconciler.go), so the edit itself moves nothing but arms or disarms the two escalations that can: the force-delete unwedger and the finalizer release"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-drain-observations]}
     status: current
 
   - state: Delete/Drain
@@ -548,7 +548,7 @@ cells:
     note: "inert here. The update and migrate passes are unreachable while a delete-owned wave is in progress, and the stuck-pod grace feeds an escalation pass that skips every row whose operation is Delete (escalation.go)"
     invariants: [one.operation.per.instance]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-drain-observations]}
     status: current
 
   # GAP: the event means a config edit that changes behavior mid-flight, but
@@ -605,7 +605,7 @@ cells:
     note: "shedding is absorbed as a plain error: the pod delete rolls its expectation back before returning (delete_batch.go), so the next pass re-reads and re-issues. The pass pacing that honors a server Retry-After is fed by the create path only, and the drain issues no create, so controller-runtime backoff sets the pace instead"
     invariants: [delete.by.observed.uid]
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-delete-shed]}
     status: current
 
   - state: Delete/Drain
@@ -669,7 +669,7 @@ cells:
     outcome: ignore
     note: "the deadline branch in inferencereplica/teardown.go runs before the workload dispatch, so once it fires no force-delete evaluation happens at all: the finalizer lifts and the wedged pod is left to background GC with its owner reference"
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-stuck-pod-at-teardown-deadline]}
     status: current
 
   - state: Delete/Drain
@@ -689,7 +689,7 @@ cells:
     note: "inferencereplica/teardown.go warns TeardownDeadlineExceeded, closes dangling ledger entries and releases the finalizer, so the owner and every InstanceStatus row it carried are purged in one delete and surviving pods fall to background GC through their owner references"
     guard: "owner Terminating, the configured deadline elapsed since its deletionTimestamp, and the teardown finalizer still held"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-teardown-deadline-at-completion]}
     status: current
 
   - state: Delete/Drain
@@ -698,7 +698,7 @@ cells:
     outcome: ignore
     note: "the deadline is evaluated at the top of reconcileTeardown, ahead of the scale-down pass, so it cannot race the completion commit within a pass; by the next one the row is already removed and the release purges an owner that no longer carries it"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-teardown-deadline-at-completion]}
     status: current
 
   - state: Delete/Drain
@@ -707,7 +707,7 @@ cells:
     outcome: ignore
     note: "a force-delete is an in-pass effect and the deadline is re-read at the top of the next pass, so the ordering is fixed: the escalation that already fired stands, and the release then hands the remaining pods to background GC"
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-force-then-teardown-deadline]}
     status: current
 
   - state: Delete/Drain
@@ -716,7 +716,7 @@ cells:
     outcome: ignore
     note: "same ordering as the evidence-driven force-delete: inferencereplica/teardown.go checks the deadline before dispatching the workload pass, so the clock-driven escalation and the finalizer release never contend inside one pass"
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-force-clock-then-teardown-deadline]}
     status: current
 
   - state: Delete/Drain
@@ -736,7 +736,7 @@ cells:
     outcome: ignore
     note: "at the deadline release the row is purged with the owner rather than removed by the completion batch, so a pod disappearing then advances nothing: inferencereplica/teardown.go has already stopped tracking this index"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-teardown-deadline-at-completion]}
     status: current
 
   - state: Delete/Drain
@@ -755,7 +755,7 @@ cells:
     outcome: ignore
     note: "the finalizer release gives up on the wedge: inferencereplica/teardown.go lifts the finalizer before the workload dispatch, so the designed unwedger stops running and the pod stays stuck for background GC to collect whenever its node returns"
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-stuck-pod-at-teardown-deadline]}
     status: current
 
   - state: Delete/Drain
@@ -774,7 +774,7 @@ cells:
     outcome: ignore
     note: "the deadline release only happens for a Terminating owner, whose planned index set is empty by definition, so a replica increase written against it can never be acted on and dies with the object"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-teardown-deadline-at-completion]}
     status: current
 
   - state: Delete/Drain
@@ -792,7 +792,7 @@ cells:
     outcome: ignore
     note: "the record dies with the owner: closeDanglingLedgerEntries in inferencereplica/teardown.go marks every in-flight ledger row owner-torn-down before the finalizer lifts, and an Accepted record carried in the owner status is purged with it rather than failing terminally"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-teardown-deadline-at-completion]}
     status: current
 
   # --- kubelet admission and slow readiness ---------------------------------
@@ -801,7 +801,7 @@ cells:
     outcome: ignore
     note: the terminal recycle that frees a refused pod's name belongs to the paths that place a replacement, and a teardown places none, so a refused pod is simply one more object that must be deleted and observed absent before the row can go; escalation skips every Delete-owned row either way (pkg/controller/v1beta1/workload/escalation/escalation.go)
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-retired-pod-refused]}
     status: current
   - state: Delete/Drain
     event: pod.runningNotReady

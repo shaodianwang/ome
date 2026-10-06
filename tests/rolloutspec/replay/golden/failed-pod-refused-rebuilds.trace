@@ -1,0 +1,22 @@
+tick=1 note the Instance is parked at Failed with its pod still present and nothing denying its revision
+tick=1 hold cleared
+tick=1 pass result=after:5s
+tick=2 note the node refuses the pod; the occupant reads as absent, so the fresh start recycles it with the kubelet's reason on LastFailure
+tick=2 apply pod.admissionRejected[OutOfResource] pod=svc-a-engine-0-default-0 reason=OutOfnvidia.com/gpu now=t+0s
+tick=2 hold cleared
+tick=2 row=0 write incarnation=1 phase=Creating runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 row=0 write incarnation=1 phase=Creating runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb retryCount=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=OutOfnvidia.com/gpu message=Node didn't have enough resource: nvidia.com/gpu, requested: 1, used: 8, capacity: 8} precondition=ok
+tick=2 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=2 event Warning TerminalPodRecycled OMENative component=engine instance=0 deleted terminal pod(s) svc-a-engine-0-default-0 (Failed/OutOfnvidia.com/gpu) for recreate (Create recycle 1)
+tick=2 pass result=after:5s
+tick=3 note the refusal is re-observed on the recycled object; the attempt owns the index and the recycle writes no phase
+tick=3 apply pod.admissionRejected[OutOfResource] pod=svc-a-engine-0-default-0 reason=OutOfnvidia.com/gpu now=t+0s
+tick=3 hold cleared
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=after:5s
+tick=4 note the refused pod is gone, so the fresh Create rebuilds the index
+tick=4 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 hold cleared
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=4 pass result=after:5s

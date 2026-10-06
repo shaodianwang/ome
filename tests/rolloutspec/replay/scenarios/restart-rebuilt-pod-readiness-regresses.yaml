@@ -1,0 +1,52 @@
+# A repair whose rebuilt pod reports ContainersReady, is gated serving, and
+# then loses ContainersReady while it keeps running: the regression drops
+# the pod below the first guard of the promote bar, which withholds the
+# promote. The operator raises minReadySeconds as the pod comes back, so
+# the promote re-reads the window from the live plan and waits it out.
+scenario: restart-rebuilt-pod-readiness-regresses
+arrows:
+  - T-ready-restart
+  - T-restart-ready
+cells:
+  - instance/Restart/Drain/pod.containersNotReady[source]/before
+  - instance/Restart/Drain/spec.policyTuning[minReadySeconds]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the rebuilt pod reports ContainersReady, so the repair writes the serving gate and waits for PodReady
+    events:
+      - pod.containersReady[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the pod's readiness regresses while it keeps running; the regression withholds the promote and nothing is written
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the pod comes back ContainersReady and PodReady as the operator raises minReadySeconds, so the promote re-reads the window and waits it out instead of landing
+    events:
+      - spec.policyTuning[minReadySeconds]: {value: "600"}
+      - pod.containersReady[source]: {pod: {index: 0}}
+      - pod.ready[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the window elapses and the repair promotes the row on the same revision
+    events:
+      - clock.advance: 10m

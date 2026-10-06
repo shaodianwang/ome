@@ -1,0 +1,48 @@
+# A demoted Instance whose leftover pod is refused by its node under
+# RecreateInstanceOnPodRestart. The rejection is invisible as a rejection,
+# since no pass reads the pod's status.reason here, but a rejected pod is
+# phase Failed, so the below-Ready member count reads the Instance as short
+# and the row moves on the edge a plain terminal pod drives: a Restart that
+# drains the dead pod and rebuilds the Instance. The refusal re-observed on
+# the draining pod adds nothing; the reason reaches LastFailure through the
+# repair's recycle.
+scenario: idle-pending-pod-refused
+arrows:
+  - T-restart-ready
+cells:
+  - instance/Pending/pod.admissionRejected[OutOfResource]/before
+  - instance/Pending/pod.admissionRejected[OutOfResource]/boundary@T-pending-terminal-restart
+  - instance/Pending/pod.admissionRejected[OutOfResource]/after@T-pending-terminal-restart
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+timeline:
+  - tick: 1
+    note: the demoted row sits with its pod present, so the Create pass creates nothing
+  - tick: 2
+    note: the node refuses the pod; a rejected pod is phase Failed, so the member count reads the Instance as short and the repair opens a Restart that drains it
+    events:
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 0}, resource: nvidia.com/gpu, message: "Node didn't have enough resource: nvidia.com/gpu, requested: 1, used: 8, capacity: 8"}
+  - tick: 3
+    note: the refusal is re-observed on the draining pod; the repair already owns the set and the Restart stamp is idempotent
+    events:
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 0}, resource: nvidia.com/gpu, message: "Node didn't have enough resource: nvidia.com/gpu, requested: 1, used: 8, capacity: 8"}
+  - tick: 4
+    note: the dead pod is gone, so the rebuild lands at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the rebuilt pod reports Ready and the repair completes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

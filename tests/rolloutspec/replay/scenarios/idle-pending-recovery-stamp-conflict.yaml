@@ -1,0 +1,28 @@
+# A demoted Instance's recovery create: the write-ahead stamp that opens
+# it is refused with a conflict for every attempt of the adapter's retry.
+# Nothing commits in that pass; the next pass re-checks the row and opens
+# the attempt.
+scenario: idle-pending-recovery-stamp-conflict
+arrows:
+  - T-pending-create
+cells:
+  - instance/Pending/api.conflict/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+timeline:
+  - tick: 1
+    note: the stamp that opens the recovery create is refused on every retry, so nothing commits and no pod is created
+    events:
+      - api.conflict: {write: 1, count: 5}
+  - tick: 2
+    note: the next pass re-checks the row and opens the attempt

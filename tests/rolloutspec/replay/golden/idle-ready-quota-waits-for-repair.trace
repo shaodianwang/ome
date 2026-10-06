@@ -1,0 +1,25 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note a quota refusal is armed and the stuck-pod grace changes; no create is outstanding for a Ready row and nothing about the grace is persisted on it
+tick=2 apply api.quotaDenied verb=create resource=pods count=1 now=t+0s
+tick=2 apply config.changed[stuckPodGrace] stuckPodGrace=1m now=t+0s
+tick=2 hold cleared
+tick=2 row=0 write no-op precondition=no-change
+tick=2 pass result=none
+tick=3 note the pod is lost, so the repair opens a Restart whose create meets the quota refusal, recorded on that attempt
+tick=3 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=3 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod count 0 below desired 1 (incarnation=2)
+tick=3 pod create-rejected name=svc-a-engine-0-default-0 rejection=api.quotaDenied
+tick=3 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal InstanceQuotaBlocked OMENative component=engine instance=0 waiting on capacity: pods "svc-a" is forbidden: exceeded quota: compute-resources, requested: pods=1, used: pods=4, limited: pods=4
+tick=3 pass result=after:5s
+tick=3 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=nil} precondition=ok
+tick=4 note the quota admits the create on the requeue, so the rebuild lands
+tick=4 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 waiting=QuotaExceeded started=t+0s lastProgressAt=t+0s deadline=nil} precondition=ok
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=2 ordinal=0
+tick=4 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 waiting=QuotaExceeded started=t+0s lastProgressAt=t+0s deadline=nil} precondition=ok
+tick=4 pass result=after:5s

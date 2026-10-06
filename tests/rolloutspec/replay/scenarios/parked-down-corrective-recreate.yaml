@@ -1,0 +1,61 @@
+# A corrective revision lands on a parked attempt whose single pod never
+# came up. It is a different ladder subject, so a fresh recreate attempt
+# replaces the parked one and drains the parked pod; a not-found answer
+# armed while the attempt was parked is consumed by that drain, since a
+# parked attempt deletes nothing of its own. The template moving again is
+# the fresh attempt's to read, not the parked row's.
+scenario: parked-down-corrective-recreate
+arrows:
+  - T-ready-recreate
+  - T-drain-deadline
+  - T-failedparked-corrective
+cells:
+  - instance/Failed/Parked/api.notFound/before
+  - instance/Failed/Parked/spec.revision/boundary@T-failedparked-corrective
+  - instance/Failed/Parked/spec.revision/after@T-failedparked-corrective
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1h, maxDelay: 2h, multiplier: 2}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod template changes, so the roll drains the pod for a recreate
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the pod leaves rotation, so it is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the old pod is gone, so the rebuild lands at the new revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the deadline elapses on a rebuilt pod that never came up; the ladder counts the wave and the attempt is parked with the row Failed
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: a not-found answer is armed for the next pod delete; a parked attempt deletes nothing of its own, so nothing consumes it
+    events:
+      - api.notFound: {}
+  - tick: 7
+    note: a corrective revision lands; it is a different ladder subject, so a fresh recreate attempt replaces the parked one, and its drain meets the armed answer, behind which the parked pod is already gone
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 8
+    note: the template moves again; the row is the fresh attempt's now and the parked machinery reads nothing
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v4}

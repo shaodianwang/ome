@@ -1,0 +1,33 @@
+# A Ready Instance's pod reappears under a new UID, fresh and Pending. An
+# Instance is keyed by index and incarnation, not by pod UID: the same-name
+# pod is observed as the same member, so no repair opens and no fresh pod is
+# created; a real loss would surface as a deletion or a runner restart after
+# ReadySince.
+scenario: idle-ready-uid-rotated
+arrows:
+
+cells:
+  - instance/Ready/pod.uidRotated/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod reappears under a new UID, fresh and Pending; the same-name pod is the same member, so nothing opens
+    events:
+      - pod.uidRotated: {pod: {index: 0}}
+  - tick: 3
+    note: a further pass

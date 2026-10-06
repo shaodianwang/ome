@@ -1,0 +1,11 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the pod reappears under a new UID, fresh and Pending; the same-name pod is the same member, so nothing opens
+tick=2 apply pod.uidRotated pod=svc-a-engine-0-default-0 uid=uid#1→uid#2 now=t+0s
+tick=2 hold cleared
+tick=2 pass result=after:5s
+tick=3 note a further pass
+tick=3 hold cleared
+tick=3 pass result=after:5s

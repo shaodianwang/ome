@@ -1,0 +1,48 @@
+# The repair's rebuilt pod reports ContainersReady, is gated serving, then
+# runs on without ever passing its probes again. Phase C promotes only over
+# a PodReady set, so the readiness limbo holds the repair to the operation
+# deadline; at that deadline the readiness wait is the evidence, and the
+# record names the pod, its unready container and the readiness message
+# under reason ContainersNotReady rather than a bare DeadlineExceeded.
+scenario: restart-rebuilt-pod-never-ready
+arrows:
+  - T-ready-restart
+  - T-restart-deadline
+cells:
+  - instance/Restart/Drain/pod.runningNotReady[source]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the rebuilt pod reports ContainersReady, so the repair writes the serving gate and waits for PodReady
+    events:
+      - pod.containersReady[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the pod's readiness regresses while it keeps running; the promote bar is PodReady, so the repair waits
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the operation deadline elapses on a pod that runs but never passes its probes, so the row fails with the Restart preserved and the record names the unready container under ContainersNotReady
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: a further pass reads the parked repair and writes nothing

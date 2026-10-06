@@ -1,0 +1,36 @@
+# A Ready Instance whose node dies on the tick its pod is lost. The repair
+# that the loss opens already owns the pod set, so the node's death adds
+# nothing the pass has not consumed; the sweep frees nothing, since the
+# pod is already gone, and the rebuild lands.
+scenario: idle-ready-node-lost-at-loss
+arrows:
+  - T-ready-restart
+  - T-restart-ready
+cells:
+  - instance/Ready/pod.nodeLost[NodeGone]/boundary@T-ready-restart
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the node is deleted and the pod is gone in the same observation; the repair the loss opens owns the set, and the node's death adds nothing to it
+    events:
+      - pod.nodeLost[NodeGone]: {pod: {index: 0}}
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the rebuilt pod reports Ready and the repair completes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

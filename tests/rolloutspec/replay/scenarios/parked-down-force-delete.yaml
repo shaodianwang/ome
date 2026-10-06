@@ -1,0 +1,70 @@
+# A parked attempt whose gang set is down loses its booting worker to a
+# deletion its kubelet never acknowledges. Under a force-delete policy the
+# Component sweep frees the name once the pod is overdue on a node that is
+# gone; the sweep acts on the pod, not on the row, which keeps following
+# its set behind the ladder.
+scenario: parked-down-force-delete
+arrows:
+  - T-empty-create
+  - T-ready-recreate
+  - T-drain-deadline
+cells:
+  - instance/Failed/Parked/timer.forceDelete[overdueSlack]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1h, maxDelay: 2h, multiplier: 2}
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes, so the roll drains the gang for a recreate
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation and the drained members are deleted, so the roll recreates them at the new revision
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 5
+    note: the rebuilt leader reports ContainersReady while the worker is still booting, so the set is short of serving
+    events:
+      - pod.containersReady[target]: {pod: {index: 0, runner: leader}}
+  - tick: 6
+    note: the deadline elapses on the live set; the ladder counts the wave and the attempt is parked with the row Failed
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 7
+    note: the booting worker is bound and then deleted by another hand; on its way out it is live and the set reads as it did
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-1}
+      - pod.terminating[source]: {pod: {index: 0, runner: worker}}
+  - tick: 8
+    note: the worker's kubelet stops acknowledging the deletion, which leaves the object behind with no finalizer on it; inside the pod's own deadline plus the slack the sweep acts on nothing
+    events:
+      - pod.stuckTerminating: {pod: {index: 0, runner: worker}}
+  - tick: 9
+    note: the overdue clock lands on a pod whose node is gone, so the sweep force-deletes it with grace zero; the row is untouched and keeps following its set behind the ladder
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+  - tick: 10
+    note: a further pass finds the name free and the fresh start still behind the ladder

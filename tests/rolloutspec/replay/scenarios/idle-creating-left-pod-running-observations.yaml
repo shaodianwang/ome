@@ -1,0 +1,69 @@
+# A migration surge row left Creating with no operation, its leftover pod
+# running. PodReady, the serving gate the drive once wrote, rotation in and
+# out, the gate leaving and a runner restart move counters and nothing
+# else; the wave that reaps the index unroutes the pod before deleting it.
+scenario: idle-creating-left-pod-running-observations
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-migrate-deadline-restore
+  - T-migratetarget-expired
+  - T-creating-reap
+  - T-delete-done
+cells:
+  - instance/Creating/pod.ready[source]/before
+  - instance/Creating/pod.servingOn[source]/before
+  - instance/Creating/endpoint.rotationIn[source]/before
+  - instance/Creating/pod.servingOff[source]/before
+  - instance/Creating/endpoint.rotationOut[source]/before
+  - instance/Creating/pod.containerRestart/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+    containerName: ome-container
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the surge pod is bound and comes up on its node while the migration waits on its promote
+    events:
+      - pod.scheduled[target]: {pod: {index: 1}, message: node-1}
+      - pod.containersReady[target]: {pod: {index: 1}}
+  - tick: 5
+    note: the record's deadline elapses with the source healthy, so expiry restores the source and unpins the surge, whose row is left Creating with no operation beyond the desired set
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 6
+    note: the leftover pod reports PodReady, carries the gate, enters and leaves the routed Service, loses the gate and restarts its runner in place; the counters move and the wave reaps the unplanned index regardless
+    events:
+      - pod.ready[source]: {pod: {index: 1}}
+      - pod.servingOn[source]: {pod: {index: 1}}
+      - endpoint.rotationIn[source]: {pod: {index: 1}}
+      - pod.servingOff[source]: {pod: {index: 1}}
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+      - pod.containerRestart: {pod: {index: 1}, message: OOMKilled}
+  - tick: 7
+    note: the wave owns the row and deletes the leftover pod
+  - tick: 8
+    note: the leftover pod is gone, so the row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}

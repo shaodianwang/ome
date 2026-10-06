@@ -1,0 +1,52 @@
+# A single-pod surge whose replacement came up and then lost readiness on
+# the pass its deadline elapsed, so the source failed with the target in
+# backoff. The replacement's readiness coming back and going again neither
+# rescues nor re-fails the source: a replacement's readiness is read by the
+# surge machine, which a Failed source has left, and the row waits on the
+# ladder.
+scenario: failed-surge-replacement-regresses
+arrows:
+  - T-ready-surge
+  - T-surge-deadline
+cells:
+  - instance/Failed/pod.containersNotReady[target]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1h, maxDelay: 2h, multiplier: 2}
+
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement reports ContainersReady but never PodReady, and the surge writes its serving gate
+    events:
+      - pod.containersReady[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the replacement loses ContainersReady on the pass the deadline elapses, so the set is no capacity and the source fails with the replacement's readiness on its record and the target in backoff
+    events:
+      - pod.containersNotReady[target]: {pod: {index: 0, ordinal: 1}}
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: the replacement's readiness comes back and regresses again within one observation; a Failed source reads nothing of its replacement and waits on the ladder
+    events:
+      - pod.containersReady[target]: {pod: {index: 0, ordinal: 1}}
+      - pod.containersNotReady[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 7
+    note: a further pass reads the same row and writes nothing

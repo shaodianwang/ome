@@ -1,0 +1,51 @@
+# The replica count drops below a demoted Instance whose only pod is held
+# by a queue admission gate. A gated pod is trivially drained, since
+# nothing routes to it, and no deadline is consumed for a Delete-owned row,
+# so nothing parks and the wave deletes it at once; admission re-arms
+# nothing on its way out, and the edits outside the revision hash and to
+# the partition are invisible to a draining row.
+scenario: delete-gated-pod-drained
+arrows:
+  - T-pending-scaledown
+  - T-delete-done
+cells:
+  - instance/Delete/Drain/pod.schedulingGated/before
+  - instance/Delete/Drain/spec.annotationOnly/before
+  - instance/Delete/Drain/pod.admitted/before
+  - instance/Delete/Drain/spec.partition/before
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    podLabels: {kueue.x-k8s.io/queue-name: queue-a}
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 1}
+timeline:
+  - tick: 1
+    note: the operator halves the replica count, and the demoted Instance is admitted into a Delete operation
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 2
+    note: a queue admission gates the retired pod and the queue label moves; a gated pod is trivially drained, so the wave deletes it at once, and the edit cannot put the index back
+    events:
+      - pod.schedulingGated: {pod: {index: 1}}
+      - spec.annotationOnly: {labels: {kueue.x-k8s.io/queue-name: queue-b}}
+  - tick: 3
+    note: the queue admits the pod on its way out and a partition is set; gate exit writes nothing for a draining index and the partition bounds the update selection alone
+    events:
+      - pod.admitted: {pod: {index: 1}}
+      - spec.partition: {to: 1}
+  - tick: 4
+    note: the pod is gone and the row leaves the owner's status
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}

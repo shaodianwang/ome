@@ -1,0 +1,73 @@
+# A repair whose rebuilt pod is still coming up: the pod reappearing under
+# a new UID at the bumped incarnation satisfies the recreate as the same
+# member, and an edit outside the revision hash, a new readiness timeout,
+# the mark-not-ready and migration knobs, a re-tuned ladder and a teardown
+# deadline are read by no phase of the repair, which promotes once the pod
+# is Ready.
+scenario: restart-rebuild-ignores-edits
+arrows:
+  - T-ready-restart
+  - T-restart-ready
+cells:
+  - instance/Restart/Drain/pod.uidRotated/before
+  - instance/Restart/Drain/spec.annotationOnly/before
+  - instance/Restart/Drain/spec.policyTuning[instanceReadyTimeout]/before
+  - instance/Restart/Drain/spec.policyTuning[markNotReady]/before
+  - instance/Restart/Drain/spec.policyTuning[migrationPolicy]/before
+  - instance/Restart/Drain/config.changed[updateRetry]/before
+  - instance/Restart/Drain/config.changed[teardownDeadline]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    podLabels: {kueue.x-k8s.io/queue-name: queue-a}
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the rebuilt pod reappears under a new UID at the bumped incarnation; the pass addresses the recreate by name and label, so the same-name pod satisfies it
+    events:
+      - pod.uidRotated: {pod: {index: 0}}
+  - tick: 4
+    note: the queue label moves; the edit is outside the revision hash and the repair reads only the running revision
+    events:
+      - spec.annotationOnly: {labels: {kueue.x-k8s.io/queue-name: queue-b}}
+  - tick: 5
+    note: the readiness timeout is shortened; the Restart's deadline was stamped once at entry and is preserved
+    events:
+      - spec.policyTuning[instanceReadyTimeout]: {value: 10m}
+  - tick: 6
+    note: the mark-not-ready knob flips; it is consulted on the in-place path only
+    events:
+      - spec.policyTuning[markNotReady]: {value: "true"}
+  - tick: 7
+    note: the migration mode changes; a Restart attempt is never disposed, so the repair never reaches the relocation branch
+    events:
+      - spec.policyTuning[migrationPolicy]: {value: Auto}
+  - tick: 8
+    note: the retry ladder is re-tuned; the retry gate is consulted before an attempt starts, never on the repair path
+    events:
+      - config.changed[updateRetry]: {config: {updateRetry: {maxAttempts: 3, initialDelay: 5m, maxDelay: 10m, multiplier: 2}}}
+  - tick: 9
+    note: a teardown deadline is configured; it re-times a release that becomes reachable only once the owner is deleted
+    events:
+      - config.changed[teardownDeadline]: {config: {teardownDeadline: 10m}}
+  - tick: 10
+    note: the rebuilt pod reports Ready, so the repair promotes the row on the same revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

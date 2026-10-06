@@ -1,0 +1,64 @@
+# A parked attempt whose gang set is down is widened by a worker. The
+# PodGroup is re-reconciled for the new width, but a parked attempt opens
+# nothing and the Create pass's fill of the new name is a fresh start the
+# ladder still denies; the group held Terminating holds no row nobody owns.
+scenario: parked-down-gang-width-grow
+arrows:
+  - T-empty-create
+  - T-ready-recreate
+  - T-drain-deadline
+cells:
+  - instance/Failed/Parked/spec.gangWidth[grow]/before
+  - instance/Failed/Parked/gang.podGroup[Terminating]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1h, maxDelay: 2h, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes, so the roll drains the gang for a recreate
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation and the drained members are deleted, so the roll recreates them at the new revision
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 5
+    note: the rebuilt leader reports ContainersReady while the worker is still booting, so the set is short of serving
+    events:
+      - pod.containersReady[target]: {pod: {index: 0, runner: leader}}
+  - tick: 6
+    note: the deadline elapses on the live set; the ladder counts the wave and the attempt is parked with the row Failed
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 7
+    note: the gang widens by a worker; the PodGroup is re-reconciled for the new width while the fill of the new name is a fresh start the ladder denies
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+  - tick: 8
+    note: the group is held Terminating; a row nobody owns records no gang hold
+    events:
+      - gang.podGroup[Terminating]: {instance: 0}
+  - tick: 9
+    note: a further pass finds the row where its set put it, still behind the ladder

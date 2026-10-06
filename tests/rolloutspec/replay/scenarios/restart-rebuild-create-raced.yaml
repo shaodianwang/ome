@@ -1,0 +1,50 @@
+# The repair's rebuild races the cache: its pod create is answered
+# already-exists, which is tolerated, and the object that holds the name is
+# adopted as the rebuilt pod. The write that promotes the row is then
+# refused with a conflict once, retried by the adapter within the pass and
+# committed.
+scenario: restart-rebuild-create-raced
+arrows:
+  - T-ready-restart-crash
+  - T-restart-ready
+cells:
+  - instance/Restart/Drain/api.alreadyExists/before
+  - instance/Restart/Drain/api.conflict/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    containerName: ome-container
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: after a minute of steady serving the runner restarts, so the repair opens a Restart and takes the pod out of serving
+    events:
+      - clock.advance: 1m
+      - pod.containerRestart: {pod: {index: 0}, message: OOMKilled}
+  - tick: 3
+    note: the old pod leaves rotation, so the drain deletes it
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the old pod is gone and the rebuild's create is answered already-exists, so the object that holds the name is adopted as the rebuilt pod
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+      - api.alreadyExists: {}
+  - tick: 5
+    note: the rebuilt pod reports Ready and the write that promotes the row is refused once, so the adapter's retry re-applies it and the promote commits in the same pass
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - api.conflict: {write: 1, count: 1}

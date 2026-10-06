@@ -62,7 +62,7 @@ cells:
     outcome: ignore
     note: binding is observation only; the aggregator counts the pod and no pass keys on where a Failed row's pod landed
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-held-pod-observations]}
     status: current
   - state: Failed
     event: pod.scheduled
@@ -247,7 +247,7 @@ cells:
     outcome: ignore
     note: no attempt is in flight to invalidate; pod identity is re-read from the live list on the next pass and the incarnation label decides ownership
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-held-pod-observations]}
     status: current
   - state: Failed
     event: pod.stuckTerminating
@@ -264,7 +264,7 @@ cells:
     outcome: ignore
     note: node-death evidence drives the relocation directive at disposition time and the force-delete policy in the delete pass; neither reads it again from a Failed row
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-held-pod-observations]}
     status: current
   - state: Failed
     event: pod.schedulingGated
@@ -275,13 +275,14 @@ cells:
       perm: []
       unit: [TestEscalation_AdmissionGatedInstance_DeadlineSkipped]
       kind: []
+      replay: [failed-held-pod-observations]
     status: current
   - state: Failed
     event: pod.evicted
     outcome: ignore
     note: an eviction resolves into the pod disappearing, which is where the gang repair and the abandon path pick it up
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-held-pod-evicted]}
     status: current
   # The corrective and retry rows both fan out: `to` names the no-pods
   # destination and the note names the rest, because the grid has no
@@ -598,7 +599,7 @@ cells:
     outcome: ignore
     note: every mutation out of Failed re-reads the row and re-checks the incarnation, phase and operation identity it expected, so a stale observation writes nothing
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-held-pod-observations]}
     status: current
   - state: Failed
     event: api.conflict
@@ -612,21 +613,21 @@ cells:
     outcome: ignore
     note: nothing in this row's own path creates a pod — the Create pass commits its marker first — and the PodGroup and Service ensures treat an existing object as satisfied
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-retry-create-raced]}
     status: current
   - state: Failed
     event: api.notFound
     outcome: ignore
     note: a missing pod is the outcome the abandon and repair paths are waiting for; a missing owner ends the pass through the owner-gone sentinel rather than through this row
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-retry-recycle-meets-not-found]}
     status: current
   - state: Failed
     event: api.quotaDenied
     outcome: ignore
     note: a quota rejection lands on the attempt that already stamped Creating or Updating, which is where it is classified and where the refusal is recorded, and the QuotaExceeded waiting token names it from the next pass, so it is charged to that state; the Failed row is left untouched and re-attempts on the next admitted pass
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-retry-quota-denied]}
     status: current
   - state: Failed
     event: pod.terminating
@@ -670,7 +671,7 @@ cells:
     outcome: ignore
     note: a replacement losing readiness does not rescue or re-fail the source; ops/update_gang.go drives the abandon off the pods disappearing, never off their readiness
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-surge-replacement-regresses]}
     status: current
   - state: Failed
     event: pod.phaseTerminal
@@ -706,14 +707,14 @@ cells:
     outcome: ignore
     note: the recycle predicate is PodFailed or PodSucceeded only (workload/query/discover.go); an Unknown pod is neither counted as lost nor cleaned, since the wreckage cleanup in ops/update.go collects alien-revision pods only
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-held-pod-observations]}
     status: current
   - state: Failed
     event: pod.admitted
     outcome: ignore
     note: escalation/deadline.go ReconcileGatedDeadlines restarts a parked clock only for a transient phase, so an already-Failed row has no deadline to un-park whatever its pods' gates do
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-held-pod-observations]}
     status: current
   - state: Failed
     event: gang.podGroup
@@ -805,7 +806,7 @@ cells:
     outcome: ignore
     note: a narrower width changes only what ops/create.go counts as missing and what BuildPodGroup asks the gang scheduler for; the already-running extra pods are neither alien-revision wreckage nor scale-down extras, so no pass removes them
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-held-gang-shrink]}
     status: current
   - state: Failed
     event: spec.gangWidth
@@ -848,7 +849,7 @@ cells:
     outcome: ignore
     note: none of these is hashed and none is re-read for a row that already failed — the relocation mode and the operation deadline were resolved at attempt time, and the minReady and mark-not-ready windows belong to promotions and in-place lifecycles a Failed row does not have
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-held-pod-observations]}
     status: current
   - state: Failed
     event: config.changed
@@ -857,7 +858,7 @@ cells:
     note: types/retryblock_writer.go stamps NextRetryAt when the block is recorded, so re-tuning the policy never re-dates a live Backoff nor releases a Held block; the new policy is read by the next failure wave
     invariants: [retryblock.gates.fresh.attempts]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-retry-create-raced]}
     status: current
   - state: Failed
     event: config.changed
@@ -866,7 +867,7 @@ cells:
     note: the grace bounds the stuck-pod evidence in escalation/escalation.go — a pod held in a terminal kubelet waiting reason past it — and escalation.go skips an already-Failed row, so shortening or lengthening it cannot re-charge this row
     invariants: [failed.is.sticky]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-held-pod-observations]}
     status: current
   - state: Failed
     event: config.changed
@@ -874,7 +875,7 @@ cells:
     outcome: ignore
     note: the policy is re-read every pass and arms or disarms the Component-wide sweep over the row's Terminating pods, a retired replacement's included; the edit itself writes nothing to a Failed row (pkg/controller/v1beta1/workload/reconcile.go)
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-held-pod-observations]}
     status: current
   - state: Failed
     event: config.changed
@@ -882,7 +883,7 @@ cells:
     outcome: ignore
     note: inferencereplica/teardown.go resolves the deadline per pass against the owner's deletionTimestamp, so the edit only re-dates when timer.teardownDeadline fires, and only while the owner is Terminating
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-held-pod-observations]}
     status: current
   - state: Failed
     event: config.changed
@@ -890,7 +891,7 @@ cells:
     outcome: ignore
     note: the interval is read once at manager start into the reconciler field, where it is immutable for the process lifetime, so this knob is deliberately not a mid-flight change; only the poll cadence of a destructive wave would move, never the row's decisions
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-held-pod-observations]}
     status: current
   - state: Failed
     event: config.changed
@@ -898,7 +899,7 @@ cells:
     outcome: ignore
     note: the budget is re-resolved every pass in inferencereplica/reconciler.go but is spent by the auto-migration selector, which refuses a source that is not steady Ready, so a Failed row is never a candidate whatever the budget says
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-held-pod-observations]}
     status: current
   - state: Failed
     event: ctrl.resync
@@ -926,7 +927,7 @@ cells:
     outcome: defer
     note: the NamespaceTerminatingCause check runs on a pod create, and the create that re-materializes this index stamps Creating first, so the refusal is classified and disposed on that state; a write issued while the row still reads Failed is an ordinary error and the row is re-driven under backoff until the owner is itself collected
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-retry-in-terminating-namespace]}
     status: current
   - state: Failed
     event: timer.stuckPodGrace
@@ -954,7 +955,7 @@ cells:
     guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
     note: inferencereplica/teardown.go tests the deadline before dispatching any pass, so the release is phase-blind — the finalizer goes, the owner and every InstanceStatus row it carried are purged in one delete, and surviving pods fall to background GC through their owner references
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-teardown-deadline]}
     status: current
   - state: Failed
     event: timer.teardownDeadline
@@ -962,7 +963,7 @@ cells:
     outcome: ignore
     note: the finalizer is removed once; a re-observed deadline finds no finalizer and the teardown pass returns immediately, leaving cleanup to background GC
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-teardown-deadline]}
     status: current
 
   # --- kubelet admission and slow readiness ---------------------------------
@@ -974,7 +975,7 @@ cells:
     guard: no operation is preserved, so the Create pass reads the row as a fresh start, and the rejected pods hold the index's target names
     note: a rejection is phase Failed, so query.IsTerminalPod reads the occupant as absent and ops/terminal_recycle.go deletes it; terminalPodTermination replaces the bare PodFailed placeholder with the pod-level status.reason, so the kubelet's refusal reaches LastFailure verbatim. Environment-caused - no RetryBlock is charged - and the index is re-materialized under a fresh Create CreatePods operation once the deletes are observed
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-pod-refused-rebuilds]}
     status: current
   - state: Failed
     event: pod.admissionRejected
@@ -982,7 +983,7 @@ cells:
     outcome: ignore
     note: the recycle writes no phase, and once the Create stamp lands the attempt owns the index; the rejection reason is already on LastFailure
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-pod-refused-rebuilds]}
     status: current
   - state: Failed
     event: pod.runningNotReady

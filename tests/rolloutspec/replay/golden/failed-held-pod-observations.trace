@@ -1,0 +1,54 @@
+tick=1 note the Instance is parked at Failed behind a Held target with its pod still present, so no fresh start is admitted
+tick=1 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=1 pass result=after:5s
+tick=2 note a queue admission gates the pod and admits it again; a Failed row has no deadline to park or re-arm
+tick=2 apply pod.schedulingGated pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply pod.admitted pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=2 pass result=after:5s
+tick=3 note the pod is bound; binding is observation only
+tick=3 apply pod.scheduled[source] pod=svc-a-engine-0-default-0 node=node-1 now=t+0s
+tick=3 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=3 pass result=after:5s
+tick=4 note the pod's node goes NotReady; node-death evidence is read at disposition time and by the delete pass, never again from a Failed row
+tick=4 apply pod.nodeLost[NodeNotReady] pod=svc-a-engine-0-default-0 node=node-1 evidence=NodeNotReady since=t+0s now=t+0s
+tick=4 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=4 pass result=after:5s
+tick=5 note the pod reappears under a new UID; no attempt is in flight to invalidate and the incarnation label decides ownership
+tick=5 apply pod.uidRotated pod=svc-a-engine-0-default-0 uid=uid#1→uid#2 now=t+0s
+tick=5 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=5 pass result=after:5s
+tick=6 note the pod goes Unknown, which the recycle predicate does not read as terminal; it is neither counted as lost nor cleaned
+tick=6 apply pod.phaseTerminal[Unknown] pod=svc-a-engine-0-default-0 now=t+0s
+tick=6 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=6 pass result=after:5s
+tick=7 note the cache lags one event behind for this pass; every mutation out of Failed re-reads the row, so nothing is written
+tick=7 apply ctrl.staleRead cache=end-of-tick-6 now=t+0s
+tick=7 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=7 pass result=after:5s
+tick=8 note the readiness timeout changes; it is not re-read for a row that already failed
+tick=8 apply spec.policyTuning[instanceReadyTimeout] instanceReadyTimeout=10m generation=1 now=t+0s
+tick=8 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=8 pass result=after:5s
+tick=9 note a force-delete policy is configured; the edit itself writes nothing to a Failed row
+tick=9 apply config.changed[forceDelete] forceDelete={overdueSlack=1m nodeUnreachableThreshold=5m} now=t+0s
+tick=9 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=9 pass result=after:5s
+tick=10 note a teardown deadline is configured; it re-dates a release that needs a Terminating owner
+tick=10 apply config.changed[teardownDeadline] teardownDeadline=10m now=t+0s
+tick=10 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=10 pass result=after:5s
+tick=11 note the scale-down cadence changes; no destructive wave is in flight for it to move
+tick=11 apply config.changed[scaleDownInterval] scaleDownInterval=1m now=t+0s
+tick=11 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=11 pass result=after:5s
+tick=12 note the auto-migrate budget changes; a Failed row is never a relocation candidate whatever the budget says
+tick=12 apply config.changed[autoMigrateBudget] autoMigrateBudget=2 now=t+0s
+tick=12 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=12 pass result=after:5s
+tick=13 note the pod crash-loops and the stuck-pod grace is shortened below its age; the escalation skips an already-Failed row, so nothing is re-charged
+tick=13 apply clock.advance by=2m0s now=t+2m0s
+tick=13 apply pod.waiting[CrashLoopBackOff] pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff now=t+2m0s
+tick=13 apply config.changed[stuckPodGrace] stuckPodGrace=10s now=t+2m0s
+tick=13 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=13 pass result=after:5s

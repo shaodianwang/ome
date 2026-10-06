@@ -1,0 +1,30 @@
+tick=1 note the operator halves the replica count, and the retired Instance is admitted into a Delete operation
+tick=1 apply spec.replicasDown replicas=1 generation=1 now=t+0s
+tick=1 row=1 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 pass result=requeue
+tick=2 note the retired pod leaves rotation, so the wave deletes it
+tick=2 apply endpoint.rotationOut[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=2 row=1 write no-op precondition=no-change
+tick=2 pod status-patch name=svc-a-engine-1-default-0 serving=True→False
+tick=2 pod delete name=svc-a-engine-1-default-0 grace=default uidPrecondition=set
+tick=2 pass result=after:30s
+tick=3 note the kubelet stops acknowledging the deletion, which leaves the object behind with no finalizer on it
+tick=3 apply pod.stuckTerminating pod=svc-a-engine-1-default-0 deletionDeadline=t+0s now=t+0s
+tick=3 row=1 write no-op precondition=no-change
+tick=3 pass result=after:30s
+tick=4 note the overdue clock lands on a pod whose node is gone, so the sweep force-deletes it ahead of the wave, whose own read finds it absent and removes the row
+tick=4 apply timer.forceDelete[overdueSlack] to=t+1m1s now=t+1m1s
+tick=4 pod delete name=svc-a-engine-1-default-0 grace=0 uidPrecondition=set
+tick=4 event Warning PodForceDeleted OMENative component=engine instance=1: force-deleted stuck-Terminating pod svc-a-engine-1-default-0 on node node-1 (evidence=node-gone, 1m1s past the pod's own deletion deadline)
+tick=4 row=1 write no-op precondition=no-change
+tick=4 row=1 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=4 pass result=requeue
+tick=5 note the owner was deleted and its teardown deadline has elapsed; the escalation that already fired stands and the release purges an owner that carries no retired row
+tick=5 apply spec.teardown[deleted] teardown=true now=t+1m1s
+tick=5 apply timer.teardownDeadline to=t+11m2s now=t+11m2s
+tick=5 event Warning TeardownDeadlineExceeded teardown deadline 10m exceeded (1 owned pod(s) observed; selector: parent="svc-a", component="engine"); releasing the teardown finalizer to background GC
+tick=5 owner deleted rows=1
+tick=5 pass result=none
+tick=6 note a late pass finds no owner left to act on
+tick=6 owner gone; nothing reconciles
+tick=6 pass result=none

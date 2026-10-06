@@ -1,0 +1,15 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the owner was deleted and its teardown deadline has elapsed as the pod disappears and the template moves; the release purges the owner and the row, so nothing is rolled or rebuilt
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=2 apply spec.teardown[deleted] teardown=true now=t+0s
+tick=2 apply timer.teardownDeadline to=t+10m1s now=t+10m1s
+tick=2 event Warning TeardownDeadlineExceeded teardown deadline 10m exceeded (0 owned pod(s) observed; selector: parent="svc-a", component="engine"); releasing the teardown finalizer to background GC
+tick=2 owner deleted rows=1
+tick=2 pass result=none
+tick=3 note a late pass finds no owner left to act on
+tick=3 owner gone; nothing reconciles
+tick=3 pass result=none

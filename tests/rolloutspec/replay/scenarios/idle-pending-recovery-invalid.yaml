@@ -1,0 +1,27 @@
+# A demoted Instance's recovery create is rejected as invalid. The
+# recovery create stamps its own attempt first, so the rejection is
+# classified and disposed on that attempt, not on the Pending row.
+scenario: idle-pending-recovery-invalid
+arrows:
+  - T-pending-create
+cells:
+  - instance/Pending/api.invalid/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+timeline:
+  - tick: 1
+    note: the apiserver rejects the recovery create as invalid; the stamp lands first, so the rejection is classified and disposed on the attempt
+    events:
+      - api.invalid: {}
+  - tick: 2
+    note: a further pass reads what the disposition left

@@ -1,0 +1,55 @@
+tick=1 note the Ready gang is steady on its two serving members
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the worker is deleted out from under the Instance, so the repair opens a Restart over the gang and takes the leader out of serving
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-3363fef6 readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 1 below desired 2 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod count 1 below desired 2 (incarnation=2)
+tick=2 pod status-patch name=svc-a-engine-0-leader-0 serving=True→False
+tick=2 pass result=after:5s
+tick=3 note the leader leaves rotation, so the drain deletes it
+tick=3 apply endpoint.rotationOut[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pod delete name=svc-a-engine-0-leader-0 grace=default
+tick=3 pass result=after:5s
+tick=4 note the old leader is gone, so both members are rebuilt at the bumped incarnation
+tick=4 apply pod.deleted[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod create name=svc-a-engine-0-leader-0 revision=3363fef6 incarnation=2 ordinal=0
+tick=4 pod create name=svc-a-engine-0-worker-0 revision=3363fef6 incarnation=2 ordinal=0
+tick=4 pass result=after:5s
+tick=5 note the rebuilt leader comes up while the rebuilt worker crash-loops past the grace, so the repair parks at Failed with its operation preserved
+tick=5 apply clock.advance by=2m0s now=t+2m0s
+tick=5 apply pod.containersReady[source] pod=svc-a-engine-0-leader-0 now=t+2m0s
+tick=5 apply pod.waiting[CrashLoopBackOff] pod=svc-a-engine-0-worker-0 reason=CrashLoopBackOff now=t+2m0s
+tick=5 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=5 row=0 write no-op precondition=no-change
+tick=5 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-3363fef6 readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 1 below desired 2 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-worker-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=5 warn instanceFailed index=0 pod=svc-a-engine-0-worker-0 reason=CrashLoopBackOff
+tick=5 pass result=after:5s
+tick=6 note the gang's PodGroup is deleted; the ensure pass re-creates it from the plan in the same pass and the row is untouched
+tick=6 apply gang.podGroup[Deleted] podGroup=svc-a-engine-0 state=Deleted now=t+2m0s
+tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=6 podgroup create name=svc-a-engine-0
+tick=6 hold cleared
+tick=6 pass result=after:5s
+tick=7 note the rebuilt leader is lost under the parked repair; a survivor remains, so the lost-member trigger re-arms the gang at once and drains the wedged worker
+tick=7 apply pod.deleted[source] pod=svc-a-engine-0-leader-0 now=t+2m0s
+tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=7 row=0 write incarnation=3 phase=Restarting runningRevision=svc-a-engine-3363fef6 readySince=t+0s op=op#2{type=Restart step=Drain reason=gang member lost: 1 of 2 pods present retryCount=1 started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} lastFailure={pod=svc-a-engine-0-worker-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=7 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: gang member lost: 1 of 2 pods present (incarnation=3)
+tick=7 pod delete name=svc-a-engine-0-worker-0 grace=default
+tick=7 pass result=after:5s
+tick=8 note the drained worker is gone; the row is Restarting and the loss is the repair's drain completing, so the rebuild lands at the bumped incarnation
+tick=8 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+2m0s
+tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=8 row=0 write no-op precondition=no-change
+tick=8 pod create name=svc-a-engine-0-leader-0 revision=3363fef6 incarnation=3 ordinal=0
+tick=8 pod create name=svc-a-engine-0-worker-0 revision=3363fef6 incarnation=3 ordinal=0
+tick=8 pass result=after:5s

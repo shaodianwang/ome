@@ -1,0 +1,22 @@
+tick=1 note the Instance is parked at Failed while its target sits in Backoff, so no fresh start is admitted
+tick=1 hold gate=RetryBlock target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb in backoff after 1 failed attempt(s): DeadlineExceeded; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=1 pass result=after:5s
+tick=2 note the pod exits with phase Failed; the recycle is the fresh start's and the fresh start is behind the ladder, so nothing moves
+tick=2 apply pod.phaseTerminal[Failed] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 hold gate=RetryBlock target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb in backoff after 1 failed attempt(s): DeadlineExceeded; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=2 pass result=after:2m0s
+tick=3 note the block comes due with a not-found answer armed; the fresh start claims the row and its recycle delete meets the answer, behind which the dead pod is already gone
+tick=3 apply timer.retryAt to=t+2m1s now=t+2m1s
+tick=3 apply api.notFound verb=delete resource=pods count=1 now=t+2m1s
+tick=3 hold cleared
+tick=3 row=0 write incarnation=1 phase=Creating runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+2m1s lastProgressAt=t+2m1s deadline=t+32m1s} precondition=ok
+tick=3 retryblock target=svc-a-engine-882059bb persist {state=Backoff attempts=1 nextRetryAt=t+2m0s reason=DeadlineExceeded}→{state=RetryInProgress attempts=1 nextRetryAt=t+2m0s reason=DeadlineExceeded}
+tick=3 row=0 write incarnation=1 phase=Creating runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb retryCount=1 started=t+2m1s lastProgressAt=t+2m1s deadline=t+32m1s} lastFailure={pod=svc-a-engine-0-default-0 reason=Failed container=main exitCode=1} precondition=ok
+tick=3 pod delete-rejected name=svc-a-engine-0-default-0 rejection=api.notFound
+tick=3 event Warning TerminalPodRecycled OMENative component=engine instance=0 deleted terminal pod(s) svc-a-engine-0-default-0 (Failed) for recreate (Create recycle 1)
+tick=3 pass result=after:5s
+tick=4 note the name is free, so the fresh Create rebuilds the index
+tick=4 hold cleared
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=4 pass result=after:5s

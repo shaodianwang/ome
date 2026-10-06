@@ -1,0 +1,42 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod count 0 below desired 1 (incarnation=2)
+tick=2 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=2 ordinal=0
+tick=2 pass result=after:5s
+tick=3 note the rebuilt pod crash-loops and is older than the grace when the wedge is read, so the row fails with its operation preserved
+tick=3 apply clock.advance by=2m0s now=t+2m0s
+tick=3 apply pod.waiting[CrashLoopBackOff] pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff now=t+2m0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=3 warn instanceFailed index=0 pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff
+tick=3 pass result=after:5s
+tick=4 note the serving gate is flipped on the wedged pod by another hand; the gate is the resume's to write after ContainersReady, so nothing is written
+tick=4 apply pod.servingOn[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the container starts and the pod reports ContainersReady; the gate the resume would write is already on the pod, so nothing is written and the promote waits for PodReady
+tick=5 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=5 pass result=after:5s
+tick=6 note the pod's readiness regresses while it keeps running, which withdraws the resume's precondition; the set reads wedged again and the row keeps its state
+tick=6 apply pod.containersNotReady[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=6 hold cleared
+tick=6 pass result=after:5s
+tick=7 note the pod reports ContainersReady and PodReady in one observation, so the resume promotes the row on its running revision at the incarnation the pod carries
+tick=7 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=7 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=7 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+2m0s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=7 event Normal RestartCompleted OMENative component=engine instance=0 restart complete (incarnation=2)
+tick=7 hold cleared
+tick=7 row=0 write no-op precondition=no-change
+tick=7 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=7 pass result=none
+tick=8 note the readiness is re-observed on the Ready row; the repair is over and nothing is written
+tick=8 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=8 hold cleared
+tick=8 row=0 write no-op precondition=no-change
+tick=8 pass result=none

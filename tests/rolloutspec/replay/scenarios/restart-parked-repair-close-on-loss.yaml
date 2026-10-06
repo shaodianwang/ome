@@ -1,0 +1,54 @@
+# A repair parked at Failed loses its wedged pod to a deletion by another
+# hand. On its way out the pod is live and the close waits on it; its
+# kubelet going silent changes nothing without a force-delete policy; once
+# the object is gone no live pod is left, so the restart pass closes the
+# spent operation and the Create pass rebuilds the row as a fresh start.
+scenario: restart-parked-repair-close-on-loss
+arrows:
+  - T-ready-restart
+  - T-restart-stuck
+  - T-failedrepair-close
+cells:
+  - instance/Failed/Repair/pod.stuckTerminating/before
+  - instance/Failed/Repair/pod.deleted[source]/boundary@T-failedrepair-close
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the rebuilt pod crash-loops and is older than the grace when the wedge is read, so the row fails with its operation preserved
+    events:
+      - clock.advance: 2m
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0}, message: "back-off restarting failed container"}
+  - tick: 4
+    note: the wedged pod is deleted by another hand; on its way out it is live, so the close waits on it
+    events:
+      - pod.terminating[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the pod's kubelet stops acknowledging the deletion; with no force-delete policy nothing frees the name and the close keeps waiting
+    events:
+      - pod.stuckTerminating: {pod: {index: 0}}
+  - tick: 6
+    note: the object is gone, so no live pod is left and the restart pass closes the spent operation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 7
+    note: the Failed row has no operation and no pod, so the Create pass rebuilds it as a fresh start

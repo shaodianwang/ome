@@ -1,0 +1,38 @@
+# An Instance parked at Failed whose owner is deleted, with the configured
+# teardown deadline elapsed by the time the controller observes it. The
+# teardown pass tests the deadline before dispatching any pass, so the
+# release is phase-blind: the finalizer goes, the owner and its row are
+# purged in one delete, and the surviving pod falls to background GC. A
+# later pass finds no object to act on.
+scenario: failed-teardown-deadline
+arrows:
+
+cells:
+  - instance/Failed/timer.teardownDeadline/before
+  - instance/Failed/timer.teardownDeadline/after@T-failed-teardown-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    scaleDownRequeueInterval: 30s
+    teardownDeadline: 10m
+  rows:
+    - {index: 0, phase: Failed, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+timeline:
+  - tick: 1
+    note: the Instance is parked at Failed with its pod still present
+  - tick: 2
+    note: the owner was deleted and its teardown deadline has elapsed before this pass observes either, so the deadline check releases the owner ahead of any teardown wave and the Failed row goes with it
+    events:
+      - spec.teardown[deleted]: {}
+      - timer.teardownDeadline: {slack: 1s}
+  - tick: 3
+    note: a late pass finds no owner left to act on

@@ -1,0 +1,48 @@
+# An Instance failed on a stuck create, in Backoff, with a quota refusal
+# armed. The refusal lands on the attempt that stamps Creating when the
+# block comes due, where it is classified and recorded; the Failed row is
+# left untouched by it and the create is retried on the admitted pass.
+scenario: failed-retry-quota-denied
+arrows:
+  - T-empty-create
+  - T-create-stuckgrace
+  - T-failed-retry
+cells:
+  - instance/Failed/api.quotaDenied/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pull wedges immediately, but the pod is younger than the grace, so the attempt keeps polling
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}
+  - tick: 3
+    note: the grace elapses, and with a retry budget the revision goes into Backoff instead of being held
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 4
+    note: the wedged pod is recycled, so nothing of the failed attempt remains
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 5
+    note: a quota refusal is armed; nothing in a Failed row's own path creates a pod, so nothing consumes it
+    events:
+      - api.quotaDenied: {}
+  - tick: 6
+    note: the block comes due; the Create pass stamps Creating and its create meets the refusal, which is recorded on that attempt
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 7
+    note: the quota admits the create on the requeue

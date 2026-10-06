@@ -1,0 +1,36 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod count 0 below desired 1 (incarnation=2)
+tick=2 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=2 ordinal=0
+tick=2 pass result=after:5s
+tick=3 note the rebuilt pod crash-loops and is older than the grace when the wedge is read, so the row fails with its operation preserved
+tick=3 apply clock.advance by=2m0s now=t+2m0s
+tick=3 apply pod.waiting[CrashLoopBackOff] pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff now=t+2m0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=3 warn instanceFailed index=0 pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff
+tick=3 pass result=after:5s
+tick=4 note the wedged pod exits with phase Failed; the set has no live pod left, so the restart pass closes the spent operation and the close writes no phase
+tick=4 apply pod.phaseTerminal[Failed] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=4 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=4 event Normal RepairClosed OMENative component=engine instance=0 repair parked after pod svc-a-engine-0-default-0 container main stuck (CrashLoopBackOff) closed: no live pod left to resume or rebuild; the Create pass rebuilds the Instance as a fresh start
+tick=4 pass result=after:5s
+tick=5 note the terminal phase is re-observed on a Failed row with no operation, so its recycle frees the name under a fresh Create
+tick=5 apply pod.phaseTerminal[Failed] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=5 hold cleared
+tick=5 row=0 write incarnation=2 phase=Creating runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#2{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=5 row=0 write incarnation=2 phase=Creating runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#2{type=Create step=CreatePods target=svc-a-engine-882059bb retryCount=1 started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=Failed container=main exitCode=1} precondition=ok
+tick=5 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=5 event Warning TerminalPodRecycled OMENative component=engine instance=0 deleted terminal pod(s) svc-a-engine-0-default-0 (Failed) for recreate (Create recycle 1)
+tick=5 pass result=after:5s
+tick=6 note the recycled pod is gone, so the fresh start rebuilds the index
+tick=6 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=6 hold cleared
+tick=6 row=0 write no-op precondition=no-change
+tick=6 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=2 ordinal=0
+tick=6 pass result=after:5s

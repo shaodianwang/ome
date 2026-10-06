@@ -1,0 +1,28 @@
+tick=1 note the demoted row sits with its pod present, so the Create pass creates nothing
+tick=1 hold cleared
+tick=1 pass result=after:5s
+tick=2 note the node refuses the pod; a rejected pod is phase Failed, so the member count reads the Instance as short and the repair opens a Restart that drains it
+tick=2 apply pod.admissionRejected[OutOfResource] pod=svc-a-engine-0-default-0 reason=OutOfnvidia.com/gpu now=t+0s
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=PodFailed message=Node didn't have enough resource: nvidia.com/gpu, requested: 1, used: 8, capacity: 8} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod count 0 below desired 1 (incarnation=2)
+tick=2 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=2 pass result=after:5s
+tick=3 note the refusal is re-observed on the draining pod; the repair already owns the set and the Restart stamp is idempotent
+tick=3 apply pod.admissionRejected[OutOfResource] pod=svc-a-engine-0-default-0 reason=OutOfnvidia.com/gpu now=t+0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=after:5s
+tick=4 note the dead pod is gone, so the rebuild lands at the bumped incarnation
+tick=4 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=2 ordinal=0
+tick=4 pass result=after:5s
+tick=5 note the rebuilt pod reports Ready and the repair completes
+tick=5 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=5 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=PodFailed message=Node didn't have enough resource: nvidia.com/gpu, requested: 1, used: 8, capacity: 8} precondition=ok
+tick=5 event Normal RestartCompleted OMENative component=engine instance=0 restart complete (incarnation=2)
+tick=5 hold cleared
+tick=5 row=0 write no-op precondition=no-change
+tick=5 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=5 pass result=none

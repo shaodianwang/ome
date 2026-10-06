@@ -1,0 +1,52 @@
+tick=1 note the index is planned and no row exists, so the Create pass opens the attempt
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-default-0 node=node-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=2 pass result=none
+tick=3 note the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+tick=3 apply spec.migrateRequest uuid=uid#2 instance=0 fromNode=node-0 now=t+0s
+tick=3 condition type=MigrationPolicyUnconfigured status=False reason=MigrationCapacityConfigured message=Migration capacity policy is configured
+tick=3 migration uuid=uid#2 write phase=Accepted→SurgePending surge=nil→1 message=nil→surge allocated; waiting for surge pods allocatedAt=nil→t+0s
+tick=3 row=0 write incarnation=1 phase=Migrating runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#2{type=Migrate step=CreateSurge surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#3{type=Migrate step=CreateSurge surgeIndex=0 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal MigrationRequestAccepted OMENative component=engine instance=0 migration accepted (uuid=uid#2, source-node=node-0, surge-index=1)
+tick=3 pod create name=svc-a-engine-1-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=3 pass result=after:5s
+tick=4 note the surge pod is bound and comes up on its node while the migration waits on its promote
+tick=4 apply pod.scheduled[target] pod=svc-a-engine-1-default-0 node=node-1 now=t+0s
+tick=4 apply pod.containersReady[target] pod=svc-a-engine-1-default-0 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 row=1 write no-op precondition=no-change
+tick=4 pod status-patch name=svc-a-engine-1-default-0 serving=absent→True
+tick=4 pass result=after:5s
+tick=5 note the record's deadline elapses with the source healthy, so expiry restores the source and unpins the surge, whose row is left Creating with no operation beyond the desired set
+tick=5 apply timer.migrationDeadline to=t+30m1s now=t+30m1s
+tick=5 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=nil precondition=ok
+tick=5 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=5 migration uuid=uid#2 write phase=SurgePending→Failed message=surge allocated; waiting for surge pods→deadline exceeded in phase SurgePending: surge pods never became ready completedAt=nil→t+30m1s
+tick=5 event Warning MigrationExpired OMENative migration uuid=uid#2 expired: deadline exceeded in phase SurgePending: surge pods never became ready; tearing down surge instance=1
+tick=5 pass result=requeue
+tick=6 note the leftover pod exits with phase Failed; a Creating row is no fresh start for the recycle, and the wave reaps the unplanned index and deletes the dead pod
+tick=6 apply pod.phaseTerminal[Failed] pod=svc-a-engine-1-default-0 now=t+30m1s
+tick=6 row=1 write incarnation=1 phase=Deleting runningRevision=nil readySince=nil op=op#4{type=Delete step=Drain started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} precondition=ok
+tick=6 pass result=requeue
+tick=7 note the wave owns the row and deletes the leftover pod
+tick=7 row=1 write no-op precondition=no-change
+tick=7 pod status-patch name=svc-a-engine-1-default-0 serving=True→False
+tick=7 pod delete name=svc-a-engine-1-default-0 grace=default uidPrecondition=set
+tick=7 pass result=after:30s
+tick=8 note the leftover pod is gone, so the row is removed
+tick=8 apply pod.deleted[source] pod=svc-a-engine-1-default-0 now=t+30m1s
+tick=8 row=1 write no-op precondition=no-change
+tick=8 row=1 remove incarnation=1 phase=Deleting runningRevision=nil readySince=nil op=op#4{type=Delete step=Drain started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} precondition=ok
+tick=8 pass result=requeue

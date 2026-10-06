@@ -1,0 +1,66 @@
+# A gang repair parked at Failed on a crash-looping rebuilt worker. Its
+# PodGroup deleted is re-created by the ensure pass in the same pass; the
+# rebuilt leader lost re-arms the gang at once, the re-armed repair
+# draining the wedged worker, and the worker gone is that drain completing.
+scenario: restart-parked-repair-gang-member-lost
+arrows:
+  - T-ready-restart
+  - T-restart-stuck
+  - T-failedrepair-member-lost
+cells:
+  - instance/Failed/Repair/gang.podGroup[Deleted]/before
+  - instance/Failed/Repair/pod.deleted[source]/boundary@T-failedrepair-member-lost
+  - instance/Failed/Repair/pod.deleted[source]/after@T-failedrepair-member-lost
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, runner: leader, ready: true, serving: true, routed: true}
+    - {index: 0, runner: worker, ready: true, serving: true}
+timeline:
+  - tick: 1
+    note: the Ready gang is steady on its two serving members
+  - tick: 2
+    note: the worker is deleted out from under the Instance, so the repair opens a Restart over the gang and takes the leader out of serving
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 3
+    note: the leader leaves rotation, so the drain deletes it
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 4
+    note: the old leader is gone, so both members are rebuilt at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+  - tick: 5
+    note: the rebuilt leader comes up while the rebuilt worker crash-loops past the grace, so the repair parks at Failed with its operation preserved
+    events:
+      - clock.advance: 2m
+      - pod.containersReady[source]: {pod: {index: 0, runner: leader}}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0, runner: worker}, message: "back-off restarting failed container"}
+  - tick: 6
+    note: the gang's PodGroup is deleted; the ensure pass re-creates it from the plan in the same pass and the row is untouched
+    events:
+      - gang.podGroup[Deleted]: {instance: 0}
+  - tick: 7
+    note: the rebuilt leader is lost under the parked repair; a survivor remains, so the lost-member trigger re-arms the gang at once and drains the wedged worker
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+  - tick: 8
+    note: the drained worker is gone; the row is Restarting and the loss is the repair's drain completing, so the rebuild lands at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

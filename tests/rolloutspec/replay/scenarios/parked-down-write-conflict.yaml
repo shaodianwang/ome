@@ -1,0 +1,52 @@
+# The write that reads a parked set as serving again is refused with a
+# conflict for every attempt of the adapter's retry. Nothing commits in
+# that pass; the next pass re-reads the set and writes the same reading.
+scenario: parked-down-write-conflict
+arrows:
+  - T-ready-recreate
+  - T-drain-deadline
+  - T-failedparked-serves
+cells:
+  - instance/Failed/Parked/api.conflict/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1h, maxDelay: 2h, multiplier: 2}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod template changes, so the roll drains the pod for a recreate
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the pod leaves rotation, so it is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the old pod is gone, so the rebuild lands at the new revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the deadline elapses on a rebuilt pod that never came up; the ladder counts the wave and the attempt is parked with the row Failed
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: the pod comes up and is gated serving, and the write that reads the set as serving again is refused on every retry, so nothing commits
+    events:
+      - pod.containersReady[source]: {pod: {index: 0}}
+      - pod.servingOn[source]: {pod: {index: 0}}
+      - api.conflict: {write: 1, count: 5}
+  - tick: 7
+    note: the next pass re-reads the set and commits the reading

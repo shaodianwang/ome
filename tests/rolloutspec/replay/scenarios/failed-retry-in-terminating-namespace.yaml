@@ -1,0 +1,53 @@
+# An Instance failed on a stuck create, in Backoff, whose namespace begins
+# terminating. The refusal is read on the pod create, and the create that
+# re-materializes the index stamps Creating first, so it is classified and
+# disposed on that state; namespace GC then deletes the owner and the next
+# pass runs teardown instead.
+scenario: failed-retry-in-terminating-namespace
+arrows:
+  - T-empty-create
+  - T-create-stuckgrace
+  - T-failed-retry
+  - T-failed-teardown
+cells:
+  - instance/Failed/api.namespaceTerminating/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+    scaleDownRequeueInterval: 30s
+
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pull wedges immediately, but the pod is younger than the grace, so the attempt keeps polling
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}
+  - tick: 3
+    note: the grace elapses, and with a retry budget the revision goes into Backoff instead of being held
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 4
+    note: the wedged pod is recycled, so nothing of the failed attempt remains
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 5
+    note: the namespace begins terminating; nothing in a Failed row's own path creates a pod, so nothing consumes the refusal yet
+    events:
+      - api.namespaceTerminating: {count: 2}
+  - tick: 6
+    note: the block comes due; the Create pass stamps Creating first and its create is refused with the terminating cause, so the attempt is disposed on that state
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 7
+    note: namespace GC deletes the owner, so the next pass runs teardown instead of another create
+    events:
+      - spec.teardown[deleted]: {}

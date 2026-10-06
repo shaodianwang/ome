@@ -1,0 +1,53 @@
+# A retired Instance draining out of rotation. A readiness regression is
+# no input to the drain, which gates on EndpointSlice convergence; a
+# re-tuned force-delete policy and retry ladder move nothing; and the pass
+# that finds the pod gone reads it through the live reader, so a lagging
+# cache cannot hold the row open.
+scenario: delete-drain-observations
+arrows:
+  - T-ready-scaledown
+  - T-delete-done
+cells:
+  - instance/Delete/Drain/pod.containersNotReady[source]/before
+  - instance/Delete/Drain/config.changed[forceDelete]/before
+  - instance/Delete/Drain/config.changed[updateRetry]/before
+  - instance/Delete/Drain/ctrl.staleRead/before
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 1, ready: true, serving: true, routed: true, node: node-1}
+timeline:
+  - tick: 1
+    note: the operator halves the replica count, and the retired Instance is admitted into a Delete operation
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 2
+    note: the retired pod loses ContainersReady while still in rotation; the drain gates on the endpoint, not on readiness, so it keeps waiting
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 1}}
+  - tick: 3
+    note: a force-delete policy and a retry ladder are configured; the first arms an escalation that has nothing to act on and the second is read by no delete-owned row
+    events:
+      - config.changed[forceDelete]: {config: {forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}}}
+      - config.changed[updateRetry]: {config: {updateRetry: {maxAttempts: 3, initialDelay: 5m, maxDelay: 10m, multiplier: 2}}}
+  - tick: 4
+    note: the retired pod leaves rotation, so the wave deletes it
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 5
+    note: the pod is gone while the cache still lists it; the wave reads the pod set live, so the row is removed regardless
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}
+      - ctrl.staleRead: {}

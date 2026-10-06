@@ -1,0 +1,41 @@
+# A demoted Instance whose only pod is held by a queue admission gate. A
+# gated pod counts as present, so the Create pass creates no duplicate and
+# waits; the scheduler's refusal is written onto no operation, since a
+# Pending row carries none; admission re-arms no clock either. The pod
+# reporting Ready is what promotes the row.
+scenario: idle-pending-gated-pod-waits
+arrows:
+  - T-pending-promote
+cells:
+  - instance/Pending/pod.schedulingGated/before
+  - instance/Pending/pod.unschedulable[source]/before
+  - instance/Pending/pod.admitted/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0}
+timeline:
+  - tick: 1
+    note: a queue admission gates the pod; it counts as present, so the Create pass creates no duplicate and waits
+    events:
+      - pod.schedulingGated: {pod: {index: 0}}
+  - tick: 2
+    note: the queue admits the pod and the scheduler refuses it a node; a Pending row carries no operation for the scheduler hold to record
+    events:
+      - pod.admitted: {pod: {index: 0}}
+      - pod.unschedulable[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod is bound and reports Ready, so the Create pass promotes the row
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-1}
+      - pod.ready[source]: {pod: {index: 0}}

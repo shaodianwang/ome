@@ -1,0 +1,45 @@
+# A demoted Instance whose pod reports ContainersReady and then loses it
+# while it keeps running. The Create promote requires the whole set
+# ContainersReady and PodReady, so a regression only withholds it; a
+# Pending row carries no operation, so no deadline runs against the pod
+# unready past the grace, and only a terminal waiting reason could end
+# the wait. The pod reporting Ready is what promotes the row.
+scenario: idle-pending-readiness-regresses
+arrows:
+  - T-pending-promote
+cells:
+  - instance/Pending/pod.containersNotReady[source]/before
+  - instance/Pending/pod.runningNotReady[source]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0}
+timeline:
+  - tick: 1
+    note: the pod reports ContainersReady; the Create promote waits for PodReady
+    events:
+      - pod.containersReady[source]: {pod: {index: 0}}
+  - tick: 2
+    note: the pod's readiness regresses while it keeps running, which withholds the promote
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod has been unready past the stuck-pod grace; a Pending row carries no operation, so no deadline runs and nothing is stamped
+    events:
+      - clock.advance: 2m
+  - tick: 4
+    note: the pod comes back and reports Ready, so the Create pass promotes the row
+    events:
+      - pod.containersReady[source]: {pod: {index: 0}}
+      - pod.ready[source]: {pod: {index: 0}}

@@ -1,0 +1,32 @@
+# A new index is planned and the apiserver rejects its pod as invalid. The
+# create that materializes the index stamps Creating first, so the
+# rejection is classified and disposed on that state, never on the empty
+# slot.
+scenario: idle-empty-create-invalid
+arrows:
+  - T-empty-create
+cells:
+  - instance/Empty/api.invalid/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod and the second index is not planned
+  - tick: 2
+    note: the replica count grows and the apiserver rejects the new index's pod as invalid; the stamp lands first, so the rejection is classified and disposed on the Creating attempt
+    events:
+      - spec.replicasUp: {to: 2}
+      - api.invalid: {}
+  - tick: 3
+    note: a further pass reads what the disposition left

@@ -1,0 +1,12 @@
+tick=1 note the demoted row sits under the pause with no pod
+tick=1 pass result=none
+tick=2 note the owner was deleted and its teardown deadline has elapsed as the block on the other revision comes due; the release runs before any dispatch and consults no gate, so the row is purged with the owner
+tick=2 apply spec.teardown[deleted] teardown=true now=t+0s
+tick=2 apply timer.retryAt to=t+2m1s now=t+2m1s
+tick=2 apply timer.teardownDeadline to=t+10m1s now=t+10m1s
+tick=2 event Warning TeardownDeadlineExceeded teardown deadline 10m exceeded (0 owned pod(s) observed; selector: parent="svc-a", component="engine"); releasing the teardown finalizer to background GC
+tick=2 owner deleted rows=1
+tick=2 pass result=none
+tick=3 note a late pass finds no owner left to act on
+tick=3 owner gone; nothing reconciles
+tick=3 pass result=none

@@ -1,0 +1,11 @@
+tick=1 note the demoted row sits under the pause with its pod present
+tick=1 pass result=none
+tick=2 note the pod's node is deleted; a Pending row has nothing serving for the loss to reach
+tick=2 apply pod.nodeLost[NodeGone] pod=svc-a-engine-0-default-0 node=node-0 evidence=gone now=t+0s
+tick=2 pass result=none
+tick=3 note the pod reappears under a new UID; the same-name pod is observed as the same member
+tick=3 apply pod.uidRotated pod=svc-a-engine-0-default-0 uid=uid#1→uid#2 now=t+0s
+tick=3 pass result=none
+tick=4 note the stuck-pod grace changes; nothing about it is persisted on the row
+tick=4 apply config.changed[stuckPodGrace] stuckPodGrace=1m now=t+0s
+tick=4 pass result=none

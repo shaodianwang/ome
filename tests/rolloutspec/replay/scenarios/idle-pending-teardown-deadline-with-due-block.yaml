@@ -1,0 +1,38 @@
+# A demoted Instance under a standard pause whose owner is deleted, with
+# the teardown deadline elapsed and a Backoff block on another revision
+# due in the same observation. The deadline release runs before the
+# teardown dispatch and consults no gate: the row is purged with the owner
+# rather than rebuilt.
+scenario: idle-pending-teardown-deadline-with-due-block
+arrows:
+
+cells:
+  - instance/Pending/timer.retryAt/boundary@T-pending-teardown-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    paused: true
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    teardownDeadline: 10m
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  retryBlocks:
+    - {revision: registry.example.com/runtime:v2, state: Backoff, attemptsStarted: 1, nextRetryAt: 2m, reason: ImagePullBackOff}
+timeline:
+  - tick: 1
+    note: the demoted row sits under the pause with no pod
+  - tick: 2
+    note: the owner was deleted and its teardown deadline has elapsed as the block on the other revision comes due; the release runs before any dispatch and consults no gate, so the row is purged with the owner
+    events:
+      - spec.teardown[deleted]: {}
+      - timer.retryAt: {slack: 1s}
+      - timer.teardownDeadline: {slack: 1s}
+  - tick: 3
+    note: a late pass finds no owner left to act on

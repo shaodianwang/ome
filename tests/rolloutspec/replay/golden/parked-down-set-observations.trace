@@ -1,0 +1,110 @@
+tick=1 note the gang's PodGroup is announced before its first member, and the Create pass materializes both
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 2 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-leader-0 revision=4c292506 incarnation=1 ordinal=0
+tick=1 pod create name=svc-a-engine-0-worker-0 revision=4c292506 incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note both members report Ready and the leader enters rotation and the availability window elapses, so the Instance promotes as one
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=2 apply clock.advance by=30s now=t+30s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-leader-0 serving=absent→True
+tick=2 pod status-patch name=svc-a-engine-0-worker-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-4c292506 readySince=t+30s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (2 pod(s) serving)
+tick=2 pass result=none
+tick=3 note the pod template changes, so the roll drains the gang for a recreate
+tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+30s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 gate consult strategy=RecreatePod surge=0 unavail=0 verdict=allow
+tick=3 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+30s op=op#2{type=Update step=Drain target=svc-a-engine-f5f6d007 reason=revision svc-a-engine-4c292506 -> svc-a-engine-f5f6d007 strategy=RecreatePod started=t+30s lastProgressAt=t+30s deadline=t+30m30s} precondition=ok
+tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 recreate (revision svc-a-engine-4c292506 -> svc-a-engine-f5f6d007, incarnation=2)
+tick=3 pod status-patch name=svc-a-engine-0-leader-0 serving=True→False
+tick=3 pod status-patch name=svc-a-engine-0-worker-0 serving=True→False
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the leader leaves rotation and the drained members are deleted, so the roll recreates them at the new revision
+tick=4 apply endpoint.rotationOut[source] pod=svc-a-engine-0-leader-0 now=t+30s
+tick=4 apply pod.deleted[source] pod=svc-a-engine-0-leader-0 now=t+30s
+tick=4 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+30s
+tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod create name=svc-a-engine-0-leader-0 revision=f5f6d007 incarnation=2 ordinal=0
+tick=4 pod create name=svc-a-engine-0-worker-0 revision=f5f6d007 incarnation=2 ordinal=0
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the rebuilt leader reports ContainersReady while the worker is still booting, so the set is short of serving
+tick=5 apply pod.containersReady[target] pod=svc-a-engine-0-leader-0 now=t+30s
+tick=5 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=5 row=0 write no-op precondition=no-change
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note the deadline elapses on the live set; the ladder counts the wave and the attempt is parked with the row Failed
+tick=6 apply timer.operationDeadline to=t+30m31s now=t+30m31s
+tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=6 row=0 write no-op precondition=no-change
+tick=6 hold cleared
+tick=6 retryblock target=svc-a-engine-f5f6d007 persist nil→{state=Backoff attempts=1 nextRetryAt=t+1h30m31s reason=ReadinessGateNotSatisfied}
+tick=6 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+30s op=op#2{type=Update step=Parked target=svc-a-engine-f5f6d007 reason=revision svc-a-engine-4c292506 -> svc-a-engine-f5f6d007 waiting=RetryBlock strategy=RecreatePod started=t+30s lastProgressAt=t+30s deadline=nil} lastFailure={pod=svc-a-engine-0-leader-0 reason=ReadinessGateNotSatisfied message=pod containers are ready but a readiness gate keeps it out of its Service; unsatisfied gates: ome.io/serving} precondition=ok
+tick=6 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout: attempt disposed terminal (no workload-caused evidence, relocation unavailable) and counted on the revision's retry ladder
+tick=6 pass result=after:5s
+tick=7 note the leader is bound; binding is observation only and the set still reads short
+tick=7 apply pod.scheduled[source] pod=svc-a-engine-0-leader-0 node=node-0 now=t+30m31s
+tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=7 hold gate=RetryBlock target=svc-a-engine-f5f6d007 reason=update to svc-a-engine-f5f6d007 in backoff after 1 failed attempt(s): ReadinessGateNotSatisfied
+tick=7 pass result=after:5s
+tick=8 note the leader's endpoint enters the routed Service; rotation moves counters, not the reading
+tick=8 apply endpoint.rotationIn[source] pod=svc-a-engine-0-leader-0 now=t+30m31s
+tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=8 hold gate=RetryBlock target=svc-a-engine-f5f6d007 reason=update to svc-a-engine-f5f6d007 in backoff after 1 failed attempt(s): ReadinessGateNotSatisfied
+tick=8 pass result=after:5s
+tick=9 note the leader reports PodReady while the worker still boots; PodReady adds nothing the reading does not take from ContainersReady and the gate
+tick=9 apply pod.ready[source] pod=svc-a-engine-0-leader-0 now=t+30m31s
+tick=9 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=9 hold gate=RetryBlock target=svc-a-engine-f5f6d007 reason=update to svc-a-engine-f5f6d007 in backoff after 1 failed attempt(s): ReadinessGateNotSatisfied
+tick=9 pass result=after:5s
+tick=10 note the leader's gate is withdrawn; the set is out of the rotation the row reads already
+tick=10 apply pod.servingOff[source] pod=svc-a-engine-0-leader-0 now=t+30m31s
+tick=10 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=10 hold gate=RetryBlock target=svc-a-engine-f5f6d007 reason=update to svc-a-engine-f5f6d007 in backoff after 1 failed attempt(s): ReadinessGateNotSatisfied
+tick=10 pass result=after:5s
+tick=11 note the leader's endpoint leaves the routed Service; rotation moves counters, not the reading
+tick=11 apply endpoint.rotationOut[source] pod=svc-a-engine-0-leader-0 now=t+30m31s
+tick=11 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=11 hold gate=RetryBlock target=svc-a-engine-f5f6d007 reason=update to svc-a-engine-f5f6d007 in backoff after 1 failed attempt(s): ReadinessGateNotSatisfied
+tick=11 pass result=after:5s
+tick=12 note the leader loses ContainersReady; a further member losing readiness confirms the reading and writes nothing
+tick=12 apply pod.containersNotReady[source] pod=svc-a-engine-0-leader-0 now=t+30m31s
+tick=12 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=12 hold gate=RetryBlock target=svc-a-engine-f5f6d007 reason=update to svc-a-engine-f5f6d007 in backoff after 1 failed attempt(s): ReadinessGateNotSatisfied
+tick=12 pass result=after:5s
+tick=13 note the leader's runner restarts in place; restart evidence is read for a Ready row only and the row follows the set
+tick=13 apply pod.containerRestart pod=svc-a-engine-0-leader-0 container=ome-container reason=OOMKilled now=t+30m31s
+tick=13 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=13 hold gate=RetryBlock target=svc-a-engine-f5f6d007 reason=update to svc-a-engine-f5f6d007 in backoff after 1 failed attempt(s): ReadinessGateNotSatisfied
+tick=13 pass result=after:5s
+tick=14 note a tick with nothing changed re-derives the same reading and writes nothing
+tick=14 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=14 hold gate=RetryBlock target=svc-a-engine-f5f6d007 reason=update to svc-a-engine-f5f6d007 in backoff after 1 failed attempt(s): ReadinessGateNotSatisfied
+tick=14 pass result=after:5s
+tick=15 note the controller restarts; everything the parked attempt is lives in status and the set is followed again
+tick=15 apply ctrl.crash expectations=dropped now=t+30m31s
+tick=15 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=15 hold gate=RetryBlock target=svc-a-engine-f5f6d007 reason=update to svc-a-engine-f5f6d007 in backoff after 1 failed attempt(s): ReadinessGateNotSatisfied
+tick=15 pass result=after:5s
+tick=16 note the cache lags one event behind for this pass; the reading is re-taken from the set and nothing is written
+tick=16 apply ctrl.staleRead cache=end-of-tick-15 now=t+30m31s
+tick=16 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=16 hold gate=RetryBlock target=svc-a-engine-f5f6d007 reason=update to svc-a-engine-f5f6d007 in backoff after 1 failed attempt(s): ReadinessGateNotSatisfied
+tick=16 pass result=after:5s
+tick=17 note the availability window elapses; no promote waits on a parked attempt
+tick=17 apply clock.advance by=30s now=t+31m1s
+tick=17 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=17 hold gate=RetryBlock target=svc-a-engine-f5f6d007 reason=update to svc-a-engine-f5f6d007 in backoff after 1 failed attempt(s): ReadinessGateNotSatisfied
+tick=17 pass result=after:5s

@@ -1,0 +1,67 @@
+# A parked attempt whose gang set is down loses its booting worker. The
+# ladder allowed one attempt, so the target is Held and the roll may not
+# take the row; under RecreateInstanceOnPodRestart the lost-member trigger
+# re-arms the gang over the parked attempt at once: the row is Restarting
+# at the next incarnation on its running revision, the surviving leader is
+# drained and deleted by that repair, and the loss of the leader is the
+# repair's own drain completing.
+scenario: parked-down-member-lost-rearms
+arrows:
+  - T-empty-create
+  - T-ready-recreate
+  - T-drain-deadline
+  - T-failedparked-member-lost
+cells:
+  - instance/Failed/Parked/pod.deleted[source]/boundary@T-failedparked-member-lost
+  - instance/Failed/Parked/pod.deleted[source]/after@T-failedparked-member-lost
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 1, initialDelay: 1h, maxDelay: 2h, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes, so the roll drains the gang for a recreate
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation and the drained members are deleted, so the roll recreates them at the new revision
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 5
+    note: the rebuilt leader reports ContainersReady while the worker is still booting, so the set is short of serving
+    events:
+      - pod.containersReady[target]: {pod: {index: 0, runner: leader}}
+  - tick: 6
+    note: the deadline elapses on the live set; the ladder's one attempt is spent, so the target is Held and the attempt is parked with the row Failed
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 7
+    note: the booting worker is deleted by another hand; the leader survives, so the lost-member trigger re-arms the gang over the parked attempt and drains the leader
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 8
+    note: the drained leader is gone; the row is Restarting and the loss is the repair's drain completing, so the rebuild lands at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}

@@ -1,0 +1,40 @@
+# The retired Instance's pod is refused by its node before the wave drains
+# it. The terminal recycle belongs to the paths that place a replacement,
+# and a retirement places none, so the refused pod is simply one more
+# object the wave waits on: its endpoint is still published, the gate is
+# withdrawn, and the row goes once the object is observed absent.
+scenario: delete-retired-pod-refused
+arrows:
+  - T-ready-scaledown
+  - T-delete-done
+cells:
+  - instance/Delete/Drain/pod.admissionRejected[OutOfResource]/before
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 1, ready: true, serving: true, routed: true, node: node-1}
+timeline:
+  - tick: 1
+    note: the operator halves the replica count, and the retired Instance is admitted into a Delete operation
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 2
+    note: the retired pod's node refuses it; no recycle frees a retired name, and with its endpoint still published the wave withdraws the gate and keeps waiting on the drain
+    events:
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 1}, resource: nvidia.com/gpu, message: "Node didn't have enough resource: nvidia.com/gpu, requested: 1, used: 8, capacity: 8"}
+  - tick: 3
+    note: the refused object is gone, which the wave counts as progress, so the row leaves the owner's status
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}

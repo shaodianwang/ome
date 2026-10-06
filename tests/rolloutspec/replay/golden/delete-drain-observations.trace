@@ -1,0 +1,25 @@
+tick=1 note the operator halves the replica count, and the retired Instance is admitted into a Delete operation
+tick=1 apply spec.replicasDown replicas=1 generation=1 now=t+0s
+tick=1 row=1 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 pass result=requeue
+tick=2 note the retired pod loses ContainersReady while still in rotation; the drain gates on the endpoint, not on readiness, so it keeps waiting
+tick=2 apply pod.containersNotReady[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=2 row=1 write no-op precondition=no-change
+tick=2 pod status-patch name=svc-a-engine-1-default-0 serving=True→False
+tick=2 pass result=after:30s
+tick=3 note a force-delete policy and a retry ladder are configured; the first arms an escalation that has nothing to act on and the second is read by no delete-owned row
+tick=3 apply config.changed[forceDelete] forceDelete={overdueSlack=1m nodeUnreachableThreshold=5m} now=t+0s
+tick=3 apply config.changed[updateRetry] updateRetry={maxAttempts=3 initialDelay=5m maxDelay=10m multiplier=2} now=t+0s
+tick=3 row=1 write no-op precondition=no-change
+tick=3 pass result=after:30s
+tick=4 note the retired pod leaves rotation, so the wave deletes it
+tick=4 apply endpoint.rotationOut[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=4 row=1 write no-op precondition=no-change
+tick=4 pod delete name=svc-a-engine-1-default-0 grace=default uidPrecondition=set
+tick=4 pass result=after:30s
+tick=5 note the pod is gone while the cache still lists it; the wave reads the pod set live, so the row is removed regardless
+tick=5 apply pod.deleted[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=5 apply ctrl.staleRead cache=end-of-tick-4 now=t+0s
+tick=5 row=1 write no-op precondition=no-change
+tick=5 row=1 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=5 pass result=requeue

@@ -1,0 +1,10 @@
+tick=1 note the Instance is parked at Failed behind a Held target with its pod still present
+tick=1 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=1 pass result=after:5s
+tick=2 note the pod is evicted under memory pressure; it resolves into a terminal pod, and the fresh start that would recycle it is held
+tick=2 apply pod.evicted pod=svc-a-engine-0-default-0 reason=Evicted now=t+0s
+tick=2 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=2 pass result=none
+tick=3 note a further pass reads the same row and writes nothing
+tick=3 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=3 pass result=none

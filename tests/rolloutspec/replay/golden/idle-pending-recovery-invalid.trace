@@ -1,0 +1,13 @@
+tick=1 note the apiserver rejects the recovery create as invalid; the stamp lands first, so the rejection is classified and disposed on the attempt
+tick=1 apply api.invalid verb=create resource=pods count=1 now=t+0s
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 pod create-rejected name=svc-a-engine-0-default-0 rejection=api.invalid
+tick=1 retryblock target=svc-a-engine-882059bb persist nil→{state=Held attempts=1 reason=InvalidPodSpec}
+tick=1 warn retryHeld target=svc-a-engine-882059bb attempts=1 reason=InvalidPodSpec
+tick=1 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb readySince=nil op=nil lastFailure={pod= reason=InvalidPodSpec message=Pod "svc-a" is invalid: spec.containers[0].resources.limits: Invalid value: "-1": must be greater than or equal to 0} precondition=ok
+tick=1 event Warning InstanceRejected OMENative component=engine instance=0: apiserver rejected pod svc-a-engine-0-default-0 (InvalidPodSpec: Pod "svc-a" is invalid: spec.containers[0].resources.limits: Invalid value: "-1": must be greater than or equal to 0); revision svc-a-engine-882059bb held for retry
+tick=1 pass result=after:5s
+tick=2 note a further pass reads what the disposition left
+tick=2 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): InvalidPodSpec; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=2 pass result=none

@@ -1,0 +1,51 @@
+# The retired Instance's pod is found stuck Terminating, already overdue,
+# on a node that is gone, and the force-delete policy frees it on the pass
+# that reads the evidence; the owner's teardown deadline elapses on the
+# next pass. The escalation that fired stands, the row is already gone, and
+# the release hands an owner with no retired row to background GC.
+scenario: delete-force-then-teardown-deadline
+arrows:
+  - T-ready-scaledown
+  - T-delete-force
+  - T-delete-done
+cells:
+  - instance/Delete/Drain/timer.teardownDeadline/after@T-delete-force
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    teardownDeadline: 10m
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 1, ready: true, serving: true, routed: true, node: node-1}
+timeline:
+  - tick: 1
+    note: the operator halves the replica count, and the retired Instance is admitted into a Delete operation
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 2
+    note: the retired pod leaves rotation, so the wave deletes it
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 3
+    note: the kubelet has stopped acknowledging the deletion and the pod is read already past its deadline plus the slack on a node that is gone, so the sweep force-deletes it on this pass and the wave removes the row
+    events:
+      - clock.advance: 2m
+      - pod.stuckTerminating: {pod: {index: 1}}
+  - tick: 4
+    note: the owner was deleted and its teardown deadline has elapsed; the escalation that already fired stands and the release purges an owner that carries no retired row
+    events:
+      - spec.teardown[deleted]: {}
+      - timer.teardownDeadline: {slack: 1s}
+  - tick: 5
+    note: a late pass finds no owner left to act on

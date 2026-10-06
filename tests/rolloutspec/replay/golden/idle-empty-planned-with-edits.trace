@@ -1,0 +1,22 @@
+tick=1 note the Ready row is steady on its one serving pod and the second index is not planned
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the replica count grows as the stuck-pod grace changes and the cache lags one event behind; the empty slot plans against the new values and the Create pass materializes it
+tick=2 apply spec.replicasUp replicas=2 generation=1 now=t+0s
+tick=2 apply config.changed[stuckPodGrace] stuckPodGrace=1m now=t+0s
+tick=2 apply ctrl.staleRead cache=end-of-tick-1 now=t+0s
+tick=2 hold cleared
+tick=2 row=0 write no-op precondition=no-change
+tick=2 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Normal InstanceCreated OMENative component=engine instance=1 materialized; 1 pod(s) requested
+tick=2 pod create name=svc-a-engine-1-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=2 pass result=after:5s
+tick=3 note the new pod reports Ready and the Instance promotes
+tick=3 apply pod.ready[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=3 hold cleared
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pod status-patch name=svc-a-engine-1-default-0 serving=absent→True
+tick=3 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=3 event Normal InstanceReady OMENative component=engine instance=1 is Ready (1 pod(s) serving)
+tick=3 pass result=none

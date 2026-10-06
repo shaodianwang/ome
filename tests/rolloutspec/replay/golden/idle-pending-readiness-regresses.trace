@@ -1,0 +1,20 @@
+tick=1 note the pod reports ContainersReady; the Create promote waits for PodReady
+tick=1 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=1 hold cleared
+tick=1 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=1 pass result=after:5s
+tick=2 note the pod's readiness regresses while it keeps running, which withholds the promote
+tick=2 apply pod.containersNotReady[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 hold cleared
+tick=2 pass result=after:5s
+tick=3 note the pod has been unready past the stuck-pod grace; a Pending row carries no operation, so no deadline runs and nothing is stamped
+tick=3 apply clock.advance by=2m0s now=t+2m0s
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the pod comes back and reports Ready, so the Create pass promotes the row
+tick=4 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=4 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=4 hold cleared
+tick=4 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+2m0s op=nil precondition=ok
+tick=4 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=4 pass result=none

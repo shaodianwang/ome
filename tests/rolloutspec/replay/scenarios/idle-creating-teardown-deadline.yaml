@@ -1,0 +1,56 @@
+# The owner is deleted while a migration surge row is left Creating with
+# no operation, and the configured teardown deadline has elapsed by the
+# time the controller observes it. The release is phase-blind: the pass
+# warns, lifts the finalizer, and the owner goes with every row while the
+# pods are left to background GC. A later pass finds no object to act on.
+scenario: idle-creating-teardown-deadline
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-migrate-deadline-restore
+  - T-migratetarget-expired
+cells:
+  - instance/Creating/timer.teardownDeadline/before
+  - instance/Creating/timer.teardownDeadline/after@T-creating-teardown-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+    teardownDeadline: 10m
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the surge pod is bound and comes up on its node while the migration waits on its promote
+    events:
+      - pod.scheduled[target]: {pod: {index: 1}, message: node-1}
+      - pod.containersReady[target]: {pod: {index: 1}}
+  - tick: 5
+    note: the record's deadline elapses with the source healthy, so expiry restores the source and unpins the surge, whose row is left Creating with no operation beyond the desired set
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 6
+    note: the owner was deleted and its teardown deadline has elapsed before this pass observes either, so the deadline check releases the owner ahead of any wave and the leftover row goes with it
+    events:
+      - spec.teardown[deleted]: {}
+      - timer.teardownDeadline: {slack: 1s}
+  - tick: 7
+    note: a late pass finds no owner left to act on

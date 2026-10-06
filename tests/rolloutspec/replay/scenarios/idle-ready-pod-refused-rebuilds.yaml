@@ -1,0 +1,41 @@
+# A Ready Instance whose pod is refused by its node under
+# RecreateInstanceOnPodRestart. A rejected pod is phase Failed, which the
+# Ready-phase detector reads explicitly, so the rejection takes the edge
+# any terminal pod takes: a Restart that drains the dead pod and rebuilds
+# the Instance; the refusal re-observed on the draining pod adds nothing.
+scenario: idle-ready-pod-refused-rebuilds
+arrows:
+  - T-ready-restart-podterminal
+cells:
+  - instance/Ready/pod.admissionRejected[OutOfResource]/before
+  - instance/Ready/pod.admissionRejected[OutOfResource]/boundary@T-ready-restart-podterminal
+  - instance/Ready/pod.admissionRejected[OutOfResource]/after@T-ready-restart-podterminal
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the node refuses the pod; a rejected pod is phase Failed, so the repair opens a Restart and drains it
+    events:
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 0}, resource: nvidia.com/gpu, message: "Node didn't have enough resource: nvidia.com/gpu, requested: 1, used: 8, capacity: 8"}
+  - tick: 3
+    note: the refusal is re-observed on the draining pod; the repair already owns the set and adds nothing
+    events:
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 0}, resource: nvidia.com/gpu, message: "Node didn't have enough resource: nvidia.com/gpu, requested: 1, used: 8, capacity: 8"}
+  - tick: 4
+    note: the dead pod is gone, so the rebuild lands at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

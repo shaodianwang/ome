@@ -1,0 +1,30 @@
+# A demoted Instance's recovery create is refused because its namespace
+# is terminating. The create stamps its own attempt first, so the refusal
+# is disposed there; namespace GC then deletes the owner and the next pass
+# runs teardown instead.
+scenario: idle-pending-recovery-in-terminating-namespace
+arrows:
+  - T-pending-create
+cells:
+  - instance/Pending/api.namespaceTerminating/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+timeline:
+  - tick: 1
+    note: the namespace refuses the recovery create; the stamp lands first, so the refusal is disposed on the attempt
+    events:
+      - api.namespaceTerminating: {count: 2}
+  - tick: 2
+    note: namespace GC deletes the owner, so the next pass runs teardown instead of another create
+    events:
+      - spec.teardown[deleted]: {}

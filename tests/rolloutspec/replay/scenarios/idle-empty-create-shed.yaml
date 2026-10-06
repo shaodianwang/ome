@@ -1,0 +1,34 @@
+# A new index is planned and the apiserver sheds its pod create with a
+# Retry-After. The create belongs to the Creating attempt it stamps first:
+# the shed create is classified as throttled there and the suggested delay
+# floors the pass requeue; the next pass creates the pod.
+scenario: idle-empty-create-shed
+arrows:
+  - T-empty-create
+cells:
+  - instance/Empty/api.throttled[TooManyRequests]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod and the second index is not planned
+  - tick: 2
+    note: the replica count grows and the apiserver sheds the new index's create with a half-minute Retry-After; the stamp lands first and the pass wakes no earlier than asked
+    events:
+      - spec.replicasUp: {to: 2}
+      - api.throttled[TooManyRequests]: {retryAfter: 30s}
+  - tick: 3
+    note: the server accepts the create on the next pass
+    events:
+      - clock.advance: 30s
