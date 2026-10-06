@@ -1,0 +1,57 @@
+# The pod an in-place patch landed on runs but never passes its probes again.
+# Completion is proven from the container status images plus
+# ContainersReady, and how long the pod has been failing its probes drives
+# no decision, so the wait ends only at the operation deadline, where the
+# record names the pod and its unready container under reason
+# ContainersNotReady rather than a bare DeadlineExceeded, and the same
+# attempt is re-opened with no retry policy configured.
+scenario: inplace-patched-pod-never-ready-at-deadline
+arrows:
+  - T-ready-inplace
+  - T-inplace-deadline
+cells:
+  - instance/Update/InPlace/pod.runningNotReady[source]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation and its gate reads False, which the pass already drove, so the drain check passes and the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.servingOff[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the image patch lands while the source is out of rotation
+  - tick: 6
+    note: the patched pod's containers drop readiness and stay down, which holds the promote
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 0}}
+  - tick: 7
+    note: two minutes on, longer than the stuck-pod grace, the pod still runs without readiness, which no fast path judges
+    events:
+      - clock.advance: 2m
+  - tick: 8
+    note: the operation deadline elapses, so the attempt is disposed with the record naming the pod and its unready container under ContainersNotReady
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 9
+    note: with no retry policy configured the same in-place attempt is re-opened

@@ -1,0 +1,72 @@
+# Edits and a readiness regression land while an in-place patch converges.
+# The kubelet dropping ContainersReady is the expected effect of the patch
+# itself and holds the promote until readiness returns on the target image;
+# a partition never holds an Instance already converging to the target; the
+# mark-not-ready flag and the ready timeout are read at the drain and at
+# operation entry, so a mid-roll edit reaches nothing; and a config edit
+# writes nothing on the row. The runtime then confirms the new image and the
+# Instance promotes.
+scenario: inplace-patch-edits-and-readiness-regression
+arrows:
+  - T-ready-inplace
+  - T-inplace-ready
+cells:
+  - instance/Update/InPlace/pod.containersNotReady[source]/before
+  - instance/Update/InPlace/spec.partition/before
+  - instance/Update/InPlace/spec.policyTuning[markNotReady]/before
+  - instance/Update/InPlace/spec.policyTuning[instanceReadyTimeout]/before
+  - instance/Update/InPlace/config.changed[stuckPodGrace]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation and its gate reads False, which the pass already drove, so the drain check passes and the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.servingOff[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the image patch lands while the source is out of rotation
+  - tick: 6
+    note: the patched pod's containers drop readiness, which is the patch taking effect, so the runtime-ready gate holds the promote until readiness returns on the target image
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 0}}
+  - tick: 7
+    note: a partition is set below this Instance, and partition candidacy skips an Instance already converging to the target, so the roll is not held
+    events:
+      - spec.partition: {to: 1}
+  - tick: 8
+    note: the mark-not-ready flag is cleared, which only guards the pre-patch drain already done, so the patch is unaffected
+    events:
+      - spec.policyTuning[markNotReady]: {value: "false"}
+  - tick: 9
+    note: the ready timeout is shortened, and the operation deadline was stamped once at operation entry, so the in-flight clock does not move
+    events:
+      - spec.policyTuning[instanceReadyTimeout]: {value: 5m}
+  - tick: 10
+    note: the stuck-pod grace is configured, which arms the fast escalation for later passes and writes nothing on this row
+    events:
+      - config.changed[stuckPodGrace]: {config: {stuckPodGrace: 1m}}
+  - tick: 11
+    note: the kubelet has rolled the container, so the runtime confirms the new image, the pod returns to rotation and the Instance promotes
+    events:
+      - pod.ready[target]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}

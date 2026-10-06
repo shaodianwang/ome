@@ -1,0 +1,81 @@
+# A gang's migration surge fails the scheduler grace on its leader with its
+# Migrate pin kept, and then its PodGroup is deleted and the gang is widened.
+# The index stays pinned while the record lives, so the PodGroup pass
+# re-creates the group from the plan; the surge is rendered at the width the
+# move was requested at, because nothing drives a pair whose surge reads
+# Failed; the record's deadline ends the move, the retired surge index is
+# torn down, and the width change reaches the restored source only then.
+scenario: migrate-gang-target-grace-failed-podgroup-and-width
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-failedmigratetarget-expired
+  - T-migrate-deadline-restore
+  - T-delete-done
+cells:
+  - instance/Failed/MigrateTarget/gang.podGroup[Deleted]/before
+  - instance/Failed/MigrateTarget/spec.gangWidth[grow]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    unschedulableGrace: 10m
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members are bound to node-0 and report Ready, and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the surge gang's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the scheduler finds the surge leader no node off node-0, so the scheduler hold is recorded on the surge row and both pair deadlines park
+    events:
+      - pod.unschedulable[target]: {pod: {index: 1, runner: leader}}
+  - tick: 6
+    note: the hold outlasts the configured grace, so the escalation stamps the surge row Failed with its Migrate pin kept while the source keeps serving under its own pin
+    events:
+      - clock.advance: 11m
+  - tick: 7
+    note: the surge gang's PodGroup is deleted, and the index is still pinned in the plan, so the PodGroup pass announces the group again
+    events:
+      - gang.podGroup[Deleted]: {instance: 1}
+  - tick: 8
+    note: the gang is widened by one worker, and nothing renders the surge again while it reads Failed, so it keeps the width the move was requested at
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+  - tick: 9
+    note: the record's deadline elapses, so the expiry clears the pin from the Failed surge row, closes the record and restores the source to Ready on its running revision
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 10
+    note: the unpinned index is beyond the desired set, so the scale-down pipeline commits Phase Deleting on it
+  - tick: 11
+    note: the drain finds nothing routed on the retired index, so its members' deletes are issued
+  - tick: 12
+    note: both surge members are gone, so the surge row is removed with them
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 13
+    note: with the retired index gone the new width reaches the restored source

@@ -1,0 +1,44 @@
+# The surge pod vanishes between the drive's read and its serving-gate
+# write at SurgePending. The not-found answer is tolerated: the drive
+# returns without changing ownership and retries, and the next pass finds
+# the surge missing and re-creates it from the source running revision.
+scenario: migrate-surge-pending-vanished-pod
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+cells:
+  - instance/Migrate/CreateSurge/api.notFound/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the surge binds off node-0 and reports ContainersReady, but it is gone by the time the drive writes its serving gate, so the write is answered not found and the drive returns without changing ownership
+    events:
+      - pod.scheduled[target]: {pod: {index: 1}, message: node-1}
+      - pod.containersReady[target]: {pod: {index: 1}}
+      - api.notFound: {verb: patch, resource: pods}
+  - tick: 5
+    note: the retried pass finds the surge missing and re-creates it from the source running revision with the record still SurgePending
+  - tick: 6
+    note: a tick with nothing changed waits on the re-created surge

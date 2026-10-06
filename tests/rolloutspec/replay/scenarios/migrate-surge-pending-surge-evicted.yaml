@@ -1,0 +1,51 @@
+# A migration's surge pod is evicted under node pressure at SurgePending.
+# An evicted pod is a terminal object the drive waits on, and once it is
+# gone the surge returns through the missing-pod diff: the drive re-creates
+# it from the source running revision with the same overlay and the record
+# stays SurgePending throughout.
+scenario: migrate-surge-pending-surge-evicted
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+cells:
+  - instance/Migrate/CreateSurge/pod.evicted/before
+  - instance/Migrate/SurgeTarget/pod.evicted/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the surge binds off node-0 and is evicted under node pressure, a terminal pod the drive waits on until it is gone
+    events:
+      - pod.scheduled[target]: {pod: {index: 1}, message: node-1}
+      - pod.evicted: {pod: {index: 1}, message: "The node was low on resource: memory."}
+  - tick: 5
+    note: a tick with nothing changed re-reads the evicted surge and waits
+  - tick: 6
+    note: the evicted surge is gone, so it returns through the drive's missing-pod diff and is re-created from the source running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1}}
+  - tick: 7
+    note: the re-created surge binds off node-0 and the record is still SurgePending
+    events:
+      - pod.scheduled[target]: {pod: {index: 1}, message: node-2}

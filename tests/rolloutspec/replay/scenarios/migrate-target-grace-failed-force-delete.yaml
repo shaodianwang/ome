@@ -1,0 +1,73 @@
+# A force-delete policy is configured while a migration surge row stands
+# Failed with its Migrate pin kept, and the surge pod is then deleted from
+# outside with no kubelet left to finish it. The config edit writes nothing
+# on the row; the Component-wide sweep force-deletes the overdue pod on its
+# own evidence and the row is untouched, nothing re-creates the pod while
+# the surge reads Failed, and the record's deadline ends the move.
+scenario: migrate-target-grace-failed-force-delete
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-failedmigratetarget-expired
+  - T-migrate-deadline-restore
+  - T-delete-done
+cells:
+  - instance/Failed/MigrateTarget/config.changed[forceDelete]/before
+  - instance/Failed/MigrateTarget/timer.forceDelete[overdueSlack]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    unschedulableGrace: 10m
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the scheduler finds the surge no node off node-0, so the scheduler hold is recorded on the surge row and both pair deadlines park
+    events:
+      - pod.unschedulable[target]: {pod: {index: 1}}
+  - tick: 5
+    note: the hold outlasts the configured grace, so the escalation stamps the surge row Failed with its Migrate pin kept while the source keeps serving under its own pin
+    events:
+      - clock.advance: 11m
+  - tick: 6
+    note: the operator configures a force-delete policy, which arms the sweep for the next pass and writes nothing on the pair
+    events:
+      - config.changed[forceDelete]: {config: {forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 10m}}}
+  - tick: 7
+    note: the surge pod is bound and something else deletes it with no kubelet left to acknowledge the deletion, and a pod on its way out is live until it is gone
+    events:
+      - pod.scheduled[target]: {pod: {index: 1}, message: node-1}
+      - pod.terminating[target]: {pod: {index: 1}}
+      - pod.stuckTerminating: {pod: {index: 1}}
+  - tick: 8
+    note: the pod is past its overdue slack on a node the cluster no longer holds, so the sweep force-deletes it and the Failed surge row is untouched
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+  - tick: 9
+    note: a tick with nothing changed re-creates nothing on a surge row that reads Failed
+  - tick: 10
+    note: the record's deadline elapses, so the expiry clears the pin from the Failed surge row, closes the record and restores the source to Ready on its running revision
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 11
+    note: the unpinned index is beyond the desired set, so the scale-down pipeline commits Phase Deleting on it
+  - tick: 12
+    note: the retired index has no pod left, so its row is removed

@@ -1,0 +1,53 @@
+# The owner is deleted while a migration surge row stands Failed with its
+# Migrate pin kept, and its teardown deadline is already past when the
+# deletion is first observed. The release is phase-blind: the finalizer
+# check purges the owner and both rows of the pair ahead of any teardown
+# wave, and a late pass finds no owner left to act on.
+scenario: migrate-target-grace-failed-teardown-outruns-deadline
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+cells:
+  - instance/Failed/MigrateTarget/timer.teardownDeadline/before
+  - instance/Failed/MigrateTarget/timer.teardownDeadline/after@T-failedmigratetarget-teardown-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    unschedulableGrace: 10m
+    teardownDeadline: 10m
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the scheduler finds the surge no node off node-0, so the scheduler hold is recorded on the surge row and both pair deadlines park
+    events:
+      - pod.unschedulable[target]: {pod: {index: 1}}
+  - tick: 5
+    note: the hold outlasts the configured grace, so the escalation stamps the surge row Failed with its Migrate pin kept while the source keeps serving under its own pin
+    events:
+      - clock.advance: 11m
+  - tick: 6
+    note: the owner was deleted and its teardown deadline has elapsed before this pass observes either, so the deadline check releases the owner ahead of any teardown wave and both rows of the pair go with it
+    events:
+      - spec.teardown[deleted]: {}
+      - timer.teardownDeadline: {slack: 1s}
+  - tick: 7
+    note: a late pass finds no owner left to act on

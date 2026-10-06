@@ -1,0 +1,58 @@
+# An in-place patch meets a shedding apiserver and then a node that refuses
+# the pod. The patch path classifies only the permanent rejections, so a
+# shed patch propagates verbatim and the next pass lands it; a pod the
+# kubelet refused is phase Failed, the shared readiness gate rejects it
+# outright rather than reading its stale conditions, and the promote waits
+# out the operation deadline, after which the same attempt is re-opened.
+scenario: inplace-patch-shed-then-refused-pod
+arrows:
+  - T-ready-inplace
+  - T-inplace-deadline
+cells:
+  - instance/Update/InPlace/api.throttled[TooManyRequests]/before
+  - instance/Update/InPlace/pod.admissionRejected[UnexpectedAdmissionError]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation and its gate reads False, which the pass already drove, so the drain check passes and the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.servingOff[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the apiserver sheds the image patch, which propagates verbatim and ends the pass with an error to retry
+    events:
+      - api.throttled[TooManyRequests]: {verb: patch, resource: pods, retryAfter: 7s}
+  - tick: 6
+    note: the retried pass lands the image patch and restamps the revision label
+  - tick: 7
+    note: the node refuses the pod, which goes Failed, and the readiness gate rejects it outright, so the promote waits
+    events:
+      - pod.admissionRejected[UnexpectedAdmissionError]: {pod: {index: 0}, message: "Allocate failed due to device plugin error"}
+  - tick: 8
+    note: a tick with nothing changed re-reads the refused pod and waits
+  - tick: 9
+    note: the operation deadline elapses, so the attempt is disposed with no workload-caused evidence
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 10
+    note: with no retry policy configured the same in-place attempt is re-opened

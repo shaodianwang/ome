@@ -1,0 +1,72 @@
+tick=1 note the index is planned and no row exists, so the Create pass opens the attempt
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-default-0 node=node-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=2 pass result=none
+tick=3 note the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+tick=3 apply spec.migrateRequest uuid=uid#2 instance=0 fromNode=node-0 now=t+0s
+tick=3 condition type=MigrationPolicyUnconfigured status=False reason=MigrationCapacityConfigured message=Migration capacity policy is configured
+tick=3 migration uuid=uid#2 write phase=Accepted→SurgePending surge=nil→1 message=nil→surge allocated; waiting for surge pods allocatedAt=nil→t+0s
+tick=3 row=0 write incarnation=1 phase=Migrating runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#2{type=Migrate step=CreateSurge surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#3{type=Migrate step=CreateSurge surgeIndex=0 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal MigrationRequestAccepted OMENative component=engine instance=0 migration accepted (uuid=uid#2, source-node=node-0, surge-index=1)
+tick=3 pod create name=svc-a-engine-1-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=3 pass result=after:5s
+tick=4 note the scheduler finds the surge no node off node-0, so the scheduler hold is recorded on the surge row and both pair deadlines park
+tick=4 apply pod.unschedulable[target] pod=svc-a-engine-1-default-0 now=t+0s
+tick=4 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#3{type=Migrate step=CreateSurge waiting=Unschedulable surgeIndex=0 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-1-default-0 reason=Unschedulable} precondition=ok
+tick=4 row=0 write no-op precondition=no-change
+tick=4 row=1 write no-op precondition=no-change
+tick=4 pass result=after:5s
+tick=4 row=0 write incarnation=1 phase=Migrating runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#2{type=Migrate step=CreateSurge surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=nil} precondition=ok
+tick=4 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#3{type=Migrate step=CreateSurge waiting=Unschedulable surgeIndex=0 started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-1-default-0 reason=Unschedulable} precondition=ok
+tick=5 note the hold outlasts the configured grace, so the escalation stamps the surge row Failed with its Migrate pin kept while the source keeps serving under its own pin
+tick=5 apply clock.advance by=11m0s now=t+11m0s
+tick=5 row=1 write no-op precondition=no-change
+tick=5 row=0 write no-op precondition=no-change
+tick=5 row=1 write no-op precondition=no-change
+tick=5 row=1 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=op#3{type=Migrate step=CreateSurge waiting=Unschedulable surgeIndex=0 started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-1-default-0 reason=Unschedulable message=Unschedulable} precondition=ok
+tick=5 warn instanceFailed index=1 pod=svc-a-engine-1-default-0 reason=Unschedulable
+tick=5 pass result=after:5s
+tick=6 note the controller restarts, and the pin and the record are durable, so the next manager re-reads both and drives nothing
+tick=6 apply ctrl.crash expectations=dropped now=t+11m0s
+tick=6 pass result=after:5s
+tick=7 note the surge pod is bound and a container waits with DeadlineExceeded, which is outside the terminal waiting set and is no early-failure evidence
+tick=7 apply pod.scheduled[target] pod=svc-a-engine-1-default-0 node=node-1 now=t+11m0s
+tick=7 apply pod.waiting[DeadlineExceeded] pod=svc-a-engine-1-default-0 reason=DeadlineExceeded now=t+11m0s
+tick=7 pass result=after:5s
+tick=8 note the surge pod's kubelet stops reporting it, which routes the name to the force-delete sweep rather than to any clock on this row
+tick=8 apply pod.phaseTerminal[Unknown] pod=svc-a-engine-1-default-0 now=t+11m0s
+tick=8 pass result=after:5s
+tick=9 note the node under the source is gone, which reaches the pair only through its pods and the sweep
+tick=9 apply pod.nodeLost[NodeGone] pod=svc-a-engine-0-default-0 node=node-0 evidence=gone now=t+11m0s
+tick=9 pass result=after:5s
+tick=10 note something else deletes the surge pod, and a pod on its way out is live until it is gone
+tick=10 apply pod.terminating[target] pod=svc-a-engine-1-default-0 now=t+11m0s
+tick=10 pass result=after:5s
+tick=11 note the kubelet behind the surge pod stops acknowledging the deletion, and with no force-delete policy the sweep leaves it where it is
+tick=11 apply pod.stuckTerminating pod=svc-a-engine-1-default-0 deletionDeadline=t+11m0s now=t+11m0s
+tick=11 pass result=after:5s
+tick=12 note the record's deadline elapses, so the expiry clears the pin from the Failed surge row, closes the record and restores the source to Ready on its running revision
+tick=12 apply timer.migrationDeadline to=t+30m1s now=t+30m1s
+tick=12 row=1 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=nil lastFailure={pod=svc-a-engine-1-default-0 reason=Unschedulable message=Unschedulable} precondition=ok
+tick=12 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=12 migration uuid=uid#2 write phase=SurgePending→Failed message=surge allocated; waiting for surge pods→deadline exceeded in phase SurgePending: surge pods never became ready completedAt=nil→t+30m1s
+tick=12 event Warning MigrationExpired OMENative migration uuid=uid#2 expired: deadline exceeded in phase SurgePending: surge pods never became ready; tearing down surge instance=1
+tick=12 pass result=requeue
+tick=13 note the unpinned index is beyond the desired set, so the scale-down pipeline commits Phase Deleting on it
+tick=13 row=1 write incarnation=1 phase=Deleting runningRevision=nil readySince=nil op=op#4{type=Delete step=Drain started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod=svc-a-engine-1-default-0 reason=Unschedulable message=Unschedulable} precondition=ok
+tick=13 pass result=requeue
+tick=14 note the drain finds nothing routed on the retired index and skips a pod already on its way out, so nothing is issued and the row waits for it to be gone
+tick=14 row=1 write no-op precondition=no-change
+tick=14 pass result=none

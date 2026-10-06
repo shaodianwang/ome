@@ -1,0 +1,71 @@
+# A gang's recreate is ended by the gang verdict with the Update operation
+# kept, and in the one pass the row reads Failed its rebuilt leader wedges
+# on its image, its worker is evicted under node pressure and the node under
+# the leader is lost. The escalation pass skips a Failed row, so the recorded
+# reason stays the verdict's; the eviction is a pod gone terminal that the
+# re-drive's Phase A deletes with the rest of the old incarnation; and node
+# death reaches the row only through its pods and the force-delete sweep.
+scenario: recreate-gang-conflict-failed-wedged-evicted-lost
+arrows:
+  - T-ready-recreate
+  - T-faileddrain-redrive
+cells:
+  - instance/Failed/Drain/pod.waiting[ImagePullBackOff]/before
+  - instance/Failed/Drain/pod.evicted/before
+  - instance/Failed/Drain/pod.nodeLost[NodeGone]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members are bound to node-0 and report Ready, and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds the gang in place of surging, so Phase A takes the serving gates down
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation, so Phase A deletes both members
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 5
+    note: both members are gone, so Phase B rebuilds the gang at the bumped incarnation behind its existing PodGroup
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 6
+    note: the group's controller reference is rewritten to another owner, which is a name this controller may not write, so the gang verdict stamps the Instance Failed with the recreate kept rather than parked
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 7
+    note: the rebuilt members are bound, the leader's pull wedges and the worker is evicted, and the escalation skips the Failed row, so the re-drive restamps the recreate and deletes both as old-incarnation pods with the verdict still the recorded reason
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-1}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-1}
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, runner: leader}, message: "manifest unknown"}
+      - pod.evicted: {pod: {index: 0, runner: worker}, message: "The node was low on resource: memory."}
+  - tick: 8
+    note: the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept and its own reason
+  - tick: 9
+    note: the node under the draining leader is gone, which reaches the row only through its pods and a sweep with no policy to act on, so the re-drive is all that happens
+    events:
+      - pod.nodeLost[NodeGone]: {pod: {index: 0, runner: leader}}
+  - tick: 10
+    note: the verdict fails the re-driven attempt again

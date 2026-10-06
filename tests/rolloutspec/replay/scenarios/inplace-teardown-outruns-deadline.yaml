@@ -1,0 +1,52 @@
+# The owner is deleted while an in-place patch converges, with its teardown
+# deadline already past when the deletion is first observed, and the pod
+# reports readiness and the template changes in the same pass. The release
+# is phase-blind: the finalizer check purges the owner and the row ahead of
+# any teardown wave, whatever the pod reports and before any revision could
+# retarget it, and a late pass finds no owner left.
+scenario: inplace-teardown-outruns-deadline
+arrows:
+  - T-ready-inplace
+cells:
+  - instance/Update/InPlace/timer.teardownDeadline/before
+  - instance/Update/InPlace/pod.containersReady[source]/boundary@T-inplace-teardown-deadline
+  - instance/Update/InPlace/spec.revision/boundary@T-inplace-teardown-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    teardownDeadline: 10m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation and its gate reads False, which the pass already drove, so the drain check passes and the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.servingOff[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the image patch lands while the source is out of rotation
+  - tick: 6
+    note: the owner was deleted and its teardown deadline has elapsed before this pass observes either, while the patched pod reports ContainersReady and the template moves again, so the deadline check releases the owner ahead of any teardown wave and the row goes with it
+    events:
+      - spec.teardown[deleted]: {}
+      - timer.teardownDeadline: {slack: 1s}
+      - pod.containersReady[source]: {pod: {index: 0}}
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 7
+    note: a late pass finds no owner left to act on

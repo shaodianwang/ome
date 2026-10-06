@@ -1,0 +1,53 @@
+tick=1 note the index is planned and no row exists, so the Create pass opens the attempt
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-default-0 node=node-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=2 pass result=none
+tick=3 note the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+tick=3 apply spec.migrateRequest uuid=uid#2 instance=0 fromNode=node-0 now=t+0s
+tick=3 condition type=MigrationPolicyUnconfigured status=False reason=MigrationCapacityConfigured message=Migration capacity policy is configured
+tick=3 migration uuid=uid#2 write phase=Accepted→SurgePending surge=nil→1 message=nil→surge allocated; waiting for surge pods allocatedAt=nil→t+0s
+tick=3 row=0 write incarnation=1 phase=Migrating runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#2{type=Migrate step=CreateSurge surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#3{type=Migrate step=CreateSurge surgeIndex=0 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal MigrationRequestAccepted OMENative component=engine instance=0 migration accepted (uuid=uid#2, source-node=node-0, surge-index=1)
+tick=3 pod create name=svc-a-engine-1-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=3 pass result=after:5s
+tick=4 note the queue label is re-pointed, which the hasher derives rather than reads, so the target revision stands and nothing reaches the migration
+tick=4 apply spec.annotationOnly labels=[kueue.x-k8s.io/queue-name:queue-b] generation=1 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 row=1 write no-op precondition=no-change
+tick=4 pass result=after:5s
+tick=5 note a partition is set, which holds Instances inside the update pass, and that pass never selects a migrate-owned row
+tick=5 apply spec.partition partition=1 generation=2 now=t+0s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 row=1 write no-op precondition=no-change
+tick=5 pass result=after:5s
+tick=6 note the requeue cadences are edited, which takes effect on the next pass and only paces how often this pair is re-driven
+tick=6 apply config.changed[requeue] requeue={operation=7s gate=4s} now=t+0s
+tick=6 row=0 write no-op precondition=no-change
+tick=6 row=1 write no-op precondition=no-change
+tick=6 pass result=after:7s
+tick=7 note a tick with nothing changed re-drives the pair at the new cadence
+tick=7 row=0 write no-op precondition=no-change
+tick=7 row=1 write no-op precondition=no-change
+tick=7 pass result=after:7s
+tick=8 note the record's deadline elapses, so the expiry clears both pins, closes the record and restores the source to Ready on its running revision
+tick=8 apply timer.migrationDeadline to=t+30m1s now=t+30m1s
+tick=8 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=nil precondition=ok
+tick=8 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=8 migration uuid=uid#2 write phase=SurgePending→Failed message=surge allocated; waiting for surge pods→deadline exceeded in phase SurgePending: surge pods never became ready completedAt=nil→t+30m1s
+tick=8 event Warning MigrationExpired OMENative migration uuid=uid#2 expired: deadline exceeded in phase SurgePending: surge pods never became ready; tearing down surge instance=1
+tick=8 pass result=requeue
+tick=9 note the unpinned surge index is beyond the desired set, so the scale-down pipeline commits Phase Deleting on it
+tick=9 row=1 write incarnation=1 phase=Deleting runningRevision=nil readySince=nil op=op#4{type=Delete step=Drain started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} precondition=ok
+tick=9 pass result=requeue

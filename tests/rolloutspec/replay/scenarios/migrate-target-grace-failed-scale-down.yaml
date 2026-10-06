@@ -1,0 +1,74 @@
+# The replica count is halved while one Instance's migration surge stands
+# Failed with its Migrate pin kept. The surge index is migration-protected in
+# the plan and excluded from the scale-down selection while the pin is held,
+# so the reduction lands on the other Instance now; the record's deadline
+# clears the pin, and only then does the reduction reach the surge index.
+scenario: migrate-target-grace-failed-scale-down
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-ready-scaledown
+  - T-delete-done
+  - T-failedmigratetarget-expired
+  - T-migrate-deadline-restore
+cells:
+  - instance/Failed/MigrateTarget/spec.replicasDown/before
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    unschedulableGrace: 10m
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, node: node-0, ready: true, serving: true, routed: true}
+    - {index: 1, node: node-1, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: both Instances are Ready on their own nodes
+  - tick: 2
+    note: the operator asks Instance 0 off node-0, and the migrate pass admits the request and allocates the surge at index 2
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 3
+    note: the scheduler finds the surge no node off node-0, so the scheduler hold is recorded on the surge row and both pair deadlines park
+    events:
+      - pod.unschedulable[target]: {pod: {index: 2}}
+  - tick: 4
+    note: the hold outlasts the configured grace, so the escalation stamps the surge row Failed with its Migrate pin kept while the source keeps serving under its own pin
+    events:
+      - clock.advance: 11m
+  - tick: 5
+    note: the operator halves the replica count, and the pinned surge index is excluded from the selection, so the reduction lands on Instance 1
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 6
+    note: the drain takes Instance 1's serving gate down and waits on its rotation
+  - tick: 7
+    note: Instance 1's pod leaves rotation, so its delete is issued
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 8
+    note: Instance 1's pod is gone, so its row leaves the owner's status while the pinned pair stands
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}
+  - tick: 9
+    note: the record's deadline elapses, so the expiry clears the pin from the Failed surge row, closes the record and restores the source to Ready on its running revision
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 10
+    note: the unpinned surge index is beyond the desired set, so the reduction reaches it and the scale-down pipeline commits Phase Deleting on it
+  - tick: 11
+    note: the drain finds nothing routed on the retired index, so its pod's delete is issued
+  - tick: 12
+    note: the surge pod is gone, so its row is removed with it
+    events:
+      - pod.deleted[target]: {pod: {index: 2}}

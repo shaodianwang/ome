@@ -1,0 +1,50 @@
+# The pod an in-place patch has already landed on reappears under a new UID.
+# Nothing in the in-place path reads the pod UID: the pass re-reads by name
+# and re-derives the marker, image and label patches against whatever pod
+# carries that name, which already carries them, and waits on its readiness;
+# the runtime confirms the image and the Instance promotes.
+scenario: inplace-patched-pod-uid-rotated
+arrows:
+  - T-ready-inplace
+  - T-inplace-ready
+cells:
+  - instance/Update/InPlace/pod.uidRotated/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation and its gate reads False, which the pass already drove, so the drain check passes and the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.servingOff[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the image patch lands while the source is out of rotation
+  - tick: 6
+    note: the patched pod reappears under a new UID, and the pass re-reads it by name, finds the patches it already carries and waits on its readiness
+    events:
+      - pod.uidRotated: {pod: {index: 0}}
+  - tick: 7
+    note: a tick with nothing changed re-derives the same wait
+  - tick: 8
+    note: the runtime confirms the new image on the rotated pod, so the Instance promotes
+    events:
+      - pod.ready[target]: {pod: {index: 0}}

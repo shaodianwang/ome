@@ -1,0 +1,106 @@
+tick=1 note the gang's PodGroup is announced before its first member, and the Create pass materializes both
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 2 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-leader-0 revision=4c292506 incarnation=1 ordinal=0
+tick=1 pod create name=svc-a-engine-0-worker-0 revision=4c292506 incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note both members are bound to node-0 and report Ready, and the leader enters rotation, and the promote waits on the availability window
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-leader-0 node=node-0 now=t+0s
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-worker-0 node=node-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-leader-0 serving=absent→True
+tick=2 pod status-patch name=svc-a-engine-0-worker-0 serving=absent→True
+tick=2 pass result=after:30s
+tick=3 note the availability window elapses, so the Instance promotes as one
+tick=3 apply clock.advance by=1m0s now=t+1m0s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 hold cleared
+tick=3 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-4c292506 readySince=t+1m0s op=nil precondition=ok
+tick=3 event Normal InstanceReady OMENative component=engine instance=0 is Ready (2 pod(s) serving)
+tick=3 pass result=none
+tick=4 note the pod template changes and the strategy rebuilds the gang in place of surging, so Phase A takes the serving gates down
+tick=4 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+1m0s
+tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=4 gate consult strategy=RecreatePod surge=0 unavail=0 verdict=allow
+tick=4 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+1m0s op=op#2{type=Update step=Drain target=svc-a-engine-f5f6d007 reason=revision svc-a-engine-4c292506 -> svc-a-engine-f5f6d007 strategy=RecreatePod started=t+1m0s lastProgressAt=t+1m0s deadline=t+31m0s} precondition=ok
+tick=4 event Normal RecreateUpdateStarted OMENative component=engine instance=0 recreate (revision svc-a-engine-4c292506 -> svc-a-engine-f5f6d007, incarnation=2)
+tick=4 pod status-patch name=svc-a-engine-0-leader-0 serving=True→False
+tick=4 pod status-patch name=svc-a-engine-0-worker-0 serving=True→False
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the leader leaves rotation, so Phase A deletes both members
+tick=5 apply endpoint.rotationOut[source] pod=svc-a-engine-0-leader-0 now=t+1m0s
+tick=5 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod delete name=svc-a-engine-0-leader-0 grace=default
+tick=5 pod delete name=svc-a-engine-0-worker-0 grace=default
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note both members are gone, so Phase B rebuilds the gang at the bumped incarnation behind its existing PodGroup
+tick=6 apply pod.deleted[source] pod=svc-a-engine-0-leader-0 now=t+1m0s
+tick=6 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+1m0s
+tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=6 row=0 write no-op precondition=no-change
+tick=6 pod create name=svc-a-engine-0-leader-0 revision=f5f6d007 incarnation=2 ordinal=0
+tick=6 pod create name=svc-a-engine-0-worker-0 revision=f5f6d007 incarnation=2 ordinal=0
+tick=6 hold cleared
+tick=6 pass result=after:5s
+tick=7 note the group's controller reference is rewritten to another owner, which is a name this controller may not write, so the gang verdict stamps the Instance Failed with the recreate kept rather than parked
+tick=7 apply gang.podGroup[OwnershipConflict] podGroup=svc-a-engine-0 state=OwnershipConflict now=t+1m0s
+tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=7 row=0 write no-op precondition=no-change
+tick=7 hold cleared
+tick=7 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+1m0s op=op#2{type=Update step=Drain target=svc-a-engine-f5f6d007 reason=revision svc-a-engine-4c292506 -> svc-a-engine-f5f6d007 strategy=RecreatePod started=t+1m0s lastProgressAt=t+1m0s deadline=t+31m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=7 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
+tick=7 pass result=after:5s
+tick=8 note the rebuilt leader is bound, its containers come up, drop out of readiness again and its runner restarts, all of which is read by nobody before the re-drive restamps the recreate at a bumped incarnation and drains the set
+tick=8 apply pod.scheduled[source] pod=svc-a-engine-0-leader-0 node=node-1 now=t+1m0s
+tick=8 apply pod.containersReady[source] pod=svc-a-engine-0-leader-0 now=t+1m0s
+tick=8 apply pod.containersNotReady[source] pod=svc-a-engine-0-leader-0 now=t+1m0s
+tick=8 apply pod.containerRestart pod=svc-a-engine-0-leader-0 container=ome-container reason=Error now=t+1m0s
+tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=8 row=0 write incarnation=3 phase=Updating runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+1m0s op=op#2{type=Update step=Drain target=svc-a-engine-f5f6d007 reason=revision svc-a-engine-4c292506 -> svc-a-engine-f5f6d007 strategy=RecreatePod started=t+1m0s lastProgressAt=t+1m0s deadline=t+31m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=8 pod delete name=svc-a-engine-0-leader-0 grace=default
+tick=8 pod delete name=svc-a-engine-0-worker-0 grace=default
+tick=8 hold cleared
+tick=8 pass result=after:5s
+tick=9 note the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept
+tick=9 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=9 row=0 write no-op precondition=no-change
+tick=9 hold cleared
+tick=9 row=0 write incarnation=3 phase=Failed runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+1m0s op=op#2{type=Update step=Drain target=svc-a-engine-f5f6d007 reason=revision svc-a-engine-4c292506 -> svc-a-engine-f5f6d007 strategy=RecreatePod started=t+1m0s lastProgressAt=t+1m0s deadline=t+31m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=9 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
+tick=9 pass result=after:5s
+tick=10 note two minutes pass, longer than the stuck-pod grace and the minReadySeconds window, while the leader runs without readiness; no clock runs on a Failed row and no promote waits on an ended attempt, so the re-drive is all that happens
+tick=10 apply clock.advance by=2m0s now=t+3m0s
+tick=10 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=10 row=0 write incarnation=4 phase=Updating runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+1m0s op=op#3{type=Update step=Drain target=svc-a-engine-f5f6d007 reason=revision svc-a-engine-4c292506 -> svc-a-engine-f5f6d007 strategy=RecreatePod started=t+3m0s lastProgressAt=t+3m0s deadline=t+33m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=10 hold cleared
+tick=10 pass result=after:5s
+tick=11 note the verdict fails the re-driven attempt again
+tick=11 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=11 row=0 write no-op precondition=no-change
+tick=11 hold cleared
+tick=11 row=0 write incarnation=4 phase=Failed runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+1m0s op=op#3{type=Update step=Drain target=svc-a-engine-f5f6d007 reason=revision svc-a-engine-4c292506 -> svc-a-engine-f5f6d007 strategy=RecreatePod started=t+3m0s lastProgressAt=t+3m0s deadline=t+33m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=11 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
+tick=11 pass result=after:5s
+tick=12 note the worker reappears under a new UID, and the re-drive partitions pods by the incarnation label, so the successor is drained as the old incarnation like the pod it replaced
+tick=12 apply pod.uidRotated pod=svc-a-engine-0-worker-0 uid=uid#4→uid#5 now=t+3m0s
+tick=12 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=12 row=0 write incarnation=5 phase=Updating runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+1m0s op=op#3{type=Update step=Drain target=svc-a-engine-f5f6d007 reason=revision svc-a-engine-4c292506 -> svc-a-engine-f5f6d007 strategy=RecreatePod started=t+3m0s lastProgressAt=t+3m0s deadline=t+33m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=12 hold cleared
+tick=12 pass result=after:5s
+tick=13 note the verdict fails the re-driven attempt again
+tick=13 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=13 row=0 write no-op precondition=no-change
+tick=13 hold cleared
+tick=13 row=0 write incarnation=5 phase=Failed runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+1m0s op=op#3{type=Update step=Drain target=svc-a-engine-f5f6d007 reason=revision svc-a-engine-4c292506 -> svc-a-engine-f5f6d007 strategy=RecreatePod started=t+3m0s lastProgressAt=t+3m0s deadline=t+33m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=13 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
+tick=13 pass result=after:5s

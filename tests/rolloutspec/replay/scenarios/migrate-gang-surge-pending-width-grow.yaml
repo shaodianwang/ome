@@ -1,0 +1,58 @@
+# A gang is widened while its migration is at SurgePending. The surge
+# mirrors the plan's live Runner list rather than the source revision, so
+# the width change widens the surge's desired pod set on the next drive pass
+# and the extra member is created, while the source keeps the pod set it
+# already had; the record's deadline then ends the move.
+scenario: migrate-gang-surge-pending-width-grow
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-migrate-deadline-restore
+  - T-migratetarget-expired
+cells:
+  - instance/Migrate/CreateSurge/spec.gangWidth[grow]/before
+  - instance/Migrate/SurgeTarget/spec.gangWidth[grow]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members are bound to node-0 and report Ready, and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the surge gang's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the gang is widened by one worker, so the drive widens the surge's desired pod set and creates the extra member, while the source keeps the pod set it already had
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+  - tick: 6
+    note: a tick with nothing changed finds the wider surge standing and waits on it
+  - tick: 7
+    note: the record's deadline elapses, so the expiry clears both pins, closes the record and restores the source to Ready on its running revision
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 8
+    note: the unpinned surge index is beyond the desired set, so the scale-down pipeline commits Phase Deleting on it

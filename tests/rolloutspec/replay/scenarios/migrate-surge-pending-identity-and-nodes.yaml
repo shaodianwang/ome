@@ -1,0 +1,61 @@
+# Pods change identity and lose their nodes around a migration at
+# SurgePending. The drive addresses pods by name against a live read each
+# pass, so a same-name successor on either side is simply picked up; node
+# loss is usually why the move was requested rather than a trigger inside
+# it, so the drive keeps polling and the record's deadline bounds the wait,
+# and the expiry then finds the source unhealthy and restores it Failed.
+scenario: migrate-surge-pending-identity-and-nodes
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-migrate-deadline
+  - T-migratetarget-expired
+cells:
+  - instance/Migrate/CreateSurge/pod.nodeLost[NodeGone]/before
+  - instance/Migrate/SurgeTarget/pod.nodeLost[NodeGone]/before
+  - instance/Migrate/CreateSurge/pod.uidRotated/before
+  - instance/Migrate/SurgeTarget/pod.uidRotated/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the surge binds to a node off node-0, and then both nodes are gone, which reaches the pair only through its pods and a sweep with no policy to act on, so the drive keeps polling
+    events:
+      - pod.scheduled[target]: {pod: {index: 1}, message: node-1}
+      - pod.nodeLost[NodeGone]: {pod: {index: 0}}
+      - pod.nodeLost[NodeGone]: {pod: {index: 1}}
+  - tick: 5
+    note: the surge pod reappears under a new UID, and the drive addresses it by name, so the successor is picked up without a status change
+    events:
+      - pod.uidRotated: {pod: {index: 1}}
+  - tick: 6
+    note: the source pod reappears under a new UID as well, fresh and unscheduled, which the drive likewise picks up by name
+    events:
+      - pod.uidRotated: {pod: {index: 0}}
+  - tick: 7
+    note: the record's deadline elapses, so the expiry clears both pins, closes the record and restores a source whose pod is not runtime-ready as Failed
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 8
+    note: the unpinned surge index is beyond the desired set, so the scale-down pipeline commits Phase Deleting on it

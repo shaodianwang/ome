@@ -1,0 +1,47 @@
+# The apiserver answers a recreate's writes with facts about the cluster. A
+# delete of an already-gone pod is treated as done and its expectation is
+# rolled back, so Phase B rebuilds at once; a Phase B create that collides
+# with a name is swallowed and the pass moves on, because the collision
+# means the pod already exists, and the recreate converges on it.
+scenario: recreate-rebuild-apiserver-answers
+arrows:
+  - T-ready-recreate
+  - T-drain-ready
+cells:
+  - instance/Update/Drain/api.notFound/before
+  - instance/Update/Drain/api.alreadyExists/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging, so Phase A takes the serving gate down
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the source leaves rotation and its delete is answered not found, so the pod is treated as gone and its expectation is rolled back
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - api.notFound: {}
+      - api.alreadyExists: {}
+  - tick: 5
+    note: Phase B's create collides with a name the earlier writer already holds, which is swallowed, and the pass moves on with the pod it finds
+  - tick: 6
+    note: the rebuilt pod reports Ready and its endpoint returns, so the Instance promotes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}

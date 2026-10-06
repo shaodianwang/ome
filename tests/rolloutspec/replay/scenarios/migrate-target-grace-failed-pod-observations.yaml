@@ -1,0 +1,128 @@
+# A migration surge whose own pod the scheduler cannot place outlasts the
+# configured grace, so the surge row is stamped Failed with its Migrate pin
+# kept. From there nothing the surge pod or the source reports moves either
+# row: the pair is driven by nothing while the surge reads Failed, so a late
+# placement, readiness, rotation and even the availability window change
+# nothing, and the record's deadline is what ends the move. The surge pod is
+# Ready and routed when the deadline lands, and the expiry still reads the
+# surge as never ready, because the promote the pair write needs requires the
+# surge row to read Creating.
+scenario: migrate-target-grace-failed-pod-observations
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-failedmigratetarget-expired
+  - T-migrate-deadline-restore
+  - T-delete-done
+cells:
+  - instance/Failed/MigrateTarget/ctrl.resync/before
+  - instance/Failed/MigrateTarget/pod.scheduled[source]/before
+  - instance/Failed/MigrateTarget/pod.containersReady[source]/before
+  - instance/Failed/MigrateTarget/pod.scheduled[target]/before
+  - instance/Failed/MigrateTarget/pod.ready[target]/before
+  - instance/Failed/MigrateTarget/pod.servingOn[target]/before
+  - instance/Failed/MigrateTarget/endpoint.rotationIn[target]/before
+  - instance/Failed/MigrateTarget/timer.minReady/before
+  - instance/Failed/MigrateTarget/endpoint.rotationOut[target]/before
+  - instance/Failed/MigrateTarget/pod.servingOff[target]/before
+  - instance/Failed/MigrateTarget/pod.containersNotReady[target]/before
+  - instance/Failed/MigrateTarget/pod.runningNotReady[target]/before
+  - instance/Failed/MigrateTarget/pod.containerRestart/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    minReadySeconds: 30
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    unschedulableGrace: 10m
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the availability window elapses, so the Instance promotes on its running revision
+    events:
+      - clock.advance: 1m
+  - tick: 4
+    note: a minute into steady Ready the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - clock.advance: 1m
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 5
+    note: the scheduler finds the surge no node off node-0, so the scheduler hold is recorded on the surge row and both pair deadlines park
+    events:
+      - pod.unschedulable[target]: {pod: {index: 1}}
+  - tick: 6
+    note: the hold outlasts the configured grace, so the escalation stamps the surge row Failed with its Migrate pin kept while the source keeps serving under its own pin
+    events:
+      - clock.advance: 11m
+  - tick: 7
+    note: a tick with nothing changed finds the record's deadline ahead, and no pass drives a pair whose surge reads Failed
+  - tick: 8
+    note: the source's binding and container readiness are observed again, which gate no step of the migration
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.containersReady[source]: {pod: {index: 0}}
+  - tick: 9
+    note: the surge pod finds a node after all, which nothing reads on a row the pair write cannot promote
+    events:
+      - pod.scheduled[target]: {pod: {index: 1}, message: node-1}
+  - tick: 10
+    note: the surge pod reports ContainersReady, and no serving gate is written for a surge row that reads Failed
+    events:
+      - pod.containersReady[target]: {pod: {index: 1}}
+  - tick: 11
+    note: the surge pod reports PodReady and its serving gate reads True, which feed a promote this row cannot take
+    events:
+      - pod.ready[target]: {pod: {index: 1}}
+      - pod.servingOn[target]: {pod: {index: 1}}
+  - tick: 12
+    note: the surge pod enters rotation, which feeds the availability gate of the same promote
+    events:
+      - endpoint.rotationIn[target]: {pod: {index: 1}}
+  - tick: 13
+    note: a minute passes, longer than the minReadySeconds window, which guards a promote this row cannot take
+    events:
+      - clock.advance: 1m
+  - tick: 14
+    note: the surge pod leaves rotation and its serving gate reads False, which move counters and nothing on the pair
+    events:
+      - endpoint.rotationOut[target]: {pod: {index: 1}}
+      - pod.servingOff[target]: {pod: {index: 1}}
+  - tick: 15
+    note: the surge pod's containers stop being ready while it keeps running, which re-closes readiness gates nobody is reading
+    events:
+      - pod.containersNotReady[target]: {pod: {index: 1}}
+  - tick: 16
+    note: two minutes on, longer than the stuck-pod grace, the surge pod still runs without readiness, and no clock on this row measures it
+    events:
+      - clock.advance: 2m
+  - tick: 17
+    note: the surge pod's runner restarts, which is evidence read against ReadySince and only on a Ready row
+    events:
+      - pod.containerRestart: {pod: {index: 1}, message: Error}
+  - tick: 18
+    note: the record's deadline elapses, so the expiry clears the pin from the Failed surge row, keeps its status slot, closes the record and restores the source to Ready on its running revision
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 19
+    note: the unpinned index is beyond the desired set, so the scale-down pipeline commits Phase Deleting on it
+  - tick: 20
+    note: the drain finds nothing routed on the retired index, so its pod's delete is issued
+  - tick: 21
+    note: the surge pod is gone, so its row is removed with it
+    events:
+      - pod.deleted[target]: {pod: {index: 1}}

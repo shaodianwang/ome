@@ -1,0 +1,69 @@
+# A gang's recreate is ended by the gang verdict with the Update operation
+# kept, and its rebuilt members die in the one pass the row reads Failed: one
+# exits, the other is refused by its node. Neither is the restart pass's,
+# and the re-drive's Phase A deletes both as old-incarnation pods when it
+# restamps the recreate; the verdict then fails the Instance again.
+scenario: recreate-gang-conflict-failed-terminal-pods
+arrows:
+  - T-ready-recreate
+  - T-faileddrain-redrive
+cells:
+  - instance/Failed/Drain/pod.phaseTerminal[Failed]/before
+  - instance/Failed/Drain/pod.admissionRejected[UnexpectedAdmissionError]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members are bound to node-0 and report Ready, and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds the gang in place of surging, so Phase A takes the serving gates down
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation, so Phase A deletes both members
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 5
+    note: both members are gone, so Phase B rebuilds the gang at the bumped incarnation behind its existing PodGroup
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 6
+    note: the group's controller reference is rewritten to another owner, which is a name this controller may not write, so the gang verdict stamps the Instance Failed with the recreate kept rather than parked
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 7
+    note: the rebuilt members are bound, the leader exits and the worker is refused by its node, and the re-drive restamps the recreate at a bumped incarnation and deletes both as old-incarnation pods
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-1}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-1}
+      - pod.phaseTerminal[Failed]: {pod: {index: 0, runner: leader}}
+      - pod.admissionRejected[UnexpectedAdmissionError]: {pod: {index: 0, runner: worker}, message: "Allocate failed due to device plugin error"}
+  - tick: 8
+    note: the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept
+  - tick: 9
+    note: both dead members are gone, and the re-drive restamps the recreate again with nothing left to drain; the members stay withheld from a name this controller may not write
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 10
+    note: the verdict fails the re-driven attempt again

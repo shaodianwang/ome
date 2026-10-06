@@ -1,0 +1,64 @@
+# A recreate's rebuilt pod runs but never passes its probes again after Phase
+# C flipped serving on. Phase C promotes only over the one bar every path
+# shares and re-derives it every wake-up, so the pod holds the roll to the
+# operation deadline; there the readiness wait is evidence, with the record
+# naming the pod and its unready container under reason ContainersNotReady,
+# but it decides no branch and charges no ladder, and the same attempt is
+# re-opened with no retry policy configured.
+scenario: recreate-rebuilt-pod-never-ready-at-deadline
+arrows:
+  - T-ready-recreate
+  - T-drain-deadline
+cells:
+  - instance/Update/Drain/pod.runningNotReady[source]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging, so Phase A takes the serving gate down
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the source leaves rotation, which releases the drain guard and issues the delete
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the source is gone, so Phase B rebuilds it at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the rebuilt pod is bound, reports ContainersReady and its endpoint returns, so Phase C flips serving on and waits for PodReady
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.containersReady[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 7
+    note: the rebuilt pod's containers drop readiness and stay down, which re-closes the gate and holds the promote
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 0}}
+  - tick: 8
+    note: two minutes on, longer than the stuck-pod grace, the pod still runs without readiness, which no fast path judges
+    events:
+      - clock.advance: 2m
+  - tick: 9
+    note: the operation deadline elapses, so the attempt is disposed with the record naming the pod and its unready container under ContainersNotReady and no ladder charged
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 10
+    note: with no retry policy configured the same recreate attempt is re-opened

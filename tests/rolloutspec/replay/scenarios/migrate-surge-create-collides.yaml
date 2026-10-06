@@ -1,0 +1,43 @@
+# The surge pod's create races an entry the cache had not caught. An
+# already-exists answer is treated as created: the expectation is rolled
+# back, the pod lands as the earlier writer's object, and the drive adopts
+# it by name on the next pass and drives it like one it created.
+scenario: migrate-surge-create-collides
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+cells:
+  - instance/Migrate/CreateSurge/api.alreadyExists/before
+  - instance/Migrate/SurgeTarget/api.alreadyExists/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, the migrate pass admits the request and establishes the pair, and the surge create collides with a pod the earlier writer already holds, which is treated as created
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+      - api.alreadyExists: {}
+  - tick: 4
+    note: the next pass adopts the surge pod by name and waits on it with the record still SurgePending
+  - tick: 5
+    note: the adopted surge binds off node-0 and reports ContainersReady, so the drive marks it serving like a pod it created
+    events:
+      - pod.scheduled[target]: {pod: {index: 1}, message: node-1}
+      - pod.containersReady[target]: {pod: {index: 1}}

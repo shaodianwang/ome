@@ -1,0 +1,63 @@
+# Plan and config edits land on a migration at SurgePending. An excluded
+# label edit leaves the revision hash unchanged, a partition holds Instances
+# inside the update pass, which never selects a migrate-owned row, and a
+# requeue cadence change only paces how often the pair is re-driven; the
+# record's deadline ends the move.
+scenario: migrate-surge-pending-plan-edits
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-migrate-deadline-restore
+  - T-migratetarget-expired
+cells:
+  - instance/Migrate/CreateSurge/spec.annotationOnly/before
+  - instance/Migrate/SurgeTarget/spec.annotationOnly/before
+  - instance/Migrate/CreateSurge/spec.partition/before
+  - instance/Migrate/SurgeTarget/spec.partition/before
+  - instance/Migrate/CreateSurge/config.changed[requeue]/before
+  - instance/Migrate/SurgeTarget/config.changed[requeue]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    podLabels: {kueue.x-k8s.io/queue-name: queue-a}
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the queue label is re-pointed, which the hasher derives rather than reads, so the target revision stands and nothing reaches the migration
+    events:
+      - spec.annotationOnly: {labels: {kueue.x-k8s.io/queue-name: queue-b}}
+  - tick: 5
+    note: a partition is set, which holds Instances inside the update pass, and that pass never selects a migrate-owned row
+    events:
+      - spec.partition: {to: 1}
+  - tick: 6
+    note: the requeue cadences are edited, which takes effect on the next pass and only paces how often this pair is re-driven
+    events:
+      - config.changed[requeue]: {config: {requeueOperation: 7s, requeueGate: 4s}}
+  - tick: 7
+    note: a tick with nothing changed re-drives the pair at the new cadence
+  - tick: 8
+    note: the record's deadline elapses, so the expiry clears both pins, closes the record and restores the source to Ready on its running revision
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 9
+    note: the unpinned surge index is beyond the desired set, so the scale-down pipeline commits Phase Deleting on it

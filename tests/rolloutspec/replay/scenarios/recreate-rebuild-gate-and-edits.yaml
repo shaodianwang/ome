@@ -1,0 +1,88 @@
+# A recreate's rebuilt pod is held in an admission queue while edits land
+# around it. A gated Phase B pod parks the deadline clock and the escalation
+# skips the Instance while any of its pods is gated; a label the hasher
+# derives, a partition and the in-place knobs reach nothing; the ready
+# timeout is read again only when the admission un-park restarts the clock,
+# which measures the rebuilt pod's budget from its admission; and the
+# recreate then converges and promotes.
+scenario: recreate-rebuild-gate-and-edits
+arrows:
+  - T-ready-recreate
+  - T-drain-ready
+cells:
+  - instance/Update/Drain/pod.schedulingGated/before
+  - instance/Update/Drain/spec.annotationOnly/before
+  - instance/Update/Drain/spec.partition/before
+  - instance/Update/Drain/spec.policyTuning[instanceReadyTimeout]/before
+  - instance/Update/Drain/spec.policyTuning[markNotReady]/before
+  - instance/Update/Drain/config.changed[stuckPodGrace]/before
+  - instance/Update/Drain/pod.admitted/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    podLabels: {kueue.x-k8s.io/queue-name: queue-a}
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging, so Phase A takes the serving gate down
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the source leaves rotation, which releases the drain guard and issues the delete
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the source is gone, so Phase B rebuilds it at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: a queue admission gates the rebuilt pod, which parks the deadline clock, and the escalation skips the Instance while a pod of its is gated
+    events:
+      - pod.schedulingGated: {pod: {index: 0}}
+  - tick: 7
+    note: the queue label is re-pointed, which the hasher derives rather than reads, so the target revision stands and the recreate is unaffected
+    events:
+      - spec.annotationOnly: {labels: {kueue.x-k8s.io/queue-name: queue-b}}
+  - tick: 8
+    note: a partition is set below this Instance, and partition candidacy skips an Instance already converging to the target, so the recreate is not held
+    events:
+      - spec.partition: {to: 1}
+  - tick: 9
+    note: the ready timeout is shortened, which reaches a parked clock only when the admission un-park restamps it
+    events:
+      - spec.policyTuning[instanceReadyTimeout]: {value: 5m}
+  - tick: 10
+    note: the mark-not-ready flag is set, which belongs to the in-place strategies, so the recreate reads nothing of it
+    events:
+      - spec.policyTuning[markNotReady]: {value: "true"}
+  - tick: 11
+    note: the stuck-pod grace is configured, which arms the fast escalation for later passes and writes nothing on this row
+    events:
+      - config.changed[stuckPodGrace]: {config: {stuckPodGrace: 1m}}
+  - tick: 12
+    note: the gate is lifted, so the gate-exit edge restarts the parked deadline at now plus the edited ready timeout and the recreate resumes converging
+    events:
+      - pod.admitted: {pod: {index: 0}}
+  - tick: 13
+    note: the rebuilt pod is bound, reports ContainersReady and its endpoint returns, so Phase C flips serving on and waits for PodReady
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.containersReady[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 14
+    note: the rebuilt pod reports PodReady, so the Instance promotes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

@@ -1,0 +1,71 @@
+tick=1 note cold start
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the pod is bound, becomes Ready and enters rotation
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-default-0 node=node-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=2 pass result=none
+tick=3 note only the image changed, so the update is eligible to run in place
+tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=3 gate consult strategy=InPlaceIfPossible surge=0 unavail=0 verdict=allow
+tick=3 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=InPlace target=svc-a-engine-6f8b1e6c strategy=InPlaceIfPossible started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal InPlaceUpdateStarted OMENative component=engine instance=0 in-place update to revision svc-a-engine-6f8b1e6c
+tick=3 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the pod leaves rotation and its gate reads False, which the pass already drove, so the drain check passes and the transition marker is written
+tick=4 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 apply pod.servingOff[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod patch name=svc-a-engine-0-default-0 annotations=[internal.ome.io/in-place-image-transition:nil→{"targetImages":{"main":"registry.example.com/runtime:v2"},"restartCounts":{"main":0}}]
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the image patch lands while the source is out of rotation
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod patch name=svc-a-engine-0-default-0 images=main=registry.example.com/runtime:v1→main=registry.example.com/runtime:v2
+tick=5 pod patch name=svc-a-engine-0-default-0 labels=[ome.io/revision-hash:882059bb→6f8b1e6c]
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note the patched pod's containers drop readiness, which is the patch taking effect, so the runtime-ready gate holds the promote until readiness returns on the target image
+tick=6 apply pod.containersNotReady[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=6 row=0 write no-op precondition=no-change
+tick=6 hold cleared
+tick=6 pass result=after:5s
+tick=7 note a partition is set below this Instance, and partition candidacy skips an Instance already converging to the target, so the roll is not held
+tick=7 apply spec.partition partition=1 generation=2 now=t+0s
+tick=7 row=0 write no-op precondition=no-change
+tick=7 hold cleared
+tick=7 pass result=after:5s
+tick=8 note the mark-not-ready flag is cleared, which only guards the pre-patch drain already done, so the patch is unaffected
+tick=8 apply spec.policyTuning[markNotReady] markNotReady=false generation=3 now=t+0s
+tick=8 row=0 write no-op precondition=no-change
+tick=8 hold cleared
+tick=8 pass result=after:5s
+tick=9 note the ready timeout is shortened, and the operation deadline was stamped once at operation entry, so the in-flight clock does not move
+tick=9 apply spec.policyTuning[instanceReadyTimeout] instanceReadyTimeout=5m generation=4 now=t+0s
+tick=9 row=0 write no-op precondition=no-change
+tick=9 hold cleared
+tick=9 pass result=after:5s
+tick=10 note the stuck-pod grace is configured, which arms the fast escalation for later passes and writes nothing on this row
+tick=10 apply config.changed[stuckPodGrace] stuckPodGrace=1m now=t+0s
+tick=10 row=0 write no-op precondition=no-change
+tick=10 hold cleared
+tick=10 pass result=after:5s
+tick=11 note the kubelet has rolled the container, so the runtime confirms the new image, the pod returns to rotation and the Instance promotes
+tick=11 apply pod.ready[target] pod=svc-a-engine-0-default-0 now=t+0s
+tick=11 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=11 row=0 write no-op precondition=no-change
+tick=11 pod status-patch name=svc-a-engine-0-default-0 serving=False→True
+tick=11 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil precondition=ok
+tick=11 event Normal InPlaceUpdateCompleted OMENative component=engine instance=0 in-place update to revision svc-a-engine-6f8b1e6c complete
+tick=11 pod patch name=svc-a-engine-0-default-0 annotations=[internal.ome.io/in-place-image-transition:{"targetImages":{"main":"registry.example.com/runtime:v2"},"restartCounts":{"main":0}}→nil]
+tick=11 hold cleared
+tick=11 pass result=requeue

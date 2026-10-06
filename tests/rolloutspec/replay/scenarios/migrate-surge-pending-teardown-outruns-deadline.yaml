@@ -1,0 +1,52 @@
+# The owner is deleted while a migration is at SurgePending, with its
+# teardown deadline, the record's deadline and the loss of the source pod
+# all landing in the pass that first observes the deletion. The release is
+# phase-blind: the finalizer check purges the owner and both rows of the pair
+# ahead of any teardown wave, so there is no record left to expire and no
+# pin left to clear, and a surviving pod, present or gone, is left to
+# background GC.
+scenario: migrate-surge-pending-teardown-outruns-deadline
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+cells:
+  - instance/Migrate/CreateSurge/timer.teardownDeadline/before
+  - instance/Migrate/SurgeTarget/timer.teardownDeadline/before
+  - instance/Migrate/CreateSurge/pod.deleted[source]/boundary@T-migrate-teardown-deadline
+  - instance/Migrate/SurgeTarget/pod.deleted[source]/boundary@T-migratetarget-teardown-deadline
+  - instance/Migrate/CreateSurge/timer.migrationDeadline/boundary@T-migrate-teardown-deadline
+  - instance/Migrate/SurgeTarget/timer.migrationDeadline/boundary@T-migratetarget-teardown-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    teardownDeadline: 10m
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the owner was deleted, its teardown deadline and the record's deadline have both elapsed and the source pod is gone before this pass observes any of it, so the deadline check releases the owner ahead of any teardown wave, both rows go with it and nothing is left to expire
+    events:
+      - spec.teardown[deleted]: {}
+      - timer.teardownDeadline: {slack: 1s}
+      - timer.migrationDeadline: {slack: 1s}
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 5
+    note: a late pass finds no owner left to act on

@@ -1,0 +1,67 @@
+# A second migration request is made against a source whose surge row
+# stands Failed with its Migrate pin kept. The request waits behind the
+# record that already owns the source: nothing is written for it while the
+# first record lives, the first record's deadline ends the move and tears the
+# surge index down, and only then is the waiting request driven.
+scenario: migrate-target-grace-failed-second-request-waits
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-failedmigratetarget-expired
+  - T-migrate-deadline-restore
+  - T-delete-done
+cells:
+  - instance/Failed/MigrateTarget/spec.migrateRequest/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    unschedulableGrace: 10m
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the scheduler finds the surge no node off node-0, so the scheduler hold is recorded on the surge row and both pair deadlines park
+    events:
+      - pod.unschedulable[target]: {pod: {index: 1}}
+  - tick: 5
+    note: the hold outlasts the configured grace, so the escalation stamps the surge row Failed with its Migrate pin kept while the source keeps serving under its own pin
+    events:
+      - clock.advance: 11m
+  - tick: 6
+    note: the operator asks the same Instance off node-0 again, and the request waits behind the record that already owns it
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 7
+    note: a tick with nothing changed drives neither the pinned pair nor the waiting request
+  - tick: 8
+    note: the first record's deadline elapses, so the expiry clears the pin from the Failed surge row, closes the record and restores the source to Ready on its running revision
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 9
+    note: the unpinned index is beyond the desired set, so the scale-down pipeline commits Phase Deleting on it
+  - tick: 10
+    note: the drain finds nothing routed on the retired index, so its pod's delete is issued
+  - tick: 11
+    note: the surge pod is gone, so its row is removed with it
+    events:
+      - pod.deleted[target]: {pod: {index: 1}}
+  - tick: 12
+    note: with the first move over, the waiting request is driven against the restored source and a new pair is established

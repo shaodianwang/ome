@@ -1,0 +1,61 @@
+# The re-drive of a gang's recreate that the gang verdict ended with the
+# Update operation kept finds one of its old-incarnation pods already gone
+# when it issues the drain: the delete is answered not found, which is one
+# fewer pod for Phase A to drain, and the other member is deleted as usual.
+scenario: recreate-gang-conflict-failed-drain-pod-not-found
+arrows:
+  - T-ready-recreate
+  - T-faileddrain-redrive
+cells:
+  - instance/Failed/Drain/api.notFound/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members are bound to node-0 and report Ready, and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds the gang in place of surging, so Phase A takes the serving gates down
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation, so Phase A deletes both members
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 5
+    note: both members are gone, so Phase B rebuilds the gang at the bumped incarnation behind its existing PodGroup
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 6
+    note: the group's controller reference is rewritten to another owner, which is a name this controller may not write, so the gang verdict stamps the Instance Failed with the recreate kept rather than parked
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 7
+    note: the rebuilt leader is gone by the time the re-drive's Phase A deletes it, so its delete is answered not found and treated as done while the worker's delete goes out
+    events:
+      - api.notFound: {}
+  - tick: 8
+    note: the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept
+  - tick: 9
+    note: the worker is gone, and the re-drive restamps the recreate with nothing left to drain and its members withheld from the foreign name
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

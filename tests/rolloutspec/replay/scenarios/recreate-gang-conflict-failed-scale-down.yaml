@@ -1,0 +1,63 @@
+# Two gangs roll by recreate and one of them is ended by the gang verdict
+# with the Update operation kept. A recreate roll pins nothing in the plan,
+# so when the replica count is halved the scale-down wave admits the Failed
+# index and the Delete operation replaces the kept Update; the reduction
+# observed again on the next pass is the admission already committed once
+# per wave, and the gang drains and leaves the owner's status.
+scenario: recreate-gang-conflict-failed-scale-down
+arrows:
+  - T-ready-recreate
+  - T-faileddrain-scaledown
+  - T-delete-done
+cells:
+  - instance/Failed/Drain/spec.replicasDown/before
+  - instance/Failed/Drain/spec.replicasDown/after@T-faileddrain-scaledown
+initial:
+  spec:
+    replicas: 2
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, runner: leader, node: node-0, ready: true, serving: true, routed: true}
+    - {index: 0, runner: worker, node: node-0, ready: true, serving: true}
+    - {index: 1, runner: leader, node: node-1, ready: true, serving: true, routed: true}
+    - {index: 1, runner: worker, node: node-1, ready: true, serving: true}
+timeline:
+  - tick: 1
+    note: both gangs are Ready on their own nodes behind their own PodGroups
+  - tick: 2
+    note: the pod template changes and the strategy rebuilds both gangs in place of surging, so Phase A takes their serving gates down
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the second gang's PodGroup is rewritten to another owner, so the gang verdict stamps that Instance Failed with its recreate kept while the first keeps draining
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 1}
+  - tick: 4
+    note: the operator halves the replica count, and the scale-down wave admits the Failed index, whose kept recreate pins nothing, so the Delete operation replaces it
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 5
+    note: the reduction is observed again, and the admission was committed once per wave
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 6
+    note: the retired gang's leader leaves rotation, so the drain issues both deletes
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1, runner: leader}}
+  - tick: 7
+    note: both members are gone, so the retired row leaves the owner's status while the first gang keeps draining
+    events:
+      - pod.deleted[source]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 1, runner: worker}}

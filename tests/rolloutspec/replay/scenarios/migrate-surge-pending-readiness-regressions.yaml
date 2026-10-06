@@ -1,0 +1,90 @@
+# Readiness comes and goes on both sides of a migration at SurgePending.
+# The drive re-evaluates runtime readiness over the whole surge pod set
+# every pass, so a surge regression blocks the serving flip until it clears
+# and a surge running without readiness holds the shared tail to the
+# record's deadline; the availability window feeds a tail gate the source
+# row never moves on; and no migration step gates on source readiness, but
+# the expiry re-reads it, so a source that is not runtime-ready when the
+# deadline lands takes the Failed branch instead of the restore branch.
+scenario: migrate-surge-pending-readiness-regressions
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-migrate-deadline
+  - T-migratetarget-expired
+cells:
+  - instance/Migrate/CreateSurge/pod.containersNotReady[target]/before
+  - instance/Migrate/SurgeTarget/pod.containersNotReady[target]/before
+  - instance/Migrate/CreateSurge/pod.runningNotReady[target]/before
+  - instance/Migrate/SurgeTarget/pod.runningNotReady[target]/before
+  - instance/Migrate/CreateSurge/timer.minReady/before
+  - instance/Migrate/SurgeTarget/timer.minReady/before
+  - instance/Migrate/CreateSurge/pod.containersNotReady[source]/before
+  - instance/Migrate/SurgeTarget/pod.containersNotReady[source]/before
+  - instance/Migrate/CreateSurge/pod.runningNotReady[source]/before
+  - instance/Migrate/SurgeTarget/pod.runningNotReady[source]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    minReadySeconds: 30
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, and the promote waits on the availability window
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the availability window elapses, so the Instance promotes on its running revision
+    events:
+      - clock.advance: 1m
+  - tick: 4
+    note: a minute into steady Ready the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - clock.advance: 1m
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 5
+    note: the surge binds off node-0 and its containers come up and drop readiness again before the pass reads them, so the serving flip is blocked and the record stays SurgePending
+    events:
+      - pod.scheduled[target]: {pod: {index: 1}, message: node-1}
+      - pod.containersReady[target]: {pod: {index: 1}}
+      - pod.containersNotReady[target]: {pod: {index: 1}}
+  - tick: 6
+    note: two minutes on, longer than the stuck-pod grace, the surge still runs without readiness, which holds the shared tail and is judged by nothing but the record's deadline
+    events:
+      - clock.advance: 2m
+  - tick: 7
+    note: the surge's readiness returns, it reports PodReady and enters rotation, so the drive flips its serving gate on and waits on the tail gates
+    events:
+      - pod.containersReady[target]: {pod: {index: 1}}
+      - pod.ready[target]: {pod: {index: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 1}}
+  - tick: 8
+    note: a minute passes, longer than the minReadySeconds window, which feeds the surge availability gate and moves neither row
+    events:
+      - clock.advance: 1m
+  - tick: 9
+    note: the source's containers stop being ready while it keeps serving, which gates no step of the migration
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 0}}
+  - tick: 10
+    note: two minutes on the source still runs without readiness, which the drive reads nothing of before the deadline
+    events:
+      - clock.advance: 2m
+  - tick: 11
+    note: the record's deadline elapses, so the expiry clears both pins, closes the record and restores a source that is not runtime-ready as Failed rather than Ready
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 12
+    note: the unpinned surge index is beyond the desired set, so the scale-down pipeline commits Phase Deleting on it

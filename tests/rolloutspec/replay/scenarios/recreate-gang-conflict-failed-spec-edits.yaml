@@ -1,0 +1,84 @@
+# Spec and config edits land on a gang's recreate that the gang verdict
+# ended with the Update operation kept. A label the hasher derives changes
+# nothing; the ready timeout is read by the re-drive, which re-derives the
+# kept operation's deadline from it; a config edit writes nothing on the row;
+# and a replica increase adds a fresh index beside this one, which is left
+# as it was. Each Failed pass is re-driven and failed again on the pass
+# after.
+scenario: recreate-gang-conflict-failed-spec-edits
+arrows:
+  - T-ready-recreate
+  - T-faileddrain-redrive
+cells:
+  - instance/Failed/Drain/spec.annotationOnly/before
+  - instance/Failed/Drain/spec.policyTuning[instanceReadyTimeout]/before
+  - instance/Failed/Drain/config.changed[stuckPodGrace]/before
+  - instance/Failed/Drain/spec.replicasUp/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    podLabels: {kueue.x-k8s.io/queue-name: queue-a}
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members are bound to node-0 and report Ready, and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds the gang in place of surging, so Phase A takes the serving gates down
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation, so Phase A deletes both members
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 5
+    note: both members are gone, so Phase B rebuilds the gang at the bumped incarnation behind its existing PodGroup
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 6
+    note: the group's controller reference is rewritten to another owner, which is a name this controller may not write, so the gang verdict stamps the Instance Failed with the recreate kept rather than parked
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 7
+    note: the queue label is re-pointed, which the hasher derives rather than reads, so the target revision stands and the re-drive restamps the recreate as it would have anyway
+    events:
+      - spec.annotationOnly: {labels: {kueue.x-k8s.io/queue-name: queue-b}}
+  - tick: 8
+    note: the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept
+  - tick: 9
+    note: the ready timeout is shortened, and the re-drive opens the continuation under the fresh timeout, re-deriving the kept operation's deadline from it
+    events:
+      - spec.policyTuning[instanceReadyTimeout]: {value: 5m}
+  - tick: 10
+    note: the verdict fails the re-driven attempt again
+  - tick: 11
+    note: the stuck-pod grace is configured, which arms the fast escalation for later passes and writes nothing on the row; the re-drive restamps as before
+    events:
+      - config.changed[stuckPodGrace]: {config: {stuckPodGrace: 1m}}
+  - tick: 12
+    note: the verdict fails the re-driven attempt again
+  - tick: 13
+    note: the replica count rises, so a fresh index is materialized beside this one in the same pass, and the re-drive restamps this row's recreate with its index left as it was
+    events:
+      - spec.replicasUp: {to: 2}
+  - tick: 14
+    note: the verdict fails the re-driven attempt again while the fresh index builds beside it
+  - tick: 15
+    note: the re-drive restamps this row again

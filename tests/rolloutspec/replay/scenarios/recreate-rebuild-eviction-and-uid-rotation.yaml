@@ -1,0 +1,62 @@
+# Pods change identity around a recreate. An eviction is a delete: the
+# old-incarnation pod evicted during Phase A only completes the drain, and an
+# evicted bumped-incarnation pod is recreated by Phase B under the same
+# name once it is gone; and the recreate keys identity on the incarnation label and the
+# stable pod name rather than the UID, so a rebuilt pod that reappears under
+# a new UID counts as the recreated member and the Instance promotes on it.
+scenario: recreate-rebuild-eviction-and-uid-rotation
+arrows:
+  - T-ready-recreate
+  - T-drain-ready
+cells:
+  - instance/Update/Drain/pod.evicted/before
+  - instance/Update/Drain/pod.uidRotated/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging, so Phase A takes the serving gate down
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the source leaves rotation and is evicted under node pressure, which only completes the drain Phase A was waiting on
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.evicted: {pod: {index: 0}, message: "The node was low on resource: memory."}
+  - tick: 5
+    note: the evicted source is gone, so Phase B rebuilds it at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the rebuilt pod is bound and evicted in turn, a terminal pod Phase B waits on until it is gone
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-1}
+      - pod.evicted: {pod: {index: 0}, message: "The node was low on resource: memory."}
+  - tick: 7
+    note: the evicted rebuild is gone, so Phase B creates the same name again
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 8
+    note: the new rebuild reappears under a new UID, which the recreate never reads, so it counts as the recreated member
+    events:
+      - pod.uidRotated: {pod: {index: 0}}
+  - tick: 9
+    note: the rotated rebuild reports Ready and its endpoint returns, so the Instance promotes on it
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
