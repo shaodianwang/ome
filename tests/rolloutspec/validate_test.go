@@ -77,6 +77,14 @@ func TestValidateViolations(t *testing.T) {
 			mutate: func(m *Machine) { m.Cells[3].Outcome = OutcomeDecide },
 			want:   "frozen machine has DECIDE",
 		},
+		"DECIDE without the open question": {
+			mutate: func(m *Machine) {
+				m.Frozen = false
+				m.Cells[3].Outcome = OutcomeDecide
+				m.Cells[3].Note = ""
+			},
+			want: "DECIDE requires a note",
+		},
 		"not_applicable unknown event": {
 			mutate: func(m *Machine) { m.States[0].NotApplicable["timer.never"] = "x" },
 			want:   `not_applicable "timer.never"`,
@@ -280,7 +288,7 @@ func TestValidateReportsAllViolations(t *testing.T) {
 // authored may carry DECIDE cells and uncovered decided cells, a frozen one
 // may not. A directory missing from this list, or a name with no directory,
 // fails the test so the list and the tree cannot drift apart.
-var embeddedMachines = []string{"instance", "run", "coordination"}
+var embeddedMachines = []string{"instance", "run", "coordination", "canary", "revision"}
 
 func TestEmbeddedMachinesValidate(t *testing.T) {
 	root := repoRoot(t)

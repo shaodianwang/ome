@@ -57,6 +57,28 @@ class CheckTest(unittest.TestCase):
         refs = [("pkg/x_test.go", 3, "m/A/e/before")]
         self.assertEqual(check_coverage.check(grid, {"TestA"}, refs), [])
 
+    def test_subtest_name_resolves_through_its_function(self):
+        grid = [cell("A", "e", unit=["TestA/m/A/e"])]
+        self.assertEqual(check_coverage.check(grid, {"TestA"}, []), [])
+
+    def test_subtest_of_unknown_function_is_reported(self):
+        grid = [cell("A", "e", unit=["TestGone/m/A/e"])]
+        problems = check_coverage.check(grid, {"TestA"}, [])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("TestGone/m/A/e", problems[0])
+
+    def test_cells_comment_for_another_machine_is_left_to_its_render(self):
+        grid = [cell("A", "e", unit=["TestA"])]
+        refs = [("pkg/x_test.go", 7, "other/A/e/before")]
+        self.assertEqual(check_coverage.check(grid, {"TestA"}, refs, machine="m"), [])
+
+    def test_cells_comment_for_this_machine_is_checked_when_scoped(self):
+        grid = [cell("A", "e", unit=["TestA"])]
+        refs = [("pkg/x_test.go", 7, "m/A/e/nowhere")]
+        problems = check_coverage.check(grid, {"TestA"}, refs, machine="m")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("m/A/e/nowhere", problems[0])
+
     def test_unknown_unit_test_name_is_reported(self):
         grid = [cell("A", "e", unit=["TestGone"])]
         problems = check_coverage.check(grid, set(), [])
@@ -152,6 +174,10 @@ class CheckArrowsTest(unittest.TestCase):
         )
         self.assertEqual(len(problems), 2)
         self.assertIn("unknown transition T-typo", problems[0])
+
+    def test_has_adapter_lane_reads_the_resolved_lane(self):
+        self.assertTrue(check_coverage.has_adapter_lane([transition("T-a", "adapter")]))
+        self.assertFalse(check_coverage.has_adapter_lane([transition("T-a"), {"id": "T-b"}]))
 
     def test_missing_lane_defaults_to_workload(self):
         problems = check_coverage.check_arrows(
@@ -254,6 +280,41 @@ class MainTest(unittest.TestCase):
             repo.mkdir()
             self._repo(repo, "TestA")
             grid = root / "g.json"
+            grid.write_text(
+                json.dumps(
+                    {
+                        "machine": "m",
+                        "transitions": [transition("T-a", "adapter")],
+                        "grid": [cell("A", "e", unit=["TestA"])],
+                    }
+                )
+            )
+            self.assertEqual(
+                check_coverage.main(["--grid", str(grid), "--repo", str(repo)]), 1
+            )
+
+    def test_arrow_citations_are_checked_only_with_adapter_arrows(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            repo = root / "repo"
+            repo.mkdir()
+            self._repo(repo, "TestA")
+            (repo / "pkg" / "y_test.go").write_text(
+                "// Arrows: T-elsewhere\nfunc TestB(t *testing.T) {}\n"
+            )
+            grid = root / "g.json"
+            grid.write_text(
+                json.dumps(
+                    {
+                        "machine": "m",
+                        "transitions": [transition("T-a")],
+                        "grid": [cell("A", "e", unit=["TestA"])],
+                    }
+                )
+            )
+            self.assertEqual(
+                check_coverage.main(["--grid", str(grid), "--repo", str(repo)]), 0
+            )
             grid.write_text(
                 json.dumps(
                     {

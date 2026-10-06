@@ -12,6 +12,7 @@ import (
 // vocabularies, dangling references, decided_in paths relative to
 // repoRoot, the frozen contract (no DECIDE cell outside a planned state,
 // and every decided cell that is not n/a names at least one check), the
+// note a DECIDE cell owes (the open question an owner answers), the
 // planned-state contract (an arrow from a state the engine resolves never
 // lands in a planned one), the transition lane vocabulary and the why an
 // adapter-lane edge owes, declared invariant ids, the pointer-field
@@ -205,6 +206,9 @@ func Validate(m *Machine, repoRoot string) []error {
 		}
 		if c.Outcome == OutcomeNA && c.Reason == "" {
 			fail("%s: n/a requires a reason", id)
+		}
+		if c.Outcome == OutcomeDecide && c.Note == "" {
+			fail("%s: DECIDE requires a note stating the open question", id)
 		}
 		if c.Status == StatusDecided && c.Outcome != OutcomeNA && c.Placement == "" {
 			fail("%s: decided cell requires placement", id)

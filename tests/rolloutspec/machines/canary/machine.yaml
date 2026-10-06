@@ -1,0 +1,16 @@
+machine: canary
+scope: one canary unit (the router, or engine plus decoder) of one OMENative InferenceService, as the canary executor drives it through its record (status.components[<primary>].canary), the primary's rolloutPhase and the pinned run
+frozen: false
+invariants:
+  - id: exec.order.fixed
+    statement: "the executor evaluates one pass in a fixed order - pause, record repair, resume, the live re-arm, the rollback hold or request, the Failed hold, the done sentinel, the run-lost hold, arming, the crash park, the capacity gate, the pre-step hold, the traffic write, the step gate - and a cell whose outcome follows from that order rather than from the state alone cites this invariant"
+  - id: one.verb.one.effect
+    statement: an applied operator verb leaves a record in status (PromotedThrough, RolledBackRevisionHash, the Failed marker) that keeps a copy of the annotation still visible after the flush inert; the controller removes the annotation only after the status write that carries its effect has landed
+  - id: stable.never.reinferred
+    statement: the record's stable revision is seeded once, from the run pin, the replica's current revision or the live pod set, and is then preserved across re-arms and never re-inferred until the cutover completes
+  - id: revert.whole.unit
+    statement: a rollback reverts every member of the unit and reads complete only when no pod of any member with a stable identity runs a revision other than its stable one, ready or not
+  - id: phase.is.input
+    statement: the state is resolved from the record and the primary's last projected rolloutPhase together; the phase supplies what the record does not carry (the split has served, the drain is open, the revert is complete), so a pass reads the phase it wrote on an earlier pass
+  - id: unpinned.never.steps
+    statement: without a pinned rollout run the executor neither arms a canary nor re-arms toward a new target; it only services the holds it already sits in

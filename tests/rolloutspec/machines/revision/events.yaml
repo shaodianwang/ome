@@ -1,0 +1,32 @@
+# Events on the revision record: the writes of the three fields by family
+# of writer (coordination for the Components it owns, the canary executor
+# for the members of its groups, the cleanup on a mode switch), the run
+# layer's pin and its reads of the record, the replica's publication of its
+# revision pair, the ControllerRevision history, and the reads that decide a
+# rollback target or a pass's freshness. A read is an event because the
+# record's answer, not its shape, is what a reader acts on.
+events:
+  - {id: write.coordRolledOut, family: write, description: "coordination's traffic pass sees exactly one revision with Ready pods on a Component it owns and records it as latestRolledoutRevision, demoting the prior latest to previous"}
+  - {id: write.coordReady, family: write, description: "coordination's traffic pass sees Ready pods on the replica's update revision (current when none) and records it as latestReadyRevision"}
+  - {id: write.canaryReady, family: write, description: "the canary executor sees Ready capacity on a member's target and records it as latestReadyRevision, ahead of the capacity gate"}
+  - {id: write.canaryPromoted, family: write, description: "the canary cutover lands: the member's target is recorded as latestRolledoutRevision with the pre-canary stable as previous, and latestReady is brought level"}
+  - {id: write.canaryRolledBack, family: write, description: "the canary revert completes: the member's stable revision is recorded as latestRolledoutRevision; a member already recorded on it changes nothing, so the rejected revision never enters previous"}
+  - {id: write.canarySettled, family: write, description: "no ladder is active on the unit and a member's replica has settled on one revision with a Ready pod and no pod of another: that revision is recorded as latestRolledoutRevision"}
+  - {id: write.modeSwitch, family: write, description: "the Component leaves the OMENative mode: the three fields and the phase are cleared on the live object"}
+  - {id: run.open, family: run, variants: [stableFromCurrentOffPin, stableFromSettledCurrent, stableFromCanaryRecord, stableFromLatestRolledout, stableFromCurrentFallback, stableUnknown], description: "a run opens and pins the Component's (revision, stableRevision); the variant names the link of the chooser that answered the stable: the replica's current revision off the pin, its current revision when settled on the pin, the canary unit's recorded stable, the Component's latestRolledoutRevision, the current revision as the last fallback, or nothing"}
+  - {id: run.retarget, family: run, variants: [moved, unmoved], description: "a retarget closes the run Superseded and reopens it: a Component whose target moved carries its pinned stable forward, known or unknown; one still on its pinned revision resolves its stable afresh"}
+  - {id: run.close, family: run, variants: [completed, rolledBack], description: "the run closes and its pin becomes the last-run record"}
+  - {id: canary.armed, family: canary, description: "a canary ladder arms for the unit: the record's stable identity is seeded from the pin, else the replica's current revision, else the live pod set, and is never re-inferred afterwards"}
+  - {id: canary.cutoverCleared, family: canary, description: "the cutover lands and the unit's stable identity is dropped: the canary revision is the stable one now"}
+  - {id: replica.currentPromoted, family: replica, variants: [roll, inPlace], description: "the replica promotes its current revision to the update revision: every Instance Ready on it and no RetryBlock naming it, after a roll or after an in-place update converged"}
+  - {id: replica.currentWithdrawn, family: replica, description: "the replica withdraws its current revision to empty because an Instance is off it while current equals update, the shape a rollback onto the last promoted revision leaves"}
+  - {id: replica.targetBumped, family: replica, description: "a new pod template mints a ControllerRevision and the replica records it as its update revision"}
+  - {id: cr.collected, family: history, description: "the retention sweep garbage-collects a ControllerRevision no live name keeps"}
+  - {id: cr.collision, family: history, description: "a same-name different-payload collision bumps the replica's collision count, so the same template mints a new hash"}
+  - {id: scope.rotated, family: history, description: "the replica is deleted and re-projected: its hashes mint under a new scope, and no retained ControllerRevision carries the old ones"}
+  - {id: read.pinStable, family: read, variants: [replicaCurrent, canaryRecord, latestRolledout, fallbackCurrent, none], description: "the run layer's chooser resolves the Component's stable for a pin; the variant is the link that answers"}
+  - {id: read.rollbackStable, family: read, variants: [activeRun, lastRunRolledBack, canaryRecord, latestRolledout, none], description: "the canary dispatch resolves a member's stable for the revert signal and the rollback inputs; the variant is the link that answers"}
+  - {id: read.stableCR, family: read, variants: [retained, notRetained, foreign], description: "the dispatch resolves the stable hash to a ControllerRevision name: one the replica controls is retained, none carries the hash, or only one another object controls does"}
+  - {id: read.rollbackCR, family: read, variants: [retained, gone, foreign], description: "the replica resolves its pinned rollback revision: retained and controlled, gone, or controlled by another object"}
+  - {id: read.staleCopy, family: read, variants: [canaryOwned, coordinationOwned], description: "a pass decides from a cached copy of the three fields that predates a newer live write"}
+  - {id: read.statusTrails, family: read, description: "a reader finds the replica's status behind its generation or its projection stamp behind the service's generation"}

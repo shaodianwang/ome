@@ -1,0 +1,43 @@
+# Events the canary executor reacts to, grouped by family. The verb family
+# is the operator's annotations on the InferenceService; the plan, run and
+# target families are what the run layer hands the executor through the
+# pinned run; the capacity, timer and pod families are what one pass reads
+# from the pods, the InferenceReplica rows and the clock; the analysis
+# family is the metric gate's sample; the record family is a persisted
+# record shape the pass repairs on sight; the pass family is the pass itself.
+#
+# A verb's variants name how the value relates to the unit: match names the
+# unit's canary revision, stale names another revision, applied names the
+# value the record already carries as applied (a copy re-shown by a lagging
+# cache after the controller removed it).
+events:
+  - {id: verb.pause, family: verb, description: "ome.io/rollout-paused is set, at either depth; both depths hold the canary equally"}
+  - {id: verb.unpause, family: verb, description: "ome.io/rollout-paused is cleared; the next pass runs with the step's clocks as the pause left them"}
+  - {id: verb.promote, family: verb, variants: [match, stale, applied], description: "ome.io/rollout-promote carries a revision hash"}
+  - {id: verb.promoteForce, family: verb, variants: [match, stale, applied], description: "ome.io/rollout-promote-force carries a revision hash: a promote that also lifts the step's capacity wait"}
+  - {id: verb.rollback, family: verb, variants: [stableServes, stableEmpty], description: "ome.io/rollout-rollback is true; stableEmpty is the request landing while a member's stable revision runs no live Instance under a held floor"}
+  - {id: verb.resume, family: verb, variants: [own, stale, otherUnit], description: "ome.io/rollout-resume names a parked canary revision: the unit's own, a revision no canary carries, or another unit's"}
+  - {id: plan.repin, family: plan, variants: [holdOrTighten, raise, pastDone], description: "ome.io/rollout-repin replaced the pinned plan: the clamped step holds or lowers traffic, would raise it, or the unit had finished under the old ladder"}
+  - {id: plan.drift, family: plan, description: "the spec's rollout groups or a referenced RolloutPolicy changed while the run is pinned"}
+  - {id: plan.unresolved, family: plan, description: "no executable canary body resolves for the unit's group on this pass (a policy reference that no longer resolves with no pin to fall back on), so the controller does not dispatch the unit"}
+  - {id: run.lost, family: run, description: "no rollout run is pinned while the record lives: the run closed or was lost"}
+  - {id: run.adopted, family: run, description: "the run layer opened a run that adopts the in-flight ladder in place, binding the record to its target id without a reset"}
+  - {id: target.new, family: target, variants: [observed, runOpen, otherGroup], description: "the run's target id for the unit changed: observed by the dispatch against the record, presented at run open through the bind, or changed by another group's run that offers this unit no target of its own"}
+  - {id: capacity.reached, family: capacity, description: "the step's staged canary capacity is Ready on the primary and every secondary"}
+  - {id: capacity.dropped, family: capacity, description: "a Ready canary pod is lost and the step's capacity is short again (a dip, not a crash)"}
+  - {id: spec.replicas, family: capacity, variants: [up, down], description: "the unit's desired replica count changes, so the step's partition and staged count are recomputed"}
+  - {id: timer.readyTimeout, family: timer, description: "the step's capacity wait, measured from when it began, outlives the ready timeout"}
+  - {id: timer.pauseElapsed, family: timer, variants: [elapsed, restartInSoak, restartSoaked], description: "a timed soak elapses since the split first served; with a canary pod restart inside the soak still shorter than the soak, or one that has served a full soak since"}
+  - {id: timer.drainElapsed, family: timer, description: "the scale-down delay elapses since the final 100% traffic shift"}
+  - {id: pod.canaryCrashed, family: pod, description: "a canary pod of the unit is in a crash loop after its Instance served"}
+  - {id: pod.canaryRestarted, family: pod, description: "a canary pod died once and is back; a single restart, read as the newest restart instant"}
+  - {id: pod.canaryDeleted, family: pod, description: "a canary pod is deleted by hand and read on its way out; a dip, not a crash"}
+  - {id: pod.rejectedGone, family: pod, variants: [unit, primaryOnly, primaryUnreadyRemains, memberWithoutStable], description: "pods of the rejected revision leave: from every member, from the primary while a member still has one, from the primary's ready set while an unready one remains, or from every member that has a stable identity while one without any still has one"}
+  - {id: pod.replacementReady, family: pod, description: "the released stable instance's replacement is Ready on the canary revision while the stable instance still serves"}
+  - {id: pod.lastStableRolled, family: pod, description: "no ready pod of any member serves a revision other than its target"}
+  - {id: analysis.sample, family: analysis, variants: [pass, passBaked, fail, failAtLimit, failAtLimitStableEmpty, inconclusive, inconclusiveRollbackPolicy, stalled, stalledRollbackOnStall], description: "the metric gate consumes one sample: a pass inside or past the bake window, a breach below or at the failure limit (with every member's stable revision serving, or with one running no live Instance under a held floor), an inconclusive read under the default or the Rollback policy, or a stall past the timeout under the default or the RollbackOnStall policy"}
+  - {id: analysis.unavailable, family: analysis, variants: [noSampler, sourceError, noFreshSample], description: "the metric gate cannot read: no sampler is wired, the source cannot be built, or no newer sample has landed"}
+  - {id: stable.crMissing, family: stable, description: "the dispatch finds no retained ControllerRevision the replica controls for a member's stable revision when it writes the revert signal"}
+  - {id: record.legacy, family: record, variants: [noTargetID, stableEqualsCanary, noStable, negativeStep, failedPhaseNoMarker], description: "a persisted record shape from before a field existed or from an external status write: no target id under a pinned run, a stable equal to the canary hash, no stable identity, a negative step, or a Failed phase with no marker"}
+  - {id: pass.resync, family: pass, description: "a pass in which nothing observed changed"}
+  - {id: pass.staleRecord, family: pass, description: "the pass decided from a record older than the live one; the status flush keeps the live record and the pass requeues"}

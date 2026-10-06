@@ -65,7 +65,9 @@ resolves both directions against something real:
 * the cell names the check, in
   `coverage: {unit: [...], perm: [...], kind: [...], replay: [...]}`.
   A `unit` entry is a Go test function name; it must exist as `func <Name>(` in
-  some `*_test.go` under `pkg/` or `tests/`. A `replay` entry is a replay
+  some `*_test.go` under `pkg/` or `tests/`. An entry of the form
+  `TestFunc/subtest` names one row of a table test (the canary tables cite the
+  executor's cell grid this way) and resolves through `TestFunc`. A `replay` entry is a replay
   scenario name and must exist as `tests/rolloutspec/replay/scenarios/<name>.yaml`;
   that scenario's own `cells:` list is the other half of the pair, and the
   replay suite checks those ids against the grid. `perm` and `kind` entries name
@@ -74,7 +76,9 @@ resolves both directions against something real:
   function, ids comma-separated. An id is the grid coordinate
   `<machine>/<state>/<event>[<variant>]/<window>[@<transition>]`, exactly as the
   heatmap and the grid JSON show it. Every id cited from a `*_test.go` under
-  `pkg/` must exist in the rendered grid.
+  `pkg/` whose machine prefix is the rendered machine must exist in its grid;
+  ids of other machines are checked by their own render. The `// Arrows:`
+  check runs for a machine that declares adapter-lane transitions.
 
 ```go
 // Cells: instance/Update/Surge/pod.ready[target]/boundary@T-surge-target-ready

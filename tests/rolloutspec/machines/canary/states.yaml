@@ -1,0 +1,295 @@
+# One state per shape the executor tells apart: the nine values of
+# rollout.StateOf, refined where the executor's own branches or its cell
+# grid distinguish further (the step's gate kind while a split serves, the
+# final step's capacity and gate, the sentinel before and after the last
+# stable instance rolls, the two reasons a park holds a rollback). The phase
+# column is the primary's rolloutPhase the state projects; Serving and
+# Draining/Held read Paused because the Canarying phase is written and
+# overwritten inside one pass and never persists.
+states:
+  - id: Idle
+    phase: Stable
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/holds.go
+    note: no record exists for the unit; the pass arms one only under a pinned run that retargets the unit and names a stable revision to shift traffic from
+    not_applicable:
+      target.new[otherGroup]: a unit with no record has no target id to change
+      analysis.sample: no step is armed, so no gate samples
+      analysis.unavailable: no step is armed, so no gate samples
+      timer.pauseElapsed: no step is armed, so no soak runs
+      timer.drainElapsed: no drain window is open
+      timer.readyTimeout: no capacity wait is clocked without a record
+      capacity.dropped: no canary pod exists before the unit arms
+      pod.canaryRestarted: no canary pod exists before the unit arms
+      pod.canaryDeleted: no canary pod exists before the unit arms
+      pod.rejectedGone: no rejected revision is recorded
+      pod.replacementReady: the held floor exists only while a ladder is in flight
+      pod.lastStableRolled: the held floor exists only while a ladder is in flight
+      stable.crMissing: no revert signal is written outside a rollback
+      record.legacy: there is no record to repair
+      run.adopted: a unit with no record is not mid-flight, so no run adopts it
+      plan.repin: there is no record to clamp
+      pass.staleRecord: a unit with no record on either side has nothing to be stale against
+      verb.rollback[stableEmpty]: no floor is held before the unit arms
+      verb.promote[applied]: no record carries an applied value
+      verb.promoteForce[applied]: no record carries an applied value
+      verb.resume[own]: no record names a canary revision for the value to match
+  - id: Staging
+    phase: Pending
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/reconciler.go
+    note: an intermediate step is armed and its staged canary capacity is not Ready yet; the capacity wait is clocked and the held split, if a prior step left one, rests on whichever side serves
+    not_applicable:
+      target.new[otherGroup]: another group's run re-pins a unit that holds no rejected revision at its own target, so its target id does not change
+      plan.repin[pastDone]: the done-stays-done clamp applies only to a unit that finished under the old ladder
+      analysis.sample: the gate is not reached while the capacity gate holds
+      analysis.unavailable: the gate is not reached while the capacity gate holds
+      timer.pauseElapsed: the soak anchor is stamped only once the split serves
+      timer.drainElapsed: no drain window is open before the final step shifts traffic
+      capacity.dropped: the step's capacity is already short
+      pod.rejectedGone: no rejected revision is recorded
+      pod.replacementReady: the held floor is not released before the done sentinel
+      pod.lastStableRolled: the held floor is not released before the done sentinel
+      stable.crMissing: no revert signal is written outside a rollback
+  - id: Staging/Final
+    phase: Pending
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/reconciler.go
+    note: the final step is armed, its capacity is short and it has never shifted traffic; no canary pod serves while it waits, so the held split rests on the stable revision
+    not_applicable:
+      target.new[otherGroup]: another group's run re-pins a unit that holds no rejected revision at its own target, so its target id does not change
+      plan.repin[pastDone]: the done-stays-done clamp applies only to a unit that finished under the old ladder
+      analysis.sample: the gate is not reached while the capacity gate holds
+      analysis.unavailable: the gate is not reached while the capacity gate holds
+      timer.pauseElapsed: the final gate's clock starts when 100% traffic shifts
+      timer.drainElapsed: no drain window is open before the final step shifts traffic
+      capacity.dropped: the step's capacity is already short
+      pod.rejectedGone: no rejected revision is recorded
+      pod.replacementReady: the held floor is not released before the done sentinel
+      pod.lastStableRolled: the held floor is not released before the done sentinel
+      stable.crMissing: no revert signal is written outside a rollback
+  - id: Serving/Manual
+    phase: Paused
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/promotion.go
+    note: an intermediate step's split serves and its bare Pause holds for an explicit promote
+    not_applicable:
+      target.new[otherGroup]: another group's run re-pins a unit that holds no rejected revision at its own target, so its target id does not change
+      plan.repin[pastDone]: the done-stays-done clamp applies only to a unit that finished under the old ladder
+      analysis.sample: the step's gate is a bare pause, not analysis
+      analysis.unavailable: the step's gate is a bare pause, not analysis
+      timer.pauseElapsed: a bare pause carries no duration
+      timer.drainElapsed: no drain window is open before the final step shifts traffic
+      pod.rejectedGone: no rejected revision is recorded
+      pod.replacementReady: the held floor is not released before the done sentinel
+      pod.lastStableRolled: the held floor is not released before the done sentinel
+      stable.crMissing: no revert signal is written outside a rollback
+  - id: Serving/Timed
+    phase: Paused
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/promotion.go
+    note: an intermediate step's split serves and its timed Pause soaks from the later of the split first serving and the newest canary pod restart
+    not_applicable:
+      target.new[otherGroup]: another group's run re-pins a unit that holds no rejected revision at its own target, so its target id does not change
+      plan.repin[pastDone]: the done-stays-done clamp applies only to a unit that finished under the old ladder
+      analysis.sample: the step's gate is a timed pause, not analysis
+      analysis.unavailable: the step's gate is a timed pause, not analysis
+      timer.drainElapsed: no drain window is open before the final step shifts traffic
+      pod.rejectedGone: no rejected revision is recorded
+      pod.replacementReady: the held floor is not released before the done sentinel
+      pod.lastStableRolled: the held floor is not released before the done sentinel
+      stable.crMissing: no revert signal is written outside a rollback
+  - id: Serving/Analysis
+    phase: Paused
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/promotion.go
+    note: an intermediate step's split serves and its metric gate samples on its interval after the initial delay; the only gate that can retreat without an operator
+    not_applicable:
+      target.new[otherGroup]: another group's run re-pins a unit that holds no rejected revision at its own target, so its target id does not change
+      plan.repin[pastDone]: the done-stays-done clamp applies only to a unit that finished under the old ladder
+      timer.drainElapsed: no drain window is open before the final step shifts traffic
+      pod.rejectedGone: no rejected revision is recorded
+      pod.replacementReady: the held floor is not released before the done sentinel
+      pod.lastStableRolled: the held floor is not released before the done sentinel
+      stable.crMissing: no revert signal is written outside a rollback
+  - id: PreHold
+    phase: Paused
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/reconciler.go
+    note: a repin clamped the ladder onto a step whose traffic would exceed the programmed weight; capacity converges to the clamped step while the traffic raise waits for a promote naming the canary revision
+    not_applicable:
+      target.new[otherGroup]: another group's run re-pins a unit that holds no rejected revision at its own target, so its target id does not change
+      plan.repin[pastDone]: the done-stays-done clamp applies only to a unit that finished under the old ladder
+      analysis.sample: the step's gate is not reached while the pre-step hold stands
+      analysis.unavailable: the step's gate is not reached while the pre-step hold stands
+      timer.pauseElapsed: the step's gate is not reached while the pre-step hold stands
+      timer.drainElapsed: no drain window is open while the pre-step hold stands
+      pod.rejectedGone: no rejected revision is recorded
+      pod.replacementReady: the held floor is not released before the done sentinel
+      pod.lastStableRolled: the held floor is not released before the done sentinel
+      stable.crMissing: no revert signal is written outside a rollback
+  - id: Draining
+    phase: Promoting
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/reconciler.go
+    note: the final step shifted 100% of the traffic onto Ready canary capacity and the scale-down delay window is open; the last stable instance is held through it
+    not_applicable:
+      plan.repin[raise]: the recorded weight is 100, which no clamped step exceeds
+      target.new[otherGroup]: another group's run re-pins a unit that holds no rejected revision at its own target, so its target id does not change
+      plan.repin[pastDone]: the done-stays-done clamp applies only to a unit that finished under the old ladder
+      analysis.sample: an ungated final step samples nothing; a gated one is Draining/Held until its gate opens
+      analysis.unavailable: an ungated final step samples nothing; a gated one is Draining/Held until its gate opens
+      timer.pauseElapsed: an ungated final step has no soak; a gated one is Draining/Held until its gate opens
+      timer.readyTimeout: the step's capacity is met, so no wait is clocked
+      capacity.reached: the step's capacity is already met
+      pod.rejectedGone: no rejected revision is recorded
+      pod.replacementReady: the held floor is not released before the done sentinel
+      pod.lastStableRolled: the held floor is not released before the done sentinel
+      stable.crMissing: no revert signal is written outside a rollback
+  - id: Draining/Held
+    phase: Paused
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/reconciler.go
+    note: the final step shifted 100% of the traffic and its own gate (a bare pause, a timed pause or analysis) still holds; the drain and the release wait behind the gate
+    not_applicable:
+      plan.repin[raise]: the recorded weight is 100, which no clamped step exceeds
+      target.new[otherGroup]: another group's run re-pins a unit that holds no rejected revision at its own target, so its target id does not change
+      plan.repin[pastDone]: the done-stays-done clamp applies only to a unit that finished under the old ladder
+      timer.readyTimeout: the step's capacity is met, so no wait is clocked
+      capacity.reached: the step's capacity is already met
+      pod.rejectedGone: no rejected revision is recorded
+      pod.replacementReady: the held floor is not released before the done sentinel
+      pod.lastStableRolled: the held floor is not released before the done sentinel
+      stable.crMissing: no revert signal is written outside a rollback
+  - id: Draining/ShortInWindow
+    phase: Promoting
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/reconciler.go
+    note: the final step shifted 100% of the traffic, a canary pod has since been lost, and the scale-down delay window is still open; the split follows the pods that serve and the capacity wait is clocked
+    not_applicable:
+      plan.repin[raise]: the recorded weight is 100, which no clamped step exceeds
+      target.new[otherGroup]: another group's run re-pins a unit that holds no rejected revision at its own target, so its target id does not change
+      plan.repin[pastDone]: the done-stays-done clamp applies only to a unit that finished under the old ladder
+      analysis.sample: the gate is ungated or already open at this point of the drain
+      analysis.unavailable: the gate is ungated or already open at this point of the drain
+      timer.pauseElapsed: the gate is ungated or already open at this point of the drain
+      capacity.dropped: the step's capacity is already short
+      pod.rejectedGone: no rejected revision is recorded
+      pod.replacementReady: the held floor is not released before the done sentinel
+      pod.lastStableRolled: the held floor is not released before the done sentinel
+      stable.crMissing: no revert signal is written outside a rollback
+  - id: Draining/ShortElapsed
+    phase: Promoting
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/reconciler.go
+    note: the scale-down delay elapsed but a canary pod is missing when the release would be read; the stable instance stays held and the release waits for the capacity, inside the ready timeout
+    not_applicable:
+      plan.repin[raise]: the recorded weight is 100, which no clamped step exceeds
+      target.new[otherGroup]: another group's run re-pins a unit that holds no rejected revision at its own target, so its target id does not change
+      plan.repin[pastDone]: the done-stays-done clamp applies only to a unit that finished under the old ladder
+      analysis.sample: the gate is ungated or already open at this point of the drain
+      analysis.unavailable: the gate is ungated or already open at this point of the drain
+      timer.pauseElapsed: the gate is ungated or already open at this point of the drain
+      timer.drainElapsed: the window has already elapsed
+      capacity.dropped: the step's capacity is already short
+      pod.rejectedGone: no rejected revision is recorded
+      pod.replacementReady: the held floor is not released before the done sentinel
+      pod.lastStableRolled: the held floor is not released before the done sentinel
+      stable.crMissing: no revert signal is written outside a rollback
+  - id: Done/Rolling
+    phase: Promoting
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/reconciler.go
+    note: the done sentinel is set and projected as partition 0, so the last stable instance is rolling; the unit stays Promoting at the step cadence until every member serves on its target alone
+    not_applicable:
+      plan.repin[raise]: a finished unit takes only the done-stays-done clamp
+      plan.repin[holdOrTighten]: a finished unit takes only the done-stays-done clamp
+      target.new[otherGroup]: another group's run re-pins a unit that holds no rejected revision at its own target, so its target id does not change
+      analysis.sample: a done canary evaluates no gate
+      analysis.unavailable: a done canary evaluates no gate
+      timer.pauseElapsed: a done canary evaluates no gate
+      timer.drainElapsed: the window elapsed before the sentinel was set
+      timer.readyTimeout: a done canary clocks no capacity wait
+      capacity.reached: the cutover is read from the pods, not from the step's staged count
+      pod.rejectedGone: no rejected revision is recorded
+      stable.crMissing: no revert signal is written outside a rollback
+      run.adopted: a unit at its sentinel is not mid-flight, so no run adopts it
+      verb.rollback[stableEmpty]: a finished ladder refuses every rollback request before the floor is read
+  - id: Done
+    phase: Stable
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/reconciler.go
+    note: the cutover landed; the promoted revisions are recorded, the pre-canary stable identity is dropped and the unit reads Stable with its sentinel kept until a new target re-arms it
+    not_applicable:
+      plan.repin[raise]: a finished unit takes only the done-stays-done clamp
+      plan.repin[holdOrTighten]: a finished unit takes only the done-stays-done clamp
+      target.new[otherGroup]: another group's run re-pins a unit that holds no rejected revision at its own target, so its target id does not change
+      analysis.sample: a done canary evaluates no gate
+      analysis.unavailable: a done canary evaluates no gate
+      timer.pauseElapsed: a done canary evaluates no gate
+      timer.drainElapsed: the window elapsed before the sentinel was set
+      timer.readyTimeout: a done canary clocks no capacity wait
+      capacity.reached: the cutover has landed
+      pod.rejectedGone: no rejected revision is recorded
+      pod.replacementReady: the cutover has landed
+      pod.lastStableRolled: the cutover has landed
+      stable.crMissing: no revert signal is written outside a rollback
+      run.adopted: a done unit is not mid-flight, so no run adopts it
+      verb.rollback[stableEmpty]: no floor is held after the cutover
+  - id: RollingBack
+    phase: RollingBack
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/reconciler.go
+    note: a rejected revision is recorded and the unit drains back to its stable revisions; the dispatch points every member's replica at its stable ControllerRevision and the traffic rests on stable capacity that serves
+    not_applicable:
+      plan.repin[pastDone]: the done-stays-done clamp applies only to a unit that finished under the old ladder
+      analysis.sample: a rollback evaluates no gate
+      analysis.unavailable: a rollback evaluates no gate
+      timer.pauseElapsed: a rollback evaluates no gate
+      timer.drainElapsed: no drain window is open during a revert
+      timer.readyTimeout: a rollback clocks no capacity wait
+      capacity.reached: no step is staging capacity during a revert
+      capacity.dropped: rejected pods leaving are the revert's progress, read as pod.rejectedGone
+      pod.canaryDeleted: rejected pods leaving are the revert's progress, read as pod.rejectedGone
+      pod.replacementReady: the held floor is not released during a revert
+      pod.lastStableRolled: the held floor is not released during a revert
+      verb.rollback[stableEmpty]: the request already recorded is the only one read
+  - id: RolledBack
+    phase: RolledBack
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/reconciler.go
+    note: the revert is complete and the rejected revision is held out until a target the run offers this unit appears or the operator resumes; the run that presented it has closed RolledBack
+    not_applicable:
+      plan.repin[pastDone]: the done-stays-done clamp applies only to a unit that finished under the old ladder
+      analysis.sample: a settled hold evaluates no gate
+      analysis.unavailable: a settled hold evaluates no gate
+      timer.pauseElapsed: a settled hold evaluates no gate
+      timer.drainElapsed: no drain window is open in a settled hold
+      timer.readyTimeout: a settled hold clocks no capacity wait
+      capacity.reached: no step is staging capacity in a settled hold
+      capacity.dropped: no canary pod remains after a completed revert
+      pod.canaryRestarted: no canary pod remains after a completed revert
+      pod.canaryDeleted: no canary pod remains after a completed revert
+      pod.rejectedGone: the rejected pods are already gone
+      pod.replacementReady: the held floor is not released in a settled hold
+      pod.lastStableRolled: the held floor is not released in a settled hold
+      stable.crMissing: no revert signal is written once the revert is complete
+      run.adopted: a settled rolled-back hold is terminal, so no run adopts it
+      verb.rollback[stableEmpty]: the request already recorded is the only one read
+  - id: Failed
+    phase: Failed
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/reconciler.go
+    note: parked at its step with the marker CapacityTimeout (the capacity wait outlived the ready timeout, or a canary pod crash-looped after serving) or AnalysisStalled; the split is back on the stable revision, the park is not re-evaluated and its clocks are not re-stamped
+    not_applicable:
+      target.new[otherGroup]: another group's run re-pins a unit that holds no rejected revision at its own target, so its target id does not change
+      plan.repin[pastDone]: the done-stays-done clamp applies only to a unit that finished under the old ladder
+      analysis.sample: a park evaluates no gate
+      analysis.unavailable: a park evaluates no gate
+      timer.pauseElapsed: a park evaluates no gate
+      timer.drainElapsed: a park keeps no drain clock
+      timer.readyTimeout: the wait that parked the unit is not clocked again
+      pod.rejectedGone: no rejected revision is recorded
+      pod.replacementReady: the held floor is not released by a park
+      pod.lastStableRolled: the held floor is not released by a park
+      stable.crMissing: no revert signal is written outside a rollback
+  - id: Failed/StableMissing
+    phase: Failed
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/dispatch.go
+    note: "parked with the marker StableRevisionMissing: a rollback was recorded but the dispatch found no retained ControllerRevision the replica controls for a member's stable revision, or a gate-decided rollback found a member's stable revision running no live Instance under a held floor; the rejected hash stays recorded, nothing drains, and a rollback request is refused rather than re-applied"
+    not_applicable:
+      target.new[otherGroup]: another group's run re-pins a unit that holds no rejected revision at its own target, so its target id does not change
+      plan.repin[pastDone]: the done-stays-done clamp applies only to a unit that finished under the old ladder
+      analysis.sample: a park evaluates no gate
+      analysis.unavailable: a park evaluates no gate
+      timer.pauseElapsed: a park evaluates no gate
+      timer.drainElapsed: a park keeps no drain clock
+      timer.readyTimeout: a park clocks no capacity wait
+      pod.rejectedGone: nothing drains while the revert cannot be carried out
+      pod.replacementReady: the held floor is not released by a park
+      pod.lastStableRolled: the held floor is not released by a park
+      verb.rollback[stableEmpty]: the request is refused whatever the floor holds

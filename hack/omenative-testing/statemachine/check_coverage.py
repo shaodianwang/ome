@@ -10,10 +10,13 @@ Coverage is recorded twice, on purpose, and the two halves can drift:
 Neither half is derivable from the other, so each is checked against
 something real. A `coverage.unit` name must resolve to a Go test function
 that exists under `pkg/` or `tests/`: a renamed or deleted test otherwise
-leaves a cell claiming proof that no longer runs. A `// Cells:` id must
-resolve to a grid cell: a mistyped or stale coordinate otherwise points a
-reader at nothing. `perm` and `kind` entries name suite specs rather than
-Go functions and are not resolved here.
+leaves a cell claiming proof that no longer runs. A name of the form
+`TestFunc/subtest` names one row of a table test and resolves through its
+function part. A `// Cells:` id must resolve to a grid cell: a mistyped or
+stale coordinate otherwise points a reader at nothing. Only the ids whose
+machine prefix is the rendered machine are checked against its grid; the
+others belong to another machine's render. `perm` and `kind` entries name
+suite specs rather than Go functions and are not resolved here.
 
 A replay scenario records coverage the same two ways: the cell names the
 scenario in `coverage.replay`, and the scenario names the cells it drives
@@ -30,7 +33,9 @@ it; instead a Go test names it in an `// Arrows: <id>, <id>` comment
 above the test function. Every adapter-lane transition must be named by
 at least one such test, every cited arrow must be a declared transition,
 and a workload-lane arrow may not be cited at all — the replay lane's
-own coverage test owns those.
+own coverage test owns those. The arrow check runs for a machine that
+declares at least one adapter-lane transition; a machine with none has no
+arrow a Go test could be naming.
 
 The third output is informational: per machine, how many decided cells
 carry coverage and which ones do not. That is the remaining work, not a
@@ -138,6 +143,11 @@ def arrow_refs(repo):
     return out
 
 
+def has_adapter_lane(transitions):
+    """Report whether a machine declares an edge only an adapter test can drive."""
+    return any((t.get("lane") or "workload") == ADAPTER_LANE for t in transitions)
+
+
 def check_arrows(transitions, refs, planned_states=()):
     """Return the violations between adapter-lane transitions and their tests.
 
@@ -168,8 +178,22 @@ def check_arrows(transitions, refs, planned_states=()):
     return problems
 
 
-def check(grid, funcs, refs, scenarios=()):
-    """Return the list of violation messages, empty when the two agree."""
+def unit_func(name):
+    """Return the Go function a coverage.unit name resolves through.
+
+    A plain name is the function; `TestFunc/subtest` names one row of a
+    table test and resolves through `TestFunc`.
+    """
+    return name.split("/", 1)[0]
+
+
+def check(grid, funcs, refs, scenarios=(), machine=None):
+    """Return the list of violation messages, empty when the two agree.
+
+    machine, when given, scopes the `// Cells:` citations: an id whose
+    machine prefix differs belongs to another machine's grid and is left
+    to that machine's render.
+    """
     problems = []
     scenarios = set(scenarios)
     for cell in grid:
@@ -177,7 +201,7 @@ def check(grid, funcs, refs, scenarios=()):
             continue
         coverage = cell.get("coverage") or {}
         for name in coverage.get("unit") or []:
-            if name not in funcs:
+            if unit_func(name) not in funcs:
                 problems.append(
                     f"{cell['id']}: coverage.unit names {name}, "
                     f"which is no Go test function under {_roots()}"
@@ -190,6 +214,8 @@ def check(grid, funcs, refs, scenarios=()):
                 )
     ids = {cell.get("id") for cell in grid}
     for path, lineno, cid in refs:
+        if machine is not None and cid.split("/", 1)[0] != machine:
+            continue
         if cid not in ids:
             problems.append(f"{path}:{lineno}: Cells comment references unknown cell id {cid}")
     return problems
@@ -234,9 +260,12 @@ def main(argv=None):
         go_test_funcs(args.repo),
         cell_refs(args.repo),
         replay_scenarios(args.repo),
+        envelope.get("machine"),
     )
-    planned_states = [s["id"] for s in envelope.get("states") or [] if s.get("planned")]
-    problems += check_arrows(envelope.get("transitions") or [], arrow_refs(args.repo), planned_states)
+    transitions = envelope.get("transitions") or []
+    if has_adapter_lane(transitions):
+        planned_states = [s["id"] for s in envelope.get("states") or [] if s.get("planned")]
+        problems += check_arrows(transitions, arrow_refs(args.repo), planned_states)
 
     for machine, counts in sorted(report(grid).items()):
         total = counts["covered"] + len(counts["uncovered"])

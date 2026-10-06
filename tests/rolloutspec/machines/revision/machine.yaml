@@ -1,0 +1,16 @@
+machine: revision
+scope: the revision record of one OMENative Component - its latestReadyRevision, latestRolledoutRevision and previousRolledoutRevision on the InferenceService, the rollout run's pinned (revision, stableRevision) for it, and the canary unit's stable identity when it is a canary primary - against the replica's revision pair and ControllerRevision history, which are the authoritative sources the record is derived from
+frozen: false
+invariants:
+  - id: one.writer.per.component
+    statement: a Component's three rolled-out fields have one writer at a time, coordination for the Components it owns and the canary executor for every member of a canary group, both through the same writer pair, so one field never carries two meanings
+  - id: previous.never.collapses
+    statement: recording the revision already recorded changes nothing, so previousRolledoutRevision never equals latestRolledoutRevision
+  - id: pin.outranks.record
+    statement: while a run is pinned every reader of a Component's stable revision takes the pin first; the record answers only where the pin and the replica cannot
+  - id: replica.answers.first
+    statement: the run's chooser asks the replica's current revision before any record, and a record is consulted only for a Component whose ladder is mid-roll or whose agreeing pair still trails Instances
+  - id: history.is.exact
+    statement: a rollback target is resolved from the ControllerRevision history by the exact pinned hash and only among revisions the replica controls; no reader guesses a stable from revision order
+  - id: live.names.retained
+    statement: the retention sweep never deletes a ControllerRevision the replica's current or update revision or any Instance row names; a record on the InferenceService keeps nothing alive

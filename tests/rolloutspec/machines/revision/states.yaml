@@ -1,0 +1,97 @@
+# One state per shape the record can take against the replica: no record,
+# the record level with the running revision, behind it, or naming a
+# revision no Instance runs, and the three shapes a pinned run gives the
+# Component. A pinned shape outranks a record shape because every reader
+# takes the pin first.
+states:
+  - id: Empty
+    phase: ""
+    decided_in: pkg/controller/v1beta1/inferenceservice/cleanup.go
+    note: "no rolled-out record exists for the Component: a first rollout, or the fields cleared when the Component left the OMENative mode"
+    not_applicable:
+      read.pinStable[latestRolledout]: the record is empty, so the link yields nothing and the chooser falls through
+      run.open[stableFromLatestRolledout]: the record is empty, so this link cannot answer the pin
+      write.canaryRolledBack: no ladder has run against a Component with no record
+      canary.cutoverCleared: no ladder has run against a Component with no record
+      run.retarget: no run is pinned
+      run.close: no run is pinned
+      replica.currentWithdrawn: a withdrawal needs a current revision the record would have followed
+      cr.collected: nothing is recorded that a collected revision could invalidate
+      read.rollbackStable: no revert is signalled for a Component with no record
+      read.stableCR: no revert is signalled for a Component with no record
+      read.rollbackCR: no rollback revision is pinned on the replica
+      read.staleCopy: an empty record on both sides is not stale
+  - id: Settled
+    phase: ""
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/traffic.go
+    note: "latestRolledoutRevision names the revision the replica's current and update revisions agree on and every Instance runs; latestReady is level with it"
+    not_applicable:
+      run.retarget: no run is pinned
+      run.close: no run is pinned
+      read.rollbackStable: no revert is signalled outside a run
+      read.stableCR: no revert is signalled outside a run
+      read.rollbackCR: no rollback revision is pinned on the replica
+  - id: Behind
+    phase: ""
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/traffic.go
+    note: "the replica has moved past the record: a roll completed and promoted a new current revision, or a canary target gained Ready capacity, and latestRolledoutRevision still names the revision that owned the traffic before"
+    not_applicable:
+      run.retarget: no run is pinned
+      run.close: no run is pinned
+      read.rollbackStable: no revert is signalled outside a run
+      read.stableCR: no revert is signalled outside a run
+      read.rollbackCR: no rollback revision is pinned on the replica
+  - id: Ahead
+    phase: ""
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/traffic.go
+    note: "latestRolledoutRevision names a revision no Instance runs any more: a rollback onto the last promoted revision, a stale copy written back, or hashes re-minted under a new scope"
+    not_applicable:
+      run.retarget: no run is pinned
+      run.close: no run is pinned
+      read.rollbackStable: no revert is signalled outside a run
+      read.stableCR: no revert is signalled outside a run
+      read.rollbackCR: no rollback revision is pinned on the replica
+  - id: Pinned/Stable
+    phase: ""
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+    note: "a run pins the Component's target and a stable revision that the replica's history carries; every reader takes the pin"
+    not_applicable:
+      read.rollbackStable[lastRunRolledBack]: the active pin's stable answers before this link
+      read.rollbackStable[canaryRecord]: the active pin's stable answers before this link
+      read.rollbackStable[latestRolledout]: the active pin's stable answers before this link
+      read.rollbackStable[none]: the active pin's stable answers before this link
+      read.stableCR[notRetained]: a pinned stable the history carries resolves to its ControllerRevision
+      read.stableCR[foreign]: a pinned stable the history carries is one the replica controls
+      read.rollbackCR[gone]: a pinned stable the history carries is retained
+      read.rollbackCR[foreign]: a pinned stable the history carries is one the replica controls
+      run.open: a run is already pinned; a new target retargets it instead
+      write.modeSwitch: a Component with a pinned run is in the OMENative mode
+  - id: Pinned/NoStable
+    phase: ""
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+    note: "a run pins the Component's target with no stable revision, so no ladder arms and no rollback target exists; the Component's first rollout"
+    not_applicable:
+      run.close[rolledBack]: a unit with no stable revision never rolls back
+      read.rollbackStable[activeRun]: the pin carries no stable, so this link yields nothing
+      run.open: a run is already pinned
+      write.modeSwitch: a Component with a pinned run is in the OMENative mode
+      write.canaryRolledBack: a unit with no stable revision never arms a ladder
+      write.canaryPromoted: a unit with no stable revision never arms a ladder
+      canary.armed: a unit with no stable revision never arms a ladder
+      canary.cutoverCleared: a unit with no stable revision never arms a ladder
+      read.stableCR: no stable hash exists to resolve
+      read.rollbackCR: no rollback revision is pinned on the replica
+  - id: Pinned/Disagrees
+    phase: ""
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/dispatch.go
+    note: "a run pins a stable revision that the replica's history no longer carries or never did - the record it was taken from named a revision the fleet left, the revision's ControllerRevision was collected, or the hashes were re-minted - so the pin and the history disagree and no reader has a rule to prefer one"
+    not_applicable:
+      run.close[rolledBack]: a revert toward a stable the history does not carry parks and never settles
+      read.rollbackStable[lastRunRolledBack]: the active pin's stable answers before this link
+      read.rollbackStable[canaryRecord]: the active pin's stable answers before this link
+      read.rollbackStable[latestRolledout]: the active pin's stable answers before this link
+      read.rollbackStable[none]: the active pin's stable answers before this link
+      read.stableCR[retained]: in this shape the history does not carry the pinned stable under the replica's control
+      read.rollbackCR[retained]: in this shape the history does not carry the pinned stable under the replica's control
+      run.open: a run is already pinned
+      write.modeSwitch: a Component with a pinned run is in the OMENative mode
