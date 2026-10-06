@@ -1402,6 +1402,11 @@ same missing key with `CreateContainerConfigError` on its pod and a row that
 never reads Ready, as the broken Instance does, across the scale-up and the
 hold window; the healthy Instances keep serving, nothing surges above the
 target, and a repair that rebuilds a waiting pod is reported, not judged.
+A gang waits through the pods rendered from the runner that reads the key;
+its other members read none and run. Once the scale has landed the two
+waiting rows read Failed naming `CreateContainerConfigError` — the broken
+Instance's with its repair parked on it, the new Instance's with its create
+disposed — and every other row settles Ready with no operation open.
 
 A pending cause is armed on the settled service before the operation
 instead of a break: `fault=taint:all` or `fault=quota:<n>` with

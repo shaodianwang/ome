@@ -15414,6 +15414,7 @@ class BrokenOperationTest(unittest.TestCase):
         self.assertFalse(run._broken_up_converged(self._ctx(5, 2), "engine", {"engine": 5}, "waits", fresh, True, waiting={"4"}),
                          "the healthy Instances keep serving")
         with mock.patch.object(run, "_get_pod", lambda name: {"name": name}), \
+                mock.patch.object(run, "_configkey_ref", lambda obj: ("cm", "k")), \
                 mock.patch.object(run, "_pod_waiting_reason", lambda obj: run.CONFIGKEY_WAITING if obj["name"] == "e4" else None):
             self.assertEqual({"4"}, run._broken_waiting_instances(ctx, "engine", {"0", "1", "2", "3"}))
             self.assertEqual(set(), run._broken_waiting_instances(ctx, "engine", {"0", "1", "2", "3", "4"}))
@@ -15429,6 +15430,77 @@ class BrokenOperationTest(unittest.TestCase):
         src = inspect.getsource(run._broken_scale)
         self.assertIn("_broken_waiting_instances(", src)
         self.assertIn("waits_served_at is not None", src)
+
+    def _key_pod(self, reads_key, waiting, cm=("cm", "k")):
+        """A live pod object as kubectl returns it: its main container reads
+        the ConfigMap key (or none) and waits on it (or runs)."""
+        env = [{"name": "V", "valueFrom": {"configMapKeyRef": {"name": cm[0], "key": cm[1]}}}] if reads_key else []
+        state = {"waiting": {"reason": run.CONFIGKEY_WAITING}} if waiting else {"running": {}}
+        return {"spec": {"containers": [{"name": run.MAIN_CONTAINER, "env": env}]},
+                "status": {"containerStatuses": [{"name": run.MAIN_CONTAINER, "state": state}]}}
+
+    def test_a_gang_waits_on_the_key_through_the_members_that_read_it(self):
+        """Only the pods rendered from the runner that reads the key can wait
+        on it: a gang's new Instance waits once its leader does, whatever its
+        worker is doing, and an Instance none of whose pods reads the key is
+        not waiting however its pods look."""
+        pre = {"0", "1"}
+        ctx = self._ctx(2, 1, new_pods=[
+            ("e2l", {"alive": True, "ready": False, "serving": False, "hash": "old", "inst": "2", "comp": "engine", "uid": "u2l"}),
+            ("e2w", {"alive": True, "ready": True, "serving": False, "hash": "old", "inst": "2", "comp": "engine", "uid": "u2w"})])
+        ctx["fault"] = {"kind": "configkey", "cm_name": "cm", "cm_key": "k"}
+        pods = {"e2l": self._key_pod(True, True), "e2w": self._key_pod(False, False)}
+        with mock.patch.object(run, "_get_pod", lambda name: pods.get(name)):
+            self.assertEqual({"2"}, run._broken_waiting_instances(ctx, "engine", pre), "the leader waits, the worker reads no key")
+            pods["e2l"] = self._key_pod(True, False)
+            self.assertEqual(set(), run._broken_waiting_instances(ctx, "engine", pre), "the leader runs: nothing waits")
+            pods["e2l"] = self._key_pod(True, True, cm=("other", "k"))
+            self.assertEqual(set(), run._broken_waiting_instances(ctx, "engine", pre), "a wait on another key is not this one")
+            pods["e2l"], pods["e2w"] = self._key_pod(False, True), self._key_pod(False, True)
+            self.assertEqual(set(), run._broken_waiting_instances(ctx, "engine", pre), "no pod reads the key")
+            pods["e2l"], pods["e2w"] = self._key_pod(True, True), self._key_pod(True, False)
+            self.assertEqual(set(), run._broken_waiting_instances(ctx, "engine", pre), "every key-reading pod must wait")
+            pods["e2w"] = self._key_pod(True, True)
+            self.assertEqual({"2"}, run._broken_waiting_instances(ctx, "engine", pre))
+            pods["e2l"] = None
+            self.assertEqual(set(), run._broken_waiting_instances(ctx, "engine", pre), "a pod that cannot be read is not waiting")
+
+    def test_rows_waiting_on_the_key_settle_as_the_waits_cells_expect(self):
+        """Under a key kept away the broken Instance's row is a repair parked
+        at Failed and the new Instance's row a disposed create, both naming
+        the key's reason; every other row settles Ready with no operation."""
+        def items(rows, replicas=5):
+            return [{"spec": {"component": "engine"},
+                     "status": {"replicas": replicas, "instanceStatuses": [dict(index=i, **r) for i, r in rows.items()]}}]
+        failure = {"podName": "e0", "reason": run.CONFIGKEY_WAITING, "message": "couldn't find key k in ConfigMap ns/cm"}
+        ready = {"phase": "Ready", "operation": None, "podCount": 1, "servingPodCount": 1}
+        rows = {0: {"phase": "Failed", "operation": {"type": "Restart"}, "lastFailure": failure},
+                1: dict(ready), 2: dict(ready), 3: dict(ready),
+                4: {"phase": "Failed", "operation": None, "lastFailure": dict(failure, podName="e4")}}
+        waiting = {("engine", "0"), ("engine", 4)}
+        want = {"engine": 5}
+        with mock.patch.object(run, "_fetch_initial_ir_items", lambda cid: items(rows)):
+            self.assertEqual((True, "settled"), run._broken_rows_settled("p999", want, {"engine"}, waiting=waiting))
+            settled, why = run._broken_rows_settled("p999", want, {"engine"})
+            self.assertFalse(settled, "without the waiting rows named the park is a row left mid-operation")
+            self.assertIn("engine/0: Failed with an operation open", why)
+        bad = [({"phase": "Restarting", "operation": {"type": "Restart"}, "lastFailure": failure}, "Restarting with an operation open"),
+               ({"phase": "Failed", "operation": {"type": "Create"}, "lastFailure": failure}, "a Create left open"),
+               ({"phase": "Failed", "operation": None, "lastFailure": dict(failure, reason="ImagePullBackOff")}, "naming ImagePullBackOff"),
+               ({"phase": "Failed", "operation": None}, "naming nothing"),
+               (dict(ready), "Ready with no operation open")]
+        for row, frag in bad:
+            with mock.patch.object(run, "_fetch_initial_ir_items", lambda cid, row=row: items({**rows, 0: row})):
+                settled, why = run._broken_rows_settled("p999", want, {"engine"}, waiting=waiting)
+                self.assertFalse(settled, (row, why))
+                self.assertIn("engine/0: " , why)
+                self.assertIn(frag, why)
+        with mock.patch.object(run, "_fetch_initial_ir_items", lambda cid: items({**rows, 3: {"phase": "Updating", "operation": {"type": "Update"}}})):
+            settled, why = run._broken_rows_settled("p999", want, {"engine"}, waiting=waiting)
+            self.assertFalse(settled)
+            self.assertIn("engine/3: Updating with an operation open", why, "the other rows still settle Ready with no operation")
+        src = inspect.getsource(run._broken_scale)
+        self.assertIn("BROKEN_ROWS_SETTLE_S, waiting_rows)", src)
 
     def test_the_broken_instances_fate_is_judged_as_the_header_states(self):
         f = {"crash_comp": "engine", "crash_inst": "0", "kind": "crashloop"}
@@ -18831,6 +18903,46 @@ class BrokenScaleOnTheWindowTest(unittest.TestCase):
             ctx["peaks"]["engine"] = 5
         return self._drive(hdr, ctx, lambda ctx, hdr: self._repair_opens(ctx, rebuilt_pod_up), read_one,
                            lambda case_id, c: self.RESTARTING_ROWS, lambda *a: (True, "settled"), self.REPAIR)
+
+    def test_a_scale_up_under_a_key_kept_away_judges_the_waiting_rows_parked_on_the_key(self):
+        """expect=waits: the scale-up converges once the new Instance's
+        key-reading pod waits on the key, the broken and the new Instance are
+        handed to the settle check as the rows parked on the key, and the
+        verdict passes with neither serving."""
+        hdr = {"mode": "scaledown", "to_e": 5, "ceil_e": 5, "inst": 0, "expect": "waits", "during": "idle"}
+        ctx = self._ctx()
+        ctx["fault"].update(kind="configkey", cm_name="cm", cm_key="k")
+        reads, settles = [], []
+
+        def read_one(ctx):
+            reads.append(1)
+            if len(reads) > 1:
+                return
+            ctx["pod_state"]["e0b"] = self._pod("0", "u0b", ready=False, serving=False)
+            ctx["pod_state"]["e4"] = self._pod("4", "u4", ready=False, serving=False)
+            ctx["agg"]["engine"] = (5, 3, 0)
+            ctx["measures"]["engine"] = (5, 0, 0)
+            ctx["peaks"]["engine"] = 5
+
+        def key_pod(name):
+            waits = name in ("e0b", "e4")
+            return {"spec": {"containers": [{"name": run.MAIN_CONTAINER, "env": [
+                        {"name": "V", "valueFrom": {"configMapKeyRef": {"name": "cm", "key": "k"}}}]}]},
+                    "status": {"containerStatuses": [{"name": run.MAIN_CONTAINER, "state":
+                        {"waiting": {"reason": run.CONFIGKEY_WAITING}} if waits else {"running": {}}}]}}
+
+        def settle(case_id, want, configured, budget_s, waiting=()):
+            settles.append(set(waiting))
+            return True, "settled"
+        with mock.patch.multiple(run, _get_pod=key_pod, IDLE_HOLD_S=0):
+            out = self._drive(hdr, ctx, lambda ctx, hdr: self._repair_opens(ctx, True), read_one,
+                              lambda case_id, c: self.RESTARTING_ROWS, settle, self.REPAIR)
+        self.assertEqual("PASS", out["verdict"], out["notes"])
+        self.assertEqual("CONVERGED", out["state"])
+        self.assertEqual([{("engine", "0"), ("engine", "4")}], settles, "the broken and the new Instance are the rows parked on the key")
+        self.assertTrue(any("new Instance(s) ['4'] wait on the key kept away" in c for c in out["checks"]), out["checks"])
+        self.assertTrue(any("the rows waiting on the key read Failed naming" in c for c in out["checks"]), out["checks"])
+        self.assertTrue(any("Instance 0 waits on the key kept away across the scale-up" in c for c in out["checks"]), out["checks"])
 
     def test_a_scale_up_landing_between_the_old_pod_and_the_rebuilt_one_sees_one_new_instance(self):
         out = self._up(rebuilt_pod_up=False)

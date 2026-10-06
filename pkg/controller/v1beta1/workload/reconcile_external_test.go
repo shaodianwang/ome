@@ -1318,6 +1318,10 @@ type recoveryHarness struct {
 	wedgeSince  time.Time
 	wedgeSticky bool
 	wedgedPods  map[string]string
+	// wedgeRunner confines the armed wedge to the pods of one runner — a
+	// gang whose leader alone reads the missing ConfigMap key — and empty
+	// applies it to every pod.
+	wedgeRunner string
 	// evicted names, by wedgeKey, the pods the kubelet evicted: each is
 	// reported phase Failed with its container terminated and stays so,
 	// holding its name, until a pass deletes the object.
@@ -2091,6 +2095,15 @@ func (h *recoveryHarness) wedgeLivePods(reason string) {
 	}
 }
 
+// wedgePod parks one live pod in reason, whatever its age: the fault hits
+// the one pod of a running set whose container reads the missing key.
+func (h *recoveryHarness) wedgePod(pod *corev1.Pod, reason string) {
+	if h.wedgedPods == nil {
+		h.wedgedPods = map[string]string{}
+	}
+	h.wedgedPods[wedgeKey(pod)] = reason
+}
+
 // wedgeKey identifies one pod object across the kubelet model's passes: the
 // fake client mints no UID, and a rebuilt pod reuses its name, so the
 // creation instant the model stamps is what tells the two apart.
@@ -2150,6 +2163,9 @@ func (h *recoveryHarness) wedgeReasonFor(pod *corev1.Pod) string {
 		return reason
 	}
 	if h.wedge == "" || pod.CreationTimestamp.Time.Before(h.wedgeSince) {
+		return ""
+	}
+	if h.wedgeRunner != "" && pod.Labels[query.LabelRunner] != h.wedgeRunner {
 		return ""
 	}
 	h.wedgedPods[wedgeKey(pod)] = h.wedge

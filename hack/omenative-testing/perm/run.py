@@ -21928,11 +21928,30 @@ def _broken_report_checks(f, out, verdict, notes, checks):
     return verdict
 
 
-def _broken_rows_settled(case_id, want, configured):
+def _row_waits_on_key(row):
+    """(ok, why): a row waiting on the ConfigMap key kept away reads Failed
+    with its failure record naming CreateContainerConfigError, and carries
+    no operation but the repair parked on it — a broken Instance's rebuild
+    keeps its Restart, a new Instance's disposed create keeps none."""
+    phase = str(row.get("phase") or "")
+    op = row.get("operation") or {}
+    reason = str((row.get("lastFailure") or {}).get("reason") or "")
+    if phase != "Failed":
+        return False, f"{phase or '?'} with {'an' if op else 'no'} operation open, want Failed waiting on the key"
+    if op and str(op.get("type") or "") != "Restart":
+        return False, f"Failed with a {op.get('type') or '?'} left open, want none but a parked repair"
+    if reason != CONFIGKEY_WAITING:
+        return False, f"Failed naming {reason or 'nothing'}, want {CONFIGKEY_WAITING}"
+    return True, ""
+
+
+def _broken_rows_settled(case_id, want, configured, waiting=()):
     """(settled, reason): every configured Component has one InferenceReplica
     whose replicas counter is its wanted count and whose rows, that many,
-    all read Ready with no operation open. Indexes may be sparse after a
-    scale-down."""
+    all read Ready with no operation open — but for the (component, index)
+    rows in `waiting`, which read parked on the ConfigMap key kept away
+    (_row_waits_on_key). Indexes may be sparse after a scale-down."""
+    waiting = {(c, str(i)) for c, i in waiting}
     by_comp = {}
     for it in _fetch_initial_ir_items(case_id) or []:
         comp = (it.get("spec") or {}).get("component")
@@ -21953,16 +21972,22 @@ def _broken_rows_settled(case_id, want, configured):
         if len(rows) != want[comp]:
             return False, f"{comp}: {len(rows)} row(s), want {want[comp]}"
         for row in rows:
+            idx = str(row.get("index", "?"))
+            if (comp, idx) in waiting:
+                ok, why = _row_waits_on_key(row)
+                if not ok:
+                    return False, f"{comp}/{idx}: {why}"
+                continue
             if str(row.get("phase") or "") != "Ready" or row.get("operation") is not None:
                 open_op = "an" if row.get("operation") is not None else "no"
-                return False, f"{comp}/{row.get('index', '?')}: {row.get('phase') or '?'} with {open_op} operation open"
+                return False, f"{comp}/{idx}: {row.get('phase') or '?'} with {open_op} operation open"
     return True, "settled"
 
 
-def _wait_broken_rows_settled(case_id, want, configured, budget_s):
+def _wait_broken_rows_settled(case_id, want, configured, budget_s, waiting=()):
     deadline = time.time() + budget_s
     while True:
-        settled, why = _broken_rows_settled(case_id, want, configured)
+        settled, why = _broken_rows_settled(case_id, want, configured, waiting=waiting)
         if settled or time.time() >= deadline:
             return settled, why
         time.sleep(2.0)
@@ -21991,14 +22016,33 @@ def _broken_up_converged(ctx, comp, target, expect, new_instances, rebuilt, wait
 
 
 def _broken_waiting_instances(ctx, comp, pre_indices):
-    """The indices of the Component's new Instances whose every pod waits
-    on the ConfigMap key (CreateContainerConfigError), read live."""
+    """The indices of the Component's new Instances that wait on the
+    ConfigMap key kept away, read live: every pod rendered from the runner
+    that reads the key waits on it (CreateContainerConfigError), and at
+    least one does. A gang's other members read no key, so they run; that
+    they never serve is the hold window's to watch."""
+    f = ctx.get("fault") or {}
+    key = (f["cm_name"], f["cm_key"]) if f.get("cm_name") and f.get("cm_key") else None
     by_index = defaultdict(list)
     for name, p in ctx["pod_state"].items():
         if p and p["alive"] and p.get("comp") == comp and str(p.get("inst", "0")) not in pre_indices:
             by_index[str(p.get("inst", "0"))].append(name)
-    return {idx for idx, names in by_index.items()
-            if all(_pod_waiting_reason(_get_pod(n)) == CONFIGKEY_WAITING for n in names)}
+    out = set()
+    for idx, names in by_index.items():
+        readers = []
+        for name in names:
+            obj = _get_pod(name)
+            if obj is None:
+                # A pod gone between the poll and the read: not this
+                # poll's wait, the next poll reads the set as it is.
+                readers = []
+                break
+            ref = _configkey_ref(obj)
+            if ref is not None and (key is None or ref == key):
+                readers.append(obj)
+        if readers and all(_pod_waiting_reason(obj) == CONFIGKEY_WAITING for obj in readers):
+            out.add(idx)
+    return out
 
 
 def _broken_scale(case_id, yaml_file, desc, hdr):
@@ -22010,8 +22054,10 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
     Instance comes up on the running revision and serves, the healthy
     Instances keep their pods and never leave rotation, and the broken one
     is repaired (rebuilt, a RestartTriggered event names it) or left as the
-    fault left it, as expect= says. Either way the Components the operator
-    did not scale stay as they were."""
+    fault left it, as expect= says; under a key kept away (expect=waits)
+    the broken Instance and the new one read parked on the key, Failed
+    naming its reason, and every other row settles. Either way the
+    Components the operator did not scale stay as they were."""
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
     if err:
         return _write_fail(case_id, desc, hdr, *err)
@@ -22160,9 +22206,14 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
     # goes when its pods are gone, which trails the pods leaving rotation by
     # their termination, so a read at the moment the pod count lands can
     # still list it.
+    # Under a key kept away the broken Instance and the new ones never
+    # read Ready: their rows are judged parked on the key instead.
+    waiting_rows = set()
+    if up and expect == BROKEN_WAIT_EXPECT:
+        waiting_rows = {(scomp, i) for i in new_instances} | {(comp, inst)}
     rows_settled, settle_why = False, "the scale did not converge"
     if state == "CONVERGED":
-        rows_settled, settle_why = _wait_broken_rows_settled(case_id, target, configured, BROKEN_ROWS_SETTLE_S)
+        rows_settled, settle_why = _wait_broken_rows_settled(case_id, target, configured, BROKEN_ROWS_SETTLE_S, waiting_rows)
     if not up:
         for c in sorted(scaled):
             rows_now = {i for i, _h, _ph in _broken_rows(case_id, c)}
@@ -22267,7 +22318,10 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
         else:
             checks.append(f"  ✓ {c} (not scaled) stayed as it was")
     if state == "CONVERGED":
-        if rows_settled:
+        if rows_settled and waiting_rows:
+            checks.append(f"  ✓ every Instance row settled: the rows waiting on the key read Failed naming "
+                          f"{CONFIGKEY_WAITING} with at most a repair parked on them, every other Ready with no operation open")
+        elif rows_settled:
             checks.append("  ✓ every Instance row settled: Ready, no operation open")
         else:
             verdict = "FAIL"

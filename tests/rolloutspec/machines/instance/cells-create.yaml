@@ -105,7 +105,7 @@ cells:
     note: a Create attempt is always disposable, so the fast escalator routes it through the disposition, which records a RetryBlock against the attempt's pinned revision and clears the operation in one write; the pin is what keeps a corrective revision from being charged for the bad one
     invariants: [one.operation.per.instance]
     placement: perm
-    coverage: {perm: [], unit: [TestDispose_WorkloadCaused_EachReason, TestDispose_PinnedCreateUsesAttemptRevisionAfterCorrectiveEdit, TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused], kind: [], replay: [T-create-stuck]}
+    coverage: {perm: [p12100, p12101, p12102, p12103, p12104, p12105], unit: [TestDispose_WorkloadCaused_EachReason, TestDispose_PinnedCreateUsesAttemptRevisionAfterCorrectiveEdit, TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused, TestMissingKey_ScaleUpBesideTheParkedRepair_NewInstanceWaitsOnTheKey], kind: [], replay: [T-create-stuck]}
     status: decided
 
   - state: Create/CreatePods

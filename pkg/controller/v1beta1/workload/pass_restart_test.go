@@ -15,6 +15,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
@@ -3929,5 +3930,190 @@ func TestDeadlineElapsesOnAWedgedRebuild_RepairParksWithItsPodSet(t *testing.T) 
 	}
 	if got := h.instance(0); got.Incarnation != parked.Incarnation+1 {
 		t.Errorf("incarnation = %d, want %d: one rebuild on the ladder", got.Incarnation, parked.Incarnation+1)
+	}
+}
+
+// missingKeyReason is the kubelet's waiting reason for a container whose
+// ConfigMap key is gone; the kubelet retries the start in place.
+const missingKeyReason = "CreateContainerConfigError"
+
+// missingKeyShapes are the Instance shapes a missing key is read under:
+// one pod, or a gang whose leader alone reads it.
+var missingKeyShapes = []struct {
+	name   string
+	gang   bool
+	runner string
+	pods   int
+}{
+	{"single pod", false, "", 1},
+	{"gang, the leader reads the key", true, "leader", 2},
+}
+
+// missingKeyHarness is replicas Instances settled on v1 under restart
+// policy None with no retry ladder, and the missing key armed: every pod
+// of runner created from now on waits on it (every pod when runner is
+// empty) and starts once it is back.
+func missingKeyHarness(t *testing.T, gang bool, runner string, replicas int32) *recoveryHarness {
+	t.Helper()
+	h := newRecoveryHarness(t, gang)
+	h.recorder = record.NewFakeRecorder(256)
+	h.retryPolicy = nil
+	none := workloadtypes.RestartPolicyNone
+	h.lifecycle = workloadtypes.Lifecycle{RestartPolicy: &none}
+	h.replicas = replicas
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(40, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("initial create")
+		t.Fatalf("%d instances never settled on v1", replicas)
+	}
+	h.armWedge(missingKeyReason, false)
+	h.wedgeRunner = runner
+	return h
+}
+
+// waitingOn is the waiting reason of the pod's first container, "" when
+// it is not waiting.
+func waitingOn(pod *corev1.Pod) string {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Waiting != nil {
+			return cs.State.Waiting.Reason
+		}
+	}
+	return ""
+}
+
+// requireWaitsOnMissingKey checks the shape of a Failed row waiting on
+// the key: pods live pods, the key-reading runner's pod waiting on it and
+// named by the failure record with the kubelet's reason, every other
+// member running.
+func requireWaitsOnMissingKey(t *testing.T, h *recoveryHarness, idx int32, runner string, pods int) {
+	t.Helper()
+	row := h.instance(idx)
+	if row == nil || row.Phase != workloadtypes.InstancePhaseFailed {
+		t.Fatalf("instance %d = %+v, want Failed", idx, row)
+	}
+	if got := len(h.podsOf(idx)); got != pods {
+		h.dumpState("pod set")
+		t.Fatalf("instance %d has %d live pods, want %d", idx, got, pods)
+	}
+	reader := h.podOf(idx, runner)
+	if got := waitingOn(reader); got != missingKeyReason {
+		t.Fatalf("pod %s waits on %q, want %s", reader.Name, got, missingKeyReason)
+	}
+	for _, pod := range h.podsOf(idx) {
+		if pod.Name != reader.Name && waitingOn(pod) != "" {
+			t.Fatalf("pod %s waits on %q, want it running: it reads no key", pod.Name, waitingOn(pod))
+		}
+	}
+	if row.LastFailure == nil || row.LastFailure.Reason != missingKeyReason || row.LastFailure.PodName != reader.Name {
+		t.Fatalf("instance %d lastFailure = %+v, want it naming pod %s and %s", idx, row.LastFailure, reader.Name, missingKeyReason)
+	}
+}
+
+// A settled Instance whose key-reading pod loses its ConfigMap key under
+// restart policy None, single pod and leader+worker gang alike. The
+// stuck-pod repair opens whatever the policy says and rebuilds the set
+// once; the rebuilt key-reading pod waits on the same key, so the row
+// parks Failed with its Restart kept and its failure record naming that
+// pod, the kubelet's reason and what the park waits for. Nothing re-arms:
+// the set stays where the kubelet retries it, the incarnation holds, and
+// the warning fires once.
+//
+// Cells: instance/Failed/timer.repairRetry/before
+func TestMissingKey_RepairUnderPolicyNone_ParksNamingTheWaitingPod(t *testing.T) {
+	for _, tc := range missingKeyShapes {
+		t.Run(tc.name, func(t *testing.T) {
+			h := missingKeyHarness(t, tc.gang, tc.runner, 1)
+			before := h.instance(0).Incarnation
+			h.wedgePod(h.podOf(0, tc.runner), missingKeyReason)
+			if !h.run(40, func() bool { return parkedRepair(h, 0) }) {
+				h.dumpState("park")
+				t.Fatalf("the repair never parked at Failed with its Restart kept")
+			}
+			parked := h.instance(0)
+			if parked.Incarnation != before+1 {
+				t.Fatalf("incarnation = %d, want %d: one rebuild under the repair", parked.Incarnation, before+1)
+			}
+			requireWaitsOnMissingKey(t, h, 0, tc.runner, tc.pods)
+			if !h.atIncarnation(0, parked.Incarnation) {
+				t.Fatalf("the parked set is not the rebuild at incarnation %d", parked.Incarnation)
+			}
+			parkedPods := podKeys(h.podsOf(0))
+
+			noted := func() bool {
+				row := h.instance(0)
+				return row.LastFailure != nil && strings.Contains(row.LastFailure.Message, workloadops.RepairWaitingNote)
+			}
+			if !h.run(10, noted) {
+				t.Fatalf("lastFailure.message = %q, want it to say what the park waits for", h.instance(0).LastFailure.Message)
+			}
+			h.settle(20)
+			got := h.instance(0)
+			if !parkedRepair(h, 0) || got.Incarnation != parked.Incarnation || got.Operation.ID != parked.Operation.ID {
+				h.dumpState("re-arm")
+				t.Fatalf("the park moved: %+v, want the repair kept as parked", got)
+			}
+			if keys := podKeys(h.podsOf(0)); keys != parkedPods {
+				t.Errorf("pods changed under the park: %s, want %s", keys, parkedPods)
+			}
+			if n := eventCount(h, string(workloadtypes.EventReasonRestartTriggered)); n != 1 {
+				t.Errorf("RestartTriggered events = %d, want exactly 1: the repair opened once and never re-armed", n)
+			}
+			if n := eventCount(h, string(workloadtypes.EventReasonRepairWaitingOnWorkload)); n != 1 {
+				t.Errorf("RepairWaitingOnWorkload events = %d, want exactly 1", n)
+			}
+		})
+	}
+}
+
+// A scale-up by one beside that park. The new Instance is rendered from
+// the same runner, so its key-reading pod waits on the same key; once it
+// has sat past the stuck-pod grace the Create attempt is disposed: the
+// row reads Failed with no operation and its failure record naming the
+// waiting pod and the kubelet's reason, the revision is held, and the pod
+// set stays where the kubelet retries it. The parked Instance keeps its
+// park and the healthy Instance keeps its pods.
+//
+// Cells: instance/Create/CreatePods/pod.waiting[CreateContainerConfigError]/before
+func TestMissingKey_ScaleUpBesideTheParkedRepair_NewInstanceWaitsOnTheKey(t *testing.T) {
+	for _, tc := range missingKeyShapes {
+		t.Run(tc.name, func(t *testing.T) {
+			h := missingKeyHarness(t, tc.gang, tc.runner, 2)
+			h.wedgePod(h.podOf(0, tc.runner), missingKeyReason)
+			if !h.run(40, func() bool { return parkedRepair(h, 0) }) {
+				h.dumpState("park")
+				t.Fatalf("the repair never parked at Failed with its Restart kept")
+			}
+			parked, healthy := h.instance(0), h.instanceIdentity(1)
+
+			h.replicas = 3
+			h.setTarget(h.revV1, goodImage)
+			disposed := func() bool {
+				row := h.instance(2)
+				return row != nil && row.Phase == workloadtypes.InstancePhaseFailed && row.Operation == nil
+			}
+			if !h.run(40, disposed) {
+				h.dumpState("scale-up")
+				t.Fatalf("the new Instance never read Failed with its Create disposed")
+			}
+			requireWaitsOnMissingKey(t, h, 2, tc.runner, tc.pods)
+			newPods := podKeys(h.podsOf(2))
+			if block := h.findBlock(h.revV1.Name); block == nil || block.State != workloadtypes.RetryBlockHeld {
+				t.Fatalf("retry block for v1 = %+v, want Held: the key is the revision's to fix", block)
+			}
+
+			h.settle(20)
+			if !disposed() || podKeys(h.podsOf(2)) != newPods {
+				h.dumpState("settle")
+				t.Fatalf("the new Instance moved: %+v with pods %s, want Failed with its set %s kept", h.instance(2), podKeys(h.podsOf(2)), newPods)
+			}
+			if got := observedIndices(h); indicesString(got) != "[0 1 2]" {
+				t.Fatalf("indices = %s, want [0 1 2]: one new Instance beside the park", indicesString(got))
+			}
+			if got := h.instance(0); !parkedRepair(h, 0) || got.Incarnation != parked.Incarnation {
+				t.Fatalf("the parked repair moved under the scale-up: %+v", got)
+			}
+			requireIdentitiesKept(t, h, map[int32]string{1: healthy}, "scale-up beside the park")
+		})
 	}
 }
