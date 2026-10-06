@@ -268,7 +268,7 @@ cells:
     note: "the annotation was patched away before the status flush and the flush failed, so the verb is gone and the pin still carries the old plan; the newer-clock preserve only stops a later writer from rolling an applied pin back and cannot recover one that never landed. The owner must decide whether the verb is consumed only after a successful flush, or whether a lost repin is acceptable and the operator re-issues it"
     invariants: [verb.consumed.once]
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [repin-consumed-before-failed-flush]}
     status: review
   - state: RepinPending
     event: api.flushFailed

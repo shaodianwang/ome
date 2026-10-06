@@ -1,0 +1,36 @@
+scenario: stale-read-misses-open
+cells:
+  - run/Open/ctrl.staleRead[missesOpen]/before
+intentional: >-
+  the pass after the open reads a copy of the service that predates the
+  flush which pinned the run; it opens the same roll again under a new
+  run id and a later clock, and the flush keeps that newer pin over the
+  live one
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service records no run
+  - tick: 2
+    note: the template edit lands and the projection catches up one pass later
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens on the live replica pair and the boundary flush pins it
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: a minute later the pass reads the copy from before the open; it re-opens the same targets under a new run id and the newer clock wins the flush
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[missesOpen]
+  - tick: 5
+    note: the next pass reads the re-minted pin and keeps it
+    events:
+      - ctrl.resync

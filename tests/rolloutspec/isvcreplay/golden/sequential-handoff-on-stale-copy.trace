@@ -1,0 +1,102 @@
+tick=0 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=1 replicas=2 ready=2 serving=2 updated=2 updatedReady=2 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=0 publish component=decoder current=svc-a-decoder-f332566b update=svc-a-decoder-f332566b observedGeneration=1 replicas=1 ready=1 serving=1 updated=1 updatedReady=1 rows=[0:Ready@f332566b]
+tick=1 note a settled service; the two single-Component groups collapse into one Sequential group
+tick=1 pass cache=live generation=1
+tick=1 run outcome=none policies=disabled
+tick=1 run active=nil
+tick=1 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=1 service create name=svc-a-engine-rev-f332566b stage=coordination
+tick=1 service create name=svc-a-engine-rev-f332566b-headless stage=coordination
+tick=1 service create name=svc-a-decoder-rev-f332566b stage=coordination
+tick=1 service create name=svc-a-decoder-rev-f332566b-headless stage=coordination
+tick=1 coordination group=0 before=nil after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil}
+tick=1 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=1 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=1 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=1 flush which=final result=written statusWrites=1 run=desired groups=0:added
+tick=1 pass result=none
+tick=2 note both templates are edited at once
+tick=2 apply spec.revision[new] component=decoder image=registry.example.com/runtime:v2 generation=2 now=t+0s
+tick=2 apply spec.revision[new] component=engine image=registry.example.com/runtime:v2 generation=3 now=t+0s
+tick=2 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-46e64ada observedGeneration=1 replicas=2 ready=2 serving=2 updated=0 updatedReady=0 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=2 publish component=decoder current=svc-a-decoder-f332566b update=svc-a-decoder-46e64ada observedGeneration=1 replicas=1 ready=1 serving=1 updated=0 updatedReady=0 rows=[0:Ready@f332566b]
+tick=2 pass cache=live generation=3
+tick=2 run outcome=none requeueAfter=10s policies=disabled
+tick=2 run active=nil
+tick=2 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=2 ir patch name=svc-a-engine stage=project image=registry.example.com/runtime:v1→registry.example.com/runtime:v2 parentGen=1→3 generation=1→2
+tick=2 ir patch name=svc-a-decoder stage=project image=registry.example.com/runtime:v1→registry.example.com/runtime:v2 parentGen=1→3 generation=1→2
+tick=2 event Normal CoordinationGroupSurging coordination group 0 surging: creating new-revision pods
+tick=2 event Warning SequentialNextSpecBumpDeferred sequential group 0: spec bump on later Component engine deferred while active Component decoder is still rolling
+tick=2 coordination group=0 before={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil} after={phase=Surging composite=decoder.Surging current=decoder previous=nil transition=t+0s anchor=nil}
+tick=2 coordination conditions RolloutCoordinationReady=False(InProgress)
+tick=2 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=2 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=2 flush which=final result=written statusWrites=1 run=same groups=0:updated{phase:Idle→Surging composite:Idle→decoder.Surging current:nil→decoder}
+tick=2 pass result=after:10s
+tick=3 note the run opens; the decoder rolls first and the engine's bump is deferred
+tick=3 apply ctrl.resync now=t+0s
+tick=3 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-46e64ada observedGeneration=2 replicas=2 ready=2 serving=2 updated=0 updatedReady=0 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=3 publish component=decoder current=svc-a-decoder-f332566b update=svc-a-decoder-46e64ada observedGeneration=2 replicas=1 ready=1 serving=1 updated=0 updatedReady=0 rows=[0:Ready@f332566b]
+tick=3 pass cache=live generation=3
+tick=3 event Normal RolloutRunOpened run svc-a-01ba865bc9a3 opened (rp1:d1c91353aa70)
+tick=3 run outcome=opened stateChanged=true requeueAfter=10s policies=disabled
+tick=3 run active id=svc-a-01ba865bc9a3 openedAt=t+0s pinnedAt=t+0s targets=[decoder=46e64ada/stable=f332566b engine=46e64ada/stable=f332566b] digests=[Inline:rp1:cca45ec1fb0f Inline:rp1:cca45ec1fb0f]
+tick=3 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=False(InSync)
+tick=3 flush which=boundary result=written statusWrites=1 run=desired groups=0:unchanged
+tick=3 coordination group=0 before={phase=Surging composite=decoder.Surging current=decoder previous=nil transition=t+0s anchor=nil} after={phase=Surging composite=decoder.Surging current=decoder previous=nil transition=t+0s anchor=nil}
+tick=3 coordination conditions RolloutCoordinationReady=False(InProgress)
+tick=3 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=3 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=3 flush which=final result=short-circuit
+tick=3 pass result=after:10s
+tick=4 note the decoder converges in one tick; the engine is next but the soak holds the group Awaiting from the hand-off instant
+tick=4 apply member.surgePodCreated component=decoder instances=1 revision=registry.example.com/runtime:v2 now=t+0s
+tick=4 apply member.readyOnTarget component=decoder pods=1 now=t+0s
+tick=4 apply member.oldPodsGone component=decoder removed=1 now=t+0s
+tick=4 apply member.converged component=decoder revision=registry.example.com/runtime:v2 now=t+0s
+tick=4 publish component=decoder current=svc-a-decoder-46e64ada update=svc-a-decoder-46e64ada observedGeneration=2 replicas=1 ready=1 serving=1 updated=1 updatedReady=1 rows=[0:Ready@46e64ada]
+tick=4 pass cache=live generation=3
+tick=4 run outcome=none policies=disabled
+tick=4 run active id=svc-a-01ba865bc9a3 openedAt=t+0s pinnedAt=t+0s targets=[decoder=46e64ada/stable=f332566b engine=46e64ada/stable=f332566b] digests=[Inline:rp1:cca45ec1fb0f Inline:rp1:cca45ec1fb0f]
+tick=4 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=True(SpecNewerThanRun)
+tick=4 service create name=svc-a-decoder-rev-46e64ada stage=coordination
+tick=4 service create name=svc-a-decoder-rev-46e64ada-headless stage=coordination
+tick=4 service delete name=svc-a-decoder-rev-f332566b stage=coordination
+tick=4 service delete name=svc-a-decoder-rev-f332566b-headless stage=coordination
+tick=4 event Normal CoordinationGroupCompleted coordination group 0 idle: Sequential soak: 5m0s remaining before engine starts
+tick=4 event Normal SequentialAwaitingNext sequential group 0 awaiting next Component: Sequential soak: 5m0s remaining before engine starts
+tick=4 coordination group=0 before={phase=Surging composite=decoder.Surging current=decoder previous=nil transition=t+0s anchor=nil} after={phase=Idle composite=Sequential.AwaitingNextComponent current=engine previous=decoder transition=t+0s anchor=nil}
+tick=4 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=4 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=4 revisions component=decoder ready=46e64ada latest=46e64ada previous=f332566b phase=nil
+tick=4 flush which=final result=written statusWrites=1 run=same groups=0:updated{phase:Surging→Idle composite:decoder.Surging→Sequential.AwaitingNextComponent current:decoder→engine}
+tick=4 pass result=none
+tick=5 note three minutes later the pass reads the copy from before the hand-off; the merge sees the decoder leave Surging again and restamps the transition time
+tick=5 apply clock.advance by=3m0s now=t+3m0s
+tick=5 apply ctrl.staleRead[phaseRegressed] cache=before-pass-4 now=t+3m0s
+tick=5 pass cache=before-pass-4 generation=3
+tick=5 run outcome=none policies=disabled
+tick=5 run active id=svc-a-01ba865bc9a3 openedAt=t+0s pinnedAt=t+0s targets=[decoder=46e64ada/stable=f332566b engine=46e64ada/stable=f332566b] digests=[Inline:rp1:cca45ec1fb0f Inline:rp1:cca45ec1fb0f]
+tick=5 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=True(SpecNewerThanRun)
+tick=5 event Normal CoordinationGroupCompleted coordination group 0 idle: Sequential soak: 2m0s remaining before engine starts
+tick=5 event Normal SequentialAwaitingNext sequential group 0 awaiting next Component: Sequential soak: 2m0s remaining before engine starts
+tick=5 coordination group=0 before={phase=Surging composite=decoder.Surging current=decoder previous=nil transition=t+0s anchor=nil} after={phase=Idle composite=Sequential.AwaitingNextComponent current=engine previous=decoder transition=t+3m0s anchor=nil}
+tick=5 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=5 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=5 revisions component=decoder ready=46e64ada latest=46e64ada previous=f332566b phase=nil
+tick=5 flush which=final result=written statusWrites=1 run=same groups=0:overwrote-newer-live{transition:t+0s→t+3m0s}
+tick=5 pass result=none
+tick=6 note the soak measured from the restamped transition time elapses; the engine is released
+tick=6 apply timer.soak deadline=t+8m0s now=t+8m1s now=t+8m1s
+tick=6 pass cache=live generation=3
+tick=6 run outcome=none policies=disabled
+tick=6 run active id=svc-a-01ba865bc9a3 openedAt=t+0s pinnedAt=t+0s targets=[decoder=46e64ada/stable=f332566b engine=46e64ada/stable=f332566b] digests=[Inline:rp1:cca45ec1fb0f Inline:rp1:cca45ec1fb0f]
+tick=6 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=True(SpecNewerThanRun)
+tick=6 event Normal CoordinationGroupSurging coordination group 0 surging: creating new-revision pods
+tick=6 coordination group=0 before={phase=Idle composite=Sequential.AwaitingNextComponent current=engine previous=decoder transition=t+3m0s anchor=nil} after={phase=Surging composite=engine.Surging current=engine previous=decoder transition=t+8m1s anchor=nil}
+tick=6 coordination conditions RolloutCoordinationReady=False(InProgress)
+tick=6 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=6 revisions component=decoder ready=46e64ada latest=46e64ada previous=f332566b phase=nil
+tick=6 flush which=final result=written statusWrites=1 run=same groups=0:updated{phase:Idle→Surging composite:Sequential.AwaitingNextComponent→engine.Surging transition:t+3m0s→t+8m1s}
+tick=6 pass result=none

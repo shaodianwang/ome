@@ -13,8 +13,9 @@ commit message, the trailer the pipeline already turns into an eval run.
 
 What counts as a rewrite:
 
-  * a golden under tests/rolloutspec/replay/golden/ modified, deleted or
-    renamed with its content changed (a new golden is not one);
+  * a golden under tests/rolloutspec/replay/golden/ or
+    tests/rolloutspec/isvcreplay/golden/ modified, deleted or renamed with
+    its content changed (a new golden is not one);
   * an authored row of tests/rolloutspec/machines/<m>/cells-*.yaml whose
     status at the base is decided and which, at HEAD, is gone (its
     state/event/variants/windows/transition key no longer appears in any
@@ -60,6 +61,9 @@ except ImportError:  # pragma: no cover - reported at run time
 
 # Where each half of the lock lives.
 GOLDEN_DIR = "tests/rolloutspec/replay/golden/"
+# The InferenceService pass has its own replay lane and goldens.
+ISVC_GOLDEN_DIR = "tests/rolloutspec/isvcreplay/golden/"
+GOLDEN_DIRS = (GOLDEN_DIR, ISVC_GOLDEN_DIR)
 MACHINES_DIR = "tests/rolloutspec/machines/"
 CASES_DIR = "hack/omenative-testing/perm/isvcs/"
 RUN_PY = "hack/omenative-testing/perm/run.py"
@@ -185,7 +189,7 @@ def commit_message(repo: str, sha: str) -> str:
 def golden_rewrites(changes: list[Change]) -> list[str]:
     out = []
     for c in changes:
-        if not (c.path.startswith(GOLDEN_DIR) or (c.old or "").startswith(GOLDEN_DIR)):
+        if not (c.path.startswith(GOLDEN_DIRS) or (c.old or "").startswith(GOLDEN_DIRS)):
             continue
         letter = c.status[0]
         if letter == "M" or letter == "T":

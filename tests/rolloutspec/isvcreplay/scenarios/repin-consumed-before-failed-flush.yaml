@@ -1,0 +1,47 @@
+scenario: repin-consumed-before-failed-flush
+cells:
+  - run/RepinPending/api.flushFailed[afterRepinConsumed]/boundary@T-repin-apply
+  - run/Open/verb.repin[matching]/before
+  - run/Open/spec.planEdit[inlineBody]/before
+intentional: >-
+  the repin verb is removed by a metadata patch inside the run layer,
+  before the boundary flush that would persist the repinned plan; when
+  that flush fails the verb is gone and the pin still carries the old
+  plan, and the next pass reports the drift the repin was meant to apply
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service records no run
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens and pins the blueGreen plan
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the group's progression is edited to a rolling update mid-run; the pinned plan continues and drift is reported
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[inlineBody]:
+          groups:
+            - components: [engine]
+              rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  - tick: 5
+    note: the operator repins; the verb is patched away inside the run layer and the boundary flush that carries the new pin fails
+    events:
+      - clock.advance: 1m
+      - verb.repin[matching]
+      - api.flushFailed[afterRepinConsumed]
+  - tick: 6
+    note: the next pass finds no verb and the old plan still pinned; the drift is back
+    events:
+      - ctrl.resync

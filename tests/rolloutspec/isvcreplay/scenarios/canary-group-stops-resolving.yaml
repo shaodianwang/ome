@@ -1,0 +1,51 @@
+scenario: canary-group-stops-resolving
+cells:
+  - canary/Serving/Manual/plan.unresolved/before
+  - canary/Serving/Manual/run.lost/before
+  - run/NoRun/policy.unresolved[notFound]/before
+intentional: >-
+  a serving canary loses its run and its policy in the same tick; with no
+  pin to fall back on the group has no executable body, so the run layer
+  parks the plan, the projection holds every Instance, and the unit is not
+  dispatched: its record, phase and split freeze where they are
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        policyRef: {name: canary-policy, progression: canary}
+  policies:
+    - name: canary-policy
+      spec:
+        canary:
+          steps:
+            - {capacity: "50%", traffic: 10, pause: {}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m, rolloutPolicyEnabled: true}
+timeline:
+  - tick: 1
+    note: a settled service; the policy resolves and the unit reads Stable
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens from the live policy and the unit arms at step 0
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the staged Instance is Ready; the split serves at 10% under the manual pause
+    events:
+      - capacity.reached: {component: engine}
+  - tick: 5
+    note: the pin is lost and the policy is deleted; the run layer parks and the unit is not dispatched
+    events:
+      - clock.advance: 1m
+      - run.lost
+      - plan.unresolved: {name: canary-policy}
+  - tick: 6
+    note: a later pass finds the same park; nothing moves the unit
+    events:
+      - clock.advance: 1m
+      - ctrl.resync

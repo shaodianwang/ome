@@ -14,7 +14,7 @@ cells:
     note: "the pinned run closes Superseded and a fresh run opens in the same pass under a new RunID; a member that moved carries its pinned stable revision forward, a member still on its pinned revision is on its stable, and a canary unit whose targets moved is reset by BindRun to step zero. A plan that no longer composes parks instead after the Superseded close (T-open-retarget-park)"
     invariants: [one.active.run, decision.reads.live.replicas]
     placement: unit
-    coverage: {perm: [], unit: [TestRetargetClosesSupersededAndReopens, TestRetargetDoesNotGuessMissingStableRevision, TestRetargetKeepsUnmovedComponentStableKnown], kind: [canary_retarget_rollback_kind_test.go]}
+    coverage: {perm: [], unit: [TestRetargetClosesSupersededAndReopens, TestRetargetDoesNotGuessMissingStableRevision, TestRetargetKeepsUnmovedComponentStableKnown], kind: [canary_retarget_rollback_kind_test.go], replay: [stale-read-misses-close]}
     status: decided
   - state: Open
     event: spec.revision
@@ -62,7 +62,7 @@ cells:
     note: "the pinned plan continues; RolloutPlanDrift reads True with reason SpecNewerThanRun until the next open or an applied repin"
     invariants: [plan.executes.only.pinned]
     placement: unit
-    coverage: {perm: [], unit: [TestMidRunEditIsInertWithDrift], kind: []}
+    coverage: {perm: [], unit: [TestMidRunEditIsInertWithDrift], kind: [], replay: [repin-consumed-before-failed-flush]}
     status: decided
   - state: Open
     event: spec.planEdit
@@ -128,7 +128,7 @@ cells:
     guard: "every pinned member's current and target revisions equal its pinned revision with no Instance trailing, and every canary unit is done and reads Stable"
     note: "the close keeps a bounded record with the targets and per-group provenance; a member that converged while another still rolls keeps the run open"
     placement: unit
-    coverage: {perm: [], unit: [TestCompletedCloseKeepsBoundedRecord, TestCreationRunClosesWithoutCanaryState], kind: [rolloutpolicy_run_kind_test.go]}
+    coverage: {perm: [], unit: [TestCompletedCloseKeepsBoundedRecord, TestCreationRunClosesWithoutCanaryState], kind: [rolloutpolicy_run_kind_test.go], replay: [open-and-close]}
     status: decided
   - state: Open
     event: ir.converged
@@ -211,7 +211,7 @@ cells:
     outcome: DECIDE
     note: "a rollback that found no stable revision parks the unit with the rejected hash recorded and nothing draining; the run layer reads that record as a revert that never settles, so the run stays pinned indefinitely and neither a rolled-back nor a completed close can fire; only a retarget or a repin to the empty plan ends it. The owner must decide whether the run closes RolledBack on the park, closes under a new outcome, or stays pinned"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [rollback-finds-no-stable-revision]}
     status: review
   - state: Open
     event: canary.resumed
@@ -252,7 +252,7 @@ cells:
     to: RepinPending
     note: "the annotation is persisted metadata; the next pass consumes it before it reads freshness, retargets or closes"
     placement: unit
-    coverage: {perm: [], unit: [TestRepinCASAndClamp], kind: [rolloutpolicy_run_kind_test.go]}
+    coverage: {perm: [], unit: [TestRepinCASAndClamp], kind: [rolloutpolicy_run_kind_test.go], replay: [repin-consumed-before-failed-flush]}
     status: decided
   - state: Open
     event: verb.repin
@@ -276,7 +276,7 @@ cells:
     note: "a pass whose cached copy lacks the pin opens the same roll again under a new RunID and OpenedAt; at the flush the newer clock wins, so the persisted run is re-minted with a new identity while the canary unit, bound by an unchanged TargetID, is not reset. No rule says whether a re-open of an identical target set should keep the RunID; the owner must decide whether the open is idempotent on targets or the churn is acceptable"
     invariants: [pin.newer.wins]
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [stale-read-misses-open]}
     status: review
   - state: Open
     event: ctrl.staleRead
@@ -285,7 +285,7 @@ cells:
     note: "a cached copy that still shows the predecessor run pinned re-judges it against the live replicas, closes it again with a fresh ClosedAt and opens a successor; the preserve rule compares wall clocks, so this write replaces the newer live pin and overwrites the predecessor's recorded outcome with Superseded. The owner must decide whether the preserve rule should compare observations (RunID and targets) rather than clocks"
     invariants: [pin.newer.wins]
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [stale-read-misses-close]}
     status: review
   - state: Open
     event: ctrl.staleRead
@@ -294,7 +294,7 @@ cells:
     note: "a cached copy with the old plan reports RolloutPlanDrift True for one pass against the live render, and the pass's desired status lacks the repin's pre-step hold; the flush keeps the live pin by its newer PinnedAt but re-arms the hold on the legacy alias record only, so the per-unit record every reader uses can lose the hold. The owner must decide where the hold is re-armed"
     invariants: [pin.newer.wins]
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [stale-read-misses-repin]}
     status: review
   - state: Open
     event: ctrl.resync

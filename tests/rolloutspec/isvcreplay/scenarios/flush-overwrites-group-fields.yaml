@@ -1,0 +1,35 @@
+scenario: flush-overwrites-group-fields
+cells:
+  - coordination/Surging/ctrl.staleRead[phaseRegressed]/before
+  - coordination/Surging/flush.staleOverwrite/before
+  - coordination/Idle/member.targetChanged[first]/before
+intentional: >-
+  the pass after the group entered Surging reads a copy whose entry still
+  says Idle; it computes Surging again, sees a phase change it already
+  saw, re-fires the transition event, restamps the transition time to a
+  later instant, and the flush copies that entry over the live one with
+  no clock or equality check
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the group is first observed Idle
+  - tick: 2
+    note: the template edit lands; the group reads Surging and stamps its transition time
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: a minute later the pass reads the copy from before the Surging write; the merge sees Idle become Surging again
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[phaseRegressed]
+  - tick: 4
+    note: the next pass reads the restamped entry as the live one
+    events:
+      - ctrl.resync

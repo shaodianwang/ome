@@ -67,6 +67,10 @@ CELL_REF_ROOT = "pkg"
 # Where a coverage.replay name resolves to, and the kinds of coverage a
 # decided cell may carry.
 REPLAY_SCENARIO_DIR = "tests/rolloutspec/replay/scenarios"
+# The InferenceService pass has its own replay lane; a coverage.replay name
+# may resolve to a scenario of either.
+ISVC_REPLAY_SCENARIO_DIR = "tests/rolloutspec/isvcreplay/scenarios"
+REPLAY_SCENARIO_DIRS = (REPLAY_SCENARIO_DIR, ISVC_REPLAY_SCENARIO_DIR)
 COVERAGE_KINDS = ("unit", "perm", "kind", "replay")
 
 CELLS_COMMENT = re.compile(r"^\s*//\s*Cells:(.*)$")
@@ -109,8 +113,10 @@ def go_test_funcs(repo):
 
 def replay_scenarios(repo):
     """Collect the scenario names available to a coverage.replay entry."""
-    directory = Path(repo).joinpath(REPLAY_SCENARIO_DIR)
-    return {path.stem for path in directory.glob("*.yaml")}
+    names = set()
+    for directory in REPLAY_SCENARIO_DIRS:
+        names.update(path.stem for path in Path(repo).joinpath(directory).glob("*.yaml"))
+    return names
 
 
 def cell_refs(repo):
@@ -210,7 +216,7 @@ def check(grid, funcs, refs, scenarios=(), machine=None):
             if name not in scenarios:
                 problems.append(
                     f"{cell['id']}: coverage.replay names {name}, "
-                    f"which is no scenario under {REPLAY_SCENARIO_DIR}/"
+                    f"which is no scenario under {' or '.join(REPLAY_SCENARIO_DIRS)}"
                 )
     ids = {cell.get("id") for cell in grid}
     for path, lineno, cid in refs:

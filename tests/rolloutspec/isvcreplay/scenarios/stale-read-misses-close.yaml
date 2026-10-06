@@ -1,0 +1,46 @@
+scenario: stale-read-misses-close
+cells:
+  - run/Open/ctrl.staleRead[missesClose]/before
+  - run/Open/spec.revision[new]/before
+intentional: >-
+  a retarget closed the first run Superseded and opened a successor; the
+  next pass reads a copy that still shows the first run pinned, closes it
+  again with a later clock and opens another successor, and the flush
+  replaces the live successor pin and its recorded close with them
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service records no run
+  - tick: 2
+    note: the first template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the first run opens toward the second revision
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: a second template edit lands before anything rolled
+    events:
+      - clock.advance: 1m
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v3}
+  - tick: 5
+    note: the retarget closes the first run Superseded and opens the successor in one pass
+    events:
+      - ctrl.resync
+  - tick: 6
+    note: a minute later the pass reads the copy from before the retarget, re-closes the first run and mints a third run; its newer clock replaces the live successor
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[missesClose]
+  - tick: 7
+    note: the next pass reads the third run as the pinned one
+    events:
+      - ctrl.resync

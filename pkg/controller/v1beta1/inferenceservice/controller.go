@@ -872,7 +872,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// flushing it here those writes are dropped on every requeuing pass,
 	// which is the steady state during active rollouts.
 	if pendingRequeue.Requeue || pendingRequeue.RequeueAfter > 0 {
-		if err := r.flushStatusThenConsume(ctx, isvc, deploymentMode, canaryConsume, base); err != nil {
+		if err := r.FlushStatusThenConsume(ctx, isvc, deploymentMode, canaryConsume, base); err != nil {
 			r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
 			return reconcile.Result{}, err
 		}
@@ -1012,7 +1012,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return reconcile.Result{}, err
 	}
 
-	if err = r.flushStatusThenConsume(ctx, isvc, deploymentMode, canaryConsume, base); err != nil {
+	if err = r.FlushStatusThenConsume(ctx, isvc, deploymentMode, canaryConsume, base); err != nil {
 		// A terminal status conflict is benign — requeue and re-reconcile
 		// off fresh state instead of surfacing an ERROR-level failure.
 		if apierrors.IsConflict(err) {
@@ -1209,13 +1209,14 @@ func (r *InferenceServiceReconciler) clearRuntimeUnresolved(isvc *v1beta1.Infere
 	})
 }
 
-// flushStatusThenConsume writes the status, then removes the operator
+// FlushStatusThenConsume writes the status, then removes the operator
 // annotations whose effect that write carried. The order is the contract: a
 // verb is consumed only once the state it produced is durable, and each
 // applied verb leaves a record in status that keeps a still-visible
 // annotation inert, so a removal that fails here is retried by a later pass
-// rather than re-applied.
-func (r *InferenceServiceReconciler) flushStatusThenConsume(ctx context.Context, isvc *v1beta1.InferenceService, deploymentMode constants.DeploymentModeType, consume []string, base *canary.Base) error {
+// rather than re-applied. It is the pass's flush; the replay driver enters
+// it with the pass's own base and verbs.
+func (r *InferenceServiceReconciler) FlushStatusThenConsume(ctx context.Context, isvc *v1beta1.InferenceService, deploymentMode constants.DeploymentModeType, consume []string, base *canary.Base) error {
 	if err := r.updateStatus(isvc, deploymentMode, base); err != nil {
 		return err
 	}

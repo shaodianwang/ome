@@ -1,0 +1,48 @@
+scenario: open-and-close
+cells:
+  - run/NoRun/spec.revision[new]/before
+  - run/Open/ir.converged/before
+  - coordination/Idle/member.targetChanged[first]/before
+  - revision/Settled/replica.targetBumped/before
+  - revision/Behind/write.coordRolledOut/before
+intentional: >-
+  the plain walk every other scenario builds on: a template edit is first
+  read with the projection one generation behind, the next pass opens the
+  run on the live replica pair, the group surges and converges, and the run
+  closes Completed once the replica promotes its current revision
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service records no run and an idle group
+  - tick: 2
+    note: the template edit lands; the projection stamps the new generation after the run layer read the replica, so the open waits one pass
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the replica pair is fresh and diverged, so the run opens and the group reads Surging
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the new-revision pods exist but are not Ready; the rows still count on the old revision
+    events:
+      - member.surgePodCreated: {component: engine}
+  - tick: 5
+    note: every Instance stands Ready on the target and the old pods are gone; the replica has not promoted its current revision yet
+    events:
+      - member.readyOnTarget: {component: engine}
+      - member.oldPodsGone: {component: engine}
+  - tick: 6
+    note: the replica promotes its current revision; the group reads Idle and the run closes Completed
+    events:
+      - member.converged: {component: engine}
+  - tick: 7
+    note: a resync after the close changes nothing
+    events:
+      - ctrl.resync

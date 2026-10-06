@@ -656,7 +656,19 @@ const (
 	// per-Instance representation of an event's old and new objects, in
 	// either encoding, to tell that rows moved; no row is decoded or consumed.
 	storedRepresentationTransition = "watch predicate comparing the stored representation of an event's old and new objects; no row consumed"
+	// replicaControllerStandIn: the InferenceService replay driver publishes,
+	// onto its fake apiserver, the status the replica controller would have
+	// published, so the service's pass can be driven without that
+	// controller; a test-only package no binary links.
+	replicaControllerStandIn = "replay driver standing in for the replica controller; a test-only package no binary links"
 )
+
+// approvedStatusWriters are the InferenceReplica status writes outside the
+// single writer, keyed as the sweep prints a site, each with the reason it
+// stands: today the one stand-in for the replica controller itself.
+var approvedStatusWriters = map[string]string{
+	"pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/replay/members.go:driver.publish (Status().Update)": replicaControllerStandIn,
+}
 
 type accessCounts struct {
 	reads      int
@@ -749,6 +761,9 @@ func TestInferenceReplicaStatusReadInventory(t *testing.T) {
 	// Shared test fixtures: the builder writes dense rows into a status it
 	// constructs; nothing outside tests links it.
 	approve("pkg/controller/v1beta1/irstatus/irstatustest/fixtures.go", "LogicalStatus", accessCounts{writes: 1}, testFixtureBuilder, rows)
+	// The InferenceService replay driver builds the dense rows its replica
+	// stand-in publishes.
+	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/replay/members.go", "driver.publish", accessCounts{writes: 1}, replicaControllerStandIn, rows)
 	// Integration tests: specs consume decoded rows and install dense fixtures
 	// through the shared helper, so no spec reads the stored field directly.
 	approve("tests/integration/util/instancestatus.go", "InstallDenseInstanceStatuses", accessCounts{writes: 1}, integrationTestBoundary, rows, "InstanceStatusEncoding", "InstanceStatusColumns")
@@ -814,6 +829,7 @@ func TestInferenceReplicaFetchInventory(t *testing.T) {
 
 	// Replay harness pass-through reads.
 	approve("pkg/controller/v1beta1/workload/replay/driver.go", "driver.bumpGeneration", "Get", 1, passThroughSpecMetadata+" (replay owner generation bump)")
+	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/replay/members.go", "driver.replica", "Get", 1, replicaControllerStandIn+" (the live replica its publication, revisions and pods are built on)")
 
 	// ISVC-side raw accessors and their callers.
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector/irstatus_read.go", "componentIRAt", "Get", 1, passThroughTopLevelStatus+" (raw accessor behind ComponentIR and ComponentIRFor, for callers that inspect no rows)")
@@ -953,17 +969,28 @@ func assertInferenceReplicaStatusWritesUseSingleWriter(t *testing.T) {
 	t.Helper()
 	inv := loadStatusInventory(t)
 	var sites []string
+	seen := map[string]bool{}
 	inv.eachProductionFile(func(pkg *packages.Package, file *ast.File, relative string) {
 		for _, site := range collectInferenceReplicaStatusWrites(pkg, file, relative) {
 			if site.function == singleWriter && strings.HasSuffix(site.file, "inferencereplica/status_writer.go") {
 				continue
 			}
-			sites = append(sites, fmt.Sprintf("%s:%s (%s)", site.file, site.function, site.method))
+			key := fmt.Sprintf("%s:%s (%s)", site.file, site.function, site.method)
+			if _, approved := approvedStatusWriters[key]; approved {
+				seen[key] = true
+				continue
+			}
+			sites = append(sites, key)
 		}
 	})
 	sort.Strings(sites)
 	if len(sites) != 0 {
 		t.Fatalf("InferenceReplica status writes outside %s: %v", singleWriter, sites)
+	}
+	for key, reason := range approvedStatusWriters {
+		if !seen[key] {
+			t.Errorf("stale status writer approval for %s (%s)", key, reason)
+		}
 	}
 }
 

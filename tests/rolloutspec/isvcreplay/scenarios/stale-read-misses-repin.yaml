@@ -1,0 +1,64 @@
+scenario: stale-read-misses-repin
+cells:
+  - run/Open/ctrl.staleRead[missesRepin]/before
+  - canary/Serving/Manual/plan.repin[raise]/before
+  - canary/Serving/Manual/capacity.reached/before
+  - revision/Behind/write.canaryReady/before
+intentional: >-
+  a repin clamped a serving canary step onto a higher traffic weight and
+  armed the pre-step hold; the next pass reads a copy of the status from
+  before that flush while the verb's removal is already visible, reports
+  drift against the old plan for one pass, and the flush keeps the live
+  pin by its newer clock and the live record by its difference from the
+  base, so the hold stays on the per-unit record
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        canary:
+          steps:
+            - {capacity: "50%", traffic: 10, pause: {}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the unit is not armed and reads Stable
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens, the bind arms the unit at step 0, and the first step waits for canary capacity under the step's partition
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the staged Instance is Ready on the canary; the split is written at 10% and the manual pause holds the step
+    events:
+      - capacity.reached: {component: engine}
+  - tick: 5
+    note: the inline ladder is edited to raise the first step to 20%; the pinned plan continues and drift is reported
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[inlineBody]:
+          groups:
+            - components: [engine]
+              canary:
+                steps:
+                  - {capacity: "50%", traffic: 20, pause: {}}
+                  - {capacity: "100%", traffic: 100}
+  - tick: 6
+    note: the repin applies; the clamped step would raise traffic, so the pre-step hold arms and the boundary flush carries both
+    events:
+      - clock.advance: 1m
+      - verb.repin[matching]
+  - tick: 7
+    note: a minute later the pass reads the status from before the repin, with the verb already gone; drift reads True for this pass and the flush keeps the live pin and the live record
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[missesRepin]
+  - tick: 8
+    note: the next pass reads the repinned plan and the record still holding
+    events:
+      - ctrl.resync

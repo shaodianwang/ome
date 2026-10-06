@@ -92,7 +92,7 @@ cells:
     note: "the replica promotes its current revision once every row is on the target; BlueGreen, RollingUpdate and Independent read Idle with a CoordinationGroupCompleted event; Sequential hands off instead: Awaiting when the next member is not bumped or a soak runs (T-surging-seq-await), the next member's phase when it rolls and no soak holds"
     invariants: [phase.follows.members]
     placement: unit
-    coverage: {perm: [], unit: [TestComputeTransition_RollingUpdateIdle, TestComputeTransition_SequentialAwaitingNext, TestComputeTransition_SequentialNextStartsAfterPrevious], kind: [bluegreen_kind_test.go, sequential_kind_test.go]}
+    coverage: {perm: [], unit: [TestComputeTransition_RollingUpdateIdle, TestComputeTransition_SequentialAwaitingNext, TestComputeTransition_SequentialNextStartsAfterPrevious], kind: [bluegreen_kind_test.go, sequential_kind_test.go], replay: [sequential-handoff-on-stale-copy]}
     status: decided
   - state: Surging
     event: member.converged
@@ -276,14 +276,14 @@ cells:
     note: "the cached entry shows an older phase, so the merge sees a phase change, restamps lastTransitionTime to now, re-fires the transition event, the dwell metric and under Sequential restarts the state-side soak; the gate side keeps the replica's Ready transition time, so the two soak clocks disagree. The owner must decide which clock the soak reads and whether the transition time is preserved from the live object"
     invariants: [transition.time.marks.base.phase]
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [flush-overwrites-group-fields]}
     status: review
   - state: Surging
     event: flush.staleOverwrite
     outcome: DECIDE
     note: "the flush copies the pass's rolloutCoordination over the live object's with no clock and no equality check, so a pass that read a stale copy rolls the live phase, anchor and transition time back by one pass; the owner must decide whether the group fields get a preserve rule like the run pin and the canary record"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [flush-overwrites-group-fields]}
     status: review
   - state: Surging
     event: api.serviceWriteFailed

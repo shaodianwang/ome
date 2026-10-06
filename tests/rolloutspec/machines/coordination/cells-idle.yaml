@@ -37,7 +37,7 @@ cells:
     note: "BlueGreen and RollingUpdate read Surging until every rolling member has a new pod; Independent reads Shifting for the whole roll; Sequential names the first rolling member in Order on the composite phase, skipping idle members ahead of it"
     invariants: [phase.follows.members, one.rolls.at.a.time]
     placement: unit
-    coverage: {perm: [], unit: [TestComputeTransition_BlueGreenSurging, TestComputeTransition_RollingUpdateSurging, TestComputeTransition_IndependentInFlight, TestComputeTransition_SequentialActiveComponent, TestCheckSequentialGate_LaterOnlyBumpReleasesLaterComponent], kind: [bluegreen_kind_test.go, sequential_kind_test.go, sequential_later_only_bump_kind_test.go]}
+    coverage: {perm: [], unit: [TestComputeTransition_BlueGreenSurging, TestComputeTransition_RollingUpdateSurging, TestComputeTransition_IndependentInFlight, TestComputeTransition_SequentialActiveComponent, TestCheckSequentialGate_LaterOnlyBumpReleasesLaterComponent], kind: [bluegreen_kind_test.go, sequential_kind_test.go, sequential_later_only_bump_kind_test.go], replay: [flush-overwrites-group-fields, open-and-close]}
     status: decided
   - state: Idle
     event: member.targetChanged
@@ -481,7 +481,7 @@ cells:
     note: "two clocks measure one soak: the group's lastTransitionTime, which a fast previous roll or a stale read can leave at the pre-rollout Idle entry so the state side releases at once, and the previous member's Ready transition on the replica, which the gate uses; a member can be admitted by the gate while the group still reads Awaiting, or the reverse. The owner must decide the one clock, and whether the handoff instant is persisted on the group status"
     invariants: [transition.time.marks.base.phase]
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [sequential-handoff-on-stale-copy]}
     status: review
   - state: SeqAwaiting
     event: spec.pause
@@ -571,7 +571,7 @@ cells:
     note: "the cached entry shows an older phase, so the merge sees a phase change, restamps lastTransitionTime to now, re-fires the transition event, the dwell metric and under Sequential restarts the state-side soak; the gate side keeps the replica's Ready transition time, so the two soak clocks disagree. The owner must decide which clock the soak reads and whether the transition time is preserved from the live object"
     invariants: [transition.time.marks.base.phase]
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [sequential-handoff-on-stale-copy]}
     status: review
   - state: SeqAwaiting
     event: flush.staleOverwrite

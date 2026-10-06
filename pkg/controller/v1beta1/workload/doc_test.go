@@ -83,6 +83,12 @@ type allowedTransitionWrite struct {
 // an owned decision, never a second decision-maker.
 var transitionWriteAllowlist = []allowedTransitionWrite{
 	{
+		file: "inferenceservice/reconcilers/omenative/replay/members.go", fn: "applyPodStatus", field: "Phase", count: 1,
+		why: "the kubelet's phase on a pod the InferenceService replay driver renders for the replica " +
+			"controller it stands in for: a corev1.PodStatus field, not an Instance row's; the driver " +
+			"is a test-only package no binary links",
+	},
+	{
 		file: "workload/escalation/escalation.go", fn: "Run", field: "UpdateRevision", count: 1,
 		why: "defaults the pass's LOCAL ReconcileInput copy (pass-by-value) so the first-rollout " +
 			"disposition can resolve its RetryBlock target before the aggregator has stamped " +

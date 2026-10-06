@@ -1,0 +1,51 @@
+scenario: rollback-finds-no-stable-revision
+cells:
+  - canary/RollingBack/stable.crMissing/before
+  - canary/Serving/Manual/verb.rollback[stableServes]/before
+  - run/Open/canary.parked/before
+intentional: >-
+  the stable revision's ControllerRevision is no longer one the replica
+  controls when the operator rolls back; the executor records the
+  rejection and the dispatch, finding no retained revision to point the
+  replica at, parks the unit Failed with the stable revision missing and
+  spends the request; the run stays pinned on the park
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        canary:
+          steps:
+            - {capacity: "50%", traffic: 10, pause: {}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the unit reads Stable
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens and the unit arms at step 0
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the staged Instance is Ready; the split serves at 10% under the manual pause
+    events:
+      - capacity.reached: {component: engine}
+  - tick: 5
+    note: the stable revision's ControllerRevision passes to another controller while the held floor still runs it
+    events:
+      - clock.advance: 1m
+      - stable.crMissing: {component: engine, image: registry.example.com/runtime:v1}
+  - tick: 6
+    note: the operator rolls back; the executor rejects the canary and the dispatch parks the unit because no retained revision it controls carries the stable hash
+    events:
+      - verb.rollback[stableServes]
+  - tick: 7
+    note: the park holds; the run layer reads a revert that never settles and keeps the run pinned
+    events:
+      - clock.advance: 1m
+      - ctrl.resync

@@ -37,7 +37,7 @@ cells:
   - {state: Settled, event: canary.cutoverCleared, outcome: ignore, note: "the unit's identity drops; the record is unaffected", placement: unit, status: current}
   - {state: Settled, event: replica.currentPromoted, outcome: transition, to: Behind, note: "the replica promoted a revision the record does not name yet, after a roll or an in-place update; the next write catches the record up", placement: unit, status: current}
   - {state: Settled, event: replica.currentWithdrawn, outcome: transition, to: Ahead, note: "an Instance is off the recorded revision while current equals update: a rollback onto the last promoted revision is in flight and the record names a revision the fleet is leaving", placement: unit, status: current}
-  - {state: Settled, event: replica.targetBumped, outcome: ignore, note: "the record follows promotions, not targets; the run layer reads the bump", placement: unit, status: current}
+  - {state: Settled, event: replica.targetBumped, outcome: ignore, note: "the record follows promotions, not targets; the run layer reads the bump", placement: unit, coverage: {replay: [open-and-close]}, status: current}
   - {state: Settled, event: cr.collected, outcome: ignore, note: "the recorded revision is the replica's current one, a live name the sweep keeps; the record itself keeps nothing alive", invariants: [live.names.retained], placement: unit, status: current}
   - {state: Settled, event: cr.collision, outcome: ignore, note: "a new hash for the same template is a bump the record follows on promotion", placement: unit, status: current}
   - {state: Settled, event: scope.rotated, outcome: transition, to: Ahead, note: "the replica's hashes mint under a new scope; the record names a hash no retained ControllerRevision carries", placement: unit, status: current}
@@ -47,9 +47,9 @@ cells:
   - {state: Settled, event: read.staleCopy, variants: [coordinationOwned], outcome: DECIDE, note: "today: no guard covers coordination-owned fields; the pass writes its cached copy back over a newer live write. Question: should coordination-owned revision fields be guarded like canary-owned ones, or re-derived from the pods on every pass so a stale copy cannot stick?", placement: sim, status: current}
   - {state: Settled, event: read.statusTrails, outcome: defer, note: "readers wait for a fresh replica status", placement: unit, status: current}
   # --- Behind ------------------------------------------------------------------
-  - {state: Behind, event: write.coordRolledOut, outcome: transition, to: Settled, note: "exactly one revision has Ready pods: it is recorded and the prior latest is demoted to previous, since the pod view knows no superseded revision", placement: unit, status: current}
+  - {state: Behind, event: write.coordRolledOut, outcome: transition, to: Settled, note: "exactly one revision has Ready pods: it is recorded and the prior latest is demoted to previous, since the pod view knows no superseded revision", placement: unit, coverage: {replay: [open-and-close]}, status: current}
   - {state: Behind, event: write.coordReady, outcome: ignore, note: "latestReady already leads", placement: unit, status: current}
-  - {state: Behind, event: write.canaryReady, outcome: ignore, note: "latestReady already leads", placement: unit, status: current}
+  - {state: Behind, event: write.canaryReady, outcome: ignore, note: "latestReady already leads", placement: unit, coverage: {replay: [stale-read-misses-repin]}, status: current}
   - {state: Behind, event: write.canaryPromoted, outcome: transition, to: Settled, note: "the cutover records the target with the pre-canary stable as previous", placement: unit, status: current}
   - {state: Behind, event: write.canaryRolledBack, outcome: transition, to: Settled, note: "the revert completed: the replica is back on the recorded stable revision and the record is level again without changing", invariants: [previous.never.collapses], placement: unit, status: current}
   - {state: Behind, event: write.canarySettled, outcome: transition, to: Settled, note: "no ladder is active and the member settled on one revision", placement: unit, status: current}
