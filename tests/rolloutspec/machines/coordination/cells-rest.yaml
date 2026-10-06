@@ -255,7 +255,7 @@ cells:
     variants: [groupRemoved]
     windows: [boundary, after]
     outcome: ignore
-    note: "the entry is gone; a re-declared group starts Unobserved"
+    note: "the entry is gone; a redeclared group starts Unobserved"
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -574,7 +574,7 @@ cells:
     variants: [groupRemoved]
     windows: [boundary, after]
     outcome: ignore
-    note: "the entry is gone; a re-declared group starts Unobserved"
+    note: "the entry is gone; a redeclared group starts Unobserved"
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -877,7 +877,7 @@ cells:
     variants: [groupRemoved]
     windows: [boundary, after]
     outcome: ignore
-    note: "the entry is gone; a re-declared group starts Unobserved"
+    note: "the entry is gone; a redeclared group starts Unobserved"
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current
