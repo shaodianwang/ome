@@ -560,14 +560,24 @@ func applyPodWaiting(ctx context.Context, d *driver, ev TimelineEvent) (string, 
 			notReadySince = pod.CreationTimestamp.Time
 		}
 		setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, notReadySince)
-		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		waiting := corev1.ContainerStatus{
 			Name:  container,
 			Image: podImage(pod, container),
 			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
 				Reason:  ev.Variant,
 				Message: ev.Args.Message,
 			}},
-		}}
+		}
+		// The kubelet keeps a container's restart count and last termination
+		// through a waiting episode, so a runner that restarted before it
+		// parked still reads as restarted.
+		for i := range pod.Status.ContainerStatuses {
+			if cs := &pod.Status.ContainerStatuses[i]; cs.Name == container {
+				waiting.RestartCount = cs.RestartCount
+				waiting.LastTerminationState = cs.LastTerminationState
+			}
+		}
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{waiting}
 	})
 }
 

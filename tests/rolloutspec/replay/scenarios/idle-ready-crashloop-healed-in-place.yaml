@@ -1,0 +1,78 @@
+# A Ready Instance with no roll in flight crash-loops on its own revision
+# inside the crash window, under restart policy None, and the kubelet
+# brings the same pod back serving before the stuck-pod grace ever runs.
+# The loop counts one failed attempt on the running revision's ladder and
+# the row remembers it; nothing rebuilds a set that serves, so the pod's
+# in-place restart leaves the row's ReadySince where it was and the set
+# is read as a comeback: in rotation, unproven until it has held Ready
+# for the proven window since it re-entered Ready. The ladder's hold
+# names that wait, as the one in backoff and then, when the backoff
+# comes due with nothing to start, as the attempt the set proves itself
+# under; at the window the hold clears and the block its rows outlived
+# is pruned.
+scenario: idle-ready-crashloop-healed-in-place
+arrows:
+  - T-empty-create
+  - T-create-ready
+cells:
+  - instance/Ready/pod.containerRestart/before
+  - instance/Ready/pod.waiting[CrashLoopBackOff]/before
+  - instance/Ready/pod.ready[source]/before
+  - instance/Ready/timer.retryAt/before
+intentional: >-
+  a crash loop the kubelet heals in place costs the running revision one
+  attempt and clears once the healed set has held Ready for the proven
+  window, the stuck-pod grace here, measured from the pod's return to
+  Ready; the ladder's hold stands for exactly that window and names the
+  Instance proving itself, and the block is pruned at the window, not at
+  the moment the pod serves again
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    maxSurge: "1"
+    maxUnavailable: "0"
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1m, maxDelay: 30m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: cold start opens the attempt on the Component's current revision
+  - tick: 2
+    note: the pod becomes Ready and enters rotation, so the Instance promotes and ReadySince is stamped
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: twenty seconds of steady serving, inside the crash window
+    events:
+      - clock.advance: 20s
+  - tick: 4
+    note: the runner dies and the kubelet starts it again under the same pod; one restart is not a crash of the revision, so the ladder records nothing, and the set is merely unproven for the window
+    events:
+      - pod.containerRestart: {pod: {index: 0}, message: Error}
+  - tick: 5
+    note: the restarted runner dies again and the kubelet backs off, so the loop counts one failed attempt on the running revision's ladder and the row remembers the crash; the pod is younger than the grace, so no repair opens, and the hold names the ladder in backoff
+    events:
+      - pod.containersNotReady: {pod: {index: 0}}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0}, message: "back-off restarting failed container"}
+  - tick: 6
+    note: ten seconds later the kubelet starts the runner again and the same pod serves, its status carrying the restart that brought it back; the set is in rotation and unproven for the window, so the hold stands as it was
+    events:
+      - clock.advance: 10s
+      - pod.ready[source]: {pod: {index: 0}}
+      - pod.containerRestart: {pod: {index: 0}, message: Error}
+  - tick: 7
+    note: the backoff comes due with nothing to start and no rebuild owed to a serving set, so the hold names the attempt the healed set proves itself under, and the block is kept while it does
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 8
+    note: the healed set has held Ready for the window since it came back, so the hold clears and the block its rows outlived is pruned
+    events:
+      - clock.advance: 10s

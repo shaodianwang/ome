@@ -549,3 +549,61 @@ func TestApplyPartitionRewritesTheCanaryHold(t *testing.T) {
 		t.Fatal("a negative partition is refused")
 	}
 }
+
+// TestApplyPodWaitingKeepsTheRunnersRestartRecord pins what a waiting
+// episode leaves on a container that restarted before it: the kubelet
+// keeps the restart count and the last termination while the container
+// waits, which is the record the crash-loop ladder dates its count by.
+// A container that never restarted parks with an empty record.
+func TestApplyPodWaitingKeepsTheRunnersRestartRecord(t *testing.T) {
+	const ready = `
+scenario: ready-pods
+arrows: [T-empty-create]
+initial:
+  spec: {replicas: 2, image: registry.example.com/runtime:v1}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+    - {index: 1, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+`
+	ctx := context.Background()
+	d := mustDriver(t, ready)
+	restarted := &PodRef{Index: 0}
+	if _, err := applyContainerRestart(ctx, d, TimelineEvent{ID: "pod.containerRestart", Args: EventArgs{Pod: restarted, Message: "Error"}}); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	waiting := TimelineEvent{ID: "pod.waiting", Variant: "CrashLoopBackOff", Args: EventArgs{Pod: restarted, Message: "back-off restarting failed container"}}
+	if _, err := applyPodWaiting(ctx, d, waiting); err != nil {
+		t.Fatalf("waiting: %v", err)
+	}
+	pod, err := d.getPod(ctx, d.podName(*restarted))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pod.Status.ContainerStatuses) != 1 {
+		t.Fatalf("one container status expected, got %+v", pod.Status.ContainerStatuses)
+	}
+	cs := pod.Status.ContainerStatuses[0]
+	if cs.State.Waiting == nil || cs.State.Waiting.Reason != "CrashLoopBackOff" {
+		t.Fatalf("the container must wait in CrashLoopBackOff, got %+v", cs.State)
+	}
+	if cs.RestartCount != 1 || cs.LastTerminationState.Terminated == nil || cs.LastTerminationState.Terminated.Reason != "Error" {
+		t.Fatalf("the restart record must survive the waiting episode, got restartCount=%d lastState=%+v", cs.RestartCount, cs.LastTerminationState)
+	}
+	never := &PodRef{Index: 1}
+	waiting.Args.Pod = never
+	if _, err := applyPodWaiting(ctx, d, waiting); err != nil {
+		t.Fatalf("waiting: %v", err)
+	}
+	pod, err = d.getPod(ctx, d.podName(*never))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cs := pod.Status.ContainerStatuses[0]; cs.RestartCount != 0 || cs.LastTerminationState.Terminated != nil {
+		t.Fatalf("a container that never restarted parks with an empty record, got restartCount=%d lastState=%+v", cs.RestartCount, cs.LastTerminationState)
+	}
+}
