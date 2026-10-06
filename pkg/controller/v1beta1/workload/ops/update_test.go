@@ -3366,3 +3366,116 @@ func TestRetryBlockOfCrashedAttempt(t *testing.T) {
 		})
 	}
 }
+
+// darkRunnerPod is a promoted pod whose runner keeps running but has
+// failed readiness since the given instant: ContainersReady and PodReady
+// False from then, the serving gate written at promotion still True, no
+// restart on its record.
+func darkRunnerPod(name string, since time.Time) *corev1.Pod {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "prod"}}
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: constants.MainContainerName, Ready: false,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(since.Add(-time.Hour))}},
+	}}
+	pod.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionFalse, LastTransitionTime: metav1.NewTime(since)},
+		{Type: corev1.PodReady, Status: corev1.ConditionFalse, LastTransitionTime: metav1.NewTime(since)},
+		{Type: query.ServingConditionType, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(since.Add(-time.Hour))},
+	}
+	return pod
+}
+
+// rotationRunnerPod is a promoted pod in rotation: Ready with the serving
+// gate True.
+func rotationRunnerPod(name string) *corev1.Pod {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "prod"}}
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: constants.MainContainerName, Ready: true,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}}
+	pod.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+		{Type: query.ServingConditionType, Status: corev1.ConditionTrue},
+	}
+	return pod
+}
+
+// TestRolledInstanceDark_ShortfallOfDarkPodsAloneIsNotTheRollsOpenWork pins
+// the reading that frees the roll from an Instance it moved onto the
+// target whose promoted pod served and then failed readiness for the
+// stuck-pod grace: nothing the pod does lifts the shortfall, so the
+// Instance is dark for the roll and holds no slot. Inside the grace the
+// Instance still holds its slot and the reading says how long until it
+// reads dark. With no grace configured, with a runner restarted since
+// Ready (the ladder's shape), with a pod missing, terminal or never
+// promoted, off the target or mid-update, the Instance is not dark. A
+// gang reads every member: a dark worker beside a serving leader is dark,
+// a member inside the grace beside one past it is not yet.
+//
+// Cells: instance/Ready/pod.runningNotReady[source]/after@T-ready-surge, instance/Ready/pod.runningNotReady[source]/after@T-ready-recreate, instance/Ready/pod.runningNotReady[source]/after@T-ready-inplace, instance/Ready/gate.deny[Budget]/before
+func TestRolledInstanceDark_ShortfallOfDarkPodsAloneIsNotTheRollsOpenWork(t *testing.T) {
+	const target = "llama-70b-engine-v2hash"
+	const grace = time.Minute
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	readySince := metav1.NewTime(now.Add(-time.Hour))
+	row := func(phase workload.InstancePhase, rev string) *workload.InstanceStatus {
+		return &workload.InstanceStatus{Index: 0, Phase: phase, RunningRevision: rev, ReadySince: &readySince}
+	}
+	dark := func(name string) *corev1.Pod { return darkRunnerPod(name, now.Add(-2*grace)) }
+	inside := func(name string) *corev1.Pod { return darkRunnerPod(name, now.Add(-grace/4)) }
+	never := dark("llama-70b-engine-0-0")
+	never.Status.Conditions = never.Status.Conditions[:2]
+	failed := dark("llama-70b-engine-0-0")
+	failed.Status.Phase = corev1.PodFailed
+	cases := []struct {
+		name    string
+		row     *workload.InstanceStatus
+		pods    []*corev1.Pod
+		desired int32
+		grace   time.Duration
+		dark    bool
+		wait    time.Duration
+	}{
+		{name: "unready past the grace with no restart since Ready", row: row(workload.InstancePhaseReady, target),
+			pods: []*corev1.Pod{dark("llama-70b-engine-0-0")}, desired: 1, grace: grace, dark: true},
+		{name: "unready inside the grace", row: row(workload.InstancePhaseReady, target),
+			pods: []*corev1.Pod{inside("llama-70b-engine-0-0")}, desired: 1, grace: grace, wait: 3 * grace / 4},
+		{name: "no grace configured", row: row(workload.InstancePhaseReady, target),
+			pods: []*corev1.Pod{dark("llama-70b-engine-0-0")}, desired: 1},
+		{name: "restarted since Ready and down", row: row(workload.InstancePhaseReady, target),
+			pods: []*corev1.Pod{restartedRunnerPod(readySince.Time, now.Add(-2*grace), false, true)}, desired: 1, grace: grace},
+		{name: "a pod short of the set", row: row(workload.InstancePhaseReady, target),
+			pods: []*corev1.Pod{dark("llama-70b-engine-0-0")}, desired: 2, grace: grace},
+		{name: "in rotation", row: row(workload.InstancePhaseReady, target),
+			pods: []*corev1.Pod{rotationRunnerPod("llama-70b-engine-0-0")}, desired: 1, grace: grace},
+		{name: "never promoted", row: row(workload.InstancePhaseReady, target),
+			pods: []*corev1.Pod{never}, desired: 1, grace: grace},
+		{name: "terminal", row: row(workload.InstancePhaseReady, target),
+			pods: []*corev1.Pod{failed}, desired: 1, grace: grace},
+		{name: "off the target", row: row(workload.InstancePhaseReady, "llama-70b-engine-v1hash"),
+			pods: []*corev1.Pod{dark("llama-70b-engine-0-0")}, desired: 1, grace: grace},
+		{name: "mid-update", row: row(workload.InstancePhaseUpdating, target),
+			pods: []*corev1.Pod{dark("llama-70b-engine-0-0")}, desired: 1, grace: grace},
+		{name: "gang: worker dark beside a serving leader", row: row(workload.InstancePhaseReady, target),
+			pods: []*corev1.Pod{rotationRunnerPod("llama-70b-engine-0-0-leader"), dark("llama-70b-engine-0-0-worker")}, desired: 2, grace: grace, dark: true},
+		{name: "gang: leader dark beside a worker never promoted", row: row(workload.InstancePhaseReady, target),
+			pods: []*corev1.Pod{dark("llama-70b-engine-0-0-leader"), never}, desired: 2, grace: grace},
+		{name: "gang: one member past the grace, one inside it", row: row(workload.InstancePhaseReady, target),
+			pods: []*corev1.Pod{dark("llama-70b-engine-0-0-leader"), inside("llama-70b-engine-0-0-worker")}, desired: 2, grace: grace, wait: 3 * grace / 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dark, wait := RolledInstanceDark(tc.row, target, time.Time{}, tc.pods, tc.desired, int32(grace/time.Second), tc.grace, now)
+			if dark != tc.dark || wait != tc.wait {
+				t.Fatalf("RolledInstanceDark = (%v, %s), want (%v, %s)", dark, wait, tc.dark, tc.wait)
+			}
+			notServing, _, _ := RolledInstanceNotServing(tc.row, target, time.Time{}, tc.pods, tc.desired, int32(grace/time.Second), now)
+			if dark && !notServing {
+				t.Fatal("a dark Instance is short of serving by the strict bar; the dark reading is the exception the roll takes")
+			}
+		})
+	}
+}

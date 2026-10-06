@@ -15,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
@@ -972,7 +973,10 @@ func RebuiltAfterFailure(pod *corev1.Pod, failure *workload.InstanceTermination,
 // a superseded revision never holds the new roll, so a corrected push
 // lands as a fresh roll. A pod that never restarted since Ready and
 // answers no such failure is read off its serving state alone:
-// minReadySeconds already paced its promotion. A container that restarted
+// minReadySeconds already paced its promotion. This is the strict bar
+// the RetryBlock prune reads; the roll's selection takes one exception
+// to it, an Instance short of serving by dark pods alone
+// (RolledInstanceDark). A container that restarted
 // more than once since Ready (RunnerRestartedAgainSinceReady) is proven
 // the same way: the anchor moves only on an entry into Ready, so a pod
 // that serves on after its restarts is read off its current run, and a
@@ -1043,6 +1047,48 @@ func rolledSetPods(target string, pods []*corev1.Pod) []*corev1.Pod {
 		own = append(own, pod)
 	}
 	return own
+}
+
+// RolledInstanceDark reports whether an Instance the roll already moved
+// onto target is short of serving by dark pods alone: promoted pods that
+// run, served and have failed readiness for the stuck-pod grace, none
+// restarted since Ready (the ladder's shape, RolledInstanceCrashed), none
+// missing, terminal or still coming up. Nothing such a pod does lifts the
+// shortfall and no policy rebuilds it, so the Instance is not the roll's
+// open work: it holds no slot in either arm's budget and opens no floor
+// hold, as a dark Instance off the target holds none. The duration is how
+// long until a pod unready inside the grace reads dark, for the pass to
+// wake on; zero otherwise. No grace configured means no pod is ever dark.
+func RolledInstanceDark(row *workload.InstanceStatus, target string, revisionBorn time.Time, pods []*corev1.Pod, desired, window int32, grace time.Duration, now time.Time) (bool, time.Duration) {
+	if row == nil || target == "" || row.RunningRevision != target || grace <= 0 {
+		return false, 0
+	}
+	if workload.UpdateContinuation(row) || isMigrateOwnedStatus(row) {
+		return false, 0
+	}
+	if RolledInstanceCrashed(row, target, revisionBorn, pods, window) {
+		return false, 0
+	}
+	own := rolledSetPods(target, pods)
+	if int32(len(own)) < desired {
+		return false, 0
+	}
+	dark, wait := false, time.Duration(0)
+	for _, pod := range own {
+		switch {
+		case podreadiness.ReadyAndServing(pod):
+		case evidence.PodUnreadyPastGrace(pod, now, grace):
+			dark = true
+		case evidence.UnreadyGraceLeft(pod, now, grace) > 0:
+			wait = max(wait, evidence.UnreadyGraceLeft(pod, now, grace))
+		default:
+			return false, 0
+		}
+	}
+	if wait > 0 {
+		return false, wait
+	}
+	return dark, 0
 }
 
 // RolledInstanceCrashed reports whether an Instance the roll moved onto

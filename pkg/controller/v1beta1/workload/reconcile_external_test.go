@@ -15,6 +15,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -12148,6 +12149,142 @@ func TestConvergedSubject_HeldLadderOnItsRevisionIsReportedWithNothingToRun(t *t
 		if !h.settledOn(h.revV1, replicas) {
 			h.dumpState("moved")
 			t.Fatalf("pass %d moved a settled Instance under a Held ladder with nothing to run", i+1)
+		}
+	}
+}
+
+// darkRollShapes are the shapes a roll over a dark Instance is driven
+// under: each drain-first arm under its unavailability budget and the
+// surge arm under its floor, standalone and listed in a rollout group
+// whose gate counts surges alone or waives an in-place start.
+var darkRollShapes = []struct {
+	name           string
+	strategy       workloadtypes.UpdateStrategyType
+	surge, unavail int32
+	gated          bool
+}{
+	{"surge standalone", workloadtypes.UpdateStrategySurgeThenDrain, 1, 0, false},
+	{"surge rolling group", workloadtypes.UpdateStrategySurgeThenDrain, 1, 0, true},
+	{"recreate standalone", workloadtypes.UpdateStrategyRecreatePod, 0, 1, false},
+	{"in-place standalone", workloadtypes.UpdateStrategyInPlaceIfPossible, 0, 1, false},
+	{"in-place rolling group", workloadtypes.UpdateStrategyInPlaceIfPossible, 0, 1, true},
+}
+
+// rollbackHooks are the moments of a roll a rollback is started at: the
+// first pod of the new revision alive, and the roll's last step, every
+// Instance but one landed on it.
+var rollbackHooks = []struct {
+	name    string
+	reached func(h *recoveryHarness, replicas int32) bool
+}{
+	{"rotating", func(h *recoveryHarness, _ int32) bool { return h.livePodOnImage(fixedImage) }},
+	{"last", func(h *recoveryHarness, replicas int32) bool { return int32(len(h.landedOn(h.revFixed))) >= replicas-1 }},
+}
+
+// keepReadinessCause re-arms the readiness fault on the Instance's pods
+// each time a fresh set of them serves at rest: the cause outlives the
+// pod it was set in, as a fault in the Instance's own configuration does.
+func (h *recoveryHarness) keepReadinessCause(idx int32) {
+	row := h.instance(idx)
+	if row == nil || row.Phase != workloadtypes.InstancePhaseReady || row.Operation != nil {
+		return
+	}
+	for _, pod := range h.podsOf(idx) {
+		if podConditionTrue(pod, corev1.PodReady) {
+			h.readinessFails[pod.UID] = true
+		}
+	}
+}
+
+// unreadyInsideGraceAt reports whether a pod of the Instance had, at the
+// given instant, failed readiness for less than the stuck-pod grace: out
+// of rotation, not yet dark.
+func (h *recoveryHarness) unreadyInsideGraceAt(idx int32, at time.Time) bool {
+	for _, pod := range h.podsOf(idx) {
+		if evidence.UnreadyGraceLeft(pod, at, h.stuckGrace) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// TestReconcile_RollOverADarkInstanceOnTheTarget_ReachesItsEndAndTheRollbackLands
+// is the closed-loop story of a push over an Instance whose readiness
+// cause outlives its pods. Four Instances; the highest one's promoted pod
+// keeps running and fails readiness, and every fresh set of that Instance
+// serves and then fails the same way. Once dark the Instance rolls first
+// at no cost in capacity; on the target its new set goes dark again, and
+// from then on it holds no slot in the roll's budget and opens no floor
+// hold: a hold may name it only while its pod is inside the grace, and
+// the roll reaches its end past it, the first pod of the new revision and
+// then every Instance but one landed. A rollback started at either moment
+// lands: every Instance settles Ready on the starting revision with no
+// operation, no pod of the new revision remains, the peers serve, and the
+// victim's row stays Ready with its serving and ready counts below its
+// pod count while its cause stays. No repair opens under either restart
+// policy, and the capacity floor the fault lowered holds throughout.
+//
+// Cells: instance/Ready/pod.runningNotReady[source]/after@T-ready-surge, instance/Ready/pod.runningNotReady[source]/after@T-ready-recreate, instance/Ready/pod.runningNotReady[source]/after@T-ready-inplace, instance/Ready/pod.runningNotReady[source]/after@T-ready-rollback-surge, instance/Ready/pod.runningNotReady[source]/after@T-ready-rollback-recreate, instance/Ready/pod.runningNotReady[source]/after@T-ready-rollback-inplace, instance/Ready/pod.runningNotReady[source]/boundary@T-ready-surge, instance/Ready/pod.runningNotReady[source]/boundary@T-ready-recreate, instance/Ready/pod.runningNotReady[source]/boundary@T-ready-inplace, instance/Ready/gate.deny[Budget]/before, instance/Update/Surge/gate.deny[Budget]/before, instance/Update/Surge/spec.revision/before, instance/Ready/spec.revision/before
+func TestReconcile_RollOverADarkInstanceOnTheTarget_ReachesItsEndAndTheRollbackLands(t *testing.T) {
+	const replicas = 4
+	for _, policy := range unreadyRollPolicies {
+		for _, sc := range darkRollShapes {
+			for _, hook := range rollbackHooks {
+				t.Run(string(policy)+"/"+sc.name+"/"+hook.name, func(t *testing.T) {
+					h, victim := unreadyVictimHarness(t, policy, sc.strategy, sc.surge, sc.unavail, replicas)
+					if sc.gated {
+						consults := 0
+						h.gate = rollingGroupGate(h, replicas, sc.surge, sc.unavail, &consults)
+					}
+					h.clk.Step(h.stuckGrace)
+					h.events = nil
+					floor := int32(replicas-1) - sc.unavail
+					// A step runs its pass and then moves the clock, so the
+					// verdict it leaves was read at the clock the previous
+					// check saw.
+					passAt := h.clk.Now()
+					invariant := func() {
+						readAt := passAt
+						passAt = h.clk.Now()
+						h.keepReadinessCause(victim)
+						if h.repairInFlight() || h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+							h.dumpState("repair")
+							t.Fatalf("a repair opened on the dark Instance: %v", h.events)
+						}
+						if n := h.servingInstances(); n < floor {
+							h.dumpState("floor")
+							t.Fatalf("%d Instances in rotation, floor %d", n, floor)
+						}
+						if holdNamesInstance(h.verdict, victim) && !h.unreadyInsideGraceAt(victim, readAt) {
+							h.dumpState("held on the dark Instance")
+							t.Fatalf("the roll is held on the dark Instance %d: %q", victim, h.verdict.Reason)
+						}
+					}
+					h.setTarget(h.revFixed, fixedImage)
+					if !h.runWithInvariant(120, func() bool { return hook.reached(h, replicas) }, invariant) {
+						h.dumpState("roll")
+						t.Fatalf("the roll never reached its %s step; last hold %+v", hook.name, h.lastHold())
+					}
+
+					h.setTarget(h.revV1, goodImage)
+					landed := func() bool {
+						row := h.instance(victim)
+						return h.settledOn(h.revV1, replicas) && row != nil &&
+							row.ServingPodCount < row.PodCount && row.ReadyPodCount < row.PodCount
+					}
+					if !h.runWithInvariant(120, landed, invariant) {
+						h.dumpState("after the rollback")
+						t.Fatalf("the rollback did not settle on %s with the victim's row reporting its loss; victim = %+v", h.revV1.Name, h.instance(victim))
+					}
+					if h.livePodOnImage(fixedImage) {
+						t.Fatalf("a pod of the rolled-back revision is still alive after the rollback settled")
+					}
+					if n := h.servingInstances(); n != replicas-1 || h.instanceServes(victim) {
+						h.dumpState("after the rollback")
+						t.Fatalf("%d Instances serve after the rollback, want %d with the victim out of rotation", n, replicas-1)
+					}
+				})
+			}
 		}
 	}
 }

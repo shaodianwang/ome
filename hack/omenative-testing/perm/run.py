@@ -4105,7 +4105,10 @@ def _rollback_fault_rows(items, N, configured, bumped, old_hashes, kept):
     """The controller's view after a rollback beside a break: without a kept
     cause the plain rollback rule; with one, every row but the kept victim's
     Ready with no open operation, its Component's counters short by that
-    one row, and the victim's row reporting a phase other than Ready."""
+    one row, and the victim's row reporting its loss the way the idle
+    readiness check reads it (_row_serving_short): a phase other than
+    Ready, or Ready with fewer serving pods than pods, the row a readiness
+    loss leaves behind."""
     if not kept:
         return _rollback_ir_settled(items, N, configured, bumped, old_hashes)
     kcomp, kinst = kept
@@ -4132,13 +4135,15 @@ def _rollback_fault_rows(items, N, configured, bumped, old_hashes, kept):
             return False, f"{kcomp}/{row.get('index', '?')}: Instance is not settled"
     if victim is None:
         return False, f"{kcomp}: no row at the kept victim's index {kinst}"
-    if victim.get("phase") == "Ready":
-        return False, f"{kcomp}/{kinst}: the kept victim's row reads Ready while its cause stays"
+    served = f"{victim.get('servingPodCount', 0)}/{victim.get('podCount', 0)}"
+    if not _row_serving_short(victim):
+        return False, (f"{kcomp}/{kinst}: the kept victim's row reads Ready and claims every pod serving "
+                       f"({served}) while its cause stays")
     if kcomp in bumped:
         cur = _revision_hash(st.get("currentRevision"))
         if cur not in (old_hashes or set()):
             return False, f"{kcomp}: currentRevision {cur or '(none)'} is not the starting revision"
-    return True, f"settled with the kept victim's row at {victim.get('phase')}"
+    return True, f"settled with the kept victim's row at {victim.get('phase')}, serving {served}"
 
 
 def _rollback_victim_index(chain, pod_state, comp, old):

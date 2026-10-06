@@ -3047,3 +3047,97 @@ func TestPlan_Update_InstanceOutOfRotationKeepsThePartition(t *testing.T) {
 		}
 	}
 }
+
+// TestPlan_Update_DarkInstanceOnTheTargetHoldsNoSlot: an Instance the roll
+// already moved onto the target whose promoted pod served and then failed
+// readiness for the stuck-pod grace is not among the rolled Instances the
+// roll waits on: it holds no slot in either arm's budget and no floor
+// stands on its account, so the roll's next fresh start is selected with
+// nothing named against it, under a drain-first and a surge strategy
+// alike. Inside the grace the Instance is listed, and the pass wakes for
+// the grace left rather than for the next tick.
+//
+// Cells: instance/Ready/pod.runningNotReady[source]/after@T-ready-surge, instance/Ready/pod.runningNotReady[source]/after@T-ready-recreate, instance/Ready/pod.runningNotReady[source]/after@T-ready-inplace, instance/Ready/gate.deny[Budget]/before
+func TestPlan_Update_DarkInstanceOnTheTargetHoldsNoSlot(t *testing.T) {
+	target := updateTarget()
+	const grace = time.Minute
+	strategies := []struct {
+		name           string
+		strategy       types.UpdateStrategyType
+		surge, unavail int
+	}{
+		{"recreate", types.UpdateStrategyRecreatePod, 0, 1},
+		{"in-place", types.UpdateStrategyInPlaceIfPossible, 0, 1},
+		{"surge", types.UpdateStrategySurgeThenDrain, 1, 0},
+	}
+	windows := []struct {
+		name       string
+		unreadyFor time.Duration
+		listed     bool
+	}{
+		{"past the grace", 2 * grace, false},
+		{"inside the grace", grace / 4, true},
+	}
+	for _, sc := range strategies {
+		for _, tc := range windows {
+			t.Run(sc.name+"/"+tc.name, func(t *testing.T) {
+				in := minimalInput(t)
+				forbidMutations(t, &in)
+				in.StuckPodGrace = grace
+				wake := &types.PassWake{}
+				in.PassWake = wake
+				in.DesiredSpec.Replicas = 2
+				readySince := metav1.NewTime(time.Now().Add(-time.Hour))
+				in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+					{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: 1, ServingPodCount: 0, RunningRevision: target.Name, ReadySince: &readySince},
+					{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: 1, ServingPodCount: 1, RunningRevision: crashLoopRepairRevision},
+				}
+				plan := types.ComponentPlan{
+					Component: types.ComponentEngine,
+					Replicas:  2,
+					UpdateStrategy: types.UpdateStrategy{
+						Type:          sc.strategy,
+						RollingUpdate: &types.RollingUpdate{MaxSurge: intOrStringInt(sc.surge), MaxUnavailable: intOrStringInt(sc.unavail)},
+					},
+					Instances: []types.InstancePlan{
+						{Index: 0, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+						{Index: 1, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+					},
+				}
+				dark := unreadyEnginePod(0, tc.unreadyFor)
+				dark.Labels[query.LabelRevisionHash] = query.RevisionFromName(target.Name).Hash()
+				// The running revision's template differs from the desired one
+				// by its image alone, the diff an in-place strategy keeps in place.
+				running := in.DesiredSpec.PodSpec.DeepCopy()
+				running.Containers[0].Image = "test:v0"
+				d := planTargetOrFail(t, in, plan, target, planSnapshotWithRevisions(in,
+					map[int32][]*corev1.Pod{0: {dark}, 1: {servingEnginePod(1)}}, map[string]*corev1.PodSpec{crashLoopRepairRevision: running}))
+				ua := findAction(d, workload.ActionUpdate)
+				if ua == nil {
+					t.Fatalf("the roll must select the fresh start on Instance 1; actions = %v", actionKinds(d))
+				}
+				if len(ua.Update.Items) != 1 || ua.Update.Items[0].Instance.Index != 1 || !ua.Update.Items[0].StartingFresh {
+					t.Fatalf("items = %+v, want the one fresh start on Instance 1", ua.Update.Items)
+				}
+				if tc.listed {
+					if len(ua.Update.RolledNotServing) != 1 || ua.Update.RolledNotServing[0] != 0 {
+						t.Fatalf("rolledNotServing = %v, want Instance 0 while its pod is inside the grace", ua.Update.RolledNotServing)
+					}
+					if left := wake.Pending(); left <= 0 || left > grace-tc.unreadyFor {
+						t.Fatalf("wake = %s, want the grace left (at most %s)", left, grace-tc.unreadyFor)
+					}
+					return
+				}
+				if len(ua.Update.RolledNotServing) != 0 {
+					t.Fatalf("rolledNotServing = %v, want none: a dark Instance on the target holds no slot", ua.Update.RolledNotServing)
+				}
+				if d.StandingHold != nil {
+					t.Fatalf("no hold stands on a dark Instance, got %+v", d.StandingHold)
+				}
+				if left := wake.Pending(); left != 0 {
+					t.Fatalf("no wake is owed for a dark Instance; got %s", left)
+				}
+			})
+		}
+	}
+}

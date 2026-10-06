@@ -10567,9 +10567,21 @@ class RollbackUnderBreakTest(unittest.TestCase):
         ok, why = run._rollback_fault_rows(items, N, {"engine"}, {"engine"}, old, ("engine", "1"))
         self.assertTrue(ok, why)
         self.assertIn("Failed", why)
-        ok, why = run._rollback_fault_rows([inference_replica("engine", 2)], N, {"engine"}, {"engine"}, old, ("engine", "1"))
+        # A readiness loss leaves the victim's row Ready; its serving count
+        # below its pod count is the signal the idle readiness check reads.
+        items = [inference_replica("engine", 2)]
+        rows = items[0]["status"]["instanceStatuses"]
+        for row in rows:
+            row.update(podCount=1, readyPodCount=1, servingPodCount=1)
+        rows[1].update(readyPodCount=0, servingPodCount=0)
+        items[0]["status"]["readyReplicas"] = items[0]["status"]["servingReplicas"] = 1
+        ok, why = run._rollback_fault_rows(items, N, {"engine"}, {"engine"}, old, ("engine", "1"))
+        self.assertTrue(ok, why)
+        self.assertIn("Ready, serving 0/1", why)
+        rows[1].update(readyPodCount=1, servingPodCount=1)
+        ok, why = run._rollback_fault_rows(items, N, {"engine"}, {"engine"}, old, ("engine", "1"))
         self.assertFalse(ok)
-        self.assertIn("reads Ready while its cause stays", why)
+        self.assertIn("claims every pod serving", why)
         ok, why = run._rollback_fault_rows([inference_replica("engine", 2)], N, {"engine"}, {"engine"}, old, None)
         self.assertTrue(ok, why)
         items = [inference_replica("engine", 2, current="revision-b", update="revision-b")]

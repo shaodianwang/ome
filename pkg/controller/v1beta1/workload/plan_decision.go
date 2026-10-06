@@ -756,19 +756,31 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 			continue
 		}
 		if notServing, wait, why := workloadops.RolledInstanceNotServing(input.ObservedState.Instance(inst.Index), target.Name, target.CreationTimestamp.Time, updateByInstance[inst.Index], inst.TotalPods(), provenWindow, input.Now()); notServing {
-			selection.RolledNotServing = append(selection.RolledNotServing, inst.Index)
-			if workloadops.RolledInstanceCrashed(input.ObservedState.Instance(inst.Index), target.Name, target.CreationTimestamp.Time, updateByInstance[inst.Index], provenWindow) {
-				selection.CrashedNotServing = append(selection.CrashedNotServing, inst.Index)
-				if !workloadops.RolledSetInRotation(target.Name, updateByInstance[inst.Index], inst.TotalPods()) {
-					selection.CrashedOutOfRotation = append(selection.CrashedOutOfRotation, inst.Index)
+			// A shortfall of dark pods alone is not the roll's open work:
+			// nothing those pods do lifts it, so the Instance holds no slot.
+			dark, graceLeft := workloadops.RolledInstanceDark(input.ObservedState.Instance(inst.Index), target.Name, target.CreationTimestamp.Time, updateByInstance[inst.Index], inst.TotalPods(), provenWindow, input.StuckPodGrace, input.Now())
+			if dark {
+				logf.FromContext(ctx).V(1).Info("rolled Instance dark: not the roll's open work",
+					"component", plan.Component, "instance", inst.Index, "target", target.Name, "reason", why)
+			} else {
+				selection.RolledNotServing = append(selection.RolledNotServing, inst.Index)
+				if workloadops.RolledInstanceCrashed(input.ObservedState.Instance(inst.Index), target.Name, target.CreationTimestamp.Time, updateByInstance[inst.Index], provenWindow) {
+					selection.CrashedNotServing = append(selection.CrashedNotServing, inst.Index)
+					if !workloadops.RolledSetInRotation(target.Name, updateByInstance[inst.Index], inst.TotalPods()) {
+						selection.CrashedOutOfRotation = append(selection.CrashedOutOfRotation, inst.Index)
+					}
 				}
-			}
-			logf.FromContext(ctx).V(1).Info("rolled Instance not serving",
-				"component", plan.Component, "instance", inst.Index, "target", target.Name, "reason", why, "wait", wait)
-			// A pod Ready again inside its window raises no watch event
-			// when the window elapses; the pass comes back for it.
-			if wait > 0 {
-				input.PassWake.Observe(wait)
+				logf.FromContext(ctx).V(1).Info("rolled Instance not serving",
+					"component", plan.Component, "instance", inst.Index, "target", target.Name, "reason", why, "wait", wait, "graceLeft", graceLeft)
+				// Neither a pod Ready again inside its window nor one unready
+				// inside its grace raises a watch event when the window or
+				// the grace elapses; the pass comes back for it.
+				if wait > 0 {
+					input.PassWake.Observe(wait)
+				}
+				if graceLeft > 0 {
+					input.PassWake.Observe(graceLeft)
+				}
 			}
 		}
 		decision := workloadops.EvaluateUpdateTrigger(input, inst, target, updateByInstance[inst.Index])

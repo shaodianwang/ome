@@ -102,11 +102,11 @@ cells:
     event: gate.deny
     variants: [Budget]
     outcome: defer
-    note: "the per-Component floor withholds the drain: while the Instances already on the target revision that do not serve it - promoted Instances whose pods crash-loop or whose runner restarted since Ready - exceed the unavailability budget, the Component is below its floor and no source leaves rotation, single-pod or gang. The replacement keeps serving beside its source at Step=Surge, the Budget hold names those Instances and the revision, and the source leaves rotation on the first pass the floor holds again; a replacement that then crash-loops itself is disposed on the ladder like any failed attempt. The floor is read where the pairing drain gate is, at Step=Surge only"
+    note: "the per-Component floor withholds the drain: while the Instances already on the target revision that do not serve it - promoted Instances whose pods crash-loop or whose runner restarted since Ready - exceed the unavailability budget, the Component is below its floor and no source leaves rotation, single-pod or gang. The replacement keeps serving beside its source at Step=Surge, the Budget hold names those Instances and the revision, and the source leaves rotation on the first pass the floor holds again; a replacement that then crash-loops itself is disposed on the ladder like any failed attempt. The floor is read where the pairing drain gate is, at Step=Surge only. An Instance on the target short of serving by dark pods alone - promoted pods that served and have failed readiness for the stuck-pod grace, none restarted since Ready - is not counted toward the floor: nothing those pods do lifts the shortfall and no policy rebuilds them, so the source leaves rotation past it (ops/update.go RolledInstanceDark); inside the grace it is counted and the pass wakes for the grace left"
     placement: unit
     coverage:
-      perm: []
-      unit: [TestCrashAfterPromotion_RollHoldsAtTheBudget, TestReconcile_HealedRunnerStopsHoldingTheFloor, TestRunnerKilledTwiceAfterPromotion_ServesTheWindowAndTheRollResumes]
+      perm: [p5959, p5961, p5965]
+      unit: [TestCrashAfterPromotion_RollHoldsAtTheBudget, TestReconcile_HealedRunnerStopsHoldingTheFloor, TestRunnerKilledTwiceAfterPromotion_ServesTheWindowAndTheRollResumes, TestReconcile_DarkRolledInstanceHoldsNoFloor, TestReconcile_RollOverADarkInstanceOnTheTarget_ReachesItsEndAndTheRollbackLands]
       kind: []
     status: decided
   - {state: Update/Surge, event: pod.ready, variants: [target], windows: [after], transition: T-surge-abandon-superseded, outcome: ignore, note: "the abandon already deleted the replacement and reset the source to Ready; a readiness event from the deleted generation is dropped", placement: perm, coverage: {perm: [], unit: [], kind: []}, status: current}
