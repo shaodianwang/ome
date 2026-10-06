@@ -104,8 +104,8 @@ def strat_ceil(strat, n):
     return n + 1 if strat == "SurgeThenDrain" else n
 
 
-# Why a case pins terminationGracePeriodSeconds on a component; the single-pod
-# runtime fixture carries the same line.
+# Why a case pins terminationGracePeriodSeconds on a component; the runtime
+# fixtures carry the same line on every component config.
 GRACE_WHY = ("The eval judges a case well inside the cluster's default pod grace; a pod that ignores its "
              "stop signal must not outlive the verdict.")
 

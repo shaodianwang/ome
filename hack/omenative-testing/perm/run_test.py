@@ -7521,6 +7521,10 @@ class StrategySwitchUnderBreakFamilyTest(unittest.TestCase):
                 self.assertEqual("none", kv["co"], "the sibling is one nobody bumped")
                 self.assertEqual(generate_cases.SWITCH_SIBLING_MOMENT[0], kv["during"])
                 self.assertIn(f"the {kv['victimcomp']} is not bumped", reason)
+                oneshot = generate_cases._switch_fault_oneshot(m["fault"], m["form"], m["lift"])
+                self.assertEqual(oneshot, "healed in place or rebuilt by a repair" in reason, n)
+                self.assertEqual(oneshot, "the proven window after the healed set is Ready again" in reason, n)
+                self.assertEqual(not oneshot, "rebuilt by a repair that names it" in reason, n)
         self.assertEqual(8, sum(1 for _n, kv, _m in running if "victimcomp" in kv))
         with tempfile.TemporaryDirectory() as d:
             for n, _kv, _m in running[::7]:
@@ -7888,6 +7892,12 @@ class GeneratedNodeGraceTest(unittest.TestCase):
     def test_the_grace_is_the_single_pod_fixtures(self):
         fixture = re.search(r"terminationGracePeriodSeconds:\s*(\d+)", generate_cases.CSR_SINGLE_TEXT)
         self.assertEqual(int(fixture.group(1)), generate_cases.NODE_RECOVER_GRACE_S)
+
+    def test_the_gang_fixture_pins_the_single_pod_fixtures_grace_on_each_component_config(self):
+        graces = [int(g) for g in re.findall(r"terminationGracePeriodSeconds:\s*(\d+)", generate_cases.CSR_GANG_TEXT)]
+        self.assertEqual([generate_cases.NODE_RECOVER_GRACE_S] * 2, graces,
+                         "the engine config (folded into its leader and worker pods, and the decoder's alias) and the router config")
+        self.assertEqual(2, generate_cases.CSR_GANG_TEXT.count("must not outlive the verdict"), "each pin states the rule")
 
     def test_every_after_recover_row_pins_the_grace_on_every_component_and_no_other_row_does(self):
         line = f"    terminationGracePeriodSeconds: {generate_cases.NODE_RECOVER_GRACE_S}\n"
@@ -11263,6 +11273,143 @@ class EditUnderBreakTest(unittest.TestCase):
                          coverage.classify_operation(dict(held, **{"break": "imagepull"}), "rollout", "many")[0])
         self.assertEqual("strategy or policy edit",
                          coverage.classify_operation(dict(base, fault="crashloop:idle", form="start"), "rollout", "many")[0])
+
+
+class HealedSiblingWindowTest(unittest.TestCase):
+    """A sibling the harness healed keeps its ladder's block, and the hold
+    that names it, for the proven window after it is Ready again; the
+    leftover-hold check waits that window out."""
+
+    POD = {"alive": True, "comp": "router", "inst": "1", "ready": True, "serving": True, "uid": "u1", "ready_since": 117.0}
+
+    def _f(self, **kw):
+        f = {"case_id": "p999", "kind": "crashloop", "param": "idle", "form": "start", "lift": "after-settle",
+             "fired": True, "fired_ts": 100.0, "infra_fail": None, "crash_comp": "router", "crash_inst": "1",
+             "crash_uid": "u1", "notes": []}
+        f.update(kw)
+        return f
+
+    def test_only_a_healed_break_on_a_sibling_nobody_bumped_has_a_window(self):
+        self.assertTrue(run._healed_sibling(self._f(), {"engine"}))
+        self.assertTrue(run._healed_sibling(self._f(kind="imagepull"), {"engine"}))
+        self.assertFalse(run._healed_sibling(self._f(crash_comp="engine"), {"engine"}), "a bumped victim is the roll's")
+        self.assertFalse(run._healed_sibling(self._f(lift=""), {"engine"}), "a kept cause is rebuilt by a repair")
+        self.assertFalse(run._healed_sibling(self._f(kind="configkey"), {"engine"}), "no restart, so no ladder block")
+        self.assertFalse(run._healed_sibling(self._f(fired=False), {"engine"}))
+        self.assertFalse(run._healed_sibling(self._f(infra_fail="the patch failed"), {"engine"}))
+        self.assertFalse(run._healed_sibling(None, {"engine"}))
+
+    def test_the_window_is_the_stuck_pod_grace_or_min_ready_seconds_if_larger(self):
+        self.assertEqual(60.0, run._proven_window_s({}, "router", {run.STUCK_POD_GRACE_KEY: "60s"}))
+        self.assertEqual(90.0, run._proven_window_s({"router": {"lifecycle": {"minReadySeconds": 90}}}, "router",
+                                                    {run.STUCK_POD_GRACE_KEY: "60s"}))
+        self.assertEqual(60.0, run._proven_window_s({"router": {"lifecycle": {"minReadySeconds": 30}}}, "router",
+                                                    {run.STUCK_POD_GRACE_KEY: "1m"}))
+        self.assertEqual(0.0, run._proven_window_s({}, "router", {}), "with neither configured Ready is proven at once")
+        self.assertEqual(15.0, run._proven_window_s({"router": {"lifecycle": {"minReadySeconds": "15"}}}, "router", None))
+        self.assertEqual(60.0, run._proven_window_s({"router": {"lifecycle": {"minReadySeconds": "x"}}}, "router",
+                                                    {run.STUCK_POD_GRACE_KEY: "60s"}))
+
+    def test_an_instances_ready_since_is_its_latest_pods(self):
+        pods = [("r1", {"ready": True, "ready_since": 100.0}), ("r1-w", {"ready": True, "ready_since": 90.0})]
+        self.assertEqual(100.0, run._instance_ready_since(pods))
+        self.assertIsNone(run._instance_ready_since([]))
+        self.assertIsNone(run._instance_ready_since([("r1", {"ready": False, "ready_since": None})]))
+        self.assertIsNone(run._instance_ready_since([("r1", {"ready": True, "ready_since": None})]))
+        self.assertIsNone(run._instance_ready_since(pods + [("r2", {"ready": False, "ready_since": None})]))
+
+    def _wait(self, f, pods, clock, holds, lifecycle=({run.STUCK_POD_GRACE_KEY: "60s"}, None), spec=None,
+              acting=("engine",), on_read=None):
+        reads = []
+
+        def read_one(ctx):
+            reads.append(clock[0])
+            clock[0] += 1.0
+            if on_read:
+                on_read(ctx, clock[0])
+
+        def sleep(s):
+            clock[0] += s
+
+        def leftover(cid):
+            return holds.pop(0) if len(holds) > 1 else holds[0]
+
+        ctx = {"case_id": "p999", "pod_state": pods, "closed": False, "trigger_ts": 100.0, "inv": {"surges": None}}
+        with mock.patch.object(run.time, "time", lambda: clock[0]), mock.patch.object(run.time, "sleep", sleep), \
+                mock.patch.object(run, "_read_one", read_one), mock.patch.object(run, "_leftover_hold", leftover), \
+                mock.patch.object(run, "_controller_lifecycle_config", lambda: lifecycle), \
+                mock.patch.object(run, "_isvc_spec", lambda cid: spec or {}), \
+                mock.patch.object(run, "_isvc_events_since", lambda cid, since, **kw: []), \
+                mock.patch.object(run, "HEALED_WINDOW_SETTLE_S", 10), \
+                contextlib.redirect_stdout(io.StringIO()):
+            note = run._healed_window_wait(ctx, f, set(acting))
+        return note, reads
+
+    def test_the_window_is_waited_out_from_the_healed_pods_return_to_ready(self):
+        clock = [161.0]   # the roll completed 61s after the push; the healed pod was Ready at 17s
+        note, reads = self._wait(self._f(), {"r1": dict(self.POD)}, clock, [""])
+        self.assertEqual(177.0, clock[0], "the status is read at Ready + the window, not at roll completion")
+        self.assertEqual(16, len(reads), "the watch is drained while waiting")
+        self.assertIn("router Instance 1 was Ready again 17s after the push", note)
+        self.assertIn("proven window of 60s", note)
+        self.assertIn("nothing was held 0s past the window", note)
+
+    def test_a_hold_that_clears_after_the_window_is_waited_for_and_reported(self):
+        clock = [170.0]
+        holds = ["router rolloutHold gate=RetryBlock reason=in backoff", "router rolloutHold gate=RetryBlock reason=in backoff", ""]
+        note, _reads = self._wait(self._f(), {"r1": dict(self.POD)}, clock, holds)
+        self.assertEqual(181.0, clock[0], "two polls past the window")
+        self.assertIn("nothing was held 4s past the window", note)
+
+    def test_a_hold_that_stands_past_the_window_is_left_to_the_leftover_check(self):
+        clock = [177.0]
+        note, _reads = self._wait(self._f(), {"r1": dict(self.POD)}, clock, ["router rolloutHold gate=RetryBlock reason=in backoff"])
+        self.assertGreaterEqual(clock[0], 188.0, "the settle is spent before giving up on the hold")
+        self.assertIn("a hold stood", note)
+        self.assertIn("gate=RetryBlock", note)
+
+    def test_min_ready_seconds_above_the_grace_lengthens_the_window(self):
+        clock = [161.0]
+        note, _reads = self._wait(self._f(), {"r1": dict(self.POD)}, clock, [""],
+                                  spec={"router": {"lifecycle": {"minReadySeconds": 90}}})
+        self.assertEqual(207.0, clock[0])
+        self.assertIn("proven window of 90s", note)
+
+    def test_a_gang_sibling_is_read_at_the_index_its_pods_stand_at_with_the_latest_ready(self):
+        pods = {"r1": dict(self.POD, comp="decoder", ready_since=110.0), "r1-w": dict(self.POD, comp="decoder", ready_since=117.0)}
+        clock = [161.0]
+        note, _reads = self._wait(self._f(crash_comp="decoder"), pods, clock, [""])
+        self.assertEqual(177.0, clock[0], "the latest pod's Ready anchors the window")
+        self.assertIn("decoder Instance 1 was Ready again 17s after the push", note)
+
+    def test_nothing_is_waited_for_without_a_healed_sibling_or_a_ready_pod(self):
+        clock = [161.0]
+        self.assertIsNone(self._wait(self._f(crash_comp="engine"), {"e1": dict(self.POD, comp="engine")}, clock, [""])[0])
+        self.assertEqual(161.0, clock[0])
+        note, _reads = self._wait(self._f(), {"r1": dict(self.POD, ready=False, serving=False, ready_since=None)}, clock, [""])
+        self.assertIn("router Instance 1 is not Ready, so there is no proven window", note)
+        self.assertEqual(162.0, clock[0], "one read, no wait")
+
+    def test_an_unreadable_controller_config_reads_the_status_at_once(self):
+        clock = [161.0]
+        note, reads = self._wait(self._f(), {"r1": dict(self.POD)}, clock, [""],
+                                 lifecycle=(None, "ConfigMap ome/inferenceservice-config could not be read: forbidden"))
+        self.assertIn("proven window is unknown (ConfigMap ome/inferenceservice-config could not be read: forbidden)", note)
+        self.assertEqual(([], 161.0), (reads, clock[0]))
+
+    def test_a_restart_after_the_heal_moves_the_window_and_the_wait_stays_bounded(self):
+        pods = {"r1": dict(self.POD)}
+
+        def restart(ctx, now):
+            if now == 170.0:   # the runner restarts again inside the window and is Ready 5s later
+                ctx["pod_state"]["r1"] = dict(self.POD, ready_since=175.0)
+
+        clock = [161.0]
+        note, _reads = self._wait(self._f(), pods, clock, [""], on_read=restart)
+        self.assertEqual(231.0, clock[0], "the window plus the settle from the start of the wait")
+        self.assertIn("Ready again 75s after the push", note)
+        self.assertIn("had not passed after 70s of waiting", note)
+        self.assertIn("the status is read inside it", note)
 
 
 class CrashloopNewFaultTest(unittest.TestCase):

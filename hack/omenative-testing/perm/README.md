@@ -145,7 +145,12 @@ admission-defaulted grace is far longer than any teardown budget here) instead
 of exiting immediately. After the `exec`, nginx's own SIGQUIT handling takes
 over, so a Ready pod always drains fast.
 `csr-multinode.yaml` applies the same startup delay to the gang runtime (leader +
-workers), so multi-node cases catch their peaks too.
+workers), so multi-node cases catch their peaks too. Both fixtures pin
+`terminationGracePeriodSeconds` on every component config (the gang's engine
+config is folded into its leader and worker pods; its router config carries
+its own), for the reason the generator states on the cases that pin it per
+component: the eval judges a case well inside the cluster's default pod
+grace, and a pod that ignores its stop signal must not outlive the verdict.
 
 Readiness is an `exec` probe with two switches, each enough to fail it while
 the startup and liveness probes (plain `httpGet /`) keep passing, so a pod can
@@ -968,7 +973,15 @@ settled and nothing held; the broken Instance ends on the new revision
 serving with no repair opened for it after the push (the roll owns an
 Instance that is off the target), a sibling ends Ready and serving on its
 running revision, rebuilt by a repair or, once healed, in place; the
-capacity floor is lowered by the broken Instance, not waived. A key kept
+capacity floor is lowered by the broken Instance, not waived. A healed
+sibling's crash costs its ladder one attempt, and the block it wrote, with
+the hold that names it, lasts the proven window after the healed set is
+Ready again: the deployed `lifecycle.stuckPodGracePeriod`, or the
+sibling's `minReadySeconds` if larger, counted from the pod's Ready
+transition. The runner reads both off the pod and the controller's
+ConfigMap and waits that window out (then `HEALED_WINDOW_SETTLE_S` for
+the status to drop the hold) before it reads the status for a leftover
+hold; a hold that stands past the window fails the case. A key kept
 away (`configkey:missing lift=never`) is the one cause no revision starts
 without: the push parks on its first pod with the reason (a Failed row at
 the Instance ready timeout, an InstanceFailed event), nothing of the new

@@ -4734,15 +4734,18 @@ def _bystander_checks(ctx, bumped, verdict, notes, checks):
 # strategy or policy with the victim on the new revision serving (a sibling
 # nobody bumped on its running revision), except when the key stays away
 # (configkey lift=never): no revision starts without it, so the push parks
-# on its first pod with the reason and the hold is kept. On the pushed
-# revision (break=<kind> at during=held|rotating) the push carries the
-# break, the edit fires once the roll is parked with its reason (held) or
-# at the first pushed pod (rotating), and the fix push, the override
-# dropped, lands under the edited spec. once=1 is each kind's one-shot
-# form: the first runner killed once (the crash kinds), the unpullable
-# image or the missing key taken away once the wait has settled, the
-# readiness switch lifted once the drop has settled; the edit at held
-# fires as the break shows and the roll completes on its own.
+# on its first pod with the reason and the hold is kept. A sibling the
+# harness healed keeps its ladder's block, and the hold that names it, for
+# the proven window after it is Ready again (the deployed stuck-pod grace,
+# or its minReadySeconds if larger); the leftover-hold check waits that
+# window out. On the pushed revision (break=<kind> at during=held|rotating)
+# the push carries the break, the edit fires once the roll is parked with
+# its reason (held) or at the first pushed pod (rotating), and the fix
+# push, the override dropped, lands under the edited spec. once=1 is each
+# kind's one-shot form: the first runner killed once (the crash kinds), the
+# unpullable image or the missing key taken away once the wait has
+# settled, the readiness switch lifted once the drop has settled; the edit
+# at held fires as the break shows and the roll completes on its own.
 EDIT_BREAK_FAULTS = BREAK_FAULTS | {READINESS_FAULT, "configkey"}
 RP_RECREATE_INSTANCE = "RecreateInstanceOnPodRestart"
 # The parameter that puts each kind's break on the settled service before
@@ -4762,6 +4765,9 @@ EDIT_BREAK_TEMPLATE_EDIT = {"crash-load": "env", "configkey": "env", ROLLBACK_BR
 # How long the edit is given to reach the manager before the fix push lands
 # on top of it, so the fix rolls under the edited spec.
 EDIT_FIX_SETTLE_S = int(5 * TIMEOUT_MULT)
+# How long past a healed sibling's proven window the status is given to
+# drop the hold that named it.
+HEALED_WINDOW_SETTLE_S = int(20 * TIMEOUT_MULT)
 # The breaks an edited runtime may carry on the victim's runners
 # (mode=runtimerev break=<kind>): the held-moment kinds. The probe it never
 # passes is kept only as the recovery guard (expect=recover break=stuck);
@@ -4954,6 +4960,80 @@ def _edit_surge_order_checks(ctx, medit, comps, verdict, notes, checks):
     return verdict
 
 
+def _healed_sibling(f, acting):
+    """True when the case healed a crash or a pull failure on a sibling
+    nobody bumped. Its ladder counted the crash, and the block it wrote,
+    with the hold that names it, lasts the proven window after the healed
+    set is Ready again."""
+    return (bool(f) and f.get("kind") in BREAK_FAULTS and f.get("lift") == HEAL_LIFT and bool(f.get("fired"))
+            and not f.get("infra_fail") and f.get("crash_comp") not in (acting or ()))
+
+
+def _proven_window_s(spec, comp, lifecycle):
+    """The window a pod that came back must hold Ready for before the roll
+    reads it as serving: the deployed stuck-pod grace, or the Component's
+    minReadySeconds if larger."""
+    grace = _duration_s((lifecycle or {}).get(STUCK_POD_GRACE_KEY)) or 0.0
+    try:
+        min_ready = int((((spec or {}).get(comp) or {}).get("lifecycle") or {}).get("minReadySeconds") or 0)
+    except (TypeError, ValueError):
+        min_ready = 0
+    return max(grace, float(min_ready))
+
+
+def _instance_ready_since(pods):
+    """The latest Ready transition among an Instance's pods; None while the
+    Instance has no pod, one is not Ready or a transition is unknown."""
+    since = [p.get("ready_since") for _n, p in pods if p.get("ready")]
+    if not pods or len(since) < len(pods) or None in since:
+        return None
+    return max(since)
+
+
+def _healed_window_wait(ctx, f, acting):
+    """Wait out a healed sibling's proven window before the status is read
+    for a leftover hold: the block its ladder wrote, and the hold that
+    names it, last that window from the healed set's return to Ready (a
+    pod that restarts again moves it), and the status is then given
+    HEALED_WINDOW_SETTLE_S to drop the hold. The note to report, or None
+    when the case healed no sibling."""
+    if not _healed_sibling(f, acting):
+        return None
+    case_id, comp, inst = ctx["case_id"], f["crash_comp"], f["crash_inst"]
+    label = f"{f['kind']} before the push"
+    lifecycle, err = _controller_lifecycle_config()
+    if err:
+        return f"{label}: the healed sibling's proven window is unknown ({err}); the status is read at once"
+    window = _proven_window_s(_isvc_spec(case_id), comp, lifecycle)
+    events = _isvc_events_since(case_id, f.get("fired_ts") or 0)
+    final = _victim_index_chain(comp, inst, (ctx.get("inv") or {}).get("surges"), events)[-1]
+    where = f"{comp} Instance {final}"
+    t0, budget, since = time.time(), min(MAX_BUDGET_S, window + HEALED_WINDOW_SETTLE_S), None
+    print(f"    waiting out the healed sibling's proven window ({window:.0f}s from {where}'s return to Ready)")
+    while not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        since = _instance_ready_since(_instance_pods(ctx["pod_state"], comp, final))
+        if since is None or now >= since + window or now - t0 >= budget:
+            break
+    if since is None:
+        return f"{label}: {where} is not Ready, so there is no proven window to wait out"
+    ready_at = since - ctx["trigger_ts"]
+    if time.time() < since + window:
+        return (f"{label}: {where} was Ready again {ready_at:.0f}s after the push and its proven window of "
+                f"{window:.0f}s had not passed after {time.time() - t0:.0f}s of waiting (its Ready transition moved, "
+                f"or the watch closed); the status is read inside it")
+    deadline = time.time() + HEALED_WINDOW_SETTLE_S
+    held = _leftover_hold(case_id)
+    while held and time.time() < deadline and not ctx["closed"]:
+        time.sleep(ROW_POLL_S)
+        held = _leftover_hold(case_id)
+    past = time.time() - (since + window)
+    how = f"nothing was held {past:.0f}s past the window" if not held else f"a hold stood {past:.0f}s past the window: {held}"
+    return (f"{label}: {where} was Ready again {ready_at:.0f}s after the push; its proven window of {window:.0f}s "
+            f"(the stuck-pod grace, or minReadySeconds if larger) was waited out and {how}")
+
+
 def _edit_leftover_checks(case_id, verdict, notes, checks):
     """Nothing stays held in status once the roll has completed."""
     left = _leftover_hold(case_id)
@@ -4973,7 +5053,10 @@ def _edit_fault(case_id, yaml_file, desc, hdr):
     has, and the roll completes under the edited strategy or policy; with
     the key kept away the push parks with its reason and the hold is kept.
     The verdict is the roll's end state with the victim judged by its kind
-    and form, and the edit on the live spec."""
+    and form, and the edit on the live spec. A sibling the harness healed
+    keeps its ladder's block, and the hold that names it, for the proven
+    window after it is Ready again; that window is waited out before the
+    status is read for a leftover hold."""
     kind = str(hdr.get("fault", "")).partition(":")[0]
     reason = _fault_capability(kind)
     if reason:
@@ -5026,6 +5109,9 @@ def _edit_fault(case_id, yaml_file, desc, hdr):
         verdict = index_collision_checks(ctx, sorted(acting), verdict, notes, checks)
         settled, why_rows = _wait_rows_settled(case_id, N, configured, ROWS_SETTLE_S)
         verdict = _rows_settled_checks(settled, why_rows, verdict, notes, checks)
+        note = _healed_window_wait(ctx, f, acting)
+        if note:
+            checks.append(f"  ⓘ {note}")
         verdict = _edit_leftover_checks(case_id, verdict, notes, checks)
     verdict = _edit_surge_order_checks(ctx, medit, sorted(acting), verdict, notes, checks)
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
@@ -5880,6 +5966,10 @@ LIFECYCLE_CONFIG_KEY = "lifecycle"
 FORCE_DELETE_KEY = "forceDelete"
 FORCE_DELETE_THRESHOLD_KEY = "nodeUnreachableThreshold"
 FORCE_DELETE_SLACK_KEY = "overdueSlack"
+# The stuck-pod grace of the same block: the window a pod that came back
+# must hold Ready for before the roll reads it as serving, or the
+# Component's minReadySeconds when that is larger.
+STUCK_POD_GRACE_KEY = "stuckPodGracePeriod"
 # How long a restarted manager is given to report Ready before a case that
 # depends on it going first is an apparatus failure.
 CTRL_READY_S = int(180 * TIMEOUT_MULT)

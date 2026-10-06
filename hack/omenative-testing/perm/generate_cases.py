@@ -1861,9 +1861,16 @@ def _switch_fault_reason(fault, form, lift, hook, field, from_, to, co, topo, ro
             out += (f"; the broken Instance is off the target from the moment of the push, so the roll owns it: it ends "
                     f"on the new revision serving with no repair opened for it after the push")
         else:
-            out += (f"; the {victim} is not bumped, so it ends Ready and serving on its running revision, "
-                    + ("healed in place or rebuilt by a repair" if _switch_fault_oneshot(fault, form, lift)
-                       else "rebuilt by a repair that names it"))
+            out += f"; the {victim} is not bumped, so it ends Ready and serving on its running revision, "
+            if not _switch_fault_oneshot(fault, form, lift):
+                out += "rebuilt by a repair that names it"
+            elif fault.startswith("crashloop"):
+                out += (f"healed in place or rebuilt by a repair; the crash costs its ladder one attempt, whose block, "
+                        f"and the hold that names it, last the proven window after the healed set is Ready again (the "
+                        f"stuck-pod grace, or the {victim}'s minReadySeconds if larger), so nothing held is read once "
+                        f"that window has passed")
+            else:
+                out += "healed in place or rebuilt by a repair"
     out += "; " + _switch_budget_words(field, from_, to, surge, unavail)
     if is_mn(topo) and field == "strategy" and IN_PLACE & {from_, to}:
         out += "; a gang runs the in-place variant as a whole-gang recreate"
@@ -2816,7 +2823,8 @@ CSR_METRICS_TEXT = (HERE / "runtime" / "csr-metrics.yaml").read_text()
 # deleted on the dead node waits out its grace plus the overdue slack before
 # the force-delete sweep may act, and the chart's deploy default would make
 # that wait most of the case. The single-pod runtime fixture's value, read off
-# it so the two never drift.
+# it so the two never drift; the gang fixture pins the same value on each
+# component config it renders.
 _GRACE_MATCH = re.search(r"terminationGracePeriodSeconds:\s*(\d+)", CSR_SINGLE_TEXT)
 if not _GRACE_MATCH:
     sys.exit("csr.yaml: the runtime fixture does not pin terminationGracePeriodSeconds as the generator expects")
