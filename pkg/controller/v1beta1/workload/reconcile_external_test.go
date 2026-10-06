@@ -11713,3 +11713,101 @@ func TestRollback_OverAnUnreadyVictimPastTheWindow_SettlesOnTheStartingRevision(
 		})
 	}
 }
+
+// TestReconcile_UnreadyVictimInsideTheWindow_RollTakesItFirst: four
+// Instances serve v1 and the highest Instance's pod stops passing
+// readiness while its row stays Ready; the push lands while the pod is
+// still inside the stuck-pod grace, so its start is charged and
+// consulted like any other. The roll takes the Instance out of rotation
+// first all the same, under a surge and a drain-first strategy alike:
+// the fix lands on it while every serving peer is untouched and in
+// rotation, before the pod's grace has run, and the roll then settles
+// within its budget with every Instance serving; no repair opens under
+// policy None. Standalone, and listed in a rollout group for the surge
+// strategy, whose gate paces surges alone; a gated drain-first push
+// inside the grace is held by the gate until the pod is dark.
+//
+// Cells: instance/Ready/pod.containersNotReady[source]/before, instance/Ready/spec.revision/boundary@T-ready-surge, instance/Ready/spec.revision/boundary@T-ready-recreate, instance/Ready/spec.revision/boundary@T-ready-inplace
+func TestReconcile_UnreadyVictimInsideTheWindow_RollTakesItFirst(t *testing.T) {
+	const replicas = 4
+	for _, sc := range offTargetStrategies[:3] {
+		for _, roll := range rollShapes {
+			if roll.gated && sc.strategy != workloadtypes.UpdateStrategySurgeThenDrain {
+				continue
+			}
+			t.Run(fmt.Sprintf("%s/%s", sc.strategy, roll.name), func(t *testing.T) {
+				h, victim := unreadyVictimHarness(t, sc.strategy, sc.surge, sc.unavail, replicas)
+				if roll.gated {
+					consults := 0
+					h.gate = rollingGroupGate(h, replicas, sc.surge, sc.unavail, &consults)
+				}
+				requireUnreadyVictimRollsFirstInsideTheWindow(t, h, victim, []int32{0, 1, 2}, sc.strategy, sc.surge, sc.unavail, replicas)
+			})
+		}
+	}
+}
+
+// TestReconcile_UnreadyGangLeaderInsideTheWindow_RollTakesItFirst: a gang
+// serves through its leader. Two leader+worker gangs serve v1 and the
+// higher gang's leader stops passing readiness beside its serving worker,
+// its row staying Ready; a push inside the stuck-pod grace takes that
+// gang first under a drain-first strategy: the fix lands on it while the
+// serving gang is untouched and in rotation, before the leader's grace
+// has run, and the roll settles within its budget with both gangs
+// serving; no repair opens under policy None.
+//
+// Cells: instance/Ready/pod.containersNotReady[source]/before, instance/Ready/spec.revision/boundary@T-ready-recreate, instance/Ready/spec.revision/boundary@T-ready-inplace
+func TestReconcile_UnreadyGangLeaderInsideTheWindow_RollTakesItFirst(t *testing.T) {
+	const replicas = 2
+	for _, sc := range offTargetStrategies[1:3] {
+		t.Run(string(sc.strategy), func(t *testing.T) {
+			h := offTargetCrashHarness(t, true, sc.strategy, sc.surge, sc.unavail, workloadtypes.RestartPolicyNone, replicas)
+			h.stuckGrace = 5 * time.Minute
+			const victim = int32(replicas - 1)
+			h.failReadiness(victim, "leader")
+			h.step()
+			row := h.instance(victim)
+			if row == nil || row.Phase != workloadtypes.InstancePhaseReady || row.Operation != nil || row.ServingPodCount >= row.PodCount {
+				h.dumpState("after the fault")
+				t.Fatalf("gang %d after the fault = %+v, want a Ready row with its leader out of rotation", victim, row)
+			}
+			requireUnreadyVictimRollsFirstInsideTheWindow(t, h, victim, []int32{0}, sc.strategy, sc.surge, sc.unavail, replicas)
+		})
+	}
+}
+
+// requireUnreadyVictimRollsFirstInsideTheWindow pushes the fix over an
+// Instance whose promoted pod is unready and still inside its grace, and
+// requires the roll to land the fix on it first (requireDarkInstanceRollsFirst),
+// before the grace has run, then to settle with every Instance serving.
+func requireUnreadyVictimRollsFirstInsideTheWindow(t *testing.T, h *recoveryHarness, victim int32, serving []int32, strategy workloadtypes.UpdateStrategyType, surge, unavail, replicas int32) {
+	t.Helper()
+	var unreadySince time.Time
+	for _, pod := range h.podsOf(victim) {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == corev1.ContainersReady && cond.Status == corev1.ConditionFalse {
+				unreadySince = cond.LastTransitionTime.Time
+			}
+		}
+	}
+	if unreadySince.IsZero() {
+		t.Fatalf("instance %d has no pod reporting its containers not ready", victim)
+	}
+	h.events = nil
+	h.setTarget(h.revFixed, fixedImage)
+	var firstLanding time.Time
+	done := func() bool {
+		if firstLanding.IsZero() && len(h.landedOn(h.revFixed)) > 0 {
+			firstLanding = h.clk.Now()
+		}
+		return h.settledOn(h.revFixed, replicas)
+	}
+	requireDarkInstanceRollsFirst(t, h, victim, serving, nil, strategy, surge, unavail, done)
+	if firstLanding.IsZero() || firstLanding.Sub(unreadySince) >= h.stuckGrace {
+		t.Fatalf("the fix landed first %s after the pod left rotation, not inside the grace of %s: the order must not wait for the pod to be dark", firstLanding.Sub(unreadySince), h.stuckGrace)
+	}
+	if n := h.servingInstances(); n != replicas {
+		h.dumpState("after the roll")
+		t.Fatalf("%d Instances serve after the roll, want %d: the roll replaced the unready pod", n, replicas)
+	}
+}

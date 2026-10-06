@@ -158,6 +158,31 @@ func PodSetServesNothing(pods []*corev1.Pod, now time.Time, grace time.Duration)
 	return live > 0
 }
 
+// PodSetOutOfRotation reports whether a non-empty pod set has no routed pod
+// in rotation at this moment, whatever the reason and for however long: the
+// Instance serves nothing now. It is the roll's ordering reading, wider than
+// PodSetServesNothing, which waits out the stuck-pod grace before it reads a
+// set as provably out of service: replacing an Instance that serves nothing
+// first costs no capacity whether or not its wait resolves, while charging
+// its start as a free one would, so the budgets and the gate keep the graced
+// reading. A gang reads its routed members alone, as PodSetServesNothing does.
+func PodSetOutOfRotation(pods []*corev1.Pod) bool {
+	live := 0
+	for _, pod := range pods {
+		if pod == nil || pod.DeletionTimestamp != nil {
+			continue
+		}
+		live++
+		if query.IsTerminalPod(pod) || !query.RoutedRunner(pod) {
+			continue
+		}
+		if podreadiness.ReadyAndServing(pod) {
+			return false
+		}
+	}
+	return live > 0
+}
+
 // PodSetUnavailableOnParkedMember reports whether a pod set is out of
 // the coordination gate's serving count because a member is out of
 // service: fewer than desired live pods are in rotation, and a live pod

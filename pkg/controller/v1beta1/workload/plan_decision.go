@@ -115,10 +115,16 @@ type UpdateItem struct {
 	// the per-Component budget still applies.
 	CoordGateExempt bool
 	// ReplacesDarkPodSet: the fresh start replaces an Instance that serves
-	// nothing (replacesDarkPodSet). Such starts restore capacity rather
-	// than spend it, so they are listed ahead of the rest and the budget
-	// reaches them before any serving Instance is taken offline.
+	// nothing by the graced reading the budgets and the gate share
+	// (replacesDarkPodSet).
 	ReplacesDarkPodSet bool
+	// OutOfRotation: the fresh start's Instance serves nothing at this
+	// pass — a dark one (ReplacesDarkPodSet) or a pod set with no routed
+	// pod in rotation, its grace run or not (evidence.PodSetOutOfRotation).
+	// Taking it first costs no capacity, so such starts are listed ahead
+	// of the rest and the budget reaches them before any serving Instance
+	// is taken offline; the budgets and the gate still read the grace.
+	OutOfRotation bool
 	// RecreateFallback: the Component's in-place strategy runs as a
 	// recreate on this Instance (ops.InPlaceFallsBackToRecreate: a gang, or
 	// a single-pod diff beyond container images), so the fresh start is
@@ -142,10 +148,10 @@ type UpdateItem struct {
 // plus the pure budget inputs the executor's within-pass counters
 // project against.
 type UpdateSelection struct {
-	// Items in the order the executor admits them: the fresh starts that
-	// replace a dark Instance first, then plan order. Instances held by
-	// the effective partition (canary) and Instances with no trigger are
-	// not listed.
+	// Items in the order the executor admits them: the fresh starts of an
+	// Instance out of rotation first (OutOfRotation), then plan order.
+	// Instances held by the effective partition (canary) and Instances
+	// with no trigger are not listed.
 	Items []UpdateItem
 	// Strategy is the resolved update strategy (empty Type defaults to
 	// SurgeThenDrain — matches workload.BuildPlan's defaulting).
@@ -823,19 +829,21 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 				row != nil && row.Phase == types.InstancePhaseReady &&
 				(evidence.PodSetServesNothing(pods, input.Now(), input.StuckPodGrace) || evidence.PodSetUnavailableOnParkedMember(pods, inst.TotalPods(), input.Now(), input.StuckPodGrace)))
 		dark := startingFresh && replacesDarkPodSet(input, row, pods)
+		outOfRotation := startingFresh && (dark || evidence.PodSetOutOfRotation(pods))
 		logf.FromContext(ctx).V(1).Info("update selected",
 			"component", plan.Component, "instance", inst.Index, "target", target.Name,
 			"startingFresh", startingFresh, "coordGateExempt", gateExempt, "recreateFallback", recreateFallback,
-			"replacesDarkPodSet", dark)
-		selection.Items = append(selection.Items, UpdateItem{Instance: inst, StartingFresh: startingFresh, CoordGateExempt: gateExempt, ReplacesDarkPodSet: dark, RecreateFallback: recreateFallback})
+			"replacesDarkPodSet", dark, "outOfRotation", outOfRotation)
+		selection.Items = append(selection.Items, UpdateItem{Instance: inst, StartingFresh: startingFresh, CoordGateExempt: gateExempt, ReplacesDarkPodSet: dark, OutOfRotation: outOfRotation, RecreateFallback: recreateFallback})
 	}
-	// A start that replaces a dark Instance restores capacity while every
-	// other start spends it, so the budget is offered to the dark ones
-	// first; within each group plan order stands. The order is all this
+	// A start on an Instance out of rotation restores capacity while every
+	// other start spends it, so the budget is offered to those first, from
+	// the moment the Instance left rotation rather than once its grace has
+	// run; within each group plan order stands. The order is all this
 	// decides: the budgets and the gate admit or deny each start on their
 	// own terms, and the partition has already chosen who is listed.
 	sort.SliceStable(selection.Items, func(i, j int) bool {
-		return selection.Items[i].ReplacesDarkPodSet && !selection.Items[j].ReplacesDarkPodSet
+		return selection.Items[i].OutOfRotation && !selection.Items[j].OutOfRotation
 	})
 	// An extra pod the API still lists holds a surge slot: a Terminating
 	// one until it exits or passes its deletion deadline, which raises no

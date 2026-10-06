@@ -10,6 +10,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	clocktesting "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -18,6 +19,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
@@ -2777,5 +2779,186 @@ func TestPlan_Update_CoordGateExempt_ReadyRowUnreadyPastTheWindow(t *testing.T) 
 				t.Fatalf("CoordGateExempt = %v, ReplacesDarkPodSet = %v, want %v and %v", item.CoordGateExempt, item.ReplacesDarkPodSet, tc.exempt, tc.dark)
 			}
 		})
+	}
+}
+
+// TestPlan_Update_InstancesOutOfRotationListedFirst: among the fresh
+// starts a pass may admit, those whose pod set has no routed pod in
+// rotation are listed first, in plan order among themselves, and the
+// rest keep plan order, under a surge, a recreate and an in-place
+// strategy alike. An Instance whose promoted pod stopped passing
+// readiness is listed first from the moment it left rotation: inside its
+// grace the start is still charged and consulted like any other, neither
+// dark nor gate-exempt; past it the start is dark as well. Two such
+// Instances keep their index order ahead of every serving peer, a serving
+// fleet keeps plain index order, and a gang is read on its routed leader:
+// a worker out of rotation beside a serving leader keeps the gang's place.
+//
+// Cells: instance/Ready/pod.containersNotReady[source]/before, instance/Ready/pod.runningNotReady[source]/before, instance/Ready/spec.revision/before, instance/Ready/spec.revision/boundary@T-ready-surge, instance/Ready/spec.revision/boundary@T-ready-recreate, instance/Ready/spec.revision/boundary@T-ready-inplace
+func TestPlan_Update_InstancesOutOfRotationListedFirst(t *testing.T) {
+	target := updateTarget()
+	member := func(pod *corev1.Pod, runner string) *corev1.Pod {
+		pod.Name += "-" + runner
+		pod.Labels[query.LabelRunner] = runner
+		return pod
+	}
+	gang := []types.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}
+	single := []types.RunnerPlan{{Name: "default", Size: 1}}
+	shapes := []struct {
+		name    string
+		runners []types.RunnerPlan
+		pods    map[int32][]*corev1.Pod
+		want    []int32
+		dark    map[int32]bool
+	}{
+		{name: "one Instance unready inside the grace", runners: single,
+			pods: map[int32][]*corev1.Pod{3: {unreadyEnginePod(3, 10*time.Second)}}, want: []int32{3, 0, 1, 2}},
+		{name: "one Instance unready past the grace", runners: single,
+			pods: map[int32][]*corev1.Pod{3: {unreadyEnginePod(3, 2*time.Minute)}}, want: []int32{3, 0, 1, 2}, dark: map[int32]bool{3: true}},
+		{name: "two Instances out of rotation", runners: single,
+			pods: map[int32][]*corev1.Pod{1: {unreadyEnginePod(1, 10*time.Second)}, 3: {unreadyEnginePod(3, 2*time.Minute)}}, want: []int32{1, 3, 0, 2}, dark: map[int32]bool{3: true}},
+		{name: "every Instance serving", runners: single, want: []int32{0, 1, 2, 3}},
+		{name: "gang leader out of rotation", runners: gang,
+			pods: map[int32][]*corev1.Pod{3: {member(unreadyEnginePod(3, 10*time.Second), "leader"), member(servingEnginePod(3), "worker")}}, want: []int32{3, 0, 1, 2}},
+		{name: "gang worker out of rotation beside a serving leader", runners: gang,
+			pods: map[int32][]*corev1.Pod{3: {member(servingEnginePod(3), "leader"), member(unreadyEnginePod(3, 10*time.Second), "worker")}}, want: []int32{0, 1, 2, 3}},
+	}
+	for _, sc := range []struct {
+		strategy       types.UpdateStrategyType
+		surge, unavail int32
+	}{
+		{types.UpdateStrategySurgeThenDrain, 1, 0},
+		{types.UpdateStrategyRecreatePod, 0, 1},
+		{types.UpdateStrategyInPlaceIfPossible, 0, 1},
+	} {
+		for _, shape := range shapes {
+			t.Run(string(sc.strategy)+"/"+shape.name, func(t *testing.T) {
+				in := minimalInput(t)
+				forbidMutations(t, &in)
+				in.StuckPodGrace = time.Minute
+				maxSurge, maxUnavailable := intstr.FromInt32(sc.surge), intstr.FromInt32(sc.unavail)
+				plan := types.ComponentPlan{
+					Component: types.ComponentEngine,
+					Replicas:  4,
+					UpdateStrategy: types.UpdateStrategy{Type: sc.strategy,
+						RollingUpdate: &types.RollingUpdate{MaxSurge: &maxSurge, MaxUnavailable: &maxUnavailable}},
+				}
+				pods := map[int32][]*corev1.Pod{}
+				for idx := int32(0); idx < 4; idx++ {
+					plan.Instances = append(plan.Instances, types.InstancePlan{Index: idx, Incarnation: 1, Runners: shape.runners})
+					if set, ok := shape.pods[idx]; ok {
+						pods[idx] = set
+					} else if len(shape.runners) > 1 {
+						pods[idx] = []*corev1.Pod{member(servingEnginePod(idx), "leader"), member(servingEnginePod(idx), "worker")}
+					} else {
+						pods[idx] = []*corev1.Pod{servingEnginePod(idx)}
+					}
+					serving := int32(0)
+					for _, pod := range pods[idx] {
+						if podreadiness.ReadyAndServing(pod) {
+							serving++
+						}
+					}
+					in.ObservedState.InstanceStatuses = append(in.ObservedState.InstanceStatuses, types.InstanceStatus{
+						Index: idx, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: int32(len(shape.runners)), ServingPodCount: serving, RunningRevision: crashLoopRepairRevision,
+					})
+				}
+				// The running revision's template differs from the desired one
+				// by its image alone, the diff an in-place strategy keeps in place.
+				running := in.DesiredSpec.PodSpec.DeepCopy()
+				running.Containers[0].Image = "test:v0"
+				d := planTargetOrFail(t, in, plan, target, planSnapshotWithRevisions(in, pods, map[string]*corev1.PodSpec{crashLoopRepairRevision: running}))
+				ua := findAction(d, workload.ActionUpdate)
+				if ua == nil {
+					t.Fatalf("expected an Update action, got %v", actionKinds(d))
+				}
+				var got []int32
+				for _, item := range ua.Update.Items {
+					got = append(got, item.Instance.Index)
+					if !item.StartingFresh {
+						t.Errorf("instance %d: every off-target Ready row is a fresh start", item.Instance.Index)
+					}
+					if dark := shape.dark[item.Instance.Index]; item.ReplacesDarkPodSet != dark {
+						t.Errorf("instance %d: ReplacesDarkPodSet = %v, want %v: the order is read on rotation, the budget on the grace", item.Instance.Index, item.ReplacesDarkPodSet, dark)
+					}
+					if exempt := shape.dark[item.Instance.Index] && sc.strategy != types.UpdateStrategySurgeThenDrain; item.CoordGateExempt != exempt {
+						t.Errorf("instance %d: CoordGateExempt = %v, want %v: a start inside the grace is consulted like any other", item.Instance.Index, item.CoordGateExempt, exempt)
+					}
+				}
+				if !reflect.DeepEqual(got, shape.want) {
+					t.Fatalf("update items = %v, want %v: the Instances out of rotation first, then plan order", got, shape.want)
+				}
+			})
+		}
+	}
+}
+
+// TestPlan_Update_InstanceOutOfRotationKeepsThePartition: the preference
+// for an Instance out of rotation orders the starts the partition admits
+// and never pulls in one it holds. Four Instances under a partition of
+// two, from the user's rollingUpdate and from a canary step's pacing
+// alike: an Instance out of rotation among the two held is not listed,
+// and one among the two released is listed ahead of its released peer.
+//
+// Cells: instance/Ready/spec.partition/before, instance/Ready/pod.containersNotReady[source]/before, instance/Ready/spec.revision/before
+func TestPlan_Update_InstanceOutOfRotationKeepsThePartition(t *testing.T) {
+	target := updateTarget()
+	for _, src := range []struct {
+		name   string
+		pacing bool
+	}{{"rollingUpdate partition", false}, {"canary step partition", true}} {
+		for _, tc := range []struct {
+			name    string
+			unready int32
+			want    []int32
+		}{
+			{name: "held Instance out of rotation stays held", unready: 1, want: []int32{2, 3}},
+			{name: "released Instance out of rotation goes first", unready: 3, want: []int32{3, 2}},
+		} {
+			t.Run(src.name+"/"+tc.name, func(t *testing.T) {
+				in := minimalInput(t)
+				forbidMutations(t, &in)
+				in.StuckPodGrace = time.Minute
+				partition := int32(2)
+				maxSurge := intstr.FromInt32(1)
+				plan := types.ComponentPlan{
+					Component: types.ComponentEngine,
+					Replicas:  4,
+					UpdateStrategy: types.UpdateStrategy{Type: types.UpdateStrategySurgeThenDrain,
+						RollingUpdate: &types.RollingUpdate{MaxSurge: &maxSurge}},
+				}
+				if src.pacing {
+					in.DesiredSpec.Pacing = &types.WorkloadPacing{Partition: &partition}
+				} else {
+					plan.UpdateStrategy.RollingUpdate.Partition = &partition
+				}
+				pods := map[int32][]*corev1.Pod{}
+				for idx := int32(0); idx < 4; idx++ {
+					plan.Instances = append(plan.Instances, types.InstancePlan{Index: idx, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}})
+					serving := int32(1)
+					if idx == tc.unready {
+						pods[idx] = []*corev1.Pod{unreadyEnginePod(idx, 10*time.Second)}
+						serving = 0
+					} else {
+						pods[idx] = []*corev1.Pod{servingEnginePod(idx)}
+					}
+					in.ObservedState.InstanceStatuses = append(in.ObservedState.InstanceStatuses, types.InstanceStatus{
+						Index: idx, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: 1, ServingPodCount: serving, RunningRevision: crashLoopRepairRevision,
+					})
+				}
+				d := planTargetOrFail(t, in, plan, target, planSnapshot(in, pods))
+				ua := findAction(d, workload.ActionUpdate)
+				if ua == nil {
+					t.Fatalf("expected an Update action, got %v", actionKinds(d))
+				}
+				var got []int32
+				for _, item := range ua.Update.Items {
+					got = append(got, item.Instance.Index)
+				}
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("update items = %v, want %v: the partition chooses who is listed, the rotation reading orders them", got, tc.want)
+				}
+			})
+		}
 	}
 }

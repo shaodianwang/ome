@@ -494,3 +494,54 @@ func TestCrashLoopWedge_UnreadyPastTheGraceIsAWedge(t *testing.T) {
 		t.Fatalf("a pod with no revision label stays in scope and reads as the row's own wedge; got none")
 	}
 }
+
+// TestPodSetOutOfRotation: the roll's ordering reading. A non-empty pod
+// set with no routed pod in rotation is out of rotation now: a promoted
+// pod unready inside its grace counts as one past it does, as do a parked
+// pod, a terminal pod and a pod that never served; a serving pod anywhere
+// in the set keeps it in rotation, a gang reads its leader alone, and a
+// set of nothing but deleting pods, or no pods, is not out of rotation.
+// Every set that serves nothing by the graced reading is out of rotation.
+func TestPodSetOutOfRotation(t *testing.T) {
+	hash := query.RevisionFromName(clRevision).Hash()
+	runner := func(pod *corev1.Pod, name string) *corev1.Pod {
+		pod.Labels = map[string]string{query.LabelRevisionHash: hash, query.LabelRunner: name}
+		return pod
+	}
+	inside := unreadyAfterServingPod("engine-0-default-0", tNow.Add(-30*time.Second))
+	past := unreadyAfterServingPod("engine-0-default-0", tNow.Add(-2*time.Minute))
+	never := runningNotReadyPod("engine-0-default-0", tNow.Add(-2*time.Minute))
+	wedged := crashLoopPod("engine-0-default-0", 10*time.Minute, hash)
+	terminal := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "engine-0-default-0"}, Status: corev1.PodStatus{Phase: corev1.PodFailed}}
+	deleting := unreadyAfterServingPod("engine-0-default-0", tNow.Add(-2*time.Minute))
+	ts := metav1.NewTime(tNow)
+	deleting.DeletionTimestamp = &ts
+
+	for _, tc := range []struct {
+		name string
+		pods []*corev1.Pod
+		want bool
+	}{
+		{name: "unready inside the grace", pods: []*corev1.Pod{inside}, want: true},
+		{name: "unready past the grace", pods: []*corev1.Pod{past}, want: true},
+		{name: "never promoted", pods: []*corev1.Pod{never}, want: true},
+		{name: "crash-looping pod", pods: []*corev1.Pod{wedged}, want: true},
+		{name: "terminal pod", pods: []*corev1.Pod{terminal}, want: true},
+		{name: "serving pod", pods: []*corev1.Pod{servingPod("engine-0-default-0")}},
+		{name: "unready beside a serving pod", pods: []*corev1.Pod{inside, servingPod("engine-0-default-1")}},
+		{name: "leader unready inside the grace beside a serving worker", pods: []*corev1.Pod{runner(unreadyAfterServingPod("engine-0-leader-0", tNow.Add(-30*time.Second)), "leader"), runner(servingPod("engine-0-worker-0"), "worker")}, want: true},
+		{name: "worker unready beside a serving leader", pods: []*corev1.Pod{runner(servingPod("engine-0-leader-0"), "leader"), runner(unreadyAfterServingPod("engine-0-worker-0", tNow.Add(-2*time.Minute)), "worker")}},
+		{name: "only a deleting pod", pods: []*corev1.Pod{deleting}},
+		{name: "no pods", pods: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := evidence.PodSetOutOfRotation(tc.pods)
+			if got != tc.want {
+				t.Fatalf("PodSetOutOfRotation = %v, want %v", got, tc.want)
+			}
+			if evidence.PodSetServesNothing(tc.pods, tNow, time.Minute) && !got {
+				t.Fatalf("a set that serves nothing must be out of rotation")
+			}
+		})
+	}
+}
