@@ -1,0 +1,56 @@
+# The gang is widened by one worker while its migration is at SurgePending.
+# The surge mirrors the source's live Runner layout, so its missing member
+# is created at the source's running revision and the hand-over waits on the
+# whole widened surge; the source keeps the pod set it already had.
+scenario: migrate-surge-pending-width-grow
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+cells:
+  - instance/Migrate/CreateSurge/spec.gangWidth[grow]/before
+  - instance/Migrate/SurgeTarget/spec.gangWidth[grow]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members are bound to node-0 and report Ready, and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the operator asks the gang off node-0, and the migrate pass admits the request, establishes the pair and requeues so the surge gets its PodGroup before its pods
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the surge PodGroup is announced and the surge gang's pods are created behind it
+  - tick: 5
+    note: the gang is widened by one worker at an unchanged revision, and the surge's missing member is created at the source's running revision
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+  - tick: 6
+    note: the two members built first report ContainersReady, but the surge is not marked serving while its new member is not
+    events:
+      - pod.containersReady[target]: {pod: {index: 1, runner: leader}}
+      - pod.containersReady[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the new member reports ContainersReady, so the whole widened surge is marked serving and the record waits on its rotation and availability gates
+    events:
+      - pod.containersReady[target]: {pod: {index: 1, runner: worker, ordinal: 1}}

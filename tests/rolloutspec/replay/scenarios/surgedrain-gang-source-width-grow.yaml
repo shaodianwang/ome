@@ -1,0 +1,62 @@
+# The gang is widened by one worker while its surge is already draining the
+# source. The replacement reads the live width: its missing member is created
+# at the pinned revision, and the drained source is deleted only once the
+# whole widened replacement is runtime-ready, so the hand-over completes at
+# the new width.
+scenario: surgedrain-gang-source-width-grow
+arrows:
+  - T-empty-gang-surge-target
+  - T-surgedrain-gang-complete
+  - T-gangtarget-ready
+cells:
+  - instance/Update/SurgeDrain/spec.gangWidth[grow]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the whole replacement reports Ready, so the source advances to the drain and leaves rotation
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 6
+    note: the gang is widened by one worker at an unchanged revision while the source drains, and the replacement's missing member is created at the pinned hash
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+  - tick: 7
+    note: the leader's endpoint goes not-ready, but the source is not deleted while the widened replacement is still short of a runtime-ready member
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 8
+    note: the new member reports Ready, so the whole widened replacement is runtime-ready and the drained source pods are deleted
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: worker, ordinal: 1}}
+  - tick: 9
+    note: the source pods are gone, so its row is removed and the widened replacement is promoted as the Instance
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

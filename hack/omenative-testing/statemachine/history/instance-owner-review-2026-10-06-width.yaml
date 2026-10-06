@@ -1,0 +1,19 @@
+# Provenance for the instance-machine cells decided in the owner review of
+# 2026-10-06 on the desired pod count per Instance changing while a surge or
+# a migration is in flight: the operation switches to the new width. A gang
+# surge and a migration surge both read the live Runner list, so a member
+# added mid-flight is created at the pinned revision and the hand-over waits
+# for the whole widened replacement. The shrink half - a member already built
+# above the new width - stays open until the surplus-member question is
+# answered.
+#
+# Selectors match the cells files exactly: an empty variants, windows or
+# transition matches all of them.
+history:
+  # --- cells-update-surge.yaml ---
+  - {state: Update/Surge, event: spec.gangWidth, variants: [grow], windows: [], transition: "", decision: owner-review-2026-10-06}
+  - {state: Update/SurgeDrain, event: spec.gangWidth, variants: [grow], windows: [], transition: "", decision: owner-review-2026-10-06}
+
+  # --- cells-migrate.yaml ---
+  - {state: Migrate/CreateSurge, event: spec.gangWidth, variants: [grow], windows: [], transition: "", decision: owner-review-2026-10-06}
+  - {state: Migrate/SurgeTarget, event: spec.gangWidth, variants: [grow], windows: [], transition: "", decision: owner-review-2026-10-06}

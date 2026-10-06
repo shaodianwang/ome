@@ -1,0 +1,64 @@
+tick=1 note the gang's PodGroup is announced before its first member, and the Create pass materializes both
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 2 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-leader-0 revision=3363fef6 incarnation=1 ordinal=0
+tick=1 pod create name=svc-a-engine-0-worker-0 revision=3363fef6 incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note both members are bound to node-0 and report Ready, and the leader enters rotation, so the Instance promotes as one
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-leader-0 node=node-0 now=t+0s
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-worker-0 node=node-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-leader-0 serving=absent→True
+tick=2 pod status-patch name=svc-a-engine-0-worker-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-3363fef6 readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (2 pod(s) serving)
+tick=2 pass result=none
+tick=3 note the operator asks the gang off node-0, and the migrate pass admits the request, establishes the pair and requeues so the surge gets its PodGroup before its pods
+tick=3 apply spec.migrateRequest uuid=uid#3 instance=0 fromNode=node-0 now=t+0s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 condition type=MigrationPolicyUnconfigured status=False reason=MigrationCapacityConfigured message=Migration capacity policy is configured
+tick=3 migration uuid=uid#3 write phase=Accepted→SurgePending surge=nil→1 message=nil→surge allocated; waiting for surge pods allocatedAt=nil→t+0s
+tick=3 row=0 write incarnation=1 phase=Migrating runningRevision=svc-a-engine-3363fef6 readySince=t+0s op=op#2{type=Migrate step=CreateSurge surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#3{type=Migrate step=CreateSurge surgeIndex=0 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal MigrationRequestAccepted OMENative component=engine instance=0 migration accepted (uuid=uid#3, source-node=node-0, surge-index=1)
+tick=3 pass result=after:5s
+tick=4 note the surge PodGroup is announced and the surge gang's pods are created behind it
+tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=4 podgroup create name=svc-a-engine-1
+tick=4 row=0 write no-op precondition=no-change
+tick=4 row=1 write no-op precondition=no-change
+tick=4 pod create name=svc-a-engine-1-leader-0 revision=3363fef6 incarnation=1 ordinal=0
+tick=4 pod create name=svc-a-engine-1-worker-0 revision=3363fef6 incarnation=1 ordinal=0
+tick=4 pass result=after:5s
+tick=5 note the gang is widened by one worker at an unchanged revision, and the surge's missing member is created at the source's running revision
+tick=5 apply spec.gangWidth[grow] workers=2 generation=1 now=t+0s
+tick=5 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=5 podgroup update name=svc-a-engine-0
+tick=5 podgroup update name=svc-a-engine-1
+tick=5 row=0 write no-op precondition=no-change
+tick=5 row=1 write no-op precondition=no-change
+tick=5 pod create name=svc-a-engine-1-worker-1 revision=3363fef6 incarnation=1 ordinal=1
+tick=5 pass result=after:5s
+tick=6 note the two members built first report ContainersReady, but the surge is not marked serving while its new member is not
+tick=6 apply pod.containersReady[target] pod=svc-a-engine-1-leader-0 now=t+0s
+tick=6 apply pod.containersReady[target] pod=svc-a-engine-1-worker-0 now=t+0s
+tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=6 row=0 write no-op precondition=no-change
+tick=6 row=1 write no-op precondition=no-change
+tick=6 pass result=after:5s
+tick=7 note the new member reports ContainersReady, so the whole widened surge is marked serving and the record waits on its rotation and availability gates
+tick=7 apply pod.containersReady[target] pod=svc-a-engine-1-worker-1 now=t+0s
+tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=7 row=0 write no-op precondition=no-change
+tick=7 row=1 write no-op precondition=no-change
+tick=7 pod status-patch name=svc-a-engine-1-leader-0 serving=absent→True
+tick=7 pod status-patch name=svc-a-engine-1-worker-0 serving=absent→True
+tick=7 pod status-patch name=svc-a-engine-1-worker-1 serving=absent→True
+tick=7 pass result=after:5s

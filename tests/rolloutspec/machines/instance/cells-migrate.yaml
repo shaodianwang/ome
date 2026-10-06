@@ -537,16 +537,32 @@ cells:
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
-  # GAP: a desired width change reaches the surge but not the source, and
-  # nothing compares the two.
   - state: Migrate/CreateSurge
     event: spec.gangWidth
+    variants: [grow]
     outcome: ignore
-    note: the surge mirrors the plan's live Runner list rather than the source
-      revision, so a width change mid-flight widens the surge's desired pod set on the
-      next drive pass and leaves any now-extra surge pods in place, while the source
-      keeps the pod set it already had
-    placement: unit
+    note: the operation switches to the new width - the surge mirrors the source's
+      live Runner list on every drive pass, so the missing member is created at the
+      source's running revision and the hand-over waits for the whole widened surge;
+      the source keeps the pod set it already had. A single-pod Instance gaining its
+      first worker is a template change - the worker spec enters the revision
+      payload - and reaches the row as spec.revision
+    placement: sim
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-width-grow]}
+    status: decided
+  # GAP: a surge member above the new width is never removed; whether a shrink
+  # trims the surge before the hand-over or the surplus is reaped afterwards is
+  # the open surplus-member question.
+  - state: Migrate/CreateSurge
+    event: spec.gangWidth
+    variants: [shrink, runnerSetChanged]
+    outcome: ignore
+    note: a shrink reaches the surge only through the names it must still create -
+      the member it already built above the new width stays and is still read by the
+      runtime-ready check - and the source keeps the pod set it already had; a
+      runner-set edit rewrites the hashed worker spec and reaches the row as
+      spec.revision
+    placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current
   - state: Migrate/CreateSurge
@@ -1300,16 +1316,33 @@ cells:
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
-  # GAP: a desired width change reaches this row but not its source, and
-  # nothing compares the two.
   - state: Migrate/SurgeTarget
     event: spec.gangWidth
+    variants: [grow]
     outcome: ignore
-    note: this row's desired pod set is the source's Runner list read live from the
-      plan, so a width change mid-flight widens it on the next drive pass and leaves
-      any now-extra pods in place; the source keeps the pod set it already had until
-      the promotion
-    placement: unit
+    note: the operation switches to the new width - this row's desired pod set is the
+      source's Runner list read live from the plan, so its missing member is created
+      at the source's running revision on the next drive pass and the hand-over waits
+      for the whole widened set; the source keeps the pod set it already had until
+      the promotion. A single-pod Instance gaining its first worker is a template
+      change - the worker spec enters the revision payload - and reaches the row as
+      spec.revision
+    placement: sim
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-width-grow]}
+    status: decided
+  # GAP: a member above the new width is never removed; whether a shrink trims
+  # this row before the hand-over or the surplus is reaped afterwards is the
+  # open surplus-member question.
+  - state: Migrate/SurgeTarget
+    event: spec.gangWidth
+    variants: [shrink, runnerSetChanged]
+    outcome: ignore
+    note: a shrink reaches this row only through the names it must still create - the
+      member it already built above the new width stays and is still read by the
+      runtime-ready check - and the source keeps the pod set it already had; a
+      runner-set edit rewrites the hashed worker spec and reaches the row as
+      spec.revision
+    placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current
   - state: Migrate/SurgeTarget

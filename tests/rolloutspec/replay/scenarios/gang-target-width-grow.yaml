@@ -8,6 +8,7 @@ arrows:
   - T-gangtarget-ready
 cells:
   - instance/Update/GangSurgeTarget/spec.gangWidth[grow]/before
+  - instance/Update/Surge/spec.gangWidth[grow]/before
 initial:
   spec:
     replicas: 1
