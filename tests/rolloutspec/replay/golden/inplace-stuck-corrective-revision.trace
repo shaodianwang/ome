@@ -1,0 +1,53 @@
+tick=1 note cold start
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the pod becomes Ready and enters rotation
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=2 pass result=none
+tick=3 note only the image changed, so the update is eligible to run in place
+tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=3 gate consult strategy=InPlaceIfPossible surge=0 unavail=0 verdict=allow
+tick=3 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=InPlace target=svc-a-engine-6f8b1e6c strategy=InPlaceIfPossible started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal InPlaceUpdateStarted OMENative component=engine instance=0 in-place update to revision svc-a-engine-6f8b1e6c
+tick=3 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the pod leaves rotation and two minutes pass, which is longer than the grace but proves nothing on its own
+tick=4 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 apply clock.advance by=2m0s now=t+2m0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod patch name=svc-a-engine-0-default-0 annotations=[internal.ome.io/in-place-image-transition:nil→{"targetImages":{"main":"registry.example.com/runtime:v2"},"restartCounts":{"main":0}}]
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the new image cannot be pulled, and the same pass issues the image patch and restamps the revision label
+tick=5 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-default-0 reason=ImagePullBackOff now=t+2m0s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod patch name=svc-a-engine-0-default-0 images=main=registry.example.com/runtime:v1→main=registry.example.com/runtime:v2
+tick=5 pod patch name=svc-a-engine-0-default-0 labels=[ome.io/revision-hash:882059bb→6f8b1e6c]
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note the wedged pod now carries the target revision and the pull has failed for longer than the grace, so the escalation charges that revision and disposes the roll
+tick=6 apply clock.advance by=2m0s now=t+4m0s
+tick=6 row=0 write no-op precondition=no-change
+tick=6 hold cleared
+tick=6 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Held attempts=1 reason=ImagePullBackOff}
+tick=6 warn retryHeld target=svc-a-engine-6f8b1e6c attempts=1 reason=ImagePullBackOff
+tick=6 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Parked target=svc-a-engine-6f8b1e6c waiting=Held strategy=InPlaceIfPossible started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
+tick=6 warn instanceFailed index=0 pod=svc-a-engine-0-default-0 reason=ImagePullBackOff: workload-caused failure; revision svc-a-engine-6f8b1e6c held for retry — fix the image/config and publish a corrected revision
+tick=6 pass result=after:5s
+tick=7 note a corrective revision lands, which the held revision does not block, so the Instance re-drives from Failed
+tick=7 apply spec.revision image=registry.example.com/runtime:v3 generation=2 now=t+4m0s
+tick=7 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-2dd013c9 readySince=t+0s op=op#3{type=Update step=InPlace target=svc-a-engine-2dd013c9 strategy=InPlaceIfPossible started=t+4m0s lastProgressAt=t+4m0s deadline=t+34m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
+tick=7 event Normal InPlaceUpdateStarted OMENative component=engine instance=0 in-place update to revision svc-a-engine-2dd013c9
+tick=7 pod patch name=svc-a-engine-0-default-0 annotations=[internal.ome.io/in-place-image-transition:{"targetImages":{"main":"registry.example.com/runtime:v2"},"restartCounts":{"main":0}}→{"targetImages":{"main":"registry.example.com/runtime:v3"},"restartCounts":{"main":0}}]
+tick=7 hold cleared
+tick=7 retryblock target=svc-a-engine-6f8b1e6c remove {state=Held attempts=1 reason=ImagePullBackOff}→nil
+tick=7 pass result=after:5s

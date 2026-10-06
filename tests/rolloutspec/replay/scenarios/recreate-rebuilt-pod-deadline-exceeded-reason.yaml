@@ -1,0 +1,48 @@
+# The rebuilt pod reports the DeadlineExceeded waiting reason, which is not
+# one of the terminal reasons the stuck check matches, so only the operation
+# deadline ends the recreate.
+scenario: recreate-rebuilt-pod-deadline-exceeded-reason
+arrows:
+  - T-ready-recreate
+  - T-drain-deadline
+cells:
+  - instance/Update/Drain/pod.waiting[DeadlineExceeded]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the source leaves rotation
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the source is gone, so the rebuild may start
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: two minutes on the rebuilt pod reports DeadlineExceeded, which the stuck check does not match, so the recreate keeps polling
+    events:
+      - clock.advance: 2m
+      - pod.waiting[DeadlineExceeded]: {pod: {index: 0}, message: "container start deadline exceeded"}
+  - tick: 7
+    note: the operation deadline elapses, so the attempt is disposed
+    events:
+      - timer.operationDeadline: {slack: 1s}

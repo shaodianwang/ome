@@ -1,0 +1,44 @@
+# The record's deadline elapses on the pass that also finds the healthy
+# source's only pod gone. Expiry re-reads the live source pods, so the
+# restore branch it would have taken flips to the unhealthy one: the source
+# is stamped Failed, and the surge index is unpinned whatever the source did.
+scenario: migrate-deadline-source-lost-at-expiry
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-migrate-deadline
+  - T-migratetarget-expired
+cells:
+  - instance/Migrate/CreateSurge/pod.deleted[source]/boundary@T-migrate-deadline-restore
+  - instance/Migrate/SurgeTarget/pod.deleted[source]/boundary@T-migratetarget-expired
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the source pod is gone on the pass the record's deadline elapses, so expiry finds no runtime-ready source pod, fails the source and unpins the surge
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 5
+    note: the unpinned index is no longer planned, so the scale-down wave commits Phase Deleting with a Delete Drain operation on it

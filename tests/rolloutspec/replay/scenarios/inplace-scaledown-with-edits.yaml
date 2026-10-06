@@ -1,0 +1,52 @@
+# The replica count is halved mid-patch on the pass that also reads the
+# retired pod ready and carries a further image edit. The retired index is
+# the scale-down wave's whatever its pod reports, and the new revision
+# reaches only the index that remains.
+scenario: inplace-scaledown-with-edits
+arrows:
+  - T-ready-inplace
+  - T-inplace-scaledown
+  - T-inplace-retarget
+  - T-delete-done
+cells:
+  - instance/Update/InPlace/pod.containersReady[source]/boundary@T-inplace-scaledown
+  - instance/Update/InPlace/spec.revision/boundary@T-inplace-scaledown
+initial:
+  spec:
+    replicas: 2
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+    - {index: 1, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: only the image changed, so both Instances are eligible to run the update in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 2
+    note: the operator halves the replica count as the retired pod reports ready and a further image edit lands, so the retired index leaves the plan whatever it reports
+    events:
+      - spec.replicasDown: {to: 1}
+      - pod.containersReady[source]: {pod: {index: 1}}
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 3
+    note: the scale-down wave still polls the retired index, so nothing else runs on this pass
+  - tick: 4
+    note: the retired index's pod leaves rotation, which is the drain the delete waits on
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 5
+    note: the drained pod is gone, so the row is removed with it
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}
+  - tick: 6
+    note: with the wave done, the remaining Instance retargets in place toward the newer revision

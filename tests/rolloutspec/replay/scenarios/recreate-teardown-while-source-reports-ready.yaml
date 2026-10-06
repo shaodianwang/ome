@@ -1,0 +1,44 @@
+# The owner is deleted mid-recreate on the pass that also reads the pod
+# ready. Teardown treats every observed index as a scale-down extra whatever
+# its pods report.
+scenario: recreate-teardown-while-source-reports-ready
+arrows:
+  - T-ready-recreate
+  - T-drain-teardown
+  - T-delete-done
+cells:
+  - instance/Update/Drain/pod.ready[source]/boundary@T-drain-teardown
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the owner's deletion begins as the pod reports ready again, so the rebuilding Instance becomes a scale-down extra
+    events:
+      - spec.teardown[deleted]: {}
+      - pod.ready[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the pod leaves rotation, which is the drain the delete waits on
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the drained pod is gone, so the row is removed with it
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

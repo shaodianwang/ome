@@ -1,0 +1,38 @@
+# The Instance is widened past one pod while an in-place patch converges.
+# The mode is re-resolved every pass and a multi-pod Instance always rebuilds,
+# so the Incarnation is bumped and the step restamped to Drain.
+scenario: inplace-gangwidth-grow-recreates
+arrows:
+  - T-ready-inplace
+cells:
+  - instance/Update/InPlace/spec.gangWidth[grow]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    topologyKey: topology.example.com/fabric-domain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation, so the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the Instance is widened to a leader and a worker at an unchanged revision, so the roll re-resolves to recreate and restamps the step to Drain at a bumped Incarnation
+    events:
+      - spec.gangWidth[grow]: {to: 1}

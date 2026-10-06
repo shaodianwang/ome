@@ -1,0 +1,52 @@
+# The patched pod reports the DeadlineExceeded waiting reason, which is not
+# one of the terminal reasons the stuck check matches, so only the operation
+# deadline ends the roll; a corrective revision afterwards re-drives the
+# Instance.
+scenario: inplace-deadline-exceeded-reason-waits
+arrows:
+  - T-ready-inplace
+  - T-inplace-deadline
+cells:
+  - instance/Update/InPlace/pod.waiting[DeadlineExceeded]/before
+  - instance/Update/InPlace/spec.revision/after@T-inplace-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation, so the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the image patch lands while the source is out of rotation
+  - tick: 6
+    note: two minutes on the patched pod reports DeadlineExceeded, which the stuck check does not match, so the roll keeps polling
+    events:
+      - clock.advance: 2m
+      - pod.waiting[DeadlineExceeded]: {pod: {index: 0}, message: "container start deadline exceeded"}
+  - tick: 7
+    note: the operation deadline elapses with the pod still held out of rotation, so the attempt is disposed
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 8
+    note: a corrective revision is a different retry subject, so the Instance re-drives from Failed
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}

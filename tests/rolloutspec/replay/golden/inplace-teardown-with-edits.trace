@@ -1,0 +1,38 @@
+tick=1 note cold start
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the pod becomes Ready and enters rotation
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=2 pass result=none
+tick=3 note only the image changed, so the update is eligible to run in place
+tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=3 gate consult strategy=InPlaceIfPossible surge=0 unavail=0 verdict=allow
+tick=3 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=InPlace target=svc-a-engine-6f8b1e6c strategy=InPlaceIfPossible started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal InPlaceUpdateStarted OMENative component=engine instance=0 in-place update to revision svc-a-engine-6f8b1e6c
+tick=3 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the owner's deletion begins as the pod reports ready and a further image edit lands, so the patching Instance becomes a scale-down extra
+tick=4 apply spec.teardown[deleted] teardown=true now=t+0s
+tick=4 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 apply spec.revision image=registry.example.com/runtime:v3 generation=2 now=t+0s
+tick=4 row=0 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#3{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=4 pass result=requeue
+tick=5 note the pod leaves rotation, which is the drain the delete waits on
+tick=5 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod delete name=svc-a-engine-0-default-0 grace=default uidPrecondition=set
+tick=5 pass result=none
+tick=6 note the drained pod is gone, so the row is removed with it
+tick=6 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=6 row=0 write no-op precondition=no-change
+tick=6 row=0 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#3{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=6 pass result=requeue

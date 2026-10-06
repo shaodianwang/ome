@@ -1,0 +1,53 @@
+# Operator edits that land while a migration is at SurgePending. The update
+# strategy and the restart policy have no reader on a migrate-owned pair, and
+# a replica increase waits because the accepted record paces the pass.
+scenario: migrate-surge-pending-spec-edits-wait
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+cells:
+  - instance/Migrate/CreateSurge/spec.strategy/before
+  - instance/Migrate/SurgeTarget/spec.strategy/before
+  - instance/Migrate/CreateSurge/spec.policyTuning[restartPolicy]/before
+  - instance/Migrate/SurgeTarget/spec.policyTuning[restartPolicy]/before
+  - instance/Migrate/CreateSurge/spec.replicasUp/before
+  - instance/Migrate/SurgeTarget/spec.replicasUp/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the update strategy is switched, which no migration step reads, so the pair is untouched
+    events:
+      - spec.strategy: {strategy: RecreatePod}
+  - tick: 5
+    note: the restart policy is switched, which the restart trigger does not read for a migrate-owned row, so the pair is untouched
+    events:
+      - spec.policyTuning[restartPolicy]: {value: RecreateInstanceOnPodRestart}
+  - tick: 6
+    note: the replica count rises, and the accepted record paces the pass before the Create pass, so no new index is materialized
+    events:
+      - spec.replicasUp: {to: 2}
+  - tick: 7
+    note: the next pass is paced by the record again, so the new index still waits

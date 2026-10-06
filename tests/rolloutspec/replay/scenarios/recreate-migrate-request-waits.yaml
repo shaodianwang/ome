@@ -1,0 +1,55 @@
+# A migration is requested while a recreate is in flight. The migrate pass
+# declines a fresh record while the source is not steady-Ready and falls
+# through so the recreate converges, and the same record is picked up once
+# the Instance is Ready.
+scenario: recreate-migrate-request-waits
+arrows:
+  - T-ready-recreate
+  - T-drain-ready
+  - T-ready-migrate
+  - T-empty-migrate-target
+cells:
+  - instance/Update/Drain/spec.migrateRequest/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the operator asks the Instance off node-0 mid-recreate, and the migrate pass declines the fresh record without taking ownership so the recreate converges
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 5
+    note: the source leaves rotation, so Phase A deletes it
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the source is gone, so Phase B rebuilds it at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 7
+    note: the rebuilt pod is bound to node-0 and reports Ready, so the recreate promotes while the record still waits
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+  - tick: 8
+    note: the Instance is steady Ready, so the same record is admitted and the pair is established

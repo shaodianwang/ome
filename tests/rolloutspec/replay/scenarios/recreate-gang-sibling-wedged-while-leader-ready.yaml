@@ -1,0 +1,53 @@
+# One member of a rebuilt gang wedges on the target image, older than the
+# grace, on the pass that reads its sibling ready. The escalation carries
+# the fully-serving guard, and one ready member of an incomplete recreate
+# does not meet it, so the Instance is failed on the wedged sibling.
+scenario: recreate-gang-sibling-wedged-while-leader-ready
+arrows:
+  - T-ready-recreate
+  - T-drain-stuck
+cells:
+  - instance/Update/Drain/pod.ready[source]/boundary@T-drain-stuck
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the Create pass materializes the whole gang at once
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds the gang in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation, so Phase A deletes both members
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 5
+    note: both members are gone, so Phase B rebuilds the gang at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 6
+    note: the rebuilt members are still booting two minutes on, which is longer than the grace but proves nothing on its own
+    events:
+      - clock.advance: 2m
+  - tick: 7
+    note: the worker wedges on the target image as the leader reports ready, and one ready member of an incomplete recreate does not retract the escalation
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, runner: worker}, message: "manifest unknown"}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}

@@ -1,0 +1,41 @@
+# A rollback is pinned while Phase A is still draining, then released. Each
+# replaces the roll target, so the recreate stamp's idempotency guard falls
+# through twice: the Incarnation is bumped again and Phase A restarts.
+scenario: recreate-rollback-restarts-drain
+arrows:
+  - T-ready-recreate
+  - T-drain-retarget
+cells:
+  - instance/Update/Drain/spec.rollbackTarget[set]/before
+  - instance/Update/Drain/spec.rollbackTarget[clear]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod stays published, so Phase A holds on the drain
+  - tick: 5
+    note: the roll is pinned back to the stored v1 revision mid-drain, so the recreate reopens at it with another Incarnation bump
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+  - tick: 6
+    note: the pin is released, so the recreate reopens at the spec revision with yet another bump
+    events:
+      - spec.rollbackTarget[clear]: {}

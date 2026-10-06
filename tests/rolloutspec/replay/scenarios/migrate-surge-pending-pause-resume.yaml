@@ -1,0 +1,59 @@
+# A pause lands on a migration at SurgePending and is lifted again, once as
+# a standard pause and once as a freeze. A paused plan selects neither the
+# expiry nor the drive pass, so the pair freezes with its pin held, and the
+# record is the anchor the drive resumes from on the unpause.
+scenario: migrate-surge-pending-pause-resume
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+cells:
+  - instance/Migrate/CreateSurge/spec.pauseTrue/before
+  - instance/Migrate/SurgeTarget/spec.pauseTrue/before
+  - instance/Migrate/CreateSurge/spec.unpause/before
+  - instance/Migrate/SurgeTarget/spec.unpause/before
+  - instance/Migrate/CreateSurge/spec.pauseFreeze/before
+  - instance/Migrate/SurgeTarget/spec.pauseFreeze/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the operator pauses, so the drive does not run and the pair's deadlines are parked with the pin held
+    events:
+      - spec.pauseTrue: {}
+  - tick: 5
+    note: the surge reports ContainersReady under the pause, which the drive is not running to read
+    events:
+      - pod.containersReady[target]: {pod: {index: 1}}
+  - tick: 6
+    note: the pause is lifted, so the drive resumes from the record, marks the surge serving and the deadlines re-arm
+    events:
+      - spec.unpause: {}
+  - tick: 7
+    note: the operator freezes, which suspends the drive exactly as the standard pause did
+    events:
+      - spec.pauseFreeze: {}
+  - tick: 8
+    note: the freeze is lifted and the drive resumes from the record again
+    events:
+      - spec.unpause: {}

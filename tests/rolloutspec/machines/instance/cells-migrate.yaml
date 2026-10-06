@@ -27,7 +27,7 @@ cells:
     note: the drive re-reads both pod sets every pass; neither the long-scheduled
       source nor the surge binding to a node off FromNode changes the pin
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-observations]}
     status: current
   - state: Migrate/CreateSurge
     event: pod.containersReady
@@ -35,7 +35,7 @@ cells:
     note: surge ContainersReady is the drive's first surge gate and is followed by
       the serving flip in the same pass; the source row keeps Phase Migrating
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-observations]}
     status: current
   - state: Migrate/CreateSurge
     event: pod.ready
@@ -43,7 +43,7 @@ cells:
     outcome: ignore
     note: the source serves throughout; its readiness gates no migration step
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-observations]}
     status: current
   - state: Migrate/CreateSurge
     event: pod.ready
@@ -54,7 +54,7 @@ cells:
       once the routable surge pod is in rotation and the surge AvailablePodCount
       covers every pod, and the source row keeps its pin either way
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-observations]}
     status: current
   - state: Migrate/CreateSurge
     event: pod.servingOn
@@ -62,7 +62,7 @@ cells:
     note: the drive itself marks the surge pods serving; the source keeps its own
       serving gate until the drain step
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-observations]}
     status: current
   - state: Migrate/CreateSurge
     event: pod.servingOff
@@ -81,7 +81,7 @@ cells:
       and the promotion wait; nothing already written is rolled back and the record
       expires if rotation never returns
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-surge-pod-churn]}
     status: current
   - state: Migrate/CreateSurge
     event: pod.deleted
@@ -91,7 +91,7 @@ cells:
     note: losing a source pod early does not shorten the migration — the surge must
       still pass its gates — it only leaves the delete loop with less to delete
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-source-pod-lost]}
     status: current
   - state: Migrate/CreateSurge
     event: pod.deleted
@@ -114,7 +114,7 @@ cells:
     note: expiry already took the unhealthy branch; one more lost source pod does
       not change the stamp it is about to write
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-deadline-unhealthy-source-pod-lost]}
     status: current
   - state: Migrate/CreateSurge
     event: pod.deleted
@@ -125,7 +125,7 @@ cells:
       in this window flips the observation and the sibling unhealthy branch stamps
       Failed instead of Ready
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-deadline-source-lost-at-expiry]}
     status: current
   - state: Migrate/CreateSurge
     event: pod.deleted
@@ -135,7 +135,7 @@ cells:
     note: teardown hands the whole pair to the scale-down pipeline; a pod already
       gone is one the batch no longer has to delete
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-teardown-outruns-deadline]}
     status: current
   - state: Migrate/CreateSurge
     event: pod.deleted
@@ -166,7 +166,7 @@ cells:
       is re-created from the source RunningRevision; after promotion the pod belongs
       to the promoted row, not to the pair
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-surge-pod-churn]}
     status: current
   - state: Migrate/CreateSurge
     event: pod.waiting
@@ -223,7 +223,7 @@ cells:
     note: the restart trigger declines for a migrate-owned status, so a container
       restart neither recreates nor fails the Instance while the pin is held
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-surge-pod-churn]}
     status: current
   - state: Migrate/CreateSurge
     event: pod.uidRotated
@@ -322,7 +322,7 @@ cells:
       missing-pod diff does not re-create it and the runtime-ready gate blocks until
       the pod actually disappears
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-surge-pod-churn]}
     status: current
   - state: Migrate/CreateSurge
     event: pod.phaseTerminal
@@ -334,7 +334,7 @@ cells:
       delete loop
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-surge-pod-churn]}
     status: current
   - state: Migrate/CreateSurge
     event: pod.phaseTerminal
@@ -372,7 +372,7 @@ cells:
     outcome: ignore
     note: the surge index stays pinned in the plan, so the PodGroup pass re-creates the group from the plan before the drive runs; pods already created keep their pod-group label
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-gang-podgroup-deleted]}
     status: current
   - state: Migrate/CreateSurge
     event: gang.podGroup
@@ -460,7 +460,7 @@ cells:
     note: migration moves placement, not template — the surge mirrors the source
       RunningRevision layout and no migration step reads the update strategy
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-spec-edits-wait]}
     status: current
   - state: Migrate/CreateSurge
     event: spec.replicasUp
@@ -469,7 +469,7 @@ cells:
       Create passes, so a newly planned index is materialized only once the record
       is terminal
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-spec-edits-wait]}
     status: current
   - state: Migrate/CreateSurge
     event: spec.replicasDown
@@ -487,7 +487,7 @@ cells:
       freezes with its pin held; a Migrate attempt is one a pause holds, so the
       operation carries Operation.Waiting=Paused and its deadline is parked with it
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-pause-resume]}
     status: current
   - state: Migrate/CreateSurge
     event: spec.pauseFreeze
@@ -495,7 +495,7 @@ cells:
     note: a frozen pause truncates the plan even earlier than a standard pause; the
       migration is equally suspended and equally resumable
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-pause-resume]}
     status: current
   - state: Migrate/CreateSurge
     event: spec.unpause
@@ -503,7 +503,7 @@ cells:
     note: the record is the resume anchor — the next pass re-selects it, re-ensures
       the idempotent pair stamps while it is at or below SurgePending, and carries on
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-pause-resume]}
     status: current
   - state: Migrate/CreateSurge
     event: spec.teardown
@@ -557,7 +557,7 @@ cells:
       source RunningRevision, so the rollback rolls only once the record is terminal
     invariants: [one.operation.per.instance]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-rollback-waits]}
     status: current
   - state: Migrate/CreateSurge
     event: spec.policyTuning
@@ -568,7 +568,7 @@ cells:
       windows belong to the update path; minReadySeconds is the exception, retiming the surge
       availability gate from the next pass on
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-spec-edits-wait]}
     status: current
   - state: Migrate/CreateSurge
     event: config.changed
@@ -668,7 +668,7 @@ cells:
     note: teardown short-circuits the reconcile before the expiry pass runs, so the
       pair is deleted rather than expired
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-teardown-outruns-deadline]}
     status: current
   - state: Migrate/CreateSurge
     event: timer.migrationDeadline
@@ -788,7 +788,7 @@ cells:
       with no gate flipped both re-read the live pod sets, re-derive the same decision
       and requeue
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-observations]}
     status: current
   - state: Migrate/CreateSurge
     event: api.invalid
@@ -824,7 +824,7 @@ cells:
       overlay, but it is observed, not stamped; the node the move leaves is resolved
       once, before the pair is stamped, from where the source actually runs
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-observations]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.containersReady
@@ -834,7 +834,7 @@ cells:
       followed by the serving flip; the row keeps Phase Creating with the pin until
       the source is gone
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-observations]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.containersReady
@@ -842,7 +842,7 @@ cells:
     outcome: ignore
     note: source container readiness gates no step of the migration
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-observations]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.ready
@@ -853,7 +853,7 @@ cells:
       SurgeReady and starts the source drain; this row stays Creating until the
       source pods are gone
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-observations]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.ready
@@ -862,7 +862,7 @@ cells:
     note: the source stays Ready and serving until the drain step, so nothing on this
       row changes
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-observations]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.servingOn
@@ -870,7 +870,7 @@ cells:
     note: the drive marks this row's pods serving once they are runtime-ready; the
       source keeps its gate on until the drain
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-observations]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.servingOff
@@ -879,7 +879,7 @@ cells:
     note: this row leaving rotation re-blocks the shared tail gates, so both the
       source drain and the promotion wait until it returns or the record expires
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-surge-pod-churn]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.servingOff
@@ -899,7 +899,7 @@ cells:
       and an ownership-guarded pair write, so a source pod disappearing early only
       shortens the delete loop
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-source-pod-lost]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.deleted
@@ -922,7 +922,7 @@ cells:
     note: expiry unpins this row on the record Deadline whatever the source pods are
       doing; the unpinned index then leaves the plan
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-deadline-source-lost-at-expiry]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.deleted
@@ -932,7 +932,7 @@ cells:
     note: teardown deletes both sides of the pair; the source pods going first
       changes nothing here
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-teardown-outruns-deadline]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.deleted
@@ -952,7 +952,7 @@ cells:
     note: a missing own pod reappears in the next drive pass's missing-pod diff and
       is re-created from the source RunningRevision with the same overlay
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-surge-pod-churn]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.waiting
@@ -1005,7 +1005,7 @@ cells:
     note: the restart trigger declines for a migrate-owned status, so a restarting
       container neither recreates nor fails this row
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-surge-pod-churn]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.uidRotated
@@ -1022,7 +1022,7 @@ cells:
       wedged own pod is left to the scale-down pipeline that takes the index over
       once expiry unpins it
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-stuck-surge-left]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.nodeLost
@@ -1094,7 +1094,7 @@ cells:
       missing-pod diff does not re-create it and the runtime-ready gate blocks until
       the pod actually disappears
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-surge-pod-churn]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.phaseTerminal
@@ -1105,7 +1105,7 @@ cells:
       the record Deadline; a terminal source pod is one more pod for the delete loop
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-surge-pod-churn]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.phaseTerminal
@@ -1143,7 +1143,7 @@ cells:
     outcome: ignore
     note: the index stays pinned while the record lives, so the PodGroup pass re-creates the group from the plan before the drive renders any missing member
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-gang-podgroup-deleted]}
     status: current
   - state: Migrate/SurgeTarget
     event: gang.podGroup
@@ -1228,7 +1228,7 @@ cells:
     note: this row runs the source RunningRevision layout; the update strategy is
       never consulted for it
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-spec-edits-wait]}
     status: current
   - state: Migrate/SurgeTarget
     event: spec.replicasUp
@@ -1236,7 +1236,7 @@ cells:
     note: an accepted migration returns from the dispatcher before the Update and
       Create passes, so new indices wait for the record to finish
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-spec-edits-wait]}
     status: current
   - state: Migrate/SurgeTarget
     event: spec.replicasDown
@@ -1254,7 +1254,7 @@ cells:
       freezes half-created with its pin held; a Migrate attempt is one a pause holds,
       so the operation carries Operation.Waiting=Paused and its deadline is parked
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-pause-resume]}
     status: current
   - state: Migrate/SurgeTarget
     event: spec.pauseFreeze
@@ -1262,7 +1262,7 @@ cells:
     note: a frozen pause truncates the plan even earlier; the half-created surge is
       equally suspended and equally resumable
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-pause-resume]}
     status: current
   - state: Migrate/SurgeTarget
     event: spec.unpause
@@ -1271,7 +1271,7 @@ cells:
       slot missing from the rebuilt observation is treated as a fresh stamp so a gang
       gets its PodGroup before its pods
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-pause-resume]}
     status: current
   - state: Migrate/SurgeTarget
     event: spec.teardown
@@ -1319,7 +1319,7 @@ cells:
       migrate-owned status, so the rollback rolls only once the record is terminal
     invariants: [one.operation.per.instance]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-rollback-waits]}
     status: current
   - state: Migrate/SurgeTarget
     event: spec.policyTuning
@@ -1331,7 +1331,7 @@ cells:
       instanceReadyTimeout reaches a gang only as the PodGroup schedule timeout written
       when the group was created
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-spec-edits-wait]}
     status: current
   - state: Migrate/SurgeTarget
     event: config.changed
@@ -1418,7 +1418,7 @@ cells:
     note: teardown short-circuits the reconcile before the expiry pass, so the index
       is deleted rather than unpinned
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-teardown-outruns-deadline]}
     status: current
   - state: Migrate/SurgeTarget
     event: timer.migrationDeadline
@@ -1518,7 +1518,7 @@ cells:
       with no gate flipped both re-read the live pod sets, re-derive the same decision
       and requeue
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-observations]}
     status: current
   - state: Migrate/SurgeTarget
     event: api.invalid

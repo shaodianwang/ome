@@ -1,0 +1,49 @@
+# The in-place attempt is disposed on a wedged pull, and a corrective
+# revision follows. The held revision denies a repeat of the same target,
+# but the correction is a different retry subject and re-drives the
+# Instance from Failed.
+scenario: inplace-stuck-corrective-revision
+arrows:
+  - T-ready-inplace
+  - T-inplace-stuck
+cells:
+  - instance/Update/InPlace/spec.revision/after@T-inplace-stuck
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation and two minutes pass, which is longer than the grace but proves nothing on its own
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - clock.advance: 2m
+  - tick: 5
+    note: the new image cannot be pulled, and the same pass issues the image patch and restamps the revision label
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}
+  - tick: 6
+    note: the wedged pod now carries the target revision and the pull has failed for longer than the grace, so the escalation charges that revision and disposes the roll
+    events:
+      - clock.advance: 2m
+  - tick: 7
+    note: a corrective revision lands, which the held revision does not block, so the Instance re-drives from Failed
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}

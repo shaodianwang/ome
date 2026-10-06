@@ -1,0 +1,52 @@
+# The same wedge observed from the other side: the worker's pull fails while
+# it is still younger than the grace, and the grace elapses on the pass that
+# reads the leader ready. One ready member does not retract it.
+scenario: recreate-gang-sibling-grace-while-leader-ready
+arrows:
+  - T-ready-recreate
+  - T-drain-stuckgrace
+cells:
+  - instance/Update/Drain/pod.ready[source]/boundary@T-drain-stuckgrace
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 5m
+timeline:
+  - tick: 1
+    note: the Create pass materializes the whole gang at once
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds the gang in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation, so Phase A deletes both members
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 5
+    note: both members are gone, so Phase B rebuilds the gang at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 6
+    note: the worker wedges on the target image while it is still younger than the grace, so the recreate keeps polling
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, runner: worker}, message: "manifest unknown"}
+  - tick: 7
+    note: the grace elapses on the wedged worker as the leader reports ready, and one ready member does not retract the escalation
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}

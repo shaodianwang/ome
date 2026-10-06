@@ -1,0 +1,60 @@
+# A gang's recreate is in Phase B when its PodGroup is deleted and the gang
+# is widened. The PodGroup pass announces the group again from the plan
+# before the dispatch, and Phase B recomputes the expected names from the
+# live plan, so the extra member is created under the same operation.
+scenario: recreate-gang-podgroup-deleted-and-widened
+arrows:
+  - T-ready-recreate
+  - T-drain-ready
+cells:
+  - instance/Update/Drain/gang.podGroup[Deleted]/before
+  - instance/Update/Drain/spec.gangWidth[grow]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds the gang in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation, so Phase A deletes both members
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 5
+    note: both members are gone, so Phase B rebuilds the gang at the bumped incarnation behind its existing PodGroup
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 6
+    note: the PodGroup is deleted, and the PodGroup pass announces it again from the plan before the recreate runs
+    events:
+      - gang.podGroup[Deleted]: {instance: 0}
+  - tick: 7
+    note: the gang is widened by one worker, which Phase B absorbs as an extra missing member under the same operation
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+  - tick: 8
+    note: every member reports Ready, so the Instance promotes
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker, ordinal: 1}}

@@ -1,0 +1,51 @@
+# The force-delete clock lands on the wedged in-place pod together with a
+# template edit and a second reading of the same clock. The sweep writes
+# nothing to the row, so the edit is decided by the mode that runs after
+# it on the same pass.
+scenario: inplace-force-clock-with-edits
+arrows:
+  - T-ready-inplace
+  - T-inplace-force-clock
+cells:
+  - instance/Update/InPlace/spec.revision/boundary@T-inplace-force-clock
+  - instance/Update/InPlace/timer.forceDelete[overdueSlack]/boundary@T-inplace-force-clock
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod is bound to node-0, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation, so the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: node-0 is drained out from under the roll and its kubelet never confirms, so the patched pod is left Terminating with nothing holding it
+    events:
+      - pod.terminating: {pod: {index: 0}}
+      - pod.stuckTerminating: {pod: {index: 0}}
+  - tick: 6
+    note: the overdue clock lands twice with a further image edit, so the sweep force-deletes the wedged pod and the roll retargets on the same pass
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+  - tick: 7
+    note: the pod set is empty, so the roll re-resolves to recreate at the newer target rather than polling a pod that is gone

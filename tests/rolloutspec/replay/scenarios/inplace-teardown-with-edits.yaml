@@ -1,0 +1,46 @@
+# The owner is deleted mid-patch on the pass that also reads the pod ready
+# and carries a further image edit. Teardown makes the index a scale-down
+# extra whatever it reports, and no revision can retarget it.
+scenario: inplace-teardown-with-edits
+arrows:
+  - T-ready-inplace
+  - T-inplace-teardown
+  - T-delete-done
+cells:
+  - instance/Update/InPlace/pod.containersReady[source]/boundary@T-inplace-teardown
+  - instance/Update/InPlace/spec.revision/boundary@T-inplace-teardown
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the owner's deletion begins as the pod reports ready and a further image edit lands, so the patching Instance becomes a scale-down extra
+    events:
+      - spec.teardown[deleted]: {}
+      - pod.containersReady[source]: {pod: {index: 0}}
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 5
+    note: the pod leaves rotation, which is the drain the delete waits on
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the drained pod is gone, so the row is removed with it
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

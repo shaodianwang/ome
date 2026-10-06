@@ -1,0 +1,55 @@
+# The owner is deleted while a migration is at SurgePending and the record's
+# deadline is already past. Teardown short-circuits every pass before the
+# expiry runs, so the pair is deleted and the record is never expired.
+scenario: migrate-teardown-outruns-deadline
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-migrate-teardown
+  - T-migratetarget-teardown
+  - T-delete-done
+cells:
+  - instance/Migrate/CreateSurge/timer.migrationDeadline/boundary@T-migrate-teardown
+  - instance/Migrate/SurgeTarget/timer.migrationDeadline/boundary@T-migratetarget-teardown
+  - instance/Migrate/CreateSurge/timer.migrationDeadline/after@T-migrate-teardown
+  - instance/Migrate/SurgeTarget/timer.migrationDeadline/after@T-migratetarget-teardown
+  - instance/Migrate/CreateSurge/pod.deleted[source]/after@T-migrate-teardown
+  - instance/Migrate/SurgeTarget/pod.deleted[source]/after@T-migratetarget-teardown
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the owner's deletion begins on the pass the record's deadline is past, so the pair is committed Deleting and nothing expires the record
+    events:
+      - spec.teardown[deleted]: {}
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 5
+    note: the source pod is gone from outside with the deadline still past, so the source row is removed with nothing to drain and the surge pod's delete is issued, and the record is still not expired
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 6
+    note: the surge pod is gone, so its row is removed and the record stays as the teardown left it
+    events:
+      - pod.deleted[target]: {pod: {index: 1}}

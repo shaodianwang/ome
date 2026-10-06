@@ -1,0 +1,89 @@
+# Observations and edits that land across a recreate's three phases. None
+# of them moves the roll off its own bar: the gate and the endpoint are not
+# the signals, a manager restart and a resync re-derive the phase, a policy
+# edit has no reader, and a replica increase is materialized beside it.
+scenario: recreate-rebuild-observations
+arrows:
+  - T-ready-recreate
+  - T-drain-ready
+cells:
+  - instance/Update/Drain/pod.servingOff[source]/before
+  - instance/Update/Drain/endpoint.rotationOut[source]/before
+  - instance/Update/Drain/pod.terminating[source]/before
+  - instance/Update/Drain/ctrl.crash/before
+  - instance/Update/Drain/pod.scheduled[source]/before
+  - instance/Update/Drain/ctrl.resync/before
+  - instance/Update/Drain/endpoint.rotationIn[source]/before
+  - instance/Update/Drain/pod.containerRestart/before
+  - instance/Update/Drain/spec.policyTuning[restartPolicy]/before
+  - instance/Update/Drain/spec.replicasUp/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the gate reads False, which Phase A already drove, and the delete still waits on the endpoint
+    events:
+      - pod.servingOff[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the source leaves rotation, which releases the drain guard and issues the delete without a row write
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the pod reads Terminating, which is Phase A's own effect, so the pass keeps waiting for it to go
+    events:
+      - pod.terminating[source]: {pod: {index: 0}}
+  - tick: 7
+    note: the manager restarts, and the resumed one re-derives Phase A from the Terminating pod
+    events:
+      - ctrl.crash: {}
+  - tick: 8
+    note: the source is gone, so Phase B rebuilds it at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 9
+    note: the rebuilt pod is bound, which is progress toward the serving flip and decides nothing on its own
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}}
+  - tick: 10
+    note: a tick with nothing changed re-derives the phase from the incarnation partition and writes nothing
+  - tick: 11
+    note: the rebuilt pod reports ContainersReady and its endpoint returns, so Phase C flips serving on and waits for PodReady rather than for membership
+    events:
+      - pod.containersReady[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 12
+    note: the runner restarts below Ready, which is the boot path of a fresh pod, so the promote simply waits
+    events:
+      - pod.containerRestart: {pod: {index: 0}, message: Error}
+  - tick: 13
+    note: the restart policy is edited, which nothing reads while the recreate converges
+    events:
+      - spec.policyTuning[restartPolicy]: {value: RecreateInstanceOnPodRestart}
+  - tick: 14
+    note: the replica count rises, so the new index is materialized in the same wake-up beside the untouched recreate
+    events:
+      - spec.replicasUp: {to: 2}
+  - tick: 15
+    note: the rebuilt pod reports PodReady, so the Instance promotes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

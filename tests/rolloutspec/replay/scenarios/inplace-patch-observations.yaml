@@ -1,0 +1,71 @@
+# Observations and edits that land while an in-place patch converges. None
+# of them moves the roll: the gate and the endpoint are not the promote bar,
+# the policy knob has no reader, a restart resumes the same patch from the
+# marker, and a replica increase is materialized beside the patch.
+scenario: inplace-patch-observations
+arrows:
+  - T-ready-inplace
+  - T-inplace-ready
+cells:
+  - instance/Update/InPlace/pod.servingOff[source]/before
+  - instance/Update/InPlace/endpoint.rotationOut[source]/before
+  - instance/Update/InPlace/ctrl.resync/before
+  - instance/Update/InPlace/pod.servingOn[source]/before
+  - instance/Update/InPlace/endpoint.rotationIn[source]/before
+  - instance/Update/InPlace/ctrl.crash/before
+  - instance/Update/InPlace/spec.policyTuning[restartPolicy]/before
+  - instance/Update/InPlace/spec.replicasUp/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation and its gate reads False, which the pass already drove, so the drain check passes and the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.servingOff[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the image patch lands while the source is out of rotation
+  - tick: 6
+    note: a tick with nothing changed re-derives the same unconfirmed patch from the live pod and writes nothing
+  - tick: 7
+    note: the serving gate flips True from outside, which commits nothing while the runtime image is unconfirmed
+    events:
+      - pod.servingOn[source]: {pod: {index: 0}}
+  - tick: 8
+    note: the endpoint returns on the target revision, which the promote never reads
+    events:
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 9
+    note: the manager restarts, and the resumed one re-derives the same patch from the row and the marker
+    events:
+      - ctrl.crash: {}
+  - tick: 10
+    note: the restart policy is edited, which nothing reads while the patch converges
+    events:
+      - spec.policyTuning[restartPolicy]: {value: RecreateInstanceOnPodRestart}
+  - tick: 11
+    note: the replica count rises, so the new index is materialized in the same wake-up beside the untouched patch
+    events:
+      - spec.replicasUp: {to: 2}
+  - tick: 12
+    note: the kubelet has rolled the container, so the runtime confirms the new image and the Instance promotes
+    events:
+      - pod.ready[target]: {pod: {index: 0}}

@@ -1,0 +1,37 @@
+# The operation deadline elapses on the pass that also reads the drained
+# source ready. The escalation retracts only for a set that is serving at
+# the desired count, and Phase A already drove the gate off.
+scenario: recreate-deadline-while-source-reports-ready
+arrows:
+  - T-ready-recreate
+  - T-drain-deadline
+cells:
+  - instance/Update/Drain/pod.ready[source]/boundary@T-drain-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod stays published, so Phase A holds on the drain
+  - tick: 5
+    note: the operation deadline elapses as the old pod reports ready again, and a pod held out of rotation does not retract the escalation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - timer.operationDeadline: {slack: 1s}

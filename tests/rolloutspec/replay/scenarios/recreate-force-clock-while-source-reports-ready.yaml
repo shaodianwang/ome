@@ -1,0 +1,50 @@
+# The force-delete clock lands twice on the pass that also reads the stuck
+# old pod ready. The sweep acts on the deletion evidence alone and writes
+# nothing to the row, and the ready pod is neither its subject nor the
+# promote signal while it occupies the name.
+scenario: recreate-force-clock-while-source-reports-ready
+arrows:
+  - T-ready-recreate
+  - T-drain-force-clock
+cells:
+  - instance/Update/Drain/pod.ready[source]/boundary@T-drain-force-clock
+  - instance/Update/Drain/timer.forceDelete[overdueSlack]/boundary@T-drain-force-clock
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod is bound to node-0, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation, so Phase A deletes it
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: node-0's kubelet stops acknowledging the deletion, so the object stays with nothing holding it; inside the deadline plus the slack Phase A keeps polling
+    events:
+      - pod.stuckTerminating: {pod: {index: 0}}
+  - tick: 6
+    note: the overdue clock lands twice as the stuck pod reports ready again, so the sweep force-deletes it and nothing promotes
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+      - pod.ready[source]: {pod: {index: 0}}
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+  - tick: 7
+    note: Phase A completes on the resulting absence and Phase B rebuilds at the bumped incarnation

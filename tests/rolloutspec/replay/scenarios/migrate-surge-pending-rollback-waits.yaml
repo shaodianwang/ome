@@ -1,0 +1,66 @@
+# A rollback is pinned while a migration is at SurgePending. The pin swaps
+# the roll target, but the update trigger declines a migrate-owned row and
+# the surge renders from the source's running revision, so the rollback
+# rolls nothing until the record is terminal; clearing it is equally inert.
+scenario: migrate-surge-pending-rollback-waits
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+  - T-ready-migrate
+  - T-empty-migrate-target
+cells:
+  - instance/Migrate/CreateSurge/spec.rollbackTarget[set]/before
+  - instance/Migrate/SurgeTarget/spec.rollbackTarget[set]/before
+  - instance/Migrate/CreateSurge/spec.rollbackTarget[clear]/before
+  - instance/Migrate/SurgeTarget/spec.rollbackTarget[clear]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is bound, serving and in rotation beside the source
+    events:
+      - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}, message: node-0}
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the source leaves rotation, so the drain has converged
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 6
+    note: the drained source is gone and the Instance promotes on v2
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair on the running v2 revision
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 8
+    note: the roll is pinned back to the stored v1 revision, and the migrate-owned pair neither rolls nor re-renders its surge
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+  - tick: 9
+    note: the pin is released, and the pair is as untouched as before
+    events:
+      - spec.rollbackTarget[clear]: {}

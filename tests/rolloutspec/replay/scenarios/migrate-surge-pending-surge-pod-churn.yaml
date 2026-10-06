@@ -1,0 +1,74 @@
+# The surge pod of a migration at SurgePending leaves rotation, restarts,
+# dies, disappears and is deleted from outside. The drive re-derives the
+# surge from the record every pass: it re-marks the gate, re-creates a
+# missing pod, and waits on a terminal or Terminating one.
+scenario: migrate-surge-pending-surge-pod-churn
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+cells:
+  - instance/Migrate/CreateSurge/pod.servingOff[target]/before
+  - instance/Migrate/SurgeTarget/pod.servingOff[target]/before
+  - instance/Migrate/CreateSurge/pod.containerRestart/before
+  - instance/Migrate/SurgeTarget/pod.containerRestart/before
+  - instance/Migrate/CreateSurge/pod.phaseTerminal[Failed]/before
+  - instance/Migrate/SurgeTarget/pod.phaseTerminal[Failed]/before
+  - instance/Migrate/CreateSurge/pod.deleted[target]/before
+  - instance/Migrate/SurgeTarget/pod.deleted[target]/before
+  - instance/Migrate/CreateSurge/pod.terminating[target]/before
+  - instance/Migrate/SurgeTarget/pod.terminating[target]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the surge reports ContainersReady, so the drive marks it serving and waits on its rotation and availability gates
+    events:
+      - pod.containersReady[target]: {pod: {index: 1}}
+  - tick: 5
+    note: the surge's serving gate drops, so the drive marks it serving again and the record keeps waiting
+    events:
+      - pod.servingOff[target]: {pod: {index: 1}}
+  - tick: 6
+    note: the runner restarts on both the surge and the source, and the restart trigger declines both migrate-owned rows
+    events:
+      - pod.containerRestart: {pod: {index: 1}, message: Error}
+      - pod.containerRestart: {pod: {index: 0}, message: Error}
+  - tick: 7
+    note: the surge pod dies, and no pass replaces or stamps it while the pin is held, so the gates stall
+    events:
+      - pod.phaseTerminal[Failed]: {pod: {index: 1}}
+  - tick: 8
+    note: the dead surge pod is gone, so the missing-pod diff re-creates it from the source's running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1}}
+  - tick: 9
+    note: the fresh surge pod is deleted from outside and held Terminating, so it still occupies its name and nothing is re-created
+    events:
+      - pod.terminating[target]: {pod: {index: 1}}
+  - tick: 10
+    note: the Terminating pod is gone, so the surge is re-created once more
+    events:
+      - pod.deleted[target]: {pod: {index: 1}}

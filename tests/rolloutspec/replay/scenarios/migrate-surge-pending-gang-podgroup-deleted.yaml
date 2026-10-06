@@ -1,0 +1,47 @@
+# A gang's migration is at SurgePending when its surge PodGroup is deleted.
+# The surge index stays pinned in the plan, so the PodGroup pass announces
+# the group again before the drive runs, and the pods already created keep
+# their label.
+scenario: migrate-surge-pending-gang-podgroup-deleted
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+cells:
+  - instance/Migrate/CreateSurge/gang.podGroup[Deleted]/before
+  - instance/Migrate/SurgeTarget/gang.podGroup[Deleted]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members are bound to node-0 and report Ready, and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the operator asks the gang off node-0, and the migrate pass admits the request, establishes the pair and requeues so the surge gets its PodGroup before its pods
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the surge PodGroup is announced and the surge gang's pods are created behind it
+  - tick: 5
+    note: the surge PodGroup is deleted, and the PodGroup pass announces it again from the plan before the drive renders anything
+    events:
+      - gang.podGroup[Deleted]: {instance: 1}
