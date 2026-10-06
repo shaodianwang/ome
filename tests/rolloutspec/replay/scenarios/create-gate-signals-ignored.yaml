@@ -1,0 +1,41 @@
+# Gate and endpoint signals on a pod the Create attempt is still waiting on. The
+# pass reads neither the serving gate nor the routed Service, a tick with nothing
+# changed writes nothing, and the promote keys on PodReady alone.
+scenario: create-gate-signals-ignored
+arrows:
+  - T-empty-create
+  - T-create-ready
+cells:
+  - instance/Create/CreatePods/pod.servingOn[source]/before
+  - instance/Create/CreatePods/pod.servingOff[source]/before
+  - instance/Create/CreatePods/endpoint.rotationIn[source]/before
+  - instance/Create/CreatePods/endpoint.rotationOut[source]/before
+  - instance/Create/CreatePods/ctrl.resync/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: a tick with nothing changed re-lists the pod set, derives the same missing set and writes nothing
+  - tick: 3
+    note: the gate is asserted from outside and the pod appears as a ready endpoint; the pass reads neither
+    events:
+      - pod.servingOn[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the gate is flipped off again and the endpoint goes away; the pass still waits on PodReady
+    events:
+      - pod.servingOff[source]: {pod: {index: 0}}
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the pod reports Ready, so the promote re-clears the hold and the row is Ready
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

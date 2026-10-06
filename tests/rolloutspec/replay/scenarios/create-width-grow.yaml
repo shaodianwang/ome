@@ -1,0 +1,36 @@
+# A gang is widened by one worker while its first Create is in flight, under a
+# restart policy that leaves the shortfall to the Create pass. The attempt keeps
+# its pin and only the newly missing ordinal is created under the same operation.
+scenario: create-width-grow
+arrows:
+  - T-empty-create
+  - T-create-ready
+cells:
+  - instance/Create/CreatePods/spec.gangWidth[grow]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the gang is widened by one worker at an unchanged revision, so the missing ordinal is created inside the same attempt
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+  - tick: 3
+    note: every member reports Ready, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker, ordinal: 1}}

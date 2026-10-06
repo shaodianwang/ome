@@ -1,0 +1,63 @@
+# Replicas grow while a gang surge holds index 1 as its replacement. The new
+# index is allocated around the marker and materialized surge-free, and the
+# surge in flight completes on its own claim.
+scenario: gang-target-scale-up-around-marker
+arrows:
+  - T-empty-gang-surge-target
+  - T-surgedrain-gang-complete
+  - T-gangtarget-ready
+cells:
+  - instance/Update/GangSurgeTarget/spec.replicasUp/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the operator asks for a second Instance; the marker's index is taken, so the new one lands at index 2
+    events:
+      - spec.replicasUp: {to: 2}
+  - tick: 6
+    note: the new Instance's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 7
+    note: the new Instance's members report Ready and it promotes on its own, with the surge pair unchanged
+    events:
+      - pod.ready[source]: {pod: {index: 2, runner: leader}}
+      - pod.ready[source]: {pod: {index: 2, runner: worker}}
+  - tick: 8
+    note: the replacement gang reports Ready, so the source advances to the drain and leaves rotation
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 9
+    note: the leader's endpoint goes not-ready, which is the guard the drain waits on, so the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 10
+    note: the source pods are gone, so its row is removed and the replacement index is promoted as the Instance
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

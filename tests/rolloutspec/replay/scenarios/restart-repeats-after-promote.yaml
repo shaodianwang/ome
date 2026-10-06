@@ -1,0 +1,42 @@
+# The Instance loses its pod again the tick after a Restart promoted it. The loss
+# is evaluated against the Ready row that landed, so a fresh Restart opens at the
+# next incarnation rather than the spent one being resumed.
+scenario: restart-repeats-after-promote
+arrows:
+  - T-ready-restart
+  - T-restart-ready
+cells:
+  - instance/Restart/Drain/pod.deleted[source]/after@T-restart-ready
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the rebuilt pod reports Ready, so the repair promotes the row on the same revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the pod is lost again; the Ready row arms a fresh Restart at the next incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the second rebuild reports Ready and the row is promoted again
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

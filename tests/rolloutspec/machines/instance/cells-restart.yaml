@@ -17,7 +17,7 @@ cells:
     outcome: ignore
     note: the pass re-derives its phase from the live pod set on every wake-up, so a fresh pod binding to a node is progress toward the readiness wait rather than a step boundary
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-rebuilt-pod-signals-ignored]}
     status: current
   - state: Restart/Drain
     event: pod.containersReady
@@ -38,7 +38,7 @@ cells:
     outcome: defer
     note: the recycle returns before the recreate, so the promote is not evaluated on the pass that issues the delete; readiness on the surviving members is re-read once the dead name is free and its pod rebuilt
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-gang-member-dies-during-rebuild]}
     status: current
   - state: Restart/Drain
     event: pod.containersReady
@@ -47,7 +47,7 @@ cells:
     outcome: ignore
     note: the promote consumed the readiness and cleared the operation, so a repeated report finds a Ready row and writes nothing
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-promoted-row-ignores-late-signals]}
     status: current
   - state: Restart/Drain
     event: pod.containersReady
@@ -58,7 +58,7 @@ cells:
     to: Ready
     note: the restart pass runs before the end-of-pass escalation, so a promote landing in the same reconcile clears the operation and the buffered Failed stamp no-ops on the cleared operation (workload/deadline.go)
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-promote-deadline-race]}
     status: current
   - state: Restart/Drain
     event: pod.containersReady
@@ -106,7 +106,7 @@ cells:
     outcome: ignore
     note: the teardown branch runs the scale-down pipeline alone, so no restart pass observes the readiness (workload/reconcile.go)
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-teardown-with-readiness]}
     status: current
   - state: Restart/Drain
     event: pod.containersReady
@@ -116,7 +116,7 @@ cells:
     outcome: ignore
     note: the index has left the planned set, so the scale-down wave claims it whatever its pods report; a completed recreate no longer keeps it alive
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-scaledown-then-teardown]}
     status: current
   - state: Restart/Drain
     event: pod.ready
@@ -124,7 +124,7 @@ cells:
     outcome: ignore
     note: PodReady is one guard of the promote bar the repair shares with every other path; it commits nothing on its own, because the bumped set must also be complete, serving and past its minReadySeconds window
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestRestart_PromotionWaitsForPodReadyAndWindow], kind: []}
     status: current
   - state: Restart/Drain
     event: pod.servingOn
@@ -132,7 +132,7 @@ cells:
     outcome: ignore
     note: Phase C owns the flip and skips a pod that already serves; an old-incarnation pod that reappears in rotation is marked not-serving again by Phase A
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-rebuilt-pod-signals-ignored]}
     status: current
   - state: Restart/Drain
     event: pod.servingOff
@@ -158,7 +158,7 @@ cells:
     outcome: ignore
     note: the transition's own write owns the row, and a loss seen at or after it is evaluated against the state that landed — a Ready row arms a fresh restart, and a Failed row arms one too when a gang member is missing, because a preserved Restart operation is a spent attempt rather than an owner
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-repeats-after-promote]}
     status: current
   - state: Restart/Drain
     event: pod.waiting
@@ -178,7 +178,7 @@ cells:
     outcome: ignore
     note: the stamp is idempotent and the escalation pass skips an already-Failed row, so repeated evidence writes nothing
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-wedge-stamp-repeats-nothing]}
     status: current
   - state: Restart/Drain
     event: pod.waiting
@@ -255,7 +255,7 @@ cells:
     outcome: ignore
     note: the repair path never consults lifecycle.updateStrategy; the edited strategy applies to the next update the Instance takes from Ready
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-strategy-edit-ignored]}
     status: current
   - state: Restart/Drain
     event: spec.replicasUp
@@ -280,7 +280,7 @@ cells:
     outcome: ignore
     note: a shrink seen at or after the transition's write is re-evaluated against the state that landed
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-promoted-then-scaled-down]}
     status: current
   - state: Restart/Drain
     event: spec.pauseTrue
@@ -319,14 +319,14 @@ cells:
     outcome: ignore
     note: the delete operation owns the row once its stamp lands, and teardown is re-asserted on every pass regardless
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-scaledown-then-teardown]}
     status: current
   - state: Restart/Drain
     event: spec.migrateRequest
     outcome: defer
     note: the migrate pass requires a steady source — Phase Ready, no operation, a recorded running revision — so a request against a restarting Instance stays an unallocated record and is re-picked after the promote
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-migrate-request-waits]}
     status: current
   - state: Restart/Drain
     event: spec.partition
@@ -353,7 +353,7 @@ cells:
     outcome: ignore
     note: the escalation pass skips an already-Failed row, and the stamp no-ops against a slot whose operation the promote cleared
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-deadline-repeats-nothing]}
     status: current
   - state: Restart/Drain
     event: timer.minReady
@@ -438,7 +438,7 @@ cells:
     outcome: defer
     note: Phase A skips re-deleting a pod that already carries a deletionTimestamp and keeps returning until the old object is gone from the live list; a bumped-incarnation pod that starts terminating counts as present for Phase B and not runtime-ready for Phase C, so the promote waits for it to disappear and be recreated (ops/restart.go)
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-drain-waits-on-old-pod]}
     status: current
   - state: Restart/Drain
     event: pod.phaseTerminal
@@ -567,7 +567,7 @@ cells:
     outcome: defer
     note: Phase A polls the per-revision routed Service's EndpointSlices live before deleting, so an old pod that is still or again a ready endpoint holds the drain; a fresh pod entering rotation is the consequence of Phase C's serving flip and is not read back (ops/restart.go, workload/drain)
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-drain-waits-on-old-pod]}
     status: current
   - state: Restart/Drain
     event: endpoint.rotationOut
@@ -585,7 +585,7 @@ cells:
     outcome: ignore
     note: Phase B enumerates the desired pod names from the live plan, so the wider set is filled at the bumped incarnation on the next pass, and the PodGroup pass raises MinMember ahead of it (ops/create.go expectedPodNamesForInstance, podgroup/podgroup.go)
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-gang-width-grow]}
     status: current
   # GAP: a narrower width is supposed to retire the pods beyond it, and the
   # repair leaves them running and routable.
@@ -610,7 +610,7 @@ cells:
     outcome: defer
     note: the override moves the Component's roll target only; the recreate labels its pods with the Instance's running revision, so the rollback is taken up by the update pass once the promote lands Ready (ops/restart.go revisionHashForInstance)
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-rollback-waits-for-promote]}
     status: current
   - state: Restart/Drain
     event: spec.policyTuning
@@ -630,7 +630,7 @@ cells:
     outcome: ignore
     note: the transition's own write owns the row, and the policy is re-read against the state that landed
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-promoted-row-ignores-late-signals]}
     status: current
   - state: Restart/Drain
     event: spec.policyTuning
@@ -729,7 +729,7 @@ cells:
     outcome: ignore
     note: the restart pass is level-triggered — a tick re-lists the pods live, re-derives the phase, and the Restarting stamp's skip-write guard keeps an unchanged row from being written at all (ops/restart.go)
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-rebuilt-pod-signals-ignored]}
     status: current
 
   # --- apiserver rejections ------------------------------------------------
@@ -776,7 +776,7 @@ cells:
     outcome: ignore
     note: the escalation pass skips an already-Failed row, and the stamp no-ops against a slot whose operation the promote cleared
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-wedge-stamp-repeats-nothing]}
     status: current
   # GAP: the scale-down, migration and update drains all reach the force-delete
   # sweep; the restart drain is the one drain that still cannot.

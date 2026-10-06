@@ -1,0 +1,63 @@
+# A new template lands the tick after a wedge stamped the pair Failed, with the
+# operation deadline elapsed as well. The retirement reads revision and step,
+# the deadline adds no second stamp, and the new target is taken up after the reset.
+scenario: gang-target-wedged-surge-superseded
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-stuck-failed
+  - T-gangtarget-cleanup-failed
+  - T-gangcleanup-done
+  - T-ready-surge
+cells:
+  - instance/Update/GangSurgeTarget/spec.revision/after@T-gangtarget-stuck-failed
+  - instance/Update/GangSurgeTarget/timer.operationDeadline/after@T-gangtarget-stuck-failed
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement gang is still booting two minutes on, which is longer than the grace but proves nothing on its own
+    events:
+      - clock.advance: 2m
+  - tick: 6
+    note: the pull wedges on a member already older than the grace, so the escalation reads the reason on this pass
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 1, runner: worker}, message: "manifest unknown"}
+  - tick: 7
+    note: the template changes as the deadline elapses; the source abandons the failed surge for the pinned revision and nothing is stamped twice
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 8
+    note: the retired members are gone, so the marker is removed, the source is reset and the failed revision's block is recorded
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 9
+    note: the reset source is off the new target, and the roll claims a fresh replacement for it

@@ -1,0 +1,68 @@
+# Container evidence on RETIRED replacement pods whose deletes are being refused:
+# a restart, a DeadlineExceeded wait, a terminal phase, a member that runs but
+# never passes readiness. The retirement deletes them all the same.
+scenario: gang-cleanup-container-signals-ignored
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+  - T-gangcleanup-done
+cells:
+  - instance/Update/GangSurgeTargetCleanup/pod.containerRestart/before
+  - instance/Update/GangSurgeTargetCleanup/pod.waiting[DeadlineExceeded]/before
+  - instance/Update/GangSurgeTargetCleanup/pod.phaseTerminal[Failed]/before
+  - instance/Update/GangSurgeTargetCleanup/pod.runningNotReady[target]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: quota refuses every delete of the retired members, so the template change claims the cleanup marker without removing its pods
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - api.quotaDenied: {verb: delete, resource: pods, count: 3}
+  - tick: 6
+    note: two minutes on, the retired leader runs with a restarted container and the worker reports DeadlineExceeded; the escalation stamps nothing and the deletes are refused again
+    events:
+      - clock.advance: 2m
+      - pod.containersReady[target]: {pod: {index: 1, runner: leader}}
+      - pod.containerRestart: {pod: {index: 1, runner: leader}, message: OOMKilled}
+      - pod.waiting[DeadlineExceeded]: {pod: {index: 1, runner: worker}, message: "context deadline exceeded"}
+  - tick: 7
+    note: the retired worker ends in a terminal phase; it is deleted like any other member, and the deletes are refused again
+    events:
+      - pod.phaseTerminal[Failed]: {pod: {index: 1, runner: worker}}
+  - tick: 8
+    note: another two minutes on, the retired leader still runs without ever passing readiness; the deletes are re-issued and admitted
+    events:
+      - clock.advance: 2m
+  - tick: 9
+    note: the retired members are gone, so the marker is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

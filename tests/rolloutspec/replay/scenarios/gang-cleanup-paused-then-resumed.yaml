@@ -1,0 +1,56 @@
+# A standard pause lands on a retirement in flight. The cleanup halts with its
+# marker still owning the index, so retired members that go under the pause
+# do not finish it; the unpause resumes the claim and the source is reset.
+scenario: gang-cleanup-paused-then-resumed
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+  - T-gangcleanup-done
+cells:
+  - instance/Update/GangSurgeTargetCleanup/spec.pauseTrue/before
+  - instance/Update/GangSurgeTargetCleanup/spec.unpause/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the template changes again while the replacement is still incomplete, so the marker is claimed as a cleanup and its members are deleted
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 6
+    note: the operator pauses the rollout; the retirement parks with its marker and deadline held
+    events:
+      - spec.pauseTrue: {}
+  - tick: 7
+    note: the retired members go under the pause, and the marker is not removed
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 8
+    note: the pause is lifted, so the retirement resumes from its marker, which is removed as the source is reset
+    events:
+      - spec.unpause: {}

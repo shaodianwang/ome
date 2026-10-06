@@ -1,0 +1,31 @@
+# The runner container of a pod under creation restarts in place before the
+# Instance ever became Ready. Restart evidence is dated against ReadySince, which
+# the row has not stamped, so the attempt reads it as the ordinary boot path.
+scenario: create-container-restart-ignored
+arrows:
+  - T-empty-create
+  - T-create-ready
+cells:
+  - instance/Create/CreatePods/pod.containerRestart/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the runner container comes up and restarts in place while the pod is still short of Ready; nothing is dated against a ReadySince
+    events:
+      - pod.containersReady[source]: {pod: {index: 0}}
+      - pod.containerRestart: {pod: {index: 0}, message: OOMKilled}
+  - tick: 3
+    note: the pod reports Ready, which is the bar every promote shares
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

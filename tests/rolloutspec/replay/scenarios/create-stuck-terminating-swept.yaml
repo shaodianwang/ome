@@ -1,0 +1,43 @@
+# A pod of the attempt is deleted by another hand and its kubelet never finishes
+# the deletion. The occupant still holds its name, so the attempt creates nothing,
+# until the Component sweep force-deletes it and the name is rebuilt.
+scenario: create-stuck-terminating-swept
+arrows:
+  - T-empty-create
+  - T-create-ready
+cells:
+  - instance/Create/CreatePods/pod.stuckTerminating/before
+  - instance/Create/CreatePods/timer.forceDelete[overdueSlack]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound to a node the fake cluster holds no object for
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod is deleted by another hand; the Terminating object still occupies its name, so the attempt creates nothing
+    events:
+      - pod.terminating[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the kubelet behind the pod goes away, so the object will never leave on its own; the attempt still waits on the name
+    events:
+      - pod.stuckTerminating: {pod: {index: 0}}
+  - tick: 5
+    note: the overdue clock lands on a pod whose node is gone, so the sweep force-deletes it and the attempt rebuilds the freed name
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+  - tick: 6
+    note: the rebuilt pod reports Ready, so the attempt promotes under its original deadline
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

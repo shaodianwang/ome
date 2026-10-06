@@ -1,0 +1,37 @@
+# The rebuilt pod reports Ready on the very tick the Restart's deadline elapses.
+# The restart pass runs before the end-of-pass escalation, so the promote clears
+# the operation and the deadline stamp finds nothing to fail.
+scenario: restart-promote-deadline-race
+arrows:
+  - T-ready-restart
+  - T-restart-ready
+cells:
+  - instance/Restart/Drain/pod.containersReady[source]/boundary@T-restart-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the rebuilt pod reports Ready as the deadline elapses; the promote lands and nothing is stamped Failed
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 4
+    note: a Ready row has no deadline left to elapse, so the next pass writes nothing

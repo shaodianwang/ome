@@ -1,0 +1,31 @@
+# The update strategy and the restart policy change while the first Create is in
+# flight. The Create pass renders and promotes identically under every strategy,
+# and no lifecycle knob is read before the Instance reaches Ready.
+scenario: create-spec-edits-ignored
+arrows:
+  - T-empty-create
+  - T-create-ready
+cells:
+  - instance/Create/CreatePods/spec.strategy/before
+  - instance/Create/CreatePods/spec.policyTuning[restartPolicy]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the strategy and the restart policy are both edited; the attempt reads neither
+    events:
+      - spec.strategy: {strategy: RecreatePod}
+      - spec.policyTuning[restartPolicy]: {value: None}
+  - tick: 3
+    note: the pod reports Ready, which is the bar every promote shares
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

@@ -1,0 +1,63 @@
+# Scheduling, readiness, gate and endpoint signals on RETIRED replacement pods
+# whose deletes are being refused. The retirement lists live pods and deletes
+# every one that is not already terminating, whatever they report.
+scenario: gang-cleanup-replacement-signals-ignored
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+  - T-gangcleanup-done
+cells:
+  - instance/Update/GangSurgeTargetCleanup/pod.scheduled[target]/before
+  - instance/Update/GangSurgeTargetCleanup/pod.ready[target]/before
+  - instance/Update/GangSurgeTargetCleanup/pod.servingOff[target]/before
+  - instance/Update/GangSurgeTargetCleanup/endpoint.rotationIn[target]/before
+  - instance/Update/GangSurgeTargetCleanup/endpoint.rotationOut[target]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: quota refuses every delete of the retired members, so the template change claims the cleanup marker without removing its pods
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - api.quotaDenied: {verb: delete, resource: pods, count: 2}
+  - tick: 6
+    note: the retired leader reports Ready and appears as a ready endpoint; the delete is re-issued and refused again
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 7
+    note: the retired worker binds late, the leader's gate is flipped off and its endpoint goes away; the deletes are re-issued and admitted
+    events:
+      - pod.scheduled[target]: {pod: {index: 1, runner: worker}}
+      - pod.servingOff[target]: {pod: {index: 1, runner: leader}}
+      - endpoint.rotationOut[target]: {pod: {index: 1, runner: leader}}
+  - tick: 8
+    note: the retired members are gone, so the marker is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

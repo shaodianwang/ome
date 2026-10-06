@@ -1,0 +1,40 @@
+# A repeated readiness report and a restart-policy flip arrive the tick after a
+# Restart promoted the row. The promote consumed the readiness and cleared the
+# operation, and the policy is re-read against a Ready row that needs no repair.
+scenario: restart-promoted-row-ignores-late-signals
+arrows:
+  - T-ready-restart
+  - T-restart-ready
+cells:
+  - instance/Restart/Drain/pod.containersReady[source]/after@T-restart-ready
+  - instance/Restart/Drain/spec.policyTuning[restartPolicy]/after@T-restart-ready
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the rebuilt pod reports Ready, so the repair promotes the row on the same revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the readiness is reported again and the restart policy is switched off; the Ready row writes nothing
+    events:
+      - pod.containersReady[source]: {pod: {index: 0}}
+      - spec.policyTuning[restartPolicy]: {value: None}

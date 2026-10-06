@@ -1,0 +1,51 @@
+# A Restart whose old pod is slow to leave: first it is still a ready endpoint of
+# the routed Service, which holds the drain, then it lingers Terminating, which
+# holds the rebuild. The repair waits for the live list to show it gone.
+scenario: restart-drain-waits-on-old-pod
+arrows:
+  - T-ready-restart-podterminal
+  - T-restart-ready
+cells:
+  - instance/Restart/Drain/endpoint.rotationIn[source]/before
+  - instance/Restart/Drain/pod.terminating[source]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod dies while still routed, so the repair opens a Restart but withholds the delete the drain gate guards
+    events:
+      - pod.phaseTerminal[Failed]: {pod: {index: 0}}
+  - tick: 3
+    note: the dead pod is still a ready endpoint, so the drain keeps waiting
+    events:
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the endpoint goes not-ready, so the drain deletes the old pod
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the old pod is still Terminating on the live list, so the rebuild waits for it to clear
+    events:
+      - pod.terminating[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the old pod is gone, so the repair rebuilds the Instance at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 7
+    note: the rebuilt pod reports Ready, so the repair promotes the row on the same revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

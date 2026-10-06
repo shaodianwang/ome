@@ -1,0 +1,20 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod count 0 below desired 1 (incarnation=2)
+tick=2 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=2 ordinal=0
+tick=2 pass result=after:5s
+tick=3 note the rebuilt pod reports no readiness until the attempt deadline elapses, and the row fails with its operation preserved
+tick=3 apply timer.operationDeadline to=t+30m1s now=t+30m1s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Restart/Drain exceeded InstanceReadyTimeout} precondition=ok
+tick=3 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Restart/Drain exceeded InstanceReadyTimeout
+tick=3 pass result=after:5s
+tick=4 note the deadline is still behind the clock, and the Failed row is stamped nothing further
+tick=4 apply timer.operationDeadline to=t+30m2s now=t+30m2s
+tick=4 hold cleared
+tick=4 pass result=after:5s

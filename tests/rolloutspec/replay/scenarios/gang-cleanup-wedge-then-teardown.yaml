@@ -1,0 +1,69 @@
+# Owner deletion lands the tick after a wedged retired member stamped the
+# marker Failed. The delete wave supersedes the retirement and owns wedge
+# escalation from then on.
+scenario: gang-cleanup-wedge-then-teardown
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+  - T-gangcleanup-stuck-failed
+  - T-gangcleanup-teardown
+  - T-delete-done
+cells:
+  - instance/Update/GangSurgeTargetCleanup/spec.teardown[deleted]/after@T-gangcleanup-stuck-failed
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: quota refuses every delete of the retired members, so the template change claims the cleanup marker without removing its pods
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - api.quotaDenied: {verb: delete, resource: pods, count: 3}
+  - tick: 6
+    note: the retired members are still alive two minutes on, so they are older than the grace
+    events:
+      - clock.advance: 2m
+  - tick: 7
+    note: a member of the retired gang holds a terminal pull failure while its delete is still refused, and the marker is stamped
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 1, runner: worker}, message: "manifest unknown"}
+  - tick: 8
+    note: the owner's deletion begins, so the stamped marker and its source are both scale-down extras
+    events:
+      - spec.teardown[deleted]: {}
+  - tick: 9
+    note: the source leaves rotation, which is the drain the source's delete waits on
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 10
+    note: every member of both gangs is gone, so both rows are removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

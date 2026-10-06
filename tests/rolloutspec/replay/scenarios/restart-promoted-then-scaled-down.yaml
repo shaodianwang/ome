@@ -1,0 +1,47 @@
+# Replicas drop the tick after a Restart promoted the repaired Instance. The shrink
+# is evaluated against the Ready row that landed, so the index is retired through
+# the ordinary scale-down of a serving Instance.
+scenario: restart-promoted-then-scaled-down
+arrows:
+  - T-ready-restart
+  - T-restart-ready
+  - T-ready-scaledown
+  - T-delete-done
+cells:
+  - instance/Restart/Drain/spec.replicasDown/after@T-restart-ready
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+    - {index: 1, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: both Instances serve
+  - tick: 2
+    note: the second Instance loses its pod, so the repair opens a Restart and rebuilds it
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}
+  - tick: 3
+    note: the rebuilt pod reports Ready, so the repair promotes the row on the same revision
+    events:
+      - pod.ready[source]: {pod: {index: 1}}
+  - tick: 4
+    note: the operator halves the replica count; the promoted index falls out of the plan and is drained
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 5
+    note: the retired pod is gone and the row leaves the owner's status
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}

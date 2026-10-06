@@ -33,7 +33,7 @@ cells:
     outcome: ignore
     note: the surge pass advances on runtime readiness of the whole replacement gang, never on a single pod binding
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-replacement-signals-ignored]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.containersReady
@@ -41,7 +41,7 @@ cells:
     outcome: ignore
     note: source readiness is not consulted while the replacement is being built; the source is drained on the replacement's readiness, not its own
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-source-signals-ignored]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.containersReady
@@ -50,7 +50,7 @@ cells:
     guard: every pod of the replacement gang ContainersReady and the pod set complete
     note: the source's pass flips serving=True on the replacement pods at ContainersReady because PodReady includes that gate, then keeps polling; the marker row itself is untouched
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-replacement-signals-ignored]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.ready
@@ -58,7 +58,7 @@ cells:
     outcome: ignore
     note: the source keeps serving on its running revision until the replacement is available; its own readiness moves nothing
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-source-signals-ignored]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.ready
@@ -75,7 +75,7 @@ cells:
     outcome: ignore
     note: the source is in rotation for the whole surge window; re-asserting its gate changes nothing for the marker
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-source-signals-ignored]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.servingOn
@@ -83,7 +83,7 @@ cells:
     outcome: ignore
     note: the source's pass wrote the gate; kubelet folding it into PodReady is the next thing the pass waits for
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-replacement-signals-ignored]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.servingOff
@@ -91,7 +91,7 @@ cells:
     outcome: ignore
     note: the source's drain flip is owned by its own row, which advances to the SurgeDrain step when it lands
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-source-signals-ignored]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.servingOff
@@ -99,7 +99,7 @@ cells:
     outcome: ignore
     note: self-healing — the surge pass re-asserts serving=True on any replacement pod whose gate is off before it looks at the source
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-replacement-signals-ignored]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.deleted
@@ -131,7 +131,7 @@ cells:
     outcome: ignore
     note: the retirement is claiming the marker; losing a source pod does not revive the promote, and the source is reset to Ready on its running revision when the cleanup completes
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-retire-source-loss]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.deleted
@@ -141,7 +141,7 @@ cells:
     outcome: ignore
     note: same as the failed retirement — the marker is being retired, and source pod loss is repaired after the source is reset
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-superseded-with-source-loss]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.deleted
@@ -151,7 +151,7 @@ cells:
     outcome: ignore
     note: teardown treats every observed index as a scale-down extra, so both sides of the pair are already headed for deletion
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-teardown-with-member-loss]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.deleted
@@ -192,7 +192,7 @@ cells:
     outcome: ignore
     note: same as the failed retirement — the superseded replacement is being deleted, and no RetryBlock is recorded because a spec change is not a failure
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-superseded-with-member-loss]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.deleted
@@ -202,7 +202,7 @@ cells:
     outcome: ignore
     note: teardown deletes the index outright, so a member lost while the delete stamp lands is simply one fewer pod to drain
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-teardown-with-member-loss]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.waiting
@@ -219,14 +219,14 @@ cells:
     outcome: ignore
     note: DeadlineExceeded is the diagnostic the deadline backstop stamps, not a kubelet waiting reason, so the stuck classifier never matches it; only the operation deadline can fail this row
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-container-signals-ignored]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.containerRestart
     outcome: ignore
     note: pod-level restart evidence is Ready-gated, so a container restart while the replacement gang is still forming reads as the ordinary boot path
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-container-signals-ignored]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.uidRotated
@@ -291,7 +291,7 @@ cells:
     outcome: ignore
     note: the promote is committing on the pinned revision; the newer target is visible afterwards as RunningRevision not equal to target and starts a fresh surge from the promoted index
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-promote-under-new-revision]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.revision
@@ -300,7 +300,7 @@ cells:
     outcome: ignore
     note: the failure retirement already owns the marker; the corrective revision is consumed by the source once the cleanup resets it, which is also where the failed revision's RetryBlock is recorded
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-retire-superseded]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.revision
@@ -309,7 +309,7 @@ cells:
     outcome: ignore
     note: teardown outranks every rollout decision — no revision is rolled once the owner carries a deletionTimestamp
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-teardown-outranks-deadline-and-revision]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.annotationOnly
@@ -330,7 +330,7 @@ cells:
     outcome: ignore
     note: the marker's index is already taken, so scale-up allocates fresh indices around it; those are surge-free and are materialized by the restricted create path while the rollout runs
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-scale-up-around-marker]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.replicasDown
@@ -345,21 +345,21 @@ cells:
     outcome: defer
     note: a standard pause plans nothing past the restart pass, so the source stops driving the surge; the marker keeps its pods and its claim, the escalation pass is suspended with the rest of the lifecycle while the hold pass that runs before it keeps recording and releasing what the authorities observe, and the attempt carries Operation.Waiting=Paused with its deadline parked - until an authority with a fact to report takes the token over. A gang SurgeThenDrain cycle is held whole rather than run to a step boundary — it spans the source and this marker and keeps the source serving from its first pass to its last, so parking it costs the Instance no capacity
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-paused-then-resumed]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.pauseFreeze
     outcome: defer
     note: freeze truncates after the truth pass, so repair is suspended too; the frozen marker is otherwise identical to a standard pause
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-frozen-then-resumed]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.unpause
     outcome: ignore
     note: the surge resumes from its durable claim — the source's SurgeIndex plus this marker — with no re-entry through the budget or the gate
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-paused-then-resumed, gang-target-frozen-then-resumed]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.teardown
@@ -379,7 +379,7 @@ cells:
     to: Delete/Drain
     note: the Deleting phase and the Delete Drain operation are committed in one status transaction, so the stamp is idempotent across the passes that follow
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-teardown-with-member-loss]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.teardown
@@ -389,7 +389,7 @@ cells:
     to: Delete/Drain
     note: teardown outranks the promote — the next reconcile takes the teardown branch before the update pass, whether or not the promote landed
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-promote-teardown-race]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.teardown
@@ -399,7 +399,7 @@ cells:
     to: Delete/Drain
     note: the scale-down pipeline owns wedge escalation under teardown, so the retirement's own drain is superseded by the delete wave
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-retire-teardown]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.teardown
@@ -409,7 +409,7 @@ cells:
     to: Delete/Drain
     note: same as the failed retirement — the delete wave supersedes it and no RetryBlock bookkeeping survives teardown
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-superseded-then-teardown]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.migrateRequest
@@ -430,7 +430,7 @@ cells:
     outcome: ignore
     note: the window is consumed by the source's drain gate while the source is still in rotation; past the Surge step it no longer applies, so a replacement that flaps Ready cannot hold a drained source out of service for another window
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-minready-window]}
     status: current
   - state: Update/GangSurgeTarget
     event: timer.expectationsTTL
@@ -456,7 +456,7 @@ cells:
     outcome: ignore
     note: the escalation pass skips an already-Failed row, so a deadline that keeps elapsing while the cleanup claim lands produces no second stamp and no second event
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-retire-source-loss]}
     status: current
   - state: Update/GangSurgeTarget
     event: timer.operationDeadline
@@ -465,7 +465,7 @@ cells:
     outcome: ignore
     note: the promote clears the marker operation, and a Ready row has no deadline to elapse; a deadline observed against the pre-promote snapshot is dropped because the mutation refuses a slot whose operation is already gone
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-promote-deadline-race]}
     status: current
   - state: Update/GangSurgeTarget
     event: timer.operationDeadline
@@ -474,7 +474,7 @@ cells:
     outcome: ignore
     note: the supersede retirement is already claiming the marker; the elapsed deadline adds no RetryBlock because a spec change is not a failure
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-superseded-at-deadline]}
     status: current
   - state: Update/GangSurgeTarget
     event: timer.operationDeadline
@@ -483,7 +483,7 @@ cells:
     outcome: ignore
     note: the escalation pass does not run at all under teardown — the scale-down pipeline owns wedge escalation there
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-teardown-outranks-deadline-and-revision]}
     status: current
   - state: Update/GangSurgeTarget
     event: ctrl.crash
@@ -541,7 +541,7 @@ cells:
     outcome: ignore
     note: the Failed stamp does not consume the promote; a source pod disappearing still drives the pair's promote on a later pass because the claim ignores phase
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-deadline-with-source-loss]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.deleted
@@ -551,7 +551,7 @@ cells:
     outcome: ignore
     note: the blamed pod is a replacement pod, so a source pod disappearing neither adds to nor removes the wedge evidence, and the promote remains available
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-wedge-with-source-loss]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.deleted
@@ -561,7 +561,7 @@ cells:
     outcome: ignore
     note: the source's surge pass recreates a missing member at the same index whatever phase the marker carries
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-deadline-with-member-loss]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.deleted
@@ -571,7 +571,7 @@ cells:
     outcome: ignore
     note: losing the wedged pod removes the evidence but not the stamp already landing; escalation is re-derived from the live pods every pass, so nothing re-fires
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-wedged-member-lost]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.revision
@@ -580,7 +580,7 @@ cells:
     outcome: ignore
     note: the supersede retirement is decided by the source's pass against the pinned revision; a Failed marker neither blocks nor triggers it
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-surge-superseded]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.revision
@@ -589,7 +589,7 @@ cells:
     outcome: ignore
     note: same as the deadline stamp — the retirement claim reads revision and step, so the wedge stamp changes nothing about which revision the marker is retired for
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-wedged-surge-superseded]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.teardown
@@ -599,7 +599,7 @@ cells:
     to: Delete/Drain
     note: teardown outranks the diagnostic stamp; the escalation pass does not run under the teardown branch at all
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-deadline-teardown-race]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.teardown
@@ -609,7 +609,7 @@ cells:
     to: Delete/Drain
     note: same as the deadline stamp — the scale-down pipeline owns wedge escalation once the owner carries a deletionTimestamp
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-wedge-then-teardown]}
     status: current
   - state: Update/GangSurgeTarget
     event: timer.operationDeadline
@@ -619,7 +619,7 @@ cells:
     to: Failed
     note: the marker's own deadline stamps Phase Failed with the operation preserved; the pass skips an already-Failed row, so the stamp and its operator event fire once
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-surge-superseded]}
     status: current
   - state: Update/GangSurgeTarget
     event: timer.operationDeadline
@@ -628,7 +628,7 @@ cells:
     outcome: ignore
     note: the stuck-pod fast path is taken ahead of the deadline branch in the same pass and leaves the row Failed, so the deadline produces no second stamp
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-wedged-surge-superseded]}
     status: current
 
   # Pod, gang and endpoint inputs the replacement gang can receive that no
@@ -673,7 +673,7 @@ cells:
     outcome: defer
     note: the promote waits on an EMPTY source pod set and LiveListPodsForInstance in pkg/controller/v1beta1/workload/query/discover.go still returns a terminating pod, so a deletion in flight holds the pair
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-source-terminating-holds-promote]}
     status: current
   # GAP: a doomed replacement member is counted as present and healthy.
   - state: Update/GangSurgeTarget
@@ -761,7 +761,7 @@ cells:
     outcome: ignore
     note: EndpointSlice readiness feeds only the Component availability counters aggregated in pkg/controller/v1beta1/inferencereplica/status.go; the surge gates on pod readiness and the serving gate instead
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-source-signals-ignored, gang-target-replacement-signals-ignored]}
     status: current
   - state: Update/GangSurgeTarget
     event: endpoint.rotationOut
@@ -778,7 +778,7 @@ cells:
     outcome: ignore
     note: a replacement pod leaving rotation is repaired by the serving-gate re-assert at the top of the surge pass rather than read as an endpoint edge
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-replacement-signals-ignored]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.gangWidth
@@ -787,7 +787,7 @@ cells:
     note: Runner.Size is absent from the revision payload so no supersede fires; the next pass simply finds more expected pod names, updates the PodGroup MinMember and creates the extra members at the pinned revision hash
     invariants: [podgroup.before.pods]
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-width-grow]}
     status: current
   # GAP: a member above the new width is never pruned and still gates.
   - state: Update/GangSurgeTarget
@@ -832,7 +832,7 @@ cells:
     outcome: ignore
     note: none of the four reaches a marker — the restart trigger in pkg/controller/v1beta1/workload/ops/update.go declines a row with a preserved non-Create operation, a gang Update attempt is never disposable, no surge keeps a window of its own, and it always clears the serving gate before deleting a source pod
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-restart-policy-flip-ignored]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.rollbackTarget
@@ -842,7 +842,7 @@ cells:
     guard: the roll target resolved from the stored revision differs from the pinned surge revision and the replacement gang is incomplete or not all runtime-ready
     note: a rollback override reaches this row as a different roll target and is decided exactly like spec.revision — the in-flight replacement is retired rather than retargeted, with no RetryBlock because an override is not a failure
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-rollback-retires-replacement]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.rollbackTarget
@@ -850,7 +850,7 @@ cells:
     outcome: ignore
     note: whichever edge is already landing owns the row; the roll target is re-resolved from scratch on the next pass and re-enters through the source once it is reset
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-rollback-to-retired-revision]}
     status: current
   - state: Update/GangSurgeTarget
     event: config.changed
@@ -864,7 +864,7 @@ cells:
     outcome: ignore
     note: the update requeue cadence in pkg/controller/v1beta1/workload/ops/update.go is what re-derives the whole surge from live pod lists; a tick with nothing changed recomputes the same decision and writes nothing
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-source-signals-ignored]}
     status: current
   - state: Update/GangSurgeTarget
     event: api.invalid
@@ -914,7 +914,7 @@ cells:
     outcome: ignore
     note: the escalation pass skips an already-Failed row, a promoted row has no in-flight attempt left to blame, and under teardown the pass does not run at all
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-wedged-member-lost]}
     status: current
   - state: Update/GangSurgeTarget
     event: timer.teardownDeadline
@@ -945,7 +945,7 @@ cells:
     outcome: ignore
     note: the wedge stamp blames a replacement pod, so a source pod disappearing neither adds to the evidence nor consumes the promote, which the claim still allows because it ignores phase
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-grace-with-source-loss]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.deleted
@@ -965,7 +965,7 @@ cells:
     outcome: ignore
     note: losing the wedged pod removes the evidence but not the stamp already landing; escalation is re-derived from the live pods every pass, so nothing re-fires
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-grace-member-lost]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.deleted
@@ -984,7 +984,7 @@ cells:
     outcome: ignore
     note: the retirement claim reads revision and step, so a wedge stamp changes nothing about which revision the marker is retired for
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-grace-surge-superseded]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.revision
@@ -1003,7 +1003,7 @@ cells:
     to: Delete/Drain
     note: teardown outranks the diagnostic stamp; the escalation pass does not run under the teardown branch at all and the index is admitted into the scale-down wave
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-grace-then-teardown]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.teardown
@@ -1021,7 +1021,7 @@ cells:
     outcome: ignore
     note: the stuck-pod fast path is taken ahead of the deadline branch in the same pass and leaves the row Failed, so the deadline produces no second stamp
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-grace-surge-superseded]}
     status: current
   - state: Update/GangSurgeTarget
     event: timer.operationDeadline
@@ -1052,7 +1052,7 @@ cells:
     outcome: ignore
     note: a retired pod that only now binds is deleted with the rest; the retirement lists live pods each pass and issues a delete for every one that is not already terminating
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-replacement-signals-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.containersReady
@@ -1060,7 +1060,7 @@ cells:
     outcome: ignore
     note: the source's pods were never drained on the abandon path — the retirement is reachable only from the Surge step, before the drain claim — so its readiness is unchanged and the reset simply restamps Ready on its running revision
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-source-signals-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.containersReady
@@ -1077,7 +1077,7 @@ cells:
     note: the source keeps serving throughout the retirement; that is the point of abandoning the replacement rather than the source
     invariants: [source.serves.through.retirement]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-source-signals-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.ready
@@ -1085,7 +1085,7 @@ cells:
     outcome: ignore
     note: same as ContainersReady — a late-ready retired pod is still deleted, and the row's minReadySeconds column is row-level n/a for exactly this reason
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-replacement-signals-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.servingOn
@@ -1093,7 +1093,7 @@ cells:
     outcome: ignore
     note: the source never left rotation, so its gate being asserted again is a no-op for the retirement
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-source-signals-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.servingOn
@@ -1109,7 +1109,7 @@ cells:
     outcome: ignore
     note: no writer takes the source out of rotation on this path, so an observed flip is external and does not change the retirement
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-source-signals-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.servingOff
@@ -1117,7 +1117,7 @@ cells:
     outcome: ignore
     note: a retired pod leaving rotation is the direction the retirement is already going; nothing re-asserts the gate once the cleanup claim is stamped
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-replacement-signals-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.deleted
@@ -1125,7 +1125,7 @@ cells:
     outcome: ignore
     note: the reset stamps the source Ready on its running revision without consulting its pods, so a source pod lost mid-retirement is repaired afterwards by the restart or create pass
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-source-pod-lost]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.deleted
@@ -1157,7 +1157,7 @@ cells:
     outcome: ignore
     note: under teardown the delete wave owns the index, so the last retired pod disappearing is just progress toward the scale-down completion rather than the cleanup's own terminator
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-teardown-with-member-loss]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.waiting
@@ -1177,7 +1177,7 @@ cells:
     outcome: ignore
     note: the escalation pass skips an already-Failed row, the removed row has nothing to stamp, and under teardown the pass does not run at all
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-wedge-member-lost]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.waiting
@@ -1185,14 +1185,14 @@ cells:
     outcome: ignore
     note: DeadlineExceeded is the diagnostic the deadline backstop stamps, not a kubelet waiting reason, so the stuck classifier never matches it; only the operation deadline can fail this row
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-container-signals-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.containerRestart
     outcome: ignore
     note: restart evidence is Ready-gated and the retirement owns this pod set regardless, so a container restart in a retired gang changes nothing
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-container-signals-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.uidRotated
@@ -1249,14 +1249,14 @@ cells:
     outcome: ignore
     note: the retirement runs to completion whatever the strategy now says; the gang surge path reads no strategy field once the pair is claimed
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-spec-edits-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: spec.replicasUp
     outcome: ignore
     note: the retired index is still taken, so scale-up allocates around it and the retirement is unaffected
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-scale-up-around-marker]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: spec.replicasDown
@@ -1271,21 +1271,21 @@ cells:
     outcome: defer
     note: pause plans no update pass, so the retirement halts with its pods and PodGroup still owned and the attempt carrying Operation.Waiting=Paused; the marker is exactly what keeps them from being reaped meanwhile
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-paused-then-resumed]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: spec.pauseFreeze
     outcome: defer
     note: freeze halts the retirement the same way and additionally suspends repair of the source, which stays serving on its running revision
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-frozen-then-resumed]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: spec.unpause
     outcome: ignore
     note: the retirement resumes from its durable marker with no re-entry through the budget or the gate
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-paused-then-resumed, gang-cleanup-frozen-then-resumed]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: spec.teardown
@@ -1305,7 +1305,7 @@ cells:
     to: Delete/Drain
     note: phase and operation are committed in one transaction, so re-observing the teardown is idempotent
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-teardown-with-member-loss]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: spec.teardown
@@ -1315,7 +1315,7 @@ cells:
     to: Delete/Drain
     note: teardown outranks the terminator — if the marker row was already removed the index is simply gone, and if the removal had not landed the delete wave picks it up
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-done-teardown-race]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: spec.migrateRequest
@@ -1395,7 +1395,7 @@ cells:
     outcome: ignore
     note: the retirement deletes every replacement pod anyway, so a member disappearing while the Failed stamp lands only shortens the wait for the removal
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-deadline-member-lost-then-teardown]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.deleted
@@ -1405,7 +1405,7 @@ cells:
     outcome: ignore
     note: the wedged pod disappearing is the retirement doing its job; the stamp is diagnostic and the removal still waits for the whole set to be gone
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-wedge-member-lost]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: spec.teardown
@@ -1415,7 +1415,7 @@ cells:
     to: Delete/Drain
     note: teardown outranks the diagnostic stamp; the escalation pass does not run under the teardown branch at all
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-deadline-member-lost-then-teardown]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: spec.teardown
@@ -1425,7 +1425,7 @@ cells:
     to: Delete/Drain
     note: same as the deadline stamp — the delete wave supersedes the retirement and owns wedge escalation from then on
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-wedge-then-teardown]}
     status: current
 
   # Inputs the retired replacement can receive that the retirement does not
@@ -1468,7 +1468,7 @@ cells:
     outcome: ignore
     note: no writer deletes a source pod on the abandon path, so an observed terminating source pod is external and is repaired after the reset by the restart or create pass
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-source-pod-lost]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.terminating
@@ -1476,14 +1476,14 @@ cells:
     outcome: defer
     note: the retirement in pkg/controller/v1beta1/workload/ops/update_gang.go skips a pod that already carries a deletionTimestamp and waits for it to disappear; that is the normal mid-retirement state
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-member-already-terminating]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.phaseTerminal
     outcome: ignore
     note: a retired pod in a terminal phase is deleted like any other; the removal waits only on the object being gone from the live list
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-container-signals-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.admitted
@@ -1529,35 +1529,35 @@ cells:
     outcome: ignore
     note: EndpointSlice readiness feeds only the Component availability counters aggregated in pkg/controller/v1beta1/inferencereplica/status.go, and a retired index contributes nothing the retirement reads back
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-source-signals-ignored, gang-cleanup-replacement-signals-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: endpoint.rotationOut
     outcome: ignore
     note: the retirement deletes without waiting for rotation-out, which is safe because a replacement is retired only while it is incomplete or not runtime-ready and therefore never entered rotation
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-replacement-signals-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: spec.gangWidth
     outcome: ignore
     note: the retirement deletes whatever the live list returns at the retired index, so the desired per-Runner size is never consulted
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-width-grow-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: spec.policyTuning
     outcome: ignore
     note: no lifecycle knob is read on the retirement path — it issues plain deletes, waits for finalization, and restamps the source on its running revision
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-spec-edits-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: spec.rollbackTarget
     outcome: ignore
     note: the cleanup claim is terminal even when the roll target is overridden back to the retired revision; the fresh roll re-enters through the source after it is reset
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-rollback-to-retired-revision]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: config.changed
@@ -1571,7 +1571,7 @@ cells:
     outcome: ignore
     note: the update requeue cadence is what re-issues the deletes and re-checks finalization; a tick with nothing changed recomputes the same decision and writes nothing
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-member-already-terminating]}
     status: current
   # GAP: an unsatisfiable write is retried until the diagnostic stamp lands.
   - state: Update/GangSurgeTargetCleanup
@@ -1616,7 +1616,7 @@ cells:
     outcome: ignore
     note: the escalation pass skips an already-Failed row, the removed row has nothing to stamp, and under teardown the pass does not run at all
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-wedge-member-lost]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: timer.teardownDeadline
@@ -1644,7 +1644,7 @@ cells:
     outcome: ignore
     note: the wedged pod disappearing is the retirement doing its job; the stamp is diagnostic and the removal still waits for the whole set to be gone
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-grace-with-member-loss]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.deleted
@@ -1664,7 +1664,7 @@ cells:
     to: Delete/Drain
     note: teardown outranks the diagnostic stamp; the escalation pass does not run under the teardown branch at all and the retired index is admitted into the scale-down wave
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-grace-then-teardown]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: spec.teardown
@@ -1708,7 +1708,7 @@ cells:
     outcome: ignore
     note: gangSurgeUpdate reads source pods only as a count, so a source failing its probes closes no gate on this row (pkg/controller/v1beta1/workload/ops/update_gang.go)
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-source-running-not-ready]}
     status: current
   - state: Update/GangSurgeTarget
     event: pod.runningNotReady
@@ -1723,7 +1723,7 @@ cells:
     outcome: ignore
     note: the cleanup claim is terminal on both sides - the retired pods are deleted whatever their conditions say, and the source is restamped Ready on its running revision without consulting its pod health (pkg/controller/v1beta1/workload/ops/update_gang.go)
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-container-signals-ignored]}
     status: current
 
   # --- Failed/GangSurge (planned): the gang-surge SOURCE failed at the Surge

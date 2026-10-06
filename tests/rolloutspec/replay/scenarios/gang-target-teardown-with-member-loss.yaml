@@ -1,0 +1,59 @@
+# Owner deletion lands as one pod of each gang disappears. Both indices are
+# scale-down extras with one fewer pod to drain, and the teardown re-asserted
+# on the next pass finds the delete stamps already committed.
+scenario: gang-target-teardown-with-member-loss
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-teardown
+  - T-delete-done
+cells:
+  - instance/Update/GangSurgeTarget/pod.deleted[source]/boundary@T-gangtarget-teardown
+  - instance/Update/GangSurgeTarget/pod.deleted[target]/boundary@T-gangtarget-teardown
+  - instance/Update/GangSurgeTarget/spec.teardown[deleted]/after@T-gangtarget-teardown
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the owner's deletion begins as a worker of each gang disappears, so both indices are scale-down extras
+    events:
+      - spec.teardown[deleted]: {}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 6
+    note: the teardown is observed again, and the Deleting stamps are already in place
+    events:
+      - spec.teardown[deleted]: {}
+  - tick: 7
+    note: the source leaves rotation, which is the drain the source's delete waits on
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 8
+    note: the surviving leaders are gone, so both rows are removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}

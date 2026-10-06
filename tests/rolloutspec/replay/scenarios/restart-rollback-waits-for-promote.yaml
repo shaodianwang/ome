@@ -1,0 +1,63 @@
+# A rollback pin lands while a Restart is rebuilding an Instance on the newer
+# revision. The rebuild labels its pod with the running revision and is not
+# retargeted; the update pass takes the pin up once the repair has promoted.
+scenario: restart-rollback-waits-for-promote
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-recreate
+  - T-drain-ready
+  - T-ready-restart
+  - T-restart-ready
+  - T-ready-rollback-recreate
+cells:
+  - instance/Restart/Drain/spec.rollbackTarget[set]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod reports Ready and enters rotation, so the Instance promotes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the template moves to a second revision, so the Instance is recreated and its pod drained
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation, which is the drain the recreate waits on, so it is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the old pod is gone, so the recreate materializes the pod on the second revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the recreated pod reports Ready and enters rotation, so the Instance is Ready on the second revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 7
+    note: the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it on the second revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 8
+    note: the roll is pinned back to the first revision; the rebuild already has its pod and is not retargeted
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+  - tick: 9
+    note: the rebuilt pod reports Ready, so the repair promotes the row on the second revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+  - tick: 10
+    note: the Ready Instance is off the pinned revision, so the roll takes it back

@@ -1,0 +1,77 @@
+# Binding, gate and endpoint signals on the REPLACEMENT pods short of PodReady.
+# The surge advances on the whole gang's readiness alone; a gate written from
+# outside is re-asserted by the pass, and the marker row is untouched.
+scenario: gang-target-replacement-signals-ignored
+arrows:
+  - T-empty-gang-surge-target
+  - T-surgedrain-gang-complete
+  - T-gangtarget-ready
+cells:
+  - instance/Update/GangSurgeTarget/pod.scheduled[target]/before
+  - instance/Update/GangSurgeTarget/pod.containersReady[target]/before
+  - instance/Update/GangSurgeTarget/pod.servingOn[target]/before
+  - instance/Update/GangSurgeTarget/pod.servingOff[target]/before
+  - instance/Update/GangSurgeTarget/endpoint.rotationIn[target]/before
+  - instance/Update/GangSurgeTarget/endpoint.rotationOut[target]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: both members bind and the worker's gate is asserted from outside before it is ready; the surge keeps polling
+    events:
+      - pod.scheduled[target]: {pod: {index: 1, runner: leader}}
+      - pod.scheduled[target]: {pod: {index: 1, runner: worker}}
+      - pod.servingOn[target]: {pod: {index: 1, runner: worker}}
+  - tick: 6
+    note: both members report ContainersReady, so the pass writes the serving gate on them and waits for PodReady
+    events:
+      - pod.containersReady[target]: {pod: {index: 1, runner: leader}}
+      - pod.containersReady[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the worker's gate is flipped off and the leader appears as a ready endpoint; the pass re-asserts the gate and reads no endpoint
+    events:
+      - pod.servingOff[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 8
+    note: the leader's endpoint goes away again, which the surge does not read either
+    events:
+      - endpoint.rotationOut[target]: {pod: {index: 1, runner: leader}}
+  - tick: 9
+    note: the replacement gang reports Ready, so the source advances to the drain and leaves rotation
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 10
+    note: the leader's endpoint goes not-ready, which is the guard the drain waits on, so the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 11
+    note: the source pods are gone, so its row is removed and the replacement index is promoted as the Instance
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

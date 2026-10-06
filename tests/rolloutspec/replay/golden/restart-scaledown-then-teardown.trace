@@ -1,0 +1,35 @@
+tick=1 note both Instances serve
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 row=1 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the second Instance loses its pod, so the repair opens a Restart and rebuilds it
+tick=2 apply pod.deleted[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=2 row=1 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=1 restart triggered: pod count 0 below desired 1 (incarnation=2)
+tick=2 pod create name=svc-a-engine-1-default-0 revision=882059bb incarnation=2 ordinal=0
+tick=2 pass result=after:5s
+tick=3 note the operator halves the replica count as the rebuilt pod reports Ready; the index has left the plan, so the wave claims it
+tick=3 apply spec.replicasDown replicas=1 generation=1 now=t+0s
+tick=3 apply pod.ready[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=3 row=1 write incarnation=2 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#2{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 pass result=requeue
+tick=4 note the owner is deleted; the retiring row keeps its delete operation and its pod is deleted, while the serving Instance waits for the wave
+tick=4 apply spec.teardown[deleted] teardown=true now=t+0s
+tick=4 row=1 write no-op precondition=no-change
+tick=4 pod delete name=svc-a-engine-1-default-0 grace=default uidPrecondition=set
+tick=4 pass result=after:30s
+tick=5 note the retired pod is gone, so its row is removed
+tick=5 apply pod.deleted[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=5 row=1 write no-op precondition=no-change
+tick=5 row=1 remove incarnation=2 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#2{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=5 pass result=requeue
+tick=6 note the serving Instance is admitted into the wave as its endpoint goes not-ready
+tick=6 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=6 row=0 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#3{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=6 pass result=requeue
+tick=7 note its pod is gone, so the last row leaves the owner's status
+tick=7 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=7 row=0 write no-op precondition=no-change
+tick=7 row=0 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#3{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=7 pass result=requeue

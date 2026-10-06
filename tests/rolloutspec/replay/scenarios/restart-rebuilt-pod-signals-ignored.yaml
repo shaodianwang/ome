@@ -1,0 +1,43 @@
+# Binding and a gate asserted from outside on the pod a Restart has rebuilt, and a
+# tick with nothing changed. The repair re-derives its phase from the live set
+# every wake-up and promotes only once the rebuilt pod reports Ready.
+scenario: restart-rebuilt-pod-signals-ignored
+arrows:
+  - T-ready-restart
+  - T-restart-ready
+cells:
+  - instance/Restart/Drain/pod.scheduled[source]/before
+  - instance/Restart/Drain/pod.servingOn[source]/before
+  - instance/Restart/Drain/ctrl.resync/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 3
+    note: a tick with nothing changed re-lists the pods, re-derives the same phase and writes nothing
+  - tick: 4
+    note: the rebuilt pod binds to a node and its gate is asserted from outside; the repair still waits on PodReady
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}}
+      - pod.servingOn[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the rebuilt pod reports Ready, so the repair promotes the row on the same revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

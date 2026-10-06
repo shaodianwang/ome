@@ -1,0 +1,34 @@
+# A pod of the attempt reports the DeadlineExceeded waiting reason, which is not in
+# the terminal set the fast escalation matches. The pod keeps its name slot, nothing
+# is replaced, and the attempt runs out on its own operation deadline.
+scenario: create-deadline-exceeded-waits
+arrows:
+  - T-empty-create
+  - T-create-deadline
+cells:
+  - instance/Create/CreatePods/pod.waiting[DeadlineExceeded]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is still booting two minutes on, which is longer than the grace but proves nothing on its own
+    events:
+      - clock.advance: 2m
+  - tick: 3
+    note: the pod reports DeadlineExceeded on a pod older than the grace; the reason is not terminal, so the attempt keeps waiting
+    events:
+      - pod.waiting[DeadlineExceeded]: {pod: {index: 0}, message: "context deadline exceeded"}
+  - tick: 4
+    note: the operation deadline elapses with the pod still waiting, and the escalation pass ends the attempt
+    events:
+      - timer.operationDeadline: {slack: 1s}

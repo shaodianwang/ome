@@ -1,0 +1,59 @@
+# The retired leader goes on the tick the stuck-pod grace elapses on the wedged
+# retired worker. The stamp lands on the worker's evidence, the loss only
+# shortens the wait, and the retirement completes once the worker is gone.
+scenario: gang-cleanup-grace-with-member-loss
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+  - T-gangcleanup-stuckgrace
+  - T-gangcleanup-done
+cells:
+  - instance/Update/GangSurgeTargetCleanup/pod.deleted[target]/boundary@T-gangcleanup-stuckgrace
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 5m
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: quota refuses every delete of the retired members, so the template change claims the cleanup marker without removing its pods
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - api.quotaDenied: {verb: delete, resource: pods, count: 2}
+  - tick: 6
+    note: a member of the retired gang holds a terminal pull failure, but it is younger than the grace, so nothing is stamped
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 1, runner: worker}, message: "manifest unknown"}
+  - tick: 7
+    note: the grace elapses on the wedged worker as the retired leader disappears; the marker is stamped and the worker's delete is admitted
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+  - tick: 8
+    note: the retired worker is gone, so the marker is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

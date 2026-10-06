@@ -1,0 +1,57 @@
+# A rollback pin lands on the very tick a scaled-up Instance's pod reports Ready.
+# The promote owns the row: the attempt pinned to the newer revision promotes on
+# it, and the pin is taken up by the update pass from Ready.
+scenario: create-rollback-at-promote
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-recreate
+  - T-drain-ready
+  - T-ready-rollback-recreate
+cells:
+  - instance/Create/CreatePods/spec.rollbackTarget[set]/boundary@T-create-ready
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod reports Ready and enters rotation, so the Instance promotes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the template moves to a second revision, so the Instance is recreated and its pod drained
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation, which is the drain the recreate waits on, so it is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the old pod is gone, so the recreate materializes the pod on the second revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the recreated pod reports Ready and enters rotation, so the Instance is Ready on the second revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 7
+    note: the operator asks for a second Instance, which is created pinned to the second revision
+    events:
+      - spec.replicasUp: {to: 2}
+  - tick: 8
+    note: the new pod reports Ready as the roll is pinned back to the first revision; the promote commits while the pin already takes the first Instance back
+    events:
+      - pod.ready[source]: {pod: {index: 1}}
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+  - tick: 9
+    note: the promoted Instance is off the pinned revision too, so the roll takes it back from Ready

@@ -61,7 +61,7 @@ cells:
     outcome: ignore
     note: the promote is what flips the gate, so observing it back is a no-op; a pod already serving is skipped when the next pass re-walks the set
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-gate-signals-ignored]}
     status: current
 
   - state: Create/CreatePods
@@ -70,7 +70,7 @@ cells:
     outcome: ignore
     note: a freshly created pod is rendered with the lifecycle hold in place, so the gate is already off; another writer re-adding a hold is simply re-cleared when the pass promotes
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-gate-signals-ignored]}
     status: current
 
   - state: Create/CreatePods
@@ -146,7 +146,7 @@ cells:
     outcome: defer
     note: this reason is not in the terminal waiting set the fast escalator matches, so there is no fast path; the pod keeps its name slot, the pass cannot replace it, and the attempt runs out on the operation deadline instead
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-deadline-exceeded-waits]}
     status: current
 
   - state: Create/CreatePods
@@ -154,7 +154,7 @@ cells:
     outcome: ignore
     note: restart evidence is Ready-gated — a container that dies while the Instance is still forming is the ordinary boot path, and the trigger only compares restarts against ReadySince, which this row has not stamped yet
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-container-restart-ignored]}
     status: current
 
   - state: Create/CreatePods
@@ -170,7 +170,7 @@ cells:
     outcome: defer
     note: the pod read is not filtered on deletionTimestamp, so a wedged terminating pod still occupies its name slot and the pass sees nothing missing to create; the attempt converges when the pod goes - on its kubelet, or on the Component pass's force-delete sweep once its node is provably dead under a configured policy - or when the operation deadline elapses
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-stuck-terminating-swept]}
     status: current
 
   - state: Create/CreatePods
@@ -243,7 +243,7 @@ cells:
     outcome: ignore
     note: the Create pass renders and promotes identically under every update strategy; the new strategy first matters on the first update after this Instance reaches Ready
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-spec-edits-ignored]}
     status: current
 
   - state: Create/CreatePods
@@ -323,7 +323,7 @@ cells:
     outcome: defer
     note: a fresh migration record refuses to stamp Migrating unless the source is a steady Ready with a recorded running revision, precisely so a mid-create stamp cannot deadlock the Create pass; the record stays Accepted, ownership is not taken, and the pass falls through so the attempt can converge first
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-migrate-request-waits]}
     status: current
 
   - state: Create/CreatePods
@@ -561,7 +561,7 @@ cells:
     outcome: ignore
     note: ops/create.go reads no EndpointSlice — the drain helpers are wired into the update, restart, migrate and delete passes only — so rotation into the routed Service is a consequence of the promote's serving-gate write, never an input to it
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-gate-signals-ignored]}
     status: current
 
   - state: Create/CreatePods
@@ -570,7 +570,7 @@ cells:
     outcome: ignore
     note: rotation out is equally unread by the Create pass; a pod that leaves the routed Service while the Instance is forming changes nothing because the promote keys on the pod's own PodReady condition and its minReadySeconds window, not on its endpoint
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-gate-signals-ignored]}
     status: current
 
   - state: Create/CreatePods
@@ -579,7 +579,7 @@ cells:
     outcome: ignore
     note: width is absent from the hashed payload, so the attempt keeps its pin; the next pass raises PodGroup MinMember before pods and ops/create.go creates only the newly missing ordinals inside the same operation and deadline
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-width-grow]}
     status: current
 
   # GAP: nothing owns an intra-Instance extra while the row is transient, so a
@@ -615,7 +615,7 @@ cells:
     outcome: ignore
     note: none of these knobs is read while a Create attempt is in flight — restartPolicy gates the gang-loss hand-off in ops/restart.go from the next pass on, migrationPolicy only the disposition branch at failure time, and minReadySeconds and markNotReady belong to availability and drain paths the create promote never runs
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-spec-edits-ignored]}
     status: current
 
   - state: Create/CreatePods
@@ -636,7 +636,7 @@ cells:
     outcome: ignore
     note: the retirement mutation is preconditioned on the incarnation, the operation id and the attempt's target, so it no-ops once the row has left Creating or the attempt has been replaced
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-rollback-at-promote]}
     status: current
 
   - state: Create/CreatePods
@@ -652,7 +652,7 @@ cells:
     outcome: ignore
     note: the Create pass is its own detector — every tick of the create requeue interval re-lists pods and re-derives the same missing set and promote decision — so a reconcile with nothing changed writes nothing
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-gate-signals-ignored]}
     status: current
 
   - state: Create/CreatePods
@@ -708,7 +708,7 @@ cells:
     outcome: ignore
     note: the Component pass sweeps every Terminating pod of the Component ahead of the verb passes, so a wedged occupant of one of the attempt's names is force-deleted once its node is gone or unreachable past the threshold and the pod is past its own deadline plus the slack, and the attempt rebuilds the name on the resulting absence; the Create operation itself reads neither clock (pkg/controller/v1beta1/workload/reconcile.go)
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-stuck-terminating-swept]}
     status: current
 
   - state: Create/CreatePods

@@ -1,0 +1,30 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod count 0 below desired 1 (incarnation=2)
+tick=2 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=2 ordinal=0
+tick=2 pass result=after:5s
+tick=3 note the rebuilt pod is still booting two minutes on, which is longer than the grace but proves nothing on its own
+tick=3 apply clock.advance by=2m0s now=t+2m0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=after:5s
+tick=4 note the pull wedges on a rebuilt pod already older than the grace, so the row fails with its operation preserved
+tick=4 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-default-0 reason=ImagePullBackOff now=t+2m0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
+tick=4 warn instanceFailed index=0 pod=svc-a-engine-0-default-0 reason=ImagePullBackOff
+tick=4 pass result=after:5s
+tick=5 note the pass after the stamp diagnoses the parked repair once
+tick=5 hold cleared
+tick=5 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown; waiting for the configuration or image the pod needs; the kubelet retries in place} announced=[RepairWaitingOnWorkload@op#1] precondition=ok
+tick=5 event Warning RepairWaitingOnWorkload OMENative component=engine instance=0 repair parked at Failed on pod svc-a-engine-0-default-0 container main stuck (ImagePullBackOff): waiting for the configuration or image the pod needs; the kubelet retries in place, and the Instance resumes on its own once the pod starts
+tick=5 pass result=after:5s
+tick=6 note the grace is long elapsed and the pull failure is reported again; the already-Failed row is stamped nothing further
+tick=6 apply timer.stuckPodGrace already-elapsed now=t+2m0s
+tick=6 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-default-0 reason=ImagePullBackOff now=t+2m0s
+tick=6 hold cleared
+tick=6 pass result=after:5s

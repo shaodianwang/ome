@@ -1,0 +1,37 @@
+# An operator migration request lands while the Instance is still being created.
+# The migrate pass refuses to stamp a source that is not a steady Ready, so the
+# record waits unallocated and is picked up once the attempt has promoted.
+scenario: create-migrate-request-waits
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-migrate
+  - T-empty-migrate-target
+cells:
+  - instance/Create/CreatePods/spec.migrateRequest/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    migrationMode: Auto
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound and the operator asks the Instance off its node; the record stays Accepted and the attempt converges first
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 3
+    note: the pod reports Ready and enters rotation, so the attempt promotes and the row records its running revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the source is a steady Ready now, so the waiting request is admitted and the pair is established

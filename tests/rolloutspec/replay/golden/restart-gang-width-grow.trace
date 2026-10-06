@@ -1,0 +1,62 @@
+tick=1 note the gang's PodGroup is announced before its first member, and the Create pass materializes both
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 2 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-leader-0 revision=3363fef6 incarnation=1 ordinal=0
+tick=1 pod create name=svc-a-engine-0-worker-0 revision=3363fef6 incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note both members report Ready and the leader enters rotation, so the Instance promotes as one
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-leader-0 serving=absent→True
+tick=2 pod status-patch name=svc-a-engine-0-worker-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-3363fef6 readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (2 pod(s) serving)
+tick=2 pass result=none
+tick=3 note the worker is lost while the gang runs the target, so the repair opens a Restart and takes the surviving leader out of service
+tick=3 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-3363fef6 readySince=t+0s op=op#2{type=Restart step=Drain reason=pod count 1 below desired 2 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod count 1 below desired 2 (incarnation=2)
+tick=3 pod status-patch name=svc-a-engine-0-leader-0 serving=True→False
+tick=3 pass result=after:5s
+tick=4 note the leader's endpoint goes not-ready, which is the guard the drain waits on, so the leader is deleted
+tick=4 apply endpoint.rotationOut[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod delete name=svc-a-engine-0-leader-0 grace=default
+tick=4 pass result=after:5s
+tick=5 note the old gang is gone, so the repair rebuilds both members at the bumped incarnation
+tick=5 apply pod.deleted[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=5 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod create name=svc-a-engine-0-leader-0 revision=3363fef6 incarnation=2 ordinal=0
+tick=5 pod create name=svc-a-engine-0-worker-0 revision=3363fef6 incarnation=2 ordinal=0
+tick=5 pass result=after:5s
+tick=6 note the gang is widened by one worker at an unchanged revision, so the repair fills the wider set at the bumped incarnation
+tick=6 apply spec.gangWidth[grow] workers=2 generation=1 now=t+0s
+tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=6 podgroup update name=svc-a-engine-0
+tick=6 row=0 write no-op precondition=no-change
+tick=6 pod create name=svc-a-engine-0-worker-1 revision=3363fef6 incarnation=2 ordinal=1
+tick=6 pass result=after:5s
+tick=7 note every member reports Ready, so the repair promotes the row on the same revision
+tick=7 apply pod.ready[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=7 apply pod.ready[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=7 apply pod.ready[source] pod=svc-a-engine-0-worker-1 now=t+0s
+tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=7 row=0 write no-op precondition=no-change
+tick=7 pod status-patch name=svc-a-engine-0-leader-0 serving=absent→True
+tick=7 pod status-patch name=svc-a-engine-0-worker-0 serving=absent→True
+tick=7 pod status-patch name=svc-a-engine-0-worker-1 serving=absent→True
+tick=7 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-3363fef6 readySince=t+0s op=nil precondition=ok
+tick=7 event Normal RestartCompleted OMENative component=engine instance=0 restart complete (incarnation=2)
+tick=7 hold cleared
+tick=7 row=0 write no-op precondition=no-change
+tick=7 event Normal InstanceReady OMENative component=engine instance=0 is Ready (3 pod(s) serving)
+tick=7 pass result=none

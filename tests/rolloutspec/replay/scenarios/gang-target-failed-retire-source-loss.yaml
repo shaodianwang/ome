@@ -1,0 +1,60 @@
+# A source pod is lost on the tick the source abandons its timed-out surge and
+# claims the marker as a cleanup. The loss revives nothing, the deadline that
+# keeps elapsing stamps nothing twice, and the source is reset when the cleanup ends.
+scenario: gang-target-failed-retire-source-loss
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-deadline
+  - T-gangtarget-cleanup-failed
+  - T-gangcleanup-done
+cells:
+  - instance/Update/GangSurgeTarget/pod.deleted[source]/boundary@T-gangtarget-cleanup-failed
+  - instance/Update/GangSurgeTarget/timer.operationDeadline/after@T-gangtarget-cleanup-failed
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement is still not Ready when the deadline elapses, so both halves of the pair are stamped Failed with their operations preserved
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: the source worker disappears as the source reads its own Failed and abandons the surge, claiming the marker as a cleanup
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 7
+    note: the deadline is still behind the clock on the next pass, and an already-Failed pair is stamped nothing further
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 8
+    note: the retired members are gone, so the marker is removed, the short source is reset Ready and the retired revision's block is recorded
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 9
+    note: the reset source is short a member and off a blocked target, which is where the next pass leaves it
