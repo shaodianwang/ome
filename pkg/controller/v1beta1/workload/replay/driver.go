@@ -538,7 +538,7 @@ func (d *driver) seedOperation(ctx context.Context, spec RowSpec, row types.Inst
 			return nil, err
 		}
 	}
-	deadline := metav1.Time{}
+	var deadline metav1.Time
 	if o.Deadline != "" {
 		at, err := d.offset(field+".deadline", o.Deadline)
 		if err != nil {
