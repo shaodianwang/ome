@@ -246,3 +246,47 @@ func TestValidateReportsAllViolations(t *testing.T) {
 	errs := Validate(m, repoRoot(t))
 	assert.GreaterOrEqual(t, len(errs), 2)
 }
+
+// embeddedMachines lists the machine directories under machines/ that the
+// gate validates one by one, beside the fixture. Whether a machine is frozen
+// is read from its machine.yaml, not restated here: a machine still being
+// authored may carry DECIDE cells and uncovered decided cells, a frozen one
+// may not. A directory missing from this list, or a name with no directory,
+// fails the test so the list and the tree cannot drift apart.
+var embeddedMachines = []string{"instance", "run", "coordination"}
+
+func TestEmbeddedMachinesValidate(t *testing.T) {
+	root := repoRoot(t)
+	for _, name := range embeddedMachines {
+		t.Run(name, func(t *testing.T) {
+			m, err := Load(name)
+			require.NoError(t, err)
+			assert.Equal(t, name, m.Machine)
+			assert.Empty(t, joined(Validate(m, root)))
+			decide := 0
+			for _, c := range m.Cells {
+				if c.Outcome == OutcomeDecide {
+					decide++
+				}
+			}
+			if m.Frozen {
+				assert.Zero(t, decide, "a frozen machine carries no DECIDE cell")
+			}
+			t.Logf("%s: frozen=%v states=%d events=%d transitions=%d cells=%d decide=%d",
+				name, m.Frozen, len(m.States), len(m.Events), len(m.Transitions), len(m.Cells), decide)
+		})
+	}
+}
+
+func TestEmbeddedMachinesListMatchesTree(t *testing.T) {
+	machines, err := LoadAll()
+	require.NoError(t, err)
+	var found []string
+	for _, m := range machines {
+		if strings.HasPrefix(m.Machine, "_") {
+			continue
+		}
+		found = append(found, m.Machine)
+	}
+	assert.ElementsMatch(t, embeddedMachines, found)
+}

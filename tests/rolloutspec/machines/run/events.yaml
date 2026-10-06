@@ -1,0 +1,32 @@
+# Events the run layer answers to, as it reads them: the spec family through
+# the InferenceReplica revision pairs read live, the canary family through
+# the persisted unit record and rollout phase, the coordination family through
+# the persisted group phase, the verb family through annotations, the policy
+# family through the referenced RolloutPolicy objects (cached for the view,
+# live for a pin), and the controller and apiserver families through the
+# pass's own cached copy and its status flush.
+events:
+  - {id: spec.revision, family: spec, variants: [new, revert, rejected], description: "a grouped member's target revision changes: to a hash no run has pinned (new), back to the revision its Instances run while some still trail (revert), or to the hash its own canary unit rolled back (rejected)"}
+  - {id: spec.planEdit, family: spec, variants: [inlineBody, groupShape, allGroupsRemoved], description: "an inline progression body changes, the number of spec groups changes, or spec.rollout is removed"}
+  - {id: policy.changed, family: policy, description: a referenced RolloutPolicy body changes while it still resolves}
+  - {id: policy.unresolved, family: policy, variants: [notFound, invalid, mismatch, featureDisabled, providerUnbound, composedInvalid], description: "a group's reference stops resolving: the policy is missing, its body fails validation, its progression kind disagrees with the group, the policy feature is not enabled, the composed canary names an unbound metric provider, or the composed body fails validation"}
+  - {id: policy.resolved, family: policy, description: a reference that failed to resolve resolves again}
+  - {id: ir.stale, family: ir, description: "an observed replica's status trails its generation, or its parent-generation stamp trails the service's generation"}
+  - {id: ir.missing, family: ir, description: a grouped member has no InferenceReplica object}
+  - {id: ir.converged, family: ir, description: "a member's current revision equals its target with no Instance trailing"}
+  - {id: ir.straggling, family: ir, description: "a member's revision pair agrees but Instances still trail it (updated below replicas)"}
+  - {id: canary.progress, family: canary, description: "the unit's step counter advances short of the ladder's end"}
+  - {id: canary.completed, family: canary, description: "the unit's ladder is done and its primary reads the Stable phase"}
+  - {id: canary.rolledBack, family: canary, variants: [inFlight, settled], description: "the unit's record names a rejected revision: the revert is still draining (phase RollingBack) or complete (phase RolledBack)"}
+  - {id: canary.failed, family: canary, description: the unit parks at its step with a Failed marker or phase while the stable revision keeps serving}
+  - {id: canary.parked, family: canary, description: "the unit's rollback found no stable revision to return to and parked with the rejected hash recorded"}
+  - {id: canary.resumed, family: canary, description: "the executor clears the unit's rejected revision on the resume verb"}
+  - {id: coord.staged, family: coordination, description: the coordination group owning a not-yet-converged member rests Staged}
+  - {id: coord.settled, family: coordination, description: the coordination group owning a member reports Idle}
+  - {id: verb.repin, family: verb, variants: [matching, mismatched, unchanged, emptyPlan, unrenderable], description: "the repin annotation is present: its value is now or the fresh render's digest (matching), another digest (mismatched), the fresh render equals the pinned digests (unchanged), the fresh render has no groups (emptyPlan), or the source does not render (unrenderable)"}
+  - {id: verb.rollback, family: verb, description: the rollback annotation is written}
+  - {id: ctrl.runLost, family: controller, description: "the pin is gone while a unit's record still holds a ladder short of its end or a revert still draining: status loss, an upgrade from a controller without the run model, or a dropped flush"}
+  - {id: ctrl.staleRead, family: controller, variants: [missesOpen, missesClose, missesRepin], description: "the pass's cached InferenceService predates the flush that opened, closed, or repinned the run"}
+  - {id: ctrl.resync, family: controller, description: "a pass with nothing changed (periodic requeue, informer resync)"}
+  - {id: api.flushFailed, family: apiserver, variants: [afterOpen, afterClose, afterRepinConsumed], description: "the status flush that follows a run boundary fails with a non-conflict error: after an open or retarget, after a close, or after the repin verb was already removed"}
+  - {id: api.conflict, family: apiserver, description: the status flush hits a 409 and is rebased onto the live object}

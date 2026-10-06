@@ -1,0 +1,208 @@
+# One state per persisted group phase, plus the Sequential soak window,
+# which the engine persists as Phase Idle with the composite phase
+# Sequential.AwaitingNextComponent, and the group's absence before its first
+# observation. Draining and RollingBack are declared by the API enum but the
+# transition function never produces them, so every event is n/a there.
+#
+# The policy (BlueGreen, RollingUpdate, Independent, Sequential) and the
+# pacing (PerComponent, RatioBalanced) are guards, not states: a cell whose
+# outcome differs by policy names the dominant outcome and says which policy
+# takes the other.
+states:
+  - id: Unobserved
+    phase: ""
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+    note: the group has no entry under status.rolloutCoordination.groups yet; the first pass that resolves it writes one at whatever phase the member facts compute, stamps lastTransitionTime, and snapshots the ratio anchor once every member reports a replica count
+    not_applicable:
+      member.targetChanged: the group has no entry until a pass observes it; that first observation is ctrl.resync and writes the phase the member facts compute
+      member.surgePodCreated: the group has no entry until a pass observes it; that first observation is ctrl.resync and writes the phase the member facts compute
+      member.readyOnTarget: the group has no entry until a pass observes it; that first observation is ctrl.resync and writes the phase the member facts compute
+      member.capacityLost: the group has no entry until a pass observes it; that first observation is ctrl.resync and writes the phase the member facts compute
+      member.oldPodsGone: the group has no entry until a pass observes it; that first observation is ctrl.resync and writes the phase the member facts compute
+      member.converged: the group has no entry until a pass observes it; that first observation is ctrl.resync and writes the phase the member facts compute
+      member.staged: the group has no entry until a pass observes it; that first observation is ctrl.resync and writes the phase the member facts compute
+      member.rollback: the group has no entry until a pass observes it; that first observation is ctrl.resync and writes the phase the member facts compute
+      member.failed: the group has no entry until a pass observes it; that first observation is ctrl.resync and writes the phase the member facts compute
+      member.recovered: no entry exists that could read Failed
+      member.dark: the group has no entry until a pass observes it; that first observation is ctrl.resync and writes the phase the member facts compute
+      ratio.met: no anchor exists before the first write, so no skew can be computed
+      ratio.lost: no anchor exists before the first write, so no skew can be computed
+      ratio.anchorMissing: the missing anchor is the condition of this state, not an arriving event; the first write snapshots it
+      seq.nextTurn: a handoff presupposes a recorded active member
+      timer.soak: no transition time exists before the first write
+      spec.pause: the group has no entry until a pass observes it; that first observation is ctrl.resync and writes Paused when the annotation is set
+      spec.unpause: no entry reads Paused
+      spec.groupEdited: an edit to a group nobody has observed is part of what the first observation reads
+      spec.replicas: a replica change on a group nobody has observed is part of what the first observation reads
+      spec.partition: a partition on a group nobody has observed is part of what the first observation reads
+      ir.missing: a member with no replica is part of what the first observation reads, as a zero observation
+      ir.readError: a read error fails the pass before any entry is written, which leaves the group where it was
+      ir.stale: a trailing replica is part of what the first observation reads
+      ctrl.staleRead: no entry has been flushed that a cached copy could trail
+      flush.staleOverwrite: no entry has been flushed that a stale desired copy could overwrite
+      api.serviceWriteFailed: the pass fails before the group entry is written, which leaves the group where it was
+      api.conflict: the first write is rebased like any other and the entry lands from the pass's copy
+  - id: Idle
+    phase: Idle
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+    note: no member rolls (every member's target revision equals its current one, or the member has no replica); the composite phase reads Idle, or for Sequential the group is complete or awaiting its first bump; RolloutCoordinationReady reads True
+    not_applicable:
+      member.targetChanged[later]: no member rolls, so every bumped member is the first rolling one in Order
+      member.oldPodsGone: no revision is old while no member rolls
+      member.rollback: no roll is in flight to roll back; a converged member re-targeted to its prior revision is a new bump
+      member.recovered: no Instance row reads Failed
+      ratio.met: the skew check runs only while the group is Surging or Waiting
+      ratio.lost: the skew check runs only while the group is Surging or Waiting
+      seq.nextTurn: a handoff presupposes a member done for handoff and a later one rolling
+      timer.soak: the soak window is the Sequential awaiting state, not Idle
+      spec.unpause: the group is not paused
+  - id: SeqAwaiting
+    phase: Idle
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+    note: a Sequential group between members; the base phase is Idle and the composite phase Sequential.AwaitingNextComponent, with currentComponent naming the next member in Order and previousComponent the one that completed; the group waits for the next member's bump, and for the configured soak since the previous completion when one is set
+    not_applicable:
+      member.targetChanged[later]: no member rolls, so every bumped member is the first rolling one in Order
+      member.oldPodsGone: no revision is old while no member rolls
+      member.rollback: no roll is in flight to roll back; a completed member re-targeted to its prior revision is a new bump
+      member.recovered: no Instance row reads Failed
+      ratio.met: Sequential rejects RatioBalanced pacing, so no skew is ever computed
+      ratio.lost: Sequential rejects RatioBalanced pacing, so no skew is ever computed
+      ratio.anchorMissing: Sequential rejects RatioBalanced pacing, so the anchor is never read
+      spec.unpause: the group is not paused
+  - id: Surging
+    phase: Surging
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+    note: at least one rolling member has no new-revision pod yet (BlueGreen requires every member to have one before it moves on); for Sequential the composite phase names the active member; RatioBalanced pacing computes the surge budget and the skew signal here
+    not_applicable:
+      member.recovered: no Instance row reads Failed
+      seq.nextTurn: a member done for handoff cannot be the one reading Surging, and the handoff is judged when the active member completes
+      timer.soak: no soak runs while a member rolls
+      spec.unpause: the group is not paused
+  - id: Waiting
+    phase: Waiting
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+    note: every rolling member has a new-revision pod and at least one of them is not Ready yet; RatioBalanced pacing computes the surge budget and the skew signal here
+    not_applicable:
+      member.recovered: no Instance row reads Failed
+      seq.nextTurn: the handoff is judged when the active member completes, not while its pods come up
+      timer.soak: no soak runs while a member rolls
+      spec.unpause: the group is not paused
+  - id: Shifting
+    phase: Shifting
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+    note: every new-revision pod is Ready and old-revision pods still exist; the pod-proportional traffic writer moves weight as pods come and go, and the replica drains the old pods; Independent reports every in-flight roll here
+    not_applicable:
+      member.recovered: no Instance row reads Failed
+      ratio.met: the skew check runs only while the group is Surging or Waiting
+      ratio.lost: the skew check runs only while the group is Surging or Waiting
+      timer.soak: no soak runs while a member rolls
+      spec.unpause: the group is not paused
+  - id: ScalingDown
+    phase: ScalingDown
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+    note: every new-revision pod is Ready and no old-revision pod remains, but the replica has not yet promoted its current revision, so the roll still reads in flight
+    not_applicable:
+      member.recovered: no Instance row reads Failed
+      member.oldPodsGone: no old-revision pod remains
+      ratio.met: the skew check runs only while the group is Surging or Waiting
+      ratio.lost: the skew check runs only while the group is Surging or Waiting
+      timer.soak: no soak runs while a member rolls
+      spec.unpause: the group is not paused
+  - id: Staged
+    phase: Staged
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+    note: every rolling member reached its desired staged shape and at least one holds old-revision Instances under a non-zero partition; a terminal resting phase that reads ready, distinct from Idle. A Sequential group never rests here, because its staged member is skipped for handoff and the group reads Awaiting or the next member's phase
+    not_applicable:
+      member.recovered: no Instance row reads Failed
+      ratio.met: the skew check runs only while the group is Surging or Waiting
+      ratio.lost: the skew check runs only while the group is Surging or Waiting
+      seq.nextTurn: a Sequential group never rests Staged
+      timer.soak: a Sequential group never rests Staged
+      spec.unpause: the group is not paused
+  - id: Failed
+    phase: Failed
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+    note: an Instance row of a member reads Failed; the phase is a rollup with no group-level latch, so it exits on the pass that finds no Failed row. For Sequential the composite phase reads Sequential.Failed with currentComponent naming the failed member, and the members after it in Order stay held
+    not_applicable:
+      ratio.met: the skew check runs only while the group is Surging or Waiting
+      ratio.lost: the skew check runs only while the group is Surging or Waiting
+      seq.nextTurn: a Failed member blocks the chain; no handoff is judged
+      timer.soak: no soak runs while a member is Failed
+      spec.unpause: the group is not paused
+  - id: Paused
+    phase: Paused
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+    note: the pause annotation is set on the InferenceService, in either accepted value; the pause is checked before any member fact and outranks Failed; member facts are read again when it is removed
+    not_applicable:
+      member.recovered: a Failed row is not read while paused, so there is nothing to recover from at the group level
+      ratio.met: the skew check runs only while the group is Surging or Waiting
+      ratio.lost: the skew check runs only while the group is Surging or Waiting
+      seq.nextTurn: no handoff is judged while paused
+  - id: Draining
+    phase: Draining
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+    note: declared by the CoordinationPhase enum and never produced by the transition function; the drain of old-revision pods is the replica's and the group reads Shifting while it runs
+    not_applicable:
+      member.targetChanged: the transition function never produces this phase
+      member.surgePodCreated: the transition function never produces this phase
+      member.readyOnTarget: the transition function never produces this phase
+      member.capacityLost: the transition function never produces this phase
+      member.oldPodsGone: the transition function never produces this phase
+      member.converged: the transition function never produces this phase
+      member.staged: the transition function never produces this phase
+      member.rollback: the transition function never produces this phase
+      member.failed: the transition function never produces this phase
+      member.recovered: the transition function never produces this phase
+      member.dark: the transition function never produces this phase
+      ratio.met: the transition function never produces this phase
+      ratio.lost: the transition function never produces this phase
+      ratio.anchorMissing: the transition function never produces this phase
+      seq.nextTurn: the transition function never produces this phase
+      timer.soak: the transition function never produces this phase
+      spec.pause: the transition function never produces this phase
+      spec.unpause: the transition function never produces this phase
+      spec.groupEdited: the transition function never produces this phase
+      spec.replicas: the transition function never produces this phase
+      spec.partition: the transition function never produces this phase
+      ir.missing: the transition function never produces this phase
+      ir.readError: the transition function never produces this phase
+      ir.stale: the transition function never produces this phase
+      ctrl.staleRead: the transition function never produces this phase
+      flush.staleOverwrite: the transition function never produces this phase
+      ctrl.resync: the transition function never produces this phase
+      api.serviceWriteFailed: the transition function never produces this phase
+      api.conflict: the transition function never produces this phase
+  - id: RollingBack
+    phase: RollingBack
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+    note: declared by the CoordinationPhase enum and never produced by the transition function; a revert reads as the roll ending (Idle) while the replica drains the abandoned revision
+    not_applicable:
+      member.targetChanged: the transition function never produces this phase
+      member.surgePodCreated: the transition function never produces this phase
+      member.readyOnTarget: the transition function never produces this phase
+      member.capacityLost: the transition function never produces this phase
+      member.oldPodsGone: the transition function never produces this phase
+      member.converged: the transition function never produces this phase
+      member.staged: the transition function never produces this phase
+      member.rollback: the transition function never produces this phase
+      member.failed: the transition function never produces this phase
+      member.recovered: the transition function never produces this phase
+      member.dark: the transition function never produces this phase
+      ratio.met: the transition function never produces this phase
+      ratio.lost: the transition function never produces this phase
+      ratio.anchorMissing: the transition function never produces this phase
+      seq.nextTurn: the transition function never produces this phase
+      timer.soak: the transition function never produces this phase
+      spec.pause: the transition function never produces this phase
+      spec.unpause: the transition function never produces this phase
+      spec.groupEdited: the transition function never produces this phase
+      spec.replicas: the transition function never produces this phase
+      spec.partition: the transition function never produces this phase
+      ir.missing: the transition function never produces this phase
+      ir.readError: the transition function never produces this phase
+      ir.stale: the transition function never produces this phase
+      ctrl.staleRead: the transition function never produces this phase
+      flush.staleOverwrite: the transition function never produces this phase
+      ctrl.resync: the transition function never produces this phase
+      api.serviceWriteFailed: the transition function never produces this phase
+      api.conflict: the transition function never produces this phase

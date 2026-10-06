@@ -1,0 +1,39 @@
+# Events the group machine answers to, as the coordination pass reads them:
+# member facts through the InferenceReplica counters and rows read from the
+# cache plus the pods listed from the cache, ratio facts through the
+# persisted anchor and the pure surge evaluation, the pause and the group
+# declaration through the InferenceService, and the controller and apiserver
+# families through the pass's own cached copy and its status flush. The
+# gate side (CheckRatio, CheckSequential, CheckSurge, CheckUnavailability,
+# CheckPairing) runs in the replica controller against live reads; its
+# verdicts are the instance machine's gate.allow and gate.deny events.
+events:
+  - {id: member.targetChanged, family: member, variants: [first, later], description: "a member's replica records a target revision that differs from its current one: the first rolling member in Order (or any member outside Sequential), or a member behind another that is already rolling"}
+  - {id: member.surgePodCreated, family: member, description: "a member's first new-revision pod exists (its updated replica count becomes positive)"}
+  - {id: member.readyOnTarget, family: member, description: "every new-revision pod of a member reports Ready"}
+  - {id: member.capacityLost, family: member, variants: [newRevision, oldRevision], description: "a member's pods of the named revision leave readiness or disappear"}
+  - {id: member.oldPodsGone, family: member, description: "a member's total pod count equals its new-revision pod count; nothing of the old revision remains"}
+  - {id: member.converged, family: member, description: "a member's replica promotes its current revision to the target, so its roll no longer reads in flight"}
+  - {id: member.staged, family: member, description: "a member reaches its desired staged shape under a non-zero partition: the unheld Instances Ready on the target and the held ones Ready on the prior revision"}
+  - {id: member.rollback, family: member, description: "a member's target revision returns to its current one while pods of the abandoned revision still exist"}
+  - {id: member.failed, family: member, description: an Instance row of a member reads Failed}
+  - {id: member.recovered, family: member, description: no Instance row of the member reads Failed any more}
+  - {id: member.dark, family: member, description: "a member has no pod in rotation and no Instance row reads Failed (its rows demoted to Pending, its pods gone or unready)"}
+  - {id: ratio.met, family: ratio, description: "the RatioBalanced evaluation admits the next surge or drain for a member"}
+  - {id: ratio.lost, family: ratio, description: "the RatioBalanced evaluation zeroes a member's surge budget because the step would leave the band or outpace a peer"}
+  - {id: ratio.anchorMissing, family: ratio, description: the group carries no ratio anchor yet}
+  - {id: seq.nextTurn, family: sequential, description: "the active Sequential member is done for handoff (its roll no longer in flight, or at its staged shape) and a later member in Order has a roll in flight"}
+  - {id: timer.soak, family: timer, description: "the configured Sequential soak since the previous member's completion elapses"}
+  - {id: spec.pause, family: spec, description: "the pause annotation is set on the InferenceService, with either accepted value"}
+  - {id: spec.unpause, family: spec, description: the pause annotation is removed}
+  - {id: spec.groupEdited, family: spec, variants: [memberAdded, memberRemoved, policyChanged, groupRemoved], description: "the group's declaration changes in the effective plan: a member joins, a member leaves, the progression or pacing changes, or the group disappears"}
+  - {id: spec.replicas, family: spec, variants: [up, down], description: "a member's desired replica count changes"}
+  - {id: spec.partition, family: spec, variants: [set, cleared], description: "a member's effective rollingUpdate.partition is set to a non-zero value or cleared"}
+  - {id: ir.missing, family: ir, description: a member has no InferenceReplica object}
+  - {id: ir.readError, family: ir, description: "a member's InferenceReplica cannot be read (not a missing object)"}
+  - {id: ir.stale, family: ir, description: "a member's replica status trails its spec, or its counters trail the pods the pass lists"}
+  - {id: ctrl.staleRead, family: controller, variants: [anchorMissing, phaseRegressed], description: "the pass's cached InferenceService predates the flush that wrote the group's ratio anchor, or one that moved its phase"}
+  - {id: flush.staleOverwrite, family: controller, description: "the status flush rebases a pass whose group fields are older than the live object's and copies them over it"}
+  - {id: ctrl.resync, family: controller, description: "a pass with nothing changed (periodic requeue, informer resync), or the pass that first observes the group"}
+  - {id: api.serviceWriteFailed, family: apiserver, variants: [ensure, namespaceTerminating], description: "a per-revision Service write fails before the group is evaluated: an ordinary error, or a create refused because the namespace is terminating"}
+  - {id: api.conflict, family: apiserver, description: the status flush hits a 409 and is rebased onto the live object}

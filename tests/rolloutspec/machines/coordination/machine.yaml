@@ -1,0 +1,18 @@
+machine: coordination
+scope: one coordination group of one InferenceService, as persisted in status.rolloutCoordination.groups[] (phase, compositePhase, currentComponent, previousComponent, observedRatio, lastTransitionTime) and read back by the next pass as the group's only memory
+frozen: false
+invariants:
+  - id: phase.follows.members
+    statement: the group phase is recomputed on every pass from the members' replica counters, their pods and the pause annotation; nothing is latched except the ratio anchor, the transition time and the active component
+  - id: one.rolls.at.a.time
+    statement: under Sequential at most one member rolls at a time, in the declared Order; a later member's bump is deferred and its update gate held until the members before it are done for handoff
+  - id: anchor.kept.for.the.roll
+    statement: the ratio anchor is snapshotted once, when every member reports a replica count, and carried forward unchanged while the group keeps it; a scale-up or scale-down mid-roll does not move it
+  - id: staged.is.rest
+    statement: a group converged to a non-zero partition rests Staged, reads ready, and counts as done for a Sequential handoff
+  - id: pause.holds.every.group
+    statement: the pause annotation, in either accepted value, holds every group Paused whatever its members do until it is removed
+  - id: failed.is.not.latched
+    statement: Failed is a rollup of Instance rows reading Failed and exits on the pass that finds none
+  - id: transition.time.marks.base.phase
+    statement: lastTransitionTime moves only when the base phase changes; a composite-only change keeps it

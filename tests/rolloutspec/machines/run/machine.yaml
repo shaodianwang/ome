@@ -1,0 +1,18 @@
+machine: run
+scope: the rollout run of one InferenceService, as persisted in status.rollout (activeRun, lastRun), the RolloutPlanReady condition, the repin annotation, and the canary unit record a rejected revision is held on
+frozen: false
+invariants:
+  - id: one.active.run
+    statement: at most one run is pinned at a time; a retarget closes the pinned run before a fresh one opens
+  - id: pin.newer.wins
+    statement: a status write never replaces a pinned run or a closed record with one whose clock (OpenedAt, PinnedAt, ClosedAt) is older
+  - id: plan.executes.only.pinned
+    statement: while a run is open every executor reads the plan through the pin; spec and policy edits are inert until the next open or an applied repin
+  - id: park.fails.closed
+    statement: a plan that does not compose opens no run and holds every grouped member's update gate; it never falls back to a default progression
+  - id: rejected.target.is.a.hold
+    statement: a revision a canary unit rolled back does not reopen a run by itself; a different target or a cleared hold does
+  - id: verb.consumed.once
+    statement: a one-shot verb is removed after it is applied, and a copy seen again after the apply changes nothing
+  - id: decision.reads.live.replicas
+    statement: open, retarget and close are judged on the live replica revision pairs, never on a cached copy, and never while a replica's status trails its spec

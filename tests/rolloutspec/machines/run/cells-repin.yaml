@@ -1,0 +1,321 @@
+# Cells for RepinPending: a run is pinned and the repin annotation is
+# present. The next pass consumes the verb before it reads replica
+# freshness, retargets or closes, and removes the annotation in every
+# branch; everything else waits one pass (rolloutrun.go handleRepin,
+# clampCanary; conditions.go consumeAnnotation).
+cells:
+  - state: RepinPending
+    event: verb.repin
+    variants: [matching]
+    windows: [before]
+    outcome: transition
+    to: Open
+    guard: "the fresh render differs from the pinned digests and the annotation names now or that render's digest"
+    note: "the plan is re-rendered from a live policy read and replaces the pin under the same RunID with PinnedAt advanced; the canary step counter is clamped into the new ladder, a finished canary stays finished, and the pre-step hold is armed when the clamped step would raise traffic, so a repin can only hold or tighten"
+    invariants: [verb.consumed.once, plan.executes.only.pinned]
+    placement: unit
+    coverage: {perm: [], unit: [TestRepinCASAndClamp, TestRepinPinsTheLivePolicyBodyWhenTheCacheLags], kind: [rolloutpolicy_run_kind_test.go]}
+    status: decided
+  - state: RepinPending
+    event: verb.repin
+    variants: [matching]
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the annotation is removed with the apply; a copy still visible after the removal patch outran the informer re-renders to exactly the pinned digests and is pure cleanup"
+    invariants: [verb.consumed.once]
+    placement: unit
+    coverage: {perm: [], unit: [TestRepinCASAndClamp], kind: []}
+    status: decided
+  - state: RepinPending
+    event: verb.repin
+    variants: [mismatched]
+    windows: [before]
+    outcome: transition
+    to: Open
+    guard: "the annotation names a digest other than the fresh render's"
+    note: "a concurrent edit landed between the operator's render and the pass; the repin is refused with a RolloutRepinRejected event, the pin is unchanged, and the annotation is removed so a rejected repin never retries forever"
+    invariants: [verb.consumed.once]
+    placement: unit
+    coverage: {perm: [], unit: [TestRepinCASAndClamp], kind: []}
+    status: decided
+  - state: RepinPending
+    event: verb.repin
+    variants: [mismatched]
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the refusal removed the annotation; nothing is left to read"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: verb.repin
+    variants: [unchanged]
+    windows: [before]
+    outcome: transition
+    to: Open
+    guard: "the fresh render equals the pinned digests"
+    note: "nothing is re-stamped and no state change is claimed; the annotation is removed"
+    invariants: [verb.consumed.once]
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: verb.repin
+    variants: [unchanged]
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the cleanup removed the annotation; nothing is left to read"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: verb.repin
+    variants: [emptyPlan]
+    windows: [before]
+    outcome: transition
+    to: Closed
+    guard: "the fresh render has no groups"
+    note: "a repin to the empty plan closes the run Superseded instead of pinning an empty plan; the annotation is removed"
+    invariants: [verb.consumed.once, one.active.run]
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: verb.repin
+    variants: [emptyPlan]
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the close removed the annotation; nothing is left to read"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: verb.repin
+    variants: [unrenderable]
+    windows: [before]
+    outcome: transition
+    to: Open
+    guard: "the current source does not render"
+    note: "the repin is refused with a RolloutRepinRejected event naming the park reason, the pin is unchanged, and the annotation is removed"
+    invariants: [verb.consumed.once]
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: verb.repin
+    variants: [unrenderable]
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the refusal removed the annotation; nothing is left to read"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: spec.revision
+    outcome: defer
+    note: "the verb is consumed first and the pass returns; a retarget is judged on the next pass against the repinned plan, where it closes the run Superseded as usual"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: spec.planEdit
+    outcome: defer
+    note: "the repin renders from the edited spec, so the edit is what gets pinned; an edit that leaves no groups closes the run"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: policy.changed
+    outcome: defer
+    note: "the repin composes from a live policy read, so the changed body is what gets pinned when the digest the annotation names matches it"
+    placement: unit
+    coverage: {perm: [], unit: [TestRepinPinsTheLivePolicyBodyWhenTheCacheLags], kind: []}
+    status: decided
+  - state: RepinPending
+    event: policy.unresolved
+    outcome: defer
+    note: "the repin cannot render, so it is refused and consumed on the next pass; the pin keeps executing"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: policy.resolved
+    outcome: defer
+    note: "the next pass renders the resolved body and applies or refuses the repin against it"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: ir.stale
+    outcome: defer
+    note: "the repin does not read the replicas and is consumed regardless of their freshness; the stale replica is waited on by the pass after"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: ir.missing
+    outcome: defer
+    note: "the verb is consumed first; the missing replica is read on the next pass"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: ir.converged
+    outcome: defer
+    note: "the verb is consumed first; the close is judged on the next pass against the repinned plan"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: ir.straggling
+    outcome: defer
+    note: "the verb is consumed first; the stragglers keep the run pinned afterwards as in Open"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: canary.progress
+    outcome: defer
+    note: "the verb is consumed first; a step advanced past the end of the new ladder is clamped to its last step, and a finished canary stays finished"
+    placement: unit
+    coverage: {perm: [], unit: [TestRepinCASAndClamp], kind: []}
+    status: decided
+  - state: RepinPending
+    event: canary.completed
+    outcome: defer
+    note: "the verb is consumed first; a canary finished under the old ladder is kept finished by the clamp and the close is judged next pass"
+    placement: unit
+    coverage: {perm: [], unit: [TestRepinCASAndClamp], kind: []}
+    status: decided
+  - state: RepinPending
+    event: canary.rolledBack
+    outcome: defer
+    note: "the verb is consumed first; the revert and its close are read on the next pass"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: canary.failed
+    outcome: defer
+    note: "the verb is consumed first; the park keeps the run pinned afterwards as in Open"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: canary.parked
+    outcome: defer
+    note: "the verb is consumed first; afterwards the park holds the run pinned as in Open, where that outcome is undecided"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: canary.resumed
+    outcome: defer
+    note: "the verb is consumed first; the re-armed unit runs the repinned ladder"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: coord.staged
+    outcome: defer
+    note: "the verb is consumed first; the staged close is judged on the next pass"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: coord.settled
+    outcome: ignore
+    note: "the run layer reads the replica pairs, not the group phase"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: verb.rollback
+    outcome: defer
+    note: "the rollback verb is the canary executor's and is read later in the same pass; the run layer sees its result as canary.rolledBack on the pass after"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: ctrl.staleRead
+    variants: [missesOpen]
+    outcome: DECIDE
+    note: "a pass whose cached copy lacks the pin never reaches the verb (it is read only under an active run), opens the same roll again under a new RunID, and the newer clock wins at the flush; the repin is then consumed against the re-minted pin on a later pass. The same open-idempotence question as Open's cell"
+    invariants: [pin.newer.wins]
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: review
+  - state: RepinPending
+    event: ctrl.resync
+    outcome: defer
+    note: "the next pass consumes the verb"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: api.flushFailed
+    variants: [afterRepinConsumed]
+    windows: [before, after]
+    outcome: n/a
+    reason: the verb is removed inside the consuming pass, so the failed flush that follows it is that pass's boundary
+    status: current
+  - state: RepinPending
+    event: api.flushFailed
+    variants: [afterRepinConsumed]
+    windows: [boundary]
+    transition: T-repin-apply
+    outcome: DECIDE
+    note: "the annotation was patched away before the status flush and the flush failed, so the verb is gone and the pin still carries the old plan; the newer-clock preserve only stops a later writer from rolling an applied pin back and cannot recover one that never landed. The owner must decide whether the verb is consumed only after a successful flush, or whether a lost repin is acceptable and the operator re-issues it"
+    invariants: [verb.consumed.once]
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: review
+  - state: RepinPending
+    event: api.flushFailed
+    variants: [afterRepinConsumed]
+    windows: [boundary]
+    transition: T-repin-close
+    outcome: DECIDE
+    note: "the annotation was patched away and the Superseded close never landed, so the run stays pinned on the plan the operator asked to abandon; the same consume-before-flush question as the apply edge"
+    invariants: [verb.consumed.once]
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: review
+  - state: RepinPending
+    event: api.flushFailed
+    variants: [afterRepinConsumed]
+    windows: [boundary]
+    transition: T-repin-reject
+    outcome: ignore
+    note: "a refused repin changed no status; only the refusal event and metric are lost with the failed flush"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: api.flushFailed
+    variants: [afterRepinConsumed]
+    windows: [boundary]
+    transition: T-repin-noop
+    outcome: ignore
+    note: "a cleanup repin changed no status; nothing is lost with the failed flush"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: api.flushFailed
+    variants: [afterRepinConsumed]
+    windows: [boundary]
+    transition: T-repin-unrenderable
+    outcome: ignore
+    note: "a refused repin changed no status; only the refusal event and metric are lost with the failed flush"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RepinPending
+    event: api.conflict
+    outcome: defer
+    note: "the flush is rebased onto the live object; the repinned plan carries the newest PinnedAt and is kept, together with its pre-step hold"
+    invariants: [pin.newer.wins]
+    placement: unit
+    coverage: {perm: [], unit: [TestPreserveNewerRunKeepsFresherPin], kind: []}
+    status: decided

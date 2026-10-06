@@ -1,0 +1,329 @@
+# Cells for Open: a run is pinned by a fresh open. Executors read the plan
+# through the pin; the run layer re-judges the pin on every pass against
+# the live replica revision pairs (retarget, close) and the canary unit's
+# persisted record and phase (rolled back, completed), and reports edits
+# as drift (rolloutrun.go reconcile, retargeted, closedOutcome, updateDrift).
+cells:
+  - state: Open
+    event: spec.revision
+    variants: [new]
+    windows: [before]
+    outcome: transition
+    to: Open
+    guard: "a pinned member's observed target moved off its pinned revision to a hash that is not its unit's rejected one, every replica is fresh, and the plan composes"
+    note: "the pinned run closes Superseded and a fresh run opens in the same pass under a new RunID; a member that moved carries its pinned stable revision forward, a member still on its pinned revision is on its stable, and a canary unit whose targets moved is reset by BindRun to step zero. A plan that no longer composes parks instead after the Superseded close (T-open-retarget-park)"
+    invariants: [one.active.run, decision.reads.live.replicas]
+    placement: unit
+    coverage: {perm: [], unit: [TestRetargetClosesSupersededAndReopens, TestRetargetDoesNotGuessMissingStableRevision, TestRetargetKeepsUnmovedComponentStableKnown], kind: [canary_retarget_rollback_kind_test.go]}
+    status: decided
+  - state: Open
+    event: spec.revision
+    variants: [new]
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the superseding pin is in memory from one live read; a target that moves again is the next pass's retarget against that pin"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: spec.revision
+    variants: [revert]
+    windows: [before]
+    outcome: transition
+    to: Open
+    guard: "the target returned to the revision the member's Instances run while some still trail it"
+    note: "a revert is a retarget like any other: the run closes Superseded and a fresh run opens toward the restored revision so the plan gate admits the trailing Instances' roll back; when nothing trails and no unit is mid-ladder the close is not followed by an open and the service reads Closed (T-open-revert-settle)"
+    invariants: [one.active.run]
+    placement: unit
+    coverage: {perm: [], unit: [TestRevertMidSurgeKeepsOneRunOpen, TestRevertAtTheLastInPlaceInstanceClosesTheRunSuperseded], kind: [cancel_midrollout_kind_test.go]}
+    status: decided
+  - state: Open
+    event: spec.revision
+    variants: [revert]
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the revert was read once against the pin; the fresh run or the settled close is what the next pass finds"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: spec.revision
+    variants: [rejected]
+    outcome: ignore
+    note: "a target that lands on its unit's rejected revision is a hold, not a retarget: the retarget check skips it and the run continues on its pin; the plan gate keeps that member's Instances on the stable revision"
+    invariants: [rejected.target.is.a.hold]
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: spec.planEdit
+    variants: [inlineBody]
+    outcome: ignore
+    note: "the pinned plan continues; RolloutPlanDrift reads True with reason SpecNewerThanRun until the next open or an applied repin"
+    invariants: [plan.executes.only.pinned]
+    placement: unit
+    coverage: {perm: [], unit: [TestMidRunEditIsInertWithDrift], kind: []}
+    status: decided
+  - state: Open
+    event: spec.planEdit
+    variants: [groupShape]
+    outcome: ignore
+    note: "the pinned plan continues under RolloutPlanDrift SpecNewerThanRun; a canary group that left the spec gets a RolloutGroupRemovedMidRun warning, since deleting a group never aborts a pinned run"
+    invariants: [plan.executes.only.pinned]
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: spec.planEdit
+    variants: [allGroupsRemoved]
+    outcome: ignore
+    note: "the pinned plan continues under RolloutPlanDrift SpecNewerThanRun with a RolloutGroupRemovedMidRun warning and a ten-second requeue; with no spec groups the pass never reaches the convergence check, so only the rollback verb or a repin to the empty plan ends this run"
+    invariants: [plan.executes.only.pinned]
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: policy.changed
+    outcome: ignore
+    note: "the pinned body keeps executing; RolloutPlanDrift reads True with reason PolicyNewerThanRun and the next open composes the new body from a live read"
+    invariants: [plan.executes.only.pinned]
+    placement: kind
+    coverage: {perm: [], unit: [], kind: [rolloutpolicy_run_kind_test.go]}
+    status: decided
+  - state: Open
+    event: policy.unresolved
+    outcome: ignore
+    note: "a reference that stops resolving mid-run does not park a pinned run: the live digest reads unresolvable, RolloutPlanDrift reads True, and the pin keeps executing"
+    invariants: [plan.executes.only.pinned]
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: policy.resolved
+    outcome: ignore
+    note: "RolloutPlanDrift returns to InSync when the live digest equals the pinned one again"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: ir.stale
+    outcome: defer
+    note: "no retarget or close is judged on a replica whose status trails its spec or whose projection trails the service's generation; the pass requeues in ten seconds"
+    invariants: [decision.reads.live.replicas]
+    placement: unit
+    coverage: {perm: [], unit: [TestRevertAtTheLastInstanceWaitsForTheProjectionBeforeJudgingTheRun], kind: []}
+    status: decided
+  - state: Open
+    event: ir.missing
+    outcome: defer
+    note: "a member with no replica reads as an empty pair: never retargeted, never converged; the run stays pinned until the replica reappears"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: ir.converged
+    windows: [before]
+    outcome: transition
+    to: Closed
+    guard: "every pinned member's current and target revisions equal its pinned revision with no Instance trailing, and every canary unit is done and reads Stable"
+    note: "the close keeps a bounded record with the targets and per-group provenance; a member that converged while another still rolls keeps the run open"
+    placement: unit
+    coverage: {perm: [], unit: [TestCompletedCloseKeepsBoundedRecord, TestCreationRunClosesWithoutCanaryState], kind: [rolloutpolicy_run_kind_test.go]}
+    status: decided
+  - state: Open
+    event: ir.converged
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the close consumed the convergence; a converged member is what Closed reads"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: ir.straggling
+    outcome: defer
+    note: "the close waits for every Instance to reach the pinned revision; the canary's done sentinel can lead the replica counters by a pass and closing early would reopen at once through the straggler trigger"
+    placement: unit
+    coverage: {perm: [], unit: [TestCanaryRunClosesOnceTheUnitReadsStable], kind: []}
+    status: decided
+  - state: Open
+    event: canary.progress
+    outcome: ignore
+    note: "the step counter is read only at the close; a step short of the ladder's end keeps the run pinned"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: canary.completed
+    windows: [before]
+    outcome: transition
+    to: Closed
+    guard: "the step counter is at the ladder's end, the primary reads Stable, no member of the group trails, and every other pinned member converged"
+    note: "a unit still Promoting at the done sentinel keeps its run pinned, because a plan resolved only through the pin must still drive the unit to report Stable"
+    placement: unit
+    coverage: {perm: [], unit: [TestCanaryRunClosesOnceTheUnitReadsStable], kind: [rolloutpolicy_run_kind_test.go]}
+    status: decided
+  - state: Open
+    event: canary.completed
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the close consumed the completion; the done sentinel stays on the record"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: canary.rolledBack
+    variants: [inFlight]
+    outcome: defer
+    note: "a revert still draining keeps the run pinned; the plan gate admits the roll back to stable only under a pinned run"
+    placement: unit
+    coverage: {perm: [], unit: [TestRollingBackRunStaysOpen], kind: []}
+    status: decided
+  - state: Open
+    event: canary.rolledBack
+    variants: [settled]
+    windows: [before]
+    outcome: transition
+    to: RejectedSticky
+    guard: "the pinned revision of the unit's primary is the rejected hash and the primary reads RolledBack"
+    note: "only a rollback of what this run presented is this run's outcome; a group still holding an older rejection was pinned at its stable revision and its standing rejection is inert here, so another group's rollout is not ended by it"
+    invariants: [rejected.target.is.a.hold]
+    placement: unit
+    coverage: {perm: [], unit: [TestRolledBackRunStillClosesForTheGroupThatFailed, TestStandingRollbackDoesNotCloseAnotherGroupsRun], kind: []}
+    status: decided
+  - state: Open
+    event: canary.rolledBack
+    variants: [settled]
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the close consumed the settled revert; the rejected hash stays on the record as the hold"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: canary.failed
+    outcome: defer
+    note: "a unit parked Failed is short of its ladder's end, so the run stays pinned while the stable revision serves; a rollback or resume verb or a new target ends the park, and nothing in the run layer closes on it"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: canary.parked
+    outcome: DECIDE
+    note: "a rollback that found no stable revision parks the unit with the rejected hash recorded and nothing draining; the run layer reads that record as a revert that never settles, so the run stays pinned indefinitely and neither a rolled-back nor a completed close can fire; only a retarget or a repin to the empty plan ends it. The owner must decide whether the run closes RolledBack on the park, closes under a new outcome, or stays pinned"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: review
+  - state: Open
+    event: canary.resumed
+    outcome: ignore
+    note: "the executor re-arms the unit under the pin; the run continues on the same targets"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: coord.staged
+    windows: [before]
+    outcome: transition
+    to: Closed
+    guard: "every member that has not converged belongs to a coordination group whose persisted phase is Staged, and every other pinned member converged"
+    note: "a lifecycle partition deliberately holds mixed revisions; keying the close on full convergence alone would pin such a run forever. The phase is read from the pass's cached copy of the InferenceService, one flush behind the coordination pass that wrote it"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: [runtime_partition_sequential_kind_test.go]}
+    status: current
+  - state: Open
+    event: coord.staged
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the close consumed the staged rest"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: coord.settled
+    outcome: ignore
+    note: "the run layer reads the replica pairs, not the group phase; an Idle group with a converged member is ir.converged"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: verb.repin
+    windows: [before]
+    outcome: transition
+    to: RepinPending
+    note: "the annotation is persisted metadata; the next pass consumes it before it reads freshness, retargets or closes"
+    placement: unit
+    coverage: {perm: [], unit: [TestRepinCASAndClamp], kind: [rolloutpolicy_run_kind_test.go]}
+    status: decided
+  - state: Open
+    event: verb.repin
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the annotation is already present; a rewrite of its value is what the consuming pass reads"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: verb.rollback
+    outcome: ignore
+    note: "the rollback verb is the canary executor's: it records the rejection on the unit and drives the revert; the run layer sees the result as canary.rolledBack"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: ctrl.staleRead
+    variants: [missesOpen]
+    outcome: DECIDE
+    note: "a pass whose cached copy lacks the pin opens the same roll again under a new RunID and OpenedAt; at the flush the newer clock wins, so the persisted run is re-minted with a new identity while the canary unit, bound by an unchanged TargetID, is not reset. No rule says whether a re-open of an identical target set should keep the RunID; the owner must decide whether the open is idempotent on targets or the churn is acceptable"
+    invariants: [pin.newer.wins]
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: review
+  - state: Open
+    event: ctrl.staleRead
+    variants: [missesClose]
+    outcome: DECIDE
+    note: "a cached copy that still shows the predecessor run pinned re-judges it against the live replicas, closes it again with a fresh ClosedAt and opens a successor; the preserve rule compares wall clocks, so this write replaces the newer live pin and overwrites the predecessor's recorded outcome with Superseded. The owner must decide whether the preserve rule should compare observations (RunID and targets) rather than clocks"
+    invariants: [pin.newer.wins]
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: review
+  - state: Open
+    event: ctrl.staleRead
+    variants: [missesRepin]
+    outcome: DECIDE
+    note: "a cached copy with the old plan reports RolloutPlanDrift True for one pass against the live render, and the pass's desired status lacks the repin's pre-step hold; the flush keeps the live pin by its newer PinnedAt but re-arms the hold on the legacy alias record only, so the per-unit record every reader uses can lose the hold. The owner must decide where the hold is re-armed"
+    invariants: [pin.newer.wins]
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: review
+  - state: Open
+    event: ctrl.resync
+    outcome: ignore
+    note: "drift is re-evaluated from the cached policies and RolloutPlanReady Pinned is re-stamped only on change"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: api.flushFailed
+    variants: [afterOpen, afterClose]
+    windows: [before, after]
+    outcome: n/a
+    reason: a boundary flush exists only while a retarget or a close is in memory and not yet persisted
+    status: current
+  - state: Open
+    event: api.flushFailed
+    variants: [afterOpen, afterClose]
+    windows: [boundary]
+    outcome: defer
+    note: "the pass returns the error with nothing persisted; the next pass recomputes the same boundary from the persisted pin and the live replicas. A retarget re-mints its RunID; a close lands a later ClosedAt"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Open
+    event: api.conflict
+    outcome: defer
+    note: "the flush is rebased onto the live object; the ActiveRun and LastRun pair with the newer clock is kept, so a rebase from a stale copy never rolls the pin back to a predecessor"
+    invariants: [pin.newer.wins]
+    placement: unit
+    coverage: {perm: [], unit: [TestPreserveNewerRunKeepsFresherPin], kind: []}
+    status: decided

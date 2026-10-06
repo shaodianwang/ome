@@ -1,0 +1,310 @@
+# Each guard states the condition reconcile() checks before the in-memory
+# status change that leaves the source state; the controller's immediate
+# status flush (StateChanged) is what lands it. An open and a park are
+# alternatives on the same event, so each source state carries one edge of
+# each; the cell names the one its guard picks and its note the other.
+transitions:
+  # --- NoRun -------------------------------------------------------------
+  - id: T-norun-open
+    from: NoRun
+    event: spec.revision
+    variant: new
+    guard: every observed replica is fresh, a grouped member diverges (target off current, or Instances trailing), and the plan composes from a live policy read
+    to: Open
+    effects: [ActiveRun pinned with TargetRevisions and the composed Plan, RolloutPlanReady True Pinned, RolloutPlanDrift False, the retargeted canary unit armed by BindRun when a stable revision is known, immediate flush]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-norun-park
+    from: NoRun
+    event: spec.revision
+    variant: new
+    guard: a grouped member diverges and the plan does not compose
+    to: Parked
+    effects: [RolloutPlanReady False with the park reason, RolloutPlanParked event, requeue one minute, no pin]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-norun-straggle
+    from: NoRun
+    event: ir.straggling
+    guard: a member's pair agrees while Instances trail it and the plan composes
+    to: Open
+    effects: [ActiveRun pinned at the agreeing revision so the plan gate admits the trailing Instances]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/observe.go
+  - id: T-norun-adopt
+    from: NoRun
+    event: ctrl.runLost
+    guard: a canary unit's record is short of the ladder's end or its revert is still draining, replicas are fresh, and the plan composes
+    to: Adopted
+    effects: [ActiveRun pinned without resetting the unit, TargetID bound on the record, a reverting unit pinned at its rejected revision, RolloutPlanRepinned event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/observe.go
+
+  # --- Parked ------------------------------------------------------------
+  - id: T-parked-open
+    from: Parked
+    event: policy.resolved
+    guard: the plan composes from a live policy read and a member still diverges
+    to: Open
+    effects: [ActiveRun pinned, RolloutPlanReady True Pinned, immediate flush]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-parked-adopt
+    from: Parked
+    event: policy.resolved
+    guard: the plan composes and a canary unit's record is short of the ladder's end or reverting
+    to: Adopted
+    effects: [ActiveRun pinned without resetting the unit]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/observe.go
+  - id: T-parked-settle
+    from: Parked
+    event: ir.converged
+    guard: no grouped member diverges any more and no unit is mid-ladder
+    to: NoRun
+    effects: [RolloutPlanReady True NoActiveRun, RolloutPlanDrift False; a LastRun on the record is kept and the service then reads Closed]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-parked-hold
+    from: Parked
+    event: canary.rolledBack
+    variant: settled
+    guard: the only divergence left is a member targeting the revision its unit rolled back
+    to: RejectedSticky
+    effects: [RolloutPlanReady True NoActiveRun, no pin]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/observe.go
+
+  # --- Open --------------------------------------------------------------
+  - id: T-open-retarget
+    from: Open
+    event: spec.revision
+    guard: a pinned member's observed target moved off its pinned revision and is not its unit's rejected hash, replicas are fresh, and the plan composes
+    to: Open
+    effects: [LastRun Superseded, a fresh ActiveRun with a new RunID, the stable revision carried for members that moved, a retargeted canary unit reset by BindRun]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-open-retarget-park
+    from: Open
+    event: spec.revision
+    guard: a pinned member retargeted and the plan no longer composes
+    to: Parked
+    effects: [LastRun Superseded, RolloutPlanReady False with the park reason]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-open-revert-settle
+    from: Open
+    event: spec.revision
+    variant: revert
+    guard: every retargeted member's target returned to the revision its Instances run with nothing trailing, and no unit is mid-ladder
+    to: Closed
+    effects: [LastRun Superseded, ActiveRun dropped, no fresh run since nothing diverges, RolloutPlanReady True NoActiveRun]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-open-complete
+    from: Open
+    event: ir.converged
+    guard: every pinned member's current and target revisions equal its pinned revision with no Instance trailing, and every canary unit is done and reads Stable
+    to: Closed
+    effects: [LastRun Completed with targets and provenance, ActiveRun dropped, RolloutPlanReady True NoActiveRun]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-open-staged
+    from: Open
+    event: coord.staged
+    guard: every member that has not converged belongs to a coordination group whose persisted phase is Staged
+    to: Closed
+    effects: [LastRun Completed, ActiveRun dropped]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-open-canary-complete
+    from: Open
+    event: canary.completed
+    guard: the unit's step counter is at the ladder's end, its primary reads Stable, no member of the group trails, and every other pinned member converged
+    to: Closed
+    effects: [LastRun Completed, ActiveRun dropped]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-open-rolledback
+    from: Open
+    event: canary.rolledBack
+    variant: settled
+    guard: the pinned revision of the unit's primary is the rejected hash
+    to: RejectedSticky
+    effects: [LastRun RolledBack with the pinned targets, ActiveRun dropped, the rejected hash kept on the unit record]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-open-repin
+    from: Open
+    event: verb.repin
+    guard: the annotation is written on the InferenceService
+    to: RepinPending
+    effects: [none until the next pass reads it]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+
+  # --- Adopted -----------------------------------------------------------
+  - id: T-adopted-retarget
+    from: Adopted
+    event: spec.revision
+    guard: a pinned member's observed target moved off its pinned revision and is not its unit's rejected hash, replicas are fresh, and the plan composes
+    to: Open
+    effects: [LastRun Superseded, a fresh ActiveRun, the retargeted canary unit reset by BindRun]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-adopted-retarget-park
+    from: Adopted
+    event: spec.revision
+    guard: a pinned member retargeted and the plan no longer composes
+    to: Parked
+    effects: [LastRun Superseded, RolloutPlanReady False with the park reason]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-adopted-revert-settle
+    from: Adopted
+    event: spec.revision
+    variant: revert
+    guard: every retargeted member's target returned to the revision its Instances run with nothing trailing, and the adopted unit is no longer mid-ladder
+    to: Closed
+    effects: [LastRun Superseded, ActiveRun dropped, no fresh run since nothing diverges]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-adopted-complete
+    from: Adopted
+    event: ir.converged
+    guard: every pinned member converged to its pinned revision and every canary unit is done and reads Stable
+    to: Closed
+    effects: [LastRun Completed, ActiveRun dropped]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-adopted-staged
+    from: Adopted
+    event: coord.staged
+    guard: every member that has not converged belongs to a group whose persisted phase is Staged
+    to: Closed
+    effects: [LastRun Completed, ActiveRun dropped]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-adopted-canary-complete
+    from: Adopted
+    event: canary.completed
+    guard: the adopted ladder reaches its end and the primary reads Stable with no member trailing
+    to: Closed
+    effects: [LastRun Completed, ActiveRun dropped]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-adopted-rolledback
+    from: Adopted
+    event: canary.rolledBack
+    variant: settled
+    guard: the adopted revert completes; the unit was pinned at its rejected revision so the rejection is this run's own
+    to: RejectedSticky
+    effects: [LastRun RolledBack, ActiveRun dropped]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-adopted-repin
+    from: Adopted
+    event: verb.repin
+    guard: the annotation is written on the InferenceService
+    to: RepinPending
+    effects: [none until the next pass reads it]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+
+  # --- RepinPending ------------------------------------------------------
+  - id: T-repin-apply
+    from: RepinPending
+    event: verb.repin
+    variant: matching
+    guard: the fresh render differs from the pinned digests and the annotation names now or that render's digest
+    to: Open
+    effects: [Plan replaced and PinnedAt advanced under the same RunID, the canary step counter clamped into the new ladder with the pre-step hold armed when the clamped step would raise traffic, RolloutPlanDrift False, RolloutPlanRepinned event, annotation removed before the flush]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-repin-reject
+    from: RepinPending
+    event: verb.repin
+    variant: mismatched
+    guard: the annotation names a digest other than the fresh render's
+    to: Open
+    effects: [pin unchanged, RolloutRepinRejected event, annotation removed]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-repin-noop
+    from: RepinPending
+    event: verb.repin
+    variant: unchanged
+    guard: the fresh render equals the pinned digests
+    to: Open
+    effects: [pin unchanged, annotation removed, no flush claimed]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-repin-close
+    from: RepinPending
+    event: verb.repin
+    variant: emptyPlan
+    guard: the fresh render has no groups
+    to: Closed
+    effects: [LastRun Superseded, ActiveRun dropped, annotation removed]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-repin-unrenderable
+    from: RepinPending
+    event: verb.repin
+    variant: unrenderable
+    guard: the current source does not render
+    to: Open
+    effects: [pin unchanged, RolloutRepinRejected event, annotation removed]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+
+  # --- Closed ------------------------------------------------------------
+  - id: T-closed-open
+    from: Closed
+    event: spec.revision
+    variant: new
+    guard: replicas are fresh, a grouped member diverges, and the plan composes from a live policy read
+    to: Open
+    effects: [ActiveRun pinned, the retargeted canary unit armed by BindRun when a stable revision is known]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-closed-park
+    from: Closed
+    event: spec.revision
+    variant: new
+    guard: a grouped member diverges and the plan does not compose
+    to: Parked
+    effects: [RolloutPlanReady False with the park reason]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-closed-straggle
+    from: Closed
+    event: ir.straggling
+    guard: a member's pair agrees while Instances trail it and the plan composes
+    to: Open
+    effects: [ActiveRun pinned at the agreeing revision so the plan gate admits the trailing Instances]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/observe.go
+  - id: T-closed-adopt
+    from: Closed
+    event: ctrl.runLost
+    guard: a canary unit's record is short of the ladder's end with no pin and the plan composes
+    to: Adopted
+    effects: [ActiveRun pinned without resetting the unit]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/observe.go
+  - id: T-closed-adopt-revert
+    from: Closed
+    event: canary.rolledBack
+    variant: inFlight
+    guard: a unit's revert is draining with no pin and the plan composes
+    to: Adopted
+    effects: [ActiveRun pinned at the rejected revision so the revert completes under the run]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/observe.go
+  - id: T-closed-hold
+    from: Closed
+    event: canary.rolledBack
+    variant: settled
+    guard: a unit's record names a rejected revision with its revert complete and a member's target still names it
+    to: RejectedSticky
+    effects: [no pin; the divergence toward the rejected hash is read as a hold]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/observe.go
+
+  # --- RejectedSticky ----------------------------------------------------
+  - id: T-rejected-open
+    from: RejectedSticky
+    event: spec.revision
+    variant: new
+    guard: a member's target moves to a hash that is not the rejected one, replicas are fresh, and the plan composes
+    to: Open
+    effects: [ActiveRun pinned, BindRun resets the unit and removes a rollback annotation left from the rejection]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-rejected-park
+    from: RejectedSticky
+    event: spec.revision
+    variant: new
+    guard: a member's target moves off the rejected hash and the plan does not compose
+    to: Parked
+    effects: [RolloutPlanReady False with the park reason]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+  - id: T-rejected-straggle
+    from: RejectedSticky
+    event: ir.straggling
+    guard: the trailing member is not one whose target is its unit's rejected revision, replicas are fresh, and the plan composes
+    to: Open
+    effects: [ActiveRun pinned at the agreeing revision, the rejected unit pinned at its stable revision]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/observe.go
+  - id: T-rejected-resume
+    from: RejectedSticky
+    event: canary.resumed
+    guard: the unit's rejected revision is cleared, the member still targets it, replicas are fresh, and the plan composes
+    to: Open
+    effects: [ActiveRun pinned toward the formerly rejected revision]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/observe.go

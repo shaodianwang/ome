@@ -1,0 +1,93 @@
+# One state per persisted shape of status.rollout plus the two inputs the
+# run layer keeps outside it: the RolloutPlanReady condition (Parked) and
+# the repin annotation (RepinPending). A rejected revision lives on the
+# canary unit's record and on the rolled-back run record; a service whose
+# member still targets it is RejectedSticky.
+#
+# While no run is pinned (NoRun, Parked, Closed, RejectedSticky) the update
+# gate of every grouped member is held by the plan gate (gate.deny[Plan]
+# in the instance machine), so Instances never roll on an unpinned plan.
+states:
+  - id: NoRun
+    phase: ""
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+    note: no ActiveRun, no LastRun, and no unit record holding a rejected revision; RolloutPlanReady reads True with reason NoActiveRun once a pass has settled it
+    not_applicable:
+      spec.revision[rejected]: no unit has rolled a revision back while no run was ever recorded; a standing rejection places the service in RejectedSticky
+      canary.progress: no run ever armed a unit; a record found mid-ladder with no pin is ctrl.runLost
+      canary.completed: no run ever armed a unit; a record found mid-ladder with no pin is ctrl.runLost
+      canary.failed: no run ever armed a unit; a record found parked with no pin is ctrl.runLost
+      canary.parked: no run ever armed a unit, so no rollback can have searched for a stable revision
+      canary.rolledBack: no run ever armed a unit; a revert found draining with no pin is ctrl.runLost
+      canary.resumed: no unit holds a rejected revision to resume from
+      ctrl.staleRead: no run boundary has been flushed that a cached copy could trail
+      api.flushFailed[afterClose]: no run has been pinned, so no close can be flushed
+      api.flushFailed[afterRepinConsumed]: the repin verb is consumed only while a run is pinned
+  - id: Parked
+    phase: Parked
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+    note: no ActiveRun; the last attempted open could not compose the plan and RolloutPlanReady reads False with reason PolicyNotFound, PolicyNotReady, ProgressionMismatch, PlanInvalid or ProviderUnbound; the open is re-attempted on every pass (requeue one minute, plus the policy watch) and the plan gate holds every grouped member
+    not_applicable:
+      canary.progress: the executor arms and steps a unit only under a pinned run
+      canary.completed: the executor arms and steps a unit only under a pinned run
+      canary.failed: the executor arms and steps a unit only under a pinned run, so no step can fail here
+      canary.parked: the executor arms and steps a unit only under a pinned run, so no rollback can park here
+      ctrl.staleRead[missesOpen]: no open has been flushed since the park
+      ctrl.staleRead[missesRepin]: no repin has been flushed since the park
+      api.flushFailed[afterClose]: the park writes a condition, not a run boundary
+      api.flushFailed[afterRepinConsumed]: the repin verb is consumed only while a run is pinned
+  - id: Open
+    phase: ActiveRun
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+    note: ActiveRun pinned by a fresh open; TargetRevisions carries each grouped member's target and stable revision and Plan carries the composed groups; the canary unit was armed by BindRun when its targets moved and a stable revision was known, and sits the run out otherwise; executors read the plan through the pin
+    not_applicable:
+      ctrl.runLost: the pin is present
+      api.flushFailed[afterRepinConsumed]: the repin verb is consumed in RepinPending
+  - id: Adopted
+    phase: ActiveRun
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/observe.go
+    note: ActiveRun pinned around a unit's ladder or revert that was already in flight with no pin (status loss, an upgrade, a dropped flush); the pass that opens it reports Adopted, the unit's record is bound by TargetID without a reset, a reverting unit is pinned at the rejected revision so its revert closes the run, and from the next pass on the run behaves as Open
+    not_applicable:
+      ctrl.runLost: the pin is present
+      api.flushFailed[afterRepinConsumed]: the repin verb is consumed in RepinPending
+  - id: RepinPending
+    phase: ActiveRun
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+    note: ActiveRun pinned and the repin annotation present on the InferenceService; the next pass consumes the verb before it reads freshness, retargets or closes, and the annotation is removed in every branch
+    not_applicable:
+      ctrl.runLost: the pin is present
+      ctrl.staleRead[missesClose]: no close has been flushed while the pin stands
+      ctrl.staleRead[missesRepin]: the repin has not been applied yet
+      api.flushFailed[afterOpen]: no open is in memory while the verb is consumed; the pin landed before the annotation was written
+      api.flushFailed[afterClose]: a close can only follow the verb's consumption, which is the afterRepinConsumed variant
+  - id: Closed
+    phase: LastRun
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/rolloutrun.go
+    note: no ActiveRun; LastRun records the previous run (Completed, Superseded, or a RolledBack whose hold has since cleared) with its targets and provenance; no member's observed target is a revision its unit rolled back; RolloutPlanReady reads True with reason NoActiveRun
+    not_applicable:
+      spec.revision[rejected]: no member targets a revision its unit rolled back; a standing rejection places the service in RejectedSticky
+      canary.parked: the rollback verb applies only to a unit short of its ladder's end, and such a unit with no pin is adopted (ctrl.runLost) before the executor runs
+      canary.rolledBack[settled]: a revert settles under the run that opened or adopted it; a settled rejection found with no pin is the standing condition of RejectedSticky, not an arriving event
+      canary.progress: the executor steps a ladder only under a pinned run; a record found short of its end with no pin is ctrl.runLost
+      canary.completed: the unit completed before the run closed; the done sentinel is what the close read
+      canary.failed: the executor steps a ladder only under a pinned run, so no step can fail here
+      canary.resumed: no unit holds a rejected revision to resume from
+      ctrl.staleRead[missesOpen]: no open has been flushed since the close
+      ctrl.staleRead[missesRepin]: no repin has been flushed since the close
+      api.flushFailed[afterClose]: the close has landed; a failed close flush is the boundary of the open run
+      api.flushFailed[afterRepinConsumed]: the repin verb is consumed only while a run is pinned
+  - id: RejectedSticky
+    phase: LastRun
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/observe.go
+    note: no ActiveRun; a canary unit's record holds a rejected revision with its revert complete, and a member's observed target still names that revision, so the divergence is read as a hold rather than a pending roll; the member set of the rejection comes from the rolled-back run record when it pinned that revision, else from the observed targets
+    not_applicable:
+      canary.progress: the unit is parked on its rejection and steps only after a re-arm, which is Open's row
+      canary.completed: the unit is parked on its rejection and steps only after a re-arm, which is Open's row
+      canary.failed: the unit is parked on its rejection and steps only after a re-arm, which is Open's row
+      canary.parked: the rejection already settled with a stable revision to return to
+      canary.rolledBack: the rejection is the standing condition of this state, not an arriving event
+      ctrl.runLost: a settled rejection is terminal, so no ladder or revert is in flight to adopt
+      ctrl.staleRead[missesOpen]: no open has been flushed since the rolled-back close
+      ctrl.staleRead[missesRepin]: no repin has been flushed since the rolled-back close
+      api.flushFailed[afterClose]: the close has landed; a failed close flush is the boundary of the open run
+      api.flushFailed[afterRepinConsumed]: the repin verb is consumed only while a run is pinned

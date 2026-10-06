@@ -1,0 +1,407 @@
+# Cells for Closed and RejectedSticky: no run is pinned and a record of the
+# last one stands. Closed re-opens on any divergence; RejectedSticky reads a
+# member still targeting the revision its canary unit rolled back as a hold
+# and re-opens only on a different target, a cleared hold, or a straggler
+# outside the rejection (observe.go stickyRejectHashes, divergedMember,
+# canaryMidFlight; rolloutrun.go reconcile, openRun).
+cells:
+  # --- Closed ------------------------------------------------------------
+  - state: Closed
+    event: spec.revision
+    variants: [new]
+    windows: [before]
+    outcome: transition
+    to: Open
+    guard: "every replica is fresh, a grouped member's target is off its current revision, and the plan composes from a live policy read"
+    note: "a fresh run opens with a new RunID; the stable revision is the replica's current one where it is off the pin, else the member sits the run out pinned at its own revision, and a record naming an earlier revision is never promoted to its rollback target. A plan that does not compose parks (T-closed-park)"
+    invariants: [park.fails.closed, decision.reads.live.replicas]
+    placement: kind
+    coverage: {perm: [], unit: [TestOpenPinsSettledUnitAtItsOwnRevisionOverStaleRolledOutRecord, TestOpenPinsSettledUnitAtItsOwnRevisionOverStaleCanaryRecord, TestSettledUnitHasNoWorkInAnotherGroupsRun], kind: [rolloutpolicy_run_kind_test.go]}
+    status: decided
+  - state: Closed
+    event: spec.revision
+    variants: [new]
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the pass composed its targets from one live read; a target that moves after that read is the next pass's retarget"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: spec.revision
+    variants: [revert]
+    outcome: ignore
+    note: "a target returning to the running revision with nothing trailing leaves no divergence; Instances that do trail read as ir.straggling and open a run"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: spec.planEdit
+    outcome: ignore
+    note: "nothing is pinned; the resolution view is refreshed and the next open composes from the live spec"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: policy.changed
+    outcome: ignore
+    note: "the edited body is picked up by the next run, which composes it from a live read; between runs the resolution view reports its digest"
+    placement: kind
+    coverage: {perm: [], unit: [TestPassesThatPinNothingReadNoLivePolicy], kind: [rolloutpolicy_run_kind_test.go]}
+    status: decided
+  - state: Closed
+    event: policy.unresolved
+    outcome: ignore
+    note: "with no diverged member nothing is composed, so nothing parks until an open is attempted"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: policy.resolved
+    outcome: ignore
+    note: "nothing was waiting on the reference; the resolution view picks up its digest"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: ir.stale
+    outcome: defer
+    note: "no open decision is made on a replica whose status trails its spec; requeue in ten seconds"
+    invariants: [decision.reads.live.replicas]
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: ir.missing
+    outcome: ignore
+    note: "a member with no replica reads as an empty pair, which never diverges"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: ir.converged
+    outcome: ignore
+    note: "no divergence; RolloutPlanReady stays True with reason NoActiveRun"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: ir.straggling
+    windows: [before]
+    outcome: transition
+    to: Open
+    guard: "a member's pair agrees while Instances still trail it and the plan composes"
+    note: "a revert that leaves Instances on the withdrawn revision would otherwise strand them behind the plan gate forever, so the agreeing revision opens a run"
+    placement: unit
+    coverage: {perm: [], unit: [TestStragglersOpenARun], kind: []}
+    status: decided
+  - state: Closed
+    event: ir.straggling
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the stragglers were read once; the pin carries the revision they roll to"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: canary.rolledBack
+    variants: [inFlight]
+    windows: [before]
+    outcome: transition
+    to: Adopted
+    guard: "a unit's revert is still draining with no pin and the plan composes"
+    note: "the rejected target opens no run of its own, and the plan gate admits the roll back to stable only under a pinned run, so the revert is adopted and its completion closes the adopted run"
+    placement: unit
+    coverage: {perm: [], unit: [TestRunLostWhileRollingBackIsAdopted], kind: []}
+    status: decided
+  - state: Closed
+    event: canary.rolledBack
+    variants: [inFlight]
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the adoption pinned once; the draining revert is what Adopted reads"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: coord.staged
+    outcome: ignore
+    note: "the run layer reads the replica pairs, not the group phase"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: coord.settled
+    outcome: ignore
+    note: "the run layer reads the replica pairs, not the group phase"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: verb.repin
+    outcome: ignore
+    note: "the verb is read only while a run is pinned; the annotation lingers until a run opens and is then consumed by its first pass"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: verb.rollback
+    outcome: ignore
+    note: "the rollback verb is the canary executor's and applies only to a unit short of its ladder's end; a finished unit refuses it and the run layer never reads it"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: ctrl.runLost
+    windows: [before]
+    outcome: transition
+    to: Adopted
+    guard: "a canary unit's record is short of the ladder's end with no pin, replicas are fresh, and the plan composes"
+    note: "the run was lost while the unit was mid-ladder (the record outlived the pin); it is pinned in place without a reset. A unit whose record sits at the done sentinel has nothing in flight and opens nothing"
+    placement: unit
+    coverage: {perm: [], unit: [TestStatusLossRecoveryReportsAdoption, TestFinishedRefCanaryOpensNoRun], kind: []}
+    status: decided
+  - state: Closed
+    event: ctrl.runLost
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the adoption pinned once; a second observation of the same record finds the pin"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: ctrl.staleRead
+    variants: [missesClose]
+    outcome: ignore
+    note: "a cached copy that still shows the closed run pinned re-judges it against the live replicas and closes it again with a fresh ClosedAt, which the flush keeps as the newer clock; the recorded outcome is the same unless the replicas moved on, in which case the retarget that follows is the correct answer anyway"
+    invariants: [pin.newer.wins]
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: ctrl.resync
+    outcome: ignore
+    note: "settleNoRun re-derives the same conditions; nothing is written when nothing changed"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: api.flushFailed
+    variants: [afterOpen]
+    windows: [before, after]
+    outcome: n/a
+    reason: a boundary flush exists only while an open is in memory and not yet persisted
+    status: current
+  - state: Closed
+    event: api.flushFailed
+    variants: [afterOpen]
+    windows: [boundary]
+    outcome: defer
+    note: "the pass returns the error with nothing persisted; the next pass re-opens from the persisted record and the live replicas under a new RunID"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Closed
+    event: api.conflict
+    outcome: defer
+    note: "the flush is rebased onto the live object; the record with the newer clock is kept"
+    invariants: [pin.newer.wins]
+    placement: unit
+    coverage: {perm: [], unit: [TestPreserveNewerRunKeepsFresherPin], kind: []}
+    status: decided
+
+  # --- RejectedSticky ----------------------------------------------------
+  - state: RejectedSticky
+    event: spec.revision
+    variants: [new]
+    windows: [before]
+    outcome: transition
+    to: Open
+    guard: "a member's target moves to a hash that is not its unit's rejected one, every replica is fresh, and the plan composes"
+    note: "a different target re-arms: the run opens for the whole service, the retargeted unit is reset by BindRun, which also removes a rollback annotation left from the rejection, and a unit whose own target still names its rejected revision is pinned at its stable revision so its standing failure cannot close the new run. A plan that does not compose parks (T-rejected-park)"
+    invariants: [rejected.target.is.a.hold, one.active.run]
+    placement: unit
+    coverage: {perm: [], unit: [TestOpenDoesNotRearmAnotherGroupsRejectedRevision, TestStickyRejectUsesPerComponentTargets, TestRetargetDuringRollbackUsesActiveComponentTargets], kind: []}
+    status: decided
+  - state: RejectedSticky
+    event: spec.revision
+    variants: [new]
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the pass composed its targets from one live read; a target that moves again is the next pass's retarget"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: spec.revision
+    variants: [revert]
+    outcome: ignore
+    note: "the rejected unit's target returning to its stable revision leaves nothing trailing after a completed revert, so no divergence remains and the hold simply ends; the service then reads Closed"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: spec.revision
+    variants: [rejected]
+    outcome: ignore
+    note: "the rejected revision is a hold, not a pending roll: it keeps being the replica's spec target throughout the hold, so the divergence and straggler checks both skip it and no run reopens toward it; the hold is scoped to the group that rolled back"
+    invariants: [rejected.target.is.a.hold]
+    placement: unit
+    coverage: {perm: [], unit: [TestStickyRejectSuppressesReopen, TestStickyRejectIsScopedToTheGroupThatRolledBack], kind: []}
+    status: decided
+  - state: RejectedSticky
+    event: spec.planEdit
+    outcome: ignore
+    note: "nothing is pinned; the resolution view is refreshed and the next open composes from the live spec"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: policy.changed
+    outcome: ignore
+    note: "the edited body is picked up by the next run; the hold is unaffected"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: policy.unresolved
+    outcome: ignore
+    note: "with the only divergence read as a hold nothing is composed, so nothing parks until an open is attempted"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: policy.resolved
+    outcome: ignore
+    note: "nothing was waiting on the reference; the resolution view picks up its digest"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: ir.stale
+    outcome: defer
+    note: "no open decision is made on a replica whose status trails its spec; requeue in ten seconds"
+    invariants: [decision.reads.live.replicas]
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: ir.missing
+    outcome: ignore
+    note: "a member with no replica reads as an empty pair; the hold on the rejected unit stands on its record"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: ir.converged
+    outcome: ignore
+    note: "a member converging elsewhere changes nothing about the hold; the rejected unit's replica reads current equal to its stable revision with the spec target still on the rejected hash"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: ir.straggling
+    windows: [before]
+    outcome: transition
+    to: Open
+    guard: "the trailing member is not one whose target is its unit's rejected revision, replicas are fresh, and the plan composes"
+    note: "the rejected unit's own stragglers are skipped before the straggler clause and never reopen a run; a member outside the rejection that trails opens one as in Closed, with the rejected unit pinned at its stable revision"
+    invariants: [rejected.target.is.a.hold]
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: ir.straggling
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the stragglers were read once; the pin carries the revision they roll to"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: canary.resumed
+    windows: [before]
+    outcome: transition
+    to: Open
+    guard: "the unit's rejected revision is cleared, the member still targets it, replicas are fresh, and the plan composes"
+    note: "with the hold gone the still-diverged target is pending work again and a run opens toward it"
+    invariants: [rejected.target.is.a.hold]
+    placement: unit
+    coverage: {perm: [], unit: [TestClearedRejectReopensRunForResume], kind: []}
+    status: decided
+  - state: RejectedSticky
+    event: canary.resumed
+    windows: [boundary, after]
+    outcome: ignore
+    note: "the open consumed the cleared hold"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: coord.staged
+    outcome: ignore
+    note: "the run layer reads the replica pairs, not the group phase"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: coord.settled
+    outcome: ignore
+    note: "the run layer reads the replica pairs, not the group phase"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: verb.repin
+    outcome: ignore
+    note: "the verb is read only while a run is pinned; the annotation lingers until a run opens and is then consumed by its first pass"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: verb.rollback
+    outcome: ignore
+    note: "the unit is already rolled back; the executor ignores a rollback on a unit carrying a rejection and the run layer never reads the verb"
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: ctrl.staleRead
+    variants: [missesClose]
+    outcome: ignore
+    note: "a cached copy that still shows the rolled-back run pinned re-judges it, closes it RolledBack again with a fresh ClosedAt, and the flush keeps the newer clock; the hold reads the same"
+    invariants: [pin.newer.wins]
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: ctrl.resync
+    outcome: ignore
+    note: "the hold is re-derived from the record and the live targets; nothing is written when nothing changed"
+    placement: unit
+    coverage: {perm: [], unit: [TestSettledRollbackWithoutRunOpensNothing], kind: []}
+    status: decided
+  - state: RejectedSticky
+    event: api.flushFailed
+    variants: [afterOpen]
+    windows: [before, after]
+    outcome: n/a
+    reason: a boundary flush exists only while an open is in memory and not yet persisted
+    status: current
+  - state: RejectedSticky
+    event: api.flushFailed
+    variants: [afterOpen]
+    windows: [boundary]
+    outcome: defer
+    note: "the pass returns the error with nothing persisted; BindRun's removal of the rollback annotation ran before the flush and survives it, which is harmless because the next open re-arms from the record alone"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: RejectedSticky
+    event: api.conflict
+    outcome: defer
+    note: "the flush is rebased onto the live object; the record with the newer clock is kept"
+    invariants: [pin.newer.wins]
+    placement: unit
+    coverage: {perm: [], unit: [TestPreserveNewerRunKeepsFresherPin], kind: []}
+    status: decided

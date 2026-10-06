@@ -1,0 +1,678 @@
+# Each guard states what ComputeTransition (state.go) computes from the
+# member observations before the status writer persists the new phase, or
+# what the reconciler does around it (the first observation, the prune of a
+# removed group). A member fact that leaves one state for several
+# destinations carries one edge per destination; the cell names the one its
+# guard picks and its note the others.
+transitions:
+  # --- Unobserved: the first observation --------------------------------
+  - id: T-unobs-idle
+    from: Unobserved
+    event: ctrl.resync
+    guard: the first pass that resolves the group finds no member rolling, no Failed row and no pause
+    to: Idle
+    effects: [group entry written with lastTransitionTime now, ratio anchor snapshotted once every member reports a replica count, RolloutCoordinationReady stamped]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+  - id: T-unobs-rolling
+    from: Unobserved
+    event: ctrl.resync
+    guard: the first pass finds a member rolling with no new-revision pod yet (Waiting, Shifting or ScalingDown when it is further along)
+    to: Surging
+    effects: [group entry written at the computed phase, no transition event or metric since there is no prior phase]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+  - id: T-unobs-failed
+    from: Unobserved
+    event: ctrl.resync
+    guard: the first pass finds an Instance row reading Failed and no pause
+    to: Failed
+    effects: [group entry written Failed, failure metric recorded]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+  - id: T-unobs-paused
+    from: Unobserved
+    event: ctrl.resync
+    guard: the first pass finds the pause annotation set
+    to: Paused
+    effects: [group entry written Paused]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+  - id: T-unobs-staged
+    from: Unobserved
+    event: ctrl.resync
+    guard: the first pass finds every rolling member at its staged shape under a non-zero partition
+    to: Staged
+    effects: [group entry written Staged]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+
+  # --- Idle --------------------------------------------------------------
+  - id: T-idle-surging
+    from: Idle
+    event: member.targetChanged
+    guard: a member's target differs from its current revision and it has no new-revision pod yet
+    to: Surging
+    effects: [phase Surging with lastTransitionTime now, CoordinationGroupSurging event; Independent reads Shifting directly; Sequential names the first rolling member in Order on the composite phase]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-idle-waiting
+    from: Idle
+    event: member.surgePodCreated
+    guard: the bump and its first new-revision pod are observed in one pass and not every new pod is Ready
+    to: Waiting
+    effects: [phase Waiting with lastTransitionTime now]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-idle-shifting
+    from: Idle
+    event: member.readyOnTarget
+    guard: the bump and its Ready new-revision pods are observed in one pass while old pods remain
+    to: Shifting
+    effects: [phase Shifting with lastTransitionTime now, CoordinationGroupShifting event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-idle-staged
+    from: Idle
+    event: member.staged
+    guard: a roll under a non-zero partition is observed already at its staged shape
+    to: Staged
+    effects: [phase Staged with lastTransitionTime now]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-idle-failed
+    from: Idle
+    event: member.failed
+    guard: an Instance row of a member reads Failed
+    to: Failed
+    effects: [phase Failed with the failed indices on the message, CoordinationGroupFailed event, RolloutCoordinationReady False Failed]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-idle-paused
+    from: Idle
+    event: spec.pause
+    guard: the pause annotation is set
+    to: Paused
+    effects: [phase Paused before any member fact is read]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-idle-removed
+    from: Idle
+    event: spec.groupEdited
+    variant: groupRemoved
+    guard: the group is absent from the effective plan
+    to: Unobserved
+    effects: [entry pruned; with no coordination-style group left the status block and RolloutCoordinationReady are cleared]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+
+  # --- SeqAwaiting -------------------------------------------------------
+  - id: T-await-bump
+    from: SeqAwaiting
+    event: member.targetChanged
+    variant: first
+    guard: the next member in Order records a target off its current revision and no soak is running
+    to: Surging
+    effects: [composite phase names the next member, lastTransitionTime now]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-await-next
+    from: SeqAwaiting
+    event: seq.nextTurn
+    guard: the previous member is done for handoff, a later member rolls, and the group has no soak
+    to: Surging
+    effects: [composite phase names the next member, lastTransitionTime now]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-await-soak
+    from: SeqAwaiting
+    event: timer.soak
+    guard: the next member rolls and now minus the group's lastTransitionTime exceeds the soak
+    to: Surging
+    effects: [composite phase names the next member, lastTransitionTime now]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-await-waiting
+    from: SeqAwaiting
+    event: member.surgePodCreated
+    guard: the next member's bump and its first new pod are observed in one pass
+    to: Waiting
+    effects: [composite phase names the next member Waiting]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-await-shifting
+    from: SeqAwaiting
+    event: member.readyOnTarget
+    guard: the next member's bump and its Ready new pods are observed in one pass while old pods remain
+    to: Shifting
+    effects: [composite phase names the next member Shifting]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-await-complete
+    from: SeqAwaiting
+    event: member.converged
+    guard: every member in Order is done for handoff
+    to: Idle
+    effects: [composite phase Idle, CoordinationGroupCompleted event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-await-failed
+    from: SeqAwaiting
+    event: member.failed
+    guard: an Instance row of a member reads Failed
+    to: Failed
+    effects: [composite phase Sequential.Failed naming the failed member]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-await-paused
+    from: SeqAwaiting
+    event: spec.pause
+    guard: the pause annotation is set
+    to: Paused
+    effects: [phase Paused]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-await-removed
+    from: SeqAwaiting
+    event: spec.groupEdited
+    variant: groupRemoved
+    guard: the group is absent from the effective plan
+    to: Unobserved
+    effects: [entry pruned]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+
+  # --- Surging -----------------------------------------------------------
+  - id: T-surging-waiting
+    from: Surging
+    event: member.surgePodCreated
+    guard: every rolling member now has a new-revision pod and not all of them are Ready
+    to: Waiting
+    effects: [phase Waiting with lastTransitionTime now]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-surging-shifting
+    from: Surging
+    event: member.readyOnTarget
+    guard: every new-revision pod is Ready and old-revision pods remain
+    to: Shifting
+    effects: [phase Shifting, CoordinationGroupShifting event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-surging-scalingdown
+    from: Surging
+    event: member.readyOnTarget
+    guard: every new-revision pod is Ready and no old-revision pod remains
+    to: ScalingDown
+    effects: [phase ScalingDown]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-surging-staged
+    from: Surging
+    event: member.staged
+    guard: every rolling member is at its staged shape and at least one holds old Instances under a non-zero partition
+    to: Staged
+    effects: [phase Staged]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-surging-idle
+    from: Surging
+    event: member.converged
+    guard: no member's target differs from its current revision any more
+    to: Idle
+    effects: [phase Idle, CoordinationGroupCompleted event, RolloutCoordinationReady True]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-surging-seq-await
+    from: Surging
+    event: member.converged
+    guard: Sequential, the active member is done for handoff and a later member in Order has not been bumped or a soak is running
+    to: SeqAwaiting
+    effects: [phase Idle with composite Sequential.AwaitingNextComponent, SequentialAwaitingNext event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-surging-revert
+    from: Surging
+    event: member.rollback
+    guard: the member's target returned to its current revision
+    to: Idle
+    effects: [phase Idle at once; the abandoned revision's pods are the replica's to drain]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-surging-gone
+    from: Surging
+    event: ir.missing
+    guard: the only rolling member's replica is gone, so it reads a zero observation
+    to: Idle
+    effects: [phase Idle]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+  - id: T-surging-failed
+    from: Surging
+    event: member.failed
+    guard: an Instance row of a member reads Failed
+    to: Failed
+    effects: [phase Failed, CoordinationGroupFailed event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-surging-paused
+    from: Surging
+    event: spec.pause
+    guard: the pause annotation is set
+    to: Paused
+    effects: [phase Paused]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-surging-removed
+    from: Surging
+    event: spec.groupEdited
+    variant: groupRemoved
+    guard: the group is absent from the effective plan
+    to: Unobserved
+    effects: [entry pruned]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+
+  # --- Waiting -----------------------------------------------------------
+  - id: T-waiting-shifting
+    from: Waiting
+    event: member.readyOnTarget
+    guard: every new-revision pod is Ready and old-revision pods remain
+    to: Shifting
+    effects: [phase Shifting, CoordinationGroupShifting event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-waiting-scalingdown
+    from: Waiting
+    event: member.readyOnTarget
+    guard: every new-revision pod is Ready and no old-revision pod remains
+    to: ScalingDown
+    effects: [phase ScalingDown]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-waiting-surging
+    from: Waiting
+    event: member.capacityLost
+    variant: newRevision
+    guard: a rolling member's new-revision pods are all gone
+    to: Surging
+    effects: [phase Surging]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-waiting-rebump
+    from: Waiting
+    event: member.targetChanged
+    guard: a member's target moves to a revision with no pod yet, or a member outside Sequential joins the roll
+    to: Surging
+    effects: [phase Surging]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-waiting-staged
+    from: Waiting
+    event: member.staged
+    guard: every rolling member is at its staged shape and at least one holds old Instances under a non-zero partition
+    to: Staged
+    effects: [phase Staged]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-waiting-idle
+    from: Waiting
+    event: member.converged
+    guard: no member's target differs from its current revision any more
+    to: Idle
+    effects: [phase Idle, CoordinationGroupCompleted event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-waiting-seq-await
+    from: Waiting
+    event: member.converged
+    guard: Sequential, the active member is done for handoff and the next is not bumped or a soak is running
+    to: SeqAwaiting
+    effects: [composite Sequential.AwaitingNextComponent]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-waiting-revert
+    from: Waiting
+    event: member.rollback
+    guard: the member's target returned to its current revision
+    to: Idle
+    effects: [phase Idle at once]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-waiting-gone
+    from: Waiting
+    event: ir.missing
+    guard: the only rolling member's replica is gone
+    to: Idle
+    effects: [phase Idle]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+  - id: T-waiting-failed
+    from: Waiting
+    event: member.failed
+    guard: an Instance row of a member reads Failed
+    to: Failed
+    effects: [phase Failed, CoordinationGroupFailed event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-waiting-paused
+    from: Waiting
+    event: spec.pause
+    guard: the pause annotation is set
+    to: Paused
+    effects: [phase Paused]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-waiting-removed
+    from: Waiting
+    event: spec.groupEdited
+    variant: groupRemoved
+    guard: the group is absent from the effective plan
+    to: Unobserved
+    effects: [entry pruned]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+
+  # --- Shifting ----------------------------------------------------------
+  - id: T-shifting-scalingdown
+    from: Shifting
+    event: member.oldPodsGone
+    guard: no member keeps an old-revision pod
+    to: ScalingDown
+    effects: [phase ScalingDown]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-shifting-idle
+    from: Shifting
+    event: member.converged
+    guard: no member's target differs from its current revision any more
+    to: Idle
+    effects: [phase Idle, CoordinationGroupCompleted event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-shifting-seq-await
+    from: Shifting
+    event: member.converged
+    guard: Sequential, the active member is done for handoff and the next is not bumped or a soak is running
+    to: SeqAwaiting
+    effects: [composite Sequential.AwaitingNextComponent, SequentialAwaitingNext event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-shifting-seq-next
+    from: Shifting
+    event: seq.nextTurn
+    guard: Sequential, the active member is done for handoff, a later member rolls and no soak holds
+    to: Surging
+    effects: [composite phase names the next member]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-shifting-waiting
+    from: Shifting
+    event: member.capacityLost
+    variant: newRevision
+    guard: a new-revision pod leaves readiness while others remain
+    to: Waiting
+    effects: [phase Waiting]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-shifting-waiting-surge
+    from: Shifting
+    event: member.surgePodCreated
+    guard: a further new-revision pod exists and is not Ready yet
+    to: Waiting
+    effects: [phase Waiting]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-shifting-rebump
+    from: Shifting
+    event: member.targetChanged
+    guard: a member's target moves to a revision with no pod yet, or a member outside Sequential joins the roll
+    to: Surging
+    effects: [phase Surging]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-shifting-staged
+    from: Shifting
+    event: member.staged
+    guard: every rolling member is at its staged shape and at least one holds old Instances under a non-zero partition
+    to: Staged
+    effects: [phase Staged]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-shifting-revert
+    from: Shifting
+    event: member.rollback
+    guard: the member's target returned to its current revision
+    to: Idle
+    effects: [phase Idle at once]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-shifting-gone
+    from: Shifting
+    event: ir.missing
+    guard: the only rolling member's replica is gone
+    to: Idle
+    effects: [phase Idle]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+  - id: T-shifting-failed
+    from: Shifting
+    event: member.failed
+    guard: an Instance row of a member reads Failed
+    to: Failed
+    effects: [phase Failed, CoordinationGroupFailed event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-shifting-paused
+    from: Shifting
+    event: spec.pause
+    guard: the pause annotation is set
+    to: Paused
+    effects: [phase Paused]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-shifting-removed
+    from: Shifting
+    event: spec.groupEdited
+    variant: groupRemoved
+    guard: the group is absent from the effective plan
+    to: Unobserved
+    effects: [entry pruned]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+
+  # --- ScalingDown -------------------------------------------------------
+  - id: T-sd-idle
+    from: ScalingDown
+    event: member.converged
+    guard: no member's target differs from its current revision any more
+    to: Idle
+    effects: [phase Idle, CoordinationGroupCompleted event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-sd-seq-await
+    from: ScalingDown
+    event: member.converged
+    guard: Sequential, the active member is done for handoff and the next is not bumped or a soak is running
+    to: SeqAwaiting
+    effects: [composite Sequential.AwaitingNextComponent, SequentialAwaitingNext event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-sd-seq-next
+    from: ScalingDown
+    event: seq.nextTurn
+    guard: Sequential, the active member is done for handoff, a later member rolls and no soak holds
+    to: Surging
+    effects: [composite phase names the next member]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-sd-waiting
+    from: ScalingDown
+    event: member.capacityLost
+    variant: newRevision
+    guard: a new-revision pod leaves readiness while others remain
+    to: Waiting
+    effects: [phase Waiting]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-sd-waiting-surge
+    from: ScalingDown
+    event: member.surgePodCreated
+    guard: a further new-revision pod exists and is not Ready yet
+    to: Waiting
+    effects: [phase Waiting]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-sd-rebump
+    from: ScalingDown
+    event: member.targetChanged
+    guard: a member's target moves to a revision with no pod yet, or a member outside Sequential joins the roll
+    to: Surging
+    effects: [phase Surging]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-sd-staged
+    from: ScalingDown
+    event: member.staged
+    guard: every rolling member is at its staged shape and at least one holds old Instances under a non-zero partition
+    to: Staged
+    effects: [phase Staged]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-sd-revert
+    from: ScalingDown
+    event: member.rollback
+    guard: the member's target returned to its current revision
+    to: Idle
+    effects: [phase Idle at once]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-sd-gone
+    from: ScalingDown
+    event: ir.missing
+    guard: the only rolling member's replica is gone
+    to: Idle
+    effects: [phase Idle]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+  - id: T-sd-failed
+    from: ScalingDown
+    event: member.failed
+    guard: an Instance row of a member reads Failed
+    to: Failed
+    effects: [phase Failed, CoordinationGroupFailed event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-sd-paused
+    from: ScalingDown
+    event: spec.pause
+    guard: the pause annotation is set
+    to: Paused
+    effects: [phase Paused]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-sd-removed
+    from: ScalingDown
+    event: spec.groupEdited
+    variant: groupRemoved
+    guard: the group is absent from the effective plan
+    to: Unobserved
+    effects: [entry pruned]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+
+  # --- Staged ------------------------------------------------------------
+  - id: T-staged-rebump
+    from: Staged
+    event: member.targetChanged
+    guard: a member's target moves to a revision with no pod yet
+    to: Surging
+    effects: [phase Surging; the staged shape is judged against the new target]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-staged-waiting
+    from: Staged
+    event: member.surgePodCreated
+    guard: a new-revision pod beyond the staged shape exists and is not Ready yet
+    to: Waiting
+    effects: [phase Waiting]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-staged-waiting-loss
+    from: Staged
+    event: member.capacityLost
+    variant: newRevision
+    guard: a new-revision pod leaves readiness, so the member is no longer at its staged shape
+    to: Waiting
+    effects: [phase Waiting]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-staged-shifting-loss
+    from: Staged
+    event: member.capacityLost
+    variant: oldRevision
+    guard: a held old-revision Instance leaves readiness, so the member is no longer at its staged shape while its old pods remain
+    to: Shifting
+    effects: [phase Shifting]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-staged-scalingdown
+    from: Staged
+    event: member.oldPodsGone
+    guard: the held old-revision pods are gone before the replica rebuilt them
+    to: ScalingDown
+    effects: [phase ScalingDown until the replica restores the held Instances]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-staged-idle
+    from: Staged
+    event: member.converged
+    guard: the partition was cleared and every Instance reached the target, so the replica promoted its current revision
+    to: Idle
+    effects: [phase Idle, CoordinationGroupCompleted event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-staged-revert
+    from: Staged
+    event: member.rollback
+    guard: the member's target returned to its current revision
+    to: Idle
+    effects: [phase Idle at once]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-staged-shifting-scale
+    from: Staged
+    event: spec.replicas
+    guard: the desired count changed, so the staged shape no longer holds while old pods remain
+    to: Shifting
+    effects: [phase Shifting until the new shape is reached]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-staged-shifting-partition
+    from: Staged
+    event: spec.partition
+    guard: the partition moved or was cleared, so the staged shape no longer holds while old pods remain
+    to: Shifting
+    effects: [phase Shifting; a cleared partition rolls the held Instances on to completion]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-staged-gone
+    from: Staged
+    event: ir.missing
+    guard: the only rolling member's replica is gone
+    to: Idle
+    effects: [phase Idle]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+  - id: T-staged-failed
+    from: Staged
+    event: member.failed
+    guard: an Instance row of a member reads Failed
+    to: Failed
+    effects: [phase Failed, CoordinationGroupFailed event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-staged-paused
+    from: Staged
+    event: spec.pause
+    guard: the pause annotation is set
+    to: Paused
+    effects: [phase Paused]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-staged-removed
+    from: Staged
+    event: spec.groupEdited
+    variant: groupRemoved
+    guard: the group is absent from the effective plan
+    to: Unobserved
+    effects: [entry pruned]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+
+  # --- Failed ------------------------------------------------------------
+  - id: T-failed-recover-surging
+    from: Failed
+    event: member.recovered
+    guard: no Instance row reads Failed and a member rolls with no new-revision pod yet
+    to: Surging
+    effects: [phase recomputed from the members (Waiting, Shifting or ScalingDown when further along), nothing latched]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-failed-recover-idle
+    from: Failed
+    event: member.recovered
+    guard: no Instance row reads Failed and no member rolls
+    to: Idle
+    effects: [phase Idle, CoordinationGroupCompleted event, RolloutCoordinationReady True]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-failed-gone
+    from: Failed
+    event: ir.missing
+    guard: the member carrying the Failed row has no replica any more
+    to: Idle
+    effects: [phase recomputed over the remaining members]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+  - id: T-failed-paused
+    from: Failed
+    event: spec.pause
+    guard: the pause annotation is set; the pause outranks the failure
+    to: Paused
+    effects: [phase Paused]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-failed-removed
+    from: Failed
+    event: spec.groupEdited
+    variant: groupRemoved
+    guard: the group is absent from the effective plan
+    to: Unobserved
+    effects: [entry pruned]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
+
+  # --- Paused ------------------------------------------------------------
+  - id: T-paused-unpause-idle
+    from: Paused
+    event: spec.unpause
+    guard: the annotation is gone and no member rolls or reads Failed
+    to: Idle
+    effects: [phase Idle with lastTransitionTime now]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-paused-unpause-surging
+    from: Paused
+    event: spec.unpause
+    guard: the annotation is gone and a member rolls (Waiting, Shifting or ScalingDown when further along)
+    to: Surging
+    effects: [phase recomputed from the members with lastTransitionTime now]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-paused-unpause-failed
+    from: Paused
+    event: spec.unpause
+    guard: the annotation is gone and an Instance row reads Failed
+    to: Failed
+    effects: [phase Failed, CoordinationGroupFailed event]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/state.go
+  - id: T-paused-removed
+    from: Paused
+    event: spec.groupEdited
+    variant: groupRemoved
+    guard: the group is absent from the effective plan
+    to: Unobserved
+    effects: [entry pruned]
+    decided_in: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/reconciler.go
