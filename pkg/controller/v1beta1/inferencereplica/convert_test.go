@@ -2171,6 +2171,50 @@ func TestPromoteCurrentRevision_FullConvergePromotes(t *testing.T) {
 		"full convergence must persist the promoted CurrentRevision")
 }
 
+// TestPromoteCurrentRevision_RollbackOverGangSurgeWithdrawsUntilTheReplacementIsGone
+// pins a rollback landing over a gang surge: every running revision names
+// the update revision, yet CurrentRevision is withdrawn while the source
+// or the marker is pinned to the withdrawn one, and lands once both are gone.
+func TestPromoteCurrentRevision_RollbackOverGangSurgeWithdrawsUntilTheReplacementIsGone(t *testing.T) {
+	g := gomega.NewWithT(t)
+	surgeIdx := int32(2)
+	ir := baselineIR("llama-engine", "prod", 2)
+	ir.Status.CurrentRevision = promotePriorRev
+	ir.Status.UpdateRevision = promotePriorRev
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating, RunningRevision: promotePriorRev, Operation: &v1beta1.InstanceOperation{
+			ID: "gangsurge-0", Type: v1beta1.InstanceOperationUpdate, Step: workloadtypes.UpdateStepSurge,
+			SurgeIndex: &surgeIdx, TargetRevision: promoteTargetRev}},
+		{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: promotePriorRev},
+		{Index: surgeIdx, Phase: v1beta1.OMENativeInstanceCreating, TargetRevision: promoteTargetRev, Operation: &v1beta1.InstanceOperation{
+			ID: "gangsurgetarget-2", Type: v1beta1.InstanceOperationUpdate, Step: workloadtypes.UpdateStepGangSurgeTarget,
+			TargetRevision: promoteTargetRev}},
+	}
+
+	r, _ := newReconciler(t, ir)
+	promote := buildPromoteCurrentRevision(r.statusWriter(), r.Client, ir)
+	g.Expect(promote(context.Background(), promotePriorRev)).To(gomega.Succeed())
+	g.Expect(ir.Status.CurrentRevision).To(gomega.BeEmpty(),
+		"a rollback over a pinned gang surge must withdraw the in-memory CurrentRevision")
+	g.Expect(getFreshIR(t, r, ir).Status.CurrentRevision).To(gomega.BeEmpty(),
+		"a rollback over a pinned gang surge must persist a withdrawn CurrentRevision")
+
+	// The abandon resets the source and removes the marker; the withdrawn
+	// revision lands on the next pass.
+	settled := baselineIR("llama-engine", "prod", 2)
+	settled.Status.CurrentRevision = ""
+	settled.Status.UpdateRevision = promotePriorRev
+	settled.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: promotePriorRev},
+		{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: promotePriorRev},
+	}
+	r, _ = newReconciler(t, settled)
+	promote = buildPromoteCurrentRevision(r.statusWriter(), r.Client, settled)
+	g.Expect(promote(context.Background(), promotePriorRev)).To(gomega.Succeed())
+	g.Expect(getFreshIR(t, r, settled).Status.CurrentRevision).To(gomega.Equal(promotePriorRev),
+		"the starting revision lands once no row is pinned to the withdrawn one")
+}
+
 // TestPromoteCurrentRevision_HeldRevisionDoesNotLandByAttrition: every
 // Instance is Ready on the pushed revision whose retry ladder holds, each
 // row remembering a crash of its promoted set, the pause between crashes

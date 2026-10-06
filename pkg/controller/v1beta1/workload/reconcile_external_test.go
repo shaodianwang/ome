@@ -10529,6 +10529,100 @@ func TestRollbackOverSurge_ResumedManagerClosesTheAbandonedSurge(t *testing.T) {
 	}
 }
 
+// TestRollbackOverGangSurge_ResumedManagerKeepsTheRolloutOpenUntilTheReplacementIsGone
+// pins a rollback landing over a gang surge: every row runs the starting
+// revision, yet the revision rollup stays withdrawn and the pinned source
+// is not counted updated until the replacement gang is gone and the source
+// is reset. Each pass starts with a fresh expectations cache, as a
+// restarted manager does, and recomputes the rollup from status alone.
+//
+// Cells: instance/Update/Surge/spec.revision/before, instance/Update/GangSurgeTarget/spec.revision/before, instance/Update/Surge/ctrl.crash/boundary@T-surge-abandon-superseded, instance/Update/GangSurgeTarget/ctrl.crash/before
+func TestRollbackOverGangSurge_ResumedManagerKeepsTheRolloutOpenUntilTheReplacementIsGone(t *testing.T) {
+	const replicas = int32(2)
+	h := newRecoveryHarness(t, true)
+	h.replicas = replicas
+	// Deletes linger as Terminating until their grace elapses, as on a
+	// cluster; the abandoned replacement goes on the bounded grace.
+	h.podGrace = 10 * time.Minute
+	h.abandonGrace = 30 * time.Second
+	h.useRollingBudget(workloadtypes.UpdateStrategySurgeThenDrain)
+	if !h.run(40, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+	}
+	if h.currentRevision != h.revV1.Name {
+		t.Fatalf("the starting revision must be promoted before the push, got %q", h.currentRevision)
+	}
+
+	// A replacement gang that never passes readiness keeps the surge
+	// uncommitted for as long as the story needs.
+	revNew := h.ensureRevision(h.podSpec(stuckImage))
+	h.setTarget(revNew, stuckImage)
+	if !h.run(20, func() bool { return h.surgeOpen(0) && h.gangSurgeMarker() != nil && h.livePodOnImage(stuckImage) }) {
+		h.dumpState("gang surge toward the new revision")
+		t.Fatalf("the gang surge toward the new revision never opened")
+	}
+
+	// The starting revision is re-applied while the replacement gang
+	// stands; rollup is the current revision the adapter would publish,
+	// carried from pass to pass as the persisted value is.
+	h.setTarget(h.revV1, goodImage)
+	rollup := h.currentRevision
+	readRollup := func() string {
+		rollup = status.CurrentRevisionFor(h.irStatuses(), rollup, h.target.Name, h.blocks)
+		return rollup
+	}
+	openWhilePinned := func() {
+		t.Helper()
+		pinned := false
+		for _, row := range h.irStatuses() {
+			if op := row.Operation; op != nil && op.Type == workloadtypes.InstanceOperationUpdate && op.TargetRevision == revNew.Name {
+				pinned = true
+			}
+		}
+		got := readRollup()
+		if pinned && got == h.revV1.Name {
+			h.dumpState("rollup landed while pinned")
+			t.Fatalf("the revision rollup names the starting revision while a row is still pinned to the withdrawn revision: %+v", h.irStatuses())
+		}
+		if h.livePodOnImage(stuckImage) && got != "" {
+			t.Fatalf("the revision rollup must be withdrawn while a pod of the withdrawn revision is live, got %q", got)
+		}
+		if pinned && h.componentCounters().UpdatedReplicas >= replicas {
+			t.Fatalf("a source pinned to a withdrawn revision counts as updated")
+		}
+	}
+	if !h.runWithInvariant(40, func() bool { return h.settledOn(h.revV1, replicas) }, openWhilePinned) {
+		h.dumpState("resumed manager")
+		t.Fatalf("the rollback never settled on the starting revision: %+v", h.irStatuses())
+	}
+	if h.gangSurgeMarker() != nil {
+		t.Fatalf("the replacement gang's marker row outlived the abandon: %+v", h.irStatuses())
+	}
+	if h.livePodOnImage(stuckImage) {
+		t.Fatalf("a pod of the withdrawn revision is still live after the rollback settled")
+	}
+	if got := readRollup(); got != h.revV1.Name {
+		t.Fatalf("the revision rollup must land on the starting revision once the rollback settled, got %q", got)
+	}
+	if got := h.componentCounters().UpdatedReplicas; got != replicas {
+		t.Fatalf("UpdatedReplicas = %d after the rollback settled, want %d", got, replicas)
+	}
+}
+
+// gangSurgeMarker is the row claiming a replacement gang's index, live or
+// in cleanup, or nil when no gang surge is in flight.
+func (h *recoveryHarness) gangSurgeMarker() *workloadtypes.InstanceStatus {
+	sts := h.irStatuses()
+	for i := range sts {
+		if op := sts[i].Operation; op != nil && op.Type == workloadtypes.InstanceOperationUpdate &&
+			(op.Step == workloadtypes.UpdateStepGangSurgeTarget || op.Step == workloadtypes.UpdateStepGangSurgeTargetCleanup) {
+			return &sts[i]
+		}
+	}
+	return nil
+}
+
 // TestPolicyFlipMidHold_FixLandsWithoutRebuildingTheBrokenRevision pins a
 // roll held because the Instance already on the pushed revision crashed
 // under load, with the restart policy edited from None to

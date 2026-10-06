@@ -107,14 +107,33 @@ func TestRolloutComplete(t *testing.T) {
 // TestCurrentRevisionFor pins the rollup both ways: promoted once every
 // Instance is Ready on the update revision and its retry ladder records
 // no failure; withdrawn when current already names the update revision
-// while an Instance still runs another; left as recorded on every other
-// shape, a repair on the current revision included. A revision whose
-// block still stands has not landed, whatever its rows read between
-// crashes, so a push never lands by attrition.
+// while an Instance still runs another or is pinned to one by its update
+// operation; left as recorded on every other shape, a repair on the
+// current revision included. A revision whose block still stands has not
+// landed, whatever its rows read between crashes, so a push never lands
+// by attrition.
 func TestCurrentRevisionFor(t *testing.T) {
 	const prior, next = "isvc-engine-aaaaaaaa", "isvc-engine-bbbbbbbb"
 	row := func(phase types.InstancePhase, rev string) types.InstanceStatus {
 		return types.InstanceStatus{Phase: phase, RunningRevision: rev}
+	}
+	// pinned is a row mid-surge: it runs running while its operation is
+	// pinned to target.
+	pinned := func(phase types.InstancePhase, running, target string) types.InstanceStatus {
+		return types.InstanceStatus{Phase: phase, RunningRevision: running, Operation: &types.InstanceOperation{
+			Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurge, TargetRevision: target}}
+	}
+	surgeIdx := int32(2)
+	gangSource := func(phase types.InstancePhase, running, target string) types.InstanceStatus {
+		s := pinned(phase, running, target)
+		s.Operation.SurgeIndex = &surgeIdx
+		return s
+	}
+	// marker is the row claiming a replacement gang's index: it has run
+	// nothing, and its claim names the replacement's revision.
+	marker := func(step, target string) types.InstanceStatus {
+		return types.InstanceStatus{Index: surgeIdx, Phase: types.InstancePhaseCreating, TargetRevision: target,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: step, TargetRevision: target}}
 	}
 	block := func(state types.RetryBlockState) []types.RetryBlock {
 		return []types.RetryBlock{{TargetRevision: next, State: state, AttemptsStarted: 1}}
@@ -154,6 +173,24 @@ func TestCurrentRevisionFor(t *testing.T) {
 		{"no update revision leaves current alone",
 			[]types.InstanceStatus{row(types.InstancePhaseReady, prior)}, prior, "", nil, prior},
 		{"no Instances leave current alone", nil, prior, prior, nil, prior},
+		{"a rollback onto the current revision withdraws it while a surge is still pinned to the superseded one",
+			[]types.InstanceStatus{pinned(types.InstancePhaseUpdating, prior, next), row(types.InstancePhaseReady, prior)}, prior, prior, nil, ""},
+		{"a rollback onto the current revision withdraws it while a gang surge marker is still pinned to the superseded one",
+			[]types.InstanceStatus{gangSource(types.InstancePhaseUpdating, prior, next), row(types.InstancePhaseReady, prior),
+				marker(types.UpdateStepGangSurgeTarget, next)}, prior, prior, nil, ""},
+		{"the cleanup marker of an abandoned gang surge keeps the current revision withdrawn",
+			[]types.InstanceStatus{gangSource(types.InstancePhaseUpdating, prior, next), row(types.InstancePhaseReady, prior),
+				marker(types.UpdateStepGangSurgeTargetCleanup, next)}, prior, prior, nil, ""},
+		{"a lingering gang surge marker alone keeps the current revision withdrawn",
+			[]types.InstanceStatus{row(types.InstancePhaseReady, prior), row(types.InstancePhaseReady, prior),
+				marker(types.UpdateStepGangSurgeTargetCleanup, next)}, prior, prior, nil, ""},
+		{"a Failed source still pinned to the superseded revision withdraws the current revision",
+			[]types.InstanceStatus{gangSource(types.InstancePhaseFailed, prior, next), row(types.InstancePhaseReady, prior),
+				marker(types.UpdateStepGangSurgeTarget, next)}, prior, prior, nil, ""},
+		{"withdrawn stays withdrawn while an operation is still pinned to the superseded revision",
+			[]types.InstanceStatus{pinned(types.InstancePhaseUpdating, prior, next), row(types.InstancePhaseReady, prior)}, "", prior, nil, ""},
+		{"an operation pinned to the update revision itself keeps it",
+			[]types.InstanceStatus{pinned(types.InstancePhaseUpdating, prior, prior), row(types.InstancePhaseReady, prior)}, prior, prior, nil, prior},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -4380,7 +4380,8 @@ func TestReconcile_TargetRevisionIsRecordedBeforeItsFirstPod(t *testing.T) {
 // TestReconcile_TargetRevisionFollowsTheSpecBackToThePriorRevision is the
 // exit of the early record: it is not a ratchet. Once a roll onto a new
 // revision is open, a spec that returns to the prior template moves the
-// recorded target back with it on the next pass.
+// recorded target back with it on the next pass; the current revision
+// follows once the surge pinned to the withdrawn revision is reset.
 func TestReconcile_TargetRevisionFollowsTheSpecBackToThePriorRevision(t *testing.T) {
 	ir, objs, prior, next := rollingSingletonIR(t)
 	r, c := newReconciler(t, append([]client.Object{ir}, objs...)...)
@@ -4419,7 +4420,22 @@ func TestReconcile_TargetRevisionFollowsTheSpecBackToThePriorRevision(t *testing
 	if after.Status.UpdateRevision != prior {
 		t.Fatalf("a spec back on the prior template must move the target back with it: updateRevision=%q want %s", after.Status.UpdateRevision, prior)
 	}
+	if after.Status.CurrentRevision != "" {
+		t.Fatalf("currentRevision=%q: a surge still pinned to the withdrawn revision keeps the rollout open", after.Status.CurrentRevision)
+	}
+	for pass := 0; pass < 6 && after.Status.CurrentRevision != prior; pass++ {
+		r.Expectations = workloadtypes.NewExpectations()
+		if _, err := r.Reconcile(context.Background(), request); err != nil {
+			t.Fatalf("settle pass %d: %v", pass, err)
+		}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), after); err != nil {
+			t.Fatalf("get IR while the abandoned surge settles: %v", err)
+		}
+	}
 	if after.Status.CurrentRevision != prior {
-		t.Fatalf("currentRevision=%q want %s: the prior revision is what the Instance runs", after.Status.CurrentRevision, prior)
+		t.Fatalf("currentRevision=%q want %s once the abandoned surge is reset: the prior revision is what the Instance runs", after.Status.CurrentRevision, prior)
+	}
+	if n := podsOnRevision(t, c, ir.Namespace, next); n != 0 {
+		t.Fatalf("%d pod(s) of the withdrawn revision %s remain after the rollback settled", n, next)
 	}
 }

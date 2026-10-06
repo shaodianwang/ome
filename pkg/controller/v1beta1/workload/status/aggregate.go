@@ -301,11 +301,13 @@ func RolloutComplete(insts []types.InstanceStatus, targetRevName string) bool {
 // operator releases a Held one, so the push reads landed only when the
 // revision has proven itself rather than by attrition. It is withdrawn
 // (empty) when it already names the update revision while some Instance
-// still runs another: a fleet rolled back onto its last promoted revision
-// is in flight until the last superseded Instance returns, and current
-// equal to update is what every reader takes for "no rollout in flight".
-// Any other row shape leaves current as recorded, so a repair on the
-// current revision never moves it.
+// is still off it, running another revision or pinned to one by its
+// update operation: a fleet rolled back onto its last promoted revision
+// is in flight until the last superseded Instance returns and the last
+// withdrawn replacement is gone, and current equal to update is what
+// every reader takes for "no rollout in flight". Any other row shape
+// leaves current as recorded, so a repair on the current revision never
+// moves it.
 func CurrentRevisionFor(insts []types.InstanceStatus, current, update string, blocks []types.RetryBlock) string {
 	if update == "" {
 		return current
@@ -313,26 +315,48 @@ func CurrentRevisionFor(insts []types.InstanceStatus, current, update string, bl
 	if RolloutComplete(insts, update) && types.FindRetryBlock(blocks, update) == nil {
 		return update
 	}
-	if current == update && anyInstanceRunsAnother(insts, update) {
+	if current == update && anyInstanceOffRevision(insts, update) {
 		return ""
 	}
 	return current
 }
 
-// anyInstanceRunsAnother reports whether some Instance records a running
-// revision other than rev. A row that has not run anything yet names no
-// revision and does not count.
-func anyInstanceRunsAnother(insts []types.InstanceStatus, rev string) bool {
+// anyInstanceOffRevision reports whether some Instance is off rev: it runs
+// another revision, or its update operation is pinned to another. A row
+// that has run nothing and pins nothing does not count.
+func anyInstanceOffRevision(insts []types.InstanceStatus, rev string) bool {
 	want := query.RevisionFromName(rev)
-	for _, inst := range insts {
-		if inst.RunningRevision == "" {
-			continue
+	for i := range insts {
+		inst := &insts[i]
+		if OperationPinnedOffRevision(inst, want) {
+			return true
 		}
-		if !query.RevisionFromName(inst.RunningRevision).Same(want) {
+		if inst.RunningRevision != "" && !query.RevisionFromName(inst.RunningRevision).Same(want) {
 			return true
 		}
 	}
 	return false
+}
+
+// RowOnRevision reports whether a row rests on rev with no roll left: it
+// runs rev and its update operation, if any, is pinned to rev. A pin left
+// behind by a retarget still owns a replacement on the pinned revision.
+func RowOnRevision(row *types.InstanceStatus, rev query.RevisionID) bool {
+	return row != nil && query.RevisionFromName(row.RunningRevision).Same(rev) && !OperationPinnedOffRevision(row, rev)
+}
+
+// OperationPinnedOffRevision reports whether the row's update operation is
+// pinned to a revision other than rev; a gang surge marker is such a row
+// before it runs anything.
+func OperationPinnedOffRevision(row *types.InstanceStatus, rev query.RevisionID) bool {
+	if row == nil || row.Operation == nil {
+		return false
+	}
+	op := row.Operation
+	if op.Type != types.InstanceOperationUpdate || op.TargetRevision == "" {
+		return false
+	}
+	return !query.RevisionFromName(op.TargetRevision).Same(rev)
 }
 
 // CountersForInstance computes the per-Instance counter set from the

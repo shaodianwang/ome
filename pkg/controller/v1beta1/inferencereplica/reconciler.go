@@ -616,7 +616,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				"previousCurrentRevision", priorCurrentRevision,
 				"currentRevision", ir.Status.CurrentRevision)
 		case priorCurrentRevision != "" && ir.Status.CurrentRevision == "":
-			log.Info("Rollout reopened; CurrentRevision withdrawn while an Instance still runs another revision",
+			log.Info("Rollout reopened; CurrentRevision withdrawn while an Instance still runs, or is still pinned to, another revision",
 				"previousCurrentRevision", priorCurrentRevision,
 				"updateRevision", ir.Status.UpdateRevision)
 		}
