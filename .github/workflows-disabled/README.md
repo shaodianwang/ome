@@ -13,13 +13,13 @@ This is a private fork of [moirai-internal/ome](https://github.com/moirai-intern
 CI for this fork runs via **BuildKite** — see the pipeline definitions under
 [`.buildkite/`](../../.buildkite/) at the repo root.
 
-The upstream GitHub Actions workflows reference resources that do not apply to
+These GitHub Actions workflows reference resources that do not apply to
 this fork, including:
 
 - Container registries under `ghcr.io/moirai-internal/...`
-- Secrets and OIDC trust relationships scoped to the upstream org
-- Release/publishing paths (PyPI, GHCR, pages) tied to upstream identities
-- Label/dependabot sync targets pointing at upstream repos
+- Secrets and OIDC trust relationships scoped to another organization
+- Release/publishing paths (PyPI, GHCR, pages) tied to other identities
+- Label and dependabot targets pointing at other repositories
 
 Running these as-is would either fail noisily or, worse, attempt to publish
 artifacts under the wrong identity.

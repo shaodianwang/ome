@@ -1,15 +1,14 @@
 # Exemptions for hack/check_internal_tokens.py: '<glob> <groups> # reason'.
 # The reason is mandatory; an exemption that matches no tracked file fails the
 # check; use '*' for every group only when the file is itself internal
-# plumbing. Only deployment configuration that never leaves this repository
-# belongs here; code, tests, docs and runbooks are fixed instead. muse/,
+# plumbing. Only operator deployment configuration belongs here; code, tests, docs and runbooks are fixed instead. muse/,
 # charts/muse/ and meta-internal/ are exempt by classification in the checker.
 .buildkite/**                              storage,repos,clusters,org-tooling,org-domains  # CI pipeline: registries, agent queues, mirrors
-charts/ome-isvc/**                         codenames,org-tooling,storage  # internal vendor bundles and example values, never shipped
-charts/ome-resources/values-usc1-*.yaml    *        # per-cluster install overlay, never shipped
-charts/ome-resources/tests/render_test.sh  clusters # renders that overlay; the block is carved from the public copy
+charts/ome-isvc/**                         codenames,org-tooling,storage  # operator vendor bundles and example values; operator-specific
+charts/ome-resources/values-usc1-*.yaml    *        # per-cluster install overlay; operator-specific
+charts/ome-resources/tests/render_test.sh  clusters # renders that overlay; the block is operator-specific
 hack/model-download/**                     org-tooling,org-domains,storage  # blob-store download tooling that only works on internal clusters
-.agents/skills/**                          clusters,repos,org-tooling,storage  # agent runbooks for this repository's own clusters and CI; never shipped
+.agents/skills/**                          clusters,repos,org-tooling,storage  # agent runbooks for this repository's own clusters and CI; operator-specific
 docs/RELEASE.md                            storage,repos,clusters  # internal release process
 hack/check_internal_tokens_test.py         *        # the checker's own fixtures
 hack/internal-tokens.txt                   *        # the pattern list itself

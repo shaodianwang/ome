@@ -267,7 +267,7 @@ Field semantics, with the reason each exists:
 - **`coverage`** lists the perm case ids, unit test names, and KIND spec files
   that assert this cell. The coverage report (Part 4) joins on it.
 - **`history`** is not a field on the cell — bugfix provenance (PR numbers)
-  must not live in the upstreamable table. It lives in a sidecar under
+  must not live in the neutral table. It lives in a sidecar under
   `hack/omenative-testing/statemachine/history/`, matched to cells by the same
   selector rule (`variants`/`windows`/`transition`) that expansion uses. It is
   what turns `review` from a feeling into a list.
@@ -492,7 +492,7 @@ Location: `tests/rolloutspec/` (tables under `machines/`, `loader.go`,
 data with a loader and a build gate, not controller code: `wellformed_test.go`
 asserts grid completeness, not runtime behavior, and nothing here ships in the
 binary. TODO: confirm the PR-number `history` field is acceptable under the
-upstreaming rules or move it to a sidecar file kept under `hack/`.
+neutrality rules or move it to a sidecar file kept under `hack/`.
 
 The test asserts: every state id and event id referenced by a cell is declared;
 every (state, event, window) triple has exactly one cell; every `n/a` has a

@@ -8,13 +8,13 @@ description: How a person on a devserver runs kubectl-ome against the clusters w
 kubectl-ome carries all OME domain logic; you choose commands and read their
 output. It is a standalone binary: `kubectl-ome get isvc -A` with a
 kubeconfig works without kubectl on PATH, and `kubectl ome ...` works where
-kubectl is present. The reference for every verb is the upstream README at
+kubectl is present. The reference for every verb is the CLI's own README at
 `cmd/kubectl-ome/README.md` and the task pages under
-`site/content/en/docs/tasks/` of the upstream repository.
+`site/content/en/docs/tasks/` of the kubectl-ome source repository.
 
 ## The binary
 
-No release tag carries the CLI yet; build it from upstream `main`:
+No release tag carries the CLI yet; build it from the kubectl-ome source at `main`:
 
 ```sh
 git clone https://github.com/ome-projects/ome && cd ome && make kubectl-ome   # bin/kubectl-ome

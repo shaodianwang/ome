@@ -4,15 +4,15 @@
 #
 # Two binaries ship in the image:
 #   /ome-bot                  built from this repository with -tags meta_internal
-#   /usr/local/bin/kubectl-ome built from the upstream repository at the commit
+#   /usr/local/bin/kubectl-ome built from the kubectl-ome source repository at the commit
 #                             in .kubectl-ome-oss-ref, exactly like
 #                             alfred.Dockerfile builds alfred: the CLI carries
-#                             all domain logic and lives upstream only.
+#                             all domain logic and lives in the kubectl-ome source only.
 #
 # The runtime stage also carries python3 for the standard-library CI scripts
 # the tool registry runs, and read-only trees for the built-in docs tool:
 #   /opt/ome/{docs,oeps,skills}   from this repository
-#   /opt/ome/upstream/...         upstream user docs and the kubectl-ome README
+#   /opt/ome/upstream/...         the kubectl-ome user docs and README
 #                                 from the same clone the CLI is built from
 # They are root-owned so the runtime user can read but never rewrite them.
 #
@@ -24,7 +24,7 @@ ARG GO_BUILDER_IMAGE=golang:1.26
 
 FROM ${GO_BUILDER_IMAGE} AS cli-builder
 ARG KUBECTL_OME_REPO=https://github.com/ome-projects/ome.git
-# Upstream commit the CLI is built from; see .kubectl-ome-oss-ref. Passed
+# The kubectl-ome commit the CLI is built from; see .kubectl-ome-oss-ref. Passed
 # explicitly because the CLI lives on upstream main and no release tag
 # carries it yet.
 ARG KUBECTL_OME_REF

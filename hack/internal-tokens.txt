@@ -1,8 +1,8 @@
-# Internal identifiers that must not appear in code, docs or fixtures that leave
-# this repository. Format: group|scope|flags|regex
+# Operator-specific identifiers that must not appear in the core tree or in the
+# files held to its standard. Format: group|scope|flags|regex
 #   scope  all      -> every scanned path
-#          upstream -> only pkg/, cmd/, internal/, scheduler/, the synced charts
-#                      and config/configmap (paths the public repo receives)
+#          core     -> only pkg/, cmd/, internal/, scheduler/, the core charts
+#                      and config/configmap (the vendor-neutral engine)
 #   flags  i        -> case-insensitive, - -> case-sensitive
 # Python regex syntax. Keep patterns specific: a false positive costs a review,
 # a miss costs a disclosure. Exempt deployment-only files in internal-tokens.allow.
@@ -14,7 +14,7 @@ org-tooling|all|i|\bfbpkg\b|\btupperware\b|\bsandcastle\b|\bconfigerator\b|\bman
 clusters|all|i|\bmsl\b|\bmsl-|\bmks\b|\bmks-|mks_|metahpc|\buse2\b|use2-\d|\busc1\b|usc1-\d|\blco\b|lco-\d|\boph1\b|cw-use2|gcp-usc1
 # People and identities.
 people|all|i|\bsimolin\b|s\.lin@|\bunixname\b|@meta\b
-# Trackers and incident ids (internal tools only; public issue refs use owner/repo#N).
+# Trackers and incident ids (internal trackers only; a GitHub reference reads owner/repo#N).
 trackers|all|-|\bT\d{7,}\b|\bD\d{7,}\b|\bS\d{6,}\b|\bP\d{9,}\b|\bSEV\d+\b|\bsev-?\d+\b
 # Codenames for models, checkpoints and products.
 codenames|all|i|\bavocado\b|\bavo-tier|\bavo_|\btier[-_ ]?5\b|\bkiki\b|consolidation_sv|consol_sv|\bllama4x\b|\bwatermelon\b|t4-9b|smg-shadow
@@ -27,7 +27,7 @@ teams|all|i|content-understanding|business-agent|\bmaiba\b|fair-research|par-pro
 # Fleet-shape wording that describes our deployment rather than the software.
 fleet|all|i|dozens of tenants|routinely share one namespace|our (prod|production) (fleet|clusters?)|every production cluster we run
 # Design-document references belong in commit messages, not in code that ships.
-oep-refs|upstream|-|\bOEP[- ]?\d{4}(\.\d+)?\b
+oep-refs|core|-|\bOEP[- ]?\d{4}(\.\d+)?\b
 # Credentials and keys of any kind.
 secrets|all|-|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|bkua_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9]{32,}|AIza[0-9A-Za-z_-]{35}|-----BEGIN (RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY
 # Address space and data-center site codes.

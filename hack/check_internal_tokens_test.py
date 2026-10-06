@@ -71,7 +71,7 @@ class CheckInternalTokens(unittest.TestCase):
         r = run(self.root, "--files", rel)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def test_oep_refs_only_fail_in_shipped_paths(self):
+    def test_oep_refs_only_fail_in_core_paths(self):
         code = write(self.root, "pkg/x/x.go", "package x\n\n// see OEP-0024\n")
         doc = write(self.root, "oeps/0024-quota/README.md", "# OEP-0024\n")
         self.assertEqual(run(self.root, "--files", code).returncode, 1)
