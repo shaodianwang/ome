@@ -122,7 +122,7 @@ func recycleTerminalPods(ctx context.Context, deps workload.Deps, input workload
 	}
 
 	termination := terminalPodTermination(dead[0], metav1.NewTime(now))
-	recycle, err := status.RecordRecycleAttempt(ctx, input, statusIdx, opType, metav1.NewTime(now), termination)
+	recycle, err := status.RecordRecycleAttempt(ctx, input, statusIdx, opType, metav1.NewTime(now), termination, dead[0].CreationTimestamp)
 	if err != nil {
 		return true, fmt.Errorf("record terminal pod recycle (instance=%d): %w", statusIdx, err)
 	}
