@@ -3695,3 +3695,41 @@ func TestRestart_PushedSetDarkAfterItsCrashIsTheLaddersWedge(t *testing.T) {
 		}
 	})
 }
+
+// A gang whose roll attempt parked after its disposition loses a member:
+// the lost-member trigger reads the parked attempt as it reads a Failed
+// row with none, and the repair is the roll's to take once it may start.
+//
+// Cells: instance/Failed/pod.deleted[source]/before
+func TestDetectRestartTrigger_ParkedAttemptDoesNotOwnALostMember(t *testing.T) {
+	const running = "llama-70b-engine-" + testRevisionHash
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-pushed", Namespace: "prod"}}
+	inst := workload.InstancePlan{Index: 0, Incarnation: 2, Runners: []workload.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}}
+	worker := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "prod", Labels: map[string]string{query.LabelRevisionHash: query.RevisionHashFromControllerRevisionName(target.Name)}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	for _, phase := range []workload.InstancePhase{workload.InstancePhaseFailed, workload.InstancePhaseUpdating} {
+		t.Run(string(phase), func(t *testing.T) {
+			input := workload.ReconcileInput{ObservedState: workload.WorkloadObservedState{
+				InstanceStatuses: []workload.InstanceStatus{{
+					Index: 0, Incarnation: 2, Phase: phase, RunningRevision: running, TargetRevision: target.Name, PodCount: 2,
+					Operation: &workload.InstanceOperation{
+						Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepParked, TargetRevision: target.Name,
+						Waiting: string(workload.RolloutHoldGateRetryBlock),
+					},
+					LastFailure: &workload.InstanceTermination{PodName: "leader", ContainerName: constants.MainContainerName, Reason: "CrashLoopBackOff"},
+				}},
+				UpdateRevision: target.Name,
+			}}
+			plan := workload.ComponentPlan{Component: workload.ComponentEngine, RestartPolicy: workload.RestartPolicyRecreateInstance}
+			needs, reason := ops.DetectRestartTriggerWithPods(input, plan, inst, []*corev1.Pod{worker})
+			if !needs || !strings.Contains(reason, "gang member lost") {
+				t.Fatalf("lost-member trigger = %v (reason %q), want it to fire over a parked attempt", needs, reason)
+			}
+			if !ops.RepairYieldsToTarget(input, plan, inst, target, []*corev1.Pod{worker}) {
+				t.Fatalf("the repair of a row off a target the roll may start on is the roll's")
+			}
+		})
+	}
+}

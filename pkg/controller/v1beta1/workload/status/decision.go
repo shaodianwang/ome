@@ -109,6 +109,98 @@ func StampFailedOnStuckPod(termination *types.InstanceTermination, blamedIncarna
 	}
 }
 
+// StampFailedParkingAttempt is the disposition's stamp for an attempt
+// whose pod set is still alive: Phase=Failed for the set that is down
+// now, with the Update operation kept on the parked step — waiting
+// names the wait the next attempt stands behind and the deadline is
+// parked, since the clock that ended the attempt must not end it again.
+// termination is recorded on LastFailure in the same write.
+//
+// attempt is the operation the disposition observed. The park lands only
+// on that attempt, read by its identity (SameAttempt): a row carrying
+// another Update attempt by the time the write lands — one opened over
+// the expired attempt since the pass observed it — is left alone, since
+// a fresh attempt is not the disposition's to end. A slot whose
+// operation is gone, or is not an Update, has nothing to park: the
+// attempt concluded or was disposed since the pass observed it. An
+// already parked Failed row is a no-op.
+func StampFailedParkingAttempt(ctx context.Context, input types.ReconcileInput, idx int32, attempt types.InstanceOperation, termination *types.InstanceTermination, waiting string) error {
+	return input.MutateInstance(ctx, idx, func(s *types.InstanceStatus) bool {
+		if s.Phase == "" || s.Operation == nil || s.Operation.Type != types.InstanceOperationUpdate || !SameAttempt(*s.Operation, attempt) {
+			return false
+		}
+		if s.Phase == types.InstancePhaseFailed && types.OperationParked(s.Operation) {
+			return false
+		}
+		s.Phase = types.InstancePhaseFailed
+		op := *s.Operation
+		op.Step = types.UpdateStepParked
+		op.Waiting = waiting
+		op.Deadline = metav1.Time{}
+		s.Operation = &op
+		if termination != nil {
+			captured := *termination
+			s.LastFailure = &captured
+		}
+		return true
+	})
+}
+
+// SameAttempt reports whether two operations are the same attempt: the
+// same ID, or the same start when neither carries one.
+func SameAttempt(a, b types.InstanceOperation) bool {
+	if a.ID != "" || b.ID != "" {
+		return a.ID == b.ID
+	}
+	return a.StartedAt.Equal(&b.StartedAt)
+}
+
+// FollowParkedAttempt gives a parked attempt the phase its pod set earns:
+// Updating while the full set serves, Failed otherwise. waiting, when
+// non-empty, replaces the wait the row names. A row whose operation is
+// not a parked attempt has moved on and is left alone.
+func FollowParkedAttempt(serving bool, waiting string) func(*types.InstanceStatus) bool {
+	return func(s *types.InstanceStatus) bool {
+		if !types.OperationParked(s.Operation) {
+			return false
+		}
+		if s.Phase != types.InstancePhaseFailed && s.Phase != types.InstancePhaseUpdating {
+			return false
+		}
+		phase := types.InstancePhaseFailed
+		if serving {
+			phase = types.InstancePhaseUpdating
+		}
+		changed := false
+		if s.Phase != phase {
+			s.Phase = phase
+			changed = true
+		}
+		if waiting != "" && s.Operation.Waiting != waiting {
+			op := *s.Operation
+			op.Waiting = waiting
+			s.Operation = &op
+			changed = true
+		}
+		return changed
+	}
+}
+
+// ParkedAttemptWaits names waiting as the wait a parked attempt stands
+// behind, and touches nothing else. A row whose operation is not a parked
+// attempt is left alone, as is one already naming it.
+func ParkedAttemptWaits(waiting string) func(*types.InstanceStatus) bool {
+	return func(s *types.InstanceStatus) bool {
+		if !types.OperationParked(s.Operation) || !types.ParkedWaitingReason(waiting) || s.Operation.Waiting == waiting {
+			return false
+		}
+		op := *s.Operation
+		op.Waiting = waiting
+		s.Operation = &op
+		return true
+	}
+}
+
 // ApplyStamp runs one stamp through the single-row seam and reports
 // whether it changed the row. The seam consumes the stamp's own answer,
 // and a caller that announces the stamp has nothing to announce for one
@@ -200,19 +292,16 @@ func StampDeadline(ctx context.Context, input types.ReconcileInput, idx int32, d
 // re-resolved on every pass, so a roll can change mechanism mid-flight
 // without the attempt ending — and an attempt that restarted its clock
 // on each of those turns would never be bounded by InstanceReadyTimeout
-// at all.
+// at all. An attempt parked after its disposition is nobody's and not in
+// flight: a new attempt opens over it with its own identity and deadline.
 func StampUpdatingInPlace(ctx context.Context, input types.ReconcileInput, idx int32, targetRev string, strategy types.UpdateStrategyType, timeout time.Duration) error {
 	now := metav1.NewTime(input.Now())
 	err := input.MutateInstance(ctx, idx, func(s *types.InstanceStatus) bool {
-		if s.Phase == types.InstancePhaseUpdating &&
-			s.Operation != nil && s.Operation.Type == types.InstanceOperationUpdate &&
-			s.Operation.Step == types.UpdateStepInPlace &&
-			s.TargetRevision == targetRev {
+		inFlight := types.Owner(s) == types.OwnerUpdate && s.Operation.Type == types.InstanceOperationUpdate
+		if inFlight && s.Operation.Step == types.UpdateStepInPlace && s.TargetRevision == targetRev {
 			return false
 		}
-		if s.Phase == types.InstancePhaseUpdating &&
-			s.Operation != nil && s.Operation.Type == types.InstanceOperationUpdate &&
-			s.Operation.TargetRevision == targetRev && s.TargetRevision == targetRev {
+		if inFlight && s.Operation.TargetRevision == targetRev && s.TargetRevision == targetRev {
 			op := *s.Operation
 			op.Step = types.UpdateStepInPlace
 			op.LastProgressAt = now
@@ -245,7 +334,9 @@ func StampUpdatingInPlace(ctx context.Context, input types.ReconcileInput, idx i
 // a revision-roll recreate is distinguishable in status from a
 // pod-failure Restart. Returns the post-write Incarnation. The
 // skip-write guard requires Step==Drain so a prior in-place pass at the
-// same target does not block the bump.
+// same target does not block the bump; an attempt parked after its
+// disposition sits on its own step, so a new attempt opens over it and
+// the bump makes the parked set the one it drains.
 func StampRecreating(ctx context.Context, input types.ReconcileInput, idx int32, targetRev, reason string, strategy types.UpdateStrategyType, timeout time.Duration) (int64, error) {
 	var observedIncarnation int64
 	err := input.MutateInstance(ctx, idx, func(s *types.InstanceStatus) bool {

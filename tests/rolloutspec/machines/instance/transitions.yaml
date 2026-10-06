@@ -332,6 +332,14 @@ transitions:
     to: Update/InPlace
     effects: [Phase Updating with the InPlace step, the block flipped to RetryInProgress]
     decided_in: pkg/controller/v1beta1/workload/ops/update_inplace.go
+  - id: T-failed-parked-serves
+    from: Failed
+    event: pod.containersReady
+    variant: source
+    guard: the row carries an attempt parked after its disposition and its own live pod set is complete and fully serving - every pod ContainersReady and carrying the serving gate, which only the attempt's own promote wrote, so a set parked before its promotion never satisfies this and the row keeps Failed until a later attempt promotes its pods
+    to: Update/Parked
+    effects: [Phase Updating with the parked operation kept as it was; nothing opens]
+    decided_in: pkg/controller/v1beta1/workload/escalation/parked.go
   - id: T-failed-gang-surge-reset
     from: Failed
     event: pod.deleted
@@ -785,14 +793,14 @@ transitions:
     event: timer.operationDeadline
     guard: the operation deadline elapsed and no pod is held by an admission scheduling gate
     to: Failed
-    effects: [the disposition classifies the attempt and clears the operation]
+    effects: [the disposition classifies the attempt; the operation is kept parked while the patched pod is alive and cleared once it is gone]
     decided_in: pkg/controller/v1beta1/workload/escalation/disposition.go
   - id: T-inplace-stuck
     from: Update/InPlace
     event: pod.waiting
     guard: the patched pod held a terminal waiting reason past the stuck-pod grace and the pod set is not fully serving
     to: Failed
-    effects: [the disposition classifies the attempt; a workload-caused reason holds the target revision]
+    effects: [the disposition classifies the attempt; a workload-caused reason holds the target revision; the operation is kept parked while the patched pod is alive]
     decided_in: pkg/controller/v1beta1/workload/escalation/disposition.go
   - id: T-inplace-force-clock
     from: Update/InPlace
@@ -820,7 +828,7 @@ transitions:
     event: timer.stuckPodGrace
     guard: the grace elapsed on the patched pod while it holds a terminal waiting reason, and the pod set is not fully serving
     to: Failed
-    effects: [the disposition classifies the attempt; a workload-caused reason holds the target revision]
+    effects: [the disposition classifies the attempt; a workload-caused reason holds the target revision; the operation is kept parked while the patched pod is alive]
     decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-inplace-teardown-deadline
     from: Update/InPlace
@@ -853,14 +861,14 @@ transitions:
     event: timer.operationDeadline
     guard: the operation deadline elapsed and no pod is held by an admission scheduling gate
     to: Failed
-    effects: [the recreate is disposed and its operation cleared, single-pod or gang; with a retry ladder configured the wave counts on the target revision's RetryBlock]
+    effects: [the recreate is disposed, single-pod or gang; with a retry ladder configured the wave counts on the target revision's RetryBlock and the operation is kept parked while a pod of the attempt's revision is alive, cleared otherwise; a set parked before the attempt's own promote wrote the serving gate never reads as serving, so the row keeps Failed until a later attempt promotes its pods]
     decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-drain-stuck
     from: Update/Drain
     event: pod.waiting
     guard: a pod held a terminal waiting reason past the stuck-pod grace and the pod set is not fully serving
     to: Failed
-    effects: [the stuck pod's termination is recorded on LastFailure before the recreate deletes it]
+    effects: [the stuck pod's termination is recorded on LastFailure; the operation is kept parked while a pod of the attempt's revision is alive; a set parked before the attempt's own promote wrote the serving gate never reads as serving, so the row keeps Failed until a later attempt promotes its pods]
     decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-drain-force-clock
     from: Update/Drain
@@ -888,10 +896,103 @@ transitions:
     event: timer.stuckPodGrace
     guard: the grace elapsed on a pod that holds a terminal waiting reason, and the pod set is not fully serving
     to: Failed
-    effects: [the stuck pod termination is recorded on LastFailure before the recreate deletes it]
+    effects: [the stuck pod termination is recorded on LastFailure; the operation is kept parked while a pod of the attempt's revision is alive; a set parked before the attempt's own promote wrote the serving gate never reads as serving, so the row keeps Failed until a later attempt promotes its pods]
     decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-drain-teardown-deadline
     from: Update/Drain
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
+
+  # --- Update/Parked -----------------------------------------------------
+  - id: T-parked-down
+    from: Update/Parked
+    event: pod.runningNotReady
+    variant: source
+    guard: the parked attempt's own set serves nothing - no routed member in rotation, and every live one unready past the stuck-pod grace or parked in a terminal waiting reason; a runner restarting in place inside the grace moves nothing
+    to: Failed
+    effects: [Phase Failed with the parked operation kept as it was]
+    decided_in: pkg/controller/v1beta1/workload/escalation/parked.go
+  - id: T-parked-backoff
+    from: Update/Parked
+    event: pod.waiting
+    guard: the routed member of the parked attempt's own set is parked in a terminal waiting reason, the kubelet's back-off included, and no routed member serves - out of service at once, with no grace to run
+    to: Failed
+    effects: [Phase Failed with the parked operation kept as it was; the escalation neither ends the attempt a second time nor charges a second wave]
+    decided_in: pkg/controller/v1beta1/workload/escalation/parked.go
+  - id: T-parked-gone
+    from: Update/Parked
+    event: pod.deleted
+    variant: source
+    guard: no live pod of the parked attempt's own set is left, or the set lost the member it serves through, and no repair takes the loss
+    to: Failed
+    effects: [Phase Failed with the parked operation kept; the Create pass rebuilds the row as a fresh start once no pod is left and its ladder admits]
+    decided_in: pkg/controller/v1beta1/workload/escalation/parked.go
+  - id: T-parked-member-lost
+    from: Update/Parked
+    event: pod.deleted
+    variant: source
+    guard: RecreateInstanceOnPodRestart, a multi-pod Instance with at least one survivor, no RetryBlock denying the rebuild, and the roll may not take the row - it is paused or the target is held
+    to: Restart/Drain
+    effects: [Phase Restarting with a Restart operation replacing the parked one, Incarnation bumped, the survivors drained]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-parked-retry
+    from: Update/Parked
+    event: timer.retryAt
+    guard: the target's Backoff RetryBlock is due, the budget and the gate admit the fresh start, and the mode resolves to recreate
+    to: Update/Drain
+    effects: [Incarnation bumped and a fresh recreate attempt with its own identity and deadline replaces the parked one, so the parked set becomes the one the drain phase replaces; the block flipped to RetryInProgress]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
+  - id: T-parked-retry-inplace
+    from: Update/Parked
+    event: timer.retryAt
+    guard: the target's Backoff RetryBlock is due, the budget and the gate admit the fresh start, and the mode resolves to in-place
+    to: Update/InPlace
+    effects: [a fresh in-place attempt with its own identity and deadline replaces the parked one, the block flipped to RetryInProgress]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_inplace.go
+  - id: T-parked-corrective
+    from: Update/Parked
+    event: spec.revision
+    guard: the corrective revision is a different RetryBlock subject than the parked attempt's, the budget and the gate admit the fresh start, and the mode resolves to recreate
+    to: Update/Drain
+    effects: [Incarnation bumped and a fresh recreate attempt at the corrective revision replaces the parked one, so the parked set becomes the one the drain phase replaces]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
+  - id: T-parked-corrective-inplace
+    from: Update/Parked
+    event: spec.revision
+    guard: the corrective revision is a different RetryBlock subject than the parked attempt's, the budget and the gate admit the fresh start, and the mode resolves to in-place
+    to: Update/InPlace
+    effects: [a fresh in-place attempt at the corrective revision replaces the parked one]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_inplace.go
+  - id: T-parked-scaledown
+    from: Update/Parked
+    event: spec.replicasDown
+    guard: the index is beyond the new desired set and the scale-down wave admits it
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-parked-reset
+    from: Update/Parked
+    event: spec.resetInstances
+    guard: the operator named this Instance, or all, and no pod of it is still in the serving rotation - its runner restarting in place inside the stuck-pod grace, or the set gone
+    to: Failed
+    effects: [every live-listed pod deleted with the expectation recorded before each delete, the parked operation cleared through the MutateInstance seam and the Phase written Failed for the set the reset removed, LastFailure untouched so the row is left in the fresh-start shape the Create pass rebuilds, InstancesReset event, the annotation consumed only after those effects commit]
+    decided_in: pkg/controller/v1beta1/inferencereplica/reset_instances.go
+    lane: adapter
+    why: the operator reset mailbox is the spec.resetInstances annotation, which the adapter consumes outside workload.Reconcile
+  - id: T-parked-teardown
+    from: Update/Parked
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-parked-teardown-deadline
+    from: Update/Parked
     event: timer.teardownDeadline
     guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
     to: Empty

@@ -23,11 +23,12 @@ import (
 // A gang's recreate is a disposable attempt: once its leader has parked
 // in CrashLoopBackOff past the stuck-pod grace the attempt is disposed,
 // counted on the revision's one retry ladder, and the row is Failed with
-// no operation. The ladder re-drives it at its own pace and the bound
-// Holds the revision with one RetryHeld warning and a rolloutHold naming
-// the crash loop. A gang that kept its operation instead would be rebuilt
-// on the crashing revision every stuck-pod grace, with nothing counting
-// the attempts and nothing in status saying why.
+// the attempt parked on the ladder's wait while its pods live. The ladder
+// re-drives it at its own pace and the bound Holds the revision with one
+// RetryHeld warning and a rolloutHold naming the crash loop. A gang whose
+// attempt stayed in flight instead would be rebuilt on the crashing
+// revision every stuck-pod grace, with nothing counting the attempts and
+// nothing in status saying why.
 //
 // The shape: two leader+worker engine gangs under RecreatePod with
 // maxUnavailable=1 toward a revision that crashes at start (fake-serving's
@@ -195,7 +196,7 @@ var _ = ginkgo.Describe("behavior - a gang whose new revision crash-loops is bou
 			g.Expect(ir.Status.RolloutHold.Target).To(Equal(badRev))
 			g.Expect(ir.Status.RolloutHold.Reason).To(ContainSubstring("CrashLoopBackOff"))
 			for _, row := range decodedInstanceStatuses(g, ir) {
-				g.Expect(row.Operation).To(BeNil(), "a held revision leaves no attempt open on instance %d", row.Index)
+				expectNoAttemptInFlight(g, row, badRev)
 				g.Expect(row.RunningRevision).To(Equal(engineRev), "instance %d must still run the sound revision", row.Index)
 			}
 			events := &corev1.EventList{}
@@ -222,7 +223,7 @@ var _ = ginkgo.Describe("behavior - a gang whose new revision crash-loops is bou
 				g.Expect(known).To(BeTrue(), "no crash-revision pod may be created after Held (new UID %s)", uid)
 			}
 			for _, row := range instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent) {
-				g.Expect(row.Operation).To(BeNil(), "no attempt may reopen on instance %d while the revision is Held", row.Index)
+				expectNoAttemptInFlight(g, row, badRev)
 			}
 		}, postHeldWindow, kindPollInterval).Should(Succeed())
 		Expect(len(crashUIDsSeen)).To(BeNumerically("<=", int(crashLoopBoundAttempts)*podsPerGang),

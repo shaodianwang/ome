@@ -962,11 +962,17 @@ func migrationSourceSteady(source *workload.InstanceStatus) bool {
 
 // migrationSourceRevisionNotStarted reports a source Failed with no
 // operation on a revision it never started (a disposed Create or Update
-// attempt); only a corrected or released revision moves such a row.
+// attempt), or an attempt parked after its disposition in either phase
+// its pods give it; only a corrected or released revision moves such a
+// row.
 func migrationSourceRevisionNotStarted(source *workload.InstanceStatus) bool {
-	return source != nil && source.Phase == workload.InstancePhaseFailed &&
-		source.Operation == nil && source.TargetRevision != "" &&
-		source.TargetRevision != source.RunningRevision
+	if source == nil || source.TargetRevision == "" || source.TargetRevision == source.RunningRevision {
+		return false
+	}
+	if workload.OperationParked(source.Operation) {
+		return true
+	}
+	return source.Phase == workload.InstancePhaseFailed && source.Operation == nil
 }
 
 // migrationSourceRevisionNotStartedReason words that rejection: the
@@ -988,10 +994,11 @@ const migrationRevisionAction = "correct or release the revision, then request t
 
 // migrationSourceRevisionHeld reports a source whose running revision
 // the retry ladder holds, with no operation in flight to move it off that
-// revision (a repair parked on the row is spent, not in flight).
+// revision (a repair parked on the row, or an attempt parked after its
+// disposition, is spent, not in flight).
 func migrationSourceRevisionHeld(input workload.ReconcileInput, source *workload.InstanceStatus) bool {
 	return source != nil && source.RunningRevision != "" &&
-		(source.Operation == nil || SpentRepair(source)) &&
+		(source.Operation == nil || SpentRepair(source) || workload.OperationParked(source.Operation)) &&
 		revisionHeld(input, source.RunningRevision)
 }
 
@@ -1022,13 +1029,14 @@ func migrationRevisionLadder(input workload.ReconcileInput, rev, failureReason s
 }
 
 // migrationSourceRepairParked reports a source Failed at the revision it
-// runs with no operation in flight — a repair parked on it, or none open
-// — and words the wait: the failure, where the repair and its ladder
-// stand, and that the row coming back Ready is what lets the move go.
+// runs with no operation in flight — a repair parked on it, a spent
+// attempt, or none open — and words the wait: the failure, where the
+// repair and its ladder stand, and that the row coming back Ready is what
+// lets the move go.
 func migrationSourceRepairParked(input workload.ReconcileInput, source *workload.InstanceStatus) (string, bool) {
 	if source == nil || source.Phase != workload.InstancePhaseFailed || source.RunningRevision == "" ||
 		(source.TargetRevision != "" && source.TargetRevision != source.RunningRevision) ||
-		(source.Operation != nil && !SpentRepair(source)) {
+		(source.Operation != nil && !SpentRepair(source) && !workload.OperationParked(source.Operation)) {
 		return "", false
 	}
 	failure := ""

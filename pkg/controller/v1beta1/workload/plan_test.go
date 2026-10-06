@@ -985,13 +985,16 @@ func TestAllocateSurgeIndex(t *testing.T) {
 
 // TestPartitionHeldIndices pins the canary hold-membership rule: the
 // lowest-indexed `Partition` Instances observed OFF the target revision
-// are held; Instances converging to target (mid-update, preserved
-// Update op — including gang-surge target markers), transient migration
-// surges, and unobserved Instances are never hold candidates. Holding a
-// mid-surge Instance would strand its surge pod (never promoted to
-// serving) and permanently consume the maxSurge budget, deadlocking the
-// roll — the hold falls to the next-lowest old-revision Instance
-// instead.
+// are held; Instances converging to target (an Update attempt in flight,
+// gang-surge target markers included, or the Failed continuation of
+// one), transient migration surges, and unobserved Instances are never
+// hold candidates. Holding a mid-surge Instance would strand its surge
+// pod (never promoted to serving) and permanently consume the maxSurge
+// budget, deadlocking the roll — the hold falls to the next-lowest
+// old-revision Instance instead. A parked attempt claims nothing and is
+// held like the Failed row it stands for.
+//
+// Cells: instance/Failed/spec.partition/before, instance/Update/Parked/spec.partition/before
 func TestPartitionHeldIndices(t *testing.T) {
 	p := func(v int32) *int32 { return &v }
 	planFor := func(indices ...int32) []types.InstancePlan {
@@ -1063,6 +1066,19 @@ func TestPartitionHeldIndices(t *testing.T) {
 				{Index: 2, Phase: types.InstancePhaseReady, RunningRevision: "old"},
 			},
 			want: map[int32]bool{2: true},
+		},
+		{
+			name:      "a parked attempt in either phase is held like the Failed row it stands for",
+			partition: p(2),
+			planned:   planFor(0, 1, 2),
+			observed: []types.InstanceStatus{
+				{Index: 0, Phase: types.InstancePhaseFailed, RunningRevision: "old",
+					Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepParked, TargetRevision: target}},
+				{Index: 1, Phase: types.InstancePhaseUpdating, RunningRevision: "old",
+					Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepParked, TargetRevision: target}},
+				{Index: 2, Phase: types.InstancePhaseReady, RunningRevision: "old"},
+			},
+			want: map[int32]bool{0: true, 1: true},
 		},
 		{
 			name:      "migration surge target excluded; Migrating source stays a candidate",

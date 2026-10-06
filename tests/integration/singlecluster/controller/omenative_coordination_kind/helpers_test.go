@@ -22,6 +22,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferencereplica"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	"github.com/ome-projects/ome/tests/integration/kindfix"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -137,6 +138,29 @@ func decodedInstanceStatuses(g gomega.Gomega, ir *v1beta1.InferenceReplica) []v1
 	rows, err := util.DecodedInstanceStatuses(ir)
 	g.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(), "decode instance statuses of InferenceReplica %s/%s", ir.Namespace, ir.Name)
 	return rows
+}
+
+// expectNoAttemptInFlight asserts a row of a Component whose roll a held
+// revision stopped carries no attempt in flight: no operation, or the
+// attempt the ladder disposed parked on the hold - an Update on the parked
+// step at the held revision, its deadline parked and its wait naming the
+// hold. A parked attempt is the roll's record of the attempt it stood
+// behind, not an attempt the roll drives.
+func expectNoAttemptInFlight(g gomega.Gomega, row v1beta1.OMENativeInstanceStatus, heldRevision string) {
+	op := row.Operation
+	if op == nil {
+		return
+	}
+	g.ExpectWithOffset(1, op.Type).To(gomega.Equal(v1beta1.InstanceOperationUpdate),
+		"instance %d: a held revision leaves at most its disposed attempt on the row, got %+v", row.Index, op)
+	g.ExpectWithOffset(1, op.Step).To(gomega.Equal(workloadtypes.UpdateStepParked),
+		"instance %d: an attempt is in flight at a held revision: %+v", row.Index, op)
+	g.ExpectWithOffset(1, op.TargetRevision).To(gomega.Equal(heldRevision),
+		"instance %d: the parked attempt must be the held revision's", row.Index)
+	g.ExpectWithOffset(1, op.Deadline.IsZero()).To(gomega.BeTrue(),
+		"instance %d: a parked attempt runs no clock, got deadline %s", row.Index, op.Deadline)
+	g.ExpectWithOffset(1, op.Waiting).To(gomega.Equal(string(v1beta1.RolloutHoldGateHeld)),
+		"instance %d: a parked attempt names the hold it stands behind", row.Index)
 }
 
 // migrationEntries reads status.migrations for one ISVC Component from

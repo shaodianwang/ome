@@ -582,13 +582,17 @@ func HeldByPartition(partition *int32, rank int32) bool {
 // counts those as held too, and the two must agree on membership).
 // Excluded from candidacy, so they are never held:
 //   - unobserved Instances (nothing running to hold);
-//   - Instances already converging to target — Phase=Updating and any
-//     preserved Update operation (gang-surge target markers, Failed
-//     continuations). An in-flight update must finish: holding it
-//     strands its surge pod, which is never promoted to serving and
-//     permanently consumes the surge budget, deadlocking the roll on
-//     the non-held Instances. The hold falls to the next-lowest old-
-//     revision Instance instead, preserving the count;
+//   - Instances already converging to target — an Update attempt in
+//     flight (the row's Owner, gang-surge target markers included) or
+//     the continuation of one (UpdateContinuation). An in-flight
+//     update must finish: holding it strands its surge pod, which is
+//     never promoted to serving and permanently consumes the surge
+//     budget, deadlocking the roll on the non-held Instances. The hold
+//     falls to the next-lowest old-revision Instance instead,
+//     preserving the count. A parked attempt claims nothing and is held
+//     like the Failed row it stands for, in either phase its pods give
+//     it; held with no pod left, the Create pass rebuilds it on the
+//     revision it runs;
 //   - transient migration surge Instances (Op.Type=Migrate on a
 //     non-Migrating phase) — the pair's source carries the steady
 //     capacity.
@@ -609,16 +613,11 @@ func PartitionHeldIndices(partition *int32, input workload.ReconcileInput, plann
 		if query.RevisionFromName(s.RunningRevision).Same(tgt) {
 			continue
 		}
-		if s.Phase == workload.InstancePhaseUpdating {
+		if workload.Owner(s) == workload.OwnerUpdate || workload.UpdateContinuation(s) {
 			continue
 		}
-		if s.Operation != nil {
-			if s.Operation.Type == workload.InstanceOperationUpdate {
-				continue
-			}
-			if s.Operation.Type == workload.InstanceOperationMigrate && s.Phase != workload.InstancePhaseMigrating {
-				continue
-			}
+		if s.Operation != nil && s.Operation.Type == workload.InstanceOperationMigrate && s.Phase != workload.InstancePhaseMigrating {
+			continue
 		}
 		candidates = append(candidates, inst.Index)
 	}
@@ -666,7 +665,12 @@ func evaluateUpdateTriggerFast(input workload.ReconcileInput, inst workload.Inst
 	if isGangSurgeTargetMarker(s) {
 		return UpdateTriggerDecision{}, false
 	}
-	if s.Phase == workload.InstancePhaseUpdating {
+	// An attempt parked after its disposition is a settled row to the
+	// ownership table and is read as the Failed row it stands for,
+	// whichever phase its pods give it: gated by its ladder below and
+	// re-opened as a fresh start.
+	parked := workload.StateOf(s) == workload.StateUpdateParked
+	if s.Phase == workload.InstancePhaseUpdating && !parked {
 		return UpdateTriggerDecision{Trigger: true}, false
 	}
 	// A Failed Instance must still re-trigger toward a NEW target. Once a
@@ -676,7 +680,7 @@ func evaluateUpdateTriggerFast(input workload.ReconcileInput, inst workload.Inst
 	// revision forever. Treat Failed like Ready for the revision comparison so a
 	// changed target re-drives it (the reconciler's budget path lets a
 	// mid-operation Failed Instance continue rather than start fresh).
-	if s.Phase != workload.InstancePhaseReady && s.Phase != workload.InstancePhaseFailed {
+	if s.Phase != workload.InstancePhaseReady && s.Phase != workload.InstancePhaseFailed && !parked {
 		return UpdateTriggerDecision{}, false
 	}
 
@@ -806,9 +810,9 @@ func isSurgeOwnedStatus(s *workload.InstanceStatus) bool {
 
 // effectiveUpdateStrategy returns the strategy an attempt runs under: the
 // one pinned on the operation in flight, or the desired one when no attempt
-// owns the Instance. A Failed row holds no attempt — editing the strategy is
-// the operator's way out of a mode that cannot make progress — so its
-// preserved operation does not pin anything.
+// owns the Instance. A Failed row and a parked attempt hold no attempt —
+// editing the strategy is the operator's way out of a mode that cannot
+// make progress — so their preserved operation does not pin anything.
 func effectiveUpdateStrategy(s *workload.InstanceStatus, desired workload.UpdateStrategyType) workload.UpdateStrategyType {
 	if workload.Owner(s) != workload.OwnerUpdate || s.Operation.Strategy == "" {
 		return desired
@@ -881,18 +885,33 @@ func RetryBlockOfCrashedAttempt(input workload.ReconcileInput, target *appsv1.Co
 	return nil
 }
 
-// anyInFlightUpdateAt reports whether any Instance carries an in-flight
-// Update Operation targeting rev. Used by the retry gate to distinguish
-// a live RetryInProgress authorization from one leaked by a superseded
-// or interrupted attempt.
+// anyInFlightUpdateAt reports whether any Instance carries an Update
+// Operation targeting rev that still claims the update verb. Used by the
+// retry gate to distinguish a live RetryInProgress authorization from one
+// leaked by a superseded or interrupted attempt. The claim, not the
+// owner: a Failed continuation still holds the authorization, while an
+// attempt parked after its disposition claims nothing.
 func anyInFlightUpdateAt(statuses []workload.InstanceStatus, rev string) bool {
 	for i := range statuses {
-		op := statuses[i].Operation
-		if op != nil && op.Type == workload.InstanceOperationUpdate && op.TargetRevision == rev {
+		s := &statuses[i]
+		if workload.ClaimOf(s) == workload.OwnerUpdate && s.Operation.TargetRevision == rev {
 			return true
 		}
 	}
 	return false
+}
+
+// LadderDeniesStart reports whether rev's retry ladder denies a fresh
+// start this pass, as the trigger gate reads it: a Held block, a backoff
+// not yet due, or an attempt at rev still in flight under the one
+// authorization the ladder grants at a time.
+func LadderDeniesStart(input workload.ReconcileInput, rev string) bool {
+	b := workload.FindRetryBlock(input.ObservedState.RetryBlocks, rev)
+	if b == nil {
+		return false
+	}
+	denied, _ := evaluateRetryBlockGate(b, input.Now(), anyInFlightUpdateAt(input.ObservedState.InstanceStatuses, rev))
+	return denied
 }
 
 // ProvenWindowSeconds is how long, in whole seconds, a promoted pod that
@@ -1166,7 +1185,9 @@ func EvaluateWreckage(s *workload.InstanceStatus, target *appsv1.ControllerRevis
 	if isMigrateOwnedStatus(s) || isGangSurgeTargetMarker(s) {
 		return false
 	}
-	if s.Phase != workload.InstancePhaseReady && s.Phase != workload.InstancePhaseFailed {
+	// A parked attempt is settled in either phase its pods give it, so a
+	// set it left on a withdrawn revision is wreckage while it serves too.
+	if state := workload.StateOf(s); state != workload.StateReady && state != workload.StateFailed && state != workload.StateUpdateParked {
 		return false
 	}
 	if failedGangSurgeContinuation(s, target.Name) {

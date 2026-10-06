@@ -36,6 +36,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -1065,8 +1066,8 @@ func TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused(t *testing.T) 
 	if insts[0].Phase != types.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", insts[0].Phase)
 	}
-	if insts[0].Operation != nil {
-		t.Errorf("Operation: got %+v want nil (disposition clears the failed attempt)", insts[0].Operation)
+	if op := insts[0].Operation; !types.OperationParked(op) || op.Waiting != string(types.RolloutHoldGateRetryBlock) {
+		t.Errorf("Operation: got %+v want the attempt parked on the ladder (its pod is alive)", op)
 	}
 	if len(rec.blockCalls) != 1 || rec.blockCalls[0].rev != "rev-bad" || rec.blockCalls[0].block.State != types.RetryBlockBackoff {
 		t.Errorf("RetryBlock: got %+v want one Backoff block for rev-bad", rec.blockCalls)
@@ -1758,8 +1759,8 @@ func TestDispose_CrashLoopOnUnservedRevisionBlamesNoNode(t *testing.T) {
 			if len(*blocks) != 1 || (*blocks)[0].TargetRevision != "rev-new" || (*blocks)[0].AttemptsStarted != 1 || (*blocks)[0].Reason != tc.wantWaveReason {
 				t.Fatalf("block: got %+v want one attempt on rev-new with reason %s", *blocks, tc.wantWaveReason)
 			}
-			if len(rec.commits) != 1 || rec.commits[0].after.Phase != types.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
-				t.Fatalf("commit: got %+v want single Failed-no-op commit", rec.commits)
+			if len(rec.commits) != 1 || rec.commits[0].after.Phase != types.InstancePhaseFailed || !types.OperationParked(rec.commits[0].after.Operation) {
+				t.Fatalf("commit: got %+v want a single commit parking the attempt at Failed (its pod is alive)", rec.commits)
 			}
 			got := rec.commits[0].after.LastFailure
 			if got == nil || got.PodName != tc.pod.Name {
@@ -1928,5 +1929,163 @@ func TestDispose_UnschedulableRebuildReleasesNodeExclusion(t *testing.T) {
 	}
 	if again := drainEvents(recorder); len(again) != 0 {
 		t.Errorf("second pass events: got %v want none (nothing left to release)", again)
+	}
+}
+
+// An attempt disposed while its own pod set is alive is parked rather
+// than ended: the operation stays on the row with the ladder's wait named
+// on it and its deadline parked, the row reads Failed for the set that is
+// down, the failure is recorded and the ladder is charged exactly as for
+// a cleared attempt. An attempt whose pods are gone, or whose wave no
+// ladder counts, is cleared as before.
+//
+// Cells: instance/Update/Drain/timer.operationDeadline/before, instance/Update/Drain/pod.waiting[CrashLoopBackOff]/before, instance/Update/InPlace/pod.waiting[CreateContainerConfigError]/before, instance/Update/Drain/pod.waiting[ImagePullBackOff]/before
+func TestDispose_LiveSetParksTheAttempt(t *testing.T) {
+	ladder := &types.RetryPolicy{MaxAttempts: 3, InitialDelay: time.Minute, MaxDelay: 30 * time.Minute, Multiplier: 2}
+	for _, tc := range []struct {
+		name      string
+		reason    string
+		step      string
+		served    bool
+		gone      bool
+		policy    *types.RetryPolicy
+		outcome   escalation.DispositionOutcome
+		parked    bool
+		wantState types.RetryBlockState
+		wantWait  string
+	}{
+		{name: "crash loop of a recreated set that served", reason: "CrashLoopBackOff", step: types.UpdateStepDrain, served: true, policy: ladder,
+			outcome: escalation.DispositionTerminal, parked: true, wantState: types.RetryBlockBackoff, wantWait: string(types.RolloutHoldGateRetryBlock)},
+		{name: "config key missing on a patched pod that served", reason: "CreateContainerConfigError", step: types.UpdateStepInPlace, served: true, policy: ladder,
+			outcome: escalation.DispositionHeldRevision, parked: true, wantState: types.RetryBlockBackoff, wantWait: string(types.RolloutHoldGateRetryBlock)},
+		{name: "held at once with no ladder configured", reason: "CreateContainerConfigError", step: types.UpdateStepDrain, served: true,
+			outcome: escalation.DispositionHeldRevision, parked: true, wantState: types.RetryBlockHeld, wantWait: string(types.RolloutHoldGateHeld)},
+		{name: "crash loop of a set that never served", reason: "CrashLoopBackOff", step: types.UpdateStepDrain, policy: ladder,
+			outcome: escalation.DispositionTerminal, parked: true, wantState: types.RetryBlockBackoff, wantWait: string(types.RolloutHoldGateRetryBlock)},
+		{name: "pull failure of a set that never started", reason: "ImagePullBackOff", step: types.UpdateStepDrain, policy: ladder,
+			outcome: escalation.DispositionHeldRevision, parked: true, wantState: types.RetryBlockBackoff, wantWait: string(types.RolloutHoldGateRetryBlock)},
+		{name: "pull failure of a set that is gone", reason: "ImagePullBackOff", step: types.UpdateStepDrain, policy: ladder, gone: true,
+			outcome: escalation.DispositionTerminal, wantState: types.RetryBlockBackoff},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+			fc := clocktesting.NewFakeClock(t0)
+			insts := []types.InstanceStatus{{
+				Index: 0, Incarnation: 2, Phase: types.InstancePhaseUpdating,
+				RunningRevision: "rev-good", TargetRevision: "rev-bad",
+				Operation: &types.InstanceOperation{
+					ID: "update-0-1", Type: types.InstanceOperationUpdate, Step: tc.step,
+					TargetRevision: "rev-bad", Deadline: metav1.NewTime(t0.Add(-time.Minute)),
+				},
+			}}
+			input, rec := dispositionFixtureInput(fc, &insts, "rev-bad", tc.policy, nil)
+			pod := waitingPod("engine-0-default-0", tc.reason, "node-a", t0.Add(-5*time.Minute))
+			if tc.served {
+				pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{Type: podreadiness.ConditionType, Status: corev1.ConditionTrue})
+			}
+			if tc.gone {
+				// The pod the disposition blames is on its way out: nothing
+				// of the set is left for the row to follow.
+				deleting := metav1.NewTime(t0)
+				pod.DeletionTimestamp = &deleting
+			}
+
+			outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{}, input,
+				types.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, tc.reason)
+			if err != nil {
+				t.Fatalf("DisposeExpiredAttempt: %v", err)
+			}
+			if outcome != tc.outcome {
+				t.Fatalf("outcome: got %v want %v", outcome, tc.outcome)
+			}
+			if len(rec.commits) != 1 {
+				t.Fatalf("MutateInstance commits: got %d want 1", len(rec.commits))
+			}
+			after := rec.commits[0].after
+			if after.Phase != types.InstancePhaseFailed {
+				t.Errorf("Phase after commit: got %q want Failed (the set is down at the disposal)", after.Phase)
+			}
+			if after.LastFailure == nil || after.LastFailure.Reason != tc.reason || (!tc.gone && after.LastFailure.PodName != pod.Name) {
+				t.Errorf("LastFailure: got %+v want Reason=%s PodName=%s", after.LastFailure, tc.reason, pod.Name)
+			}
+			if len(rec.blockCalls) != 1 || rec.blockCalls[0].rev != "rev-bad" {
+				t.Fatalf("MutateRetryBlock calls: got %+v want one for rev-bad", rec.blockCalls)
+			}
+			if block := rec.blockCalls[0].block; block.State != tc.wantState || block.AttemptsStarted != 1 {
+				t.Errorf("block: got (state=%s attempts=%d) want (%s, 1)", block.State, block.AttemptsStarted, tc.wantState)
+			}
+			if !tc.parked {
+				if after.Operation != nil {
+					t.Fatalf("a set that is gone has nothing to park on; the operation must be cleared, got %+v", after.Operation)
+				}
+				return
+			}
+			op := after.Operation
+			if op == nil || op.ID != "update-0-1" || op.Type != types.InstanceOperationUpdate || op.Step != types.UpdateStepParked || op.TargetRevision != "rev-bad" {
+				t.Fatalf("the attempt must stay on the row on the parked step, got %+v", op)
+			}
+			if op.Waiting != tc.wantWait {
+				t.Errorf("Waiting: got %q want %q (the wait the ladder names)", op.Waiting, tc.wantWait)
+			}
+			if !op.Deadline.IsZero() {
+				t.Errorf("Deadline: got %v want parked (zero): the clock that ended the attempt must not end it again", op.Deadline)
+			}
+		})
+	}
+}
+
+// The park lands only on the attempt the disposition observed. A row that
+// carries another Update attempt by the time the write lands - one opened
+// over the expired attempt in the same pass, at a corrected revision or
+// the same one - is neither parked with the old attempt's wait nor
+// cleared: a fresh attempt is not the disposition's to end. The wave is
+// still counted on the expired attempt's revision.
+//
+// Cells: instance/Update/Drain/timer.operationDeadline/before
+func TestDispose_AttemptReopenedSinceObservedIsNotParked(t *testing.T) {
+	ladder := &types.RetryPolicy{MaxAttempts: 3, InitialDelay: time.Minute, MaxDelay: 30 * time.Minute, Multiplier: 2}
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name     string
+		revision string
+	}{
+		{name: "re-opened at a corrected revision", revision: "rev-fixed"},
+		{name: "re-opened at the same revision and step", revision: "rev-bad"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := clocktesting.NewFakeClock(t0)
+			insts := []types.InstanceStatus{{
+				Index: 0, Incarnation: 2, Phase: types.InstancePhaseUpdating,
+				RunningRevision: "rev-good", TargetRevision: "rev-bad",
+				Operation: &types.InstanceOperation{
+					ID: "update-0-1", Type: types.InstanceOperationUpdate, Step: types.UpdateStepDrain,
+					TargetRevision: "rev-bad", Deadline: metav1.NewTime(t0.Add(-time.Minute)),
+				},
+			}}
+			input, rec := dispositionFixtureInput(fc, &insts, "rev-bad", ladder, nil)
+			observed := insts[0]
+			fresh := &types.InstanceOperation{
+				ID: "update-0-2", Type: types.InstanceOperationUpdate, Step: types.UpdateStepDrain,
+				TargetRevision: tc.revision, StartedAt: metav1.NewTime(t0), Deadline: metav1.NewTime(t0.Add(time.Hour)),
+			}
+			insts[0].Operation = fresh
+			pod := waitingPod("engine-0-default-0", "CrashLoopBackOff", "node-a", t0.Add(-5*time.Minute))
+			pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{Type: podreadiness.ConditionType, Status: corev1.ConditionTrue})
+
+			if _, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{}, input,
+				types.DispositionDeps{}, observed, []*corev1.Pod{pod}, "CrashLoopBackOff"); err != nil {
+				t.Fatalf("DisposeExpiredAttempt: %v", err)
+			}
+			if len(rec.commits) != 0 {
+				t.Fatalf("MutateInstance commits: got %+v want none, the fresh attempt is not the disposition's to end", rec.commits)
+			}
+			if row := insts[0]; row.Phase != types.InstancePhaseUpdating || row.Operation != fresh || row.LastFailure != nil ||
+				row.Operation.Step != types.UpdateStepDrain || row.Operation.Waiting != "" || row.Operation.Deadline.IsZero() {
+				t.Fatalf("row = %+v, want the fresh attempt left exactly as it was", row)
+			}
+			if len(rec.blockCalls) != 1 || rec.blockCalls[0].rev != "rev-bad" {
+				t.Fatalf("MutateRetryBlock calls: got %+v want the wave counted on rev-bad", rec.blockCalls)
+			}
+		})
 	}
 }

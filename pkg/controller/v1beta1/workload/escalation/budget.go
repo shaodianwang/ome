@@ -125,9 +125,11 @@ func CurrentSurgeInFlight(statuses []types.InstanceStatus) int32 {
 func CurrentUnavailableInFlight(statuses []types.InstanceStatus) int32 {
 	var n int32
 	for _, s := range statuses {
-		updating := s.Phase == types.InstancePhaseUpdating
-		failedUpdate := s.Phase == types.InstancePhaseFailed && s.Operation != nil &&
-			s.Operation.Type == types.InstanceOperationUpdate
+		// A parked attempt holds no slot in either phase: the table reads
+		// it as settled and claiming nothing, so the next attempt on its
+		// Instance is a fresh start; a Failed continuation still claims one.
+		updating := s.Phase == types.InstancePhaseUpdating && types.StateOf(&s) != types.StateUpdateParked
+		failedUpdate := s.Phase == types.InstancePhaseFailed && types.ClaimOf(&s) == types.OwnerUpdate
 		if !updating && !failedUpdate {
 			continue
 		}

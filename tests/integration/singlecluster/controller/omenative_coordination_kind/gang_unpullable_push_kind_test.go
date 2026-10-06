@@ -21,7 +21,8 @@ import (
 // Under RecreatePod the first gang is drained and its replacement parks
 // in ImagePullBackOff. Each attempt ends within the stuck-pod grace, is
 // counted on the revision's retry ladder and leaves the gang's row at
-// Failed with the pull failure as its reason; at the bound the revision
+// Failed with the pull failure as its reason and the disposed attempt
+// parked on the ladder's wait while its pods live; at the bound the revision
 // is Held, the status says so, and no further attempt is opened. The gang
 // the roll never reached keeps serving throughout, and a corrected push
 // lands on both gangs.
@@ -200,7 +201,7 @@ var _ = ginkgo.Describe("behavior - a gang pushed onto an unpullable image is he
 			rows := decodedInstanceStatuses(g, ir)
 			g.Expect(rows).To(HaveLen(2))
 			for _, row := range rows {
-				g.Expect(row.Operation).To(BeNil(), "a held revision leaves no attempt open on instance %d", row.Index)
+				expectNoAttemptInFlight(g, row, badRev)
 				g.Expect(row.RunningRevision).To(Equal(v1Rev), "instance %d must still record the sound revision", row.Index)
 				if row.Index == 0 {
 					g.Expect(row.Phase).To(Equal(v1beta1.OMENativeInstanceFailed), "the gang the push reached must read Failed")
@@ -225,7 +226,7 @@ var _ = ginkgo.Describe("behavior - a gang pushed onto an unpullable image is he
 				g.Expect(known).To(BeTrue(), "no unpullable-image pod may be created after Held (new UID %s)", uid)
 			}
 			for _, row := range instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent) {
-				g.Expect(row.Operation).To(BeNil(), "no attempt may reopen on instance %d while the revision is Held", row.Index)
+				expectNoAttemptInFlight(g, row, badRev)
 			}
 		}, postHeldWindow, kindPollInterval).Should(Succeed())
 		// Each attempt materializes one gang of two pods.

@@ -84,9 +84,10 @@ var _ = ginkgo.Describe("behavior — a one-down, no-surge roll stops at a bad p
 		crashRev := engineTargetRevision(Default, ns.Name, isvcName)
 		crashHash := query.RevisionHashFromControllerRevisionName(crashRev)
 
-		// The roll stops at one Instance: its row is Failed with no attempt
-		// open, the crashing revision is Held with the crash loop named, and
-		// the two other Instances still serve the running revision.
+		// The roll stops at one Instance: its row is Failed with the disposed
+		// attempt parked on the hold and no attempt in flight, the crashing
+		// revision is Held with the crash loop named, and the two other
+		// Instances still serve the running revision.
 		ginkgo.By("the roll stops at one Failed Instance with the crashing revision held")
 		var failedIndex string
 		Eventually(func(g Gomega) {
@@ -108,7 +109,7 @@ var _ = ginkgo.Describe("behavior — a one-down, no-surge roll stops at a bad p
 				if row.Phase == v1beta1.OMENativeInstanceFailed {
 					failed++
 					failedIndex = strconv.Itoa(int(row.Index))
-					g.Expect(row.Operation).To(BeNil(), "a held revision leaves no attempt open on instance %d", row.Index)
+					expectNoAttemptInFlight(g, row, crashRev)
 					continue
 				}
 				g.Expect(row.RunningRevision).To(Equal(runningRev), "instance %d must still run the running revision", row.Index)
@@ -135,7 +136,7 @@ var _ = ginkgo.Describe("behavior — a one-down, no-surge roll stops at a bad p
 				g.Expect(known).To(BeTrue(), "no pod on the crashing revision may be created while it is Held (new pod %s on instance %s)", uid, index)
 			}
 			for _, row := range instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent) {
-				g.Expect(row.Operation).To(BeNil(), "no attempt may reopen on instance %d while the revision is Held", row.Index)
+				expectNoAttemptInFlight(g, row, crashRev)
 			}
 		}).WithTimeout(kindSteadyStateWindow).WithPolling(kindPollInterval).Should(Succeed())
 		Expect(instanceIndicesOf(crashPodsWhileHeld)).To(ConsistOf(failedIndex),

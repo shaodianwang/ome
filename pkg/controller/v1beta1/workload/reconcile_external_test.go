@@ -6196,6 +6196,12 @@ func namesTheCrash(reason string) bool {
 	return reason == "CrashLoopBackOff" || strings.Contains(reason, "failed (Error, exit 1)")
 }
 
+// attemptOpen reports whether the row carries an attempt in flight: an
+// operation that is not a spent one parked after its disposition.
+func attemptOpen(s *workloadtypes.InstanceStatus) bool {
+	return s != nil && s.Operation != nil && !workloadtypes.OperationParked(s.Operation)
+}
+
 // heldOn reports whether the RetryBlock for rev is Held.
 func (h *recoveryHarness) heldOn(rev string) bool {
 	b := h.findBlock(rev)
@@ -6268,7 +6274,7 @@ func TestCrashLoopBound_NewRevisionCrashesAtStart(t *testing.T) {
 			h.settle(2)
 			h.runWithInvariant(8, func() bool { return false }, func() {
 				h.trackPodsOnImage(crashStartImage, seen)()
-				if s := h.instance(0); s == nil || s.Operation != nil || s.Phase == workloadtypes.InstancePhaseUpdating {
+				if s := h.instance(0); s == nil || attemptOpen(s) || s.Phase == workloadtypes.InstancePhaseUpdating {
 					h.dumpState("attempt after Held")
 					t.Fatalf("an attempt at the held revision was reopened: %+v", s)
 				}
@@ -8532,7 +8538,7 @@ func TestGangPush_UnpullableRevisionIsHeldWithinTheLadder(t *testing.T) {
 			}
 			h.settle(4)
 			row := h.instance(0)
-			if row == nil || row.Phase != workloadtypes.InstancePhaseFailed || row.Operation != nil ||
+			if row == nil || row.Phase != workloadtypes.InstancePhaseFailed || attemptOpen(row) ||
 				row.LastFailure == nil || row.LastFailure.Reason != "ImagePullBackOff" {
 				h.dumpState("held row")
 				t.Fatalf("the stuck gang must park at Failed with no attempt in flight and the pull failure as its reason, got %+v", row)
@@ -8642,7 +8648,7 @@ func TestUnpullablePush_ChargesTheLadderWhateverTheInstanceShape(t *testing.T) {
 			// the block, nothing in flight.
 			firstAttemptCharged := func() bool {
 				row, block := h.instance(0), h.findBlock(h.revBad.Name)
-				return row != nil && row.Phase == workloadtypes.InstancePhaseFailed && row.Operation == nil &&
+				return row != nil && row.Phase == workloadtypes.InstancePhaseFailed && !attemptOpen(row) &&
 					row.LastFailure != nil && row.LastFailure.Reason == "ImagePullBackOff" &&
 					block != nil && block.State == workloadtypes.RetryBlockBackoff && block.AttemptsStarted == 1 && block.NextRetryAt != nil
 			}
@@ -8718,7 +8724,7 @@ func TestUnpullablePush_ChargesTheLadderWhateverTheInstanceShape(t *testing.T) {
 				t.Fatalf("%d pods were made on the unpullable revision, want %d: one pod set per attempt of the ladder and none after it was Held", len(seen), want)
 			}
 			row := h.instance(0)
-			if row == nil || row.Phase != workloadtypes.InstancePhaseFailed || row.Operation != nil ||
+			if row == nil || row.Phase != workloadtypes.InstancePhaseFailed || attemptOpen(row) ||
 				row.LastFailure == nil || row.LastFailure.Reason != "ImagePullBackOff" {
 				h.dumpState("held row")
 				t.Fatalf("the stuck Instance must park at Failed with no attempt in flight and the pull failure as its reason, got %+v", row)
@@ -12286,5 +12292,330 @@ func TestReconcile_RollOverADarkInstanceOnTheTarget_ReachesItsEndAndTheRollbackL
 				})
 			}
 		}
+	}
+}
+
+// A one-down, no-surge roll stops at the Instance a bad push breaks and the
+// next push lands there first. Three single-pod Instances under RecreatePod
+// with maxSurge 0 and maxUnavailable 1; a push whose container dies at every
+// start takes one Instance down and the ladder holds the revision there: the
+// row carries the disposed attempt parked on the hold, Failed with no attempt
+// in flight, the two others serve v1 untouched, no second Instance is taken
+// and no pod of the crashing revision is made past the bound. The corrected
+// push lands on the parked Instance first, since replacing a set that serves
+// nothing costs no capacity, with both peers still serving v1, then on the
+// peers one at a time; nothing rebuilds the crashing revision once the fix is
+// the target and no repair opens on the parked Instance.
+//
+// Cells: instance/Update/Drain/pod.waiting[CrashLoopBackOff]/before, instance/Update/Parked/gate.deny[Held]/before, instance/Update/Parked/spec.revision/before, instance/Failed/spec.revision/before
+func TestOneDownNoSurge_BadPushParksOneInstanceAndTheFixLandsThereFirst(t *testing.T) {
+	const replicas = 3
+	h := offTargetCrashHarness(t, false, workloadtypes.UpdateStrategyRecreatePod, 0, 1, workloadtypes.RestartPolicyNone, replicas)
+	h.retryPolicy = pushRetryLadder
+
+	seen := map[types.UID]struct{}{}
+	revCrash := h.crashRevision(crashStartImage)
+	oneDown := func() {
+		h.trackPodsOnImage(crashStartImage, seen)()
+		if n := h.servingInstances(); n < replicas-1 {
+			h.dumpState("two down")
+			t.Fatalf("%d Instances in rotation, want at least %d: at most one Instance may be out of rotation", n, replicas-1)
+		}
+	}
+	if !h.runWithInvariant(120, func() bool { return h.heldOn(revCrash.Name) }, oneDown) {
+		h.dumpState("crash loop never held")
+		t.Fatalf("the crashing revision was never Held: attempts at it are unbounded")
+	}
+	parked := int32(-1)
+	for _, s := range h.irStatuses() {
+		if !workloadtypes.OperationParked(s.Operation) {
+			if !h.untouchedOn(s.Index, h.revV1) {
+				h.dumpState("second Instance taken")
+				t.Fatalf("instance %d = %+v, want it untouched on v1: the bad push may cost one Instance", s.Index, s)
+			}
+			continue
+		}
+		if parked >= 0 {
+			h.dumpState("two parked")
+			t.Fatalf("instances %d and %d both carry the parked attempt; the bad push may cost one Instance", parked, s.Index)
+		}
+		parked = s.Index
+		if s.Phase != workloadtypes.InstancePhaseFailed || s.Operation.TargetRevision != revCrash.Name ||
+			s.Operation.Waiting != string(workloadtypes.RolloutHoldGateHeld) || !s.Operation.Deadline.IsZero() || s.LastFailure == nil {
+			h.dumpState("parked row")
+			t.Fatalf("the parked row = %+v, want Failed with the attempt at %s parked on the hold and the crash recorded", s, revCrash.Name)
+		}
+	}
+	if parked < 0 {
+		h.dumpState("no parked row")
+		t.Fatal("no Instance carries the attempt the ladder held")
+	}
+	for _, pod := range h.podsOnImage(crashStartImage) {
+		if idx, _ := query.InstanceIdxFromLabels(pod); idx != parked {
+			t.Fatalf("pod %s of the crashing revision belongs to instance %d, want only the parked instance %d", pod.Name, idx, parked)
+		}
+	}
+	if len(seen) > int(pushRetryLadder.MaxAttempts) {
+		t.Fatalf("%d pods were made on the crashing revision, want at most the ladder's bound %d", len(seen), pushRetryLadder.MaxAttempts)
+	}
+	var peers []int32
+	for idx := int32(0); idx < replicas; idx++ {
+		if idx != parked {
+			peers = append(peers, idx)
+		}
+	}
+	// Held has no time bound: nothing re-opens the parked row and no peer moves.
+	h.runWithInvariant(6, func() bool { return false }, func() {
+		oneDown()
+		if s := h.instance(parked); attemptOpen(s) || s.Phase == workloadtypes.InstancePhaseUpdating {
+			h.dumpState("attempt after Held")
+			t.Fatalf("an attempt at the held revision was reopened: %+v", s)
+		}
+		for _, peer := range peers {
+			if !h.untouchedOn(peer, h.revV1) {
+				h.dumpState("peer taken under the hold")
+				t.Fatalf("instance %d left v1 while the crashing revision is held", peer)
+			}
+		}
+	})
+	if len(seen) > int(pushRetryLadder.MaxAttempts) {
+		t.Fatalf("a pod of the crashing revision was made under the hold: %d seen, bound %d", len(seen), pushRetryLadder.MaxAttempts)
+	}
+
+	h.events = nil
+	h.setTarget(h.revFixed, fixedImage)
+	requireDarkInstanceRollsFirst(t, h, parked, peers, nil, workloadtypes.UpdateStrategyRecreatePod, 0, 1,
+		func() bool { return h.settledOn(h.revFixed, replicas) })
+	if n := h.servingInstances(); n != replicas {
+		h.dumpState("after the fix")
+		t.Fatalf("%d Instances serve after the fix, want %d", n, replicas)
+	}
+	if pods := h.podsOnImage(crashStartImage); len(pods) != 0 {
+		t.Fatalf("%d pod(s) of the crashing revision are still alive after the fix landed", len(pods))
+	}
+	if h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+		t.Fatalf("a repair opened on the parked Instance; it is the update pass's once the fix is the target: %v", h.events)
+	}
+}
+
+// A roll onto a revision whose runner dies after serving, under a
+// minReadySeconds window the runner never holds: the recreate attempt
+// never promotes, its deadline ends it, and the revision's retry ladder
+// paces the next one. Between the two the kubelet keeps restarting the
+// runner in place and the pod set serves between crashes. The phase says
+// what the pods do: the row keeps the attempt, parked on the wait the
+// ladder names, reads Failed while the set sits in the kubelet's back-off
+// and not Failed while the full set serves, keeps its reading across a
+// restart in place inside the stuck-pod grace, records the crash, and the
+// ladder is charged one attempt per disposal until it holds, where the
+// phase keeps following the pods. The next attempt replaces the pods as a
+// fresh recreate, the Instance the roll never reached serves throughout,
+// and a corrected revision lands through the ordinary roll.
+//
+// Cells: instance/Update/Drain/timer.operationDeadline/before, instance/Failed/pod.containersReady[source]/before, instance/Update/Parked/pod.containersNotReady[source]/before, instance/Update/Parked/pod.waiting[CrashLoopBackOff]/before, instance/Update/Parked/gate.deny[Held]/before, instance/Update/Parked/timer.retryAt/before, instance/Failed/timer.retryAt/before
+func TestCrashBeforePromotion_DisposedRollAttemptFollowsItsPods(t *testing.T) {
+	for _, shape := range []struct {
+		name     string
+		multiPod bool
+	}{
+		{name: "single pod"},
+		{name: "gang whose leader dies", multiPod: true},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			const replicas = 2
+			h := newRecoveryHarnessFor(t, shape.multiPod, constants.MainContainerName)
+			h.replicas = replicas
+			repair := workloadtypes.RestartPolicyRecreateInstance
+			h.lifecycle.RestartPolicy = &repair
+			// The runner serves one pass and dies, and the promote needs a
+			// window of several passes, so no attempt at the crashing
+			// revision promotes: only the attempt deadline ends it.
+			h.crashAfterServed = 1
+			h.crashLeaderOnly = shape.multiPod
+			h.stuckGrace = 10 * time.Minute
+			h.stepCap = recoveryStepFloor
+			h.minReadySeconds = int32(4 * recoveryStepFloor / time.Second)
+			h.lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: 4 * recoveryStepFloor}
+			h.retryPolicy = pushRetryLadder
+			h.useRollingBudget(workloadtypes.UpdateStrategyRecreatePod)
+			if !h.run(60, func() bool { return h.settledOn(h.revV1, replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+			}
+			peerPods := map[types.UID]bool{}
+			for _, pod := range h.podsOf(1) {
+				peerPods[pod.UID] = true
+			}
+
+			revCrash := h.crashRevision(flapAfterServingImage)
+			parkedOn := func(op *workloadtypes.InstanceOperation) bool {
+				return workloadtypes.OperationParked(op) && op.TargetRevision == revCrash.Name && workloadtypes.ParkedWaitingReason(op.Waiting)
+			}
+			waitingReason := func(pod *corev1.Pod) string {
+				for _, cs := range pod.Status.ContainerStatuses {
+					if cs.State.Waiting != nil {
+						return cs.State.Waiting.Reason
+					}
+				}
+				return ""
+			}
+			// crashSet reports whether Instance 0 holds its full pod set on
+			// the crashing revision, whether every member of it serves, and
+			// whether the set is dark: its routed runner in the kubelet's
+			// back-off, which reads out of service at once.
+			crashSet := func() (full, serving, dark bool) {
+				live := 0
+				serving = true
+				for _, pod := range h.podsOf(0) {
+					if pod.Spec.Containers[0].Image != flapAfterServingImage || pod.DeletionTimestamp != nil {
+						continue
+					}
+					live++
+					if !podreadiness.IsContainersReady(pod) || !podreadiness.IsServing(pod) {
+						serving = false
+					}
+					if query.RoutedRunner(pod) && !podreadiness.ReadyAndServing(pod) && waitingReason(pod) == "CrashLoopBackOff" {
+						dark = true
+					}
+				}
+				full = live == len(h.desired.Runners)
+				return full, full && serving, dark
+			}
+			attempts := func() int32 {
+				if block := h.findBlock(revCrash.Name); block != nil {
+					return block.AttemptsStarted
+				}
+				return 0
+			}
+			seen := map[types.UID]struct{}{}
+			var sawParkedServing, sawParkedDown, sawHeldServing, sawFreshAttempt bool
+			var lastParkedPhase workloadtypes.InstancePhase
+			observe := func() {
+				h.trackPodsOnImage(flapAfterServingImage, seen)()
+				if peer := h.instance(1); peer == nil || peer.Phase != workloadtypes.InstancePhaseReady || peer.RunningRevision != h.revV1.Name {
+					h.dumpState("peer taken")
+					t.Fatalf("Instance 1 must stay Ready on v1 while the roll parks on Instance 0, got %+v", peer)
+				}
+				for _, pod := range h.podsOf(1) {
+					if !peerPods[pod.UID] {
+						h.dumpState("peer pod replaced")
+						t.Fatalf("Instance 1 serves through a pod the roll never made: %s", pod.Name)
+					}
+				}
+				row := h.instance(0)
+				if row == nil || row.RunningRevision == revCrash.Name {
+					return
+				}
+				full, serving, dark := crashSet()
+				if row.Phase == workloadtypes.InstancePhaseFailed && serving {
+					h.dumpState("failed while serving")
+					t.Fatalf("Instance 0 reads Failed while its full pod set is Ready and in rotation: %+v", *row)
+				}
+				if !parkedOn(row.Operation) {
+					lastParkedPhase = ""
+					if attempts() > 0 && row.Phase == workloadtypes.InstancePhaseUpdating && row.Operation != nil &&
+						row.Operation.TargetRevision == revCrash.Name && row.Operation.Waiting == "" {
+						sawFreshAttempt = true
+					}
+					return
+				}
+				if row.LastFailure == nil {
+					t.Fatalf("a parked attempt records the crash that ended it: %+v", *row)
+				}
+				held := h.heldOn(revCrash.Name)
+				switch {
+				case serving:
+					if row.Phase != workloadtypes.InstancePhaseUpdating {
+						h.dumpState("parked while serving")
+						t.Fatalf("a parked attempt whose full set serves reads as the roll in progress, got %s: %+v", row.Phase, *row)
+					}
+					sawParkedServing = true
+					if held {
+						sawHeldServing = true
+					}
+				case dark:
+					if row.Phase != workloadtypes.InstancePhaseFailed {
+						h.dumpState("parked while down")
+						t.Fatalf("a parked attempt whose set is in the kubelet's back-off reads Failed, got %s: %+v", row.Phase, *row)
+					}
+					sawParkedDown = true
+				case full && lastParkedPhase != "":
+					if row.Phase != lastParkedPhase {
+						h.dumpState("parked while restarting")
+						t.Fatalf("a parked attempt whose runner restarts in place inside the grace keeps reading %s, got %s: %+v", lastParkedPhase, row.Phase, *row)
+					}
+				}
+				lastParkedPhase = row.Phase
+			}
+			reached := h.runWithInvariant(240, func() bool {
+				return h.heldOn(revCrash.Name) && sawHeldServing && sawParkedDown
+			}, observe)
+			if !reached {
+				h.dumpState("ladder")
+				t.Fatalf("the story never reached a held ladder with the parked attempt observed serving and down (held=%v serving=%v down=%v attempts=%d)",
+					h.heldOn(revCrash.Name), sawHeldServing, sawParkedDown, attempts())
+			}
+			if !sawParkedServing || !sawFreshAttempt {
+				t.Fatalf("the story must observe the parked attempt serving (%v) and a fresh attempt replacing it (%v)", sawParkedServing, sawFreshAttempt)
+			}
+			block := h.findBlock(revCrash.Name)
+			if block.AttemptsStarted != pushRetryLadder.MaxAttempts {
+				t.Fatalf("attempts counted = %d, want one per disposal up to the ladder's bound %d", block.AttemptsStarted, pushRetryLadder.MaxAttempts)
+			}
+			if want := int(pushRetryLadder.MaxAttempts) * len(h.desired.Runners); len(seen) != want {
+				h.dumpState("attempts")
+				t.Fatalf("%d pods were made on the crashing revision, want %d: one pod set per attempt of the ladder", len(seen), want)
+			}
+			row := h.instance(0)
+			if !parkedOn(row.Operation) || row.Operation.Waiting != string(workloadtypes.RolloutHoldGateHeld) {
+				t.Fatalf("under a held ladder the parked attempt names the hold as its wait, got %+v", row.Operation)
+			}
+			// The phase keeps following the pods under the hold.
+			h.runWithInvariant(6, func() bool { return false }, observe)
+
+			// A runner the kubelet restarts in place, back inside the stuck-pod
+			// grace, moves nothing: the row keeps reading as the roll in
+			// progress and the pass writes no status.
+			if !h.runWithInvariant(6, func() bool {
+				_, serving, _ := crashSet()
+				return serving && h.instance(0).Phase == workloadtypes.InstancePhaseUpdating
+			}, observe) {
+				h.dumpState("serving under the hold")
+				t.Fatalf("the parked set never read serving under the hold")
+			}
+			var routed *corev1.Pod
+			for _, pod := range h.podsOf(0) {
+				if pod.Spec.Containers[0].Image == flapAfterServingImage && query.RoutedRunner(pod) {
+					routed = pod
+				}
+			}
+			h.killRunnerOnce(routed)
+			writes := h.statusWrites
+			h.step()
+			var restarted *corev1.Pod
+			for _, pod := range h.podsOf(0) {
+				if pod.Name == routed.Name {
+					restarted = pod
+				}
+			}
+			if restarted == nil || restarted.Status.Phase != corev1.PodRunning || podreadiness.IsContainersReady(restarted) || waitingReason(restarted) != "" {
+				t.Fatalf("the kubelet model must report the runner restarting in place, got %+v", restarted)
+			}
+			if row := h.instance(0); !parkedOn(row.Operation) || row.Phase != workloadtypes.InstancePhaseUpdating {
+				h.dumpState("restart in place")
+				t.Fatalf("a parked attempt whose runner restarts in place inside the grace keeps reading Updating, got %+v", *row)
+			}
+			if h.statusWrites != writes {
+				t.Fatalf("the restart in place must write no status, got %d write(s)", h.statusWrites-writes)
+			}
+
+			h.setTarget(h.revFixed, fixedImage)
+			if !h.run(80, func() bool {
+				return h.settledOn(h.revFixed, replicas) && len(h.podsOnImage(flapAfterServingImage)) == 0
+			}) {
+				h.dumpState("corrected push")
+				t.Fatalf("the corrected push did not land on every Instance after the crashing revision was held")
+			}
+		})
 	}
 }

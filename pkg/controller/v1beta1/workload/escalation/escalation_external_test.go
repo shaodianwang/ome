@@ -200,8 +200,8 @@ func TestEscalation_StuckPodNotServing_IdenticalDispositionOutcome(t *testing.T)
 	if rec.store[0].Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", rec.store[0].Phase)
 	}
-	if rec.store[0].Operation != nil {
-		t.Errorf("Operation: got %+v want nil (disposition clears the failed attempt)", rec.store[0].Operation)
+	if op := rec.store[0].Operation; !workloadtypes.OperationParked(op) || op.Waiting != string(workloadtypes.RolloutHoldGateHeld) {
+		t.Errorf("Operation: got %+v want the attempt parked under the hold (its pod is alive)", op)
 	}
 	if len(rec.blocks) != 1 || rec.blocks[0].TargetRevision != "own-engine-badhash" {
 		t.Errorf("RetryBlock: got %+v want one block for own-engine-badhash", rec.blocks)
@@ -553,8 +553,8 @@ func TestEscalation_DispositionFlushesPendingStamps(t *testing.T) {
 	if store[0].Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("instance 0 Phase: got %q want Failed", store[0].Phase)
 	}
-	if store[1].Phase != workloadtypes.InstancePhaseFailed || store[1].Operation != nil {
-		t.Errorf("instance 1: got Phase=%q Operation=%v want Failed with Operation cleared (disposition path)", store[1].Phase, store[1].Operation)
+	if store[1].Phase != workloadtypes.InstancePhaseFailed || !workloadtypes.OperationParked(store[1].Operation) {
+		t.Errorf("instance 1: got Phase=%q Operation=%v want Failed with the attempt parked (disposition path)", store[1].Phase, store[1].Operation)
 	}
 }
 
@@ -2842,6 +2842,50 @@ func TestEscalation_RestartingRowNamingTheLoopIsJudgedOnItsRebuild(t *testing.T)
 			}
 			if len(rec.warns) != tc.wantWarns {
 				t.Errorf("WarnInstanceFailed: got %v want %d call(s)", rec.warns, tc.wantWarns)
+			}
+		})
+	}
+}
+
+// An attempt parked after its disposition is left to its ladder: the
+// clocks that ended it do not end it again, whichever phase its pods
+// currently give it. A pod wedged past the grace on such a row writes no
+// second disposal, charges no second wave and raises no second warning.
+//
+// Cells: instance/Update/Parked/timer.stuckPodGrace/before, instance/Update/Parked/pod.waiting[CrashLoopBackOff]/before, instance/Failed/timer.stuckPodGrace/before
+func TestEscalation_ParkedAttemptIsLeftToItsLadder(t *testing.T) {
+	for _, phase := range []workloadtypes.InstancePhase{workloadtypes.InstancePhaseUpdating, workloadtypes.InstancePhaseFailed} {
+		t.Run(string(phase), func(t *testing.T) {
+			now := time.Now()
+			insts := []workloadtypes.InstanceStatus{{
+				Index: 0, Phase: phase, PodCount: 1,
+				RunningRevision: "own-engine-oldhash", TargetRevision: "own-engine-newhash",
+				Operation: &workloadtypes.InstanceOperation{
+					ID: "update-0-1", Type: workloadtypes.InstanceOperationUpdate, Step: workloadtypes.UpdateStepParked,
+					TargetRevision: "own-engine-newhash", Waiting: string(workloadtypes.RolloutHoldGateRetryBlock),
+				},
+				LastFailure: &workloadtypes.InstanceTermination{PodName: "engine-0-default-0", Reason: "CrashLoopBackOff", Time: metav1.NewTime(now.Add(-time.Minute))},
+			}}
+			input, rec := escalationFixture(insts)
+			input.StuckPodGrace = 30 * time.Second
+			pod := waitingPod("engine-0-default-0", "CrashLoopBackOff", "node-a", now.Add(-time.Hour))
+			pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{Type: podreadiness.ConditionType, Status: corev1.ConditionTrue})
+
+			if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1), map[int32][]*corev1.Pod{0: {pod}}); err != nil {
+				t.Fatalf("escalation pass: %v", err)
+			}
+			row := rec.store[0]
+			if row.Phase != phase {
+				t.Errorf("Phase: got %q want %q untouched", row.Phase, phase)
+			}
+			if row.Operation == nil || row.Operation.ID != "update-0-1" || row.Operation.Waiting != string(workloadtypes.RolloutHoldGateRetryBlock) {
+				t.Errorf("Operation: got %+v want the parked attempt kept as it was", row.Operation)
+			}
+			if len(rec.blocks) != 0 {
+				t.Errorf("RetryBlock: got %+v want no second wave", rec.blocks)
+			}
+			if len(rec.warns) != 0 {
+				t.Errorf("WarnInstanceFailed: got %v want none", rec.warns)
 			}
 		})
 	}

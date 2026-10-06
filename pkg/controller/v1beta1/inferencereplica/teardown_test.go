@@ -1082,7 +1082,7 @@ func TestTeardown_DeadlineExceeded_WarnsAndReleases(t *testing.T) {
 // same way: the Warning, the finalizer released, and the row purged with
 // the owner in one delete.
 //
-// Arrows: T-pending-teardown-deadline, T-ready-teardown-deadline, T-failed-teardown-deadline, T-create-teardown-deadline, T-surge-teardown-deadline, T-surgedrain-teardown-deadline, T-gangtarget-teardown-deadline, T-gangcleanup-teardown-deadline, T-inplace-teardown-deadline, T-drain-teardown-deadline, T-restart-teardown-deadline, T-migrate-teardown-deadline, T-migratetarget-teardown-deadline, T-delete-teardown-deadline
+// Arrows: T-pending-teardown-deadline, T-ready-teardown-deadline, T-failed-teardown-deadline, T-create-teardown-deadline, T-surge-teardown-deadline, T-surgedrain-teardown-deadline, T-gangtarget-teardown-deadline, T-gangcleanup-teardown-deadline, T-inplace-teardown-deadline, T-drain-teardown-deadline, T-parked-teardown-deadline, T-restart-teardown-deadline, T-migrate-teardown-deadline, T-migratetarget-teardown-deadline, T-delete-teardown-deadline
 func TestTeardown_DeadlineExceeded_ReleasesFromEveryInstanceState(t *testing.T) {
 	op := func(opType v1beta1.InstanceOperationType, step string) *v1beta1.InstanceOperation {
 		return &v1beta1.InstanceOperation{ID: "op-" + step, Type: opType, Step: step}
@@ -1102,6 +1102,7 @@ func TestTeardown_DeadlineExceeded_ReleasesFromEveryInstanceState(t *testing.T) 
 		{state: "Update/GangSurgeTargetCleanup", phase: v1beta1.OMENativeInstanceCreating, op: op(v1beta1.InstanceOperationUpdate, workloadtypes.UpdateStepGangSurgeTargetCleanup)},
 		{state: "Update/InPlace", phase: v1beta1.OMENativeInstanceUpdating, op: op(v1beta1.InstanceOperationUpdate, "InPlace")},
 		{state: "Update/Drain", phase: v1beta1.OMENativeInstanceUpdating, op: op(v1beta1.InstanceOperationUpdate, "Drain")},
+		{state: "Update/Parked", phase: v1beta1.OMENativeInstanceUpdating, op: op(v1beta1.InstanceOperationUpdate, workloadtypes.UpdateStepParked)},
 		{state: "Restart/Drain", phase: v1beta1.OMENativeInstanceRestarting, op: op(v1beta1.InstanceOperationRestart, "Drain")},
 		{state: "Migrate/CreateSurge", phase: v1beta1.OMENativeInstanceMigrating, op: op(v1beta1.InstanceOperationMigrate, "CreateSurge")},
 		{state: "Migrate/SurgeTarget", phase: v1beta1.OMENativeInstanceCreating, op: op(v1beta1.InstanceOperationMigrate, "CreateSurge")},

@@ -1122,3 +1122,36 @@ func TestTerminatingSurgeInFlight(t *testing.T) {
 		})
 	}
 }
+
+// An attempt parked after its disposition holds no unavailability slot: the
+// next attempt on its own Instance is a fresh start the budget must be
+// free to admit, in whichever phase the parked row's pods give it.
+//
+// Cells: instance/Failed/gate.deny[Budget]/before, instance/Update/Parked/gate.deny[Budget]/before
+func TestCurrentUnavailableInFlight_ParkedAttemptHoldsNoSlot(t *testing.T) {
+	parked := func(phase types.InstancePhase, waiting string) types.InstanceStatus {
+		return types.InstanceStatus{Index: 0, Phase: phase, Operation: &types.InstanceOperation{
+			Type: types.InstanceOperationUpdate, Step: types.UpdateStepParked, TargetRevision: "rev-b", Waiting: waiting,
+		}}
+	}
+	inFlight := types.InstanceStatus{Index: 0, Phase: types.InstancePhaseUpdating, Operation: &types.InstanceOperation{
+		Type: types.InstanceOperationUpdate, Step: types.UpdateStepDrain, TargetRevision: "rev-b",
+	}}
+	for _, tc := range []struct {
+		name string
+		row  types.InstanceStatus
+		want int32
+	}{
+		{name: "parked on the ladder while its set serves", row: parked(types.InstancePhaseUpdating, string(types.RolloutHoldGateRetryBlock)), want: 0},
+		{name: "parked on the ladder while its set is down", row: parked(types.InstancePhaseFailed, string(types.RolloutHoldGateRetryBlock)), want: 0},
+		{name: "parked under a held ladder", row: parked(types.InstancePhaseFailed, string(types.RolloutHoldGateHeld)), want: 0},
+		{name: "parked behind the budget", row: parked(types.InstancePhaseUpdating, string(types.RolloutHoldGateBudget)), want: 0},
+		{name: "an attempt in flight still holds its slot", row: inFlight, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := escalation.CurrentUnavailableInFlight([]types.InstanceStatus{tc.row}); got != tc.want {
+				t.Fatalf("CurrentUnavailableInFlight = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

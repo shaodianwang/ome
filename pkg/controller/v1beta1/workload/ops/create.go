@@ -872,11 +872,21 @@ func allowCreateForMissingInstance(input workload.ReconcileInput, plan workload.
 }
 
 // createFreshStart reports whether the row is one the Create pass would open
-// a first attempt on: no row at all, or the Failed-with-no-Operation shape a
-// disposed attempt and the operator reset mailbox both leave behind. Any
-// other row is rebuilding — it holds pods, an attempt, or both.
+// a first attempt on: no row at all, a Failed row whose operation claims no
+// verb — the shape a disposed attempt and the operator reset mailbox both
+// leave behind, and a parked attempt — or a parked attempt whose set
+// serves. Any other row is rebuilding — it holds pods, an attempt, or both.
 func createFreshStart(s *workload.InstanceStatus) bool {
-	return s == nil || (s.Phase == workload.InstancePhaseFailed && s.Operation == nil)
+	if s == nil {
+		return true
+	}
+	switch workload.StateOf(s) {
+	case workload.StateUpdateParked:
+		return true
+	case workload.StateFailed:
+		return workload.ClaimOf(s) == workload.OwnerNone
+	}
+	return false
 }
 
 // createRevision names the revision a Create attempt on Instance idx renders

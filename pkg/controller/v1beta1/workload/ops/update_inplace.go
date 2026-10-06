@@ -60,10 +60,10 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 	}
 
 	// In-place keeps the same Incarnation — only the container image rolls.
-	wasNotUpdating := true
-	if s := input.ObservedState.Instance(inst.Index); s != nil && s.Phase == workload.InstancePhaseUpdating {
-		wasNotUpdating = false
-	}
+	// A row the update pass owns is mid-update; one in Updating only
+	// because a parked attempt's pods serve is not, and the patch over it
+	// is a first pass.
+	wasNotUpdating := workload.Owner(input.ObservedState.Instance(inst.Index)) != workload.OwnerUpdate
 	if err := status.StampUpdatingInPlace(ctx, input, inst.Index, target.Name, plan.UpdateStrategy.Type, plan.InstanceReadyTimeout); err != nil {
 		return false, fmt.Errorf("patch status Updating (instance=%d): %w", inst.Index, err)
 	}

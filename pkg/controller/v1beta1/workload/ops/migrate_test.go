@@ -2045,6 +2045,25 @@ func seedSourceFailedOnUnstartedRevision(t *testing.T, f *migFixture, idx int32,
 	return pushed
 }
 
+// seedSourceParkedOnUnstartedRevision is seedSourceFailedOnUnstartedRevision
+// with the attempt kept on the row as a parked attempt, read in phase: the
+// set serving (Updating) or down (Failed).
+func seedSourceParkedOnUnstartedRevision(t *testing.T, f *migFixture, idx int32, phase v1beta1.OMENativeInstancePhase, failureReason string) string {
+	t.Helper()
+	pushed := seedSourceFailedOnUnstartedRevision(t, f, idx, failureReason)
+	ir := f.getIR(t)
+	row := migrationStatusByIndex(t, ir, idx)
+	row.Phase = phase
+	row.Operation = &v1beta1.InstanceOperation{
+		ID: "update-0-1", Type: v1beta1.InstanceOperationUpdate, Step: workload.UpdateStepParked,
+		TargetRevision: pushed, Waiting: string(workload.RolloutHoldGateRetryBlock),
+	}
+	if err := f.c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("seed parked source: %v", err)
+	}
+	return pushed
+}
+
 // seedStartedLedgerRow persists the Started row the accept pass writes
 // for uuid, started at startedAt, with no surge allocated.
 func seedStartedLedgerRow(t *testing.T, f *migFixture, uuid, startedAt string) {
@@ -2538,17 +2557,63 @@ func TestMigrate_PausedComponent_WaitsNamingThePause(t *testing.T) {
 	}
 }
 
+// A move against an attempt parked after its disposition is answered in
+// the pass that picks it, exactly as one against the Failed row with no
+// operation the parked attempt stands for, whichever phase its pods give
+// the row: the revision has not started, and only a corrected or
+// released revision moves such a row.
+// Cells: instance/Update/Parked/spec.migrateRequest/before, instance/Failed/spec.migrateRequest/before
+func TestMigrate_SourceParkedOnARevisionThatHasNotStarted_RejectedAtOnce(t *testing.T) {
+	for _, phase := range []v1beta1.OMENativeInstancePhase{v1beta1.OMENativeInstanceUpdating, v1beta1.OMENativeInstanceFailed} {
+		t.Run(string(phase), func(t *testing.T) {
+			f := newSinglePodMigFixture(t)
+			f.recorder = record.NewFakeRecorder(16)
+			const uuid = "mig-source-parked-attempt"
+			f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+			pushed := seedSourceParkedOnUnstartedRevision(t, f, 0, phase, "CrashLoopBackOff")
+			f.retryBlocks = []workload.RetryBlock{{TargetRevision: pushed, State: workload.RetryBlockBackoff, AttemptsStarted: 1, Reason: "CrashLoopBackOff"}}
+			startedAt := metav1.NewTime(time.Now().Add(-time.Hour)).UTC().Format(time.RFC3339)
+			seedStartedLedgerRow(t, f, uuid, startedAt)
+
+			done, accepted := f.pass(t, uuid)
+			if !done || !accepted {
+				t.Fatalf("the move must be answered in the pass: done=%v accepted=%v", done, accepted)
+			}
+			assertRecordFailed(t, f, uuid, "has not started")
+			rec := f.record(t, uuid)
+			for _, want := range []string{pushed, "retry block Backoff after 1 failed attempt(s): CrashLoopBackOff", "correct or release the revision, then request the move again"} {
+				if !strings.Contains(rec.Message, want) {
+					t.Errorf("record Message = %q, want substring %q", rec.Message, want)
+				}
+			}
+			for _, r := range f.records {
+				if r.Phase == workload.MigrationPhaseAccepted {
+					t.Errorf("no record may stay Accepted after the answer; got %+v", r)
+				}
+			}
+			row := findInstanceStatusOnIRForFixture(t, f, 0)
+			if row.Phase != phase || row.Operation == nil || row.Operation.Step != workload.UpdateStepParked {
+				t.Errorf("the parked attempt must be left as it was, got %+v", row)
+			}
+		})
+	}
+}
+
 // The rejection is for a Failed row with no operation whose target
-// revision is not the one it runs; a parked repair at its running
-// revision, an open operation, or a row not Failed is another path's.
+// revision is not the one it runs, and for an attempt parked after its
+// disposition in either phase; a parked repair at its running revision,
+// an open operation, or a row not Failed is another path's.
 func TestMigrationSourceRevisionNotStarted(t *testing.T) {
 	op := &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, TargetRevision: "rev-b"}
+	parked := &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepParked, TargetRevision: "rev-b", Waiting: string(workload.RolloutHoldGateRetryBlock)}
 	cases := []struct {
 		name string
 		row  *workload.InstanceStatus
 		want bool
 	}{
 		{"failed on a revision it never started", &workload.InstanceStatus{Phase: workload.InstancePhaseFailed, RunningRevision: "rev-a", TargetRevision: "rev-b"}, true},
+		{"parked attempt with its set down", &workload.InstanceStatus{Phase: workload.InstancePhaseFailed, RunningRevision: "rev-a", TargetRevision: "rev-b", Operation: parked}, true},
+		{"parked attempt with its set serving", &workload.InstanceStatus{Phase: workload.InstancePhaseUpdating, RunningRevision: "rev-a", TargetRevision: "rev-b", Operation: parked}, true},
 		{"failed on its first revision", &workload.InstanceStatus{Phase: workload.InstancePhaseFailed, TargetRevision: "rev-b"}, true},
 		{"failed at its running revision", &workload.InstanceStatus{Phase: workload.InstancePhaseFailed, RunningRevision: "rev-a", TargetRevision: "rev-a"}, false},
 		{"failed with no target recorded", &workload.InstanceStatus{Phase: workload.InstancePhaseFailed, RunningRevision: "rev-a"}, false},

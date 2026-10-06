@@ -95,7 +95,7 @@ states:
     phase: Failed
     applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
     decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
-    note: the escalation pass stamped the failure; a disposed Create, recreate or in-place Update attempt, single-pod or gang, also had its operation cleared, while a gang surge keeps its operation for the abandon path to consume. A kept Restart operation records a parked repair, which keeps two exits of its own - the restart pass resumes its promote when the rebuilt set comes up, and re-arms it on the operator's retry ladder while the set stays wedged - besides the gang-member-loss trigger that re-arms over it and the operator reset mailbox that clears it outright
+    note: the escalation pass stamped the failure; a disposed Create attempt, and a disposed recreate or in-place Update attempt whose own pods are gone, also had its operation cleared, while a gang surge keeps its operation for the abandon path to consume. A disposed recreate or in-place attempt whose own pod set is still alive keeps its operation on the parked step (Update/Parked) - Operation.Waiting names the wait the next attempt stands behind and the deadline is parked - and the row reads this state while that set is gone, parked in the kubelet's back-off or unready past the stuck-pod grace, and Update/Parked once it serves, a restart in place inside the grace moving nothing; the roll re-opens the row as a fresh start once the wait ends, and the Create pass does once the set is gone. A kept Restart operation records a parked repair, which keeps two exits of its own - the restart pass resumes its promote when the rebuilt set comes up, and re-arms it on the operator's retry ladder while the set stays wedged - besides the gang-member-loss trigger that re-arms over it and the operator reset mailbox that clears it outright
     not_applicable:
       timer.migrationDeadline: a migration record that failed its Instance is already terminal
   - id: Create/CreatePods
@@ -230,6 +230,27 @@ states:
       timer.migrationDeadline: no operation pins this index to a migration record
       gate.allow: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
       gate.deny: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+      pod.ready[target]: no replacement generation exists outside a surge or migration pair
+      pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOn[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOff[target]: no replacement generation exists outside a surge or migration pair
+      pod.deleted[target]: no replacement generation exists outside a surge or migration pair
+      pod.terminating[target]: no replacement generation exists outside a surge or migration pair
+      pod.unschedulable[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersNotReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.runningNotReady[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationIn[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationOut[target]: no replacement generation exists outside a surge or migration pair
+  - id: Update/Parked
+    phase: Updating
+    op: {type: Update, step: Parked}
+    applies: {strategies: [RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
+    decided_in: pkg/controller/v1beta1/workload/escalation/parked.go
+    note: a recreate or in-place attempt parked after its disposition, read while its own pod set serves. The disposition kept the operation with Operation.Waiting naming the wait the next attempt stands behind and the deadline parked; the ladder was charged as for a cleared attempt. Nobody owns the row and it claims no verb, so it is gated and re-opened as the Failed row it stands for - the roll opens a fresh attempt over it when the ladder, the budget and the gate admit, the Create pass does once its pods are gone - and its phase is its pod set's, read every pass whether or not the Component is paused - Failed once the set is gone, parked in the kubelet's back-off or unready past the stuck-pod grace, unchanged while a runner restarts in place inside the grace (escalation/parked.go)
+    not_applicable:
+      timer.repairRetry: a parked repair's re-arm is measured from a Restart parking at Failed, and this row holds no parked repair
+      timer.migrationDeadline: no operation pins this index to a migration record
       pod.ready[target]: no replacement generation exists outside a surge or migration pair
       pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
       pod.containersReady[target]: no replacement generation exists outside a surge or migration pair

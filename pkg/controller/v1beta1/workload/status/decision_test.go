@@ -352,3 +352,122 @@ func TestApplyStamp_ReportsWhetherTheStampTook(t *testing.T) {
 		t.Fatalf("second apply: committed=%v err=%v writes=%d, want a no-op on the Failed row", committed, err, writes)
 	}
 }
+
+// The two Update entry stamps never continue an attempt parked after its
+// disposition: a new attempt opens over it with its own identity and
+// deadline, as it does over a Failed row, and the recreate bumps the
+// incarnation so the parked set becomes the one it drains.
+func TestUpdateEntryStamps_OpenANewAttemptOverAParkedOne(t *testing.T) {
+	now := time.Date(2026, time.September, 21, 0, 0, 0, 0, time.UTC)
+	parked := func() types.InstanceStatus {
+		return types.InstanceStatus{
+			Index: 0, Incarnation: 2, Phase: types.InstancePhaseUpdating, TargetRevision: "rev-b",
+			Operation: &types.InstanceOperation{
+				ID: "update-0-1", Type: types.InstanceOperationUpdate, Step: types.UpdateStepParked, TargetRevision: "rev-b",
+				Waiting: string(types.RolloutHoldGateRetryBlock),
+			},
+		}
+	}
+
+	w := newRowWriter(parked())
+	inc, err := StampRecreating(context.Background(), w.input(now), 0, "rev-b", "revision rev-a -> rev-b", types.UpdateStrategyRecreatePod, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := w.rows[0]
+	if inc != 3 || row.Incarnation != 3 || row.Operation == nil || row.Operation.ID == "update-0-1" ||
+		row.Operation.Waiting != "" || row.Operation.Deadline.IsZero() || row.Operation.Step != types.UpdateStepDrain {
+		t.Fatalf("recreate over a parked attempt = incarnation %d row %+v, want a fresh attempt at a bumped incarnation", inc, row)
+	}
+
+	w = newRowWriter(parked())
+	if err := StampUpdatingInPlace(context.Background(), w.input(now), 0, "rev-b", types.UpdateStrategyInPlaceIfPossible, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	row = w.rows[0]
+	if row.Operation == nil || row.Operation.ID == "update-0-1" || row.Operation.Waiting != "" ||
+		row.Operation.Deadline.IsZero() || row.Operation.Step != types.UpdateStepInPlace {
+		t.Fatalf("in-place over a parked attempt = %+v, want a fresh attempt with its own deadline", row)
+	}
+}
+
+// The parking stamp keeps the attempt on the row with the wait named and
+// the clock parked, records the failure, and lands only on a row whose
+// Update attempt is still the one observed - a row re-opened by another
+// attempt since, at any revision, is left alone; the follow stamp moves
+// the phase with the set and the wait with the ladder, and leaves every
+// other row alone.
+func TestParkedAttemptStamps_KeepTheAttemptAndFollowTheSet(t *testing.T) {
+	now := time.Date(2026, time.September, 21, 0, 0, 0, 0, time.UTC)
+	termination := &types.InstanceTermination{PodName: "engine-0", Reason: "CrashLoopBackOff", Time: metav1.NewTime(now)}
+	attempt := types.InstanceStatus{
+		Index: 0, Incarnation: 2, Phase: types.InstancePhaseUpdating, TargetRevision: "rev-b",
+		Operation: &types.InstanceOperation{
+			ID: "update-0-1", Type: types.InstanceOperationUpdate, Step: types.UpdateStepDrain,
+			TargetRevision: "rev-b", Deadline: metav1.NewTime(now.Add(time.Hour)),
+		},
+	}
+
+	w := newRowWriter(attempt)
+	if err := StampFailedParkingAttempt(context.Background(), w.input(now), 0, *attempt.Operation, termination, string(types.RolloutHoldGateRetryBlock)); err != nil {
+		t.Fatal(err)
+	}
+	row := w.rows[0]
+	if row.Phase != types.InstancePhaseFailed || !types.OperationParked(row.Operation) || row.Operation.ID != "update-0-1" ||
+		row.Operation.Step != types.UpdateStepParked || row.Operation.TargetRevision != "rev-b" ||
+		!row.Operation.Deadline.IsZero() || row.LastFailure == nil || row.LastFailure.Reason != "CrashLoopBackOff" {
+		t.Fatalf("parked row = %+v, want Failed with the attempt kept on the parked step, its clock parked and the failure recorded", row)
+	}
+	if err := StampFailedParkingAttempt(context.Background(), w.input(now), 0, *attempt.Operation, termination, string(types.RolloutHoldGateRetryBlock)); err != nil {
+		t.Fatal(err)
+	}
+	if w.writes != 1 {
+		t.Fatalf("writes = %d, want the second park to be a no-op", w.writes)
+	}
+
+	concluded := newRowWriter(types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady})
+	if err := StampFailedParkingAttempt(context.Background(), concluded.input(now), 0, *attempt.Operation, termination, string(types.RolloutHoldGateRetryBlock)); err != nil {
+		t.Fatal(err)
+	}
+	if concluded.writes != 0 {
+		t.Fatal("a row whose attempt already ended has nothing to park")
+	}
+
+	for _, fresh := range []*types.InstanceOperation{
+		{ID: "update-0-2", Type: types.InstanceOperationUpdate, Step: types.UpdateStepDrain, TargetRevision: "rev-c", Deadline: metav1.NewTime(now.Add(time.Hour))},
+		{ID: "update-0-2", Type: types.InstanceOperationUpdate, Step: types.UpdateStepDrain, TargetRevision: "rev-b", Deadline: metav1.NewTime(now.Add(time.Hour))},
+	} {
+		reopened := attempt
+		reopened.Operation = fresh
+		rw := newRowWriter(reopened)
+		if err := StampFailedParkingAttempt(context.Background(), rw.input(now), 0, *attempt.Operation, termination, string(types.RolloutHoldGateRetryBlock)); err != nil {
+			t.Fatal(err)
+		}
+		if got := rw.rows[0]; rw.writes != 0 || got.Phase != types.InstancePhaseUpdating || got.Operation != fresh || got.LastFailure != nil {
+			t.Fatalf("a row re-opened by attempt %s at %s = %+v, want it left alone: neither parked nor cleared", fresh.ID, fresh.TargetRevision, got)
+		}
+	}
+
+	follow := FollowParkedAttempt(true, string(types.RolloutHoldGateHeld))
+	if !follow(&row) || row.Phase != types.InstancePhaseUpdating || row.Operation.Waiting != string(types.RolloutHoldGateHeld) {
+		t.Fatalf("follow while serving = %+v, want Updating naming the hold", row)
+	}
+	if follow(&row) {
+		t.Fatal("a row already where the set puts it is a no-op")
+	}
+	if !FollowParkedAttempt(false, "")(&row) || row.Phase != types.InstancePhaseFailed || row.Operation.Waiting != string(types.RolloutHoldGateHeld) {
+		t.Fatalf("follow while down = %+v, want Failed with the wait kept", row)
+	}
+	inFlight := openRow(0, types.InstancePhaseUpdating)
+	if FollowParkedAttempt(false, "")(&inFlight) || inFlight.Phase != types.InstancePhaseUpdating {
+		t.Fatal("an attempt in flight is not followed")
+	}
+
+	waits := ParkedAttemptWaits(string(types.RolloutHoldGateBudget))
+	if !waits(&row) || row.Operation.Waiting != string(types.RolloutHoldGateBudget) {
+		t.Fatalf("the budget's denial must be named on the parked attempt, got %+v", row.Operation)
+	}
+	if waits(&row) || ParkedAttemptWaits("Unschedulable")(&row) || ParkedAttemptWaits(string(types.RolloutHoldGateBudget))(&inFlight) {
+		t.Fatal("a wait already named, a token that is no gate, and an attempt in flight all write nothing")
+	}
+}

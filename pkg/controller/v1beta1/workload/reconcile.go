@@ -195,12 +195,11 @@ func executeDecision(ctx context.Context, deps types.Deps, input types.Reconcile
 // observation — the hold authorities ran at the top of the pass and
 // reported what they found, so the row still names the wait an operator
 // needs to see — and the supersede-prune is withheld work in the same
-// sense, not an observation a pause hides.
+// sense, not an observation a pause hides. The parked attempts' phases
+// follow their pods on every pass, paused included: that is observation
+// of a set no pass drives, not repair.
 func endOfPassBookkeeping(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, decision Decision, held holds.Result) error {
-	if !decision.Escalate {
-		return nil
-	}
-	if err := escalation.Run(ctx, escalation.PassInput{
+	pass := escalation.PassInput{
 		Deps:     deps,
 		Input:    input,
 		Plan:     plan,
@@ -208,13 +207,19 @@ func endOfPassBookkeeping(ctx context.Context, deps types.Deps, input types.Reco
 		Pods:     snapshot.CachedPods,
 		Excluded: scaleDownExtras(decision),
 		Held:     held,
-	}); err != nil {
-		return err
 	}
-	if err := escalation.PruneSupersededRetryBlocks(ctx, input, target); err != nil {
-		return err
+	if decision.Escalate {
+		if err := escalation.Run(ctx, pass); err != nil {
+			return err
+		}
+		if err := escalation.PruneSupersededRetryBlocks(ctx, input, target); err != nil {
+			return err
+		}
+		if err := escalation.PruneOutlivedRetryBlocks(ctx, input, plan, target, snapshot.CachedPods); err != nil {
+			return err
+		}
 	}
-	return escalation.PruneOutlivedRetryBlocks(ctx, input, plan, target, snapshot.CachedPods)
+	return escalation.FollowParkedAttempts(ctx, pass)
 }
 
 // sweepStuckTerminatingPods is the Component-wide force-delete sweep:

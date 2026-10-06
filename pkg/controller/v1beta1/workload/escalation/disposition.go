@@ -157,7 +157,7 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 				return DispositionHeldRevision, fmt.Errorf("record retry block for disposed attempt (instance=%d rev=%s): %w", inst.Index, targetRev, err)
 			}
 			termination := types.PodTerminationWithReason(pod, matched, now)
-			if err := status.StampFailed(ctx, input, inst.Index, termination); err != nil {
+			if err := endAttempt(ctx, input, inst, pods, termination, parkedWaitAfterWave(input, targetRev, matched, types.FailureCauseOf(matched), now)); err != nil {
 				return DispositionHeldRevision, fmt.Errorf("clear operation + stamp Failed (instance=%d): %w", inst.Index, err)
 			}
 			if input.WarnInstanceFailed != nil {
@@ -265,6 +265,9 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 	}
 	outcome := DispositionTerminal
 	detail := "attempt disposed terminal (no workload-caused evidence, relocation unavailable); operation-specific recovery decides whether another attempt is safe"
+	// The wait a parked attempt names, empty when no ladder counts the
+	// wave: an uncounted attempt is cleared and re-opened at once.
+	parkedWait := ""
 	if directiveRecorded {
 		outcome = DispositionRelocationDirective
 		detail = "attempt disposed with relocation directive; the rebuild is steered off the recorded node"
@@ -273,12 +276,14 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 		// the revision's ladder takes this one. Written ahead of the
 		// op-clear so a crash between the two re-enters here and the
 		// writer's wave dedup refreshes without recounting.
-		if err := types.RecordUpdateFailureInRetryBlock(ctx, input, chargeRev, terminalWaveReason(shortReason, termination), types.CauseUnattributed); err != nil {
+		waveReason := terminalWaveReason(shortReason, termination)
+		if err := types.RecordUpdateFailureInRetryBlock(ctx, input, chargeRev, waveReason, types.CauseUnattributed); err != nil {
 			return DispositionTerminal, fmt.Errorf("record retry block for disposed attempt (instance=%d rev=%s): %w", inst.Index, chargeRev, err)
 		}
+		parkedWait = parkedWaitAfterWave(input, chargeRev, waveReason, types.CauseUnattributed, now)
 		detail = "attempt disposed terminal (no workload-caused evidence, relocation unavailable) and counted on the revision's retry ladder"
 	}
-	if err := status.StampFailed(ctx, input, inst.Index, termination); err != nil {
+	if err := endAttempt(ctx, input, inst, pods, termination, parkedWait); err != nil {
 		return outcome, fmt.Errorf("clear operation + stamp Failed (instance=%d): %w", inst.Index, err)
 	}
 	// Suppress the per-reconcile warn+event storm when an instance is stuck
@@ -293,6 +298,56 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 		input.WarnInstanceFailed(inst.Index, "", fmt.Sprintf("%s: %s", reason, detail))
 	}
 	return outcome, nil
+}
+
+// endAttempt writes the disposed attempt's end in one row write. An
+// attempt the ladder counted whose own pod set is still alive is parked:
+// the row keeps the operation with the wait named on it, so the roll's next
+// attempt is visible on the row and the phase can follow a set the
+// kubelet goes on retrying — a runner restarted in place serves between
+// its crashes, a wedged pod comes up once its cause is gone. An attempt
+// whose pods are gone, or that no ladder counted, is cleared.
+func endAttempt(ctx context.Context, input types.ReconcileInput, inst types.InstanceStatus, pods []*corev1.Pod, termination *types.InstanceTermination, wait string) error {
+	if wait != "" && attemptParkable(inst, pods) {
+		return status.StampFailedParkingAttempt(ctx, input, inst.Index, *inst.Operation, termination, wait)
+	}
+	return status.StampFailed(ctx, input, inst.Index, termination)
+}
+
+// attemptParkable reports whether a disposed attempt leaves a pod set the
+// row can follow: a recreate or in-place Update, single-pod or gang, with
+// a live pod of its own revision. A surge keeps a serving source beside
+// its replacement and is not parked.
+func attemptParkable(inst types.InstanceStatus, pods []*corev1.Pod) bool {
+	op := inst.Operation
+	if op == nil || op.Type != types.InstanceOperationUpdate || op.SurgeIndex != nil {
+		return false
+	}
+	if op.Step != types.UpdateStepDrain && op.Step != types.UpdateStepInPlace {
+		return false
+	}
+	for _, pod := range evidence.AttemptStuckPods(inst, pods, op.TargetRevision) {
+		if pod != nil && pod.DeletionTimestamp == nil && !query.IsTerminalPod(pod) {
+			return true
+		}
+	}
+	return false
+}
+
+// parkedWaitAfterWave names the wait a parked attempt stands behind once
+// this wave is counted: the hold when the ladder holds at it, else the
+// ladder's pacing. It is read off the same transition the block writer
+// applies, since the pass's observation predates the write.
+func parkedWaitAfterWave(input types.ReconcileInput, rev, reason string, cause types.FailureCause, now metav1.Time) string {
+	block := types.RetryBlock{TargetRevision: rev}
+	if cur := types.FindRetryBlock(input.ObservedState.RetryBlocks, rev); cur != nil {
+		block = *cur
+	}
+	types.ApplyUpdateFailureToRetryBlock(&block, input.UpdateRetryPolicy, now, reason, cause)
+	if block.State == types.RetryBlockHeld {
+		return string(types.RolloutHoldGateHeld)
+	}
+	return string(types.RolloutHoldGateRetryBlock)
 }
 
 // terminalChargeRevision names the revision a terminal wave counts

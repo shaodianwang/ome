@@ -17,14 +17,19 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
+	clocktesting "k8s.io/utils/clock/testing"
 	"knative.dev/pkg/apis"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 func TestReconcile_NilISVCErrors(t *testing.T) {
@@ -1388,6 +1393,124 @@ func TestBuildComponentObservation_FailedPropagatesThroughBlueGreen(t *testing.T
 	tr := ComputeTransition(obs)
 	if tr.Phase != v1beta1.CoordinationPhaseFailed {
 		t.Errorf("BlueGreen with any Failed Component must report Failed; got %q", tr.Phase)
+	}
+}
+
+// A parked roll attempt's phase is its pod set's, and the Component's
+// failure rollup is the row's phase, so the group's phase follows the set:
+// it enters Failed while the set sits in the kubelet's back-off, leaves it
+// once the set serves, and holds still while the runner restarts in place
+// inside the stuck-pod grace, however many times - the GroupFailed warning
+// fires once for the back-off and not again until the set is unready past
+// the grace. The rows are the workload layer's own readings of the set.
+func TestGroupPhase_ParkedAttemptRestartingInsideTheGraceDoesNotReenterFailed(t *testing.T) {
+	const grace = 90 * time.Second
+	now := time.Now()
+	const attemptRevision = "llama-engine-newhash"
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: attemptRevision}}
+	row := workloadtypes.InstanceStatus{
+		Index: 0, Incarnation: 2, Phase: workloadtypes.InstancePhaseFailed, PodCount: 1,
+		RunningRevision: "llama-engine-oldhash", TargetRevision: attemptRevision,
+		Operation: &workloadtypes.InstanceOperation{
+			ID: "update-0-1", Type: workloadtypes.InstanceOperationUpdate, Step: workloadtypes.UpdateStepParked,
+			TargetRevision: attemptRevision, Waiting: string(workloadtypes.RolloutHoldGateRetryBlock),
+		},
+		LastFailure: &workloadtypes.InstanceTermination{PodName: "llama-engine-0-default-0", Reason: "CrashLoopBackOff"},
+	}
+	pod := func(ready bool, unreadyFor time.Duration, waiting string) *corev1.Pod {
+		status := corev1.ConditionFalse
+		if ready {
+			status = corev1.ConditionTrue
+		}
+		since := metav1.NewTime(now.Add(-unreadyFor))
+		p := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "llama-engine-0-default-0", CreationTimestamp: metav1.NewTime(now.Add(-time.Hour))},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{
+				{Type: podreadiness.ConditionType, Status: corev1.ConditionTrue},
+				{Type: corev1.ContainersReady, Status: status, LastTransitionTime: since},
+				{Type: corev1.PodReady, Status: status, LastTransitionTime: since},
+			}},
+		}
+		cs := corev1.ContainerStatus{Name: "main", Ready: ready, RestartCount: 2, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}
+		if waiting != "" {
+			cs.State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: waiting}}
+		}
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{cs}
+		return p
+	}
+	serving := pod(true, 0, "")
+	backoff := pod(false, 0, "CrashLoopBackOff")
+	restarting := func(unreadyFor time.Duration) *corev1.Pod { return pod(false, unreadyFor, "") }
+
+	input := workloadtypes.ReconcileInput{StuckPodGrace: grace, Clock: clocktesting.NewFakeClock(now)}
+	input.MutateInstance = func(_ context.Context, _ int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
+		mutate(&row)
+		return nil
+	}
+	plan := workloadtypes.ComponentPlan{Component: workloadtypes.ComponentEngine, Replicas: 1,
+		Instances: []workloadtypes.InstancePlan{{Index: 0, Incarnation: 2, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}}}}
+	follow := func(p *corev1.Pod) {
+		t.Helper()
+		input.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{row}
+		err := escalation.FollowParkedAttempts(context.Background(), escalation.PassInput{
+			Input: input, Plan: plan, Target: target,
+			Pods: func(context.Context) (map[int32][]*corev1.Pod, error) { return map[int32][]*corev1.Pod{0: {p}}, nil },
+		})
+		if err != nil {
+			t.Fatalf("FollowParkedAttempts: %v", err)
+		}
+	}
+
+	isvc := testOMENativeISVC()
+	g := ResolvedGroup{Name: "0", Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Policy: v1beta1.CoordinationPolicyRollingUpdate}
+	rec := record.NewFakeRecorder(20)
+	var prevPhase v1beta1.CoordinationPhase
+	var prevComposite string
+	groupPass := func() v1beta1.CoordinationPhase {
+		t.Helper()
+		ir := &v1beta1.InferenceReplica{
+			ObjectMeta: metav1.ObjectMeta{Name: irprojector.InferenceReplicaName(isvc.Name, v1beta1.EngineComponent), Namespace: isvc.Namespace},
+			Status:     v1beta1.InferenceReplicaStatus{Replicas: 1, InstanceStatuses: v1beta1convert.InstanceStatusSliceFromWorkload([]workloadtypes.InstanceStatus{row})},
+		}
+		obs, err := buildGroupObservation(context.Background(), testClient(ir), isvc, g, map[v1beta1.ComponentType]map[string]int32{})
+		if err != nil {
+			t.Fatalf("buildGroupObservation: %v", err)
+		}
+		tr := ComputeTransition(obs)
+		emitPhaseEvents(rec, isvc, g, tr, prevPhase, prevComposite)
+		prevPhase, prevComposite = tr.Phase, tr.CompositePhase
+		return tr.Phase
+	}
+	failedEvents := func() int {
+		n := 0
+		for _, e := range drainEvents(rec) {
+			if contains(e, EventReasonGroupFailed) {
+				n++
+			}
+		}
+		return n
+	}
+
+	follow(backoff)
+	if phase := groupPass(); phase != v1beta1.CoordinationPhaseFailed || failedEvents() != 1 {
+		t.Fatalf("the set in the kubelet's back-off: group %s, want Failed announced once", phase)
+	}
+	follow(serving)
+	if phase := groupPass(); phase == v1beta1.CoordinationPhaseFailed {
+		t.Fatalf("the set serving again must take the group out of Failed")
+	}
+	for i, p := range []*corev1.Pod{restarting(5 * time.Second), serving, restarting(grace / 2), serving, restarting(grace - time.Second)} {
+		follow(p)
+		if phase := groupPass(); phase == v1beta1.CoordinationPhaseFailed || row.Phase != workloadtypes.InstancePhaseUpdating {
+			t.Fatalf("pass %d: group %s with the row %s, want the restart in place inside the grace to move nothing", i, phase, row.Phase)
+		}
+	}
+	if n := failedEvents(); n != 0 {
+		t.Fatalf("%d GroupFailed warning(s) across restarts in place inside the grace, want none", n)
+	}
+	follow(restarting(grace + time.Second))
+	if phase := groupPass(); phase != v1beta1.CoordinationPhaseFailed || failedEvents() != 1 {
+		t.Fatalf("the set unready past the grace: group %s, want Failed announced once more", phase)
 	}
 }
 

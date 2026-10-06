@@ -2083,15 +2083,18 @@ func TestCreate_PodlessDemotedRowRendersTheTarget(t *testing.T) {
 // step's stable side: the rebuild renders the revision the row records and
 // pins it, so the step keeps its planned size and only the step machine
 // promotes the Instance. Released by the step, the same row renders the roll
-// target; a Failed row whose attempt was disposed follows the same rule. The
-// user's own rollingUpdate partition is no canary and leaves the rebuild at
-// the target.
+// target; a Failed row whose attempt was disposed follows the same rule, and
+// so does a parked attempt whose pods are gone, in either phase its pods
+// last gave it. The user's own rollingUpdate partition is no canary and
+// leaves the rebuild at the target.
 //
-// Cells: instance/Pending/spec.revision/before, instance/Pending/spec.partition/before, instance/Failed/spec.partition/before
+// Cells: instance/Pending/spec.revision/before, instance/Pending/spec.partition/before, instance/Failed/spec.partition/before, instance/Update/Parked/spec.partition/before
 func TestCreate_PodlessStableRowUnderACanaryKeepsItsRevision(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		phase v1beta1.OMENativeInstancePhase
+		// parked keeps a parked Update attempt on the row.
+		parked bool
 		// step is the canary step's projected partition; user is the
 		// user's own rollingUpdate partition. nil leaves either unset.
 		step, user *int32
@@ -2100,12 +2103,20 @@ func TestCreate_PodlessStableRowUnderACanaryKeepsItsRevision(t *testing.T) {
 		{name: "demoted row the step holds", phase: v1beta1.OMENativeInstancePending, step: ptr.To[int32](1), keeps: true},
 		{name: "demoted row the step released", phase: v1beta1.OMENativeInstancePending, step: ptr.To[int32](0)},
 		{name: "disposed Failed row the step holds", phase: v1beta1.OMENativeInstanceFailed, step: ptr.To[int32](1), keeps: true},
+		{name: "parked attempt the step holds", phase: v1beta1.OMENativeInstanceFailed, parked: true, step: ptr.To[int32](1), keeps: true},
+		{name: "parked attempt last read serving the step holds", phase: v1beta1.OMENativeInstanceUpdating, parked: true, step: ptr.To[int32](1), keeps: true},
+		{name: "parked attempt the step released", phase: v1beta1.OMENativeInstanceFailed, parked: true, step: ptr.To[int32](0)},
 		{name: "demoted row under the user's own partition", phase: v1beta1.OMENativeInstancePending, user: ptr.To[int32](1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newRefillFixture(t, time.Now(), v1beta1.OMENativeInstanceStatus{
-				Index: 0, Incarnation: 1, Phase: tc.phase,
-			}, true)
+			seed := v1beta1.OMENativeInstanceStatus{Index: 0, Incarnation: 1, Phase: tc.phase}
+			if tc.parked {
+				seed.Operation = &v1beta1.InstanceOperation{
+					ID: "op-parked", Type: v1beta1.InstanceOperationUpdate, Step: workload.UpdateStepParked,
+					TargetRevision: "comp-rev-parked", Waiting: string(workload.RolloutHoldGateRetryBlock),
+				}
+			}
+			f := newRefillFixture(t, time.Now(), seed, true)
 			if tc.step != nil {
 				f.input.DesiredSpec.Pacing = &workload.WorkloadPacing{Partition: tc.step}
 			}
@@ -2235,5 +2246,28 @@ func TestCreate_FirstMaterializationUnderACanaryRendersTheTarget(t *testing.T) {
 				t.Errorf("a first materialization pins the target under the hold, got %+v", s.Operation)
 			}
 		})
+	}
+}
+
+// A parked attempt is the fresh start a disposed attempt leaves behind: the
+// Create pass opens a first attempt over it once its pods are gone, in
+// whichever phase its pods last gave it.
+func TestCreateFreshStart_ParkedAttemptIsAFreshStart(t *testing.T) {
+	parked := func(phase workload.InstancePhase) *workload.InstanceStatus {
+		return &workload.InstanceStatus{Index: 0, Phase: phase, Operation: &workload.InstanceOperation{
+			Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepParked, TargetRevision: "rev-b",
+			Waiting: string(workload.RolloutHoldGateRetryBlock),
+		}}
+	}
+	for _, phase := range []workload.InstancePhase{workload.InstancePhaseFailed, workload.InstancePhaseUpdating} {
+		if !createFreshStart(parked(phase)) {
+			t.Errorf("%s: a parked attempt must read as a fresh start", phase)
+		}
+	}
+	inFlight := &workload.InstanceStatus{Index: 0, Phase: workload.InstancePhaseUpdating, Operation: &workload.InstanceOperation{
+		Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepDrain, TargetRevision: "rev-b",
+	}}
+	if createFreshStart(inFlight) {
+		t.Errorf("an attempt in flight is not a fresh start")
 	}
 }

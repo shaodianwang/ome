@@ -200,7 +200,7 @@ func Run(ctx context.Context, in PassInput) error {
 		if podSetIsCapacity(row, pods, desired) {
 			continue
 		}
-		if reason := gangTerminalReason(gang.State); reason != "" && gangVerdictActionable(row.Operation) {
+		if reason := gangTerminalReason(gang.State); reason != "" && gangVerdictActionable(&row) {
 			escalateGangFailure(input, stamps, row, gang, reason, now)
 			continue
 		}

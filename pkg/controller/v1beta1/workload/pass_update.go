@@ -13,6 +13,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -87,6 +88,13 @@ func executeUpdatePass(ctx context.Context, deps types.Deps, input types.Reconci
 				anyGated = true
 				if firstDenial == nil {
 					firstDenial = denial
+				}
+				// A parked attempt names the wait its next attempt stands
+				// behind; a denial here is that wait once the ladder admits.
+				if row := input.ObservedState.Instance(item.Instance.Index); row != nil && types.OperationParked(row.Operation) && row.Operation.Waiting != string(denial.Gate) {
+					if _, err := status.ApplyStamp(ctx, input, item.Instance.Index, status.ParkedAttemptWaits(string(denial.Gate))); err != nil {
+						return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: record the wait on the parked attempt (instance=%d): %w", item.Instance.Index, err)
+					}
 				}
 				continue
 			}

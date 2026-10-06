@@ -3479,3 +3479,89 @@ func TestRolledInstanceDark_ShortfallOfDarkPodsAloneIsNotTheRollsOpenWork(t *tes
 		})
 	}
 }
+
+// An attempt parked after its disposition is gated like the Failed row it
+// stands for, whichever phase its pods give it: the ladder's backoff denies
+// it with the remaining wait, a held ladder denies it outright, a due
+// ladder triggers it as a fresh start, and it is never an attempt in
+// flight at its revision.
+//
+// Cells: instance/Update/Parked/gate.deny[RetryBlock]/before, instance/Update/Parked/gate.deny[Held]/before, instance/Update/Parked/timer.retryAt/before, instance/Failed/timer.retryAt/before
+func TestEvaluateUpdateTrigger_ParkedAttemptIsGatedByItsLadder(t *testing.T) {
+	t0 := time.Now()
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newhash", Namespace: "prod"}}
+	parked := func(phase workload.InstancePhase, waiting string) workload.InstanceStatus {
+		return workload.InstanceStatus{
+			Index: 0, Phase: phase, RunningRevision: "llama-70b-engine-oldhash", TargetRevision: target.Name,
+			Operation: &workload.InstanceOperation{
+				Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepParked,
+				TargetRevision: target.Name, Waiting: waiting,
+			},
+		}
+	}
+	for _, phase := range []workload.InstancePhase{workload.InstancePhaseUpdating, workload.InstancePhaseFailed} {
+		t.Run(string(phase), func(t *testing.T) {
+			fc := clocktesting.NewFakeClock(t0)
+			next := metav1.NewTime(t0.Add(37 * time.Second))
+			input := workload.ReconcileInput{Clock: fc, ObservedState: workload.WorkloadObservedState{
+				InstanceStatuses: []workload.InstanceStatus{parked(phase, string(workload.RolloutHoldGateRetryBlock))},
+				RetryBlocks:      []workload.RetryBlock{{TargetRevision: target.Name, State: workload.RetryBlockBackoff, NextRetryAt: &next}},
+			}}
+			dec := EvaluateUpdateTrigger(input, workload.InstancePlan{Index: 0}, target, nil)
+			if dec.Trigger || !dec.RetryBlockDenied || dec.RetryAfter != 37*time.Second {
+				t.Fatalf("under a backoff not due: got %+v, want denied with the remaining wait", dec)
+			}
+
+			fc.Step(40 * time.Second)
+			dec = EvaluateUpdateTrigger(input, workload.InstancePlan{Index: 0}, target, nil)
+			if !dec.Trigger || dec.RetryBlockDenied {
+				t.Fatalf("once the ladder is due: got %+v, want a fresh start", dec)
+			}
+
+			input.ObservedState.InstanceStatuses = []workload.InstanceStatus{parked(phase, string(workload.RolloutHoldGateHeld))}
+			input.ObservedState.RetryBlocks = []workload.RetryBlock{{TargetRevision: target.Name, State: workload.RetryBlockHeld}}
+			dec = EvaluateUpdateTrigger(input, workload.InstancePlan{Index: 0}, target, nil)
+			if dec.Trigger || !dec.RetryBlockDenied {
+				t.Fatalf("under a held ladder: got %+v, want denied", dec)
+			}
+		})
+	}
+	if anyInFlightUpdateAt([]workload.InstanceStatus{parked(workload.InstancePhaseUpdating, string(workload.RolloutHoldGateRetryBlock))}, target.Name) {
+		t.Fatalf("a parked attempt is not an attempt in flight at its revision")
+	}
+	inFlight := parked(workload.InstancePhaseUpdating, "")
+	inFlight.Operation.Step = workload.UpdateStepDrain
+	if !anyInFlightUpdateAt([]workload.InstanceStatus{inFlight}, target.Name) {
+		t.Fatalf("an attempt on its Drain step is in flight")
+	}
+}
+
+// A parked attempt pins nothing on the next one: the strategy it runs
+// under is the desired one, as for a Failed row, and the wreckage scan
+// reads the row in either of the phases its pods give it.
+func TestParkedAttempt_PinsNoStrategyAndIsScannedForWreckage(t *testing.T) {
+	parked := func(phase workload.InstancePhase) *workload.InstanceStatus {
+		return &workload.InstanceStatus{
+			Index: 0, Phase: phase, RunningRevision: "llama-70b-engine-oldhash", TargetRevision: "llama-70b-engine-badhash",
+			Operation: &workload.InstanceOperation{
+				Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepParked, Strategy: workload.UpdateStrategyRecreatePod,
+				TargetRevision: "llama-70b-engine-badhash", Waiting: string(workload.RolloutHoldGateRetryBlock),
+			},
+		}
+	}
+	for _, phase := range []workload.InstancePhase{workload.InstancePhaseUpdating, workload.InstancePhaseFailed} {
+		if got := effectiveUpdateStrategy(parked(phase), workload.UpdateStrategyInPlaceIfPossible); got != workload.UpdateStrategyInPlaceIfPossible {
+			t.Errorf("%s: effective strategy = %s, want the desired one; a parked attempt pins nothing", phase, got)
+		}
+		if recreateInFlight(parked(phase)) {
+			t.Errorf("%s: a parked attempt is not a recreate in flight", phase)
+		}
+	}
+	rolledBack := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-oldhash", Namespace: "prod"}}
+	alien := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "engine-0", Labels: map[string]string{
+		query.LabelRevisionHash: query.RevisionHashFromControllerRevisionName("llama-70b-engine-badhash"),
+	}}}
+	if !EvaluateWreckage(parked(workload.InstancePhaseUpdating), rolledBack, []*corev1.Pod{alien}) {
+		t.Errorf("a parked attempt whose pods are on a withdrawn revision is wreckage while its set serves too")
+	}
+}

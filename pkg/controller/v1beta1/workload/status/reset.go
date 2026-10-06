@@ -7,12 +7,14 @@ import (
 )
 
 // ResetOwnsOperation reports whether an operator reset may clear the
-// Operation a Failed Instance preserved: none, or a Create / Restart
+// Operation a Failed Instance preserved: none, a Create / Restart
 // attempt — the repair passes' own work, parked when its deadline
-// expired. Update and Migrate continuations (and a Delete) belong to the
-// rollout and migration machinery: the gang abandon, wreckage cleanup,
-// release-held, and migration-expiry paths own them, and clearing one
-// from a reset would orphan its surge marker or migration record.
+// expired — or an Update attempt parked after its disposition, which is
+// spent in the same sense. Update and Migrate continuations (and a
+// Delete) belong to the rollout and migration machinery: the gang
+// abandon, wreckage cleanup, release-held, and migration-expiry paths
+// own them, and clearing one from a reset would orphan its surge marker
+// or migration record.
 func ResetOwnsOperation(op *types.InstanceOperation) bool {
 	if op == nil {
 		return true
@@ -20,6 +22,8 @@ func ResetOwnsOperation(op *types.InstanceOperation) bool {
 	switch op.Type {
 	case types.InstanceOperationCreate, types.InstanceOperationRestart:
 		return true
+	case types.InstanceOperationUpdate:
+		return types.OperationParked(op)
 	}
 	return false
 }
@@ -27,23 +31,31 @@ func ResetOwnsOperation(op *types.InstanceOperation) bool {
 // ClearFailedInstanceOperation drops the Operation a Failed Instance kept
 // when its attempt expired, returning the Instance to the fresh-start
 // shape — Failed with no Operation — that the Create pass rebuilds once
-// its pods are gone. Phase and LastFailure are untouched. It is the
-// operator-reset counterpart of StampFailed: that one parks an attempt
-// at Failed, this one releases the parked attempt.
+// its pods are gone. LastFailure is untouched, and so is Phase, except
+// that an Update attempt parked after its disposition is addressed in
+// either phase its pod set gave it and reads Failed once cleared: the
+// reset deleted the set the phase followed. It is the operator-reset
+// counterpart of StampFailed: that one parks an attempt at Failed, this
+// one releases the parked attempt.
 //
 // mutate is the adapter's MutateInstance seam. Reports whether a write
-// happened: a non-Failed Instance, a Failed Instance with no Operation,
-// a fresh-empty slot (Phase=="") from the seam's append path — a status
-// deleted out from under the caller — and an Operation the reset does
-// not own (ResetOwnsOperation) all write nothing; the ownership check is
-// enforced here on the fresh read, whatever the caller classified.
+// happened: a non-Failed Instance with no parked attempt, a Failed
+// Instance with no Operation, a fresh-empty slot (Phase=="") from the
+// seam's append path — a status deleted out from under the caller — and
+// an Operation the reset does not own (ResetOwnsOperation) all write
+// nothing; the ownership check is enforced here on the fresh read,
+// whatever the caller classified.
 func ClearFailedInstanceOperation(ctx context.Context, mutate func(context.Context, int32, func(*types.InstanceStatus) bool) error, idx int32) (bool, error) {
 	cleared := false
 	err := mutate(ctx, idx, func(s *types.InstanceStatus) bool {
 		cleared = false
-		if s.Phase != types.InstancePhaseFailed || s.Operation == nil || !ResetOwnsOperation(s.Operation) {
+		if s.Operation == nil || !ResetOwnsOperation(s.Operation) {
 			return false
 		}
+		if s.Phase != types.InstancePhaseFailed && !types.OperationParked(s.Operation) {
+			return false
+		}
+		s.Phase = types.InstancePhaseFailed
 		s.Operation = nil
 		cleared = true
 		return true

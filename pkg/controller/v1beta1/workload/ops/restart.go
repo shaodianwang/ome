@@ -213,20 +213,27 @@ func instanceLostGangMember(input workload.ReconcileInput, plan workload.Compone
 	case workload.InstancePhaseEmpty, workload.InstancePhasePending,
 		workload.InstancePhaseCreating, workload.InstancePhaseFailed,
 		workload.InstancePhaseReady:
+	case workload.InstancePhaseUpdating:
+		// A roll attempt parked after its disposition is settled in the
+		// phase its pods give it; an attempt in flight owns its set.
+		if workload.StateOf(s) != workload.StateUpdateParked {
+			return "", false
+		}
 	default:
 		return "", false
 	}
 	if isMigrateOwnedStatus(s) {
 		return "", false
 	}
-	// A preserved Update or Migrate operation keeps its own pass as owner
+	// A preserved Update or Migrate claim keeps its own pass as owner
 	// whatever the phase says. A Restart operation parked at Failed is a
 	// spent attempt, not an owner: its deadline elapsed with a member still
 	// missing, and only another Restart can rebuild the gang as a whole
 	// (incarnation bump, survivors drained), so it may re-arm. Each cycle
-	// is bounded by the attempt deadline.
-	if s.Operation != nil && s.Operation.Type != workload.InstanceOperationCreate &&
-		!(s.Operation.Type == workload.InstanceOperationRestart && s.Phase == workload.InstancePhaseFailed) {
+	// is bounded by the attempt deadline. A roll attempt parked after its
+	// disposition claims nothing and is spent the same way.
+	if claim := workload.ClaimOf(s); claim != workload.OwnerNone && claim != workload.OwnerCreate &&
+		!(claim == workload.OwnerRestart && s.Phase == workload.InstancePhaseFailed) {
 		return "", false
 	}
 	createCommitted := s.Operation != nil && s.Operation.Step == status.CreateStepCreatePods
