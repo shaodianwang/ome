@@ -1883,7 +1883,7 @@ func TestTerminalFinalizationOwned_GangSourceMarkerSurvivesRemovalRetry(t *testi
 		},
 	}
 
-	owned := terminalFinalizationOwned(observed)
+	owned := TerminalFinalizationOwned(observed)
 	if _, found := owned[3]; !found {
 		t.Fatal("persisted gang source cleanup marker did not suppress PodGroup ensure")
 	}
@@ -1893,10 +1893,10 @@ func TestTerminalFinalizationOwned_GangSourceMarkerSurvivesRemovalRetry(t *testi
 
 	observed.InstanceStatuses[0].Operation.Step = workloadtypes.UpdateStepSurge
 	observed.InstanceStatuses[1].Operation.Step = workloadtypes.UpdateStepGangSurgeTarget
-	if _, found := terminalFinalizationOwned(observed)[3]; found {
+	if _, found := TerminalFinalizationOwned(observed)[3]; found {
 		t.Fatal("pre-terminal gang source unexpectedly suppressed PodGroup ensure")
 	}
-	if _, found := terminalFinalizationOwned(observed)[surgeIndex]; found {
+	if _, found := TerminalFinalizationOwned(observed)[surgeIndex]; found {
 		t.Fatal("pre-terminal gang target unexpectedly suppressed PodGroup ensure")
 	}
 }
@@ -1945,7 +1945,7 @@ func TestTerminalFinalizationOwned_MigrationAndOrdinaryDelete(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, found := terminalFinalizationOwned(test.observed)[index]
+			_, found := TerminalFinalizationOwned(test.observed)[index]
 			if found != test.want {
 				t.Fatalf("terminal ownership: got %v want %v", found, test.want)
 			}

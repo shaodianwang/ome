@@ -1,0 +1,54 @@
+# A retired replacement member reports Unschedulable while quota refuses its
+# delete. The hold pass records the token on the marker as on any Update-owned
+# row and parks the deadlines; the deletion releases it and the removal proceeds.
+scenario: gang-cleanup-unplaced-member-holds-a-pass
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+  - T-gangcleanup-done
+cells:
+  - instance/Update/GangSurgeTargetCleanup/pod.unschedulable[target]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: quota refuses every delete of the retired members, so the template change claims the cleanup marker without removing its pods
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - api.quotaDenied: {verb: delete, resource: pods, count: 2}
+  - tick: 6
+    note: the retired worker reports Unschedulable; the hold pass records the token on the marker and parks both deadlines while the delete is refused again
+    events:
+      - pod.unschedulable[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the deletes are admitted; the token stays on the marker while the pod is on its way out, and the retirement is never held
+  - tick: 8
+    note: the retired members are gone, so the token leaves with the pod, the marker is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

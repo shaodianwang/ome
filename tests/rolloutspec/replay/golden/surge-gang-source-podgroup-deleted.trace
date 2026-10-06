@@ -54,10 +54,9 @@ tick=6 pod status-patch name=svc-a-engine-0-leader-0 serving=True→False
 tick=6 pod status-patch name=svc-a-engine-0-worker-0 serving=True→False
 tick=6 hold cleared
 tick=6 pass result=after:5s
-tick=7 note the source's PodGroup is deleted again mid-drain; it is recreated and the draining gang is unaffected
+tick=7 note the source's PodGroup is deleted again mid-drain; a draining gang finalizes its own group, so nothing recreates it and the drain is unaffected
 tick=7 apply gang.podGroup[Deleted] podGroup=svc-a-engine-0 state=Deleted now=t+0s
 tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=7 podgroup create name=svc-a-engine-0
 tick=7 row=1 write no-op precondition=no-change
 tick=7 row=0 write no-op precondition=no-change
 tick=7 hold cleared

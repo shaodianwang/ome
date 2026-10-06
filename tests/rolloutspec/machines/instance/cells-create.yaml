@@ -622,12 +622,12 @@ cells:
     event: spec.rollbackTarget
     windows: [before]
     outcome: transition
-    to: Failed
+    to: Create/CreatePods
     guard: the roll target moves to a revision the in-flight attempt is not pinned to; an attempt already pinned to that revision, or a rollback naming a ControllerRevision that has been collected, leaves the row untouched
-    note: inferencereplica/reconciler.go resolves Pacing.RollbackToRevision into the roll target handed to the ops passes, and ops/create.go retires any Creating attempt whose Operation.TargetRevision is not that target — the same retirement the superseded arrow describes, reached without a spec hash change
+    note: inferencereplica/reconciler.go resolves Pacing.RollbackToRevision into the roll target handed to the ops passes, and ops/create.go retires any Creating attempt whose Operation.TargetRevision is not that target and restarts it at the pinned revision in the same write (CreateAttemptSuperseded) — the retirement T-create-retire-superseded describes, reached without a spec hash change; the row never passes through Failed and no RetryBlock is recorded
     invariants: [one.operation.per.instance]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [create-rollback-retires-pinned-attempt]}
     status: current
 
   - state: Create/CreatePods

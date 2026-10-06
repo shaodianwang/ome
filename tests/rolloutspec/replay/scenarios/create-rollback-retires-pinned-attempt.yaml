@@ -1,0 +1,59 @@
+# A rollback pin lands while a scaled-up Instance is still Creating at the
+# newer revision. The attempt is retired and restarted at the pinned revision
+# in one write: the row never passes through Failed and no RetryBlock is recorded.
+scenario: create-rollback-retires-pinned-attempt
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-recreate
+  - T-drain-ready
+  - T-create-retire-superseded
+  - T-ready-rollback-recreate
+cells:
+  - instance/Create/CreatePods/spec.rollbackTarget[set]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod reports Ready and enters rotation, so the Instance promotes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the template moves to a second revision, so the Instance is recreated and its pod drained
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation, which is the drain the recreate waits on, so it is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the old pod is gone, so the recreate materializes the pod on the second revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the recreated pod reports Ready and enters rotation, so the Instance is Ready on the second revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 7
+    note: the operator asks for a second Instance, which is created pinned to the second revision
+    events:
+      - spec.replicasUp: {to: 2}
+  - tick: 8
+    note: the roll is pinned back to the first revision while the second Instance is still Creating; its attempt is retired and restarted at the pinned revision in one write, and the Ready Instance is taken back by the roll
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+  - tick: 9
+    note: the retired attempt's pod is gone, so the restarted attempt materializes its pod at the pinned revision
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}

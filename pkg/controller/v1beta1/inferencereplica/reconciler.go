@@ -752,7 +752,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 	podGroupState := workloadgang.PodGroupReconcileState{
 		Inventory:     podGroupInventory,
-		TerminalOwned: terminalFinalizationOwned(input.ObservedState),
+		TerminalOwned: TerminalFinalizationOwned(input.ObservedState),
 	}
 	deps.EnsureGangPodGroup = workloadgang.EnsureSurgePodGroupWithState(deps, podGroupState)
 
@@ -904,7 +904,7 @@ func (r *Reconciler) requiresAuthoritativePodGroupInventory(
 	if scaleDownPodObservationRequired(input, plan) {
 		return true, nil
 	}
-	if len(terminalFinalizationOwned(input.ObservedState)) > 0 {
+	if len(TerminalFinalizationOwned(input.ObservedState)) > 0 {
 		return true, nil
 	}
 	return workloadgang.CachedOwnerHasPodGroups(ctx, r.Client, input.OwnerObject)
@@ -934,7 +934,7 @@ func (r *Reconciler) reconcileStaleSinglePodGroups(
 	if inventory == nil || !inventory.Available() {
 		return false, nil
 	}
-	terminalOwned := terminalFinalizationOwned(input.ObservedState)
+	terminalOwned := TerminalFinalizationOwned(input.ObservedState)
 	type stalePodGroup struct {
 		name  string
 		index int32
@@ -1017,7 +1017,10 @@ func (r *Reconciler) reconcileStaleSinglePodGroups(
 	return blocked, nil
 }
 
-func terminalFinalizationOwned(observed workloadtypes.WorkloadObservedState) map[int32]struct{} {
+// TerminalFinalizationOwned is the set of Instance indices whose PodGroup a
+// terminal lifecycle owner finalizes itself: a draining migration source, a
+// Deleting row, a gang-surge cleanup marker, and a drained or failed surge pair.
+func TerminalFinalizationOwned(observed workloadtypes.WorkloadObservedState) map[int32]struct{} {
 	owned := make(map[int32]struct{})
 	for _, record := range observed.Migrations {
 		if record.Phase == workloadtypes.MigrationPhaseDraining {

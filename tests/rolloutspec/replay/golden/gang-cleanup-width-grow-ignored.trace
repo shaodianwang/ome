@@ -48,7 +48,6 @@ tick=6 note the gang is widened by one worker at an unchanged revision; the reti
 tick=6 apply spec.gangWidth[grow] workers=2 generation=3 now=t+0s
 tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=6 podgroup update name=svc-a-engine-0
-tick=6 podgroup update name=svc-a-engine-1
 tick=6 row=1 write no-op precondition=no-change
 tick=6 hold cleared
 tick=6 pass result=after:5s

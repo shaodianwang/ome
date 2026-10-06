@@ -616,12 +616,10 @@ cells:
     event: spec.policyTuning
     variants: [restartPolicy]
     windows: [before]
-    outcome: transition
-    to: Create/CreatePods
-    guard: the policy no longer selects RecreateInstanceOnPodRestart
-    note: the restart pass is planned only under that policy, so the flip drops it and stops excluding the index from the Create pass, which stamps Phase Creating with a fresh Create operation over the Restart — or promotes the row straight to Ready when the live pod set is already complete and runtime-ready (plan_decision.go, ops/create.go)
+    outcome: ignore
+    note: an open repair is driven to completion whatever the policy says — the policy governs whether a repair starts, and a half-drained Instance abandoned mid-repair is worse than one never repaired (ops/restart.go DetectRestartTriggerWithPods); the new policy is read against the Ready row the repair leaves and governs the next trigger
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestDetectRestartTrigger_OpenRepairKeepsDrivingUnderPolicyNone], kind: [], replay: [restart-policy-flip-mid-repair-ignored]}
     status: current
   - state: Restart/Drain
     event: spec.policyTuning

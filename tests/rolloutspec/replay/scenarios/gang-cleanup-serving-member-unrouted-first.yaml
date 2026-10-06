@@ -1,0 +1,54 @@
+# A retired replacement member asserts its serving gate while quota refuses
+# its delete. The retirement takes a member in rotation out of it a pass
+# ahead of deleting it, and the marker row itself is untouched.
+scenario: gang-cleanup-serving-member-unrouted-first
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+  - T-gangcleanup-done
+cells:
+  - instance/Update/GangSurgeTargetCleanup/pod.servingOn[target]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: quota refuses the first delete of the retired members, so the template change claims the cleanup marker without removing its pods
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - api.quotaDenied: {verb: delete, resource: pods, count: 1}
+  - tick: 6
+    note: the retired leader asserts its serving gate; the retirement flips the gate off instead of deleting, and the marker row is untouched
+    events:
+      - pod.servingOn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 7
+    note: the unrouted leader and the worker are deleted on the pass after the flip
+  - tick: 8
+    note: the retired members are gone, so the marker is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

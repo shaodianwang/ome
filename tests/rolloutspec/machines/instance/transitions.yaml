@@ -932,6 +932,14 @@ transitions:
     to: Failed
     effects: [Phase Failed with the parked operation kept; the Create pass rebuilds the row as a fresh start once no pod is left and its ladder admits]
     decided_in: pkg/controller/v1beta1/workload/escalation/parked.go
+  - id: T-parked-leaving
+    from: Update/Parked
+    event: pod.terminating
+    variant: source
+    guard: the member the parked attempt's own set serves through - a gang's leader, or the single pod - carries a deletionTimestamp, so it is out of its Service at once and not live to the parked reading; a terminating worker beside a serving leader moves nothing until the set reads short
+    to: Failed
+    effects: [Phase Failed with the parked operation kept, as T-parked-gone leaves it; the Create pass rebuilds the row as a fresh start once no pod is left and its ladder admits]
+    decided_in: pkg/controller/v1beta1/workload/escalation/parked.go
   - id: T-parked-member-lost
     from: Update/Parked
     event: pod.deleted

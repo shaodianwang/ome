@@ -1099,9 +1099,9 @@ cells:
     event: pod.servingOn
     variants: [target]
     outcome: ignore
-    note: the retirement deletes the replacement pods outright and issues no drain flip for them; a serving gate asserted before the retirement is released by the deletion itself
+    note: the retirement takes a replacement member that is in rotation out of it a pass ahead of deleting it (ops/update.go unrouteServingPods, under the delete-drain writer key), so a serving gate asserted on a retired pod is flipped off rather than left to the deletion; the marker row itself is untouched
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-serving-member-unrouted-first]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.servingOff
@@ -1441,10 +1441,10 @@ cells:
   - state: Update/GangSurgeTargetCleanup
     event: pod.unschedulable
     variants: [target]
-    outcome: ignore
-    note: a retired pod that never got a node is deleted like any other; the retirement reads the live list, never PodScheduled
+    outcome: defer
+    note: the hold pass records the Unschedulable waiting token on the marker as on every Update-owned row (holds/scheduler.go; the owner rule refuses only a teardown and an unowned row), parking both the marker's and the source's deadlines for the pass before the retirement deletes the pod; the token leaves with the pod and the removal is never held
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-unplaced-member-holds-a-pass]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.containersNotReady
@@ -1506,7 +1506,7 @@ cells:
     outcome: ignore
     note: a PodGroup at the retired name that is not controlled by this owner is reported finalized and left untouched by pkg/controller/v1beta1/workload/gang/inventory.go, so a foreign collision never blocks the removal
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-foreign-podgroup-ignored]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: gang.podGroup
@@ -1514,7 +1514,7 @@ cells:
     outcome: ignore
     note: EnsurePodGroups in pkg/controller/v1beta1/workload/gang/gang.go skips a terminal-owned index, so nothing recreates the group and an externally deleted one only makes the finalization report complete sooner
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-podgroup-deleted-not-recreated]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: gang.podGroup

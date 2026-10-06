@@ -1,6 +1,6 @@
 # A gang source's own PodGroup is deleted while it surges and again while
-# it drains; the PodGroup pass recreates the group from the plan ahead of
-# the dispatcher and the running gang is unaffected either time.
+# it drains. The PodGroup pass recreates it for the surging gang and leaves
+# a draining gang to its own finalization; the gang is unaffected either time.
 scenario: surge-gang-source-podgroup-deleted
 arrows:
   - T-empty-gang-surge-target
@@ -47,7 +47,7 @@ timeline:
       - pod.ready[target]: {pod: {index: 1, runner: leader}}
       - pod.ready[target]: {pod: {index: 1, runner: worker}}
   - tick: 7
-    note: the source's PodGroup is deleted again mid-drain; it is recreated and the draining gang is unaffected
+    note: the source's PodGroup is deleted again mid-drain; a draining gang finalizes its own group, so nothing recreates it and the drain is unaffected
     events:
       - gang.podGroup[Deleted]: {instance: 0}
   - tick: 8

@@ -1,0 +1,28 @@
+# A planned index with no row waits on its revision's Backoff block. The
+# block comes due as the template moves: the create pins the moved target,
+# and the released block's revision is never built.
+scenario: idle-empty-retry-due-with-moved-template
+arrows:
+  - T-empty-create-retry
+cells:
+  - instance/Empty/spec.revision/boundary@T-empty-create-retry
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+  retryBlocks:
+    - {revision: current, state: Backoff, attemptsStarted: 1, nextRetryAt: 2m, reason: ImagePullBackOff}
+timeline:
+  - tick: 1
+    note: the index is planned but its revision sits in Backoff, so the Create pass opens nothing and no row is written
+  - tick: 2
+    note: the block comes due as the template moves; the create pins the moved target, and the revision the block released is never built
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+      - timer.retryAt: {slack: 1s}

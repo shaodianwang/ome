@@ -1017,12 +1017,13 @@ cells:
     status: current
   - state: Migrate/SurgeTarget
     event: pod.stuckTerminating
-    outcome: ignore
-    note: the drive's force-delete escalation loop runs over the SOURCE pods only; a
-      wedged own pod is left to the scale-down pipeline that takes the index over
-      once expiry unpins it
+    outcome: defer
+    note: the wedged own pod keeps its name until the Component sweep frees it at the
+      overdue clock under a configured force-delete policy (ops/force_delete.go
+      SweepStuckTerminatingPods); with no policy the clock never fires and the pod is
+      left to the scale-down pipeline that takes the index over once expiry unpins it
     placement: kind
-    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-stuck-surge-left]}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-stuck-surge-left, migrate-surge-pending-stuck-surge-swept]}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.nodeLost
@@ -1441,13 +1442,20 @@ cells:
     status: current
   - state: Migrate/SurgeTarget
     event: timer.forceDelete
-    outcome: ignore
-    note: the drive's force-delete escalation runs over the SOURCE pods only, so its
-      clocks reach this row only as the source pods finally disappearing; a wedged own
-      pod is left to the scale-down pipeline that takes the index over once expiry
-      unpins it
+    outcome: transition
+    to: Migrate/SurgeTarget
+    guard: a force-delete policy is configured and a Terminating own pod is past its
+      deletion deadline plus the overdue slack while its node is gone or has been
+      unreachable past the threshold
+    note: the Component-wide sweep runs ahead of every verb pass over every Terminating
+      pod of the Component, whether or not an operation waits on it
+      (ops/force_delete.go SweepStuckTerminatingPods), so a wedged own pod is
+      force-deleted with grace zero under a UID precondition at the overdue clock and
+      the drive re-creates the freed name in the same pass; the row's step is
+      unchanged. The drive's own escalation loop still runs over the source pods only
+      (ops/migrate.go)
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-stuck-surge-swept]}
     status: current
   - state: Migrate/SurgeTarget
     event: timer.teardownDeadline

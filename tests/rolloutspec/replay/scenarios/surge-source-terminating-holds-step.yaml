@@ -1,0 +1,41 @@
+# The source is deleted from under a surge whose replacement is not yet
+# ready. A pod on its way out is out of rotation, so the step holds with the
+# SourceUnrouted token until the object is gone and the replacement promotes.
+scenario: surge-source-terminating-holds-step
+arrows:
+  - T-ready-surge
+  - T-surge-source-lost-promote
+cells:
+  - instance/Update/Surge/pod.terminating[source]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the source is deleted by another hand while the replacement is not yet ready; it reads as out of rotation, so the step holds with the SourceUnrouted token
+    events:
+      - pod.terminating[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 5
+    note: a further pass finds the source still on its way out and the replacement still unready; the hold stands
+  - tick: 6
+    note: the source is gone as the replacement reports Ready, so the promote lands with no drain to run
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

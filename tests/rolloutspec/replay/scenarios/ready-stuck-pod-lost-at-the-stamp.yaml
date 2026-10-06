@@ -1,0 +1,62 @@
+# An Instance Ready ahead of the Component wedges on its image, and the
+# wedged pod is deleted on the tick the escalation would stamp Failed. The
+# repair consumes the loss first, and the stuck stamp never lands.
+scenario: ready-stuck-pod-lost-at-the-stamp
+arrows:
+  - T-empty-create
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+  - T-ready-restart
+cells:
+  - instance/Ready/pod.deleted[source]/boundary@T-ready-stuck-failed
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start on v1, which is the Component's current revision for the whole walk
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the template moves to v2, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation beside the source
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the source leaves rotation, so the drain has converged
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 6
+    note: the drained source is gone and the Instance is Ready on v2 ahead of the Component
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the rolled pod is two minutes old, longer than the grace, which proves nothing on its own
+    events:
+      - clock.advance: 2m
+  - tick: 8
+    note: the rolled pod wedges; it served before, so the grace runs from the wedge and the pass that reads it stamps nothing yet
+    events:
+      - pod.servingOff[source]: {pod: {index: 0, ordinal: 1}}
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, ordinal: 1}, message: "manifest unknown"}
+  - tick: 9
+    note: the wedge outlasts the grace on the tick the pod is deleted; the repair opens over the empty set first and the stuck evidence leaves with the pod, so no Failed stamp lands
+    events:
+      - clock.advance: 2m
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 1}}
