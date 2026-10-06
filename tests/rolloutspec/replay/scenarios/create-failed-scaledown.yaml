@@ -1,0 +1,51 @@
+# Two gangs are created and the second's PodGroup name turns out to be held
+# by another controller, so its Create attempt is ended by the gang verdict
+# with the operation kept. The operator then scales to one: an in-flight
+# Create pins nothing in the plan, so the failed index falls out when the
+# scale-down wave admits it, the Delete stamp is re-applied under a status
+# conflict, and a re-observed reduction re-derives the same stamp.
+scenario: create-failed-scaledown
+arrows:
+  - T-failedcreate-scaledown
+cells:
+  - instance/Failed/Create/spec.replicasDown/before
+  - instance/Failed/Create/spec.replicasDown/after@T-failedcreate-scaledown
+  - instance/Failed/Create/api.conflict/before
+initial:
+  spec:
+    replicas: 2
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes all four
+  - tick: 2
+    note: the first gang promotes as its members report Ready, while the second group's controller reference is rewritten to another owner; the gang verdict ends that attempt alone, Failed with its Create operation kept
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+      - gang.podGroup[OwnershipConflict]: {instance: 1}
+  - tick: 3
+    note: the operator scales to one and the first status write of the pass is refused once with a conflict; the failed index pins nothing, so the wave admits it and the Delete Drain operation that replaces the kept Create is re-applied under the conflict retry
+    events:
+      - spec.replicasDown: {to: 1}
+      - api.conflict: {write: 1, count: 1}
+  - tick: 4
+    note: the reduction is observed again; the admission was committed once, so only the drain advances and the half-built pods are deleted
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 5
+    note: the retired pods are gone, so the row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 1, runner: worker}}

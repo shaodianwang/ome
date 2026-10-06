@@ -1,0 +1,92 @@
+# Spec, policy and configuration edits land on a gang source that failed on
+# its deadline at the drain step, and a frozen pause then halts and releases
+# the continuation. An excluded label mints no revision, the handoff reads
+# no lifecycle knob and the sweep re-reads its policy every pass, so only
+# the requeue cadence shows an edit; a frozen pause suspends the update
+# pass with the source out of rotation, and the unpause only un-parks it.
+scenario: gang-draindeadline-spec-edits-ignored
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-surgedrain-deadline
+  - T-failedgangtarget-ready
+  - T-failedgangsurgedrain-complete
+cells:
+  - instance/Failed/GangSurgeDrain/spec.annotationOnly/before
+  - instance/Failed/GangSurgeDrain/spec.policyTuning[restartPolicy]/before
+  - instance/Failed/GangSurgeDrain/spec.policyTuning[minReadySeconds]/before
+  - instance/Failed/GangSurgeDrain/config.changed[stuckPodGrace]/before
+  - instance/Failed/GangSurgeDrain/config.changed[requeue]/before
+  - instance/Failed/GangSurgeDrain/spec.pauseFreeze/before
+  - instance/Failed/GangSurgeDrain/spec.unpause/before
+  - instance/Failed/GangSurgeTarget/spec.pauseFreeze/before
+  - instance/Failed/GangSurgeTarget/spec.unpause/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: both replacement members report Ready and the leader enters rotation, so the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 6
+    note: the replacement worker's readiness regresses while the source is still published, so the pair is no longer fully serving
+    events:
+      - pod.containersNotReady[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the deadline elapses with the replacement short, so the source is stamped Failed at its drain step and the marker Failed too, both operations kept
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 8
+    note: a queue label, a restart-policy flip, a minReadySeconds window, a stuck-pod grace and a requeue cadence land together; the continuation reads none of them and only the requeue shows the edit
+    events:
+      - spec.annotationOnly: {labels: {kueue.x-k8s.io/queue-name: queue-b}}
+      - spec.policyTuning[restartPolicy]: {value: None}
+      - spec.policyTuning[minReadySeconds]: {value: "30"}
+      - config.changed[stuckPodGrace]: {config: {stuckPodGrace: 1m}}
+      - config.changed[requeue]: {config: {requeueOperation: 7s, requeueGate: 3s}}
+  - tick: 9
+    note: a frozen pause lands and the replacement worker comes back Ready; the update pass is suspended, so the handoff halts with the source out of rotation
+    events:
+      - spec.pauseFreeze: {}
+      - pod.containersReady[target]: {pod: {index: 1, runner: worker}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 10
+    note: the source leader leaves the routed Service under the freeze; nothing runs to read it
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 11
+    note: the pause is cleared, which only un-parks the passes; the continuation re-driven on the pass that follows finds the gang Ready and the source drained, and deletes the source pods
+    events:
+      - spec.unpause: {}
+  - tick: 12
+    note: the source pods are gone, so the replacement is promoted Ready on the pinned revision and the source row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

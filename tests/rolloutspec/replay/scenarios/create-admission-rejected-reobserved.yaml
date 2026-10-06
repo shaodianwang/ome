@@ -1,0 +1,43 @@
+# A pod of a Create attempt is refused by its node, and the refusal is
+# observed again while the recycle's delete is still in flight. The recycle
+# is a pod delete that leaves phase and step where they are, so the
+# re-observed rejection lands on the same row and is satisfied by the
+# delete already in flight; once the object is gone the name is re-created
+# and the attempt promotes.
+scenario: create-admission-rejected-reobserved
+arrows:
+  - T-empty-create
+  - T-create-recycle-terminal
+  - T-create-ready
+cells:
+  - instance/Create/CreatePods/pod.admissionRejected[OutOfResource]/before
+  - instance/Create/CreatePods/pod.admissionRejected[OutOfResource]/after@T-create-recycle-terminal
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound and its node refuses it for want of an accelerator; the pod never ran, so the attempt recycles it with the refusal recorded
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 0}, resource: nvidia.com/gpu, message: "Pod Node didn't have enough resource: nvidia.com/gpu"}
+  - tick: 3
+    note: the refusal is observed again on the pod the recycle is already deleting; it lands on the same row and is satisfied by the delete in flight
+    events:
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 0}, resource: nvidia.com/gpu, message: "Pod Node didn't have enough resource: nvidia.com/gpu"}
+  - tick: 4
+    note: the refused pod is gone, so the name is re-created inside the same attempt
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the re-created pod reports Ready, so the Instance promotes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

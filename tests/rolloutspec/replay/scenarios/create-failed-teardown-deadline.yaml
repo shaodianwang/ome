@@ -1,0 +1,40 @@
+# The owner of a gang whose Create attempt sits Failed on the gang verdict
+# was deleted long enough ago that its teardown deadline has already elapsed
+# when the controller first observes the deletion. The release is
+# phase-blind: the finalizer goes and the row is purged with the owner, and
+# a later tick finds nothing to reconcile.
+scenario: create-failed-teardown-deadline
+cells:
+  - instance/Failed/Create/timer.teardownDeadline/before
+  - instance/Failed/Create/timer.teardownDeadline/after@T-failedcreate-teardown-deadline
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    teardownDeadline: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the owner's deletion is observed with its teardown deadline already behind the clock; the finalizer is released and the row is purged with the owner, its pods left to background GC
+    events:
+      - spec.teardown[deleted]: {}
+      - timer.teardownDeadline: {slack: 1s}
+  - tick: 4
+    note: the deadline is observed again on an owner that is gone; the finalizer was removed once and nothing reconciles
+    events:
+      - timer.teardownDeadline: {slack: 1s}

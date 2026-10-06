@@ -1,0 +1,51 @@
+# The owner of a single-pod surge at its drain step is deleted with its
+# teardown deadline already elapsed, and the replacement is lost on that
+# same observation. The release consults no pod state: the finalizer goes
+# and the row is purged with the owner, so there is no row left to
+# recreate the replacement for, and a later tick finds nothing to
+# reconcile.
+scenario: surgedrain-teardown-deadline-late-signals
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+cells:
+  - instance/Update/SurgeDrain/timer.teardownDeadline/before
+  - instance/Update/SurgeDrain/pod.deleted[target]/boundary@T-surgedrain-teardown-deadline
+  - instance/Update/SurgeDrain/timer.teardownDeadline/after@T-surgedrain-teardown-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    teardownDeadline: 1m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation, so the step advances and the source leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the owner's deletion is observed with its teardown deadline already behind the clock as the replacement is lost; the release consults no pod state, so the finalizer goes and the row is purged with the owner, with no row left to recreate the replacement for
+    events:
+      - spec.teardown[deleted]: {}
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+      - timer.teardownDeadline: {slack: 1s}
+  - tick: 6
+    note: the deadline is observed again on an owner that is gone; the finalizer was removed once and nothing reconciles
+    events:
+      - timer.teardownDeadline: {slack: 1s}

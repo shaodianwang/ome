@@ -1,0 +1,33 @@
+# The owner of a single-pod Instance still being created is deleted with
+# its teardown deadline already elapsed. The release is phase-blind: the
+# finalizer goes, the owner and its row are purged in one delete with the
+# mid-create pod left to background GC, and a later tick finds nothing to
+# reconcile.
+scenario: create-teardown-deadline
+arrows:
+  - T-empty-create
+cells:
+  - instance/Create/CreatePods/timer.teardownDeadline/before
+  - instance/Create/CreatePods/timer.teardownDeadline/after@T-create-teardown-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    teardownDeadline: 1m
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the owner's deletion is observed with its teardown deadline already behind the clock; the finalizer is released and the row is purged with the owner, its half-built pod left to background GC
+    events:
+      - spec.teardown[deleted]: {}
+      - timer.teardownDeadline: {slack: 1s}
+  - tick: 3
+    note: the deadline is observed again on an owner that is gone; the finalizer was removed once and nothing reconciles
+    events:
+      - timer.teardownDeadline: {slack: 1s}

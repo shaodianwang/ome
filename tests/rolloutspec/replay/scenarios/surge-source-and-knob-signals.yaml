@@ -1,0 +1,66 @@
+# A single-pod surge is worked on while its replacement boots: the source
+# loses readiness and runs unready for minutes, the replacement is published
+# early, and the timeout and minReadySeconds knobs change. The surge reads
+# the source only as a count and rotation membership, gates the drain on
+# PodReady plus the window and never on EndpointSlice membership, keeps the
+# deadline it stamped at entry, and reads the window live, so the widened
+# window is what the step waits out once the replacement is Ready.
+scenario: surge-source-and-knob-signals
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/Surge/pod.containersNotReady[source]/before
+  - instance/Update/Surge/endpoint.rotationIn[target]/before
+  - instance/Update/Surge/spec.policyTuning[instanceReadyTimeout]/before
+  - instance/Update/Surge/spec.policyTuning[minReadySeconds]/before
+  - instance/Update/Surge/pod.runningNotReady[source]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the source's readiness regresses, the replacement is published before it is Ready, and a longer timeout and a thirty-second window are set; the step holds, the stamped deadline is untouched and only the window is read live
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+      - spec.policyTuning[instanceReadyTimeout]: {value: 45m}
+      - spec.policyTuning[minReadySeconds]: {value: "30"}
+  - tick: 5
+    note: two minutes pass with the source running but not ready; the source closes no gate on this row
+    events:
+      - clock.advance: 2m
+  - tick: 6
+    note: the replacement reports Ready; the widened window now applies, so the step waits it out
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 7
+    note: the window elapses, so the step advances and the source leaves the serving gate
+    events:
+      - clock.advance: 31s
+  - tick: 8
+    note: the source leaves rotation and is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 9
+    note: the drained source is gone and the Instance promotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

@@ -1,0 +1,33 @@
+tick=1 note the index is planned and no row exists, so the Create pass opens the attempt
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the pod is bound and its node refuses it for want of an accelerator; the pod never ran, so the attempt recycles it with the refusal recorded
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-default-0 node=node-0 now=t+0s
+tick=2 apply pod.admissionRejected[OutOfResource] pod=svc-a-engine-0-default-0 reason=OutOfnvidia.com/gpu now=t+0s
+tick=2 hold cleared
+tick=2 row=0 write no-op precondition=no-change
+tick=2 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb retryCount=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=OutOfnvidia.com/gpu message=Pod Node didn't have enough resource: nvidia.com/gpu} precondition=ok
+tick=2 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=2 event Warning TerminalPodRecycled OMENative component=engine instance=0 deleted terminal pod(s) svc-a-engine-0-default-0 (Failed/OutOfnvidia.com/gpu) for recreate (Create recycle 1)
+tick=2 pass result=after:5s
+tick=3 note the refusal is observed again on the pod the recycle is already deleting; it lands on the same row and is satisfied by the delete in flight
+tick=3 apply pod.admissionRejected[OutOfResource] pod=svc-a-engine-0-default-0 reason=OutOfnvidia.com/gpu now=t+0s
+tick=3 hold cleared
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=after:5s
+tick=4 note the refused pod is gone, so the name is re-created inside the same attempt
+tick=4 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 hold cleared
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=4 pass result=after:5s
+tick=5 note the re-created pod reports Ready, so the Instance promotes
+tick=5 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=5 hold cleared
+tick=5 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=5 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=OutOfnvidia.com/gpu message=Pod Node didn't have enough resource: nvidia.com/gpu} precondition=ok
+tick=5 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=5 pass result=none

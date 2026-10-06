@@ -1,0 +1,44 @@
+# The owner is deleted while a gang's Create attempt sits Failed on the gang
+# verdict with its Create operation kept. Teardown ignores the failure: the
+# Delete operation replaces the kept Create, a re-observed deletion
+# re-derives nothing new, and the half-built pods are deleted.
+scenario: create-failed-teardown
+arrows:
+  - T-failedcreate-teardown
+cells:
+  - instance/Failed/Create/spec.teardown[deleted]/before
+  - instance/Failed/Create/spec.teardown[deleted]/after@T-failedcreate-teardown
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the owner is deleted; teardown ignores the failure and a Delete Drain operation replaces the kept Create
+    events:
+      - spec.teardown[deleted]: {}
+  - tick: 4
+    note: the deletion is observed again; the Delete stamp was committed once, so only the drain advances and the half-built pods are deleted
+    events:
+      - spec.teardown[deleted]: {}
+  - tick: 5
+    note: the pods are gone, so the row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

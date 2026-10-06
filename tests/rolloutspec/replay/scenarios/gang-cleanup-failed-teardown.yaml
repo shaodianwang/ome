@@ -1,0 +1,69 @@
+# The owner is deleted while a gang surge pair sits Failed with the abandon
+# already on its cleanup claim. Teardown ignores the failure: both rows take
+# a Delete Drain operation over their kept ones in one transaction, a
+# re-observed deletion re-derives nothing new, and the routed source drains
+# before its pods go.
+scenario: gang-cleanup-failed-teardown
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-deadline
+  - T-failedgangtarget-cleanup-failed
+  - T-failedgangsurge-teardown
+  - T-failedgangcleanup-teardown
+cells:
+  - instance/Failed/GangSurgeTargetCleanup/spec.teardown[deleted]/before
+  - instance/Failed/GangSurgeTargetCleanup/spec.teardown[deleted]/after@T-failedgangcleanup-teardown
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement is still not Ready when the deadline elapses, so both halves of the pair are stamped Failed with their operations preserved
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: the abandon claims the cleanup marker and deletes the retired replacement's members
+  - tick: 7
+    note: the owner is deleted; teardown ignores the failure and both rows of the pair take a Delete Drain operation over their kept ones in one transaction
+    events:
+      - spec.teardown[deleted]: {}
+  - tick: 8
+    note: the deletion is observed again; the Delete stamps were committed once, so only the drains advance and the source's gate is withdrawn
+    events:
+      - spec.teardown[deleted]: {}
+  - tick: 9
+    note: the source leader leaves the routed Service, so its drain has converged and the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 10
+    note: every pod of the pair is gone, so both rows are removed
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

@@ -1,0 +1,57 @@
+# The replacement gang's PodGroup is taken over by another controller while
+# the surge is in flight, so the marker is Failed with its operation kept,
+# and the roll is then pinned back to the revision the source already runs.
+# A rolled-back target is a superseded pinned revision to the source's pass,
+# which retires the replacement as a revision move does and re-enters from
+# the reset source, where nothing is left to roll.
+scenario: gang-target-failed-verdict-rollback-retires
+arrows:
+  - T-empty-gang-surge-target
+  - T-failedgangtarget-cleanup-superseded
+  - T-failedgangcleanup-done
+cells:
+  - instance/Failed/GangSurgeTarget/spec.rollbackTarget[set]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement group's controller reference is rewritten to another owner; the gang verdict ends the marker alone, Failed with its operation kept, while the source stays Updating and keeps driving the surge
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 1}
+  - tick: 6
+    note: the roll is pinned back to the first revision; the pinned surge is superseded, so the Failed marker takes the cleanup claim and its members are deleted
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+  - tick: 7
+    note: the retired replacement's members are gone, so the marker row is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 8
+    note: the reset source already runs the pinned revision, so nothing is rolled

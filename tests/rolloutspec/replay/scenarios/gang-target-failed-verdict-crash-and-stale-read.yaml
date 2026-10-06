@@ -1,0 +1,69 @@
+# The replacement gang's PodGroup is taken over by another controller while
+# the surge is in flight, so the marker is Failed with its operation kept
+# and the source keeps driving the build. The controller then restarts, and
+# later reads its cache one event behind as the replacement becomes Ready:
+# the marker and the source's claim are durable, and the gang surge reads
+# its members from the live list, so the lag costs nothing.
+scenario: gang-target-failed-verdict-crash-and-stale-read
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-failedgangtarget-ready
+cells:
+  - instance/Failed/GangSurgeTarget/ctrl.crash/before
+  - instance/Failed/GangSurgeTarget/ctrl.staleRead/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement group's controller reference is rewritten to another owner; the gang verdict ends the marker alone, Failed with its operation kept, while the source stays Updating and keeps driving the surge
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 1}
+  - tick: 6
+    note: the controller restarts; the marker and the source's claim are durable, so the next manager re-enters the surge where it stood and finds the replacement still booting
+    events:
+      - ctrl.crash: {}
+  - tick: 7
+    note: both members report Ready and the leader enters rotation while the cache still shows them booting; the gang surge reads its members from the live list, so the source advances to the drain and leaves the serving gate regardless
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+      - ctrl.staleRead: {}
+  - tick: 8
+    note: a tick with nothing changed finds the drain waiting on the source's endpoint
+  - tick: 9
+    note: the source leader leaves the routed Service, so the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 10
+    note: the source pods are gone, so the Failed marker is promoted Ready on the pinned revision and the source row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

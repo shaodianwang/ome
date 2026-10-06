@@ -1,0 +1,72 @@
+# A gang surge pair fails on its deadline under a stuck-pod grace, and a
+# minReadySeconds window is set while the abandon retires the replacement.
+# The clocks keep elapsing: no promote waits on a retired replacement, so
+# its window passing moves nothing, and the fast escalator skips rows
+# already stamped Failed even when a retired member wedges past the grace,
+# so neither clock produces a second stamp.
+scenario: gang-failed-timers-ignored
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-deadline
+  - T-failedgangtarget-cleanup-failed
+  - T-failedgangsurge-reset
+cells:
+  - instance/Failed/GangSurge/timer.minReady/before
+  - instance/Failed/GangSurge/pod.waiting[ImagePullBackOff]/before
+  - instance/Failed/GangSurge/timer.stuckPodGrace/before
+  - instance/Failed/GangSurge/pod.ready[target]/before
+  - instance/Failed/GangSurge/spec.policyTuning[minReadySeconds]/before
+  - instance/Failed/GangSurgeTargetCleanup/pod.waiting[ImagePullBackOff]/before
+  - instance/Failed/GangSurgeTargetCleanup/timer.stuckPodGrace/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement is still not Ready when the deadline elapses, so both halves of the pair are stamped Failed with their operations preserved
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: the replacement leader reports Ready as a minReadySeconds window is set; no promote waits on a retired replacement, so the abandon claims the cleanup marker and deletes the replacement as it would have
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - spec.policyTuning[minReadySeconds]: {value: "60"}
+  - tick: 7
+    note: the window passes on the retired leader and the retired worker reports an image-pull wedge on its way out; neither is read, and the retirement deletes nothing it has not already deleted
+    events:
+      - clock.advance: 1m1s
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 1, runner: worker}, message: "manifest unknown"}
+  - tick: 8
+    note: the stuck-pod grace elapses on the wedged member; both rows are already Failed, so the fast escalator produces no stamp
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 9
+    note: the retired replacement's members are gone, so the marker row is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

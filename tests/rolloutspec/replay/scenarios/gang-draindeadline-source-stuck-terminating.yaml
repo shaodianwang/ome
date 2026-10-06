@@ -1,0 +1,93 @@
+# A gang source fails on its deadline at the drain step with a replacement
+# member short of readiness. The controller restarts, the member comes back,
+# and the drain's deletes meet the apiserver: a shed delete is retried on
+# the next pass, a delete answered not found is done, a source pod left
+# Terminating by a dead kubelet holds the promote until the sweep frees it
+# on node-gone evidence, and the promote's write is re-applied under a
+# status conflict.
+scenario: gang-draindeadline-source-stuck-terminating
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-surgedrain-deadline
+  - T-failedgangtarget-ready
+  - T-failedgangsurgedrain-complete
+cells:
+  - instance/Failed/GangSurgeDrain/ctrl.crash/before
+  - instance/Failed/GangSurgeDrain/api.throttled[TooManyRequests]/before
+  - instance/Failed/GangSurgeDrain/api.notFound/before
+  - instance/Failed/GangSurgeDrain/pod.stuckTerminating/before
+  - instance/Failed/GangSurgeDrain/pod.phaseTerminal[Unknown]/before
+  - instance/Failed/GangSurgeDrain/pod.nodeLost[NodeGone]/before
+  - instance/Failed/GangSurgeDrain/timer.forceDelete[overdueSlack]/before
+  - instance/Failed/GangSurgeDrain/api.conflict/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-1}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: both replacement members report Ready and the leader enters rotation, so the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 6
+    note: the replacement worker's readiness regresses while the source is still published, so the pair is no longer fully serving
+    events:
+      - pod.containersNotReady[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the deadline elapses with the replacement short, so the source is stamped Failed at its drain step and the marker Failed too, both operations kept
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 8
+    note: the controller restarts and the replacement worker comes back Ready; the kept operations and the marker are durable, so the next manager re-enters the handoff where it stood and finds the gang whole
+    events:
+      - ctrl.crash: {}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 9
+    note: the source leader leaves the routed Service and the apiserver sheds the drain's first delete, so the pass leaves through its error path
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - api.throttled[TooManyRequests]: {verb: delete, retryAfter: 30s}
+  - tick: 10
+    note: the retried pass has its first delete answered not found, which leaves the source leader gone at once, and the source worker's delete lands
+    events:
+      - api.notFound: {verb: delete}
+  - tick: 11
+    note: the source worker is left Terminating with no kubelet behind it, reporting phase Unknown, and its node is gone; the promote waits on the name
+    events:
+      - pod.stuckTerminating: {pod: {index: 0, runner: worker}}
+      - pod.phaseTerminal[Unknown]: {pod: {index: 0, runner: worker}}
+      - pod.nodeLost[NodeGone]: {pod: {index: 0, runner: worker}}
+  - tick: 12
+    note: the overdue slack elapses and the first status write of the pass is refused once with a conflict; the sweep force-deletes the stuck source pod on its node-gone evidence, and the promote goes on from the absence under the conflict retry
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+      - api.conflict: {write: 1, count: 1}

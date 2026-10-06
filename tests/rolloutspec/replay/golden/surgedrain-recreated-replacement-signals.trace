@@ -1,0 +1,100 @@
+tick=1 note cold start
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the source becomes Ready and enters rotation
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=2 pass result=none
+tick=3 note the pod template changes, so the rollout surges a replacement
+tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=3 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=3 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c (newOrdinal=1)
+tick=3 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the replacement is serving and in rotation, so the step advances and the source leaves the serving gate
+tick=4 apply pod.ready[target] pod=svc-a-engine-0-default-1 now=t+0s
+tick=4 apply endpoint.rotationIn[target] pod=svc-a-engine-0-default-1 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod status-patch name=svc-a-engine-0-default-1 serving=absent→True
+tick=4 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=4 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the replacement is lost, so the step holds and the next pass recreates it at the surge ordinal while the source stays out of rotation
+tick=5 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+0s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note the recreated replacement is held behind a scheduling gate; the deadline is parked and the escalation pass skips the Instance, so the drain waits without consuming its timeout
+tick=6 apply pod.schedulingGated pod=svc-a-engine-0-default-1 now=t+0s
+tick=6 row=0 write no-op precondition=no-change
+tick=6 hold cleared
+tick=6 pass result=after:5s
+tick=6 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=nil} precondition=ok
+tick=7 note the replacement is admitted; the step does not advance and the only write is the deadline restart
+tick=7 apply pod.admitted pod=svc-a-engine-0-default-1 now=t+0s
+tick=7 row=0 write no-op precondition=no-change
+tick=7 hold cleared
+tick=7 pass result=after:5s
+tick=7 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=8 note the replacement is bound and refused by its node; the shared recycle frees the name and the pass returns before the drain block
+tick=8 apply pod.scheduled[target] pod=svc-a-engine-0-default-1 node=node-1 now=t+0s
+tick=8 apply pod.admissionRejected[OutOfResource] pod=svc-a-engine-0-default-1 reason=OutOfnvidia.com/gpu now=t+0s
+tick=8 row=0 write no-op precondition=no-change
+tick=8 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain retryCount=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-1 reason=OutOfnvidia.com/gpu message=Pod Node didn't have enough resource: nvidia.com/gpu} precondition=ok
+tick=8 pod delete name=svc-a-engine-0-default-1 grace=default
+tick=8 event Warning TerminalPodRecycled OMENative component=engine instance=0 deleted terminal pod(s) svc-a-engine-0-default-1 (Failed/OutOfnvidia.com/gpu) for recreate (Update recycle 1)
+tick=8 hold cleared
+tick=8 pass result=after:5s
+tick=9 note the refused pod is gone and the rebuild's create finds its name already taken; the existing pod is adopted by name
+tick=9 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+0s
+tick=9 apply api.alreadyExists verb=create resource=pods count=1 now=t+0s
+tick=9 row=0 write no-op precondition=no-change
+tick=9 pod create-rejected name=svc-a-engine-0-default-1 rejection=api.alreadyExists
+tick=9 hold cleared
+tick=9 pass result=after:5s
+tick=10 note the adopted replacement is bound and evicted under node pressure; an evicted replacement is recreated at the surge ordinal once it is gone, the source staying out of rotation
+tick=10 apply pod.scheduled[target] pod=svc-a-engine-0-default-1 node=node-2 now=t+0s
+tick=10 apply pod.evicted pod=svc-a-engine-0-default-1 reason=Evicted now=t+0s
+tick=10 row=0 write no-op precondition=no-change
+tick=10 hold cleared
+tick=10 pass result=after:5s
+tick=11 note the evicted replacement is gone, so it is recreated at the surge ordinal
+tick=11 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+0s
+tick=11 row=0 write no-op precondition=no-change
+tick=11 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
+tick=11 hold cleared
+tick=11 pass result=after:5s
+tick=12 note the recreated replacement comes up and loses readiness again as the source leaves rotation, and two minutes pass with it running unready; the replacement is re-checked every pass, so the regression blocks the drain even though the endpoints have converged
+tick=12 apply pod.containersReady[target] pod=svc-a-engine-0-default-1 now=t+0s
+tick=12 apply pod.containersNotReady[target] pod=svc-a-engine-0-default-1 now=t+0s
+tick=12 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=12 apply clock.advance by=2m0s now=t+2m0s
+tick=12 row=0 write no-op precondition=no-change
+tick=12 hold cleared
+tick=12 pass result=after:5s
+tick=13 note the replacement reports Ready, so the drain clears and the source is deleted
+tick=13 apply pod.ready[target] pod=svc-a-engine-0-default-1 now=t+2m0s
+tick=13 row=0 write no-op precondition=no-change
+tick=13 pod status-patch name=svc-a-engine-0-default-1 serving=absent→True
+tick=13 row=0 write no-op precondition=no-change
+tick=13 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=13 hold cleared
+tick=13 pass result=after:5s
+tick=14 note the drained source is gone and the Instance promotes
+tick=14 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=14 row=0 write no-op precondition=no-change
+tick=14 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-6f8b1e6c activeOrdinal=1 readySince=t+2m0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=OutOfnvidia.com/gpu message=Pod Node didn't have enough resource: nvidia.com/gpu} precondition=ok
+tick=14 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c complete (activeOrdinal=1)
+tick=14 hold cleared
+tick=14 pass result=requeue

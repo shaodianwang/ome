@@ -1,0 +1,99 @@
+# A gang source fails on its deadline at the drain step, with a replacement
+# member short of readiness. While the continuation waits for the gang to be
+# runtime-ready again, observations land on both gangs' pods: the drained
+# source's binding, readiness, gate and restarts are read by nobody, the
+# replacement's gates and endpoints move only counters, and both gangs are
+# read by name from the live list.
+scenario: gang-draindeadline-pod-observations-ignored
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-surgedrain-deadline
+  - T-failedgangtarget-ready
+  - T-failedgangsurgedrain-complete
+cells:
+  - instance/Failed/GangSurgeDrain/pod.scheduled[source]/before
+  - instance/Failed/GangSurgeDrain/pod.containersReady[source]/before
+  - instance/Failed/GangSurgeDrain/pod.ready[source]/before
+  - instance/Failed/GangSurgeDrain/pod.containersNotReady[source]/before
+  - instance/Failed/GangSurgeDrain/pod.servingOn[source]/before
+  - instance/Failed/GangSurgeDrain/pod.servingOff[source]/before
+  - instance/Failed/GangSurgeDrain/pod.containerRestart/before
+  - instance/Failed/GangSurgeDrain/pod.uidRotated/before
+  - instance/Failed/GangSurgeDrain/pod.servingOn[target]/before
+  - instance/Failed/GangSurgeDrain/pod.servingOff[target]/before
+  - instance/Failed/GangSurgeDrain/endpoint.rotationIn[target]/before
+  - instance/Failed/GangSurgeDrain/endpoint.rotationOut[target]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: both replacement members report Ready and the leader enters rotation, so the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 6
+    note: the replacement worker's readiness regresses while the source is still published, so the pair is no longer fully serving
+    events:
+      - pod.containersNotReady[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the deadline elapses with the replacement short, so the source is stamped Failed at its drain step and the marker Failed too, both operations kept
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 8
+    note: the drained source's worker is observed bound, runtime-ready and Ready, its leader's gate is re-asserted from outside and its runner restarts, and the replacement worker re-asserts the gate it already holds; nothing reads a drained source, and a gate the replacement holds moves only counters
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.containersReady[source]: {pod: {index: 0, runner: worker}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: leader}}
+      - pod.containerRestart: {pod: {index: 0, runner: leader}, message: OOMKilled}
+      - pod.servingOn[target]: {pod: {index: 1, runner: worker}}
+  - tick: 9
+    note: the source worker's readiness regresses and its gate is withdrawn, the source leader reappears under a new UID, and the replacement leader's gate is dropped while its endpoint leaves and rejoins the routed Service; the continuation still waits on the short gang
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOff[source]: {pod: {index: 0, runner: worker}}
+      - pod.uidRotated: {pod: {index: 0, runner: leader}}
+      - pod.servingOff[target]: {pod: {index: 1, runner: leader}}
+      - endpoint.rotationOut[target]: {pod: {index: 1, runner: leader}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 10
+    note: the replacement worker comes back Ready, so the gang is whole again and the dropped replacement gate is rewritten; the rotated source leader is out of every Service, so the continuation deletes the source pods without touching the gate re-asserted on the source leader
+    events:
+      - pod.containersReady[target]: {pod: {index: 1, runner: worker}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 11
+    note: the source pods are Terminating; the promote waits until they are gone
+  - tick: 12
+    note: the source pods are gone, so the replacement is promoted Ready on the pinned revision and the source row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

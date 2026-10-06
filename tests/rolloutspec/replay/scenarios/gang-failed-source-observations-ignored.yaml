@@ -1,0 +1,86 @@
+# A gang surge runs out its deadline with the replacement still booting, so
+# the source is Failed with its Surge operation kept. Observations about the
+# source gang's own pods land while the abandon retires the replacement: the
+# source keeps serving on its running revision and nothing reads its
+# binding, readiness, gate, endpoints or restarts; the abandon finishes and
+# the reset stamps the source Ready without consulting its pods.
+scenario: gang-failed-source-observations-ignored
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-deadline
+  - T-failedgangtarget-cleanup-failed
+  - T-failedgangsurge-reset
+cells:
+  - instance/Failed/GangSurge/pod.scheduled[source]/before
+  - instance/Failed/GangSurge/pod.containersReady[source]/before
+  - instance/Failed/GangSurge/pod.ready[source]/before
+  - instance/Failed/GangSurge/pod.servingOn[source]/before
+  - instance/Failed/GangSurge/pod.containerRestart/before
+  - instance/Failed/GangSurge/ctrl.resync/before
+  - instance/Failed/GangSurge/pod.containersNotReady[source]/before
+  - instance/Failed/GangSurge/pod.servingOff[source]/before
+  - instance/Failed/GangSurge/endpoint.rotationOut[source]/before
+  - instance/Failed/GangSurgeTarget/pod.containersReady[source]/boundary@T-failedgangtarget-cleanup-failed
+  - instance/Failed/GangSurgeTarget/pod.ready[source]/boundary@T-failedgangtarget-cleanup-failed
+  - instance/Failed/GangSurgeTarget/pod.servingOn[source]/boundary@T-failedgangtarget-cleanup-failed
+  - instance/Failed/GangSurgeTargetCleanup/ctrl.resync/before
+  - instance/Failed/GangSurgeTargetCleanup/pod.containersNotReady[source]/before
+  - instance/Failed/GangSurgeTargetCleanup/pod.servingOff[source]/before
+  - instance/Failed/GangSurgeTargetCleanup/endpoint.rotationOut[source]/before
+  - instance/Failed/GangSurgeTargetCleanup/pod.deleted[target]/boundary@T-failedgangcleanup-done
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement is still not Ready when the deadline elapses, so both halves of the pair are stamped Failed with their operations preserved
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: the source gang's binding, readiness, gate and a runner restart are re-observed as the abandon claims the cleanup marker and deletes the replacement; none of them is read, and the source keeps serving
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.containersReady[source]: {pod: {index: 0, runner: worker}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: leader}}
+      - pod.containerRestart: {pod: {index: 0, runner: leader}, message: OOMKilled}
+  - tick: 7
+    note: a tick with nothing changed re-polls the retired replacement, which is still on its way out, and writes nothing
+  - tick: 8
+    note: the source worker's readiness regresses, the leader's gate is withdrawn and its endpoint leaves the routed Service; a row nobody owns records no hold, and the abandon still waits only on the replacement's pods
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOff[source]: {pod: {index: 0, runner: leader}}
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 9
+    note: the retired replacement's members are gone, so the marker row is removed and the source is reset Ready on its running revision without its pods being consulted
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 10
+    note: the reset source is a Ready row still short of the roll target, so the roll opens a fresh surge from it; what its pods reported meanwhile was read by no pass

@@ -1,0 +1,43 @@
+# A gang's Create attempt is ended by the gang verdict with its Create
+# operation kept, and the operator pauses the Component before the next
+# pass. A paused Create pass finishes only a committed Creating row, which
+# this is not, and the paused selection starts nothing on a row that claims
+# the create verb, so the row rests; the lost-member repair keeps running
+# under the pause and rebuilds the gang when a member is lost.
+scenario: create-failed-pause-repair-runs
+arrows:
+  - T-failedcreate-member-lost
+cells:
+  - instance/Failed/Create/spec.pauseTrue/before
+  - instance/Failed/Create/pod.deleted[source]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the Component is paused; the paused selection starts nothing on a row that claims the create verb, so the failed attempt rests with its pods
+    events:
+      - spec.pauseTrue: {}
+  - tick: 4
+    note: a further pass under the pause changes nothing
+  - tick: 5
+    note: the worker is lost under the pause; the lost-member repair keeps running, so the gang is re-armed as a whole at the bumped incarnation and the surviving leader is drained
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

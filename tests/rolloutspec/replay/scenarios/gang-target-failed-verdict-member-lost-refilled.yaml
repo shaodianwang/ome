@@ -1,0 +1,72 @@
+# The replacement gang's PodGroup is taken over by another controller while
+# the surge is in flight, so the marker is Failed with its operation kept
+# and the source keeps driving the build. The foreign group is then deleted
+# and a member is lost: the surge re-ensures the group ahead of any member
+# it creates, refills the lost member at the same index, and a create that
+# finds its name already taken is satisfied by the pod it finds.
+scenario: gang-target-failed-verdict-member-lost-refilled
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-failedgangtarget-ready
+cells:
+  - instance/Failed/GangSurgeTarget/gang.podGroup[Deleted]/before
+  - instance/Failed/GangSurgeTarget/pod.deleted[target]/before
+  - instance/Failed/GangSurgeTarget/api.alreadyExists/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement group's controller reference is rewritten to another owner; the gang verdict ends the marker alone, Failed with its operation kept, while the source stays Updating and keeps driving the surge
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 1}
+  - tick: 6
+    note: the foreign group is deleted from outside; the surge index is pinned in the plan, so the PodGroup pass restores the group ahead of the pods that reference it
+    events:
+      - gang.podGroup[Deleted]: {instance: 1}
+  - tick: 7
+    note: the replacement worker is lost; with a live source the surge pass recreates the missing member at the same index, and its create finds the name already taken by an earlier writer, which satisfies the build
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+      - api.alreadyExists: {verb: create}
+  - tick: 8
+    note: both members report Ready and the leader enters rotation, so the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 9
+    note: the source leader leaves the routed Service, so the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 10
+    note: the source pods are gone, so the Failed marker is promoted Ready on the pinned revision and the source row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

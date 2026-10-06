@@ -1,0 +1,42 @@
+# The per-Instance worker count grows while a single-pod surge is in
+# flight. The desired pod count is read from the plan on every pass, so the
+# grow re-routes the row into the gang surge path, which sees no surge index
+# on the in-flight operation and opens a fresh gang surge at a new index
+# beside the orphaned single-pod replacement.
+scenario: surge-width-grow-reroutes-to-gang
+arrows:
+  - T-ready-surge
+cells:
+  - instance/Update/Surge/spec.gangWidth[grow]/before
+initial:
+  spec:
+    replicas: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the width grows to one worker while the single-pod surge is in flight; the row is re-routed into the gang surge path, which sees no surge index on the operation and claims a fresh gang surge at the next index
+    events:
+      - spec.gangWidth[grow]: {to: 1}
+  - tick: 5
+    note: the replacement gang's PodGroup is announced and its members are created, while the orphaned single-pod replacement stays where it was
+  - tick: 6
+    note: a further pass finds the gang surge waiting on its members

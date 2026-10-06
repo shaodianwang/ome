@@ -1,0 +1,63 @@
+# The replacement gang's PodGroup is taken over by another controller while
+# the surge is in flight, so the marker is Failed with its operation kept,
+# and the template then moves twice more. The first move supersedes the
+# pinned surge while the replacement is incomplete, so the marker's step
+# advances to the cleanup claim on the claim and the identity, never the
+# phase; the second move changes nothing on the marker and re-enters from
+# the source once the pair resolves.
+scenario: gang-target-failed-verdict-superseded-twice
+arrows:
+  - T-empty-gang-surge-target
+  - T-failedgangtarget-cleanup-superseded
+  - T-failedgangcleanup-done
+cells:
+  - instance/Failed/GangSurgeTarget/spec.revision/before
+  - instance/Failed/GangSurgeTarget/spec.revision/after@T-failedgangtarget-cleanup-superseded
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement group's controller reference is rewritten to another owner; the gang verdict ends the marker alone, Failed with its operation kept, while the source stays Updating and keeps driving the surge
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 1}
+  - tick: 6
+    note: the template moves to a third revision while the replacement is incomplete; the pinned surge is superseded, so the Failed marker takes the cleanup claim exactly as a live one and its members are deleted, with no RetryBlock recorded
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 7
+    note: the template moves to a fourth revision; the cleanup claim is committed and reads no revision, so the move changes nothing on the marker
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v4}
+  - tick: 8
+    note: the retired replacement's members are gone, so the marker row is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 9
+    note: the reset source re-enters the roll at the latest revision

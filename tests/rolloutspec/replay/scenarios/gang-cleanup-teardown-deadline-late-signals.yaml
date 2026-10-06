@@ -1,0 +1,59 @@
+# The owner of a gang surge whose replacement was retired by a second
+# revision move is deleted with its teardown deadline already elapsed, and a
+# retired member is lost on that same observation. The release is driven by
+# the owner's clock alone: the finalizer goes and both rows are purged with
+# the owner, surviving retired pods left to background GC, and the
+# re-observed teardown a tick later opens no Delete operation.
+scenario: gang-cleanup-teardown-deadline-late-signals
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+cells:
+  - instance/Update/GangSurgeTargetCleanup/timer.teardownDeadline/before
+  - instance/Update/GangSurgeTargetCleanup/pod.deleted[target]/boundary@T-gangcleanup-teardown-deadline
+  - instance/Update/GangSurgeTargetCleanup/timer.teardownDeadline/after@T-gangcleanup-teardown-deadline
+  - instance/Update/GangSurgeTargetCleanup/spec.teardown[deleted]/after@T-gangcleanup-teardown-deadline
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    teardownDeadline: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the template changes again while the replacement is still incomplete, so the marker is claimed as a cleanup and its members are deleted
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 6
+    note: the owner's deletion is observed with its teardown deadline already behind the clock as a retired member is gone; the release consults no pod state, so the finalizer goes and both rows are purged with the owner
+    events:
+      - spec.teardown[deleted]: {}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+      - timer.teardownDeadline: {slack: 1s}
+  - tick: 7
+    note: the teardown and the deadline are observed again on an owner that is gone; nothing reconciles and no Delete operation is opened
+    events:
+      - spec.teardown[deleted]: {}
+      - timer.teardownDeadline: {slack: 1s}

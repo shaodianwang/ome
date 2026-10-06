@@ -1,0 +1,53 @@
+# The owner of a single-pod surge is deleted with its teardown deadline
+# already elapsed, and on that same observation the controller restarts,
+# the replacement reports Ready and the template moves again. The release
+# is driven by the owner's clock alone: the finalizer goes, the owner and
+# its row are purged, and the same signals a tick later find nothing to
+# reconcile.
+scenario: surge-teardown-deadline-late-signals
+arrows:
+  - T-ready-surge
+cells:
+  - instance/Update/Surge/ctrl.crash/boundary@T-surge-teardown-deadline
+  - instance/Update/Surge/pod.ready[target]/boundary@T-surge-teardown-deadline
+  - instance/Update/Surge/spec.revision/boundary@T-surge-teardown-deadline
+  - instance/Update/Surge/ctrl.crash/after@T-surge-teardown-deadline
+  - instance/Update/Surge/pod.ready[target]/after@T-surge-teardown-deadline
+  - instance/Update/Surge/spec.revision/after@T-surge-teardown-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    teardownDeadline: 1m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the owner's deletion is observed with its teardown deadline already behind the clock, as the controller restarts, the replacement reports Ready and the template moves on; the release consults none of them, so the finalizer goes and the row is purged with the owner
+    events:
+      - spec.teardown[deleted]: {}
+      - ctrl.crash: {}
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - timer.teardownDeadline: {slack: 1s}
+  - tick: 5
+    note: the same signals arrive again on an owner that is gone; nothing reconciles
+    events:
+      - ctrl.crash: {}
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - spec.revision: {image: registry.example.com/runtime:v4}
+      - timer.teardownDeadline: {slack: 1s}

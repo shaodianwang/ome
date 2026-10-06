@@ -1,0 +1,75 @@
+# Spec and operator-configuration edits land on a gang surge pair that has
+# failed on its deadline, while the abandon retires the replacement. An
+# excluded label mints no revision, no lifecycle knob is read by the
+# abandon and the sweep reads its policy afresh, so the retirement and the
+# reset run exactly as they would have, and only the requeue cadence shows
+# the edit; the fresh roll after the reset is what reads the knobs.
+scenario: gang-failed-spec-edits-ignored
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-deadline
+  - T-failedgangtarget-cleanup-failed
+  - T-failedgangsurge-reset
+cells:
+  - instance/Failed/GangSurge/spec.annotationOnly/before
+  - instance/Failed/GangSurge/spec.policyTuning[restartPolicy]/before
+  - instance/Failed/GangSurge/config.changed[stuckPodGrace]/before
+  - instance/Failed/GangSurgeTarget/spec.annotationOnly/boundary@T-failedgangtarget-cleanup-failed
+  - instance/Failed/GangSurgeTarget/spec.policyTuning[restartPolicy]/boundary@T-failedgangtarget-cleanup-failed
+  - instance/Failed/GangSurgeTarget/config.changed[stuckPodGrace]/boundary@T-failedgangtarget-cleanup-failed
+  - instance/Failed/GangSurge/spec.policyTuning[minReadySeconds]/before
+  - instance/Failed/GangSurge/config.changed[requeue]/before
+  - instance/Failed/GangSurgeTargetCleanup/spec.annotationOnly/before
+  - instance/Failed/GangSurgeTargetCleanup/spec.policyTuning[minReadySeconds]/before
+  - instance/Failed/GangSurgeTargetCleanup/config.changed[requeue]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement is still not Ready when the deadline elapses, so both halves of the pair are stamped Failed with their operations preserved
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: a queue label, a restart-policy flip and a stuck-pod grace land together; none retargets or re-reads the kept operation, and the abandon claims the cleanup marker and deletes the replacement as it would have
+    events:
+      - spec.annotationOnly: {labels: {kueue.x-k8s.io/queue-name: queue-b}}
+      - spec.policyTuning[restartPolicy]: {value: None}
+      - config.changed[stuckPodGrace]: {config: {stuckPodGrace: 1m}}
+  - tick: 7
+    note: a further queue label, a minReadySeconds window and a requeue cadence land while the retired pods are on their way out; the retirement reads none of them and the new cadence shows only in the requeue
+    events:
+      - spec.annotationOnly: {labels: {kueue.x-k8s.io/queue-name: queue-c}}
+      - spec.policyTuning[minReadySeconds]: {value: "30"}
+      - config.changed[requeue]: {config: {requeueOperation: 7s, requeueGate: 3s}}
+  - tick: 8
+    note: the retired replacement's members are gone, so the marker row is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 9
+    note: the fresh roll from the reset source surges again under the strategy the spec still names

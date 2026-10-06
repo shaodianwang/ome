@@ -1,0 +1,71 @@
+# A single-pod surge at its drain step is worked on from outside: the source
+# loses readiness and runs unready, a stuck-pod grace, a partition, a longer
+# timeout and a minReadySeconds window are set, and the Ready replacement is
+# deleted from outside. The drain reads none of them - the source's probes
+# are not consulted, an Updating row is no partition candidate, the deadline
+# was stamped at surge entry and the window applies at the Surge step only -
+# and a Terminating replacement that is still ContainersReady passes the
+# gate, so the drain deletes the source behind a pod that is itself going
+# away.
+scenario: surgedrain-edits-and-terminating-replacement
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+cells:
+  - instance/Update/SurgeDrain/pod.containersNotReady[source]/before
+  - instance/Update/SurgeDrain/config.changed[stuckPodGrace]/before
+  - instance/Update/SurgeDrain/spec.partition/before
+  - instance/Update/SurgeDrain/spec.policyTuning[instanceReadyTimeout]/before
+  - instance/Update/SurgeDrain/spec.policyTuning[minReadySeconds]/before
+  - instance/Update/SurgeDrain/pod.runningNotReady[source]/before
+  - instance/Update/SurgeDrain/pod.terminating[target]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation, so the step advances and the source leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the source's readiness regresses as a stuck-pod grace, a partition, a longer timeout and a minReadySeconds window land; the drain reads none of them
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 0, ordinal: 0}}
+      - config.changed[stuckPodGrace]: {config: {stuckPodGrace: 1m}}
+      - spec.partition: {to: 1}
+      - spec.policyTuning[instanceReadyTimeout]: {value: 45m}
+      - spec.policyTuning[minReadySeconds]: {value: "30"}
+  - tick: 6
+    note: two minutes pass with the drained source running but not ready; the drain gates on EndpointSlice convergence, not on the source's probes
+    events:
+      - clock.advance: 2m
+  - tick: 7
+    note: the Ready replacement is deleted from outside and stays Terminating; the occupied slot suppresses the recreate, and a Terminating replacement that is still ContainersReady passes the gate
+    events:
+      - pod.terminating[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 8
+    note: the source leaves rotation, so the drain deletes it behind a replacement that is itself going away
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 9
+    note: the drained source is gone; what the promote does behind a Terminating replacement is read off the pass
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

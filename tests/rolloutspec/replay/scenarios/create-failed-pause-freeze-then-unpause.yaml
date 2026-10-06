@@ -1,0 +1,45 @@
+# A gang's Create attempt is ended by the gang verdict with its Create
+# operation kept, and a frozen pause lands before the next pass. A frozen
+# pause suspends the repair as well as the roll, so a member lost under it
+# moves nothing; clearing the pause only un-parks the passes, and the row
+# leaves through the exit the next pass finds, which is the lost-member
+# repair.
+scenario: create-failed-pause-freeze-then-unpause
+arrows:
+  - T-failedcreate-member-lost
+cells:
+  - instance/Failed/Create/spec.pauseFreeze/before
+  - instance/Failed/Create/spec.unpause/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: a frozen pause lands; only the status-only truth pass runs, so the failed attempt rests with its pods
+    events:
+      - spec.pauseFreeze: {}
+  - tick: 4
+    note: the worker is lost under the freeze; the repair is suspended too, so nothing moves
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 5
+    note: the pause is cleared, which only un-parks the passes; the pass that follows finds the gang short and re-arms it as a whole, draining the surviving leader
+    events:
+      - spec.unpause: {}

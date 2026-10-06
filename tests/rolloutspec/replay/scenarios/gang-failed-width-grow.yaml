@@ -1,0 +1,61 @@
+# The per-Instance worker count changes while a gang surge pair sits Failed
+# on its deadline. A width change mints no revision: the retired
+# replacement is deleted whole whatever the width, the abandon and the reset
+# run as they would have, and the new width reaches the Instance only after
+# the reset.
+scenario: gang-failed-width-grow
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-deadline
+  - T-failedgangtarget-cleanup-failed
+  - T-failedgangsurge-reset
+cells:
+  - instance/Failed/GangSurge/spec.gangWidth[grow]/before
+  - instance/Failed/GangSurgeTargetCleanup/spec.gangWidth[grow]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement is still not Ready when the deadline elapses, so both halves of the pair are stamped Failed with their operations preserved
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: the width grows to two workers; the edit mints no revision, so the abandon claims the cleanup marker and deletes the replacement whole as it would have
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+  - tick: 7
+    note: the width grows again while the retired members are on their way out; the retirement reads no width
+    events:
+      - spec.gangWidth[grow]: {to: 3}
+  - tick: 8
+    note: the retired replacement's members are gone, so the marker row is removed and the source is reset Ready on its running revision at its old width
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 9
+    note: the reset source re-enters the roll, whose fresh surge is what renders the new width

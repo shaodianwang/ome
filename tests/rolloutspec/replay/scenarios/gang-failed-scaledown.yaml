@@ -1,0 +1,73 @@
+# Two gangs serve under a partition that holds the first; the second surges
+# into a third index and the pair fails on its deadline. The operator then
+# scales to one. A failed source pins nothing in the plan, itself included,
+# so the pair is ranked as one unit behind the serving row and falls beyond
+# the desired set: both rows take a Delete Drain operation over their kept
+# ones in one wave, a re-observed reduction re-derives the same stamps, the
+# routed source drains before its pods go, and the held gang is untouched.
+scenario: gang-failed-scaledown
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-deadline
+  - T-failedgangsurge-scaledown
+  - T-failedgangtarget-scaledown
+cells:
+  - instance/Failed/GangSurge/spec.replicasDown/before
+  - instance/Failed/GangSurgeTarget/spec.replicasDown/before
+  - instance/Failed/GangSurge/spec.replicasDown/after@T-failedgangsurge-scaledown
+  - instance/Failed/GangSurgeTarget/spec.replicasDown/after@T-failedgangtarget-scaledown
+initial:
+  spec:
+    replicas: 2
+    workers: 1
+    partition: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: both gangs' PodGroups are announced before their first members, and the Create pass materializes all four pods
+  - tick: 2
+    note: every member reports Ready and both leaders enter rotation, so both Instances promote
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 1, runner: leader}}
+      - pod.ready[source]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 1, runner: leader}}
+  - tick: 3
+    note: the template changes; the partition keeps index 0 on its revision and index 1 claims index 2 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement is still not Ready when the deadline elapses, so both halves of the pair are stamped Failed with their operations preserved
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: the operator scales to one; the failed pair pins nothing and ranks behind the serving row, so it falls beyond the desired set and both rows take a Delete Drain operation over their kept ones in one wave
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 7
+    note: the reduction is observed again; the admission was committed once, so the same stamps are re-derived and only the drains advance, the retired replacement deleted outright and the source's gate withdrawn
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 8
+    note: the source leader leaves the routed Service, so its drain has converged and the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1, runner: leader}}
+  - tick: 9
+    note: every pod of the pair is gone, so both rows are removed and the held gang is the one Instance left
+    events:
+      - pod.deleted[target]: {pod: {index: 2, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 2, runner: worker}}
+      - pod.deleted[source]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 1, runner: worker}}

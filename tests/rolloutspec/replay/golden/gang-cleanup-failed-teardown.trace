@@ -1,0 +1,88 @@
+tick=1 note the gang's PodGroup is announced before its first member, and the Create pass materializes both
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 2 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-leader-0 revision=4c292506 incarnation=1 ordinal=0
+tick=1 pod create name=svc-a-engine-0-worker-0 revision=4c292506 incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note both members report Ready and the leader enters rotation, so the Instance promotes as one
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-leader-0 serving=absent→True
+tick=2 pod status-patch name=svc-a-engine-0-worker-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-4c292506 readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (2 pod(s) serving)
+tick=2 pass result=none
+tick=3 note the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=3 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-f5f6d007 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 row=1 write incarnation=1 phase=Creating runningRevision=nil targetRevision=svc-a-engine-f5f6d007 readySince=nil op=op#3{type=Update step=GangSurgeTarget target=svc-a-engine-f5f6d007 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 gang surge to revision svc-a-engine-f5f6d007 (surge-index=1)
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the replacement's PodGroup is announced before its first member, and both members are created
+tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=4 podgroup create name=svc-a-engine-1
+tick=4 row=1 write no-op precondition=no-change
+tick=4 pod create name=svc-a-engine-1-leader-0 revision=f5f6d007 incarnation=1 ordinal=0
+tick=4 pod create name=svc-a-engine-1-worker-0 revision=f5f6d007 incarnation=1 ordinal=0
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the replacement is still not Ready when the deadline elapses, so both halves of the pair are stamped Failed with their operations preserved
+tick=5 apply timer.operationDeadline to=t+30m1s now=t+30m1s
+tick=5 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=5 row=1 write no-op precondition=no-change
+tick=5 hold cleared
+tick=5 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-f5f6d007 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Surge exceeded InstanceReadyTimeout} precondition=ok
+tick=5 row=1 write incarnation=1 phase=Failed runningRevision=nil targetRevision=svc-a-engine-f5f6d007 readySince=nil op=op#3{type=Update step=GangSurgeTarget target=svc-a-engine-f5f6d007 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/GangSurgeTarget exceeded InstanceReadyTimeout} precondition=ok
+tick=5 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/Surge exceeded InstanceReadyTimeout
+tick=5 warn instanceFailed index=1 pod=nil reason=DeadlineExceeded: Update/GangSurgeTarget exceeded InstanceReadyTimeout
+tick=5 pass result=after:5s
+tick=6 note the abandon claims the cleanup marker and deletes the retired replacement's members
+tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=6 row=1 write no-op precondition=no-change
+tick=6 row=1 write incarnation=1 phase=Failed runningRevision=nil targetRevision=svc-a-engine-f5f6d007 readySince=nil op=op#3{type=Update step=GangSurgeTargetCleanup target=svc-a-engine-f5f6d007 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/GangSurgeTarget exceeded InstanceReadyTimeout} precondition=ok
+tick=6 pod delete name=svc-a-engine-1-leader-0 grace=default
+tick=6 pod delete name=svc-a-engine-1-worker-0 grace=default
+tick=6 hold cleared
+tick=6 pass result=after:5s
+tick=7 note the owner is deleted; teardown ignores the failure and both rows of the pair take a Delete Drain operation over their kept ones in one transaction
+tick=7 apply spec.teardown[deleted] teardown=true now=t+30m1s
+tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=7 row=1 write incarnation=1 phase=Deleting runningRevision=nil targetRevision=svc-a-engine-f5f6d007 readySince=nil op=op#4{type=Delete step=Drain started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/GangSurgeTarget exceeded InstanceReadyTimeout} precondition=ok
+tick=7 row=0 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+0s op=op#5{type=Delete step=Drain started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Surge exceeded InstanceReadyTimeout} precondition=ok
+tick=7 pass result=requeue
+tick=8 note the deletion is observed again; the Delete stamps were committed once, so only the drains advance and the source's gate is withdrawn
+tick=8 apply spec.teardown[deleted] teardown=true now=t+30m1s
+tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=8 row=1 write no-op precondition=no-change
+tick=8 row=0 write no-op precondition=no-change
+tick=8 pod status-patch name=svc-a-engine-0-leader-0 serving=True→False
+tick=8 pod status-patch name=svc-a-engine-0-worker-0 serving=True→False
+tick=8 pass result=none
+tick=9 note the source leader leaves the routed Service, so its drain has converged and the source pods are deleted
+tick=9 apply endpoint.rotationOut[source] pod=svc-a-engine-0-leader-0 now=t+30m1s
+tick=9 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=9 row=1 write no-op precondition=no-change
+tick=9 row=0 write no-op precondition=no-change
+tick=9 pod delete name=svc-a-engine-0-leader-0 grace=default uidPrecondition=set
+tick=9 pod delete name=svc-a-engine-0-worker-0 grace=default uidPrecondition=set
+tick=9 pass result=none
+tick=10 note every pod of the pair is gone, so both rows are removed
+tick=10 apply pod.deleted[target] pod=svc-a-engine-1-leader-0 now=t+30m1s
+tick=10 apply pod.deleted[target] pod=svc-a-engine-1-worker-0 now=t+30m1s
+tick=10 apply pod.deleted[source] pod=svc-a-engine-0-leader-0 now=t+30m1s
+tick=10 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+30m1s
+tick=10 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=10 row=1 write no-op precondition=no-change
+tick=10 row=0 write no-op precondition=no-change
+tick=10 row=1 remove incarnation=1 phase=Deleting runningRevision=nil targetRevision=svc-a-engine-f5f6d007 readySince=nil op=op#4{type=Delete step=Drain started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/GangSurgeTarget exceeded InstanceReadyTimeout} precondition=ok
+tick=10 row=0 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+0s op=op#5{type=Delete step=Drain started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Surge exceeded InstanceReadyTimeout} precondition=ok
+tick=10 pass result=requeue

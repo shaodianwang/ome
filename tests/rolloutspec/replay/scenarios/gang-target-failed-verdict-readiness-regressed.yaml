@@ -1,0 +1,78 @@
+# The replacement gang's PodGroup is taken over by another controller while
+# the surge is in flight, so the marker is Failed with its operation kept
+# and the source keeps driving the build. A member's readiness then
+# regresses and the leader's gate is dropped: the source's pass re-reads
+# the whole gang's runtime readiness every pass, holds the drain while a
+# member is short, rewrites the gate once the gang is runtime-ready again,
+# and no clock of the Failed marker runs meanwhile.
+scenario: gang-target-failed-verdict-readiness-regressed
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-failedgangtarget-ready
+cells:
+  - instance/Failed/GangSurgeTarget/pod.containersNotReady[target]/before
+  - instance/Failed/GangSurgeTarget/pod.servingOff[target]/before
+  - instance/Failed/GangSurgeTarget/pod.runningNotReady[target]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement group's controller reference is rewritten to another owner; the gang verdict ends the marker alone, Failed with its operation kept, while the source stays Updating and keeps driving the surge
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 1}
+  - tick: 6
+    note: both replacement members report ContainersReady, so the source's pass writes their serving gates
+    events:
+      - pod.containersReady[target]: {pod: {index: 1, runner: leader}}
+      - pod.containersReady[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the worker's readiness regresses as the leader reports Ready and enters rotation; the whole gang is no longer runtime-ready, so the drain holds and the marker is untouched
+    events:
+      - pod.containersNotReady[target]: {pod: {index: 1, runner: worker}}
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 8
+    note: the leader's gate is dropped from outside and two minutes pass with the worker running but not ready; the gate is rewritten only once the gang is runtime-ready, and the Failed marker runs no clock of its own
+    events:
+      - pod.servingOff[target]: {pod: {index: 1, runner: leader}}
+      - clock.advance: 2m
+  - tick: 9
+    note: the worker reports Ready, so the gang is runtime-ready again, the leader's gate is rewritten, and the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 10
+    note: the source leader leaves the routed Service, so the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 11
+    note: the source pods are gone, so the Failed marker is promoted Ready on the pinned revision and the source row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

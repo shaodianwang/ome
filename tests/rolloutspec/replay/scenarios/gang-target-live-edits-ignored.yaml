@@ -1,0 +1,95 @@
+# Spec, policy and configuration edits and a source regression land on a
+# gang surge while its three-pod replacement builds. The source is read only
+# as a count, an excluded label mints no revision, a marker is never a
+# partition candidate, a changed timeout is not re-stamped, a widened
+# minReadySeconds window reaches the pending drain, a new stuck-pod grace is
+# only re-read, a member's regression re-closes the drain gate, and a
+# narrower width deletes no surplus member, which must still be
+# runtime-ready before the promote.
+scenario: gang-target-live-edits-ignored
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-surgedrain-gang-complete
+cells:
+  - instance/Update/GangSurgeTarget/pod.containersNotReady[source]/before
+  - instance/Update/GangSurgeTarget/spec.annotationOnly/before
+  - instance/Update/GangSurgeTarget/spec.partition/before
+  - instance/Update/GangSurgeTarget/spec.policyTuning[instanceReadyTimeout]/before
+  - instance/Update/GangSurgeTarget/spec.policyTuning[minReadySeconds]/before
+  - instance/Update/GangSurgeTarget/config.changed[stuckPodGrace]/before
+  - instance/Update/GangSurgeTarget/pod.containersNotReady[target]/before
+  - instance/Update/GangSurgeTarget/spec.gangWidth[shrink]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 2
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes all three
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker, ordinal: 0}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker, ordinal: 1}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and all three members are created
+  - tick: 5
+    note: a source worker loses readiness as a queue label, a partition, a longer timeout, a thirty-second minReadySeconds window and a stuck-pod grace land; the source is read only as a count and none of the edits writes the marker
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 0, runner: worker, ordinal: 0}}
+      - spec.annotationOnly: {labels: {kueue.x-k8s.io/queue-name: queue-b}}
+      - spec.partition: {to: 1}
+      - spec.policyTuning[instanceReadyTimeout]: {value: 45m}
+      - spec.policyTuning[minReadySeconds]: {value: "30"}
+      - config.changed[stuckPodGrace]: {config: {stuckPodGrace: 1m}}
+  - tick: 6
+    note: all three replacement members report ContainersReady, so the source's pass writes their serving gates
+    events:
+      - pod.containersReady[target]: {pod: {index: 1, runner: leader}}
+      - pod.containersReady[target]: {pod: {index: 1, runner: worker, ordinal: 0}}
+      - pod.containersReady[target]: {pod: {index: 1, runner: worker, ordinal: 1}}
+  - tick: 7
+    note: the second replacement worker's readiness regresses as the leader and the first worker report Ready and the leader enters rotation; the whole gang is re-read every pass, so the drain gate re-closes
+    events:
+      - pod.containersNotReady[target]: {pod: {index: 1, runner: worker, ordinal: 1}}
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker, ordinal: 0}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 8
+    note: the width shrinks to one worker; the surge deletes no surplus member and scans the whole live list, so the unready surplus worker still holds the drain gate closed
+    events:
+      - spec.gangWidth[shrink]: {to: 1}
+  - tick: 9
+    note: the surplus worker reports Ready, so the gang is whole again and the widened window starts on the pending drain
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: worker, ordinal: 1}}
+  - tick: 10
+    note: the window elapses, so the source advances to the drain and leaves the serving gate
+    events:
+      - clock.advance: 31s
+  - tick: 11
+    note: the source leader leaves the routed Service, so the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 12
+    note: the source pods are gone, so the marker is promoted Ready on the pinned revision and the source row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker, ordinal: 0}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker, ordinal: 1}}

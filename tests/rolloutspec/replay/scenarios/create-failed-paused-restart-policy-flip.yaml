@@ -1,0 +1,50 @@
+# A gang's Create attempt is ended by the gang verdict with its Create
+# operation kept, and the operator pauses the Component so the row rests.
+# The restart policy is then flipped: the lost-member re-arm fires only
+# under RecreateInstanceOnPodRestart, so a member lost while the policy is
+# None moves nothing, and restoring the policy arms the re-arm for the
+# next pass.
+scenario: create-failed-paused-restart-policy-flip
+arrows:
+  - T-failedcreate-member-lost
+cells:
+  - instance/Failed/Create/spec.policyTuning[restartPolicy]/before
+  - instance/Failed/Create/spec.pauseTrue/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the Component is paused and the restart policy is set to None; the paused selection starts nothing on a row that claims the create verb, and the lost-member re-arm is disarmed
+    events:
+      - spec.pauseTrue: {}
+      - spec.policyTuning[restartPolicy]: {value: None}
+  - tick: 4
+    note: the worker is lost; with the re-arm disarmed nothing claims the loss, and the row rests short of a member
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 5
+    note: the restart policy is restored, which arms the re-arm for the next pass; the pass that reads it finds the gang short and re-arms it as a whole
+    events:
+      - spec.policyTuning[restartPolicy]: {value: RecreateInstanceOnPodRestart}
+  - tick: 6
+    note: the drained leader is gone, which is the loss consumed once
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}

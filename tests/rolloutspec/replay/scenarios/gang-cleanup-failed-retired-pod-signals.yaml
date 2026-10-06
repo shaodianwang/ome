@@ -1,0 +1,78 @@
+# A gang surge pair fails on its deadline and quota refuses the abandon's
+# deletes for two passes, so the retired replacement lingers under its
+# cleanup marker. Observations about the retired pods land meanwhile: a
+# late binding, readiness, a runner restart and an asserted gate change
+# nothing, an asserted gate is withdrawn a pass ahead of the delete, and a
+# pod back under a new UID is deleted by name like any other.
+scenario: gang-cleanup-failed-retired-pod-signals
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-deadline
+  - T-failedgangtarget-cleanup-failed
+  - T-failedgangsurge-reset
+cells:
+  - instance/Failed/GangSurgeTargetCleanup/pod.scheduled[target]/before
+  - instance/Failed/GangSurgeTargetCleanup/pod.containersReady[target]/before
+  - instance/Failed/GangSurgeTargetCleanup/pod.ready[target]/before
+  - instance/Failed/GangSurgeTargetCleanup/pod.servingOn[target]/before
+  - instance/Failed/GangSurgeTargetCleanup/endpoint.rotationIn[target]/before
+  - instance/Failed/GangSurgeTargetCleanup/pod.containerRestart/before
+  - instance/Failed/GangSurgeTargetCleanup/pod.uidRotated/before
+  - instance/Failed/GangSurge/pod.uidRotated/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement is still not Ready when the deadline elapses, so both halves of the pair are stamped Failed with their operations preserved
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: quota refuses the abandon's first delete, so the cleanup claim lands on the marker but the retired members stay
+    events:
+      - api.quotaDenied: {verb: delete, count: 2}
+  - tick: 7
+    note: the retired leader binds, becomes runtime-ready and enters rotation, and the retired worker reports Ready, asserts its gate and restarts its runner; nothing revives a retired replacement, the asserted gate is withdrawn a pass ahead of the delete, and no delete is attempted on this pass
+    events:
+      - pod.scheduled[target]: {pod: {index: 1, runner: leader}, message: node-1}
+      - pod.containersReady[target]: {pod: {index: 1, runner: leader}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - pod.servingOn[target]: {pod: {index: 1, runner: worker}}
+      - pod.containerRestart: {pod: {index: 1, runner: worker}, message: OOMKilled}
+  - tick: 8
+    note: the retirement attempts its deletes again and quota refuses the first once more
+  - tick: 9
+    note: the worker reappears under a new UID before any delete landed on it; the retirement reads the live list by name, so the rotated pod is deleted with the leader once quota admits the deletes
+    events:
+      - pod.uidRotated: {pod: {index: 1, runner: worker}}
+  - tick: 10
+    note: the retired replacement's members are gone, so the marker row is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

@@ -1,0 +1,81 @@
+# The replacement gang's PodGroup is taken over by another controller while
+# the surge is in flight, so the marker is Failed with its operation kept
+# and the source keeps driving the build. One member exits and another is
+# evicted: no pass recreates a terminal pod on a stable name, so the pair
+# waits until the objects are gone, and only then does the source's build
+# refill the names. The foreign group is deleted first, so the names are
+# not withheld on it.
+scenario: gang-target-failed-verdict-member-terminal
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-failedgangtarget-ready
+cells:
+  - instance/Failed/GangSurgeTarget/pod.phaseTerminal[Failed]/before
+  - instance/Failed/GangSurgeTarget/pod.evicted/before
+  - instance/Failed/GangSurgeTarget/pod.deleted[target]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement group's controller reference is rewritten to another owner; the gang verdict ends the marker alone, Failed with its operation kept, while the source stays Updating and keeps driving the surge
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 1}
+  - tick: 6
+    note: the foreign group is deleted from outside; the surge index is pinned in the plan, so the PodGroup pass restores the group and the names are no longer withheld
+    events:
+      - gang.podGroup[Deleted]: {instance: 1}
+  - tick: 7
+    note: the replacement leader is bound and then evicted under node pressure while the worker exits with a terminal phase; neither is recreated on its stable name, and the marker is untouched
+    events:
+      - pod.scheduled[target]: {pod: {index: 1, runner: leader}, message: node-1}
+      - pod.evicted: {pod: {index: 1, runner: leader}, message: "The node was low on resource: memory"}
+      - pod.phaseTerminal[Failed]: {pod: {index: 1, runner: worker}}
+  - tick: 8
+    note: a further pass finds the same two terminal pods and still recreates nothing
+  - tick: 9
+    note: both terminal pods are gone, so the source's build refills the names at the same index
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 10
+    note: the refilled members report Ready and the leader enters rotation, so the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 11
+    note: the source leader leaves the routed Service, so the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 12
+    note: the source pods are gone, so the Failed marker is promoted Ready on the pinned revision and the source row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

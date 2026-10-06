@@ -1,0 +1,42 @@
+# A gang's Create attempt is ended by the gang verdict with its Create
+# operation kept, and its pods then all come up. The update trigger reads a
+# Failed row with no running revision through its pods: a complete set on
+# the target revision that is runtime-ready is adopted in place, Ready on
+# the target with the kept operation cleared, and a repeat of the same
+# readiness afterwards writes nothing.
+scenario: create-failed-adopted-when-ready
+arrows:
+  - T-failedcreate-adopt
+cells:
+  - instance/Failed/Create/pod.containersReady[source]/before
+  - instance/Failed/Create/pod.containersReady[source]/after@T-failedcreate-adopt
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: both members report ContainersReady on the target revision, so the Failed row is adopted in place, Ready on the target with its kept operation cleared
+    events:
+      - pod.containersReady[source]: {pod: {index: 0, runner: leader}}
+      - pod.containersReady[source]: {pod: {index: 0, runner: worker}}
+  - tick: 4
+    note: the leader's readiness is observed again; the adoption stamp is idempotent and the row is already Ready, so nothing is written
+    events:
+      - pod.containersReady[source]: {pod: {index: 0, runner: leader}}

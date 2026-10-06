@@ -1,0 +1,59 @@
+# A gang surge's replacement is retired by a second revision move and the
+# apiserver answers the retirement's deletes: a rejected delete returns an
+# opaque error and is retried on backoff, a shed delete propagates verbatim
+# and the retirement resumes on a later pass, and a delete that is answered
+# not found counts as already gone.
+scenario: gang-cleanup-live-api-answers
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+  - T-gangcleanup-done
+cells:
+  - instance/Update/GangSurgeTargetCleanup/api.invalid/before
+  - instance/Update/GangSurgeTargetCleanup/api.throttled[TooManyRequests]/before
+  - instance/Update/GangSurgeTargetCleanup/api.notFound/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the template changes again while the replacement is still incomplete, so the marker is claimed as a cleanup; the apiserver rejects the retirement's first delete as invalid, which leaves the pass through its error path
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - api.invalid: {verb: delete}
+  - tick: 6
+    note: the apiserver sheds the retried delete; the refusal propagates verbatim and the retirement resumes on a later pass
+    events:
+      - api.throttled[TooManyRequests]: {verb: delete, retryAfter: 30s}
+  - tick: 7
+    note: the retried delete is answered not found, which leaves that retired member gone at once; the other is deleted
+    events:
+      - api.notFound: {verb: delete}
+  - tick: 8
+    note: the last retired member is gone, so the marker is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

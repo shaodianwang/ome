@@ -1,0 +1,57 @@
+# A gang surge's replacement is retired by a second revision move while
+# quota refuses the retirement's deletes, and the node under a retired
+# member dies meanwhile. No node-death evidence is consulted on the
+# retirement path: the member is deleted like any other once the deletes are
+# admitted, and the marker is removed once it is gone.
+scenario: gang-cleanup-live-node-lost-member
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+  - T-gangcleanup-done
+cells:
+  - instance/Update/GangSurgeTargetCleanup/pod.nodeLost[NodeGone]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: quota refuses the first delete of the retired members, so the template change claims the cleanup marker without removing its pods
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - api.quotaDenied: {verb: delete, resource: pods, count: 2}
+  - tick: 6
+    note: the retired worker is bound and its node is then gone; no node-death evidence is consulted on the retirement path, and quota refuses the delete again
+    events:
+      - pod.scheduled[target]: {pod: {index: 1, runner: worker}, message: node-2}
+      - pod.nodeLost[NodeGone]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the deletes are admitted, so both retired members are deleted like any other
+  - tick: 8
+    note: the retired members are gone, so the marker is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

@@ -1,0 +1,91 @@
+# The replacement of a single-pod surge at its drain step is lost and
+# recreated, and the recreated pod meets the scheduler, its node and an
+# earlier writer on the way back: a gated pod parks the deadline, admission
+# restarts it, a node's refusal is recycled and the freed name rebuilt, a
+# create that finds its name taken adopts the pod, an evicted replacement
+# is recreated again while the source stays out of rotation, and a
+# replacement running unready re-blocks the drain until it clears.
+scenario: surgedrain-recreated-replacement-signals
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/SurgeDrain/pod.schedulingGated/before
+  - instance/Update/SurgeDrain/pod.admitted/before
+  - instance/Update/SurgeDrain/pod.admissionRejected[OutOfResource]/before
+  - instance/Update/SurgeDrain/api.alreadyExists/before
+  - instance/Update/SurgeDrain/pod.evicted/before
+  - instance/Update/SurgeDrain/pod.runningNotReady[target]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation, so the step advances and the source leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the replacement is lost, so the step holds and the next pass recreates it at the surge ordinal while the source stays out of rotation
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 6
+    note: the recreated replacement is held behind a scheduling gate; the deadline is parked and the escalation pass skips the Instance, so the drain waits without consuming its timeout
+    events:
+      - pod.schedulingGated: {pod: {index: 0, ordinal: 1}}
+  - tick: 7
+    note: the replacement is admitted; the step does not advance and the only write is the deadline restart
+    events:
+      - pod.admitted: {pod: {index: 0, ordinal: 1}}
+  - tick: 8
+    note: the replacement is bound and refused by its node; the shared recycle frees the name and the pass returns before the drain block
+    events:
+      - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}, message: node-1}
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 0, ordinal: 1}, resource: nvidia.com/gpu, message: "Pod Node didn't have enough resource: nvidia.com/gpu"}
+  - tick: 9
+    note: the refused pod is gone and the rebuild's create finds its name already taken; the existing pod is adopted by name
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+      - api.alreadyExists: {verb: create}
+  - tick: 10
+    note: the adopted replacement is bound and evicted under node pressure; an evicted replacement is recreated at the surge ordinal once it is gone, the source staying out of rotation
+    events:
+      - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}, message: node-2}
+      - pod.evicted: {pod: {index: 0, ordinal: 1}, message: "The node was low on resource: memory"}
+  - tick: 11
+    note: the evicted replacement is gone, so it is recreated at the surge ordinal
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 12
+    note: the recreated replacement comes up and loses readiness again as the source leaves rotation, and two minutes pass with it running unready; the replacement is re-checked every pass, so the regression blocks the drain even though the endpoints have converged
+    events:
+      - pod.containersReady[target]: {pod: {index: 0, ordinal: 1}}
+      - pod.containersNotReady[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+      - clock.advance: 2m
+  - tick: 13
+    note: the replacement reports Ready, so the drain clears and the source is deleted
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 14
+    note: the drained source is gone and the Instance promotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

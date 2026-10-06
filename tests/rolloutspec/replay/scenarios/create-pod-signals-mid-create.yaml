@@ -1,0 +1,68 @@
+# A three-pod gang is created under a restart policy that never re-arms it,
+# and its attempt is worked on from outside before it promotes. A member
+# losing readiness only re-opens the wait inside the same attempt, an
+# excluded label and a changed timeout leave the pinned attempt and its
+# stamped deadline alone, a new requeue cadence paces the next wake-up, a
+# same-name pod under a new UID is adopted on the next list, a terminating
+# pod holds its name slot until it is gone and is then re-created inside the
+# same attempt, and a narrower width deletes no surplus pod, which must
+# still be ready before the promote.
+scenario: create-pod-signals-mid-create
+arrows:
+  - T-empty-create
+  - T-create-ready
+cells:
+  - instance/Create/CreatePods/pod.containersNotReady[source]/before
+  - instance/Create/CreatePods/spec.annotationOnly/before
+  - instance/Create/CreatePods/spec.policyTuning[instanceReadyTimeout]/before
+  - instance/Create/CreatePods/config.changed[requeue]/before
+  - instance/Create/CreatePods/pod.uidRotated/before
+  - instance/Create/CreatePods/pod.terminating[source]/before
+  - instance/Create/CreatePods/spec.gangWidth[shrink]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 2
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes all three
+  - tick: 2
+    note: the leader comes up and loses readiness again as a queue label, a longer timeout and a new requeue cadence land; the regression re-opens the wait inside the attempt, the pinned attempt and its stamped deadline are untouched, and only the requeue shows the edit
+    events:
+      - pod.containersReady[source]: {pod: {index: 0, runner: leader}}
+      - pod.containersNotReady[source]: {pod: {index: 0, runner: leader}}
+      - spec.annotationOnly: {labels: {kueue.x-k8s.io/queue-name: queue-b}}
+      - spec.policyTuning[instanceReadyTimeout]: {value: 45m}
+      - config.changed[requeue]: {config: {requeueOperation: 7s, requeueGate: 3s}}
+  - tick: 3
+    note: the first worker reappears under a new UID and the second is deleted from outside; the pass addresses pods by name, so the rotated pod is adopted on the next list and the terminating pod still occupies its slot
+    events:
+      - pod.uidRotated: {pod: {index: 0, runner: worker, ordinal: 0}}
+      - pod.terminating[source]: {pod: {index: 0, runner: worker, ordinal: 1}}
+  - tick: 4
+    note: the terminating worker is gone, so its name is re-created inside the same attempt
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker, ordinal: 1}}
+  - tick: 5
+    note: the width shrinks to one worker; the surplus ordinal's pod is deleted by no pass, so it stays and must still be ready before the promote
+    events:
+      - spec.gangWidth[shrink]: {to: 1}
+  - tick: 6
+    note: the leader and the first worker report Ready; the surplus worker is not, so the promote waits on it
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker, ordinal: 0}}
+  - tick: 7
+    note: the surplus worker reports Ready too, so the whole live set clears the bar and the Instance promotes
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: worker, ordinal: 1}}

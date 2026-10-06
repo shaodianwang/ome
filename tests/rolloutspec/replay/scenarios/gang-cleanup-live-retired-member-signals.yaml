@@ -1,0 +1,85 @@
+# A gang surge's replacement is retired by a second revision move while
+# quota refuses the retirement's deletes for three passes, so the retired
+# members linger under the live cleanup marker. They are gated, admitted,
+# bound, evicted, refused by their node, rotated under a new UID and lose or
+# gain readiness meanwhile, and a label, a partition and a requeue cadence
+# land; the retirement deletes whatever the live list returns once the
+# deletes are admitted, reads no readiness and no partition, and only the
+# requeue shows an edit.
+scenario: gang-cleanup-live-retired-member-signals
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+  - T-gangcleanup-done
+cells:
+  - instance/Update/GangSurgeTargetCleanup/pod.schedulingGated/before
+  - instance/Update/GangSurgeTargetCleanup/pod.evicted/before
+  - instance/Update/GangSurgeTargetCleanup/pod.containersNotReady[source]/before
+  - instance/Update/GangSurgeTargetCleanup/pod.admitted/before
+  - instance/Update/GangSurgeTargetCleanup/pod.admissionRejected[OutOfResource]/before
+  - instance/Update/GangSurgeTargetCleanup/pod.containersNotReady[target]/before
+  - instance/Update/GangSurgeTargetCleanup/pod.uidRotated/before
+  - instance/Update/GangSurgeTargetCleanup/spec.annotationOnly/before
+  - instance/Update/GangSurgeTargetCleanup/spec.partition/before
+  - instance/Update/GangSurgeTargetCleanup/config.changed[requeue]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: quota refuses the first delete of the retired members, so the template change claims the cleanup marker without removing its pods
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - api.quotaDenied: {verb: delete, resource: pods, count: 3}
+  - tick: 6
+    note: the retired worker is held behind a scheduling gate, the retired leader is bound, comes up and is evicted, and a source worker loses readiness; the retirement reads none of it and quota refuses the delete again
+    events:
+      - pod.schedulingGated: {pod: {index: 1, runner: worker}}
+      - pod.scheduled[target]: {pod: {index: 1, runner: leader}, message: node-1}
+      - pod.containersReady[target]: {pod: {index: 1, runner: leader}}
+      - pod.evicted: {pod: {index: 1, runner: leader}, message: "The node was low on resource: memory"}
+      - pod.containersNotReady[source]: {pod: {index: 0, runner: worker}}
+  - tick: 7
+    note: the retired worker is admitted, bound and refused by its node, the evicted leader reappears under a new UID, and a label, a partition and a requeue cadence land; nothing recreates a retired pod, no partition reads a marker, and quota refuses the delete a third time
+    events:
+      - pod.admitted: {pod: {index: 1, runner: worker}}
+      - pod.scheduled[target]: {pod: {index: 1, runner: worker}, message: node-2}
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 1, runner: worker}, resource: nvidia.com/gpu, message: "Pod Node didn't have enough resource: nvidia.com/gpu"}
+      - pod.uidRotated: {pod: {index: 1, runner: leader}}
+      - spec.annotationOnly: {labels: {kueue.x-k8s.io/queue-name: queue-b}}
+      - spec.partition: {to: 1}
+      - config.changed[requeue]: {config: {requeueOperation: 7s, requeueGate: 3s}}
+  - tick: 8
+    note: the rotated leader comes up and loses readiness again; the cleanup claim is terminal, so health in either direction is irrelevant, and the deletes are admitted
+    events:
+      - pod.containersReady[target]: {pod: {index: 1, runner: leader}}
+      - pod.containersNotReady[target]: {pod: {index: 1, runner: leader}}
+  - tick: 9
+    note: the retired members are gone, so the marker is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

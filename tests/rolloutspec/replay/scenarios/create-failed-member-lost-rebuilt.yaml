@@ -1,0 +1,44 @@
+# A gang's Create attempt is ended by the gang verdict with its Create
+# operation kept, and a member is then lost under the multi-pod default
+# restart policy. A kept Create claim is one the lost-member trigger admits,
+# and the committed Create step proves the set was once complete, so the
+# gang is rebuilt as a whole carrying the pinned revision; the drain's own
+# deletion of the survivor is the loss consumed once, and the rebuild on the
+# name the foreign group still holds is ended by the verdict again.
+scenario: create-failed-member-lost-rebuilt
+arrows:
+  - T-failedcreate-member-lost
+cells:
+  - instance/Failed/Create/pod.deleted[source]/before
+  - instance/Failed/Create/pod.deleted[source]/after@T-failedcreate-member-lost
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the worker is lost; the lost-member trigger admits the kept Create claim, so the gang is re-armed as a whole at the bumped incarnation and the surviving leader is drained
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 4
+    note: the drained leader is gone, which is the loss consumed once; the rebuild would render the whole gang on the name the foreign group still holds, so the gang verdict ends it again and parks the repair at Failed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+  - tick: 5
+    note: with no live pod left to resume or rebuild, the parked repair is closed and its operation cleared

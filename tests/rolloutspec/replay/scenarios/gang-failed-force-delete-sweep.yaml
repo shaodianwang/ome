@@ -1,0 +1,67 @@
+# A gang surge pair fails on its deadline with the replacement bound to
+# nodes that then die. The abandon's deletes leave both retired members
+# Terminating with no kubelet behind them; the abandon re-polls, node-death
+# evidence reaches the row only through the force-delete sweep, and the
+# sweep frees the names on its own evidence so the reset can land.
+scenario: gang-failed-force-delete-sweep
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-deadline
+  - T-failedgangtarget-cleanup-failed
+  - T-failedgangsurge-reset
+cells:
+  - instance/Failed/GangSurge/pod.phaseTerminal[Unknown]/before
+  - instance/Failed/GangSurge/pod.nodeLost[NodeGone]/before
+  - instance/Failed/GangSurge/timer.forceDelete[overdueSlack]/before
+  - instance/Failed/GangSurgeTargetCleanup/pod.phaseTerminal[Unknown]/before
+  - instance/Failed/GangSurgeTargetCleanup/pod.stuckTerminating/before
+  - instance/Failed/GangSurgeTargetCleanup/pod.nodeLost[NodeGone]/before
+  - instance/Failed/GangSurgeTargetCleanup/timer.forceDelete[overdueSlack]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: both replacement members are bound, and the replacement is still not Ready when the deadline elapses, so both halves of the pair are stamped Failed with their operations preserved
+    events:
+      - pod.scheduled[target]: {pod: {index: 1, runner: leader}, message: node-1}
+      - pod.scheduled[target]: {pod: {index: 1, runner: worker}, message: node-2}
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: the abandon claims the cleanup marker and deletes the retired replacement's members
+  - tick: 7
+    note: both retired members are left Terminating with no kubelet to finish them, one of them reporting phase Unknown, and the node under the worker is gone; the abandon re-polls and the row reads nothing of it
+    events:
+      - pod.stuckTerminating: {pod: {index: 1, runner: leader}}
+      - pod.stuckTerminating: {pod: {index: 1, runner: worker}}
+      - pod.phaseTerminal[Unknown]: {pod: {index: 1, runner: worker}}
+      - pod.nodeLost[NodeGone]: {pod: {index: 1, runner: worker}}
+  - tick: 8
+    note: the overdue slack elapses on both deletions; the sweep force-deletes each on its own node-gone evidence, and the abandon goes on from the absence to remove the marker and reset the source Ready
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}

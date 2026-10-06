@@ -1,0 +1,91 @@
+# A gang surge's replacement is worked on by the scheduler, its nodes and
+# outside writers while it builds. A gated member parks both the marker's
+# and the source's deadline and the admission restarts them, a lost node
+# has no handler on the gang surge path, a same-name pod under a new UID is
+# read as present, an evicted member reads as pod loss and is refilled with
+# the PodGroup ensured first, a refill that finds its name taken is adopted
+# by name, and a member already being deleted neither triggers a recreate
+# nor blocks the promote.
+scenario: gang-target-live-admission-signals
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-surgedrain-gang-complete
+cells:
+  - instance/Update/GangSurgeTarget/pod.schedulingGated/before
+  - instance/Update/GangSurgeTarget/pod.admitted/before
+  - instance/Update/GangSurgeTarget/pod.nodeLost[UnreachableTaint]/before
+  - instance/Update/GangSurgeTarget/pod.uidRotated/before
+  - instance/Update/GangSurgeTarget/pod.evicted/before
+  - instance/Update/GangSurgeTarget/api.alreadyExists/before
+  - instance/Update/GangSurgeTarget/pod.terminating[target]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement worker is held behind a scheduling gate and the leader binds; a queued replacement is not stuck, so the marker's deadline and the source's are parked
+    events:
+      - pod.schedulingGated: {pod: {index: 1, runner: worker}}
+      - pod.scheduled[target]: {pod: {index: 1, runner: leader}, message: node-1}
+  - tick: 6
+    note: the worker is admitted; both parked deadlines restart from admission and no step of the surge advances on the gate exit itself
+    events:
+      - pod.admitted: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the node under the replacement leader stops reporting; node death has no handler on the gang surge path, so nothing is recorded and the operation deadline stays the only bound
+    events:
+      - pod.nodeLost[UnreachableTaint]: {pod: {index: 1, runner: leader}}
+  - tick: 8
+    note: the leader is evicted under node pressure and the worker reappears under a new UID; the eviction reads as pod loss once the object is gone, and the rotated worker is read as present by name
+    events:
+      - pod.evicted: {pod: {index: 1, runner: leader}, message: "The node was low on resource: memory"}
+      - pod.uidRotated: {pod: {index: 1, runner: worker}}
+  - tick: 9
+    note: the evicted leader is gone and its refill finds the name already taken by an earlier writer; the pod is adopted by name
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - api.alreadyExists: {verb: create}
+  - tick: 10
+    note: both members report Ready and the leader enters rotation, so the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 11
+    note: the replacement worker is deleted from outside while still runtime-ready; the missing-pod set and the readiness gate ignore the deletion timestamp, so nothing is recreated and the promote is not blocked
+    events:
+      - pod.terminating[target]: {pod: {index: 1, runner: worker}}
+  - tick: 12
+    note: the source leader leaves the routed Service, so the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 13
+    note: the source pods are gone, so the marker is promoted Ready on the pinned revision behind a worker that is itself going away, and the source row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

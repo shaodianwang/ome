@@ -1,0 +1,80 @@
+# The replacement gang's PodGroup is taken over by another controller while
+# the surge is in flight. The gang verdict fails the marker alone, with its
+# operation kept, and the source stays Updating: it keeps driving the
+# replacement on claim predicates that read revision and step and never
+# phase, so the Failed marker is gated, drained against and promoted exactly
+# as the live one would be.
+scenario: gang-target-failed-verdict-promoted
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-failedgangtarget-ready
+cells:
+  - instance/Update/GangSurgeTarget/gang.podGroup[OwnershipConflict]/before
+  - instance/Failed/GangSurgeTarget/ctrl.resync/before
+  - instance/Failed/GangSurgeTarget/pod.containersReady[target]/before
+  - instance/Failed/GangSurgeTarget/pod.ready[target]/before
+  - instance/Failed/GangSurgeTarget/pod.servingOn[target]/before
+  - instance/Failed/GangSurgeTarget/endpoint.rotationIn[target]/before
+  - instance/Failed/GangSurgeTarget/endpoint.rotationOut[source]/before
+  - instance/Failed/GangSurgeTarget/pod.terminating[source]/before
+  - instance/Failed/GangSurgeTarget/pod.deleted[source]/before
+  - instance/Failed/GangSurgeTarget/pod.deleted[source]/boundary@T-failedgangtarget-ready
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement group's controller reference is rewritten to another owner; the gang verdict ends the marker alone, Failed with its operation kept, while the source stays Updating and keeps driving the surge
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 1}
+  - tick: 6
+    note: a tick with nothing changed re-drives the source's surge, which finds the replacement still booting; the marker moves only through the source and stays as it was stamped
+  - tick: 7
+    note: both replacement members report ContainersReady; the source's pass writes their serving gates as it does for a live marker and keeps waiting for PodReady
+    events:
+      - pod.containersReady[target]: {pod: {index: 1, runner: leader}}
+      - pod.containersReady[target]: {pod: {index: 1, runner: worker}}
+  - tick: 8
+    note: both members report Ready, the leader re-asserts its gate and enters rotation; that is the drain gate the source's pass waits on, so the source advances to the drain and leaves the serving gate, the marker untouched
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - pod.servingOn[target]: {pod: {index: 1, runner: leader}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 9
+    note: the source leader leaves the routed Service, which is the source row's drain; the marker reads no endpoint, and the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 10
+    note: the source pods are Terminating, which is the drain's delete landing; the promote waits until they are gone
+  - tick: 11
+    note: the source pods are gone, so the Failed marker is promoted exactly as a live one, Ready on the pinned revision with its operation cleared, and the source row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
