@@ -1848,7 +1848,7 @@
           "x-kubernetes-list-type": "atomic"
         },
         "weight": {
-          "description": "Weight is permitted only for static Split. If any term has an explicit weight, matching term weights add and omitted weights contribute one. Omission must be preserved to distinguish unweighted overlapping terms.",
+          "description": "Weight is permitted only for static Split. If any term has an explicit weight, matching term weights add and omitted weights contribute one. Omission must be preserved to distinguish unweighted overlapping terms. Weights are replica ratios, so they have no upper bound.",
           "type": "integer",
           "format": "int32"
         }

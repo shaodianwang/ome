@@ -71,8 +71,9 @@ has equal weight, including one matched by several terms.
 
 `matchExpressions` supports `In`, `NotIn`, `Exists`, `DoesNotExist`, `Gt`, and
 `Lt` with Kubernetes node-selector semantics. `matchFields` supports `In` and
-`NotIn` against the actual `metadata.name`. Weights are valid only for `Split`.
-Omitting affinity is unconstrained. An explicit empty or null affinity is invalid.
+`NotIn` against the actual `metadata.name`. Weights are valid only for `Split`
+and have no upper bound. Omitting affinity is unconstrained. An explicit empty
+or null affinity is invalid.
 
 Shares use largest remainders, with cluster-name order breaking ties. Three
 replicas across two equally weighted registrations produce two and one, never

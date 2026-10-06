@@ -209,7 +209,6 @@ spec:
                           x-kubernetes-list-type: atomic
                         weight:
                           format: int32
-                          maximum: 100
                           minimum: 1
                           type: integer
                       type: object

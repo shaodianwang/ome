@@ -3421,7 +3421,7 @@ func schema_pkg_apis_ome_v1beta1_ClusterAffinityTerm(ref common.ReferenceCallbac
 				Properties: map[string]spec.Schema{
 					"weight": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Weight is permitted only for static Split. If any term has an explicit weight, matching term weights add and omitted weights contribute one. Omission must be preserved to distinguish unweighted overlapping terms.",
+							Description: "Weight is permitted only for static Split. If any term has an explicit weight, matching term weights add and omitted weights contribute one. Omission must be preserved to distinguish unweighted overlapping terms. Weights are replica ratios, so they have no upper bound.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},

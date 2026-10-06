@@ -373,10 +373,12 @@ Preserve omitted versus explicit weight in the API type; do not apply a stored
 weight default. Otherwise admission defaulting would turn unweighted overlapping
 selectors into weighted allocation and change their meaning.
 
-Proposed term weights are integers from 1 through 100, following Kubernetes'
-preferred-term range; effective sums may exceed 100. This is an API validation
-bound, not a configurable scheduling score. Weight 0 is rejected; exclude a
-cluster with affinity instead. Arithmetic uses checked wide integers.
+Term weights are positive integers with no upper bound. They are replica
+ratios, not a scheduling score, so Kubernetes' 1..100 preferred-term range does
+not apply: a cap that low cannot express shares counted in accelerator units
+without rounding whole replicas between clusters. Weight 0 is rejected; exclude
+a cluster with affinity instead. Effective sums are int64, and arithmetic uses
+checked wide integers.
 
 For a fixed count N and effective weights w over M, let W be their sum:
 
@@ -791,7 +793,7 @@ a sufficient implementation.
 | Empty/null affinity or empty term | Reject; do not interpret a malformed restriction as the whole fleet. |
 | Label requirement | Kubernetes key/operator/value validation; In/NotIn need values, Exists/DoesNotExist forbid them, Gt/Lt need one integer value. |
 | Field requirement | Only metadata.name and In/NotIn with one or more valid names. Unknown fields/operators are errors. |
-| Weight | Integer 1..100; allowed only in Split, including when its value is 1. |
+| Weight | Positive integer, no upper bound; allowed only in Split, including when its value is 1. |
 | Split settings | Retain replicas (positive when present) and maxReplicasPerCluster (nonnegative; zero is uncapped), for both Split modes. Reject a computed target above a declared cap. |
 | Legacy fields/annotations | Honor under Legacy; reject under ClusterAffinity. Never silently ignore restrictions or Packed intent. |
 | Unresolved floor or capacity normalization | Hold with an actionable condition; never invent counts or a hardware conversion. |
