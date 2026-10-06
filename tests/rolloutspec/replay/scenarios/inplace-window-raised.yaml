@@ -1,0 +1,48 @@
+# An in-place roll whose patched pod has just reported the new image, when
+# the operator raises minReadySeconds. The promote re-reads the window from
+# the live plan on every pass, so the raise re-opens the availability wait
+# on the patched pod, and the Instance promotes once the pod has been Ready
+# for the new window.
+scenario: inplace-window-raised
+arrows:
+  - T-ready-inplace
+  - T-inplace-ready
+cells:
+  - instance/Update/InPlace/spec.policyTuning[minReadySeconds]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the source leaves rotation and reports Ready, so the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.ready[target]: {pod: {index: 0}}
+  - tick: 5
+    note: the image patch lands while the source is out of rotation
+  - tick: 6
+    note: the operator raises minReadySeconds as the runtime confirms the new image, so the promote waits out the new window instead of landing
+    events:
+      - spec.policyTuning[minReadySeconds]: {value: "600"}
+      - pod.ready[target]: {pod: {index: 0}}
+  - tick: 7
+    note: the window elapses and the Instance promotes on the target revision
+    events:
+      - clock.advance: 10m

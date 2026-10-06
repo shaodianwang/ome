@@ -1,0 +1,41 @@
+# A Ready Instance loses its pod while its namespace is being deleted. The
+# repair opens and issues its create, which the apiserver refuses with the
+# terminating cause: the attempt is disposed on the first refusal, with the
+# cause on LastFailure and no retry block, because the cause is the
+# environment's. A Failed row with no pod is the Create pass's fresh start,
+# so the next pass issues the create again and the namespace refuses it
+# again; the loop ends when namespace GC reaches the owner and the pass
+# after runs teardown instead.
+scenario: ready-repair-in-terminating-namespace
+arrows:
+  - T-ready-restart
+cells:
+  - instance/Ready/api.namespaceTerminating/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod is deleted out from under the Instance while the namespace is being deleted, so the repair opens and its create is refused with the terminating cause; the attempt is disposed on the spot
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+      - api.namespaceTerminating: {count: 2}
+  - tick: 3
+    note: the Failed row has no pod and no retry block, so the Create pass starts it fresh and the namespace refuses the create again
+  - tick: 4
+    note: namespace GC deletes the owner, so the next pass runs teardown instead of another create
+    events:
+      - spec.teardown[deleted]: {}

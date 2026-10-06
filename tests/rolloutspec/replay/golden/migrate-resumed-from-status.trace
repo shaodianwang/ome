@@ -1,0 +1,15 @@
+tick=1 note the resumed pass finds the record allocated and the surge pod created but not Ready, so it waits
+tick=1 row=0 write no-op precondition=no-change
+tick=1 row=1 write no-op precondition=no-change
+tick=1 pass result=after:5s
+tick=2 note the surge pod reports Ready, so it is marked serving
+tick=2 apply pod.ready[target] pod=svc-a-engine-1-default-0 now=t+0s
+tick=2 row=0 write no-op precondition=no-change
+tick=2 row=1 write no-op precondition=no-change
+tick=2 pod status-patch name=svc-a-engine-1-default-0 serving=absent→True
+tick=2 pass result=after:5s
+tick=3 note the surge pod enters rotation, and the drive waits on the published availability of the surge Instance
+tick=3 apply endpoint.rotationIn[target] pod=svc-a-engine-1-default-0 now=t+0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 row=1 write no-op precondition=no-change
+tick=3 pass result=after:5s

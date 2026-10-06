@@ -1,0 +1,57 @@
+# The node refuses the surge replacement after scheduling: the pod goes
+# Failed with the kubelet's capacity reason and never runs, yet it holds the
+# replacement's name. The refusal is the node's accounting rather than
+# anything the revision asked for, so the name is freed at once instead of
+# being polled to the deadline: the occupant is deleted with the expectation
+# recorded first, its reason lifted onto LastFailure, and the replacement is
+# recreated once the delete is observed.
+scenario: surge-target-admission-rejected
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/Surge/pod.admissionRejected[OutOfResource]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is bound and its node refuses it for lack of a resource, so the recycle deletes the occupant of the replacement's name
+    events:
+      - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}, message: node-1}
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 0, ordinal: 1}, resource: nvidia.com/gpu, message: "Node didn't have enough resource: nvidia.com/gpu, requested: 1, used: 8, capacity: 8"}
+  - tick: 5
+    note: the refused pod is gone, so the replacement is created again under the same name
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 6
+    note: the new replacement is serving and in rotation, so the step advances and the source leaves rotation
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 7
+    note: the source leaves rotation and is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 8
+    note: the drained source is gone and the Instance promotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

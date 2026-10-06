@@ -1,0 +1,45 @@
+# A recreate roll resumed from persisted status at its drain step: the row
+# already carries the bumped Incarnation and the Update/Drain operation
+# while the pod of the previous incarnation still serves. The resumed pass
+# drains and deletes it, then rebuilds at the recorded incarnation.
+scenario: recreate-resumed-from-status
+arrows:
+  - T-drain-ready
+cells:
+  - instance/Update/Drain/ctrl.crash/before
+  - instance/Update/Drain/pod.deleted[source]/boundary@T-drain-ready
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v2
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  currentRevision: registry.example.com/runtime:v1
+  rows:
+    - index: 0
+      incarnation: 2
+      phase: Updating
+      runningRevision: registry.example.com/runtime:v1
+      targetRevision: current
+      readySince: 0s
+      operation: {type: Update, step: Drain, strategy: RecreatePod}
+  pods:
+    - {index: 0, incarnation: 1, previousImage: registry.example.com/runtime:v1, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the resumed pass partitions the pods by incarnation and begins draining the old one
+  - tick: 2
+    note: the old pod leaves rotation, so it is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the old pod is gone, so the rebuild lands at the recorded incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the rebuilt pod reports Ready and the Instance promotes onto the target
+    events:
+      - pod.ready[target]: {pod: {index: 0}}

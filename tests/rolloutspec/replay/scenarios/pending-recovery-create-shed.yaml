@@ -1,0 +1,36 @@
+# A demoted Instance's recovery create is shed by the apiserver with a
+# Retry-After. The shed create is classified as throttled and writes
+# nothing — no failure accounting, no deadline change — and the suggested
+# delay floors the pass requeue, so the retry follows the server's own
+# schedule rather than the controller's backoff. The next pass creates
+# the pod.
+scenario: pending-recovery-create-shed
+arrows:
+  - T-pending-create
+cells:
+  - instance/Pending/api.throttled[TooManyRequests]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+timeline:
+  - tick: 1
+    note: the apiserver sheds the recovery create and asks for half a minute, so the pass stamps the attempt, writes no pod and wakes no earlier than asked
+    events:
+      - api.throttled[TooManyRequests]: {retryAfter: 30s}
+  - tick: 2
+    note: the server accepts the create on the next pass
+    events:
+      - clock.advance: 30s
+  - tick: 3
+    note: the pod reports Ready and the Instance promotes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

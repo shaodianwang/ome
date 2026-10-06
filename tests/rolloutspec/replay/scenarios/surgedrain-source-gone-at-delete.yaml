@@ -1,0 +1,45 @@
+# The drained source of a surge is already gone when the drain step's
+# delete reaches the apiserver. A delete against a pod that no longer
+# exists is the outcome the drain wanted, so the attempt treats the answer
+# as done and rolls its expectation back, and the next pass promotes onto
+# an empty source set.
+scenario: surgedrain-source-gone-at-delete
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/SurgeDrain/api.notFound/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation beside the source, so the step advances and the source leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the source leaves rotation and is gone by the time the drain's delete reaches the apiserver, which answers not found; the attempt reads that as done
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+      - api.notFound: {verb: delete}
+  - tick: 6
+    note: the source set is empty, so the Instance promotes onto the replacement's slot

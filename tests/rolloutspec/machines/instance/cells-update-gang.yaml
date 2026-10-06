@@ -491,7 +491,7 @@ cells:
     note: the durable anchor is the pair — the source's SurgeIndex plus this marker row — so a restart resumes the surge; a marker lost between the two writes is re-established before any pod effect, and a marker restored over an incomplete replacement is restored straight into the cleanup claim; the Component's revision rollup is recomputed from the pair on the first pass after the restart, so a rollback over the surge keeps reading in flight until the pair is closed
     invariants: [rollup.open.while.pinned]
     placement: kind
-    coverage: {perm: [], unit: [TestGangSurge_RestoresMissingTargetMarkerBeforeEffects, TestGangSurge_RestartAfterTargetStampFailureRestoresCleanupBeforeRedirects, TestRollbackOverGangSurge_ResumedManagerKeepsTheRolloutOpenUntilTheReplacementIsGone], kind: []}
+    coverage: {perm: [], unit: [TestGangSurge_RestoresMissingTargetMarkerBeforeEffects, TestGangSurge_RestartAfterTargetStampFailureRestoresCleanupBeforeRedirects, TestRollbackOverGangSurge_ResumedManagerKeepsTheRolloutOpenUntilTheReplacementIsGone], kind: [], replay: [gang-surge-resumed-from-status]}
     status: decided
   - state: Update/GangSurgeTarget
     event: ctrl.staleRead

@@ -1,0 +1,49 @@
+# The surge replacement becomes Ready and enters rotation, but the pass
+# that observes it reads its cache one event behind: the cached pod still
+# reports no readiness while the live reader is current. Every write on
+# the surge path is idempotent and the destructive reads go live, so the
+# lag costs exactly one pass and the next one advances the step.
+scenario: surge-stale-cache-replacement-ready
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/Surge/ctrl.staleRead/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is Ready and in rotation, but the cache still shows it booting, so the pass changes nothing
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+      - ctrl.staleRead: {}
+  - tick: 5
+    note: the cache has caught up, so the step advances and the source leaves rotation
+  - tick: 6
+    note: the source leaves rotation and is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the drained source is gone and the Instance promotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

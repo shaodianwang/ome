@@ -1,0 +1,48 @@
+# The surge's replacement create loses to its own earlier pass: the name is
+# already taken when the create reaches the apiserver, because the earlier
+# create landed before the watch delivered it. The attempt swallows the
+# answer and the next pass adopts the existing pod by name; the ordinal and
+# revision-hash reclassification counts it as the surge and the roll
+# completes on it.
+scenario: surge-replacement-create-raced
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/Surge/api.alreadyExists/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes and the surge's replacement create finds its name already taken, so the attempt swallows the answer with the replacement in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+      - api.alreadyExists: {verb: create}
+  - tick: 4
+    note: the replacement is adopted by name, serving and in rotation, so the step advances and the source leaves rotation
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the source leaves rotation and is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 6
+    note: the drained source is gone and the Instance promotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

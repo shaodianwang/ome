@@ -1,0 +1,49 @@
+# The recreate's old pod is gone, and the pass that observes it reads its
+# cache one event behind: the cached list still holds the Terminating pod
+# of the previous incarnation, so Phase A finds a pod to wait for and the
+# pass ends before Phase B. The lag costs exactly one pass. The live
+# completion check guards the other direction: Phase B never creates
+# against an incarnation the apiserver still holds, whatever the cache
+# says, and once the cache catches up the rebuild lands.
+scenario: drain-stale-cache-source-gone
+arrows:
+  - T-ready-recreate
+  - T-drain-ready
+cells:
+  - instance/Update/Drain/ctrl.staleRead/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the source leaves rotation, so it is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the source is gone while the cache still lists it Terminating, so Phase A waits on the cached pod and the pass ends before the rebuild
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+      - ctrl.staleRead: {}
+  - tick: 6
+    note: the cache has caught up and the live completion check agrees, so the rebuild lands at the recorded incarnation
+  - tick: 7
+    note: the rebuilt pod reports Ready and the Instance promotes onto the target
+    events:
+      - pod.ready[target]: {pod: {index: 0}}

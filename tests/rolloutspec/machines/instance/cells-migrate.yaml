@@ -736,7 +736,7 @@ cells:
       the record is at or below SurgePending
     invariants: [record.written.last]
     placement: kind
-    coverage: {perm: [], unit: [TestMigrate_ResumeAfterCrash_PreStamp, TestMigrate_ResumeAfterCrash_Draining, TestMigrate_CompletionTailCrashRecoversBeforeDeadline], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_ResumeAfterCrash_PreStamp, TestMigrate_ResumeAfterCrash_Draining, TestMigrate_CompletionTailCrashRecoversBeforeDeadline], kind: [], replay: [migrate-resumed-from-status]}
     status: decided
   - state: Migrate/CreateSurge
     event: ctrl.staleRead
@@ -1476,7 +1476,7 @@ cells:
       rebuilt observation is re-stamped as if fresh, and a gang surge then requeues
       one pass so its PodGroup exists before its pods render
     placement: kind
-    coverage: {perm: [], unit: [TestMigrate_ResumeAfterCrash_PreStamp, TestMigrate_GangResume_SurgeSlotUnstamped_RequeuesBeforePods], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_ResumeAfterCrash_PreStamp, TestMigrate_GangResume_SurgeSlotUnstamped_RequeuesBeforePods], kind: [], replay: [migrate-resumed-from-status]}
     status: decided
   - state: Migrate/SurgeTarget
     event: ctrl.staleRead

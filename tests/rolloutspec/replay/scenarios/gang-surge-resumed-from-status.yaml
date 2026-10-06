@@ -1,0 +1,61 @@
+# A gang surge resumed from persisted status: the source row carries the
+# Update/Surge operation with its surge index, the replacement index carries
+# the GangSurgeTarget marker, and both gangs' members exist. The resumed
+# pass announces their PodGroups, waits for the replacement, drains the
+# source gang and finalizes the handoff.
+scenario: gang-surge-resumed-from-status
+arrows:
+  - T-gangtarget-ready
+  - T-surgedrain-gang-complete
+cells:
+  - instance/Update/Surge/ctrl.crash/before
+  - instance/Update/GangSurgeTarget/ctrl.crash/before
+  - instance/Update/GangSurgeTarget/pod.deleted[source]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v2
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  currentRevision: registry.example.com/runtime:v1
+  rows:
+    - index: 0
+      phase: Updating
+      runningRevision: registry.example.com/runtime:v1
+      targetRevision: current
+      readySince: 0s
+      operation: {type: Update, step: Surge, strategy: SurgeThenDrain, surgeIndex: 1}
+    - index: 1
+      phase: Creating
+      targetRevision: current
+      operation: {type: Update, step: GangSurgeTarget}
+  pods:
+    - {index: 0, runner: leader, previousImage: registry.example.com/runtime:v1, ready: true, serving: true, routed: true}
+    - {index: 0, runner: worker, previousImage: registry.example.com/runtime:v1, ready: true, serving: true}
+    - {index: 1, runner: leader, phase: Pending}
+    - {index: 1, runner: worker, phase: Pending}
+timeline:
+  - tick: 1
+    note: the resumed pass announces the PodGroups behind both gangs' members and finds the replacement not yet Ready, so it waits
+  - tick: 2
+    note: both replacement members report Ready and the leader enters rotation, so the source gang leaves rotation
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 3
+    note: the source leader's endpoint goes not-ready, so the whole source gang is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 4
+    note: the source's pods are gone, so its row is removed and the replacement index is the Instance
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

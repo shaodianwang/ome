@@ -1,0 +1,60 @@
+# A queue admission holds the surge replacement behind a scheduling gate.
+# A gated pod is queued rather than stuck: the deadline is parked, the
+# escalation pass skips the Instance however long the queue takes, and
+# admission restarts the clock from the moment the pod may schedule. The
+# surge then completes on the restarted window.
+scenario: surge-target-queued
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/Surge/pod.schedulingGated/before
+  - instance/Update/Surge/pod.admitted/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: a queue admission holds the replacement behind a scheduling gate, so the deadline is parked
+    events:
+      - pod.schedulingGated: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: an hour in the queue is longer than the readiness window, and nothing escalates
+    events:
+      - clock.advance: 1h
+  - tick: 6
+    note: the queue admits the pod, so the clock restarts from now
+    events:
+      - pod.admitted: {pod: {index: 0, ordinal: 1}}
+  - tick: 7
+    note: the replacement is bound, serving and in rotation, so the step advances and the source leaves rotation
+    events:
+      - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}}
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 8
+    note: the source leaves rotation and is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 9
+    note: the drained source is gone and the Instance promotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

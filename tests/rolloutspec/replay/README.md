@@ -82,9 +82,10 @@ recently `c990ad96` (`[Bugfix] Pause freezes repair, not hold evidence`),
 which moved the two `hold-*` traces that pair the scheduler with a pause.
 The rest have been re-recorded only for the trace format and for the
 driver's fidelity fixes (deadline parking, pod-write values, the owner
-generation, the per-revision routed Service). Each of those changed how a
-run is rendered, or what the driver put in front of the engine — never
-what the engine does with it.
+generation, the per-revision routed Service, the grace-zero delete
+removing its pod at once). Each of those changed how a run is rendered,
+or what the driver put in front of the engine — never what the engine
+does with it.
 
 Engine fixes the lock itself surfaced are recorded the other way round:
 they move the goldens of the scenarios that walk the fixed route, and
@@ -134,6 +135,66 @@ plan and the target ControllerRevision from it through the production
 `spec.revision` event is an image rewrite and the new hash follows from
 the engine's own hashing.
 
+A revision field in `initial` — a row's `runningRevision` or
+`targetRevision`, an operation's `targetRevision`, a retry block's
+`revision`, `initial.currentRevision` — names a revision the way
+`spec.rollbackTarget` does: `current` is the revision the initial spec
+renders, and an image reference is the revision that image's template
+mints. A pod's `previousImage` renders the pod from that template, so a
+seeded pod and a seeded row can agree on a revision the spec has already
+moved past.
+
+## Operations in flight at the start
+
+A row may be seeded mid-operation, which is what a controller restarted
+mid-rollout finds in the owner status:
+
+```yaml
+initial:
+  currentRevision: registry.example.com/runtime:v1
+  rows:
+    - index: 0
+      phase: Updating
+      runningRevision: registry.example.com/runtime:v1
+      targetRevision: current
+      readySince: 0s
+      operation: {type: Update, step: Surge, strategy: SurgeThenDrain}
+  pods:
+    - {index: 0, ordinal: 0, previousImage: registry.example.com/runtime:v1, ready: true, serving: true, routed: true}
+    - {index: 0, ordinal: 1, phase: Pending}
+```
+
+`operation` carries what the engine's own stamps write: `type`, `step`,
+`targetRevision` (an Update defaults it to the row's), `strategy`,
+`surgeIndex` (a gang surge's replacement, or the other half of a migration
+pair), `requestUUID` (a Migrate pin), `reason`, `waiting`, `retryCount`,
+and `startedAt`, `lastProgressAt` and `deadline` as offsets from the
+scenario start. A deadline left out is `startedAt` plus the spec's
+`instanceReadyTimeout`, as the stamps derive it, and the operation id is
+minted in the shape the engine mints it, so the row reads in a trace
+exactly as one the engine opened. The seed is checked against the engine's
+own owner table: a phase and operation that `types.StateOf` resolves to no
+state of the machine fails the run before the first tick, because no pass
+would drive it.
+
+A Migrate pin resumes from its `status.migrations` record, so it needs one
+in `initial.migrations` (`{uuid, instance, surgeIndex, fromNode, reason,
+phase, startedAt, allocatedAt}`; a record with a surge index reads
+`SurgePending` and allocated at its start, one without reads `Accepted`).
+A seeded gang's PodGroups are announced by the first pass, as for any
+gang whose members already stand, and a pod seeded `terminating: true` is
+held behind the driver's finalizer the way `pod.terminating` leaves it.
+
+The driver seeds the shape and nothing else: the pods a seeded step
+implies are the scenario's to declare, and a row whose pods contradict it
+is answered by the engine in the trace, not by the loader. The
+`*-resumed-from-status` scenarios start one family each mid-operation —
+surge, in-place, recreate, gang surge, migrate, restart and scale-down
+delete — and run it to settle; `surge-resumed-without-strategy-pin` seeds
+the shape of a surge row persisted without a pinned strategy while the
+desired strategy has moved on. Most other scenarios still start from an
+empty cluster and walk, which puts the create path in every golden.
+
 ## Pod age
 
 Every pod the driver admits — created by the engine or seeded by
@@ -166,12 +227,78 @@ Terminating pod that still carries a finalizer classifies as
 Such a pod leaves the fake apiserver on exactly two events: the scenario's
 own `pod.deleted`, or a delete with `gracePeriodSeconds: 0`, which is the
 escalation's. A graceful delete on it changes nothing, as it changes nothing
-on a real cluster where the object is already on its way out.
+on a real cluster where the object is already on its way out. A grace-zero
+delete removes any pod at once, Terminating or not: the apiserver does not
+wait for a kubelet on it, and the driver's finalizer, which stands in for
+that kubelet, does not survive it.
 
-The escalation's other half is node-death evidence, and the fake cluster
-holds no Node objects, so a pod the scenario has scheduled (`pod.scheduled`)
-classifies as `node-gone`. The unreachable-taint and NotReady branches need
-Nodes seeded first and are not driven (see **Unlocked paths**).
+The escalation's other half is node-death evidence. The fake cluster holds
+no Node until a scenario names one, so a pod the scenario has scheduled
+(`pod.scheduled`) classifies as `node-gone`; `pod.nodeLost` writes the
+other two forms (see **Nodes**).
+
+## Nodes
+
+`pod.nodeLost[<form>]` is the node under a bound pod dying, in the three
+forms the force-delete evidence tells apart. `NodeGone` deletes the Node
+object, if the cluster holds one. `UnreachableTaint` writes the Node with
+the `node.kubernetes.io/unreachable` taint stamped `TimeAdded` now and
+`NodeReady` Unknown; `NodeNotReady` writes it with `NodeReady` False
+transitioned now. Those are the instants the evidence ages from, so
+`timer.forceDelete[nodeUnreachable]` resolves the earliest of them plus
+`config.forceDelete.nodeUnreachableThreshold` over the nodes the pods are
+bound to. The last two forms also take the pod out of `Ready` for the
+node lifecycle controller's `NodeNotReady` reason, as that controller does
+for every pod on such a node; a kubelet that stopped reporting leaves the
+container statuses as they were. An unbound pod has no node to lose and
+fails the run.
+
+## Scheduling gates
+
+`pod.schedulingGated` is a queue admission holding a pod: the pod carries
+a scheduling gate, stays Pending and reports `PodScheduled=False` with
+the scheduler's `SchedulingGated` reason, which is the object the
+engine's admission predicate reads. `pod.admitted` takes every gate and
+that report off and leaves the pod to the scheduler, whose verdict is a
+separate observation (`pod.scheduled` or `pod.unschedulable`). A real
+cluster stamps the gate on admission; the driver writes it onto the
+created pod after the fact. A bound pod cannot be gated and an ungated pod
+cannot be admitted; either fails the run.
+
+## Readiness regression
+
+`pod.containersNotReady` is a running pod's readiness regressing: the
+kubelet drops `ContainersReady`, folds that into `Ready`, and reports the
+containers not ready while they keep running. It is an observation about
+a pod that was ContainersReady, so a pod that never was fails the run.
+
+## Kubelet admission rejection
+
+`pod.admissionRejected[<reason>]` is the node refusing a scheduled pod:
+the pod goes Failed with the refusal as its pod-level `status.reason`,
+`message:` as the kubelet's message, and no container ever runs.
+`UnexpectedAdmissionError` is the reason itself; `OutOfResource` stands
+for the kubelet's `OutOf<resource>` family and names the resource through
+`resource:`, so `resource: nvidia.com/gpu` reads as `OutOfnvidia.com/gpu`,
+the spelling the engine's predicate recognizes. Only a bound pod can be
+refused by its node, so an unscheduled one fails the run.
+
+## A pod reappearing under a new UID
+
+`pod.uidRotated` is a pod of the same name reappearing under a new UID:
+the object the engine observed is gone and an identical one — same
+labels and template, fresh, unscheduled, Pending — stands where it was.
+The watch would see a delete and an add, so the expectations balance,
+and a delete the engine pinned to the old UID no longer matches anything.
+
+## Eviction
+
+`pod.evicted` is the kubelet evicting a bound pod under node pressure:
+the pod goes Failed with the `Evicted` reason and `message:` as the
+kubelet's message, its containers killed. An eviction through the
+Eviction API is a graceful delete and is staged as `pod.terminating`
+instead; only a node evicts under pressure, so an unbound pod fails the
+run.
 
 ## The runner container
 
@@ -191,6 +318,34 @@ pod template and therefore of the revision, and unlike the image it is not
 a diff the in-place strategies may converge on, which is what makes an
 `InPlaceOnly` rejection reachable.
 
+## Apiserver refusals
+
+`api.quotaDenied`, `api.invalid`, `api.notFound`, `api.alreadyExists`,
+`api.throttled[TooManyRequests|ServiceUnavailable]` and
+`api.namespaceTerminating` arm an apiserver refusal for the engine's next
+matching write (`verb`, `resource`, `count`); a write the scenario itself
+stages never consumes one. The verb defaults to the write the refusal is
+the natural answer to — `create` for a quota, validation, already-exists,
+shed or terminating-namespace refusal, `delete` for not found. A shed
+refusal carries the `retryAfter:` the scenario names, if any, which is
+what the engine's pacing reads. The two answers that state a fact about
+the cluster make it true as they are given: behind a not-found answer the
+pod the write addressed leaves the apiserver, and behind an already-exists
+answer the pod the engine rendered lands as the earlier writer's object,
+observed like any create, so the next read finds exactly what the answer
+said.
+
+`api.conflict` is the one refusal with a retry behind it. On the owner
+status — its default resource, the one the row store stands in for — it
+answers the `write:`-th status write of the next pass with a 409, `count`
+attempts in a row, and the store does what the adapter's
+`RetryOnConflict` does: every refused attempt is traced as
+`status conflict write=N attempt=A/B`, the batch is re-applied against a
+fresh snapshot, and the budget exhausted hands the conflict to the engine
+with nothing committed. A conflict armed for a write the pass never
+reaches fails the run. On any other resource it is an ordinary refusal of
+the engine's next matching write, `update` by default.
+
 ## Spec events
 
 `initial.spec` is the driver's mutable owner spec and a spec event is a
@@ -201,6 +356,12 @@ from what it says.
   image (the in-place-eligible diff), `env:` rewrites its environment (a
   diff the in-place strategies refuse), and an edit must name at least one
   of them.
+- `spec.annotationOnly` rewrites the pod template's `labels:` and
+  `annotations:` (`initial.spec.podLabels` / `podAnnotations` seed them)
+  with an edit the revision hasher derives rather than reads as intent —
+  a queue label, a placement marker — so the target revision stands. The
+  hasher is the judge: an edit that moves the hash is a template change
+  and fails the load, because the table spells that edit `spec.revision`.
 - `spec.teardown[deleted]` begins owner deletion. From that pass on the
   planned index set reads as empty, so every Instance is a scale-down
   extra and nothing else runs. The `ownerRotated` variant — an owner
@@ -216,13 +377,20 @@ from what it says.
   overrides the rendered template with the stored payload and becomes the
   roll target, while the owner keeps reporting the rendered template as
   its update revision.
+- `spec.partition` rewrites `rollingUpdate.partition` to `to:`, the canary
+  hold that keeps the Instances below it on their revision
+  (`initial.spec.partition` seeds it). The partition is outside the
+  revision payload, so the edit retargets nothing; what it changes is
+  which rows the next update pass may select.
 - `spec.gangWidth[grow|shrink]` rewrites `to:` as the per-Instance worker
   count. The width is outside the revision payload, so the expected pod
   set moves at an unchanged target hash.
-- `spec.policyTuning[restartPolicy]` rewrites the restart policy to
-  `value:`. It is the one lifecycle knob the driver edits: no knob feeds
-  the revision payload, so the edit retargets nothing, and this one
-  changes which pass owns a row that already has pods, which is what a
+- `spec.policyTuning[<knob>]` rewrites one lifecycle knob to `value:`,
+  spelled as the owner spec spells it: `restartPolicy`, `migrationPolicy`
+  (the migration mode), `instanceReadyTimeout` (a duration),
+  `minReadySeconds` (a count of seconds) and `markNotReady` (a boolean).
+  No knob feeds the revision payload, so the edit retargets nothing; what
+  it changes is the next decision that reads the knob, which is what a
   scenario lands against a roll in flight.
 
 `initial.spec.workers` makes the Component multi-pod: one `leader` Runner
@@ -231,6 +399,22 @@ in. Most multi-pod scenarios also set `topologyKey` and `schedulerName`,
 which keeps the two advisory gang Warnings out of their traces so each
 scenario records only what it is about. `gang-advisory-warnings` is the
 one that declares neither, and it is where those two Warnings are locked.
+
+## Config events
+
+`config.changed[<knob>]` rewrites one operator-configuration knob between
+two passes, which is what the adapter's short-lived ConfigMap cache turns
+an operator edit into: the very next pass reads the new value. The
+argument is the knob's whole new value — `{config: {stuckPodGrace: 1m}}`
+— so a group left empty clears the knob, and a field outside the named
+knob fails the load, because the variant says which knob changed. The
+knobs are `updateRetry`, `stuckPodGrace`, `forceDelete`,
+`teardownDeadline`, `scaleDownInterval` (`scaleDownRequeueInterval`),
+`autoMigrateBudget`, `audit` (`migrationAudit`) and `requeue` (both
+cadences). `gangScheduleTimeout` and `retryBlockHistoryLimit` are refused
+by name: the driver carries neither the PodGroup schedule clamp nor the
+adapter's RetryBlock history prune, so there is nothing for the edit to
+change.
 
 ## Controller events
 
@@ -241,6 +425,25 @@ passes. The driver drops it, so the next pass reads every pending create
 and delete as satisfied and re-derives each row's step from status and
 the pods alone. A scenario places it between a pass that issued a write
 and the observation that would confirm it (`surge-abandon-resumed`).
+
+`ctrl.staleRead` is the informer lagging one event behind the apiserver
+for one pass. The engine holds two readers — the cached client and the
+live reader (`Deps.Client` and `Deps.APIReader`) — and the driver hands
+it exactly that pair: during a stale pass every read through the cached
+client is served from a copy of the cluster taken at the end of the
+previous tick, every write through it goes to the apiserver, and the live
+reader stays current. The adapter's own cached read, the deadline park
+step, lags with it. The snapshot copies every kind
+the fake cluster holds, so whatever the engine chooses to read through
+its cache is stale; what it reads live is not. In this engine that line
+falls almost entirely between pods and everything else: the update pass,
+the create pass's existing-pod list, the hold pass, the escalation pass,
+the force-delete sweep and the planning screens read pods from the cache,
+while EndpointSlices, ControllerRevisions, PodGroups, Nodes and the audit
+ledger are only ever read live, and every destructive read of pods goes
+live too. A scenario names the event on the tick whose pass should lag
+(`surge-stale-cache-replacement-ready`); the driver copies the cluster at
+the end of every tick only for a scenario that names it.
 
 ## Gangs
 
@@ -285,6 +488,8 @@ moves nothing.
 | `timer.repairRetry` | the earliest `lastFailure.time` plus the `config.updateRetry` delay for the next attempt, over the Restarts parked at Failed |
 | `timer.migrationDeadline` | the earliest `Deadline` over the non-terminal migration records |
 | `timer.forceDelete[overdueSlack]` | the earliest `pod.deletionTimestamp + config.forceDelete.overdueSlack` over the Terminating pods |
+| `timer.forceDelete[nodeUnreachable]` | the earliest unreachable-taint `TimeAdded` or `NodeReady` transition plus `config.forceDelete.nodeUnreachableThreshold` over the nodes the pods are bound to |
+| `timer.teardownDeadline` | the owner's deletion instant (`spec.teardown`) plus `config.teardownDeadline` |
 
 Because the deadline is read rather than written, a scenario states no
 duration that config already fixes: `T-create-stuckgrace` sets
@@ -294,16 +499,26 @@ the `instanceReadyTimeout` the migration record's deadline was minted from. An e
 resolve — no in-flight deadline, no wedged pod, no due block — fails the
 run rather than silently doing nothing.
 
-`timer.teardownDeadline` has no applier. It is decided entirely in the IR
-adapter's teardown pass, outside `workload.Reconcile`, so the driver cannot
-reach the arrows that fire on it (see **Unlocked paths**).
+## The teardown deadline
 
-`timer.forceDelete[overdueSlack]` resolves the earliest
-`pod.deletionTimestamp + config.forceDelete.overdueSlack` over the
-Terminating pods. The `nodeUnreachable` variant has no deadline to resolve
-and is rejected: the fake cluster holds no Node objects, so a scheduled
-pod's node reads as gone rather than as unreachable for a measurable time,
-and there is no interval to age (see **Unlocked paths**).
+The owner's teardown deadline is decided in the IR adapter's teardown
+pass, ahead of the dispatch into `workload.Reconcile`, and the driver
+stands in for exactly that check: when a deleted owner (`spec.teardown`)
+has held its finalizer past `config.teardownDeadline`, the tick records
+the adapter's `TeardownDeadlineExceeded` Warning with the pods that
+survive, then `owner deleted rows=N` — the finalizer release, which takes
+the owner object and every row and retry block it carried in one stroke
+— and runs no pass. Every later tick records `owner gone; nothing
+reconciles`, which is the late observation the boundary and after cells
+describe. The surviving pods stay where they are: the fake apiserver runs
+no background GC. An unconfigured deadline holds strictly, so
+`timer.teardownDeadline` fails the run rather than inventing one, and the
+owner's deletion instant is the clock's reading when `spec.teardown`
+first applies (a later `spec.teardown` is the deletion observed again and
+moves nothing), so a deadline that elapsed before the controller ever
+observed the deletion is staged by naming both in one tick. The arrows that fire
+on the deadline stay adapter-lane: a scenario here cites their cells, and
+the Go tests in the adapter package keep the arrows.
 
 ## Trace format
 
@@ -347,9 +562,11 @@ Three rules hold the format together:
    than normalized away.
 
 Line kinds: `note`, `apply` (a scenario event staged), `row` (one buffered
-status mutation with its precondition verdict), `retryblock`, `event` (a
-Kubernetes event), `pod` / `podgroup` (create / patch / delete, including
-a rejected or failed one), the callback lines (`gate consult`, `hold`,
+status mutation with its precondition verdict), `retryblock`,
+`status conflict` (a status write the apiserver refused with a 409, by
+its ordinal in the pass and the retry attempt), `event` (a Kubernetes
+event), `pod` / `podgroup` (create / patch / delete, including a
+rejected or failed one), the callback lines (`gate consult`, `hold`,
 `warn`, `condition`, `migration`), and `pass result=` closing every tick.
 
 A `pod create` line carries `image=` only when the created pod does not
@@ -412,59 +629,67 @@ or determinism forced a change, and they are the ones to review.
 4. **A tick's `apply` line comes with the clock reading.** The OEP's
    example showed only the effects; a walk is much easier to read when the
    observation and the instant it happened at are in the trace.
-5. **`initial.rows` seeds no in-flight operation.** `RowSpec` carries
-   phase, incarnation, running revision, active ordinal and `readySince`,
-   and nothing else. A hand-written operation can contradict invariants the
-   engine maintains between a row and its pods; a scenario reaches an
-   operation by driving the engine into it. Most scenarios therefore start
-   from an empty cluster and walk, which also puts the create path in every
-   golden.
-6. **Pod deletion is two observations, not one.** The driver stamps a
+5. **Pod deletion is two observations, not one.** The driver stamps a
    finalizer on every pod, so the engine's delete leaves a Terminating
    object and the scenario's `pod.deleted` is what removes it. That is the
    real sequence, and it is what lets a scenario hold a pod in Terminating.
    `pod.stuckTerminating` is the second hold, the one with no finalizer
    behind it (see **Terminating pods** above).
-7. **`clock.advance` is the one event outside the table's vocabulary.** It
+6. **`clock.advance` is the one event outside the table's vocabulary.** It
    is harness control, not an observation. `timer.operationDeadline` is a
    table event and is implemented as a clock move onto the earliest
    in-flight deadline plus a slack.
-8. **The driver assigns pod UIDs.** The fake client assigns none and the
+7. **The driver assigns pod UIDs.** The fake client assigns none and the
    engine refuses to delete a pod without an observed UID. They are numbered
    in creation order and normalized to `uid#N`.
-9. **Expectations are confirmed by the driver, not by an informer.** A pod
+8. **Expectations are confirmed by the driver, not by an informer.** A pod
    create is observed as soon as the object exists; a delete is observed
    when the object leaves the apiserver, whether the scenario's
    `pod.deleted` took it out or the force-delete sweep did.
-10. **The deadline park/rearm step is modelled, the rest of the aggregate
-    pass is not.** The adapter parks every in-flight deadline before the
-    dispatcher when paused, and parks or rearms admission-held deadlines
-    after it on every reconcile; the driver does both. The counters and
-    conditions the same aggregate pass publishes are not computed.
-11. **An event may carry only the arguments it declares.** The parser
+9. **The deadline park/rearm step is modelled, the rest of the aggregate
+   pass is not.** The adapter parks every in-flight deadline before the
+   dispatcher when paused, and parks or rearms admission-held deadlines
+   after it on every reconcile; the driver does both. The counters and
+   conditions the same aggregate pass publishes are not computed.
+10. **An event may carry only the arguments it declares.** The parser
     rejects anything else, so a mistyped argument fails the load instead
     of silently doing nothing, and `timer.operationDeadline` requires its
     slack rather than defaulting to one the harness invented.
-12. **A row line omits `ReadyPodCount`, `ScheduledPodCount` and
+11. **A row line omits `ReadyPodCount`, `ScheduledPodCount` and
     `NodesOccupied`.** Those are materialized only on the status
     publication path, which runs outside `workload.Reconcile`, and the
     workload package's removable-field audit forbids reading them
     anywhere else. A trace cannot honestly report a field the run never
     writes.
+12. **The teardown deadline is a driver stand-in, not the adapter's
+    code.** The check is three lines the adapter runs ahead of its
+    dispatch — deletion instant plus deadline, a Warning, the finalizer
+    lifted — and the driver mirrors them rather than importing the
+    adapter, which the workload tree never does. The Warning's reason is
+    pinned to the adapter's constant by a test; its message is the
+    driver's own wording.
 
 ## What is not modelled yet
 
 The table events the driver can stage are the ones the scenarios here need:
-`pod.scheduled`, `pod.containersReady`, `pod.ready`, `pod.servingOn/Off`,
-`pod.terminating`, `pod.stuckTerminating`, `pod.deleted`,
-`pod.phaseTerminal`, `pod.waiting`,
-`pod.unschedulable`, `pod.containerRestart`, `endpoint.rotationIn/Out`, `api.quotaDenied`,
-`api.invalid`, `spec.revision`, `spec.replicasUp/Down`,
+`pod.scheduled`, `pod.containersReady`, `pod.containersNotReady`,
+`pod.ready`, `pod.servingOn/Off`,
+`pod.terminating`, `pod.stuckTerminating`, `pod.deleted`, `pod.uidRotated`,
+`pod.phaseTerminal`, `pod.admissionRejected`, `pod.evicted`, `pod.nodeLost`,
+`pod.waiting`,
+`pod.unschedulable`, `pod.schedulingGated`, `pod.admitted`,
+`pod.containerRestart`, `endpoint.rotationIn/Out`, `api.quotaDenied`,
+`api.invalid`, `api.notFound`, `api.alreadyExists`, `api.throttled`,
+`api.namespaceTerminating`, `api.conflict`, `spec.revision`,
+`spec.annotationOnly`,
+`spec.replicasUp/Down`,
 `spec.pauseTrue/pauseFreeze/unpause`, `spec.strategy`, `spec.teardown`,
-`spec.migrateRequest`, `spec.rollbackTarget`, `spec.gangWidth`,
-`gang.podGroup`,
+`spec.migrateRequest`, `spec.rollbackTarget`, `spec.gangWidth`, `spec.partition`,
+`config.changed` (every knob but `gangScheduleTimeout` and
+`retryBlockHistoryLimit`), `gang.podGroup`,
 `timer.operationDeadline`, `timer.stuckPodGrace`, `timer.retryAt`,
-`timer.repairRetry`, `timer.migrationDeadline`, `timer.forceDelete[overdueSlack]`,
+`timer.repairRetry`, `timer.migrationDeadline`, `timer.forceDelete`,
+`timer.teardownDeadline`, `ctrl.crash`, `ctrl.staleRead`,
 and `clock.advance`. A scenario naming any other declared event fails to load
 with that as the reason, so the gap is always visible rather than silent.
 
@@ -484,7 +709,8 @@ Recorded result, over 118 scenarios:
 
 | mutation | goldens failed |
 |---|---|
-| `isSurgeOwnedStatus` → `false` **and** `effectiveUpdateStrategy`'s pin dropped (`ops/update.go`) | 1: `strategy-edit-midsurge` |
+| `isSurgeOwnedStatus` → `false` (`ops/update.go`) | 1: `surge-resumed-without-strategy-pin` |
+| `isSurgeOwnedStatus` → `false` **and** `effectiveUpdateStrategy`'s pin dropped (`ops/update.go`) | 2: `strategy-edit-midsurge`, `surge-resumed-without-strategy-pin` |
 | `supersedes` → `false` (`types/externalhold.go`) | 3: `hold-pause-then-quota`, `hold-pause-then-unrouted`, `hold-pause-then-unschedulable` |
 | `supersedes` → `true` | 4: `hold-pause-then-quota`, `hold-pause-then-unrouted`, `hold-quota-then-pause`, `hold-unschedulable-then-pause` |
 | the first-writer-wins guard in `MarkExternalHold` removed | the same 4 |
@@ -495,16 +721,19 @@ Recorded result, over 118 scenarios:
 
 Three things to read off it.
 
-**The surge guards are only sensitive as a pair.** Flipping
-`isSurgeOwnedStatus` alone changes nothing, because
-`effectiveUpdateStrategy` already pins the mechanism from
-`Operation.Strategy`, which every row this build writes carries; the two
-are redundant for any row the harness can produce.
+**The surge guards are redundant for every row this build writes.**
+Flipping `isSurgeOwnedStatus` alone moves no golden recorded from an
+empty cluster, because `effectiveUpdateStrategy` already pins the
+mechanism from `Operation.Strategy`, which every row this build writes
+carries.
 `isSurgeOwnedStatus` is load-bearing only for a surge row persisted
-*without* a pinned strategy, a shape an older build wrote, and the
-scenario format deliberately cannot seed an in-flight operation. With
-both disabled, `strategy-edit-midsurge` fails — it locks that a strategy
-edit does not derail an attempt already in flight.
+*without* a pinned strategy, a shape an older build wrote, which no walk
+from an empty cluster produces. `surge-resumed-without-strategy-pin`
+seeds exactly that row beside a desired strategy of RecreatePod, so the
+guard is locked on its own: with `isSurgeOwnedStatus` alone flipped, that
+scenario drains the source for a rebuild instead of finishing the surge.
+With both disabled, `strategy-edit-midsurge` fails as well — it locks that
+a strategy edit does not derail an attempt already in flight.
 
 **Hold precedence is locked by the `hold-*` scenarios.** Each one puts a
 second authority on a row that already carries a token, which is the only
@@ -592,16 +821,18 @@ Effects the driver does not record:
   taking over from a cleared pod token is recorded from the other side
   (`hold-unschedulable-then-gang`) instead.
 
-- The owner's teardown deadline. `timer.teardownDeadline` and the 14
-  arrows that fire on it are decided in the IR adapter's teardown pass,
-  which removes the finalizer; `workload.Reconcile` never sees it.
-  Adapter lane.
+- The teardown pass itself. The driver stands in for the adapter's
+  deadline check (see **The teardown deadline**), but not for the rest of
+  that pass: the authoritative pod snapshot it hands the engine, the
+  orphan PodGroup sweep, the headless Service delete, the ledger close
+  and the strict-hold `TeardownBlocked` Warning. The arrows that fire on
+  the deadline stay adapter-lane.
 - Timestamps on aggregate conditions and on `LastFailure`, because the
   engine stamps both from the wall clock (see Follow-ups).
 
 - The migration completion tail. The surge's availability gate reads the
   row's `PodCount` and `AvailablePodCount`, which only the status
-  publication path writes (see deviation 12 above), so a replayed
+  publication path writes (see deviation 11 above), so a replayed
   migration never advances past `SurgePending` and the promote and
   completion arrows are out of reach. Everything the record decides before
   that gate — early wedge evidence, the deadline, teardown — is reachable.
@@ -614,12 +845,6 @@ Effects the driver does not record:
   never reaches the source drain the sweep runs in. The sweep itself is
   driven from the scale-down wave and from the top of the update pass.
   Adapter lane.
-
-- The force-delete escalation's other two evidence branches,
-  `node-unreachable-taint` and `node-not-ready`. Both age from a Node
-  object's own taint or condition, and the fake cluster holds none, so a
-  scheduled pod's node classifies as `node-gone`. Driving them needs a Node
-  applier the scenarios here do not call for.
 
 - The gang-member-loss rebuild of a row below Ready. Outside
   `Phase=Failed` the trigger reads the row's recorded `PodCount` before
@@ -636,10 +861,12 @@ Effects the driver does not record:
 Reads, which are never traced at all: EndpointSlices, Services,
 ControllerRevisions, and Nodes.
 
-Two apiserver behaviors are absent: there is no conflict retry (the fake
-client raises no 409, so the adapter's `RetryOnConflict` loop is never
-entered), and a rejection injected by a scenario is delivered
-synchronously rather than racing a concurrent writer.
+A rejection injected by a scenario is delivered synchronously rather than
+racing a concurrent writer, and a status conflict is answered by the
+store's own copy of the adapter's retry rather than by a second writer
+whose change the retry would read. A stale read is staged per pass and
+lags by exactly one tick; a cache that lags by more, or that lags for some
+kinds and not others, is not modelled.
 
 ## Follow-ups
 

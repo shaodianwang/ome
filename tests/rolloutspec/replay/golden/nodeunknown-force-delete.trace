@@ -14,8 +14,7 @@ tick=3 hold cleared
 tick=3 pod delete name=svc-a-engine-0-default-0 grace=0 uidPrecondition=set
 tick=3 event Warning PodForceDeleted OMENative component=engine instance=0: force-deleted pod svc-a-engine-0-default-0 on node node-0, which its kubelet stopped reporting (evidence=node-gone)
 tick=3 pass result=after:5s
-tick=4 note the force-deleted object is collected, and the same attempt rebuilds the pod under its original deadline
-tick=4 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 note the force-deleted object is gone, and the same attempt rebuilds the pod under its original deadline
 tick=4 hold cleared
 tick=4 row=0 write no-op precondition=no-change
 tick=4 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0

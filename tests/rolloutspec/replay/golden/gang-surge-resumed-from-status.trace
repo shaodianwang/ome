@@ -1,0 +1,40 @@
+tick=1 note the resumed pass announces the PodGroups behind both gangs' members and finds the replacement not yet Ready, so it waits
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 podgroup create name=svc-a-engine-1
+tick=1 row=1 write no-op precondition=no-change
+tick=1 hold cleared
+tick=1 pass result=after:5s
+tick=2 note both replacement members report Ready and the leader enters rotation, so the source gang leaves rotation
+tick=2 apply pod.ready[target] pod=svc-a-engine-1-leader-0 now=t+0s
+tick=2 apply pod.ready[target] pod=svc-a-engine-1-worker-0 now=t+0s
+tick=2 apply endpoint.rotationIn[target] pod=svc-a-engine-1-leader-0 now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 row=1 write no-op precondition=no-change
+tick=2 pod status-patch name=svc-a-engine-1-leader-0 serving=absent→True
+tick=2 pod status-patch name=svc-a-engine-1-worker-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#1{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 pod status-patch name=svc-a-engine-0-leader-0 serving=True→False
+tick=2 pod status-patch name=svc-a-engine-0-worker-0 serving=True→False
+tick=2 hold cleared
+tick=2 pass result=after:5s
+tick=3 note the source leader's endpoint goes not-ready, so the whole source gang is deleted
+tick=3 apply endpoint.rotationOut[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 row=1 write no-op precondition=no-change
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pod delete name=svc-a-engine-0-leader-0 grace=default
+tick=3 pod delete name=svc-a-engine-0-worker-0 grace=default
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the source's pods are gone, so its row is removed and the replacement index is the Instance
+tick=4 apply pod.deleted[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=4 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=4 row=1 write no-op precondition=no-change
+tick=4 row=0 write no-op precondition=no-change
+tick=4 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-367ef4b7 readySince=t+0s op=nil precondition=ok
+tick=4 row=0 remove incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#1{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=4 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 gang surge complete: instance 1 promoted to revision svc-a-engine-367ef4b7
+tick=4 hold cleared
+tick=4 pass result=requeue

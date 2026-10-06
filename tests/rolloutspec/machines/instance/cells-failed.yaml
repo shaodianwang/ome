@@ -605,7 +605,7 @@ cells:
     outcome: defer
     note: status writers re-read and re-apply under conflict retry; exhausted retries requeue and the same mutation is re-derived from the evidence next pass
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-retry-write-conflict]}
     status: current
   - state: Failed
     event: api.alreadyExists

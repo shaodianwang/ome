@@ -2,7 +2,7 @@
 # with a force-delete policy in force. The name is not recycled the way a
 # dead pod's is; the sweep frees it on the pass that first reads it, the
 # source keeps serving, and the same attempt rebuilds the replacement at
-# the surge ordinal once the object is collected, under the deadline it
+# the surge ordinal once the object is gone, under the deadline it
 # was stamped with.
 scenario: surge-target-unknown-swept
 intentional: >-
@@ -45,6 +45,4 @@ timeline:
     events:
       - pod.phaseTerminal[Unknown]: {pod: {index: 0, ordinal: 1}}
   - tick: 6
-    note: the force-deleted object is collected, and the same attempt rebuilds the replacement at the surge ordinal
-    events:
-      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+    note: the force-deleted object is gone, and the same attempt rebuilds the replacement at the surge ordinal

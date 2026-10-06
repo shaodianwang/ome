@@ -1,0 +1,34 @@
+# The stamp that opens a Ready Instance's surge loses every attempt of the
+# adapter's conflict retry. Status mutations are read-modify-write under
+# that retry: each refused attempt re-reads the owner and re-applies the
+# stamp, and the budget exhausted hands the conflict to the pass with
+# nothing committed, so the pass ends in error and the next pass re-derives
+# the same stamp from the evidence and opens the surge.
+scenario: ready-roll-stamp-conflict
+arrows:
+  - T-ready-surge
+cells:
+  - instance/Ready/api.conflict/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod template changes and the surge's opening stamp is refused on every attempt the retry allows, so the pass ends in error with the row untouched
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+      - api.conflict: {write: 1, count: 5}
+  - tick: 3
+    note: the next pass re-derives the stamp from the same evidence and opens the surge

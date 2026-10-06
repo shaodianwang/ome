@@ -1,0 +1,24 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the pod is deleted out from under the Instance while the namespace is being deleted, so the repair opens and its create is refused with the terminating cause; the attempt is disposed on the spot
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply api.namespaceTerminating verb=create resource=pods count=2 now=t+0s
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod count 0 below desired 1 (incarnation=2)
+tick=2 pod create-rejected name=svc-a-engine-0-default-0 rejection=api.namespaceTerminating
+tick=2 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil lastFailure={pod= reason=NamespaceTerminating message=pods "svc-a" is forbidden: unable to create new content in namespace because it is being terminated} precondition=ok
+tick=2 event Warning InstanceRejected OMENative component=engine instance=0: apiserver rejected pod svc-a-engine-0-default-0 (NamespaceTerminating: pods "svc-a" is forbidden: unable to create new content in namespace because it is being terminated); no revision is blamed
+tick=2 pass result=after:5s
+tick=3 note the Failed row has no pod and no retry block, so the Create pass starts it fresh and the namespace refuses the create again
+tick=3 hold cleared
+tick=3 row=0 write incarnation=2 phase=Creating runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#2{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=NamespaceTerminating message=pods "svc-a" is forbidden: unable to create new content in namespace because it is being terminated} precondition=ok
+tick=3 pod create-rejected name=svc-a-engine-0-default-0 rejection=api.namespaceTerminating
+tick=3 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil lastFailure={pod= reason=NamespaceTerminating message=pods "svc-a" is forbidden: unable to create new content in namespace because it is being terminated} precondition=ok
+tick=3 event Warning InstanceRejected OMENative component=engine instance=0: apiserver rejected pod svc-a-engine-0-default-0 (NamespaceTerminating: pods "svc-a" is forbidden: unable to create new content in namespace because it is being terminated); no revision is blamed
+tick=3 pass result=after:5s
+tick=4 note namespace GC deletes the owner, so the next pass runs teardown instead of another create
+tick=4 apply spec.teardown[deleted] teardown=true now=t+0s
+tick=4 row=0 write incarnation=2 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#3{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=NamespaceTerminating message=pods "svc-a" is forbidden: unable to create new content in namespace because it is being terminated} precondition=ok
+tick=4 pass result=requeue

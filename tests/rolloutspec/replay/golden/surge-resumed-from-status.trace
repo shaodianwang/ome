@@ -1,0 +1,27 @@
+tick=1 note the resumed pass finds the surge in flight with its replacement created and not yet Ready, so it changes nothing and waits
+tick=1 row=0 write no-op precondition=no-change
+tick=1 hold cleared
+tick=1 pass result=after:5s
+tick=2 note the replacement is serving and in rotation beside the source, so the step advances and the source leaves rotation
+tick=2 apply pod.ready[target] pod=svc-a-engine-0-default-1 now=t+0s
+tick=2 apply endpoint.rotationIn[target] pod=svc-a-engine-0-default-1 now=t+0s
+tick=2 row=0 write no-op precondition=no-change
+tick=2 pod status-patch name=svc-a-engine-0-default-1 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=SurgeDrain target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=2 hold cleared
+tick=2 pass result=after:5s
+tick=3 note the source leaves rotation, so the drain has converged and the source is deleted
+tick=3 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the drained source is gone, so the Instance promotes onto the replacement's slot
+tick=4 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-6f8b1e6c activeOrdinal=1 readySince=t+0s op=nil precondition=ok
+tick=4 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c complete (activeOrdinal=1)
+tick=4 hold cleared
+tick=4 pass result=requeue

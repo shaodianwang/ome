@@ -376,7 +376,7 @@ cells:
     outcome: ignore
     note: phase, operation and the bumped Incarnation are durable in status, so the next manager re-enters at the same step; the emptied expectation cache reports satisfied and the pass re-derives its phase from the live pod set
     placement: kind
-    coverage: {perm: [], unit: [TestRestart_ConvergesAcrossPasses], kind: []}
+    coverage: {perm: [], unit: [TestRestart_ConvergesAcrossPasses], kind: [], replay: [restart-resumed-from-status]}
     status: current
   - state: Restart/Drain
     event: ctrl.staleRead

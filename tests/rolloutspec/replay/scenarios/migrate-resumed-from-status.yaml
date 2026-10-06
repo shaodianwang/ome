@@ -1,0 +1,44 @@
+# A migration resumed from persisted status: the record has allocated its
+# surge, both pins are stamped, and the surge pod exists but is not Ready.
+# The resumed pass drives the surge to serving and in rotation, and then
+# waits on the availability gate the status publication feeds.
+scenario: migrate-resumed-from-status
+cells:
+  - instance/Migrate/CreateSurge/ctrl.crash/before
+  - instance/Migrate/SurgeTarget/ctrl.crash/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+  migrations:
+    - {instance: 0, surgeIndex: 1, fromNode: node-0, reason: NodeDrain}
+  rows:
+    - index: 0
+      phase: Migrating
+      runningRevision: current
+      readySince: 0s
+      operation: {type: Migrate, step: CreateSurge, surgeIndex: 1, requestUUID: migration-1}
+    - index: 1
+      phase: Creating
+      operation: {type: Migrate, step: CreateSurge, surgeIndex: 0, requestUUID: migration-1}
+  pods:
+    - {index: 0, node: node-0, ready: true, serving: true, routed: true}
+    - {index: 1, phase: Pending}
+timeline:
+  - tick: 1
+    note: the resumed pass finds the record allocated and the surge pod created but not Ready, so it waits
+  - tick: 2
+    note: the surge pod reports Ready, so it is marked serving
+    events:
+      - pod.ready[target]: {pod: {index: 1}}
+  - tick: 3
+    note: the surge pod enters rotation, and the drive waits on the published availability of the surge Instance
+    events:
+      - endpoint.rotationIn[target]: {pod: {index: 1}}

@@ -376,7 +376,7 @@ cells:
     note: "Phase=Deleting plus the Delete operation is the durable anchor. The next pass re-selects the row through the owned-pool predicate, re-runs the identity preflight before any effect, and rebuilds the pod set from the live read; the emptied expectations cache reads as satisfied so the wave simply resumes"
     invariants: [owned.wave.before.fresh]
     placement: kind
-    coverage: {perm: [], unit: [TestDeleteBatchPreflightConfirmsPriorRemovalBeforeEffects, TestDeleteBatchResumedWaveRequiresAtomicStatusAdapter], kind: []}
+    coverage: {perm: [], unit: [TestDeleteBatchPreflightConfirmsPriorRemovalBeforeEffects, TestDeleteBatchResumedWaveRequiresAtomicStatusAdapter], kind: [], replay: [delete-resumed-from-status]}
     status: current
 
   - state: Delete/Drain

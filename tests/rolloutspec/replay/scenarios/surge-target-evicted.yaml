@@ -1,0 +1,57 @@
+# The node evicts the surge replacement under pressure before it ever
+# served. The evicted pod is Failed and still holds the replacement's name,
+# and the surge leaves it there: unlike a node's admission refusal, a
+# kubelet eviction is not recycled by the attempt, so the pass waits while
+# the source serves on. Once the evicted object is gone the replacement is
+# created again at the surge ordinal and the surge completes.
+scenario: surge-target-evicted
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/Surge/pod.evicted/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement comes up on its node and is evicted under memory pressure before it serves; the Failed pod keeps the replacement's name and the pass waits on it
+    events:
+      - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}, message: node-1}
+      - pod.containersReady[target]: {pod: {index: 0, ordinal: 1}}
+      - pod.evicted: {pod: {index: 0, ordinal: 1}, message: "The node was low on resource: memory."}
+  - tick: 5
+    note: the evicted object is gone, so the replacement is created again at the surge ordinal
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 6
+    note: the new replacement is serving and in rotation, so the step advances and the source leaves rotation
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 7
+    note: the source leaves rotation and is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 8
+    note: the drained source is gone and the Instance promotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

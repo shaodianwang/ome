@@ -1,0 +1,46 @@
+# The pod template's queue label is re-pointed while an in-place roll is
+# between its marker and its image patch. The queue label is one the
+# admission plane owns, so the hasher keeps it out of the revision: the
+# target does not move, the roll in flight is unaffected, and the patch
+# lands and promotes as if nothing had been edited.
+scenario: inplace-queue-label-edit
+arrows:
+  - T-ready-inplace
+  - T-inplace-ready
+cells:
+  - instance/Update/InPlace/spec.annotationOnly/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    podLabels: {kueue.x-k8s.io/queue-name: queue-a}
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the source leaves rotation and reports Ready, so the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.ready[target]: {pod: {index: 0}}
+  - tick: 5
+    note: the queue label is re-pointed; the hasher derives it rather than reads it, so the target revision stands and the image patch lands as planned
+    events:
+      - spec.annotationOnly: {labels: {kueue.x-k8s.io/queue-name: queue-b}}
+  - tick: 6
+    note: the runtime confirms the new image, so the pod returns to rotation on the target revision and the Instance promotes
+    events:
+      - pod.ready[target]: {pod: {index: 0}}

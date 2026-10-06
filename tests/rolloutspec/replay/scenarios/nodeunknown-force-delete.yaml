@@ -35,6 +35,4 @@ timeline:
     events:
       - pod.phaseTerminal[Unknown]: {pod: {index: 0}}
   - tick: 4
-    note: the force-deleted object is collected, and the same attempt rebuilds the pod under its original deadline
-    events:
-      - pod.deleted[source]: {pod: {index: 0}}
+    note: the force-deleted object is gone, and the same attempt rebuilds the pod under its original deadline

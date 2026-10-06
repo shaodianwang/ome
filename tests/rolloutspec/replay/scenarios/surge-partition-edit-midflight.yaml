@@ -1,0 +1,47 @@
+# A canary partition is raised over an Instance whose surge is already in
+# flight. Partition candidacy excludes an Updating row and any row with an
+# Update operation, so the edit holds nothing the attempt owns: the
+# replacement is promoted and the roll completes under a partition that
+# would have held the Instance had it still been Ready.
+scenario: surge-partition-edit-midflight
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/Surge/spec.partition/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the partition is raised over the Instance mid-surge; an Updating row is no candidate for the hold, so the step advances as the replacement serves and the source leaves rotation
+    events:
+      - spec.partition: {to: 1}
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the source leaves rotation and is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 6
+    note: the drained source is gone and the Instance promotes under the partition
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

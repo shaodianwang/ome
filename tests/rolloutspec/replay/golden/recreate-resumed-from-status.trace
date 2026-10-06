@@ -1,0 +1,25 @@
+tick=1 note the resumed pass partitions the pods by incarnation and begins draining the old one
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=1 hold cleared
+tick=1 pass result=after:5s
+tick=2 note the old pod leaves rotation, so it is deleted
+tick=2 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 row=0 write no-op precondition=no-change
+tick=2 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=2 hold cleared
+tick=2 pass result=after:5s
+tick=3 note the old pod is gone, so the rebuild lands at the recorded incarnation
+tick=3 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pod create name=svc-a-engine-0-default-0 revision=6f8b1e6c incarnation=2 ordinal=0
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the rebuilt pod reports Ready and the Instance promotes onto the target
+tick=4 apply pod.ready[target] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=4 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil precondition=ok
+tick=4 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 recreate to revision svc-a-engine-6f8b1e6c complete
+tick=4 hold cleared
+tick=4 pass result=requeue

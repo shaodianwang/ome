@@ -1,0 +1,41 @@
+# The owner is deleted while a surge is in flight, and by the time the
+# controller observes it the configured teardown deadline has already
+# elapsed. The deadline check runs ahead of the teardown dispatch, so the
+# Surge row is never stamped Deleting: the pass warns, releases the
+# finalizer, and the owner goes with every row it carried while the
+# mid-surge pods are left to background GC. A later pass finds no object
+# to act on.
+scenario: surge-teardown-deadline
+cells:
+  - instance/Update/Surge/timer.teardownDeadline/before
+  - instance/Update/Surge/timer.teardownDeadline/after@T-surge-teardown-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    teardownDeadline: 10m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the owner was deleted and its teardown deadline has elapsed before this pass observes either, so the deadline check releases the owner ahead of any teardown wave and the surge row goes with it
+    events:
+      - spec.teardown[deleted]: {}
+      - timer.teardownDeadline: {slack: 1s}
+  - tick: 5
+    note: a late pass finds no owner left to act on
