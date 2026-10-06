@@ -41,6 +41,17 @@ per production file across `pkg/controller/v1beta1/workload/...` and
 confines row writes to the packages that write rows. All three live in
 `hack/omenative-testing/statemachine/`, and its README states their rules.
 
+A fifth gate, `TestCoverageFloorHolds` in `tests/rolloutspec`, holds each
+table to a ratchet: every machine has a `machines/<name>.coverage-floor.yaml`
+recording how many of its authored rows cite no check (`uncovered`: every
+row with an outcome other than n/a and an empty `coverage`) and how many
+are not yet `decided` (`undecided`: status current or review), with the
+date the numbers were last lowered. A count at or under its number passes;
+a count above it fails and lists the rows behind the number, so a row added
+without coverage or a decision has to be covered or decided in the same
+change. The numbers only go down: lower them when rows gain coverage or are
+decided, and refresh `set_on`.
+
 ## Lanes: which arrows this directory is responsible for
 
 A transition of the instance table carries a `lane`. The default,

@@ -2195,7 +2195,7 @@ class TestEvalTargeted(PipelineTestCase):
         # The fixture round, 5% sampled under the pinned commit: the pin
         # moves with the corpus like the full and smoke totals.
         # The three settled-unit and aged-record cases redraw the 5% sample; the total holds only for a fixed corpus.
-        self.assertEqual(sum(gp._job_count(document) for document in batches), 421)
+        self.assertEqual(sum(gp._job_count(document) for document in batches), 422)
 
 
 class TestEvalVerdicts(unittest.TestCase):
@@ -3089,7 +3089,7 @@ class TestEvalMode(PipelineTestCase):
         self.assertEqual(len(self.full), 2629)
         self.assertEqual(len(self.smoke), 203)
         self.assertEqual(len(self.smoke_batches), 3)
-        self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 312)
+        self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 313)
         # Only a full round records its verdicts.
         self.assertNotIn(f'key: "{gp.EVAL_VERDICTS_STEP_KEY}"', "".join(self.smoke_batches))
 
@@ -3258,7 +3258,7 @@ class TestPipelineUploads(PipelineTestCase):
     def test_todays_corpus_uploads_within_the_limit_and_the_total_is_pinned(self):
         self.assert_uploads_are_well_formed(self.batches, self.children)
         self.assertGreater(len(self.batches), 2)
-        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2739)
+        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2740)
 
     def test_the_full_round_records_its_verdicts_after_every_eval_group(self):
         last = self.batches[-1]

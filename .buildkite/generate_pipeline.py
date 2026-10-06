@@ -2542,6 +2542,20 @@ def ci_steps() -> str:
             plugins:
 {_tw_docker_plugin(CI_IMAGE, indent=14)}
 
+          - label: ":lock: Rollout Lock Tripwire"
+            key: "rollout-lock-tripwire"
+{_gh_status("rollout-lock-tripwire")}
+{_infra_retry()}
+            # A rewritten golden, decided cell or harness contract string
+            # must arrive with an Eval: line naming the eval it reran; the
+            # wrapper runs hack/check_lock_rewrite.py over base...HEAD.
+            command: |
+              bash .buildkite/check_lock_rewrite.sh
+            agents:
+              queue: "{DEFAULT_QUEUE}"
+            plugins:
+{_tw_docker_plugin(CI_IMAGE, indent=14)}
+
           - label: ":test_tube: Integration Tests"
             key: "integration-test"
 {_gh_status("integration-test")}

@@ -335,6 +335,16 @@ rollout-behavior-lock: rolloutspec-check ## 🔒 Rollout engine behavior lock: s
 	@$(GO_CMD) test -count=1 $(ROLLOUT_LOCK_PACKAGES)
 	@echo "✅ Behavior lock holds: tables checked, goldens identical, decided cells covered"
 
+# The change set the tripwire judges: ROLLOUT_LOCK_BASE...ROLLOUT_LOCK_HEAD,
+# with HEAD's commit message read for the Eval: line.
+ROLLOUT_LOCK_BASE ?= origin/main
+ROLLOUT_LOCK_HEAD ?= HEAD
+
+.PHONY: rollout-lock-tripwire
+rollout-lock-tripwire: ## 🧷 Refuse a rewritten golden, decided cell or harness contract string that names no Eval: rerun
+	@echo "🧷 Checking $(ROLLOUT_LOCK_BASE)...$(ROLLOUT_LOCK_HEAD) for rewrites of the behavior lock..."
+	@python3 hack/check_lock_rewrite.py --base $(ROLLOUT_LOCK_BASE) --head $(ROLLOUT_LOCK_HEAD)
+
 .PHONY: tidy
 tidy: ## 📦 Run go mod tidy
 	@echo "📦 Tidying Go modules..."
