@@ -204,19 +204,29 @@ type UpdateSelection struct {
 	// other pass says anything about while the pod is up between
 	// crashes.
 	CrashedNotServing []int32
+	// CrashedOutOfRotation lists, in plan order, the Instances of
+	// CrashedNotServing whose set is short of fully in rotation
+	// (ops.RolledSetInRotation): a pod down, restarting or not yet
+	// serving. The rest are back in rotation and merely unproven for the
+	// window, which paces a further start and nothing else. It is the
+	// standing hold's reading alone: an item's OutOfRotation ordering key
+	// asks whether the Instance serves nothing now, a different question.
+	CrashedOutOfRotation []int32
 	// StandingHold is the hold the roll stands behind on account of the
 	// Instances already on the target that do not serve it, whether or
 	// not a start reaches the admission this pass: the ladder's when the
-	// target's block denies a fresh start, else the budget's when those
-	// Instances and the starts in flight already exhaust the strategy's
-	// arm. It stands only while one of them crashed after promotion
-	// (CrashedNotServing): a rolled Instance short of serving for another
-	// reason is repaired or parked by a pass that says so itself. Nil
-	// otherwise, when a further start would still be admitted, or while
-	// paused. The update pass reports it when it admits nothing, a roll
-	// with nothing selected reports it at the update position
-	// (Decision.StandingHold), and a pass the restart pass consumes
-	// reports it in the update pass's place.
+	// target's block denies a fresh start or counts their crash, else the
+	// budget's when those Instances and the starts in flight already
+	// exhaust the strategy's arm. The budget's stands only while one of
+	// them crashed after promotion and is out of rotation
+	// (CrashedOutOfRotation): a rolled Instance short of serving for
+	// another reason is repaired or parked by a pass that says so itself,
+	// and one back in rotation leaves a roll with nothing to start nothing
+	// to stand behind. Nil otherwise, when a further start would still be
+	// admitted, or while paused. The update pass reports it when it admits
+	// nothing, a roll with nothing selected reports it at the update
+	// position (Decision.StandingHold), and a pass the restart pass
+	// consumes reports it in the update pass's place.
 	StandingHold *types.RolloutHold
 }
 
@@ -277,10 +287,11 @@ type Decision struct {
 	// UpdateIdle reports that the update selection ran for an unpaused
 	// Component and found nothing: no Instance to drive, no same-target
 	// RetryBlock that still denies a start, and no Instance on the target
-	// that does not serve it and holds the roll. Execute reports a nil
-	// rollout hold at the update pass's position, so a hold a prior pass
-	// recorded does not outlive the roll it paced, while a ladder that
-	// gave up on the revision stays reported.
+	// that crashed after promotion and is out of rotation or under the
+	// ladder's attempt. Execute reports a nil rollout hold at the update
+	// pass's position, so a hold a prior pass recorded does not outlive
+	// the roll it paced or the loss it named, while a ladder that gave up
+	// on the revision stays reported.
 	UpdateIdle bool
 
 	// LadderHold is the hold an unpaused roll waits on when the target's
@@ -292,7 +303,7 @@ type Decision struct {
 
 	// StandingHold is the hold an unpaused roll with nothing selected
 	// stands behind on account of the Instances already on the target that
-	// do not serve it because a pushed pod crashed after promotion
+	// are out of rotation because a pushed pod crashed after promotion
 	// (UpdateSelection.StandingHold with no items). Execute reports it at
 	// the update pass's position after the ladder's hold, and a pass the
 	// restart pass consumes reports it there in the update pass's place.
@@ -452,8 +463,9 @@ func Plan(ctx context.Context, input types.ReconcileInput, plan types.ComponentP
 			// A roll with nothing left to do holds nothing: no Instance to
 			// drive, no ladder that still holds the target, whether a
 			// candidate reached its gate or a partition kept every one back,
-			// and no Instance on the target that does not serve it and
-			// holds the roll.
+			// and no Instance on the target out of rotation after a crash,
+			// or proving itself under the ladder's attempt, that holds the
+			// roll.
 			decision.UpdateIdle = len(selection.Items) == 0 && len(selection.RetryBlockDenied) == 0 && selection.LadderHold == nil && selection.StandingHold == nil
 			// A roll with nothing to run but a hold to report waits on it:
 			// the ladder's when the target's block denies every start, else
@@ -747,6 +759,9 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 			selection.RolledNotServing = append(selection.RolledNotServing, inst.Index)
 			if workloadops.RolledInstanceCrashed(input.ObservedState.Instance(inst.Index), target.Name, target.CreationTimestamp.Time, updateByInstance[inst.Index], provenWindow) {
 				selection.CrashedNotServing = append(selection.CrashedNotServing, inst.Index)
+				if !workloadops.RolledSetInRotation(target.Name, updateByInstance[inst.Index], inst.TotalPods()) {
+					selection.CrashedOutOfRotation = append(selection.CrashedOutOfRotation, inst.Index)
+				}
 			}
 			logf.FromContext(ctx).V(1).Info("rolled Instance not serving",
 				"component", plan.Component, "instance", inst.Index, "target", target.Name, "reason", why, "wait", wait)
@@ -871,6 +886,7 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		"liveExtraPods", selection.ExtraPodSurge.Live,
 		"rolledNotServing", selection.RolledNotServing,
 		"crashedNotServing", selection.CrashedNotServing,
+		"crashedOutOfRotation", selection.CrashedOutOfRotation,
 		"retryBlockDenied", selection.RetryBlockDenied)
 	selection.LadderHold = ladderHold(input, target, selection.RolledNotServing, selection.CrashedNotServing, ladderRebuilds(input, plan, target, updateByInstance))
 	selection.StandingHold = standingHold(&selection, target)

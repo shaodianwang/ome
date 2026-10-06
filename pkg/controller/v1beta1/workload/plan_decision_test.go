@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -869,6 +870,90 @@ func TestPlan_Update_IdleRollReportsNoHold(t *testing.T) {
 	d = planOrFail(t, in, plan, planSnapshot(in, nil))
 	if d.UpdateIdle {
 		t.Errorf("a nil target plans no update pass and is not idle: actions=%v", actionKinds(d))
+	}
+}
+
+// TestPlan_Update_CrashedSetBackInRotationLeavesTheRollIdle pins the
+// standing hold's boundary on a roll with nothing left to start: an
+// Instance on the target whose promoted set crashed and was rebuilt holds
+// the roll while the rebuilt set is out of rotation, and holds nothing
+// once every pod of it is Ready and serving, inside the window it has yet
+// to hold Ready for. The window paces a further start at the admission; a
+// roll with none to start has nothing to stand behind, so the update
+// stage reads idle and a recorded hold clears. A block the ladder holds
+// for the revision is the ladder's hold either way. Under SurgeThenDrain
+// maxUnavailable 0 and RecreatePod maxUnavailable 1.
+//
+// Cells: instance/Ready/gate.deny[Budget]/before, instance/Ready/gate.deny[RetryBlock]/before
+func TestPlan_Update_CrashedSetBackInRotationLeavesTheRollIdle(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	target := updateTarget()
+	failedAt := metav1.NewTime(now.Add(-40 * time.Second))
+	readyAgain := metav1.NewTime(now.Add(-10 * time.Second))
+	// rebuilt is the pod the row built right after its set's failure, Ready
+	// again for less than the window or still out of rotation.
+	rebuilt := func(inRotation bool) *corev1.Pod {
+		pod := liveEnginePod("llama-70b", "prod", 0, 0, "newtarget", failedAt.Add(5*time.Second))
+		pod.Status.Phase = corev1.PodRunning
+		ready := corev1.ConditionTrue
+		if !inRotation {
+			ready = corev1.ConditionFalse
+		}
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name: "main", Ready: inRotation,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(readyAgain.Add(-5 * time.Second))}},
+		}}
+		pod.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.ContainersReady, Status: ready, LastTransitionTime: readyAgain},
+			{Type: corev1.PodReady, Status: ready, LastTransitionTime: readyAgain},
+			{Type: query.ServingConditionType, Status: ready},
+		}
+		return pod
+	}
+	one, zero := intstr.FromInt32(1), intstr.FromInt32(0)
+	strategies := []struct {
+		name     string
+		strategy types.UpdateStrategy
+	}{
+		{name: "SurgeThenDrain maxUnavailable 0", strategy: types.UpdateStrategy{Type: types.UpdateStrategySurgeThenDrain, RollingUpdate: &types.RollingUpdate{MaxSurge: &one, MaxUnavailable: &zero}}},
+		{name: "RecreatePod maxUnavailable 1", strategy: types.UpdateStrategy{Type: types.UpdateStrategyRecreatePod, RollingUpdate: &types.RollingUpdate{MaxSurge: &zero, MaxUnavailable: &one}}},
+	}
+	for _, sc := range strategies {
+		t.Run(sc.name, func(t *testing.T) {
+			plan := minimalPlan()
+			plan.UpdateStrategy = sc.strategy
+			observe := func(pod *corev1.Pod, blocks ...types.RetryBlock) (types.ReconcileInput, *workload.ObservedSnapshot) {
+				in := minimalInput(t)
+				forbidMutations(t, &in)
+				in.Clock = clocktesting.NewFakeClock(now)
+				in.StuckPodGrace = time.Minute
+				in.ObservedState.InstanceStatuses = []types.InstanceStatus{{
+					Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: target.Name,
+					ReadySince: &readyAgain, PodCount: 1, ServingPodCount: 1,
+					LastFailure: &types.InstanceTermination{PodName: pod.Name, ContainerName: "main", Reason: "Error", Time: failedAt},
+				}}
+				in.ObservedState.RetryBlocks = blocks
+				return in, planSnapshot(in, map[int32][]*corev1.Pod{0: {pod}})
+			}
+
+			in, snapshot := observe(rebuilt(true))
+			d := planTargetOrFail(t, in, plan, target, snapshot)
+			if !d.UpdateIdle || d.StandingHold != nil || findAction(d, workload.ActionUpdate) != nil {
+				t.Errorf("a rebuilt set back in rotation inside its window leaves a roll with nothing to start idle: idle=%t standing=%+v actions=%v", d.UpdateIdle, d.StandingHold, actionKinds(d))
+			}
+
+			in, snapshot = observe(rebuilt(false))
+			d = planTargetOrFail(t, in, plan, target, snapshot)
+			if d.UpdateIdle || d.StandingHold == nil || d.StandingHold.Gate != types.RolloutHoldGateBudget || d.StandingHold.Target != target.Name || !strings.Contains(d.StandingHold.Reason, "Instance 0") {
+				t.Errorf("a rebuilt set out of rotation holds the roll at the budget and names itself: idle=%t standing=%+v", d.UpdateIdle, d.StandingHold)
+			}
+
+			in, snapshot = observe(rebuilt(true), types.RetryBlock{TargetRevision: target.Name, State: types.RetryBlockRetryInProgress, AttemptsStarted: 1, Reason: "Error"})
+			d = planTargetOrFail(t, in, plan, target, snapshot)
+			if d.UpdateIdle || d.LadderHold == nil || d.LadderHold.Gate != types.RolloutHoldGateRetryBlock || d.LadderHold.Target != target.Name {
+				t.Errorf("a rebuilt set proving itself under the ladder's attempt is the ladder's to report: idle=%t ladder=%+v", d.UpdateIdle, d.LadderHold)
+			}
+		})
 	}
 }
 

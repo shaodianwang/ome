@@ -12003,3 +12003,151 @@ func requireUnreadyVictimRollsFirstInsideTheWindow(t *testing.T, h *recoveryHarn
 		t.Fatalf("%d Instances serve after the roll, want %d: the roll replaced the unready pod", n, replicas)
 	}
 }
+
+// Single-pod Instances serve one revision with nothing in flight, under
+// restart policy None, and one Instance's pod is taken by hand three
+// times, each time once the Instance is back and serving: deleted, with
+// the kubelet reporting the stopped pod first, or evicted. Each loss
+// exhausts the unavailability budget, and while the Instance is short the
+// pass reports the Budget hold naming it, so status says why the
+// Component is below its floor. Once the pod is back in rotation and
+// every row is Ready with no operation open, the next pass reports no
+// hold and neither does any pass after it, inside the window the rebuilt
+// pod has yet to hold Ready for: a roll with nothing left to start has
+// nothing to stand behind, and the status writer publishes the nil
+// verdict as it publishes a hold. Under SurgeThenDrain maxSurge 1 and
+// RecreatePod maxUnavailable 1, on four engine Instances and on two
+// router Instances, which run the same loop.
+//
+// Cells: instance/Ready/pod.deleted[source]/before, instance/Ready/pod.phaseTerminal[Succeeded]/before, instance/Ready/pod.evicted/before, instance/Ready/gate.deny[Budget]/before
+func TestSteadyService_PodLossHoldClearsOnceTheInstanceServesAgain(t *testing.T) {
+	const repetitions = 3
+	components := []struct {
+		component workloadtypes.ComponentType
+		replicas  int32
+	}{
+		{component: workloadtypes.ComponentEngine, replicas: 4},
+		{component: workloadtypes.ComponentRouter, replicas: 2},
+	}
+	for _, shape := range components {
+		for _, strategy := range []workloadtypes.UpdateStrategyType{workloadtypes.UpdateStrategySurgeThenDrain, workloadtypes.UpdateStrategyRecreatePod} {
+			for _, story := range []struct {
+				name  string
+				evict bool
+			}{
+				{name: "the pod is deleted and the kubelet reports it stopped first"},
+				{name: "the pod is evicted", evict: true},
+			} {
+				t.Run(string(shape.component)+"/"+string(strategy)+"/"+story.name, func(t *testing.T) {
+					replicas := shape.replicas
+					h := newComponentRecoveryHarness(t, false, "main", shape.component)
+					h.recorder = record.NewFakeRecorder(512)
+					h.replicas = replicas
+					none := workloadtypes.RestartPolicyNone
+					h.lifecycle.RestartPolicy = &none
+					// Several passes fit inside the window a rebuilt pod has
+					// yet to hold Ready for.
+					h.stuckGrace = 60 * time.Second
+					h.stepFloor = 5 * time.Second
+					h.stepCap = h.stepFloor
+					h.kubeletLag = time.Second
+					if !story.evict {
+						h.podGrace = 30 * time.Second
+					}
+					h.useRollingBudget(strategy)
+					if !h.run(60, func() bool { return h.settledOn(h.revV1, replicas) }) {
+						h.dumpState("initial create")
+						t.Fatalf("initial create never settled on v1 for %d Instances", replicas)
+					}
+					serving := func() bool {
+						return h.settledOn(h.revV1, replicas) && h.instancesServingOn(goodImage) == int(replicas)
+					}
+					take := func() {
+						pod := h.podOf(0, "")
+						if story.evict {
+							h.evictPods(0)
+							return
+						}
+						if h.exitsCleanOnStop == nil {
+							h.exitsCleanOnStop = map[string]bool{}
+						}
+						h.exitsCleanOnStop[pod.Name] = true
+						if err := h.c.Delete(h.ctx, pod); err != nil {
+							t.Fatalf("delete %s: %v", pod.Name, err)
+						}
+					}
+					for rep := 0; rep < repetitions; rep++ {
+						take()
+						namedWhileShort := false
+						if !h.runWithInvariant(40, serving, func() {
+							if serving() {
+								return
+							}
+							if hold := h.verdict; hold != nil && hold.Gate == workloadtypes.RolloutHoldGateBudget && hold.Target == h.revV1.Name && holdNamesInstance(hold, 0) {
+								namedWhileShort = true
+							}
+						}) {
+							h.dumpState("loss")
+							t.Fatalf("loss %d: Instance 0 never came back serving", rep)
+						}
+						if !namedWhileShort {
+							h.dumpState("silent loss")
+							t.Fatalf("loss %d: no pass reported the Budget hold naming Instance 0 while it was short; the story did not run (holds=%v)", rep, h.holds)
+						}
+						for i := 0; i < 3; i++ {
+							h.step()
+							if !serving() {
+								h.dumpState("left serving")
+								t.Fatalf("loss %d: the Component left its settled state with nothing taking it", rep)
+							}
+							if h.verdict != nil {
+								h.dumpState("hold left behind")
+								t.Fatalf("loss %d: a hold is left behind while every Instance is Ready and serving: %+v", rep, h.verdict)
+							}
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+// Four single-pod Instances serve the revision the Component is at with
+// nothing in flight, and that revision's retry ladder is Held. A pass
+// with nothing to run reports the Held ladder as the roll's hold, pass
+// after pass: a converged subject whose ladder gave up on its revision
+// says so rather than reading idle, and the status writer publishes what
+// the pass reports.
+//
+// Cells: instance/Ready/gate.deny[Held]/before
+func TestConvergedSubject_HeldLadderOnItsRevisionIsReportedWithNothingToRun(t *testing.T) {
+	const replicas = int32(4)
+	h := newRecoveryHarness(t, false)
+	h.replicas = replicas
+	// The rows stay inside the window the block's prune waits out.
+	h.stuckGrace = 10 * time.Minute
+	h.stepFloor = 5 * time.Second
+	h.stepCap = h.stepFloor
+	h.kubeletLag = time.Second
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(60, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 for %d Instances", replicas)
+	}
+	h.blocks = append(h.blocks, workloadtypes.RetryBlock{TargetRevision: h.target.Name, State: workloadtypes.RetryBlockHeld, AttemptsStarted: 3, Reason: "Error"})
+	for i := 0; i < 3; i++ {
+		verdicts := h.holdVerdicts
+		h.step()
+		if h.holdVerdicts == verdicts {
+			t.Fatalf("pass %d reported no verdict at the update position", i+1)
+		}
+		if hold := h.verdict; hold == nil || hold.Gate != workloadtypes.RolloutHoldGateHeld || hold.Target != h.target.Name || !strings.Contains(hold.Reason, "3 failed attempt") {
+			h.dumpState("held ladder")
+			t.Fatalf("pass %d must report the Held ladder on %s, got %+v", i+1, h.target.Name, hold)
+		}
+		if !h.settledOn(h.revV1, replicas) {
+			h.dumpState("moved")
+			t.Fatalf("pass %d moved a settled Instance under a Held ladder with nothing to run", i+1)
+		}
+	}
+}

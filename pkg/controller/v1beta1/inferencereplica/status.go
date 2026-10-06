@@ -682,9 +682,11 @@ func summarizeFailureReasons(reasons map[string]int) string {
 // clears it.
 //
 // A converged subject is read the same way: a roll with nothing left to
-// do clears the hold with a nil verdict, while one whose promoted sets
-// crash after it completed still stands behind the ladder or the budget
-// and its verdict says so. Only a subject with no update revision has
+// do clears the hold with a nil verdict, which a pass that finds every
+// row settled and serving reports, while one whose promoted sets crash
+// after it completed stands behind the budget while a set is out of
+// rotation, or behind the ladder while its block counts the crash, and
+// its verdict says so. Only a subject with no update revision has
 // nothing to hold.
 func effectiveRolloutHold(holdObserved bool, hold *workloadtypes.RolloutHold, status *v1beta1.InferenceReplicaStatus, now time.Time) *v1beta1.RolloutHold {
 	if status.UpdateRevision == "" {

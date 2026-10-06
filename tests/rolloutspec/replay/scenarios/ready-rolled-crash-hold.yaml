@@ -1,9 +1,12 @@
 # Two single-pod Instances under RecreatePod maxUnavailable 1 both move
 # onto a revision whose runner dies after promotion, under the single-pod
 # default restart policy. With no Instance left to start the budget is
-# never asked for a start, yet the Instance whose pushed pod restarted
-# since Ready holds the roll's budget on its own, so the pass that reads
-# the restart reports that hold, naming the Instance and the revision.
+# never asked for a start. The runner that dies and comes back serving
+# under the same pod leaves the set in rotation, unproven for the window
+# but a loss to no one, so the pass that reads the restart reports no
+# hold; once the pod leaves rotation the Instance holds the roll's budget
+# on its own, and the pass reports that hold, naming the Instance and the
+# revision.
 scenario: ready-rolled-crash-hold
 arrows:
   - T-empty-create
@@ -14,8 +17,10 @@ cells:
   - instance/Ready/pod.containerRestart/before
   - instance/Ready/gate.deny[Budget]/before
 intentional: >-
-  a roll with nothing left to start still reports the hold its parked
-  Instances stand behind, in the pass that reads the restart
+  a roll with nothing left to start reports the budget hold its crashed
+  Instances stand behind only while their set is out of rotation; a
+  runner that comes back serving under the same pod is unproven, which
+  paces a further start, not a loss the roll stands behind
 initial:
   spec:
     replicas: 2
@@ -76,6 +81,10 @@ timeline:
     events:
       - clock.advance: 30s
   - tick: 12
-    note: the first Instance's runner dies and comes back under the same pod, and with nothing left to start the pass still reports the budget that Instance holds, naming it and the revision
+    note: the first Instance's runner dies and comes back serving under the same pod; the set is in rotation and merely unproven for the window, so with nothing left to start the pass reports no hold
     events:
       - pod.containerRestart: {pod: {index: 0}, message: OOMKilled}
+  - tick: 13
+    note: the restarted runner's pod is taken out of rotation; the Instance is out of rotation on the revision when the pass reads it, so the pass reports the budget it holds, naming it and the revision
+    events:
+      - pod.servingOff[source]: {pod: {index: 0}}

@@ -25,9 +25,11 @@ cells:
   - instance/Ready/pod.containerRestart/boundary@T-ready-surge
   - instance/Update/Surge/spec.revision/boundary@T-surge-target-ready
 intentional: >-
-  the pass that opens the repair on the crashed Instance is consumed by
-  the restart pass, and reports the hold the roll stands behind there,
-  where the update pass would have reported it; the second Instance's
+  the passes the restart pass consumes report the hold the roll stands
+  behind where the update pass would have reported it, from the pass that
+  finds the crashed set out of rotation; the pass that opens the repair
+  reads the set it drains still in rotation, reports nothing, and the
+  drain hold the pass before recorded stands as written; the second Instance's
   surge toward the broken revision is abandoned when the fix is pushed,
   since a Ready replacement whose revision the desired state withdrew has
   nothing to promote to while its source stands

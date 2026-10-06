@@ -389,8 +389,9 @@ func executeActions(ctx context.Context, deps types.Deps, input types.ReconcileI
 // nothing to run (Decision.LadderHold) reports the ladder hold there,
 // every pass, so the hold names what the ladder's attempt rebuilds as the
 // wait goes on; a roll with nothing to run whose Instances on the target
-// crashed after promotion and hold its budget (Decision.StandingHold)
-// reports that hold there. A pass that ends before the update position,
+// crashed after promotion, are out of rotation and hold its budget
+// (Decision.StandingHold) reports that hold there. A pass that ends
+// before the update position,
 // on a scale wave or a repair, never reaches it and leaves the hold
 // standing, except the repair, which reports the standing hold itself
 // (reportStandingHold).

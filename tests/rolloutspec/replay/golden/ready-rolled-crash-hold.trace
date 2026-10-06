@@ -83,9 +83,16 @@ tick=11 hold cleared
 tick=11 row=0 write no-op precondition=no-change
 tick=11 row=1 write no-op precondition=no-change
 tick=11 pass result=none
-tick=12 note the first Instance's runner dies and comes back under the same pod, and with nothing left to start the pass still reports the budget that Instance holds, naming it and the revision
+tick=12 note the first Instance's runner dies and comes back serving under the same pod; the set is in rotation and merely unproven for the window, so with nothing left to start the pass reports no hold
 tick=12 apply pod.containerRestart pod=svc-a-engine-0-default-0 container=ome-container reason=OOMKilled now=t+30s
-tick=12 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 1 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving
+tick=12 hold cleared
 tick=12 row=0 write no-op precondition=no-change
 tick=12 row=1 write no-op precondition=no-change
 tick=12 pass result=after:30s
+tick=13 note the restarted runner's pod is taken out of rotation; the Instance is out of rotation on the revision when the pass reads it, so the pass reports the budget it holds, naming it and the revision
+tick=13 apply pod.servingOff[source] pod=svc-a-engine-0-default-0 now=t+30s
+tick=13 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 1 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving
+tick=13 pod status-patch name=svc-a-engine-0-default-0 serving=False→True
+tick=13 row=0 write no-op precondition=no-change
+tick=13 row=1 write no-op precondition=no-change
+tick=13 pass result=after:30s

@@ -987,16 +987,9 @@ func RolledInstanceNotServing(row *workload.InstanceStatus, target string, revis
 	if workload.UpdateContinuation(row) || isMigrateOwnedStatus(row) {
 		return false, 0, ""
 	}
-	targetRev := query.RevisionFromName(target)
-	own := make([]*corev1.Pod, 0, len(pods))
+	own := rolledSetPods(target, pods)
 	held, wait, reason := false, time.Duration(0), ""
-	for _, pod := range pods {
-		if pod == nil || pod.DeletionTimestamp != nil {
-			continue
-		}
-		if podRev := query.RevisionFromPod(pod); !podRev.IsZero() && !podRev.Same(targetRev) {
-			continue
-		}
+	for _, pod := range own {
 		comeback := ""
 		if RebuiltAfterFailure(pod, row.LastFailure, revisionBorn, window) {
 			comeback = fmt.Sprintf("pod %s rebuilt after the failure recorded at %s", pod.Name, row.LastFailure.Time.UTC().Format(time.RFC3339))
@@ -1014,7 +1007,6 @@ func RolledInstanceNotServing(row *workload.InstanceStatus, target string, revis
 				reason = fmt.Sprintf("%s, Ready again for less than the %ds window (%s left)", comeback, window, remaining.Round(time.Second))
 			}
 		}
-		own = append(own, pod)
 	}
 	if held {
 		return true, wait, reason
@@ -1023,6 +1015,34 @@ func RolledInstanceNotServing(row *workload.InstanceStatus, target string, revis
 		return true, 0, fmt.Sprintf("pod set not fully serving (%d of %d pods on the revision)", len(own), desired)
 	}
 	return false, 0, ""
+}
+
+// RolledSetInRotation reports whether the pod set an Instance runs on
+// target is fully in rotation: every pod of that revision is live,
+// ContainersReady and serving, whatever window a pod that came back has
+// yet to hold Ready for. It is the serving half of what
+// RolledInstanceNotServing holds a slot for: a set that is in rotation
+// and unproven paces a further start, while one short of rotation is
+// what a roll with nothing left to start still stands behind.
+func RolledSetInRotation(target string, pods []*corev1.Pod, desired int32) bool {
+	return query.PodSetFullyServing(rolledSetPods(target, pods), desired)
+}
+
+// rolledSetPods is the pod set an Instance runs on target as the roll
+// reads it: the live pods carrying that revision, or no revision at all.
+func rolledSetPods(target string, pods []*corev1.Pod) []*corev1.Pod {
+	targetRev := query.RevisionFromName(target)
+	own := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if pod == nil || pod.DeletionTimestamp != nil {
+			continue
+		}
+		if podRev := query.RevisionFromPod(pod); !podRev.IsZero() && !podRev.Same(targetRev) {
+			continue
+		}
+		own = append(own, pod)
+	}
+	return own
 }
 
 // RolledInstanceCrashed reports whether an Instance the roll moved onto

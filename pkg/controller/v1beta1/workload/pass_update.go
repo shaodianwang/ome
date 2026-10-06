@@ -343,20 +343,27 @@ func ladderHold(input types.ReconcileInput, target *appsv1.ControllerRevision, r
 // standingHold is the hold the roll stands behind on account of the
 // Instances already on the target that do not serve it (UpdateSelection.
 // StandingHold), read as the update pass would report it with nothing
-// admitted: the ladder's when the target's block denies a fresh start,
-// which already names them; under SurgeThenDrain the floor's when they
-// exceed the unavailability budget and no source may leave rotation;
-// else the budget of the strategy's arm, projected as the admission
-// projects a start, when those Instances and the starts in flight leave
-// it no room. It stands only while one of them crashed after promotion;
-// nil otherwise, or when a further start would still be admitted: the
-// roll is then moving or complete, and holds nothing.
+// admitted: the ladder's when the target's block denies a fresh start or
+// counts their crash, which already names them; under SurgeThenDrain the
+// floor's when they exceed the unavailability budget and no source may
+// leave rotation; else the budget of the strategy's arm, projected as the
+// admission projects a start, when those Instances and the starts in
+// flight leave it no room. It stands only while one of them crashed
+// after promotion, and the budget's only while one of those is out of
+// rotation: a crashed set back in rotation is unproven, not down, and the
+// window it has yet to hold Ready for paces a further start at the
+// admission, which reports its own denial. Nil otherwise, or when a
+// further start would still be admitted: the roll is then moving or
+// complete, and holds nothing.
 func standingHold(selection *UpdateSelection, target *appsv1.ControllerRevision) *types.RolloutHold {
 	if len(selection.CrashedNotServing) == 0 {
 		return nil
 	}
 	if selection.LadderHold != nil {
 		return selection.LadderHold
+	}
+	if len(selection.CrashedOutOfRotation) == 0 {
+		return nil
 	}
 	if hold := floorHold(selection, target); hold != nil {
 		return hold

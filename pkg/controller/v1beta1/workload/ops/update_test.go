@@ -3247,6 +3247,44 @@ func TestRolledInstanceNotServing_RestartedRunnerServesOnceItHoldsReadyForTheWin
 	}
 }
 
+// TestRolledSetInRotation pins the serving half of the roll's reading of
+// a promoted set: in rotation when every live pod of the revision is
+// ContainersReady and serving, whatever window a pod that came back has
+// yet to hold Ready for; short of rotation when a pod is not Ready, is
+// terminal, or is missing. A Terminating pod and a pod of another
+// revision are not the set's.
+func TestRolledSetInRotation(t *testing.T) {
+	const target = "llama-70b-engine-v2hash"
+	readySince := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	readyAgain := readySince.Add(45 * time.Second)
+	serving := restartedRunnerPod(readySince, readyAgain, false, false)
+	down := restartedRunnerPod(readySince, readyAgain, false, true)
+	terminating := restartedRunnerPod(readySince, readyAgain, false, false)
+	terminating.DeletionTimestamp = &metav1.Time{Time: readyAgain}
+	other := restartedRunnerPod(readySince, readyAgain, false, false)
+	other.Labels = map[string]string{query.LabelRevisionHash: "v1hash"}
+	cases := []struct {
+		name    string
+		pods    []*corev1.Pod
+		desired int32
+		want    bool
+	}{
+		{name: "Ready again inside the window is in rotation", pods: []*corev1.Pod{serving}, desired: 1, want: true},
+		{name: "a pod not Ready is short of rotation", pods: []*corev1.Pod{down}, desired: 1},
+		{name: "no pod is short of rotation", desired: 1},
+		{name: "a Terminating pod is not the set's", pods: []*corev1.Pod{terminating}, desired: 1},
+		{name: "a pod of another revision is not the set's", pods: []*corev1.Pod{other}, desired: 1},
+		{name: "a gang short of a member is short of rotation", pods: []*corev1.Pod{serving}, desired: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RolledSetInRotation(target, tc.pods, tc.desired); got != tc.want {
+				t.Fatalf("RolledSetInRotation = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRolledInstanceCrashed_RememberedCrashReadsThroughTheRebuild pins the
 // row's own record as a reading of the crash: a failure of a container of
 // the promoted set dated after the row entered Ready keeps the Instance

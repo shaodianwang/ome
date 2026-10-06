@@ -1993,6 +1993,11 @@ func TestEffectiveRolloutHold(t *testing.T) {
 	if h := effectiveRolloutHold(false, nil, converged, now); h == nil || h.Gate != v1beta1.RolloutHoldGateBudget || !h.Since.Equal(&converged.RolloutHold.Since) {
 		t.Errorf("a converged subject with no verdict this pass must keep the persisted hold as written: got %+v", h)
 	}
+	// The pass that finds nothing to update reports a nil verdict, and the
+	// nil verdict outranks the persisted budget hold.
+	if h := effectiveRolloutHold(true, nil, converged, now); h != nil {
+		t.Errorf("a converged subject whose Update pass found nothing to update must clear the persisted hold: got %+v", h)
+	}
 	converged.RetryBlocks = []v1beta1.RetryBlock{{TargetRevision: "rev-a", State: v1beta1.RetryBlockHeld, AttemptsStarted: 3, Reason: "Error"}}
 	if h := effectiveRolloutHold(false, nil, converged, now); h == nil || h.Gate != v1beta1.RolloutHoldGateHeld {
 		t.Errorf("a converged subject whose ladder holds the revision must report the Held block when the Update pass did not run: got %+v", h)
