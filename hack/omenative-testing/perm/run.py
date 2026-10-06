@@ -14898,15 +14898,42 @@ def _window_move_request(ctx, hdr):
     return mv
 
 
-def _window_move_poll(mv, case_id, now, every=OVERLAP_POLL_S):
+def _window_move_poll(mv, case_id, now, every=OVERLAP_POLL_S, running=None):
     """Refresh the move's record, ledger row and consumed annotation, at
-    most every `every` seconds."""
+    most every `every` seconds. A caller that accepts an abandoned move
+    beside a push names the running revision's hashes in `running`; the
+    poll then also reads which of the moved Component's Instances the push
+    promoted onto a revision its ladder then held (mv["held"])."""
     if now - mv["last_poll"] < every:
         return
     mv["last_poll"] = now
     entry = _migration_ledger_entry(case_id, mv["uuid"])
     mv["entry"] = entry
     mv["seen"] = (_migration_record(case_id, mv["comp"], mv["uuid"]), entry, mv["key"] not in _isvc_annotations(case_id))
+    if running and mv.get("accept_abandoned"):
+        mv["held"] = _held_revision_rows(case_id, mv["comp"], running)
+
+
+def _held_revision_rows(case_id, comp, running):
+    """{index: revision hash} of comp's Instances standing on a revision the
+    push promoted them to and its ladder then held: the row's running
+    revision is none of `running` and a retry block in state Held names it
+    (with no block listed, the hold the status derives names the update
+    revision). {} when the status cannot be read."""
+    item = _ir_by_component(case_id).get(comp)
+    if not item or not running:
+        return {}
+    status = item.get("status") or {}
+    held = {_rev_hash(b.get("targetRevision")) for b in _retry_blocks(item) if b.get("state") == RETRY_BLOCK_HELD}
+    if not held and (status.get("rolloutHold") or {}).get("gate") == RETRY_BLOCK_HELD:
+        held = {_rev_hash(status.get("updateRevision"))}
+    held.discard("")
+    out = {}
+    for row in _instance_rows(status):
+        rev = _rev_hash(row.get("runningRevision"))
+        if rev and rev not in running and rev in held:
+            out[str(row.get("index"))] = rev
+    return out
 
 
 def _move_abandon_reason(record, entry):
@@ -14923,13 +14950,16 @@ def _window_move_done(ctx, f, mv):
     accepts an abandoned move (accept_abandoned: a pod taken at a moment of
     the move, a move on a stuck push), a row that reads Failed with a reason
     closes it too, the Instance whole and serving at its source index on the
-    running revision (a held push's pod may stand beside it)."""
+    running revision (a held push's pod may stand beside it), or whole on
+    the pod set the request found where the push promoted it onto a
+    revision its ladder then held (mv["held"], read by the poll)."""
     entry = mv.get("entry") or {}
     if entry.get("phase") == "Failed" and mv.get("accept_abandoned") and mv["seen"][2]:
         reason = _move_abandon_reason(mv["seen"][0], entry)
         if not reason:
             return False
-        ok, why = _move_end_state(ctx, f, mv["comp"], mv["inst"], set(), False, running=ctx.get("old_hashes"))
+        ok, why = _move_end_state(ctx, f, mv["comp"], mv["inst"], mv["src_uids"], False,
+                                  running=ctx.get("old_hashes"), held=mv.get("held"))
         mv["end"], mv["abandoned"] = (ok, why, mv["inst"]), reason
         return ok
     if entry.get("phase") != "Completed" or not mv["seen"][2]:
@@ -19969,7 +19999,7 @@ def _move_wait_reason(ctx, mcomp, record, entry):
     return ""
 
 
-def _move_end_state(ctx, f, mcomp, idx, src_uids, completed, kept_inst=None, running=None):
+def _move_end_state(ctx, f, mcomp, idx, src_uids, completed, kept_inst=None, running=None, held=None):
     """(ok, why) of the moved Component now: the Instance at idx is whole
     (every pod slot filled), Ready and serving; no source pod survives a
     completed move; no pod a break hit survives unserving; and the Component
@@ -19978,18 +20008,33 @@ def _move_end_state(ctx, f, mcomp, idx, src_uids, completed, kept_inst=None, run
     and not serving by design (_move_break_unserving judges it) and its index
     counts as held, not whole. running is the running revision's hashes: a
     pod of another revision at an index is a held push's attempt, left
-    beside the Instance's own pods and not judged."""
+    beside the Instance's own pods and not judged. held is {index: hash} of
+    the Instances the push promoted onto a revision its ladder then held:
+    such an Instance's own pods are the ones on that revision, it is whole
+    on a full set whether or not it serves between its crashes, and at idx
+    the set must be the pods the request found (src_uids), since a move
+    the hold rejects rebuilds nothing."""
     n, ppi = ctx["N"][mcomp], max(1, ctx["pods_per_inst"].get(mcomp, 1))
+    held = held or {}
 
-    def own(ps):
+    def own(index, ps):
+        rev = held.get(str(index))
+        if rev is not None:
+            return [p for p in ps if p.get("hash") == rev]
         return [p for p in ps if running is None or not p.get("hash") or p["hash"] in running]
 
-    pods = [(name, p) for name, p in _instance_pods(ctx["pod_state"], mcomp, idx) if own([p])]
+    pods = [(name, p) for name, p in _instance_pods(ctx["pod_state"], mcomp, idx) if own(idx, [p])]
     if len(pods) != ppi:
         return False, f"Instance {idx} has {len(pods)}/{ppi} pod(s)"
-    down = [name for name, p in pods if not (p.get("ready") and p.get("serving"))]
-    if down:
-        return False, f"Instance {idx} is not serving ({', '.join(down)})"
+    if str(idx) in held:
+        strangers = [name for name, p in pods if p.get("uid") not in src_uids]
+        if strangers:
+            return False, (f"Instance {idx} stands on held revision {held[str(idx)]} with a pod the request "
+                           f"did not find ({', '.join(strangers)})")
+    else:
+        down = [name for name, p in pods if not (p.get("ready") and p.get("serving"))]
+        if down:
+            return False, f"Instance {idx} is not serving ({', '.join(down)})"
     live = {p["uid"]: p for p in ctx["pod_state"].values() if p and p["alive"] and p.get("uid")}
     if completed and src_uids & set(live):
         return False, "a source pod is still alive after the move completed"
@@ -19997,11 +20042,14 @@ def _move_end_state(ctx, f, mcomp, idx, src_uids, completed, kept_inst=None, run
     if (kept_inst is None and (f or {}).get("kind") in MOVE_BREAK_KINDS and hit is not None
             and not (hit.get("ready") and hit.get("serving"))):
         return False, f"the pod the fault hit ({f.get('crash_pod')}) is still there and not serving"
-    by = {key: own(ps) for key, ps in _instances_by_index(ctx["pod_state"], {mcomp}).items()}
+    by = {key: own(key[1], ps) for key, ps in _instances_by_index(ctx["pod_state"], {mcomp}).items()}
     whole = [key for key, ps in by.items()
-             if key == kept_inst or (len(ps) == ppi and all(p.get("ready") and p.get("serving") for p in ps))]
+             if key == kept_inst or (len(ps) == ppi and (key[1] in held or all(p.get("ready") and p.get("serving") for p in ps)))]
     if len(by) != n or len(whole) != n:
-        return False, f"{mcomp} holds {len(whole)} whole serving Instance(s) over {len(by)} index(es), want {n}"
+        kind = "whole Instance(s) (serving, or on a held revision)" if held else "whole serving Instance(s)"
+        return False, f"{mcomp} holds {len(whole)} {kind} over {len(by)} index(es), want {n}"
+    if str(idx) in held:
+        return True, f"whole on held revision {held[str(idx)]}, the pod set the request found"
     return True, "whole, Ready and serving"
 
 
@@ -21240,10 +21288,12 @@ def _stuck_move(case_id, yaml_file, desc, hdr):
     names. The verdict: the move finishes, or is abandoned with a reason its
     record carries, within budget and is recorded once; the moved Instance
     ends whole, Ready and serving on one pod set (the revision its
-    replacement runs is reported, not judged); the Instances that served
-    when the request was filed keep serving; the Components neither pushed
-    nor moved keep their pods; and the status keeps reporting the push that
-    has not landed, the hold itself under held."""
+    replacement runs is reported, not judged), or, where the push promoted
+    it onto the revision its ladder then held, is left the pod set the
+    request found by a move rejected naming that revision; the Instances
+    that served when the request was filed keep serving; the Components
+    neither pushed nor moved keep their pods; and the status keeps
+    reporting the push that has not landed, the hold itself under held."""
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
     if err:
         return _write_fail(case_id, desc, hdr, *err)
@@ -21282,7 +21332,7 @@ def _stuck_move(case_id, yaml_file, desc, hdr):
     while time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
         _read_one(ctx)
         now = time.time()
-        _window_move_poll(mv, case_id, now, every=ROW_POLL_S * 2)
+        _window_move_poll(mv, case_id, now, every=ROW_POLL_S * 2, running=ctx.get("old_hashes"))
         if _window_move_done(ctx, None, mv):
             stable = stable or now
             if now - stable >= STABILITY_S:
@@ -21296,7 +21346,7 @@ def _stuck_move(case_id, yaml_file, desc, hdr):
     verdict = _ceiling_checks(ctx, verdict, notes, checks)
     if state == "CONVERGED" and mv.get("abandoned"):
         checks.append(f"  ✓ the move was abandoned with a reason while the push was {stuck}: {mv['abandoned'][:160]}; "
-                      f"Instance {end[2]} keeps serving at its source index")
+                      f"Instance {end[2]} is {end[1]} at its source index")
     elif state == "CONVERGED":
         checks.append(f"  ✓ the move finished while the push was {stuck}: Instance {end[2]} is {end[1]}")
         hashes = {p.get("hash") for _n, p in _instance_pods(ctx["pod_state"], mcomp, end[2])}

@@ -16148,6 +16148,86 @@ class MoveUnderEveryFaultTest(unittest.TestCase):
         self.assertFalse(run._window_move_done(ctx, None, gone))
         self.assertIn("Instance 0 has 0/1 pod(s)", gone["end"][1])
 
+    def test_an_abandoned_move_on_an_instance_the_push_promoted_onto_a_held_revision_keeps_its_pod_set(self):
+        # The roll promoted Instance 0 before the revision's ladder was spent: its
+        # one pod runs the held revision and serves only between its crashes.
+        pods = {"e0": {"comp": "engine", "inst": "0", "alive": True, "ready": False, "serving": False, "uid": "u0", "hash": "held"},
+                "e1": {"comp": "engine", "inst": "1", "alive": True, "ready": True, "serving": True, "uid": "u1", "hash": "old"},
+                "e1h": {"comp": "engine", "inst": "1", "alive": True, "ready": False, "serving": False, "uid": "u1h", "hash": "held"}}
+        why = ("source engine/0 runs revision p999-engine-held, which is held after its attempts; "
+               "the move would rebuild that revision elsewhere")
+        mv = {"comp": "engine", "inst": "0", "src_uids": {"u0"}, "seen": ({"phase": "Failed", "message": why}, None, True),
+              "entry": {"phase": "Failed", "reason": "perm-test", "outcome": why}, "accept_abandoned": True, "held": {"0": "held"}}
+        ctx = dict(self._ctx(pods), old_hashes={"old"})
+        self.assertTrue(run._window_move_done(ctx, None, mv))
+        self.assertEqual((why, (True, "whole on held revision held, the pod set the request found", "0")),
+                         (mv["abandoned"], mv["end"]))
+        blind = dict(mv, held={})
+        self.assertFalse(run._window_move_done(ctx, None, blind), "read against the running revision alone the Instance has no pod")
+        self.assertIn("Instance 0 has 0/1 pod(s)", blind["end"][1])
+        pods["e0"]["ready"] = pods["e0"]["serving"] = True
+        self.assertTrue(run._window_move_done(ctx, None, dict(mv)), "serving between crashes is not judged on a held revision")
+        pods["e0"]["uid"] = "u0x"
+        rebuilt = dict(mv)
+        self.assertFalse(run._window_move_done(ctx, None, rebuilt), "a rejected move rebuilds nothing")
+        self.assertIn("a pod the request did not find (e0)", rebuilt["end"][1])
+        pods["e0"]["uid"] = "u0"
+        pods["e0b"] = dict(pods["e0"], uid="u0b")
+        two = dict(mv)
+        self.assertFalse(run._window_move_done(ctx, None, two))
+        self.assertIn("Instance 0 has 2/1 pod(s)", two["end"][1])
+        del pods["e0b"], pods["e1"]
+        both = dict(mv, held={"0": "held", "1": "held"})
+        self.assertTrue(run._window_move_done(ctx, None, both), "a peer the push promoted onto the held revision is whole on its set too")
+        short = dict(mv)
+        self.assertFalse(run._window_move_done(ctx, None, short), "a peer read against the running revision alone is short")
+        self.assertIn("want 2", short["end"][1])
+
+    def test_held_revision_rows_name_the_instances_standing_on_a_revision_the_ladder_holds(self):
+        def item(blocks, hold=None):
+            status = {"retryBlocks": blocks, "currentRevision": "p999-engine-old", "updateRevision": "p999-engine-held",
+                      "instanceStatuses": [{"index": 0, "phase": "Failed", "runningRevision": "p999-engine-held"},
+                                           {"index": 1, "phase": "Ready", "runningRevision": "p999-engine-old",
+                                            "targetRevision": "p999-engine-held"},
+                                           {"index": 2, "phase": "Ready", "runningRevision": "p999-engine-old"}]}
+            if hold:
+                status["rolloutHold"] = hold
+            return {"spec": {"component": "engine"}, "status": status}
+        held = [{"state": "Held", "targetRevision": "p999-engine-held", "attemptsStarted": 3}]
+        with mock.patch.object(run, "_ir_by_component", lambda case_id: {"engine": item(held)}):
+            self.assertEqual({"0": "held"}, run._held_revision_rows("p999", "engine", {"old"}))
+            self.assertEqual({}, run._held_revision_rows("p999", "router", {"old"}), "a Component without a status stands on nothing held")
+            self.assertEqual({}, run._held_revision_rows("p999", "engine", set()), "with no running revision named nothing reads as promoted")
+        pacing = [{"state": "Backoff", "targetRevision": "p999-engine-held", "attemptsStarted": 1}]
+        with mock.patch.object(run, "_ir_by_component", lambda case_id: {"engine": item(pacing)}):
+            self.assertEqual({}, run._held_revision_rows("p999", "engine", {"old"}), "a ladder still pacing holds nothing")
+        with mock.patch.object(run, "_ir_by_component", lambda case_id: {"engine": item([], hold={"gate": "Held", "reason": "spent"})}):
+            self.assertEqual({"0": "held"}, run._held_revision_rows("p999", "engine", {"old"}),
+                             "the hold the status derives names the update revision")
+
+    def test_the_move_poll_reads_the_held_rows_only_where_a_running_revision_is_named(self):
+        calls = []
+
+        def held_rows(case_id, comp, running):
+            calls.append((comp, set(running)))
+            return {"0": "held"}
+        mv = {"uuid": "u", "key": "k", "comp": "engine", "inst": "0", "seen": (None, None, False), "last_poll": 0.0,
+              "entry": None, "accept_abandoned": True}
+        with mock.patch.object(run, "_migration_ledger_entry", lambda case_id, u: {"phase": "Failed"}), \
+             mock.patch.object(run, "_migration_record", lambda case_id, comp, u: None), \
+             mock.patch.object(run, "_isvc_annotations", lambda case_id: {}), \
+             mock.patch.object(run, "_held_revision_rows", held_rows):
+            run._window_move_poll(mv, "p999", 10.0, running={"old"})
+            self.assertEqual(({"0": "held"}, [("engine", {"old"})]), (mv["held"], calls))
+            plain = dict(mv, last_poll=0.0, held=None)
+            run._window_move_poll(plain, "p999", 20.0)
+            self.assertEqual((1, None), (len(calls), plain["held"]), "a caller naming no running revision reads no held rows")
+            mid = dict(mv, last_poll=0.0, held=None, accept_abandoned=False)
+            run._window_move_poll(mid, "p999", 30.0, running={"old"})
+            self.assertEqual((1, None), (len(calls), mid["held"]), "only a caller that accepts an abandoned move judges against the hold")
+        self.assertIn('running=ctx.get("old_hashes")', inspect.getsource(run._stuck_move),
+                      "the move on a stuck push names the running revision to its poll")
+
     def test_an_abandoned_moves_reason_is_the_records_message_or_the_rows_outcome(self):
         pods = {"e0": {"comp": "engine", "inst": "0", "alive": True, "ready": True, "serving": True, "uid": "u0"},
                 "e1": {"comp": "engine", "inst": "1", "alive": True, "ready": True, "serving": True, "uid": "u1"}}

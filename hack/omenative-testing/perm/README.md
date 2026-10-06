@@ -1570,7 +1570,11 @@ the engine's move on the engine+router shapes) requests the move once the
 push has reached the named state:
 the move finishes or is abandoned with a reason within budget, recorded
 once; the moved Instance ends whole and serving at the index the record
-names (the revision its replacement runs is reported, not judged); the
+names (the revision its replacement runs is reported, not judged), or,
+where the push promoted it onto the revision its ladder then held, keeps
+the pod set the request found under a move rejected naming that revision
+(its row's running revision under the Held block names it; serving between
+its crashes is not judged); the
 Instances that served at the request keep serving; the Components neither
 pushed nor moved keep their pods; and the status keeps reporting the push
 that has not landed, the hold itself under `held`.

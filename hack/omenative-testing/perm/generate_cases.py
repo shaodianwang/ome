@@ -7496,8 +7496,10 @@ def _move_stuck_reason(kind, stuck, topo, w, nr, sibling):
            f"{MOVE_STUCK_STATE[stuck]}; then {_move_request_words(topo, w, nr)}: the move finishes, or is abandoned "
            f"with a reason its record carries, within budget and is recorded once; the moved Instance ends whole, Ready "
            f"and serving on one pod set at the index the record names (the revision its replacement runs is reported, "
-           f"not judged); the Instances that served when the request was filed keep serving; the Components neither "
-           f"pushed nor moved keep their pods; and the status keeps reporting the push that has not landed"
+           f"not judged), or, where the push promoted it onto the revision its ladder then held, is left the pod set "
+           f"the request found by a move rejected naming that revision; the Instances that served when the request was "
+           f"filed keep serving; the Components neither pushed nor moved keep their pods; and the status keeps "
+           f"reporting the push that has not landed"
            + (", the hold itself" if stuck == "held" else ""))
     if is_mn(topo):
         out += "; each Instance is a gang, moved whole"
