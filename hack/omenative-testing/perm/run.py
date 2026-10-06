@@ -3948,12 +3948,16 @@ def _rollback_checks(rb, case_id, state, converged_at, pod_state, old_hashes, po
 # missing key, form=recover on readiness) take the cause away once the
 # rollback has fired. The victim must end on the starting revision too:
 # serving (rebuilt by a repair or by the roll back, or healed in place)
-# unless its cause outlives a rebuild (the key kept away, the readiness
-# switch kept), when it ends on the starting revision without serving and
-# the status says so. On the pushed revision (during=held break=<kind>) the
-# push carries the break, the roll parks on its first broken pod with the
-# status saying why, and the rollback withdraws the revision: nothing of it
-# is left and no repair is opened for it.
+# unless its cause outlives a rebuild, when it ends on the starting
+# revision without serving and the status says so: the key kept away does
+# for every pod of the Instance; the readiness switch kept lives in the pod
+# it was set in, so the victim is held to that end state while the pod
+# stands and, once the roll has replaced the pod, to a rebuild on the
+# starting revision that serves (_rollback_kept_now). On the pushed
+# revision (during=held break=<kind>) the push carries the break, the roll
+# parks on its first broken pod with the status saying why, and the
+# rollback withdraws the revision: nothing of it is left and no repair is
+# opened for it.
 ROLLBACK_BREAK_FAULTS = BREAK_FAULTS | {READINESS_FAULT, "configkey"}
 ROLLBACK_FAULT_HOOKS = {"settling", "rotating", "draining", "last"}
 # What parks the push at the held moment: the readiness probe it never
@@ -4048,9 +4052,11 @@ def _held_once_lift(f):
 
 
 def _rollback_break_kept(f):
-    """True when the break's cause outlives a rebuild for the whole case: the
-    key kept away (configkey lift=never), the readiness switch kept
-    (readiness form=persist). Such a victim cannot serve again."""
+    """True when the break's cause is kept for the whole case: the key kept
+    away (configkey lift=never), the readiness switch kept (readiness
+    form=persist). The key outlives any rebuild of the victim; the switch
+    lives in the pod it was set in and goes with it (_rollback_cause_in_pod),
+    so a victim the roll rebuilt may serve again."""
     if not f:
         return False
     if f.get("kind") == "configkey":
@@ -4058,6 +4064,32 @@ def _rollback_break_kept(f):
     if f.get("kind") == READINESS_FAULT:
         return f.get("form") != "recover"
     return False
+
+
+def _rollback_cause_in_pod(f):
+    """True when a kept cause lives in the pod it was set in and goes with
+    it: the readiness switch, a file in one container. The key kept away is
+    the ConfigMap's, read by every pod of the Instance, old or rebuilt."""
+    return bool(f) and f.get("kind") == READINESS_FAULT
+
+
+def _rollback_victim_stands(f, pod_state):
+    """True while a pod the break hit is still alive."""
+    uids = {rec.get("crash_uid") for rec in _break_victims(f) if rec.get("crash_uid")}
+    return any(p and p["alive"] and p.get("uid") in uids for p in pod_state.values())
+
+
+def _rollback_kept_now(f, pod_state):
+    """The (Component, Instance) of a break victim whose cause is still on
+    it: a kept cause no pod of the Instance can shed, or one that lives in
+    a pod the roll has not replaced. None once the roll has replaced the pod
+    a pod-bound cause was set in: the rollback rebuilds the Instance with a
+    fresh pod that carries no switch, and it must serve like any other."""
+    if not f or not _rollback_break_kept(f):
+        return None
+    if _rollback_cause_in_pod(f) and not _rollback_victim_stands(f, pod_state):
+        return None
+    return f["crash_comp"], f["crash_inst"]
 
 
 def _rollback_break_oneshot(f):
@@ -4162,10 +4194,13 @@ def _rollback_victim_checks(f, ctx, acting, kept, verdict, notes, checks):
     surge chain that holds its pods on the starting revision (a surge the
     rollback withdrew is skipped): on the starting revision and serving
     (rebuilt by a repair or the roll back, or healed in place), or with a
-    kept cause on the starting revision without serving, the status
-    saying so. The repairs that named it are reported, not judged: a
-    repair of the starting revision is the policy at work once that
-    revision is the target again."""
+    kept cause still on it on the starting revision without serving, the
+    status saying so. kept is the caller's reading of the cause at the end
+    (_rollback_kept_now): a kept switch whose pod the roll replaced is no
+    longer on the Instance, and the rebuild is judged like any other. The
+    repairs that named it are reported, not judged: a repair of the
+    starting revision is the policy at work once that revision is the
+    target again."""
     if not f or not f.get("fired") or f.get("infra_fail"):
         return verdict
     pod_state, old = ctx["pod_state"], ctx["old_hashes"] or set()
@@ -4201,7 +4236,12 @@ def _rollback_victim_checks(f, ctx, acting, kept, verdict, notes, checks):
             checks.append(f"  ✗ {label}: {where}{side} must end Ready and serving on the starting revision; "
                           f"pods={len(pods)} off-revision={off} not-serving={down}")
         else:
-            how = "healed in place (the pod the break hit serves again)" if survivor else "rebuilt"
+            if survivor:
+                how = "healed in place (the pod the break hit serves again)"
+            elif _rollback_break_kept(f) and _rollback_cause_in_pod(f):
+                how = f"rebuilt by the roll back: the kept switch went with the pod it was set in ({rec.get('crash_pod')})"
+            else:
+                how = "rebuilt"
             checks.append(f"  ✓ {label}: {where}{side} ends Ready and serving on the starting revision, {how}")
         checks.append(f"  ⓘ {label}: {len(repairs)} RestartTriggered event(s) name {where} since the break"
                       + (f": {repairs[0][:120]}" if repairs else ""))
@@ -4247,14 +4287,20 @@ def _rollback_fault(case_id, yaml_file, desc, hdr):
         return _write_fail(case_id, desc, hdr, *err)
     f, configured, ppi, N = ctx["fault"], ctx["configured"], ctx["pods_per_inst"], ctx["N"]
     oneshot = _rollback_break_oneshot(f)
+    in_pod = _rollback_break_kept(f) and _rollback_cause_in_pod(f)
     print(f"  Phase 2: {hdr.get('fault')} on the settled service, then the push and a rollback at {hdr.get('during')}"
-          + (" (the cause lifted once the rollback has fired)" if oneshot else " (the cause kept)"))
+          + (" (the cause lifted once the rollback has fired)" if oneshot
+             else " (the cause kept; the switch goes with the pod it was set in)" if in_pod else " (the cause kept)"))
     ok, why = _rollback_break_land(ctx, f)
     if not ok:
         f["infra_fail"] = f["infra_fail"] or why
         return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [why], [f"  ✗ {why}"])
     ctx["floor_allowance"] = {f["crash_comp"]: len(_break_victims(f))}
-    kept = (f["crash_comp"], f["crash_inst"]) if _rollback_break_kept(f) else None
+
+    def kept_now():
+        # The kept reading follows the pods: a switch whose pod the roll
+        # replaced is gone, and the end state then wants the rebuild serving.
+        return _rollback_kept_now(f, ctx["pod_state"])
     st = _op_launch(ctx, hdr, "rollback", "the rollback at its hook")
     if st["error"]:
         return _finish(case_id, desc, hdr, ctx, "TRIGGER_FAIL", "FAIL",
@@ -4270,7 +4316,7 @@ def _rollback_fault(case_id, yaml_file, desc, hdr):
             moved["seen"] = any(agg.get(c, (0, 0, 0))[2] > 0 for c in acting) or any(
                 p and p["alive"] and p.get("comp") in acting and _pod_on_new(p, ctx["old_hashes"])
                 for p in ctx["pod_state"].values())
-        return moved["seen"] and _rollback_fault_done(ctx, acting, kept)
+        return moved["seen"] and _rollback_fault_done(ctx, acting, kept_now())
 
     reached, why = _window_wait_hook(ctx, "rollback", "settling", rb, None, None, acting, done, budget)
     verdict, notes, checks = "PASS", [], []
@@ -4283,14 +4329,14 @@ def _rollback_fault(case_id, yaml_file, desc, hdr):
         while time.time() - t0 < budget and not ctx["closed"]:
             _read_one(ctx)
             now = time.time()
-            if not _rollback_fault_done(ctx, acting, kept):
+            if not _rollback_fault_done(ctx, acting, kept_now()):
                 stable = None
                 continue
             stable = stable or now
             if now - stable < STABILITY_S:
                 continue
             settled, why_rows = _rollback_fault_rows(_fetch_initial_ir_items(case_id), N, configured, acting,
-                                                     ctx["old_hashes"], kept)
+                                                     ctx["old_hashes"], kept_now())
             if settled:
                 state = "CONVERGED"
                 ctx["converged_at"] = stable - ctx["trigger_ts"]
@@ -4301,6 +4347,7 @@ def _rollback_fault(case_id, yaml_file, desc, hdr):
                 rows_why = why_rows
         else:
             state = "ROTATE_TIMEOUT"
+    kept = kept_now()
     grouped = bool(ctx["info"].get("policy")) and bool(ctx["info"].get("members"))
     verdict = _rollback_checks(rb, case_id, state, ctx.get("converged_at"), ctx["pod_state"], ctx["old_hashes"], ppi,
                                N, acting, configured, grouped, ctx["trigger_ts"], verdict, notes, checks, kept=kept)

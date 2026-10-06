@@ -4173,7 +4173,13 @@ def _rollback_fault_reason(fault, form, lift, hook, strat, co, topo, router, vic
            f"{ROLLBACK_MOMENT[hook]}; every Instance of the bumped members ends on the starting revision, no pod of the "
            f"new revision remains, the capacity floor (lowered by the broken Instance) holds throughout and no Instance "
            f"is left mid-operation")
-    if kept:
+    if kept and fault == "readiness:old":
+        out += (f"; the switch lives in the pod it was set in: while that pod stands the broken {victim} Instance ends on "
+                f"the starting revision without serving, its Component one Instance short, and its row reporting the "
+                f"loss; once the roll has replaced that pod (the out-of-rotation Instance is the roll's first step) the "
+                f"rollback rebuilds the Instance with a fresh pod that carries no switch, and it ends Ready and serving "
+                f"on the starting revision like any other")
+    elif kept:
         out += (f"; the broken {victim} Instance cannot serve while its cause stays, so it ends on the starting revision "
                 f"without serving, its Component one Instance short, and its row reads other than Ready")
     else:

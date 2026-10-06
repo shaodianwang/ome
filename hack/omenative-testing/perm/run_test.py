@@ -10387,6 +10387,8 @@ class PlainRollbackTest(unittest.TestCase):
             self.assertTrue(reason.startswith("# reason: the operator pushes a revision over a fleet whose "), n)
             kept = generate_cases._rollback_fault_kept(m["fault"], m["form"], m["lift"])
             self.assertEqual(kept, "without serving" in reason, n)
+            self.assertEqual(kept and m["fault"] == "readiness:old", "a fresh pod that carries no switch" in reason, n)
+            self.assertEqual(kept and m["fault"] == "configkey:missing", "its row reads other than Ready" in reason, n)
             self.assertEqual(generate_cases._rollback_fault_oneshot(m["fault"], m["form"], m["lift"]),
                              "taken away once the rollback has fired" in reason, n)
             self.assertEqual(m["fault"] == "configkey:missing", "kind: ConfigMap" in text, n)
@@ -10692,6 +10694,76 @@ class RollbackUnderBreakTest(unittest.TestCase):
             self.assertTrue(any("engine Instance 1 ends on the starting revision without serving" in c for c in checks), checks)
         finally:
             run._isvc_events_since, run._victim_index_chain = orig_ev, orig_chain
+
+    def test_a_kept_switch_goes_with_the_pod_it_was_set_in(self):
+        """The key kept away outlives every rebuild; the readiness switch lives
+        in the pod it was set in, so the kept reading holds while that pod
+        stands and lifts once the roll has replaced it."""
+        pod = self._pod
+        key = {"kind": "configkey", "lift": "never", "crash_comp": "engine", "crash_inst": "3", "crash_uid": "u3"}
+        switch = {"kind": "readiness", "form": "persist", "crash_comp": "engine", "crash_inst": "3", "crash_uid": "u3"}
+        self.assertFalse(run._rollback_cause_in_pod(key))
+        self.assertTrue(run._rollback_cause_in_pod(switch))
+        self.assertFalse(run._rollback_cause_in_pod(None))
+        standing = {"e3": pod("engine", 3, "a", "u3", ready=False, serving=False)}
+        gone = {"e3": pod("engine", 3, "a", "u3r")}
+        leaving = {"e3": dict(pod("engine", 3, "a", "u3", ready=False, serving=False), alive=False)}
+        self.assertTrue(run._rollback_victim_stands(switch, standing))
+        self.assertFalse(run._rollback_victim_stands(switch, gone))
+        self.assertFalse(run._rollback_victim_stands(switch, leaving), "a pod on its way out takes the switch with it")
+        self.assertFalse(run._rollback_victim_stands(switch, {"e3": None}))
+        self.assertEqual(("engine", "3"), run._rollback_kept_now(switch, standing))
+        self.assertIsNone(run._rollback_kept_now(switch, gone), "the switch went with the pod")
+        self.assertIsNone(run._rollback_kept_now(switch, leaving))
+        self.assertEqual(("engine", "3"), run._rollback_kept_now(key, gone), "the key is away for the rebuilt pod too")
+        self.assertIsNone(run._rollback_kept_now(dict(switch, form="recover"), standing), "the one-shot form is never kept")
+        self.assertIsNone(run._rollback_kept_now(None, standing))
+        storm = dict(switch, extra_victims=[{"crash_uid": "u2"}])
+        self.assertEqual(("engine", "3"), run._rollback_kept_now(storm, {"e2": pod("engine", 2, "a", "u2", ready=False, serving=False)}),
+                         "a storm's other victims stand for it too")
+
+    def test_a_kept_switch_victim_the_roll_rebuilt_is_judged_as_a_rebuild(self):
+        """Once the pod the switch was set in is gone, the victim must be a
+        rebuild on the starting revision that serves, named as such; while
+        it stands, the kept end state as before; the key kept away never
+        lets a rebuild serve."""
+        f = {"case_id": "p999", "kind": "readiness", "form": "persist", "lift": "", "fired": True, "fired_ts": 1.0,
+             "infra_fail": None, "crash_pod": "e1", "crash_comp": "engine", "crash_inst": "1", "crash_uid": "u1", "kills": None}
+        with mock.patch.object(run, "_isvc_events_since", lambda cid, since, **kw: []), \
+                mock.patch.object(run, "_victim_index_chain", lambda comp, inst, surges, events: [inst]):
+            pods = {"e1": self._pod("engine", 1, "a", "u1r")}
+            checks = []
+            self.assertEqual("PASS", run._rollback_victim_checks(f, self._victim_ctx(pods), {"engine"}, run._rollback_kept_now(f, pods),
+                                                                 "PASS", [], checks))
+            self.assertTrue(any("engine Instance 1 ends Ready and serving on the starting revision, rebuilt by the roll back: "
+                                "the kept switch went with the pod it was set in (e1)" in c for c in checks), checks)
+            for pods in ({"e1": self._pod("engine", 1, "b", "u1b")}, {"e1": self._pod("engine", 1, "a", "u1r", ready=False, serving=False)}, {}):
+                notes = []
+                self.assertEqual("FAIL", run._rollback_victim_checks(f, self._victim_ctx(pods), {"engine"}, run._rollback_kept_now(f, pods),
+                                                                     "PASS", notes, []))
+                self.assertTrue(any("is not serving on the starting revision after the rollback" in n for n in notes), notes)
+            pods = {"e1": self._pod("engine", 1, "a", "u1", ready=False, serving=False)}
+            checks = []
+            self.assertEqual("PASS", run._rollback_victim_checks(f, self._victim_ctx(pods), {"engine"}, run._rollback_kept_now(f, pods),
+                                                                 "PASS", [], checks))
+            self.assertTrue(any("ends on the starting revision without serving, as its kept cause" in c for c in checks), checks)
+            pods = {"e1": self._pod("engine", 1, "a", "u1")}
+            notes = []
+            self.assertEqual("FAIL", run._rollback_victim_checks(f, self._victim_ctx(pods), {"engine"}, run._rollback_kept_now(f, pods),
+                                                                 "PASS", notes, []))
+            self.assertTrue(any("with its cause kept did not end on the starting revision without serving" in n for n in notes), notes)
+            g = dict(f, kind="configkey", lift="never", cause="ConfigMap key cm/value")
+            pods = {"e1": self._pod("engine", 1, "a", "u1r")}
+            notes = []
+            self.assertEqual("FAIL", run._rollback_victim_checks(g, self._victim_ctx(pods), {"engine"}, run._rollback_kept_now(g, pods),
+                                                                 "PASS", notes, []))
+            self.assertTrue(any("with its cause kept did not end on the starting revision without serving" in n for n in notes), notes)
+            s_ = dict(f, crash_comp="router", crash_pod="r1", crash_uid="r1")
+            checks = []
+            rpods = {"r1": self._pod("router", 1, "a", "r1-new")}
+            self.assertEqual("PASS", run._rollback_victim_checks(s_, self._victim_ctx(rpods), {"engine"}, run._rollback_kept_now(s_, rpods),
+                                                                 "PASS", [], checks))
+            self.assertTrue(any("a sibling nobody bumped" in c and "went with the pod it was set in (r1)" in c for c in checks), checks)
 
     def _hb(self, **kw):
         hb = {"kind": "crash-start", "once": False, "armed": "image x", "bite_at": 12.0, "bite": "e5 waits in CrashLoopBackOff",
@@ -13656,6 +13728,97 @@ class HandlerSmokeTest(unittest.TestCase):
         self.assertTrue(any("never showed the break" in n for n in out["notes"]), out["notes"])
         self.assertTrue(any("INFRA-FAIL" in c and "never showed the break" in c for c in out["checks"]), out["checks"])
 
+
+    def _kept_switch_rollback(self, fault="readiness:old", form="persist", lift=""):
+        """A break of the running revision beside a rollback, as the fire left
+        it: the fleet with the victim dark on the starting revision, the fault
+        record and the rollback record as its hook left it."""
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 3, "ceil_d": 0, "ceil_r": 0, "mode": "rollout", "co": "none",
+               "topo": "engine", "fault": fault, "form": form, "lift": lift, "rollback": 1, "during": "draining"}
+        pods = {"p999-engine-0-0": _rec("engine", 0, "a", uid="u0"), "p999-engine-1-0": _rec("engine", 1, "a", uid="u1", ready=False)}
+        ctx = _ctx_for(hdr, pods)
+        ctx["fault"].update(fired=True, fired_ts=1.0, crash_pod="p999-engine-1-0", crash_comp="engine", crash_inst="1",
+                            crash_uid="u1", crash_hash="a", switch_lifted=False)
+        rb = run._rollback_new(hdr)
+        rb.update(fired=True, fired_at=5.0, new_pods_at_fire=1, on_start_at_fire={}, busy_at_fire=[("engine", "1")])
+        return hdr, ctx, rb
+
+    @staticmethod
+    def _rollback_launch(rb, error=None, seen=None):
+        def launch(ctx_, hdr_, op, then):
+            if seen is not None:
+                seen["on_read"] = ctx_.get("on_read")
+            ctx_["trigger_ts"] = time.time()
+            ctx_["rb"] = rb
+            return {"error": error, "rb": rb, "acting": {"engine"}, "budget": 3, "controls": set(), "done": lambda: False}
+        return launch
+
+    def test_rollback_over_a_kept_switch_whose_pod_the_roll_replaced_waits_for_the_rebuild_to_serve(self):
+        """The roll replaces the dark pod before the hook and the rollback
+        rebuilds the Instance with a fresh pod: the kept reading lifts with
+        the pod, the watch reads no row while the rebuild is starting, and
+        the end state is the plain one with the rebuild named."""
+        hdr, ctx, rb = self._kept_switch_rollback()
+        items = [inference_replica("engine", 2)]
+        reads = []
+
+        def fetch(cid):
+            p = ctx["pod_state"].get("p999-engine-1-0") or {}
+            reads.append((p.get("uid"), bool(p.get("ready"))))
+            return items
+
+        def script(ctx_, n):
+            ps = ctx_["pod_state"]
+            if n == 2:   # the roll replaced the dark pod with its own on the pushed revision
+                ps["p999-engine-1-0"] = _rec("engine", 1, "b", uid="u1b")
+            elif n == 3:   # the rollback rebuilt the index on the starting revision; the pod is starting
+                ps["p999-engine-1-0"] = _rec("engine", 1, "a", uid="u1r", ready=False)
+            elif n == 12:   # it serves
+                ps["p999-engine-1-0"] = _rec("engine", 1, "a", uid="u1r")
+        out = self._run(run._rollback_fault, ctx, _FakeFleet(ctx, script),
+                        {"_rollback_break_land": lambda ctx_, f: (True, ""), "_op_launch": self._rollback_launch(rb),
+                         "_window_wait_hook": lambda *a: (True, ""), "_fetch_initial_ir_items": fetch,
+                         "kubectl": lambda *a, **kw: subprocess.CompletedProcess(a, 0, "", "")})
+        self.assertEqual(("CONVERGED", "PASS"), (out["state"], out["verdict"]), out["checks"])
+        self.assertNotIn(("u1r", False), reads, "no row is read while the rebuilt victim is starting")
+        self.assertIn(("u1r", True), reads)
+        self.assertTrue(any("ends on the starting revision and serving (engine 2/2); no pod of the new revision remains" in c
+                            for c in out["checks"]), out["checks"])
+        self.assertFalse(any("excepted" in c for c in out["checks"]), out["checks"])
+        self.assertTrue(any("engine Instance 1 ends Ready and serving on the starting revision, rebuilt by the roll back: "
+                            "the kept switch went with the pod it was set in (p999-engine-1-0)" in c for c in out["checks"]), out["checks"])
+
+    def test_rollback_over_a_kept_switch_whose_pod_stands_keeps_the_kept_end_state(self):
+        """The rollback fires before the roll reaches the dark Instance: the
+        pod the switch was set in stands, so the Component ends one short
+        and the victim's row must report the loss, as before."""
+        hdr, ctx, rb = self._kept_switch_rollback()
+        items = [inference_replica("engine", 2)]
+        rows = items[0]["status"]["instanceStatuses"]
+        for row in rows:
+            row.update(podCount=1, readyPodCount=1, servingPodCount=1)
+        rows[1].update(readyPodCount=0, servingPodCount=0)
+        items[0]["status"]["readyReplicas"] = items[0]["status"]["servingReplicas"] = 1
+        out = self._run(run._rollback_fault, ctx, _FakeFleet(ctx),
+                        {"_rollback_break_land": lambda ctx_, f: (True, ""), "_op_launch": self._rollback_launch(rb),
+                         "_window_wait_hook": lambda *a: (True, ""), "_fetch_initial_ir_items": lambda cid: items,
+                         "kubectl": lambda *a, **kw: subprocess.CompletedProcess(a, 0, "", "")})
+        self.assertEqual(("CONVERGED", "PASS"), (out["state"], out["verdict"]), out["checks"])
+        self.assertTrue(any("kept break victim engine/1 excepted" in c for c in out["checks"]), out["checks"])
+        self.assertTrue(any("engine Instance 1 ends on the starting revision without serving, as its kept cause" in c
+                            for c in out["checks"]), out["checks"])
+        # The same pod standing and claiming to serve is the lie the rule exists for.
+        hdr, ctx, rb = self._kept_switch_rollback()
+        rows[1].update(readyPodCount=1, servingPodCount=1)
+        items[0]["status"]["readyReplicas"] = items[0]["status"]["servingReplicas"] = 2
+        ctx["pod_state"]["p999-engine-1-0"] = _rec("engine", 1, "a", uid="u1")
+        out = self._run(run._rollback_fault, ctx, _FakeFleet(ctx),
+                        {"_rollback_break_land": lambda ctx_, f: (True, ""), "_op_launch": self._rollback_launch(rb),
+                         "_window_wait_hook": lambda *a: (True, ""), "_fetch_initial_ir_items": lambda cid: items,
+                         "kubectl": lambda *a, **kw: subprocess.CompletedProcess(a, 0, "", "")})
+        self.assertEqual("FAIL", out["verdict"], out["checks"])
+        self.assertTrue(any("claims every pod serving" in n for n in out["notes"]), out["notes"])
+        self.assertTrue(any("with its cause kept did not end on the starting revision without serving" in n for n in out["notes"]), out["notes"])
 
     def test_rollback_at_held_by_a_one_shot_pull_failure_lifts_the_cause_after_the_rollback(self):
         """The pushed revision's first pod is pointed at the unpullable image

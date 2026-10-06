@@ -1077,9 +1077,22 @@ revision ever drains and neither the draining nor the last hook arrives
 own strategy and group). The victim must end on the starting revision too:
 Ready and serving (rebuilt by a repair or the roll back, or healed in
 place; the repairs that named it are reported, not judged), unless its
-cause outlives a rebuild (the key kept away, the readiness switch kept),
-when it ends on the starting revision without serving, its Component one
-short, and its row reads other than Ready. On the pushed revision,
+cause outlives a rebuild, when it ends on the starting revision without
+serving, its Component one short, and its row reporting the loss (a phase
+other than Ready, or Ready with fewer serving pods than pods). The key kept
+away outlives every rebuild. The readiness switch kept lives in the pod it
+was set in, so it outlives the rollback only while that pod stands (a
+rollback that fires before the roll reaches the dark Instance, or a
+single-pod in-place roll, which patches the pod where it is), and the
+victim is then held to that end state. The out-of-rotation Instance is the
+roll's first step, so the roll may replace the victim's pod before the hook
+(the first source drained under the surge strategy, the first gang
+recreated under the gang in-place roll); the rollback then rebuilds the
+Instance with a fresh pod that carries no switch, and the victim must end
+Ready and serving on the starting revision like any other, the verdict
+naming the rebuild and the pod the switch went with. The kept reading is
+taken from the pods at each read, so the watch waits for the rebuild to
+serve before it reads the rows. On the pushed revision,
 `during=held break=crash-start|crash-load|imagepull|configkey` (beside
 `break=stuck`) arms the bumped runner (`victimcomp=decoder` under a group
 on a prefill/decode service; `bump=router victimcomp=router` for a
