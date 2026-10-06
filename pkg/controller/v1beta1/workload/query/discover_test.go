@@ -270,6 +270,99 @@ func promotePod(name string, containersReady bool, readyAt time.Time) *corev1.Po
 // remainder so the caller wakes on it instead of polling.
 //
 // Cells: instance/Create/CreatePods/pod.containersReady[source]/before, instance/Create/CreatePods/pod.ready[source]/before
+// conditionedPod builds a pod in phase carrying the given conditions True,
+// with its one container running.
+func conditionedPod(name string, phase corev1.PodPhase, conds ...corev1.PodConditionType) *corev1.Pod {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"}}
+	pod.Status.Phase = phase
+	for _, c := range conds {
+		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{Type: c, Status: corev1.ConditionTrue})
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "main", Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
+	return pod
+}
+
+// admittedPod is ContainersReady with the serving gate written: the bar
+// PodSetFullyServing reads, before the kubelet has folded Ready.
+func admittedPod(name string, phase corev1.PodPhase) *corev1.Pod {
+	return conditionedPod(name, phase, corev1.ContainersReady, ServingConditionType)
+}
+
+// rotationPod is admittedPod with Ready folded: in its Service's endpoints.
+func rotationPod(name string, phase corev1.PodPhase) *corev1.Pod {
+	return conditionedPod(name, phase, corev1.ContainersReady, ServingConditionType, corev1.PodReady)
+}
+
+// deletingPod marks the pod as draining with its conditions cleared.
+func deletingPod(pod *corev1.Pod) *corev1.Pod {
+	now := metav1.Now()
+	pod.DeletionTimestamp = &now
+	pod.Finalizers = []string{"example.com/termination"}
+	pod.Status.Conditions = nil
+	return pod
+}
+
+// TestPodSetFullyServing_TerminalPodDisqualifies: the admitted-set reading
+// never treats a terminal pod as health, whatever stale conditions it
+// carries and whether or not a serving sibling would cover the count; a
+// deleting pod is excluded rather than disqualifying.
+func TestPodSetFullyServing_TerminalPodDisqualifies(t *testing.T) {
+	serving := admittedPod("serving", corev1.PodRunning)
+	cases := []struct {
+		name    string
+		pods    []*corev1.Pod
+		desired int32
+		want    bool
+	}{
+		{"healthy set", []*corev1.Pod{serving}, 1, true},
+		{"failed pod with stale healthy conditions", []*corev1.Pod{admittedPod("dead", corev1.PodFailed)}, 1, false},
+		{"succeeded pod with stale healthy conditions", []*corev1.Pod{admittedPod("done", corev1.PodSucceeded)}, 1, false},
+		{"serving sibling does not cover a failed member", []*corev1.Pod{serving, admittedPod("dead", corev1.PodFailed)}, 1, false},
+		{"deleting pod is still excluded, not disqualifying", []*corev1.Pod{serving, deletingPod(admittedPod("draining", corev1.PodRunning))}, 1, true},
+		{"nothing expected proves nothing", []*corev1.Pod{serving}, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PodSetFullyServing(tc.pods, tc.desired); got != tc.want {
+				t.Fatalf("PodSetFullyServing = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPodSetReadyAndServing_RequiresReadyAndTheGate: the rotation reading
+// counts a pod only when PodReady and the serving gate agree. A pod whose
+// gate is written but whose Ready never followed is in no Service's
+// endpoints, so it neither counts nor is covered by a sibling that is;
+// terminal and deleting pods read as they do for the admitted set.
+func TestPodSetReadyAndServing_RequiresReadyAndTheGate(t *testing.T) {
+	inRotation := rotationPod("ready", corev1.PodRunning)
+	gateOnly := admittedPod("gate-written", corev1.PodRunning)
+	readyNoGate := conditionedPod("ready-no-gate", corev1.PodRunning, corev1.ContainersReady, corev1.PodReady)
+	cases := []struct {
+		name    string
+		pods    []*corev1.Pod
+		desired int32
+		want    bool
+	}{
+		{"ready and serving", []*corev1.Pod{inRotation}, 1, true},
+		{"gate written but Ready never followed", []*corev1.Pod{gateOnly}, 1, false},
+		{"Ready without the gate", []*corev1.Pod{readyNoGate}, 1, false},
+		{"serving sibling does not cover a member whose Ready never followed", []*corev1.Pod{inRotation, gateOnly}, 2, false},
+		{"a member short of rotation disqualifies even above the count", []*corev1.Pod{inRotation, gateOnly}, 1, false},
+		{"deleting pod is excluded, not disqualifying", []*corev1.Pod{inRotation, deletingPod(rotationPod("draining", corev1.PodRunning))}, 1, true},
+		{"terminal pod with stale conditions disqualifies", []*corev1.Pod{inRotation, rotationPod("dead", corev1.PodFailed)}, 1, false},
+		{"nothing expected proves nothing", []*corev1.Pod{inRotation}, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PodSetReadyAndServing(tc.pods, tc.desired); got != tc.want {
+				t.Fatalf("PodSetReadyAndServing = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPodSetPromotable(t *testing.T) {
 	cases := []struct {
 		name            string

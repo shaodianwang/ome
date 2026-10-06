@@ -456,7 +456,7 @@ func PodSetPromotable(pods []*corev1.Pod, minReadySeconds int32, now time.Time, 
 	return wait == 0, wait
 }
 
-// PodSetFullyServing reports whether the pod set is fully healthy in
+// PodSetFullyServing reports whether the pod set is fully admitted to
 // the rotation: at least `desired` live (non-deleting) pods, every one
 // of them ContainersReady AND carrying the serving gate. The bar is the
 // gate rather than the pod's Ready condition because the gate is written
@@ -471,6 +471,22 @@ func PodSetPromotable(pods []*corev1.Pod, minReadySeconds int32, now time.Time, 
 // the count. desired <= 0 never counts as serving (nothing is expected,
 // so nothing can prove health).
 func PodSetFullyServing(pods []*corev1.Pod, desired int32) bool {
+	return podSetAtBar(pods, desired, func(p *corev1.Pod) bool {
+		return podreadiness.IsContainersReady(p) && podreadiness.IsServing(p)
+	})
+}
+
+// PodSetReadyAndServing is PodSetFullyServing at the rotation bar: every
+// live pod PodReady AND carrying the gate (podreadiness.ReadyAndServing).
+// A pod whose gate is written but whose Ready never followed does not count.
+func PodSetReadyAndServing(pods []*corev1.Pod, desired int32) bool {
+	return podSetAtBar(pods, desired, podreadiness.ReadyAndServing)
+}
+
+// podSetAtBar is the set reading both bars share: deleting pods are
+// skipped, a terminal pod or a live pod short of bar disqualifies the set,
+// and at least desired (> 0) live pods must clear it.
+func podSetAtBar(pods []*corev1.Pod, desired int32, bar func(*corev1.Pod) bool) bool {
 	if desired <= 0 {
 		return false
 	}
@@ -479,7 +495,7 @@ func PodSetFullyServing(pods []*corev1.Pod, desired int32) bool {
 		if p == nil || p.DeletionTimestamp != nil {
 			continue
 		}
-		if IsTerminalPod(p) || !podreadiness.IsContainersReady(p) || !podreadiness.IsServing(p) {
+		if IsTerminalPod(p) || !bar(p) {
 			return false
 		}
 		live++

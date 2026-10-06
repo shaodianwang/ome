@@ -1356,6 +1356,15 @@ type recoveryHarness struct {
 	// a pod rebuilt under the same name, or a container restarted in place
 	// by an image patch, starts sound.
 	readinessFails map[types.UID]bool
+	// readinessGate, when set, is a second readiness gate the template
+	// declares beside the serving gate, as a load-balancer controller's
+	// would be. The kubelet model writes it True on every pod created
+	// before gateHeldSince and on none created at or after it, so a pod
+	// rebuilt under the hold folds no Ready however healthy it is;
+	// gateHeldRunner confines the hold to one runner's pods (empty: all).
+	readinessGate  corev1.PodConditionType
+	gateHeldSince  time.Time
+	gateHeldRunner string
 	// atomicStatus wires the owner-aware atomic status adapter the
 	// scale-down wave requires; off, the passes take the one-row write
 	// path.
@@ -1456,7 +1465,11 @@ func recoveryPodSpec(image string) *corev1.PodSpec {
 // podSpec is the harness template for image, rendered under the
 // harness's container name.
 func (h *recoveryHarness) podSpec(image string) *corev1.PodSpec {
-	return &corev1.PodSpec{Containers: []corev1.Container{{Name: h.container, Image: image}}}
+	spec := &corev1.PodSpec{Containers: []corev1.Container{{Name: h.container, Image: image}}}
+	if h.readinessGate != "" {
+		spec.ReadinessGates = []corev1.PodReadinessGate{{ConditionType: h.readinessGate}}
+	}
+	return spec
 }
 
 // newRecoveryHarness builds the harness plus the three ControllerRevisions
@@ -1754,7 +1767,7 @@ func (h *recoveryHarness) kubelet() {
 				}},
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionTrue, h.clk.Now())
-			setPodCondition(pod, corev1.PodReady, h.servingGate(pod), h.clk.Now())
+			setPodCondition(pod, corev1.PodReady, h.foldReady(pod), h.clk.Now())
 		case h.imageChangedInPlace(pod):
 			// The kubelet replaces a running container whose spec image
 			// changed: the old process is killed, the restart count rises,
@@ -1788,7 +1801,7 @@ func (h *recoveryHarness) kubelet() {
 			}}
 			carryRestartEvidence(&pod.Status.ContainerStatuses[0], prior)
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionTrue, h.clk.Now())
-			setPodCondition(pod, corev1.PodReady, h.servingGate(pod), h.clk.Now())
+			setPodCondition(pod, corev1.PodReady, h.foldReady(pod), h.clk.Now())
 		}
 		if podConditionTrue(pod, corev1.PodReady) {
 			h.servedPasses[wedgeKey(pod)]++
@@ -1961,6 +1974,41 @@ func (h *recoveryHarness) servingGate(pod *corev1.Pod) corev1.ConditionStatus {
 		}
 	}
 	return corev1.ConditionFalse
+}
+
+// foldReady is the kubelet folding every readiness gate the pod declares
+// into Ready: the serving gate as the controller wrote it, and the
+// template's second gate, which the model satisfies unless the pod is
+// under the hold (gateHeld), where no writer ever does.
+func (h *recoveryHarness) foldReady(pod *corev1.Pod) corev1.ConditionStatus {
+	ready := h.servingGate(pod)
+	if h.readinessGate == "" || !declaresReadinessGate(pod, h.readinessGate) {
+		return ready
+	}
+	if h.gateHeld(pod) {
+		return corev1.ConditionFalse
+	}
+	setPodCondition(pod, h.readinessGate, corev1.ConditionTrue, h.clk.Now())
+	return ready
+}
+
+// gateHeld reports whether the pod was created under the second gate's
+// hold: at or after gateHeldSince, and of gateHeldRunner when one is named.
+func (h *recoveryHarness) gateHeld(pod *corev1.Pod) bool {
+	if h.gateHeldSince.IsZero() || pod.CreationTimestamp.Time.Before(h.gateHeldSince) {
+		return false
+	}
+	return h.gateHeldRunner == "" || pod.Labels[query.LabelRunner] == h.gateHeldRunner
+}
+
+// declaresReadinessGate reports whether the pod's spec lists gate.
+func declaresReadinessGate(pod *corev1.Pod, gate corev1.PodConditionType) bool {
+	for _, g := range pod.Spec.ReadinessGates {
+		if g.ConditionType == gate {
+			return true
+		}
+	}
+	return false
 }
 
 // crashPod points the live pod of runner at index idx at image, the way

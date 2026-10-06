@@ -116,12 +116,14 @@ type PassInput struct {
 //     be failed out from under the batch still driving it.
 //
 // FAILED-WHILE-SERVING GUARD: an Instance whose blamed pod set is fully
-// healthy — every live (non-deleting) pod ContainersReady AND in the
-// serving rotation, at the desired count — is never escalated, whatever
-// the evidence says. Stamping Phase=Failed over a serving workload is a
+// in rotation — every live (non-deleting) pod PodReady AND carrying the
+// serving gate, at the desired count — is never escalated, whatever the
+// evidence says. Stamping Phase=Failed over a serving workload is a
 // status lie (the pods are fine; only the bookkeeping is stale), and the
 // coordination layer would amplify it into a group-level failure. Such
-// an Instance is skipped untouched.
+// an Instance is skipped untouched. A pod whose gate is written but whose
+// Ready never followed is in no Service's endpoints and earns no exemption:
+// the deadline is the one exit of an attempt it holds behind the promote bar.
 //
 // Instances with a disposable in-flight attempt (Create, recreate and
 // in-place Update Operations — see disposableAttempt) route through
@@ -573,7 +575,8 @@ func (b *failureStampBuffer) flush(ctx context.Context) error {
 }
 
 // podSetIsCapacity reports whether the Instance is healthy capacity,
-// which is what buys it the FAILED-WHILE-SERVING exemption.
+// which is what buys it the FAILED-WHILE-SERVING exemption: a set in
+// rotation, PodReady and the serving gate agreeing on every pod.
 //
 // Pod conditions alone do not settle that during a surge. Until the
 // drain step the source is what holds the Instance's traffic, and a
@@ -582,13 +585,7 @@ func (b *failureStampBuffer) flush(ctx context.Context) error {
 // in rotation, and a replacement wedged in that state must escalate
 // rather than be exempted by a source that is not serving.
 func podSetIsCapacity(row types.InstanceStatus, pods []*corev1.Pod, desired int32) bool {
-	return podSetFullyServing(pods, desired) && !types.OperationSourceUnrouted(row.Operation)
-}
-
-// podSetFullyServing is query.PodSetFullyServing under the name the
-// escalation pass's guards read by.
-func podSetFullyServing(pods []*corev1.Pod, desired int32) bool {
-	return query.PodSetFullyServing(pods, desired)
+	return query.PodSetReadyAndServing(pods, desired) && !types.OperationSourceUnrouted(row.Operation)
 }
 
 // anyPodAdmissionGated reports whether any pod still carries an

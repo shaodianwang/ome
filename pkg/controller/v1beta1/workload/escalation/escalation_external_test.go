@@ -927,8 +927,8 @@ func TestEscalation_AdmissionGatedInstance_DeadlineSkipped(t *testing.T) {
 	}
 }
 
-// TestEscalation_DrainingPodDoesNotMaskStuckReplacement pins
-// podSetFullyServing's deleting-pod rule from three sides. A completed
+// TestEscalation_DrainingPodDoesNotMaskStuckReplacement pins the
+// capacity reading's deleting-pod rule from three sides. A completed
 // surge leaves the drained source next to its serving replacement, so a
 // deleting pod must not disqualify an otherwise healthy set (a); but it
 // proves nothing on its own, so it cannot cover the desired count (b),
@@ -1499,6 +1499,127 @@ func TestEscalation_RestartDeadlineWithGateNotFoldedPod_NamesTheGate(t *testing.
 	}
 	if !strings.Contains(got.LastFailure.Message, string(podreadiness.ConditionType)) {
 		t.Errorf("LastFailure.Message: got %q want the unsatisfied gate named", got.LastFailure.Message)
+	}
+	if len(rec.blocks) != 0 {
+		t.Errorf("RetryBlock: got %v want none (an unsatisfied gate is ambiguous, not revision-scoped)", rec.blocks)
+	}
+}
+
+// The other way Ready never follows: the serving gate IS written, and a
+// second readiness gate the pod declares stays unsatisfied. The pod reads
+// ContainersReady and serving, yet it is in no Service's endpoints, so it
+// is not capacity and no exemption may keep it from the deadline.
+
+// secondReadinessGate is a readiness gate another writer owns, declared
+// on the pod beside the serving gate.
+const secondReadinessGate corev1.PodConditionType = "example.com/load-balancer"
+
+// gateWrittenNeverReadyPod builds that shape: phase Running, the container
+// running and Ready, ContainersReady=True, the serving gate True, and the
+// second gate declared with no condition for it, so Ready stays False.
+func gateWrittenNeverReadyPod(name string, since time.Time) *corev1.Pod {
+	pod := gateNotFoldedPod(name, since)
+	pod.Spec.ReadinessGates = append(pod.Spec.ReadinessGates, corev1.PodReadinessGate{ConditionType: secondReadinessGate})
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type:               podreadiness.ConditionType,
+		Status:             corev1.ConditionTrue,
+		LastTransitionTime: metav1.NewTime(since),
+	})
+	for i := range pod.Status.Conditions {
+		if pod.Status.Conditions[i].Type == corev1.PodReady {
+			pod.Status.Conditions[i].Message = "corresponding condition of pod readiness gate \"" + string(secondReadinessGate) + "\" does not exist"
+		}
+	}
+	return pod
+}
+
+// TestEscalation_RestartDeadlineWithGateWrittenButNeverReady_NamesTheGate:
+// a restart's rebuilt pod passes its probes and receives the serving gate,
+// but never becomes Ready because a second readiness gate stays
+// unsatisfied. The row is not capacity, so the elapsed deadline fails the
+// repair with that gate named and the attempt keeps its blame.
+//
+// Cells: instance/Restart/Drain/pod.runningNotReady[source]/before, instance/Restart/Drain/timer.operationDeadline/before
+func TestEscalation_RestartDeadlineWithGateWrittenButNeverReady_NamesTheGate(t *testing.T) {
+	now := time.Now()
+	insts := []workloadtypes.InstanceStatus{{
+		Index:       0,
+		Incarnation: 2,
+		Phase:       workloadtypes.InstancePhaseRestarting,
+		PodCount:    1,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:     workloadtypes.InstanceOperationRestart,
+			Step:     "Drain",
+			Deadline: metav1.NewTime(now.Add(-time.Hour)),
+		},
+	}}
+	input, rec := escalationFixture(insts)
+
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
+		map[int32][]*corev1.Pod{0: {gateWrittenNeverReadyPod("engine-0-default-0", now.Add(-time.Hour))}}); err != nil {
+		t.Fatalf("escalation pass: %v", err)
+	}
+
+	got := rec.store[0]
+	if got.Phase != workloadtypes.InstancePhaseFailed {
+		t.Fatalf("Phase: got %q want Failed (a pod the serving gate alone cannot make Ready is not capacity)", got.Phase)
+	}
+	if got.Operation == nil || got.Operation.Type != workloadtypes.InstanceOperationRestart {
+		t.Errorf("Operation: got %+v want the Restart preserved", got.Operation)
+	}
+	if got.LastFailure == nil || got.LastFailure.Reason != evidence.ReasonReadinessGateNotSatisfied {
+		t.Fatalf("LastFailure.Reason: got %+v want %q", got.LastFailure, evidence.ReasonReadinessGateNotSatisfied)
+	}
+	if !strings.Contains(got.LastFailure.Message, string(secondReadinessGate)) {
+		t.Errorf("LastFailure.Message: got %q want the unsatisfied gate %q named", got.LastFailure.Message, secondReadinessGate)
+	}
+	if len(rec.blocks) != 0 {
+		t.Errorf("RetryBlock: got %v want none (an unsatisfied gate is ambiguous, not revision-scoped)", rec.blocks)
+	}
+}
+
+// TestEscalation_RestartDeadlineWithOneGangMemberNeverReady_NamesItsGate:
+// the gang form. One rebuilt member is Ready and serving, the other has
+// the serving gate but never becomes Ready, so the set is short of
+// rotation and the deadline fails the repair naming that member's gate.
+//
+// Cells: instance/Restart/Drain/pod.runningNotReady[source]/before, instance/Restart/Drain/timer.operationDeadline/before
+func TestEscalation_RestartDeadlineWithOneGangMemberNeverReady_NamesItsGate(t *testing.T) {
+	now := time.Now()
+	insts := []workloadtypes.InstanceStatus{{
+		Index:       0,
+		Incarnation: 2,
+		Phase:       workloadtypes.InstancePhaseRestarting,
+		PodCount:    2,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:     workloadtypes.InstanceOperationRestart,
+			Step:     "Drain",
+			Deadline: metav1.NewTime(now.Add(-time.Hour)),
+		},
+	}}
+	input, rec := escalationFixture(insts)
+
+	pods := []*corev1.Pod{
+		servingPod("engine-0-leader-0"),
+		gateWrittenNeverReadyPod("engine-0-worker-0", now.Add(-time.Hour)),
+	}
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 2),
+		map[int32][]*corev1.Pod{0: pods}); err != nil {
+		t.Fatalf("escalation pass: %v", err)
+	}
+
+	got := rec.store[0]
+	if got.Phase != workloadtypes.InstancePhaseFailed {
+		t.Fatalf("Phase: got %q want Failed (a gang with a member out of rotation is not capacity)", got.Phase)
+	}
+	if got.LastFailure == nil || got.LastFailure.Reason != evidence.ReasonReadinessGateNotSatisfied {
+		t.Fatalf("LastFailure.Reason: got %+v want %q", got.LastFailure, evidence.ReasonReadinessGateNotSatisfied)
+	}
+	if got.LastFailure.PodName != "engine-0-worker-0" {
+		t.Errorf("LastFailure.PodName: got %q want the member that never became Ready", got.LastFailure.PodName)
+	}
+	if !strings.Contains(got.LastFailure.Message, string(secondReadinessGate)) {
+		t.Errorf("LastFailure.Message: got %q want the unsatisfied gate %q named", got.LastFailure.Message, secondReadinessGate)
 	}
 	if len(rec.blocks) != 0 {
 		t.Errorf("RetryBlock: got %v want none (an unsatisfied gate is ambiguous, not revision-scoped)", rec.blocks)

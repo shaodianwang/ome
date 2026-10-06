@@ -15,6 +15,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -889,6 +890,97 @@ func newRestartHarness(t *testing.T, replicas int32) *recoveryHarness {
 		t.Fatalf("initial create never converged on v1 for %d instances", replicas)
 	}
 	return h
+}
+
+// recoverySecondGate is the second readiness gate the gated stories declare
+// on the template beside the serving gate: one another controller owns.
+const recoverySecondGate corev1.PodConditionType = "example.com/load-balancer"
+
+// newGatedRestartHarness is newRestartHarness with the template declaring
+// recoverySecondGate, an attempt deadline short enough for a repair that
+// cannot finish to meet it inside the story, and the multi-pod shape on
+// request. The kubelet model satisfies the gate on the initial pods, so
+// the Component converges Ready before the story acts.
+func newGatedRestartHarness(t *testing.T, multiPod bool) *recoveryHarness {
+	t.Helper()
+	h := newRecoveryHarness(t, multiPod)
+	policy := workloadtypes.RestartPolicyRecreateInstance
+	h.lifecycle = workloadtypes.Lifecycle{
+		RestartPolicy:        &policy,
+		InstanceReadyTimeout: &metav1.Duration{Duration: 6 * recoveryStepFloor},
+	}
+	h.readinessGate = recoverySecondGate
+	h.revV1 = h.ensureRevision(h.podSpec(goodImage))
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(40, func() bool { return h.settledOn(h.revV1, 1) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 behind a second readiness gate")
+	}
+	return h
+}
+
+// A repaired pod comes up, passes its probes and receives the serving gate,
+// but a second readiness gate it declares is never satisfied, so Ready
+// never follows and the promote bar never clears. The Instance serves
+// nothing, so the operation deadline is what ends the repair: Failed with
+// the Restart preserved and the unsatisfied gate named. The gang form holds
+// the gate on one member only.
+//
+// Cells: instance/Restart/Drain/pod.runningNotReady[source]/before, instance/Restart/Drain/timer.operationDeadline/before
+func TestRestart_RebuiltPodGateWrittenButNeverReady_FailsAtTheDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		multiPod   bool
+		heldRunner string
+	}{
+		{"single pod", false, ""},
+		{"gang with one member never Ready", true, "worker"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newGatedRestartHarness(t, tc.multiPod)
+			h.gateHeldSince = h.clk.Now()
+			h.gateHeldRunner = tc.heldRunner
+			h.losePods(0)
+
+			// The shape under test: every held member of the rebuilt set is
+			// ContainersReady with the serving gate written and Ready withheld.
+			gateWrittenNeverReady := func() bool {
+				held := 0
+				for _, pod := range h.podsOf(0) {
+					if !h.gateHeld(pod) {
+						continue
+					}
+					held++
+					if !podreadiness.IsContainersReady(pod) || !podreadiness.IsServing(pod) || podreadiness.IsPodReady(pod) {
+						return false
+					}
+				}
+				return held > 0
+			}
+			if !h.run(20, gateWrittenNeverReady) {
+				h.dumpState("rebuild")
+				t.Fatalf("the rebuilt pod never reached ContainersReady with the serving gate written and Ready withheld")
+			}
+			if !h.run(40, func() bool { return parkedRepair(h, 0) }) {
+				h.dumpState("deadline")
+				phase := workloadtypes.InstancePhase("")
+				if s := h.instance(0); s != nil {
+					phase = s.Phase
+				}
+				t.Fatalf("the repair outlived its deadline: the row stayed %q with the Instance serving nothing", phase)
+			}
+			got := h.instance(0)
+			if got.LastFailure == nil || got.LastFailure.Reason != evidence.ReasonReadinessGateNotSatisfied {
+				t.Fatalf("LastFailure: got %+v want reason %q", got.LastFailure, evidence.ReasonReadinessGateNotSatisfied)
+			}
+			if !strings.Contains(got.LastFailure.Message, string(recoverySecondGate)) {
+				t.Errorf("LastFailure.Message: got %q want the gate %q named", got.LastFailure.Message, recoverySecondGate)
+			}
+			if tc.heldRunner != "" && !strings.Contains(got.LastFailure.PodName, tc.heldRunner) {
+				t.Errorf("LastFailure.PodName: got %q want the %s member", got.LastFailure.PodName, tc.heldRunner)
+			}
+		})
+	}
 }
 
 // crashForm names how the old-revision Instance breaks: its pod dies at
