@@ -80,6 +80,9 @@ func writeStateSection(b *strings.Builder, m *rolloutspec.Machine, s *rolloutspe
 		opText = fmt.Sprintf("operation `%s`/`%s`", s.Op.Type, s.Op.Step)
 	}
 	fmt.Fprintf(b, "Phase `%s`, %s. Decided in `%s`.\n", s.Phase, opText, s.DecidedIn)
+	if s.Planned {
+		b.WriteString("Planned: declared ahead of the engine, which still resolves this shape to its parent state.\n")
+	}
 	if s.Note != "" {
 		fmt.Fprintf(b, "%s\n", s.Note)
 	}

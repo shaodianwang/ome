@@ -138,10 +138,16 @@ def arrow_refs(repo):
     return out
 
 
-def check_arrows(transitions, refs):
-    """Return the violations between adapter-lane transitions and their tests."""
+def check_arrows(transitions, refs, planned_states=()):
+    """Return the violations between adapter-lane transitions and their tests.
+
+    An adapter-lane arrow leaving a planned state owes no tagged test: the
+    adapter cannot build a row the engine does not resolve. Dropping the
+    planned marker is what makes the test owed.
+    """
     problems = []
     lanes = {t["id"]: t.get("lane") or "workload" for t in transitions}
+    planned = {t["id"] for t in transitions if t.get("from") in set(planned_states)}
     cited = set()
     for path, lineno, aid in refs:
         if aid not in lanes:
@@ -155,7 +161,7 @@ def check_arrows(transitions, refs):
             continue
         cited.add(aid)
     for aid, lane in sorted(lanes.items()):
-        if lane == ADAPTER_LANE and aid not in cited:
+        if lane == ADAPTER_LANE and aid not in cited and aid not in planned:
             problems.append(
                 f"{aid}: adapter-lane transition is named by no Go test in an // Arrows: comment"
             )
@@ -229,7 +235,8 @@ def main(argv=None):
         cell_refs(args.repo),
         replay_scenarios(args.repo),
     )
-    problems += check_arrows(envelope.get("transitions") or [], arrow_refs(args.repo))
+    planned_states = [s["id"] for s in envelope.get("states") or [] if s.get("planned")]
+    problems += check_arrows(envelope.get("transitions") or [], arrow_refs(args.repo), planned_states)
 
     for machine, counts in sorted(report(grid).items()):
         total = counts["covered"] + len(counts["uncovered"])

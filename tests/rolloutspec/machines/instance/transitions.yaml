@@ -1196,3 +1196,508 @@ transitions:
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
     lane: adapter
     why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
+
+  # --- Failed/Parked (planned) -------------------------------------------
+  - id: T-failedparked-serves
+    from: Failed/Parked
+    event: pod.containersReady
+    variant: source
+    guard: the parked attempt's own live pod set is complete and fully serving - every pod ContainersReady and carrying the serving gate, which only the attempt's own promote wrote
+    to: Update/Parked
+    effects: [Phase Updating with the parked operation kept as it was; nothing opens]
+    decided_in: pkg/controller/v1beta1/workload/escalation/parked.go
+  - id: T-failedparked-retry
+    from: Failed/Parked
+    event: timer.retryAt
+    guard: the target's Backoff RetryBlock is due, a live pod of the parked set remains, the budget and the gate admit the fresh start, and the mode resolves to recreate
+    to: Update/Drain
+    effects: [Incarnation bumped and a fresh recreate attempt with its own identity and deadline replaces the parked one, so the parked set is the one the drain phase replaces; the block flipped to RetryInProgress]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
+  - id: T-failedparked-retry-inplace
+    from: Failed/Parked
+    event: timer.retryAt
+    guard: the target's Backoff RetryBlock is due, the parked pod is alive, the budget and the gate admit the fresh start, and the mode resolves to in-place
+    to: Update/InPlace
+    effects: [a fresh in-place attempt with its own identity and deadline replaces the parked one, the block flipped to RetryInProgress]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_inplace.go
+  - id: T-failedparked-retry-create
+    from: Failed/Parked
+    event: timer.retryAt
+    guard: no pod of the parked set is left, the Backoff RetryBlock for the revision the attempt would pin is due, and no authorized attempt at it is in flight
+    to: Create/CreatePods
+    effects: [Phase Creating with a Create CreatePods operation replacing the parked one, the block flipped to RetryInProgress when the attempt starts]
+    decided_in: pkg/controller/v1beta1/workload/ops/create.go
+  - id: T-failedparked-corrective
+    from: Failed/Parked
+    event: spec.revision
+    guard: the corrective revision is a different RetryBlock subject than the parked attempt's target, a live pod of the parked set remains, the budget and the gate admit the fresh start, and the mode resolves to recreate
+    to: Update/Drain
+    effects: [Incarnation bumped and a fresh recreate attempt at the corrective revision replaces the parked one, so the parked set is the one the drain phase replaces]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
+  - id: T-failedparked-corrective-inplace
+    from: Failed/Parked
+    event: spec.revision
+    guard: the corrective revision is a different RetryBlock subject than the parked attempt's target, the parked pod is alive, the budget and the gate admit the fresh start, and the mode resolves to in-place
+    to: Update/InPlace
+    effects: [a fresh in-place attempt at the corrective revision replaces the parked one]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_inplace.go
+  - id: T-failedparked-corrective-create
+    from: Failed/Parked
+    event: spec.revision
+    guard: no pod of the parked set is left and no RetryBlock denies the corrective revision
+    to: Create/CreatePods
+    effects: [Phase Creating with a Create CreatePods operation pinned to the corrective revision replacing the parked one]
+    decided_in: pkg/controller/v1beta1/workload/ops/create.go
+  - id: T-failedparked-member-lost
+    from: Failed/Parked
+    event: pod.deleted
+    variant: source
+    guard: policy RecreateInstanceOnPodRestart, a multi-pod Instance with at least one survivor once terminal-phase pods are excluded, no RetryBlock denying the rebuild, and the revision the rebuild would land on still the roll target or the roll withheld by a pause or a Held target
+    to: Restart/Drain
+    effects: [Incarnation bumped, Phase Restarting with a Restart operation replacing the parked one and the gang-member-lost reason recorded, the survivors drained]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-failedparked-recycle-rebuild
+    from: Failed/Parked
+    event: pod.phaseTerminal
+    guard: every remaining pod of the parked set is in a terminal phase, so the missing-pod diff reads their names as free and the Create pass claims the row as a fresh start
+    to: Create/CreatePods
+    effects: [the dead occupants deleted with expectations recorded first and a TerminalPodRecycled warning, the targets recreated on a later pass under a fresh Create CreatePods operation that replaces the parked one]
+    decided_in: pkg/controller/v1beta1/workload/ops/terminal_recycle.go
+  - id: T-failedparked-reset
+    from: Failed/Parked
+    event: spec.resetInstances
+    guard: the operator named this Instance, or all, and no pod of it is still in the serving rotation
+    to: Failed
+    effects: [every live-listed pod deleted with the expectation recorded before each delete, the parked operation cleared through the MutateInstance seam, Phase Failed and LastFailure kept so the row is left in the fresh-start shape the Create pass rebuilds, InstancesReset event, the annotation consumed only after those effects commit]
+    decided_in: pkg/controller/v1beta1/inferencereplica/reset_instances.go
+    lane: adapter
+    why: the operator reset mailbox is the spec.resetInstances annotation, which the adapter consumes outside workload.Reconcile
+  - id: T-failedparked-scaledown
+    from: Failed/Parked
+    event: spec.replicasDown
+    guard: the index is beyond the new desired set and the scale-down wave admits it
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-failedparked-teardown
+    from: Failed/Parked
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-failedparked-teardown-deadline
+    from: Failed/Parked
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
+
+  # --- Failed/Repair (planned) -------------------------------------------
+  - id: T-failedrepair-resume
+    from: Failed/Repair
+    event: pod.containersReady
+    variant: source
+    guard: the live pod set is complete, every pod at the row's incarnation and ContainersReady, whatever the restart policy says and whether or not a retry ladder is configured
+    to: Ready
+    effects: [the serving gate written on the rebuilt pods, then once they clear the shared promote bar Phase Ready with the spent operation cleared and RunningRevision untouched, RestartCompleted event]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-failedrepair-rearm
+    from: Failed/Repair
+    event: timer.repairRetry
+    guard: the live pod set is complete but not one the resume takes, the recorded failure is not workload-caused, lifecycle.updateRetry is configured, its delay for the next attempt has elapsed since the recorded failure, the attempts are not spent, and no RetryBlock denies rebuilding the running revision
+    to: Restart/Drain
+    effects: [Incarnation bumped, Phase Restarting with a fresh Restart whose RetryCount continues the spent one's, RestartTriggered event, the wedged set drained and rebuilt under a fresh deadline]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-failedrepair-member-lost
+    from: Failed/Repair
+    event: pod.deleted
+    variant: source
+    guard: policy RecreateInstanceOnPodRestart, a multi-pod Instance with at least one survivor once terminal-phase pods are excluded, no RetryBlock denying the rebuild, and the revision the rebuild would land on still the roll target
+    to: Restart/Drain
+    effects: [Incarnation bumped, Phase Restarting with the gang-member-lost reason recorded and the RetryCount continued, the survivors drained and the gang rebuilt as a whole]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-failedrepair-close
+    from: Failed/Repair
+    event: pod.deleted
+    variant: source
+    guard: no live pod is left - every pod of the set gone or in a terminal phase, a pod still terminating counted as live
+    to: Failed
+    effects: [the spent operation cleared with Phase, Incarnation and LastFailure kept, RepairClosed event; the Create pass rebuilds the row as a fresh start on the pass after]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-failedrepair-close-terminal
+    from: Failed/Repair
+    event: pod.phaseTerminal
+    guard: every remaining pod of the set is in a terminal phase, which the repair's exits read as no live pod left
+    to: Failed
+    effects: [the spent operation cleared with Phase, Incarnation and LastFailure kept, RepairClosed event; the Create pass recycles the dead occupants and rebuilds the row on the pass after]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-failedrepair-corrective
+    from: Failed/Repair
+    event: spec.revision
+    guard: the row's running revision is not the roll target, so the restart pass yields it to the roll, a recreate-resolved strategy with the unavailability budget and the gate admitting a fresh start
+    to: Update/Drain
+    effects: [Incarnation bumped, Phase Updating with the Drain step at the corrective revision, the spent Restart replaced by the roll's operation]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
+  - id: T-failedrepair-corrective-surge
+    from: Failed/Repair
+    event: spec.revision
+    guard: the row's running revision is not the roll target, strategy SurgeThenDrain with the coordination gate and the surge budget admitting a fresh start
+    to: Update/Surge
+    effects: [Phase Updating with the Surge step pinned to the corrective revision, replacement pod or gang created, the spent Restart replaced by the roll's operation]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
+  - id: T-failedrepair-corrective-inplace
+    from: Failed/Repair
+    event: spec.revision
+    guard: the row's running revision is not the roll target, a single-pod Instance under an in-place strategy whose diff is regular-container images only, with the budget and the gate admitting
+    to: Update/InPlace
+    effects: [Phase Updating with the InPlace step at the corrective revision, the spent Restart replaced by the roll's operation]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_inplace.go
+  - id: T-failedrepair-retry
+    from: Failed/Repair
+    event: timer.retryAt
+    guard: the row's running revision is not the roll target and the target's Backoff RetryBlock is due, a recreate-resolved strategy with the budget and the gate admitting
+    to: Update/Drain
+    effects: [Incarnation bumped, Phase Updating with the Drain step, the block flipped to RetryInProgress, the spent Restart replaced]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
+  - id: T-failedrepair-retry-surge
+    from: Failed/Repair
+    event: timer.retryAt
+    guard: the row's running revision is not the roll target and the target's Backoff RetryBlock is due, strategy SurgeThenDrain with the gate and the surge budget admitting
+    to: Update/Surge
+    effects: [Phase Updating with the Surge step, the block flipped to RetryInProgress, the spent Restart replaced]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
+  - id: T-failedrepair-retry-inplace
+    from: Failed/Repair
+    event: timer.retryAt
+    guard: the row's running revision is not the roll target and the target's Backoff RetryBlock is due, an in-place-resolved strategy with the budget and the gate admitting
+    to: Update/InPlace
+    effects: [Phase Updating with the InPlace step, the block flipped to RetryInProgress, the spent Restart replaced]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_inplace.go
+  - id: T-failedrepair-reset
+    from: Failed/Repair
+    event: spec.resetInstances
+    guard: the operator named this Instance, or all, and no pod of it is still in the serving rotation
+    to: Failed
+    effects: [every live-listed pod deleted with the expectation recorded before each delete, the spent Restart cleared through the MutateInstance seam, Phase and LastFailure untouched so the row is left in the fresh-start shape the Create pass rebuilds, InstancesReset event, the annotation consumed only after those effects commit]
+    decided_in: pkg/controller/v1beta1/inferencereplica/reset_instances.go
+    lane: adapter
+    why: the operator reset mailbox is the spec.resetInstances annotation, which the adapter consumes outside workload.Reconcile
+  - id: T-failedrepair-scaledown
+    from: Failed/Repair
+    event: spec.replicasDown
+    guard: the index is beyond the new desired set and the scale-down wave admits it
+    to: Delete/Drain
+    effects: [the spent Restart replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-failedrepair-teardown
+    from: Failed/Repair
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-failedrepair-teardown-deadline
+    from: Failed/Repair
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
+
+  # --- Failed/GangSurge (planned) ----------------------------------------
+  - id: T-failedgangsurge-reset
+    from: Failed/GangSurge
+    event: pod.deleted
+    variant: target
+    guard: the replacement's pods are all gone and the cleanup marker is claimed by this source
+    to: Ready
+    effects: [replacement index finalized and its row removed, source reset to Ready on its running revision, the pinned revision's RetryBlock charged toward Held only when the source's LastFailure reason is workload-caused and otherwise entered into Backoff at the current rung, GangSurgeAbandoned warning event]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+  - id: T-failedgangsurge-scaledown
+    from: Failed/GangSurge
+    event: spec.replicasDown
+    guard: a failed source pins nothing, so the pair is ranked as one unit behind the serving rows, and that unit falls beyond the new desired set
+    to: Delete/Drain
+    effects: [the kept Update operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction; the marker it referenced is an extra of the same wave]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-failedgangsurge-teardown
+    from: Failed/GangSurge
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-failedgangsurge-teardown-deadline
+    from: Failed/GangSurge
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
+
+  # --- Failed/GangSurgeDrain (planned) -----------------------------------
+  - id: T-failedgangsurgedrain-complete
+    from: Failed/GangSurgeDrain
+    event: pod.deleted
+    variant: source
+    guard: the replacement gang is complete and runtime-ready, the source's pods are drained and gone, and the replacement has been promoted Ready on the pinned revision
+    to: Empty
+    effects: [source resources finalized and its status row removed, the replacement index becomes the Instance]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+  - id: T-failedgangsurgedrain-scaledown
+    from: Failed/GangSurgeDrain
+    event: spec.replicasDown
+    guard: a failed source pins nothing, so the pair is ranked as one unit behind the serving rows, and that unit falls beyond the new desired set
+    to: Delete/Drain
+    effects: [the kept Update operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-failedgangsurgedrain-teardown
+    from: Failed/GangSurgeDrain
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-failedgangsurgedrain-teardown-deadline
+    from: Failed/GangSurgeDrain
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
+
+  # --- Failed/GangSurgeTarget (planned) ----------------------------------
+  - id: T-failedgangtarget-ready
+    from: Failed/GangSurgeTarget
+    event: pod.deleted
+    variant: source
+    guard: the paired source is on the SurgeDrain step with its pods gone and this marker still matches the claim for the pinned revision, which reads revision and step and never phase
+    to: Ready
+    effects: [Phase Ready on the pinned revision with the marker operation cleared, that revision's RetryBlock pruned]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+  - id: T-failedgangtarget-cleanup-failed
+    from: Failed/GangSurgeTarget
+    event: timer.operationDeadline
+    guard: the paired source failed on this surge before the replacement was promoted, so its abandon claims the cleanup marker
+    to: Failed/GangSurgeTargetCleanup
+    effects: [the marker's step advanced to the cleanup claim so it keeps ownership of its pods and PodGroup, the phase left as it is]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+  - id: T-failedgangtarget-cleanup-superseded
+    from: Failed/GangSurgeTarget
+    event: spec.revision
+    guard: the source's pinned surge revision is superseded while the replacement gang is incomplete or not runtime-ready
+    to: Failed/GangSurgeTargetCleanup
+    effects: [the marker's step advanced to the cleanup claim; no RetryBlock is recorded because a spec change is not a failure]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+  - id: T-failedgangtarget-scaledown
+    from: Failed/GangSurgeTarget
+    event: spec.replicasDown
+    guard: the paired source has failed as well, so the pair pins nothing and is ranked as one unit behind the serving rows, and that unit falls beyond the new desired set
+    to: Delete/Drain
+    effects: [the marker operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-failedgangtarget-teardown
+    from: Failed/GangSurgeTarget
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-failedgangtarget-teardown-deadline
+    from: Failed/GangSurgeTarget
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
+
+  # --- Failed/GangSurgeTargetCleanup (planned) ---------------------------
+  - id: T-failedgangcleanup-done
+    from: Failed/GangSurgeTargetCleanup
+    event: pod.deleted
+    variant: target
+    guard: every pod of the retired replacement is gone and its instance resources are finalized
+    to: Empty
+    effects: [the marker row removed and the source reset to Ready in one transaction, expectations forgotten, the RetryBlock recorded when the retirement was a failure]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+  - id: T-failedgangcleanup-scaledown
+    from: Failed/GangSurgeTargetCleanup
+    event: spec.replicasDown
+    guard: the paired source has failed as well, so the pair pins nothing and is ranked as one unit behind the serving rows, and that unit falls beyond the new desired set; an unreferenced marker is an extra on its own
+    to: Delete/Drain
+    effects: [the cleanup claim replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-failedgangcleanup-teardown
+    from: Failed/GangSurgeTargetCleanup
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-failedgangcleanup-teardown-deadline
+    from: Failed/GangSurgeTargetCleanup
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
+
+  # --- Failed/Create (planned) -------------------------------------------
+  - id: T-failedcreate-member-lost
+    from: Failed/Create
+    event: pod.deleted
+    variant: source
+    guard: policy RecreateInstanceOnPodRestart, the Create step committed, at least one member alive but fewer than expected once terminal-phase pods are excluded, no RetryBlock denying the rebuild, and the attempt's pinned revision still the roll target
+    to: Restart/Drain
+    effects: [Incarnation bumped, Phase Restarting with the gang-member-lost reason recorded and the pinned revision carried onto the rebuild, the survivors drained]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-failedcreate-corrective
+    from: Failed/Create
+    event: spec.revision
+    guard: the pods carry a revision other than the roll target and no RetryBlock denies the target; an Instance that never ran a revision has no serving source for a surge to keep, so it re-enters as a recreate under every strategy
+    to: Update/Drain
+    effects: [Incarnation bumped, Phase Updating with the Drain step at the corrective revision, the kept Create operation replaced]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
+  - id: T-failedcreate-adopt
+    from: Failed/Create
+    event: pod.containersReady
+    variant: source
+    guard: RunningRevision is empty, every pod carries the target revision's hash and is ContainersReady, so the update trigger selects the AdoptRevision backfill instead of a roll
+    to: Ready
+    effects: [Phase Ready on the target revision with the operation cleared and that revision's RetryBlock pruned]
+    decided_in: pkg/controller/v1beta1/workload/ops/update.go
+  - id: T-failedcreate-reset
+    from: Failed/Create
+    event: spec.resetInstances
+    guard: the operator named this Instance, or all, and no pod of it is still in the serving rotation
+    to: Failed
+    effects: [every live-listed pod deleted with the expectation recorded before each delete, the kept Create operation cleared through the MutateInstance seam, Phase and LastFailure untouched so the row is left in the fresh-start shape the Create pass rebuilds, InstancesReset event, the annotation consumed only after those effects commit]
+    decided_in: pkg/controller/v1beta1/inferencereplica/reset_instances.go
+    lane: adapter
+    why: the operator reset mailbox is the spec.resetInstances annotation, which the adapter consumes outside workload.Reconcile
+  - id: T-failedcreate-scaledown
+    from: Failed/Create
+    event: spec.replicasDown
+    guard: an in-flight Create pins nothing in the plan, so the index falls out when replicas drop and the scale-down wave admits it
+    to: Delete/Drain
+    effects: [the kept Create operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-failedcreate-teardown
+    from: Failed/Create
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-failedcreate-teardown-deadline
+    from: Failed/Create
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
+
+  # --- Failed/Drain (planned) --------------------------------------------
+  - id: T-faileddrain-redrive
+    from: Failed/Drain
+    event: ctrl.resync
+    guard: the row still claims the update verb and its running revision is not the roll target, so the update pass selects it as a continuation, exempt from the budget, the ladder and the gate
+    to: Update/Drain
+    effects: [Incarnation bumped and a fresh recreate attempt with its own identity and deadline restamped over the kept one, so the pods of the ended attempt are the set the drain phase replaces]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
+  - id: T-faileddrain-scaledown
+    from: Failed/Drain
+    event: spec.replicasDown
+    guard: a recreate roll pins nothing in the plan, so the index falls out when replicas drop and the scale-down wave admits it
+    to: Delete/Drain
+    effects: [the kept Update operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-faileddrain-teardown
+    from: Failed/Drain
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-faileddrain-teardown-deadline
+    from: Failed/Drain
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
+
+  # --- Failed/MigrateTarget (planned) ------------------------------------
+  - id: T-failedmigratetarget-expired
+    from: Failed/MigrateTarget
+    event: timer.migrationDeadline
+    guard: the migration record passed its deadline, so the pin is dropped and the unpinned index leaves the plan
+    to: Delete/Drain
+    effects: [Migrate pin cleared with the Failed phase kept, the source restored through the record, the index becomes a scale-down extra and the next wave commits Phase Deleting with a Delete Drain operation]
+    decided_in: pkg/controller/v1beta1/workload/ops/migrate_expire.go
+  - id: T-failedmigratetarget-terminal
+    from: Failed/MigrateTarget
+    event: pod.waiting
+    guard: a pod of this surge holds a terminal waiting reason past the stuck-pod grace, which the record consumes as early failure evidence
+    to: Delete/Drain
+    effects: [the record closed Failed and the pin cleared, so the unpinned index leaves the plan and the scale-down pipeline tears it down; the paired source is restored through the record rather than stamped here]
+    decided_in: pkg/controller/v1beta1/workload/ops/migrate.go
+  - id: T-failedmigratetarget-teardown
+    from: Failed/MigrateTarget
+    event: spec.teardown
+    guard: teardown deletes a mid-migration pair like everything else, so the migration exclusion does not apply
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-failedmigratetarget-teardown-deadline
+    from: Failed/MigrateTarget
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
+
+  # --- Creating (planned) ------------------------------------------------
+  - id: T-creating-reap
+    from: Creating
+    event: ctrl.resync
+    guard: the index is beyond the desired set and no pin keeps it in the plan, so the scale-down scan reads it as an extra and the wave admits it
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction, the leftover pods drained and deleted by the wave]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-creating-teardown
+    from: Creating
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-creating-teardown-deadline
+    from: Creating
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile

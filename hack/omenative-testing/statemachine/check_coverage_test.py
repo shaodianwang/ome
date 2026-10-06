@@ -159,6 +159,22 @@ class CheckArrowsTest(unittest.TestCase):
         )
         self.assertIn("workload-lane", problems[0])
 
+    def test_adapter_lane_arrow_from_a_planned_state_owes_no_test(self):
+        transitions = [
+            {"id": "T-a", "lane": "adapter", "from": "Planned"},
+            {"id": "T-b", "lane": "adapter", "from": "Bound"},
+        ]
+        problems = check_coverage.check_arrows(transitions, [], planned_states=["Planned"])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("T-b", problems[0])
+
+    def test_planned_state_arrow_may_still_be_tagged(self):
+        transitions = [{"id": "T-a", "lane": "adapter", "from": "Planned"}]
+        problems = check_coverage.check_arrows(
+            transitions, [("pkg/x_test.go", 3, "T-a")], planned_states=["Planned"]
+        )
+        self.assertEqual(problems, [])
+
 
 class ScanTest(unittest.TestCase):
     def test_go_test_funcs_reads_pkg_and_tests(self):

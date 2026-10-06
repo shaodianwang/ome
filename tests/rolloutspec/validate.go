@@ -10,13 +10,15 @@ import (
 
 // Validate returns every well-formedness violation in m: closed
 // vocabularies, dangling references, decided_in paths relative to
-// repoRoot, the frozen contract (no DECIDE cell, and every decided cell
-// that is not n/a names at least one check), the transition lane
-// vocabulary and the why an adapter-lane edge owes, declared invariant ids, the
-// pointer-field spellings that are
-// present-but-empty rather than absent, and that Expand succeeds. It
-// collects every violation rather than stopping at the first, so a table
-// can be fixed in one pass instead of one error at a time.
+// repoRoot, the frozen contract (no DECIDE cell outside a planned state,
+// and every decided cell that is not n/a names at least one check), the
+// planned-state contract (an arrow from a state the engine resolves never
+// lands in a planned one), the transition lane vocabulary and the why an
+// adapter-lane edge owes, declared invariant ids, the pointer-field
+// spellings that are present-but-empty rather than absent, and that
+// Expand succeeds. It collects every violation rather than stopping at
+// the first, so a table can be fixed in one pass instead of one error at
+// a time.
 func Validate(m *Machine, repoRoot string) []error {
 	var errs []error
 	fail := func(format string, args ...any) {
@@ -120,6 +122,12 @@ func Validate(m *Machine, repoRoot string) []error {
 			fail("transition %s: unknown variant %q", t.ID, t.Variant)
 		}
 		pathExists("transition "+t.ID, t.DecidedIn)
+		// The engine's own arrows reach only states it resolves; a planned
+		// state is entered through the parent arrow it refines, so only
+		// another planned state may name it as to.
+		if from, to := states[t.From], states[t.To]; from != nil && to != nil && to.Planned && !from.Planned {
+			fail("transition %s: lands in planned state %q from %q, which the engine resolves", t.ID, t.To, t.From)
+		}
 		if _, ok := lanes[t.LaneOf()]; !ok {
 			fail("transition %s: lane %q is not workload|adapter", t.ID, t.Lane)
 		}
@@ -201,7 +209,9 @@ func Validate(m *Machine, repoRoot string) []error {
 		if c.Status == StatusDecided && c.Outcome != OutcomeNA && c.Placement == "" {
 			fail("%s: decided cell requires placement", id)
 		}
-		if m.Frozen && c.Outcome == OutcomeDecide {
+		// A planned state is declared ahead of the engine, so its open
+		// questions are allowed to stand on a frozen machine.
+		if m.Frozen && c.Outcome == OutcomeDecide && (states[c.State] == nil || !states[c.State].Planned) {
 			fail("%s: frozen machine has DECIDE cell", id)
 		}
 		if m.Frozen && c.Status == StatusDecided && c.Outcome != OutcomeNA && !hasCoverage(c.Coverage) {

@@ -54,6 +54,12 @@ type State struct {
 	DecidedIn     string            `json:"decided_in"`
 	NotApplicable map[string]string `json:"not_applicable,omitempty"`
 	Note          string            `json:"note,omitempty"`
+	// Planned marks a state the machine declares ahead of the engine: a
+	// persisted shape the code writes and reads apart but the ownership
+	// table does not answer for. A frozen machine admits DECIDE cells on
+	// it, no arrow from a state the engine resolves may land in it, and
+	// the owner-table binding skips it while the marker stands.
+	Planned bool `json:"planned,omitempty"`
 }
 
 // Event is one column family of the grid. Variants split the column

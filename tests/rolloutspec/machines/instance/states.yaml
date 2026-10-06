@@ -342,3 +342,186 @@ states:
       pod.runningNotReady[target]: no replacement generation exists outside a surge or migration pair
       endpoint.rotationIn[target]: no replacement generation exists outside a surge or migration pair
       endpoint.rotationOut[target]: no replacement generation exists outside a surge or migration pair
+  # Planned states. Each is a persisted (Phase, Operation.Type, Operation.Step)
+  # the engine writes and reads apart, and resolves to its parent state until
+  # the ownership table answers for it; the parent's arrows into the shape
+  # stay on the parent, and the arrows below are the shape's own exits.
+  - id: Failed/Parked
+    phase: Failed
+    op: {type: Update, step: Parked}
+    applies: {strategies: [RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
+    planned: true
+    decided_in: pkg/controller/v1beta1/workload/escalation/parked.go
+    note: a recreate or in-place attempt parked after its disposition, read while its own pod set is down - gone, parked in the kubelet's back-off, or unready past the stuck-pod grace. The same row serving is Update/Parked, and the engine resolves this shape to Failed. Nobody owns it, it claims no verb and holds no budget slot; its Operation.Waiting names the wait the next attempt stands behind and its deadline is parked. The roll re-opens it as a fresh start when that wait ends, the Create pass does once no pod is left, a lost gang member re-arms the repair over it, and the reset mailbox clears it
+    not_applicable:
+      timer.repairRetry: a parked repair's re-arm is measured from a Restart parking at Failed, and this row holds a parked roll attempt, not a repair
+      timer.migrationDeadline: no operation pins this index to a migration record
+      pod.ready[target]: no replacement generation exists outside a surge or migration pair
+      pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOn[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOff[target]: no replacement generation exists outside a surge or migration pair
+      pod.deleted[target]: no replacement generation exists outside a surge or migration pair
+      pod.terminating[target]: no replacement generation exists outside a surge or migration pair
+      pod.unschedulable[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersNotReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.runningNotReady[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationIn[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationOut[target]: no replacement generation exists outside a surge or migration pair
+  - id: Failed/Repair
+    phase: Failed
+    op: {type: Restart, step: Drain}
+    applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
+    planned: true
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+    note: a repair parked at Failed - a Restart whose deadline elapsed, whose rebuilt pod wedged past the stuck-pod grace, or whose gang name belongs to another controller - with the spent operation kept so its RetryCount indexes the operator's retry ladder and an operator sees what was in flight. The engine resolves this shape to Failed. No pass owns it and it holds no budget slot, but the restart pass keeps its exits - the rebuilt set coming up resumes the promote, a set that stays wedged is rebuilt again on the ladder, a lost member re-arms the gang at once, and a set entirely gone closes the operation so the Create pass rebuilds the row as a fresh start - and the roll replaces it outright once its revision is not the target
+    not_applicable:
+      timer.migrationDeadline: no operation pins this index to a migration record
+      pod.ready[target]: no replacement generation exists outside a surge or migration pair
+      pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOn[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOff[target]: no replacement generation exists outside a surge or migration pair
+      pod.deleted[target]: no replacement generation exists outside a surge or migration pair
+      pod.terminating[target]: no replacement generation exists outside a surge or migration pair
+      pod.unschedulable[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersNotReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.runningNotReady[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationIn[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationOut[target]: no replacement generation exists outside a surge or migration pair
+  - id: Failed/GangSurge
+    phase: Failed
+    op: {type: Update, step: Surge}
+    applies: {strategies: [SurgeThenDrain], shape: [gang]}
+    planned: true
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+    note: a gang-surge source failed before its replacement was promoted, the operation kept with its SurgeIndex so the abandon path can consume it. The engine resolves this shape to Failed. The row still claims the update verb, so the update pass re-drives it as a continuation - under a pause too, never budget-charged or gated - and the abandon retires the replacement, charges the pinned revision's ladder by the recorded cause, and resets the source to Ready on its running revision; the source's own pods keep serving throughout. A failed pair pins nothing in the plan and competes for the steady budget as one unit
+    not_applicable:
+      timer.repairRetry: a parked repair's re-arm is measured from a Restart parking at Failed, and this row holds no parked repair
+      timer.migrationDeadline: no operation pins this index to a migration record
+  - id: Failed/GangSurgeDrain
+    phase: Failed
+    op: {type: Update, step: SurgeDrain}
+    applies: {strategies: [SurgeThenDrain], shape: [gang]}
+    planned: true
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+    note: a gang-surge source failed after its replacement cleared the promote bar and the drain claim landed - the deadline elapsed or a pod wedged while the source left rotation. The engine resolves this shape to Failed. The abandon path is reachable only from the Surge step, so the continuation finishes the handoff instead - source drained and deleted, replacement promoted on the pinned revision, source row removed - while a replacement that dies first leaves the row with no exit of its own
+    not_applicable:
+      timer.repairRetry: a parked repair's re-arm is measured from a Restart parking at Failed, and this row holds no parked repair
+      timer.migrationDeadline: no operation pins this index to a migration record
+  - id: Failed/GangSurgeTarget
+    phase: Failed
+    op: {type: Update, step: GangSurgeTarget}
+    applies: {strategies: [SurgeThenDrain], shape: [gang]}
+    planned: true
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+    note: the replacement gang's marker stamped Failed by the escalation pass - its own deadline, a wedged member past the stuck-pod grace, a foreign PodGroup name or the scheduler grace - with the marker operation kept. The engine resolves this shape to Failed. The source's gang surge keeps driving it on claim predicates that match revision and step and never phase, so it is still built, promoted or retired exactly as the live marker is; the phase is diagnostic. "target" is a pod of this replacement gang, "source" a pod of the paired source gang
+    not_applicable:
+      timer.repairRetry: a parked repair's re-arm is measured from a Restart parking at Failed, and this row holds no parked repair
+      timer.migrationDeadline: no operation pins this index to a migration record
+      spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, and a marker is never an attempt the gate admits
+      timer.retryAt: the retry gate is consulted before an attempt starts, never during one
+      gate.allow: the update trigger skips a gang surge-target marker, so the coordination gate is never consulted for it
+      gate.deny: the update trigger skips a gang surge-target marker, so the coordination gate is never consulted for it
+  - id: Failed/GangSurgeTargetCleanup
+    phase: Failed
+    op: {type: Update, step: GangSurgeTargetCleanup}
+    applies: {strategies: [SurgeThenDrain], shape: [gang]}
+    planned: true
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+    note: a retired replacement gang's cleanup marker stamped Failed by the escalation pass - its deadline or a wedged member - with the cleanup claim kept. The engine resolves this shape to Failed. The retirement reads the claim and never the phase, so it finishes as the live cleanup marker does, the row removed together with the source's reset once every retired pod is gone
+    not_applicable:
+      timer.repairRetry: a parked repair's re-arm is measured from a Restart parking at Failed, and this row holds no parked repair
+      timer.migrationDeadline: no operation pins this index to a migration record
+      spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, and a retired marker is never an attempt the gate admits
+      timer.retryAt: the retry gate is consulted before an attempt starts, never during one
+      timer.minReady: no pod of a retired replacement is read for readiness
+      gate.allow: the update trigger skips a gang surge-target marker, so the coordination gate is never consulted for it
+      gate.deny: the update trigger skips a gang surge-target marker, so the coordination gate is never consulted for it
+  - id: Failed/Create
+    phase: Failed
+    op: {type: Create, step: CreatePods}
+    applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [gang]}
+    planned: true
+    decided_in: pkg/controller/v1beta1/workload/escalation/gang.go
+    note: a Create attempt ended by the gang verdict - its PodGroup name belongs to another controller - with the committed Create operation kept, since the verdict's stamp keeps every operation; every other way a Create attempt ends clears it. The engine resolves this shape to Failed. The row claims the create verb, so it is no fresh start for the ladder to gate, the reset mailbox owns it, a lost member re-arms the gang under RecreateInstanceOnPodRestart, and a corrective revision rolls it as an Instance that never ran a revision; what the Create pass does with it once the name is free is undecided
+    not_applicable:
+      timer.repairRetry: a parked repair's re-arm is measured from a Restart parking at Failed, and this row holds no parked repair
+      timer.migrationDeadline: no operation pins this index to a migration record
+      pod.ready[target]: no replacement generation exists outside a surge or migration pair
+      pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOn[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOff[target]: no replacement generation exists outside a surge or migration pair
+      pod.deleted[target]: no replacement generation exists outside a surge or migration pair
+      pod.terminating[target]: no replacement generation exists outside a surge or migration pair
+      pod.unschedulable[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersNotReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.runningNotReady[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationIn[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationOut[target]: no replacement generation exists outside a surge or migration pair
+  - id: Failed/Drain
+    phase: Failed
+    op: {type: Update, step: Drain}
+    applies: {strategies: [RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [gang]}
+    planned: true
+    decided_in: pkg/controller/v1beta1/workload/escalation/gang.go
+    note: a recreate attempt on a gang ended by the gang verdict - its PodGroup name belongs to another controller - with the Update operation kept rather than parked, since the verdict's stamp keeps every operation. The engine resolves this shape to Failed. The row still claims the update verb, so the update pass re-drives it as a continuation on the next pass, restamping a fresh recreate over it with the Incarnation bumped; nothing parks it for the name to free
+    not_applicable:
+      timer.repairRetry: a parked repair's re-arm is measured from a Restart parking at Failed, and this row holds no parked repair
+      timer.migrationDeadline: no operation pins this index to a migration record
+      pod.ready[target]: no replacement generation exists outside a surge or migration pair
+      pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOn[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOff[target]: no replacement generation exists outside a surge or migration pair
+      pod.deleted[target]: no replacement generation exists outside a surge or migration pair
+      pod.terminating[target]: no replacement generation exists outside a surge or migration pair
+      pod.unschedulable[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersNotReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.runningNotReady[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationIn[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationOut[target]: no replacement generation exists outside a surge or migration pair
+  - id: Failed/MigrateTarget
+    phase: Failed
+    op: {type: Migrate, step: CreateSurge}
+    applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
+    planned: true
+    decided_in: pkg/controller/v1beta1/workload/escalation/scheduler.go
+    note: a migration surge row failed by the scheduler grace - its own pod unplaceable past lifecycle.unschedulableGracePeriod - with the Migrate pin kept, the one escalation that reaches a Migrate-pinned row. The engine resolves this shape to Failed. The migration record stays the timeout authority and the index stays pinned in the plan while the pin stands, but the pair write that promotes a surge requires it to read Creating, so the move can only end through the record - its deadline, or terminal evidence on the surge pods - which clears the pin and lets the scale-down pipeline tear the index down while the source is restored through the record
+    not_applicable:
+      timer.repairRetry: a parked repair's re-arm is measured from a Restart parking at Failed, and this row holds no parked repair
+      spec.releaseHeldRevision: the retry gate governs revision rollouts, not placement moves
+      timer.retryAt: the retry gate governs revision rollouts, not placement moves
+      gate.allow: the update trigger skips a Migrate-owned row, so the coordination gate is never consulted for it
+      gate.deny: the update trigger skips a Migrate-owned row, so the coordination gate is never consulted for it
+  - id: Creating
+    phase: Creating
+    applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
+    planned: true
+    decided_in: pkg/controller/v1beta1/workload/ops/migrate_expire.go
+    note: a row left in phase Creating with no operation - a migration surge whose pin the record's expiry or terminal evidence cleared while its status slot stayed, or a status write applied in part. The engine resolves this shape to no state at all, so no pass owns it; the Create pass reads it as a slot of its own. Beyond the desired set the unpinned index leaves the plan and the scale-down pipeline tears it down; inside the desired set what the Create pass does with its leftover pods is undecided
+    not_applicable:
+      timer.repairRetry: a parked repair's re-arm is measured from a Restart parking at Failed, and this row holds no parked repair
+      timer.operationDeadline: no operation is in flight
+      timer.migrationDeadline: no operation pins this index to a migration record
+      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
+      gate.allow: the update trigger declines below Ready, so the coordination gate is never consulted for this row
+      gate.deny[Plan]: the update trigger declines below Ready, so the coordination gate is never consulted for this row
+      gate.deny[Pairing]: the update trigger declines below Ready, so the coordination gate is never consulted for this row
+      gate.deny[Ratio]: the update trigger declines below Ready, so the coordination gate is never consulted for this row
+      gate.deny[Sequential]: the update trigger declines below Ready, so the coordination gate is never consulted for this row
+      gate.deny[Budget]: the update trigger declines below Ready, so the coordination gate is never consulted for this row
+      gate.deny[RetryBlock]: a row that is no fresh start is not asked the ladder's one-at-a-time question
+      pod.ready[target]: no replacement generation exists outside a surge or migration pair
+      pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOn[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOff[target]: no replacement generation exists outside a surge or migration pair
+      pod.deleted[target]: no replacement generation exists outside a surge or migration pair
+      pod.terminating[target]: no replacement generation exists outside a surge or migration pair
+      pod.unschedulable[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersNotReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.runningNotReady[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationIn[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationOut[target]: no replacement generation exists outside a surge or migration pair

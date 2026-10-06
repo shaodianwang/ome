@@ -204,6 +204,33 @@ func TestValidateViolations(t *testing.T) {
 	}
 }
 
+// A planned state is declared ahead of the engine, so a frozen machine
+// keeps its DECIDE cells there; the "frozen machine with DECIDE" case
+// above holds the rule for a state the engine resolves. The fixture's two
+// states form a cycle, so both are marked planned to keep every arrow
+// legal.
+func TestValidateFrozenAllowsDecideOnPlannedState(t *testing.T) {
+	m := fixture(t)
+	m.States[0].Planned, m.States[1].Planned = true, true
+	m.Cells[3].Outcome = OutcomeDecide
+	assert.Empty(t, Validate(m, repoRoot(t)))
+}
+
+// Only another planned state may name a planned state as its to: an
+// arrow the engine takes lands in a state the engine resolves.
+func TestValidatePlannedStateIsEnteredOnlyFromPlannedStates(t *testing.T) {
+	m := fixture(t)
+	m.States[1].Planned = true
+	got := joined(Validate(m, repoRoot(t)))
+	assert.Contains(t, got, `transition idle-to-working: lands in planned state "Working" from "Idle", which the engine resolves`)
+	assert.NotContains(t, got, "transition working-to-idle")
+
+	m = fixture(t)
+	m.States[0].Planned = true
+	m.States[1].Planned = true
+	assert.Empty(t, Validate(m, repoRoot(t)))
+}
+
 func TestValidateNonFrozenAllowsDecide(t *testing.T) {
 	m := fixture(t)
 	m.Frozen = false
@@ -263,14 +290,15 @@ func TestEmbeddedMachinesValidate(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, name, m.Machine)
 			assert.Empty(t, joined(Validate(m, root)))
+			planned := plannedStates(m)
 			decide := 0
 			for _, c := range m.Cells {
-				if c.Outcome == OutcomeDecide {
+				if c.Outcome == OutcomeDecide && !planned[c.State] {
 					decide++
 				}
 			}
 			if m.Frozen {
-				assert.Zero(t, decide, "a frozen machine carries no DECIDE cell")
+				assert.Zero(t, decide, "a frozen machine carries no DECIDE cell outside a planned state")
 			}
 			t.Logf("%s: frozen=%v states=%d events=%d transitions=%d cells=%d decide=%d",
 				name, m.Frozen, len(m.States), len(m.Events), len(m.Transitions), len(m.Cells), decide)

@@ -34,11 +34,27 @@ func rowForState(s State) *types.InstanceStatus {
 	return row
 }
 
+// plannedStates is the set of states the machine declares ahead of the
+// engine. The table does not answer for them, so the bindings below
+// leave them out and only check that the marker has not gone stale.
+func plannedStates(m *Machine) map[string]bool {
+	planned := map[string]bool{}
+	for _, s := range m.States {
+		if s.Planned {
+			planned[s.ID] = true
+		}
+	}
+	return planned
+}
+
 // TestOwnerTableMatchesInstanceMachine holds the engine's ownership table
 // and the Instance machine to the same vocabulary: every state the machine
 // declares is a state the table answers for and resolves to from the
 // state's own (phase, operation), every event the table names is an event
 // the machine declares, and neither side carries an id the other does not.
+// A planned state is the one exception: the table must not answer for it,
+// and its own (phase, operation) must still resolve elsewhere, or the
+// marker is stale and the state has to be bound like the rest.
 func TestOwnerTableMatchesInstanceMachine(t *testing.T) {
 	m, err := Load("instance")
 	require.NoError(t, err)
@@ -47,15 +63,22 @@ func TestOwnerTableMatchesInstanceMachine(t *testing.T) {
 	for _, s := range m.States {
 		declared[s.ID] = s
 	}
+	planned := plannedStates(m)
 	answered := map[string]bool{}
 	for _, state := range types.OwnershipStates() {
 		answered[string(state)] = true
 		s, ok := declared[string(state)]
 		require.Truef(t, ok, "ownership table names state %q, which the instance machine does not declare", state)
+		require.Falsef(t, s.Planned, "ownership table answers for state %q, which the instance machine still marks planned", state)
 		require.Equalf(t, state, types.StateOf(rowForState(s)),
 			"state %q: the machine's own phase and operation do not resolve to it", state)
 	}
-	for id := range declared {
+	for id, s := range declared {
+		if planned[id] {
+			require.NotEqualf(t, types.RowState(id), types.StateOf(rowForState(s)),
+				"planned state %q already resolves through StateOf; drop its planned marker and bind it", id)
+			continue
+		}
 		require.Truef(t, answered[id], "instance machine declares state %q, which the ownership table does not answer for", id)
 	}
 
@@ -93,10 +116,11 @@ func TestInterruptibleMatchesBeforeWindow(t *testing.T) {
 		event, variant := splitEvent(ev)
 		events[event+"\x00"+variant] = ev
 	}
+	planned := plannedStates(m)
 
 	checked := 0
 	for _, gc := range grid.Cells {
-		if gc.Window != WindowBefore {
+		if gc.Window != WindowBefore || planned[gc.State] {
 			continue
 		}
 		ev, ok := events[gc.Event+"\x00"+gc.Variant]

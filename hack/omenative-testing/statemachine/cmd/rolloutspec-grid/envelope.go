@@ -25,6 +25,9 @@ type stateOut struct {
 	Phase     string `json:"phase"`
 	DecidedIn string `json:"decidedIn"`
 	Note      string `json:"note"`
+	// Planned marks a state declared ahead of the engine; the coverage
+	// checker owes its adapter-lane arrows no tagged test.
+	Planned bool `json:"planned"`
 }
 
 type eventOut struct {
@@ -111,7 +114,7 @@ func buildEnvelope(m *rolloutspec.Machine, g *rolloutspec.Grid) envelope {
 		Grid:        make([]gridEntry, 0, len(g.Cells)),
 	}
 	for _, s := range m.States {
-		env.States = append(env.States, stateOut{ID: s.ID, Phase: s.Phase, DecidedIn: s.DecidedIn, Note: s.Note})
+		env.States = append(env.States, stateOut{ID: s.ID, Phase: s.Phase, DecidedIn: s.DecidedIn, Note: s.Note, Planned: s.Planned})
 	}
 	for _, e := range m.Events {
 		env.Events = append(env.Events, eventOut{ID: e.ID, Family: e.Family, Variants: nonNil(e.Variants), Description: e.Description})
