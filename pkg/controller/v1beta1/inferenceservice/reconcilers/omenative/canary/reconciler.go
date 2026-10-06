@@ -508,8 +508,7 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 		if stepGated(step) {
 			switch evaluateStep(ctx, in, cs, step) {
 			case decRollback:
-				cs.RolledBackRevisionHash = cs.CanaryRevisionHash
-				return reconcileRollback(in, cs), nil
+				return rollBackOnGateFailure(in, cs, partition), nil
 			case decFailed:
 				parkFailed(in.ISVC, in.Component, cs, v1beta1.CanaryFailureAnalysisStalled, in.Now)
 				return (&Result{Active: true, Partition: partition}).wake(in.ParkedRequeue), nil
@@ -565,8 +564,7 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 	if stepGated(step) {
 		switch evaluateStep(ctx, in, cs, step) {
 		case decRollback:
-			cs.RolledBackRevisionHash = cs.CanaryRevisionHash
-			return reconcileRollback(in, cs), nil
+			return rollBackOnGateFailure(in, cs, partition), nil
 		case decFailed:
 			parkFailed(in.ISVC, in.Component, cs, v1beta1.CanaryFailureAnalysisStalled, in.Now)
 			return (&Result{Active: true, Partition: partition}).wake(in.ParkedRequeue), nil

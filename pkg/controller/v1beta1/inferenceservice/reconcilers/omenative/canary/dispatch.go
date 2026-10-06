@@ -275,6 +275,13 @@ func Dispatch(ctx context.Context, d DispatchDeps) (Outcome, error) {
 		return Outcome{}, err
 	}
 
+	// With no ladder active on the unit the rolled-out records are not the
+	// memory of a traffic shift: each member's record follows the revision
+	// its InferenceReplica has settled on.
+	if !res.Active {
+		recordSettledRevisions(d.ISVC, d.Group, primary, revisions, secondaryObserved, perRev, readyRev)
+	}
+
 	// Rollback signal: when the executor is rolling back, point EVERY group
 	// Component's IR at its own stable ControllerRevision so it rolls every
 	// Instance back to stable; otherwise clear the signal. (Reconcile shifted

@@ -102,10 +102,13 @@ REVISION_BOUND_FAULTS = [
     "crash at start", "crash after Ready", "image pull", "config missing",
     "readiness never passes", "metric breach", "sibling broken",
 ]
+# A Component's stable identity aged back to its previous rolled-out revision
+# in the status records a rollback reads (fault=agerecord).
+STALE_RECORD_FAULT = "stale revision record"
 UNBOUND_FAULTS = [
     "pod deleted by hand", "gang member lost", "pod Pending", "node", "evicted or preempted",
     "controller restart", "webhook unavailable", "apiserver conflict", "quota",
-    "analysis source unusable",
+    "analysis source unusable", STALE_RECORD_FAULT,
 ]
 FAULT_FORMS = ["one-shot", "persistent"]
 FAULT_SIDES = ["running", "new"]
@@ -300,6 +303,8 @@ def _fault(v):
         return param in ("new", "idle") or _hook(param)
     if kind == "source":
         return param == "idle" or _hook(param)   # the analysis source goes before the push or at a hook
+    if kind == "agerecord":
+        return param == "idle" or _hook(param)   # a stable identity aged before the push or at a hook
     if kind == "cordon":
         return param in ("source", "all")   # the source node, or every node (a roll with no room)
     if kind == "configkey":
@@ -370,6 +375,8 @@ HEADER_CHECKS = {
     "order_soft": _flag,
     "fault": _fault, "during": _during, "during2": _hook, "edit": _edit, "lift": _lift,
     "inst": lambda v: _int_list(v) or v == "last", "errorrate": _number, "timeout": _duration, "cell": _cells, "bump": _members,
+    # preroll=<members>: rolled once, through their own ladder, before the case's story
+    "preroll": _members,
     "img": _text, "rt": _text, "reason": _text, "proto": _text, "proto2": _text, "pairto": _text,
     "inv_on": _opt_in_invariants,
 }
@@ -749,6 +756,9 @@ def classify_faults(h, mode, pods, strategy, verbs):
                        str(h.get("victimcomp", "engine"))))
     elif kind == "source":
         faults.append(("analysis source unusable", "one-shot" if lifted else "persistent", "-", str(h.get("form", ""))))
+    elif kind == "agerecord":
+        # the victim's stable identity names its previous rolled-out revision until a writer levels it
+        faults.append((STALE_RECORD_FAULT, "persistent", "-", str(h.get("victimcomp", "engine"))))
     elif kind == "configkey":
         # the running revision's key removed at idle (missing), or the pushed revision reading a key the ConfigMap lacks (new)
         faults.append(("config missing", "one-shot" if lifted else "persistent", "new" if param == "new" else "running",

@@ -26,6 +26,12 @@ const (
 	// no retained ControllerRevision for the stable revision and parks Failed
 	// instead of reporting a revert that cannot happen.
 	EventReasonCanaryStableRevisionMissing = "CanaryStableRevisionMissing"
+	// EventReasonCanaryStableRevisionEmpty is recorded when a rollback's
+	// target, a member's stable revision, runs no live Instance while the
+	// ladder holds a floor for it: a rollback the controller decided parks
+	// instead, and one the operator requested proceeds. The event names the
+	// revision and the Component.
+	EventReasonCanaryStableRevisionEmpty = "CanaryStableRevisionEmpty"
 	// EventReasonCanaryPodCrashed is recorded when a canary pod keeps dying
 	// after its Instance was serving, a crash loop rather than a single
 	// restart, and the ladder parks at its step, naming the pod.

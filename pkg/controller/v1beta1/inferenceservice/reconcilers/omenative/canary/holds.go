@@ -165,7 +165,9 @@ func applyHolds(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanaryStatu
 			}
 		} else if isRollbackRequested(in.ISVC) && int(cs.CurrentStep) < steps {
 			// A rollback is the operator's decision about the canary, parked
-			// or not: it ends a Failed park and drains the rejected revision.
+			// or not: it ends a Failed park and drains the rejected revision,
+			// toward an empty stable revision too, which is said out loud.
+			warnEmptyRollbackTargets(in, cs)
 			cs.RolledBackRevisionHash = cs.CanaryRevisionHash
 			cs.Failed = nil
 			recordRollback(in.ISVC, in.Component, "manual")

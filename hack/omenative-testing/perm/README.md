@@ -580,6 +580,20 @@ such as the recovery half of a podkill, carries both ids.
   "Fault cases" section while the ladder is at that state; the window
   verdict is read beside the ladder's, with the step index never going back
   (see "A window at every hook").
+- **A stable identity aged.** `fault=agerecord:idle|canary-<state>[@step]
+  victimcomp=<member>` writes, through the status subresource, the member's
+  stable identity back to the revision it rolled out before the current one
+  (its `previousRolledoutRevision`; a member that never rolled fails the
+  apparatus, so pair it with `preroll=`), in every record a rollback reads
+  at that moment: the rolled-out record, and under a pinned run the run's
+  pinned stable for the member and its unit's canary stable identity. At
+  idle the verdict asks that the record is level with the revision the
+  member stands on again by the end (the dispatcher levels an idle member's
+  record with its replica) beside the idle-unit checks; at a hook, that the
+  gate's rollback parked the unit on the empty stable revision
+  (`StableRevisionMissing`, with a `CanaryStableRevisionEmpty` event naming
+  the member) and that no pod of the member was rebuilt onto the aged
+  revision.
 - **`terminal=Stable|RolledBack|Failed`** — the expected terminal phase when the
   derivation from `analysis=`/`rollback=` does not apply; `Failed` asserts the
   park (no canary traffic, not fully rolled, nothing rolled back).
@@ -605,6 +619,18 @@ such as the recovery half of a podkill, carries both ids.
   the Idle/runLost cell needs an invalid policy fixture instead.
   **`nophase=<Phase>`** — a phase that must not be observed once the hook has
   fired (with `prearm=`, once the bump lands).
+- **`preroll=<members>`** — history before the story: once the initial
+  fleet has settled and its run has closed, the named members are bumped to
+  a revision of their own and their ladders (which must advance on their
+  own) are waited for, until every Instance stands whole on the new
+  revision, the replica rows are steady and each unit reads the end of its
+  ladder; the run closes again and the watcher starts over from that fleet
+  (revisions, peaks, floors), so the case's own bump is judged on its own.
+  The service then carries a previous rolled-out revision whose
+  ControllerRevision is retained and a record naming the revision each
+  member stands on, which is what a case about those records needs
+  (`fault=agerecord`), and what makes a unit beside the driven one a
+  settled unit rather than a fresh one (`unit=`).
 
 Failure cases set `canary.readyTimeout: "90s"` in the group so the park lands
 inside the case budget.

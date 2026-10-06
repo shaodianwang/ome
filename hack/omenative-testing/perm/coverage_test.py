@@ -638,14 +638,21 @@ class LedgerTest(unittest.TestCase):
         # rows at steady state, the gate rows outside a canary, and the
         # one-shot new-side rows under a scale, a move and a delete, and the
         # repeating pod losses under a delete
-        self.assertEqual(raw - 6 - 72 - 72 - 96 - 540 - 80 - 312 - 136 - 12, len(product))
-        self.assertEqual(3528 - 1326, len(product))
+        self.assertEqual(raw - 6 - 72 - 72 - 96 - 564 - 80 - 312 - 136 - 12, len(product))
+        # 51 rows over 72 family-operation pairs. The two stale-revision-record
+        # rows (one-shot and persistent, no side) are 144 of them: 24 fall to
+        # the pause and freeze columns, the other 120 stand on the ten
+        # remaining operations of every family.
+        self.assertEqual(3672 - 1350, len(product))
+        self.assertEqual(120, sum(1 for _f, _o, row in product if row[0] == coverage.STALE_RECORD_FAULT))
 
     def test_the_triage_removals_name_their_sentences_and_counts(self):
         sentences = {
             "a pause or a freeze is a moment of another cell, not an operation a fault crosses: the cell is proved by "
             "pausing while the operation and the fault are in flight, or by the fault landing while paused, which the "
-            "ledger records as the `paused` timing and the operation+operation overlap of the fault's own cell": 540,
+            # every fault row but the kill family's own on six families and two
+            # columns; the two stale-revision-record rows are 24 of the 564
+            "ledger records as the `paused` timing and the operation+operation overlap of the fault's own cell": 564,
             "a fault on the new revision has no meaning under an operation that creates no new revision": 80,
             "a metric breach and an unusable analysis source are read by a canary step's analysis gate alone; no other "
             "operation reads the health metric or the analysis source": 312,
@@ -659,7 +666,9 @@ class LedgerTest(unittest.TestCase):
         removed = coverage.removed_by_reason()
         self.assertEqual(sentences, {reason: removed[reason] for reason in sentences})
         self.assertEqual([reason for reason, _p in coverage.EXCLUDED_CELLS][-5:], list(sentences))
-        self.assertEqual(1326, sum(removed.values()))
+        # 1326 for the rows of every other fault, and the 24 pause and freeze
+        # cells of the two stale-revision-record rows.
+        self.assertEqual(1350, sum(removed.values()))
         product = coverage.product_cells()
         # the pause and freeze columns keep only the kill family's own cells
         self.assertIn(("engine single", "pause", ("pod deleted by hand", "one-shot", "-")), product)

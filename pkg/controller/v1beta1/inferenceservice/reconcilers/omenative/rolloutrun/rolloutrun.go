@@ -335,10 +335,14 @@ func openRun(isvc *v1beta1.InferenceService, plan composedPlan, targets map[v1be
 	seen := map[v1beta1.ComponentType]bool{}
 	for i := range plan.groups {
 		g := &plan.groups[i].Group
+		// Adoption is a unit's: only the Components of the unit whose ladder
+		// the run adopts are mid-roll, so only they resolve their stable from
+		// the records; every other unit resolves as in a fresh run.
+		unitAdopting := adopting && unitLadderInFlight(isvc, g)
 		// Adoption does not reset the unit, so the pin must be the target the
 		// executor's hold is keyed on; the run's close then recognizes the
 		// rollback as its own.
-		reverting := adopting && g.Canary != nil && revertInFlight(isvc, g)
+		reverting := unitAdopting && revertInFlight(isvc, g)
 		for _, comp := range g.Components {
 			if seen[comp] {
 				continue
@@ -351,7 +355,7 @@ func openRun(isvc *v1beta1.InferenceService, plan composedPlan, targets map[v1be
 			}
 			stable, carried := stableOverrides[comp]
 			if !carried {
-				stable = componentStableRevision(isvc, comp, rev, t, adopting)
+				stable = componentStableRevision(isvc, comp, rev, t, unitAdopting)
 			}
 			if hold := rejected[comp]; hold != "" && rev == hold && stable != "" && !reverting {
 				rev = stable
@@ -399,17 +403,25 @@ func closeRun(isvc *v1beta1.InferenceService, active *v1beta1.RolloutRun, outcom
 	isvc.Status.Rollout.ActiveRun = nil
 }
 
-// componentStableRevision resolves the last promoted revision for a Component.
-// A distinct IR current revision is authoritative at run open. When the IR has
-// already advanced CurrentRevision to its target (a run adopted mid-flight),
-// the unit's canary record names the stable it shifts from, and the
-// Component's LatestRolledoutRevision names the revision that last owned its
-// traffic: the durable identity every OMENative writer keeps, coordination
-// for its Components and the canary executor at each completed promotion and
-// rollback for its members, so a secondary with no record of its own still
-// resolves.
+// componentStableRevision resolves the revision a Component falls back to in
+// the run: the InferenceReplica answers wherever it can, the status records
+// only where it cannot. A current revision off the pin is the stable. A
+// Component settled on the pin, its current revision the pinned one with no
+// Instance trailing, is where it stands: the run pins it at that revision as
+// both target and stable, so it sits the run out, and a record naming an
+// earlier revision (one no Instance may run any more) is never promoted to
+// its rollback target. The records answer for the Components of the unit
+// whose ladder the run adopts (adopting), mid-roll by definition, and for a
+// Component whose agreeing pair still trails Instances (a mid-roll revert): the unit's
+// canary record names the stable its ladder shifts traffic from, and
+// LatestRolledoutRevision names the revision that last owned the traffic,
+// kept by coordination for its Components and by the canary executor for
+// its members, so a secondary with no record of its own still resolves.
 func componentStableRevision(isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, pinnedRevision string, target targetPair, adopting bool) string {
 	if target.current != "" && target.current != pinnedRevision {
+		return target.current
+	}
+	if !adopting && target.current != "" && !target.straggling() {
 		return target.current
 	}
 	if cs := rollout.CanaryStatusFor(&isvc.Status, comp); comp == rollout.CanaryUnit(comp) && cs != nil && cs.StableRevisionHash != "" {

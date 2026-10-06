@@ -2637,6 +2637,28 @@ READINESS_FORMS = {"persist", "recover"}
 CANARY_STABLE_FAULTS = BREAK_FAULTS | {"configkey", READINESS_FAULT}
 # The pod faults a canary case may repeat at a grid state (repeat=<n>).
 CANARY_REPEAT_FAULTS = {"podkill", "evict"}
+# fault=agerecord:idle|canary-<state>: the victim Component's stable identity
+# aged back to the revision it rolled out before the current one, through the
+# status subresource, in every record a rollback reads at that moment: the
+# rolled-out record, and under a pinned run the run's pinned stable for the
+# Component and its unit's canary stable identity.
+RECORD_FAULT = "agerecord"
+# The park marker a rollback with no stable revision to return to carries,
+# and the event a rollback toward a stable revision with no live Instance
+# records, naming the member and the revision.
+STABLE_UNAVAILABLE_REASON = "StableRevisionMissing"
+STABLE_EMPTY_EVENT = "CanaryStableRevisionEmpty"
+# The revision value a preroll bumps the named members to; the case's own
+# bump uses TRIGGER_VAL, a re-bump its own value, so the three stay distinct.
+PREROLL_VAL = "pre"
+# The health a bump sets on the canary pods through Downward-API annotations
+# (the metrics runtime emits them): pass < the 0.05 threshold, breach >> it,
+# inconclusive emits no metric at all.
+ANALYSIS_HEALTH = {
+    "pass":         {"perm.test/error-rate": "0.01", "perm.test/emit": "true"},
+    "breach":       {"perm.test/error-rate": "0.9", "perm.test/emit": "true"},
+    "inconclusive": {"perm.test/error-rate": "0.0", "perm.test/emit": "false"},
+}
 READINESS_SWITCH_ENV = "TEST_UNREADY"
 READINESS_SWITCH_FILE = "/tmp/perm-unready"
 # How long a pod that stopped passing readiness may take to leave the Ready
@@ -2811,7 +2833,7 @@ KILL_VIAS = {"delete", "evict", "preempt"}
 FAULT_RETRY_S = 5.0
 # Hook faults fire once at a phase hook; armed faults are in place before the
 # trigger and have no hook to miss.
-HOOK_FAULTS = {"podkill", "ctrlrestart", "evict", "preempt"} | BREAK_FAULTS | GATE_FAULTS
+HOOK_FAULTS = {"podkill", "ctrlrestart", "evict", "preempt"} | BREAK_FAULTS | GATE_FAULTS | {RECORD_FAULT}
 ARMED_FAULTS = {"quota", "cordon", "taint"}
 # repeat=<n>: the fault is applied again each time what it took has come
 # back, n times in all, and then stops (the lift). A pod fault (a podkill,
@@ -5979,6 +6001,10 @@ def _fault_ok(v):
         return param in (CRASHLOOP_NEW, IDLE_FAULT_PHASE) or _canary_hook_ok(param)
     if kind == SOURCE_FAULT:
         return param == IDLE_FAULT_PHASE or _canary_hook_ok(param)
+    if kind == RECORD_FAULT:
+        # The stable identity aged on the idle service before the push, or
+        # at a canary grid state under the pinned run.
+        return param == IDLE_FAULT_PHASE or _canary_hook_ok(param)
     if kind == "configkey":
         # The running revision's key removed (missing; under a canary before
         # the push, idle, or at a grid state) or a pushed revision reading a
@@ -6058,7 +6084,7 @@ def _fault_before_push(f):
     (fault=<kind>:idle under a canary): the stable side is already broken,
     its metrics already breach or the gate's source is already unusable when
     the push lands, and no phase hook fires it."""
-    return bool(f) and f.get("kind") in CANARY_STABLE_FAULTS | GATE_FAULTS and f.get("param") == IDLE_FAULT_PHASE
+    return bool(f) and f.get("kind") in CANARY_STABLE_FAULTS | GATE_FAULTS | {RECORD_FAULT} and f.get("param") == IDLE_FAULT_PHASE
 
 
 def _canary_stable_hook_fault(f):
@@ -6126,6 +6152,112 @@ def _metric_on_new(f):
     """True when the pushed revision's own metrics breach (fault=metric:new):
     the bump sets the canary's health, so no hook fires it."""
     return bool(f) and f.get("kind") == METRIC_FAULT and f.get("param") == CRASHLOOP_NEW
+
+
+def _revision_name_hash(revision_name):
+    """The revision hash a per-revision Service name carries
+    (<service>-<component>-rev-<hash>); "" for any other name."""
+    _, sep, tail = str(revision_name or "").rpartition("-rev-")
+    return tail if sep else ""
+
+
+def _agerecord_ops(status, comp, previous):
+    """The JSON patch that ages comp's stable identity to the revision named
+    by previous (a per-revision Service name) in every status record that
+    holds it: the rolled-out record; under a pinned run, the run's pinned
+    stable for comp; and the stable identity of comp's unit canary when one
+    is armed. Only records that exist are touched."""
+    ops = [{"op": "replace", "path": f"/status/components/{comp}/latestRolledoutRevision", "value": previous}]
+    aged_hash = _revision_name_hash(previous)
+    run = ((status.get("rollout") or {}).get("activeRun") or {})
+    for i, target in enumerate(run.get("targetRevisions") or []):
+        if target.get("component") == comp and aged_hash:
+            ops.append({"op": "replace", "path": f"/status/rollout/activeRun/targetRevisions/{i}/stableRevision", "value": aged_hash})
+    unit = canary_unit(comp)
+    if unit == comp and aged_hash and ((status.get("components") or {}).get(unit) or {}).get("canary"):
+        ops.append({"op": "replace", "path": f"/status/components/{unit}/canary/stableRevisionHash", "value": aged_hash})
+    return ops
+
+
+def _fault_agerecord_fire(f):
+    """fault=agerecord: age the victim Component's stable identity back to
+    its previous rolled-out revision through the status subresource, in
+    every record a rollback reads (_agerecord_ops). A Component that never
+    rolled has no previous revision to age back to: the fault cannot land
+    and the case is apparatus-failed."""
+    cid, comp = f["case_id"], f.get("victimcomp") or BREAK_DEFAULT_COMP
+    st = fetch_status(cid)
+    cs = (st.get("components") or {}).get(comp) or {}
+    latest, previous = str(cs.get("latestRolledoutRevision") or ""), str(cs.get("previousRolledoutRevision") or "")
+    if not previous or previous == latest:
+        f["infra_fail"] = f"agerecord: {comp} has no previous rolled-out revision to age back to (latest={latest or '-'})"
+        return
+    ops = _agerecord_ops(st, comp, previous)
+    rr = kubectl("-n", NS, "patch", "isvc", cid, "--subresource=status", "--type=json", "-p", json.dumps(ops))
+    if rr.returncode != 0:
+        f["infra_fail"] = f"agerecord: status patch failed: {rr.stderr.strip()[:120]}"
+        return
+    f["aged_from"], f["aged_to"], f["aged_hash"] = latest, previous, _revision_name_hash(previous)
+    f["rebuilt_onto_aged"], f["leveled_at"] = set(), None
+    f["notes"].append(f"fault fired: agerecord {comp} ({f['param']}): stable identity aged from {latest} back to {previous}"
+                      f" in {len(ops)} record(s)")
+    print(f"    ⚡ {f['notes'][-1]}")
+
+
+def _agerecord_tick(f, st, pod_state, now):
+    """Fold one sample into the record fault: when the aged rolled-out record
+    reads level with the revision the victim stands on again, and every pod
+    of the victim seen on the aged revision, the rebuild a rollback onto it
+    would be."""
+    if not f or f.get("kind") != RECORD_FAULT or not f.get("fired") or f.get("infra_fail"):
+        return
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+    record = str(((st.get("components") or {}).get(comp) or {}).get("latestRolledoutRevision") or "")
+    if f.get("leveled_at") is None and record and record == f.get("aged_from"):
+        f["leveled_at"] = now
+    for name, p in pod_state.items():
+        if p and p["alive"] and p.get("comp") == comp and p.get("hash") == f.get("aged_hash"):
+            f.setdefault("rebuilt_onto_aged", set()).add(name)
+
+
+def _agerecord_checks(f, st, events, verdict, notes, checks):
+    """The record fault's verdict. Idle form: the rolled-out record names
+    the revision the victim stands on again by the end (the dispatcher
+    levels an idle member's record with its replica). Hook form: the
+    automatic rollback the gate decided parked the unit (the stable
+    revision unavailable, with the empty-stable warning naming the victim)
+    and no pod of the victim was ever rebuilt onto the aged revision."""
+    if not f or f.get("kind") != RECORD_FAULT or not f.get("fired") or f.get("infra_fail"):
+        return verdict
+
+    def ok(cond, msg_ok, msg_bad):
+        nonlocal verdict
+        if cond:
+            checks.append(f"  ✓ {msg_ok}")
+        else:
+            verdict = "FAIL"; notes.append(msg_bad); checks.append(f"  ✗ {msg_bad}")
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+    record = str(((st.get("components") or {}).get(comp) or {}).get("latestRolledoutRevision") or "")
+    if f.get("param") == IDLE_FAULT_PHASE:
+        leveled = f.get("leveled_at")
+        when = f" {leveled - f.get('fired_ts', leveled):.0f}s after it was aged" if leveled is not None and f.get("fired_ts") else ""
+        ok(record == f.get("aged_from"),
+           f"{comp}'s rolled-out record was brought level with the revision it stands on{when}",
+           f"{comp}'s rolled-out record still names the aged revision {f.get('aged_to')} (want {f.get('aged_from')})")
+        return verdict
+    unit = canary_unit(comp)
+    ucs = (st.get("components") or {}).get(unit) or {}
+    failed = (ucs.get("canary") or {}).get("failed") or {}
+    ok(ucs.get("rolloutPhase") == "Failed" and failed.get("reason") == STABLE_UNAVAILABLE_REASON,
+       f"{unit} unit parked Failed with the stable revision unavailable ({STABLE_UNAVAILABLE_REASON})",
+       f"{unit} unit is not parked on the empty stable revision: phase={ucs.get('rolloutPhase')} failed={failed or 'none'}")
+    named = [m for r, m in events if r == STABLE_EMPTY_EVENT and comp in m]
+    ok(bool(named), f"{STABLE_EMPTY_EVENT} recorded naming {comp}: {named[0][:120]}" if named else "",
+       f"no {STABLE_EMPTY_EVENT} event names {comp}")
+    rebuilt = sorted(f.get("rebuilt_onto_aged") or ())
+    ok(not rebuilt, f"no {comp} pod was rebuilt onto the aged revision {f.get('aged_hash')}",
+       f"{len(rebuilt)} {comp} pod(s) rebuilt onto the aged revision {f.get('aged_hash')}: {', '.join(rebuilt)}")
+    return verdict
 
 
 def _fault_fired_by_handler(f):
@@ -6600,6 +6732,9 @@ def _fault_fire_once(f, pod_state, pods_per_inst, old_hashes, inv=None):
         return
     if f["kind"] == SOURCE_FAULT:
         _fault_source_fire(f, pod_state, old_hashes)
+        return
+    if f["kind"] == RECORD_FAULT:
+        _fault_agerecord_fire(f)
         return
     if f["kind"] == "evict":
         _fault_evict_fire(f, pod_state, pods_per_inst, old_hashes)
@@ -8830,8 +8965,8 @@ def _hook_fault_fired_checks(f, phases, verdict, notes, checks):
     nothing. (The older hook faults keep reporting a missed hook.)"""
     if not f or f.get("fired") or f.get("infra_fail"):
         return verdict
-    mine = f.get("kind") in GATE_FAULTS or (f.get("kind") in BREAK_FAULTS
-                                           and (f.get("lift") == HEAL_LIFT or f.get("victim") == "canary")) \
+    mine = f.get("kind") in GATE_FAULTS | {RECORD_FAULT} or (f.get("kind") in BREAK_FAULTS
+                                                            and (f.get("lift") == HEAL_LIFT or f.get("victim") == "canary")) \
         or (f.get("kind") in CANARY_STABLE_FAULTS - BREAK_FAULTS) or _node_hook_fault(f)
     where = str(f.get("param") or "")
     if not mine or where.partition("@")[0] not in CANARY_HOOKS:
@@ -16010,6 +16145,9 @@ HDR_VALIDATORS = {
     "bump": lambda v: bool(str(v)) and all(m in COMPS for m in str(v).split(",")),
     "terminal": lambda v: v in {"Stable", "RolledBack", "Failed", "Held"},
     "prearm": lambda v: v in PREARM_VERBS,
+    # preroll=<members> rolls the named members once, through their own
+    # ladder, before the case's own story, so the service has history.
+    "preroll": lambda v: bool(str(v)) and all(m in COMPS for m in str(v).split(",")),
     # release= fires that verb releaseafter= seconds after the second verb,
     # so a case whose second verb leaves a pre-step hold in place can end;
     # pairto= is the protocol verb=pairing patches in at its hook.
@@ -16563,12 +16701,12 @@ def validate_case_file(path):
                     f"a move-moment fault (needs mode=migrate at=<moment>), or names the side a metric breach or a break "
                     f"at a canary hook hits (victim=stable|canary)")
     held_break = (mode == "rollout" and fields.get("rollback") == 1 and "break" in fields) or edit_held
-    if "victimcomp" in fields and fault_kind not in ("podkill", "evict", "preempt", METRIC_FAULT) and fault_kind not in BREAK_FAULTS \
+    if "victimcomp" in fields and fault_kind not in ("podkill", "evict", "preempt", METRIC_FAULT, RECORD_FAULT) and fault_kind not in BREAK_FAULTS \
             and "podkill" not in hook_verbs and fault_kind != READINESS_FAULT and not (fault_kind == "configkey" and broken_op) \
             and not held_break and not runtimerev_carried and "stuck" not in fields:
-        errs.append(f"{path}:1: victimcomp= aims a podkill, an eviction, a preemption, a break or a metric breach at one Component "
+        errs.append(f"{path}:1: victimcomp= aims a podkill, an eviction, a preemption, a break, a metric breach or an aged record at one Component "
                     f"(needs fault=podkill:<phase>, fault=evict:<phase>, fault=preempt:<phase>, verb=podkill, fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM}, "
-                    f"fault=configkey:{CONFIGKEY_PARAM} before a scale or a delete, or fault={METRIC_FAULT}:<hook>)")
+                    f"fault=configkey:{CONFIGKEY_PARAM} before a scale or a delete, fault={METRIC_FAULT}:<hook>, or fault={RECORD_FAULT}:idle|<hook>)")
     if fault_kind in GATE_FAULTS:
         if mode != "canary" or "analysis" not in fields:
             errs.append(f"{path}:1: fault={fields.get('fault')} breaks what an analysis gate reads "
@@ -23530,6 +23668,34 @@ def _canary_run(st, primary):
     return comp.get("canary") or st.get("canary") or {}
 
 
+def _unit_run_identity(canary):
+    """The fields of a unit's canary record that say which run it is in: the
+    target, the step, a rejection and a park. None for no record; traffic
+    weights and samples are the same run moving, not another one."""
+    if not canary:
+        return None
+    return (canary.get("canaryRevisionHash"), canary.get("currentStep"),
+            canary.get("rolledBackRevisionHash") or "", bool(canary.get("failed")))
+
+
+def _idle_units_start(st, units):
+    """The record every idle unit's story starts with: none, or the finished
+    ladder a preroll left at its end. The tracker holds the first sample that
+    reads a different run per unit."""
+    comps = st.get("components") or {}
+    return {"start": {u: _unit_run_identity((comps.get(u) or {}).get("canary")) for u in units}, "moved": {}}
+
+
+def _idle_units_track(track, st, at):
+    """Fold one status sample into the idle units' record: the first sample
+    whose canary record is not the one the unit started with."""
+    comps = st.get("components") or {}
+    for u, start in track["start"].items():
+        rec = _unit_run_identity((comps.get(u) or {}).get("canary"))
+        if rec != start and u not in track["moved"]:
+            track["moved"][u] = (at, rec)
+
+
 def _canary_command_state(canary, current_hash, old_hashes, promoted_step):
     """Resolve the live target and whether an operator command is safe to issue."""
     observed_hash = canary.get("canaryRevisionHash") or None
@@ -24344,6 +24510,98 @@ def _prearm(ctx, verb, primary, scale_to):
     return True, ""
 
 
+def _preroll_pods_settled(ctx, members):
+    """Whether every Instance of each prerolled member stands whole and
+    serving on a revision the roll brought. (True, "") or (False, why)."""
+    serving = _serving_instance_counts(ctx["pod_state"], ctx["pods_per_inst"])
+    for c in sorted(members):
+        new, old = _inst_rev_split(ctx, c)
+        if new != ctx["N"][c] or old:
+            return False, f"{c}: {new}/{ctx['N'][c]} Instances on the new revision, {old} still on the old one"
+        if serving.get(c, 0) != ctx["N"][c]:
+            return False, f"{c}: serving {serving.get(c, 0)}/{ctx['N'][c]}"
+    return True, ""
+
+
+def _preroll_unit_done(ctx, st, members):
+    """Whether each prerolled member's unit has finished its ladder: the unit
+    reads Stable with its step at the ladder's end, or carries no ladder at
+    all. (True, "") or (False, why)."""
+    steps = {g["unit"]: len(g.get("steps") or []) for g in (ctx["info"].get("canary_groups") or [])}
+    for c in sorted(members):
+        unit = canary_unit(c)
+        comp = (st.get("components") or {}).get(unit) or {}
+        can = comp.get("canary")
+        if not can:
+            continue
+        step, nsteps = can.get("currentStep"), steps.get(unit, 0)
+        if comp.get("rolloutPhase") != "Stable" or step is None or (nsteps and int(step) < nsteps):
+            return False, f"{unit} unit at step {step} phase {comp.get('rolloutPhase')}"
+    return True, ""
+
+
+def _rebaseline(ctx):
+    """Start the case's own story from the fleet as it stands: the revisions,
+    UIDs and nodes the rolled fleet has are the baseline, the peaks and the
+    post-trigger floor and gang spans start over, and nothing is post-trigger
+    until the case's own bump."""
+    alive = [p for p in ctx["pod_state"].values() if p and p["alive"]]
+    ctx["old_hashes"] = {p["hash"] for p in alive if p.get("hash")}
+    for c in ctx["configured"]:
+        ctx["old_uids"][c] = {p["uid"] for p in alive if p["comp"] == c and p.get("uid")}
+    ctx["old_nodes"] = {(p["comp"], p["inst"]): p.get("node", "") for p in alive}
+    ctx["peaks"] = {c: 0 for c in COMPS}
+    ctx["trigger_ts"] = None
+    for key in ("gang_mixed_since", "gang_worst", "min_ready", "floor_since", "floor_sust"):
+        ctx.pop(key, None)
+
+
+def _preroll(ctx, members):
+    """preroll=<members>: roll the named members once before the case's own
+    story, through their own ladder, so the service has history: a previous
+    rolled-out revision with its ControllerRevision retained, and a record
+    naming the revision each member now stands on. The members' ladders
+    must advance on their own; the roll is waited for (every Instance whole
+    on the new revision, the replica rows steady, the unit at the end of its
+    ladder), then for the run to close, and the watcher is re-baselined so
+    the case's story is judged on its own. Returns (ok, message)."""
+    cid = ctx["case_id"]
+    if not _bump_rev(ctx, members, val=PREROLL_VAL, extra=ANALYSIS_HEALTH["pass"]):
+        return False, "preroll bump patch failed: " + str(ctx.get("trigger_error") or "")
+    ctx["trigger_ts"] = None   # the preroll is history, not the story: no hook fires on it
+    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(
+        ctx["N"][c] * ctx["pods_per_inst"].get(c, 1) for c in members) + 120)
+    print(f"  Phase 1b: preroll {sorted(members)} to a new revision (≤{budget}s)")
+    t0, last_poll, settled_since, why = time.time(), 0.0, None, ""
+    while time.time() - t0 < budget and not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        if now - last_poll < 2.0:
+            continue
+        last_poll = now
+        ok, why = _preroll_pods_settled(ctx, members)
+        if ok:
+            ok, why = _rolled_ir_settled(_fetch_initial_ir_items(cid) or [], ctx["N"], set(members))
+        if ok:
+            ok, why = _preroll_unit_done(ctx, fetch_status(cid), members)
+        if not ok:
+            settled_since = None
+            continue
+        settled_since = settled_since or now
+        if now - settled_since >= STABILITY_S:
+            break
+    else:
+        return False, f"preroll: {sorted(members)} did not settle on the new revision within {budget}s ({why})"
+    idle_after = _wait_no_active_run(cid, IDLE_RUN_CLOSE_S)
+    if idle_after is None:
+        return False, f"preroll: a run was still pinned {IDLE_RUN_CLOSE_S}s after {sorted(members)} settled"
+    _rebaseline(ctx)
+    note = f"preroll: {sorted(members)} rolled to a new revision in {time.time() - t0:.0f}s; the story starts from there"
+    ctx.setdefault("verb_notes", []).append(note)
+    print(f"    {note}")
+    return True, ""
+
+
 def _canary(case_id, yaml_file, desc, hdr):
     """Canary rollout (OEP-0017 v2). The ISVC ships a spec.rollout.groups[] canary
     group in the initial apply; once rev A is Ready we bump the primary component's revision to
@@ -24398,6 +24656,15 @@ def _canary(case_id, yaml_file, desc, hdr):
                            f"a run was still pinned {IDLE_RUN_CLOSE_S}s after the initial fleet settled; the service never reached Idle")
     if idle_after > 0:
         ctx.setdefault("verb_notes", []).append(f"idle: the initial run closed {idle_after:.0f}s after the fleet settled")
+    # History before the story: the members a preroll names roll once through
+    # their own ladder and settle, so the case meets a service with a previous
+    # rolled-out revision on record.
+    preroll = {m.strip() for m in str(hdr.get("preroll") or "").split(",") if m.strip()} & ctx["configured"]
+    if preroll:
+        ok, msg = _preroll(ctx, preroll)
+        if not ok:
+            _stop_watcher(ctx)
+            return _write_fail(case_id, desc, hdr, "PREROLL_FAIL", msg)
     cgroup = _canary_group(ctx)
     if hdr.get("unit") and cgroup is None:
         return _write_fail(case_id, desc, hdr, "NO_PRIMARY",
@@ -24423,11 +24690,7 @@ def _canary(case_id, yaml_file, desc, hdr):
         health = str(hdr.get("health") or "breach").lower()
     else:
         health = str(hdr.get("health") or analysis_mode or "").lower()
-    analysis_extra = {
-        "pass":         {"perm.test/error-rate": "0.01", "perm.test/emit": "true"},
-        "breach":       {"perm.test/error-rate": "0.9", "perm.test/emit": "true"},
-        "inconclusive": {"perm.test/error-rate": "0.0", "perm.test/emit": "false"},
-    }.get(health)
+    analysis_extra = ANALYSIS_HEALTH.get(health)
     # errorrate header pins the canary's exact emitted error-rate (boundary /
     # operator cases need a precise value, e.g. 0.05 == threshold), overriding the
     # pass/breach default.
@@ -24592,6 +24855,9 @@ def _canary(case_id, yaml_file, desc, hdr):
                                f"configkey:{CRASHLOOP_NEW}: the {victim_comp} runner reads no ConfigMap key "
                                f"(the case must give it an env valueFrom.configMapKeyRef)")
         bad_image, image_comps, armed_env = armed
+    # The record each idle unit starts the story with; every later sample is
+    # held to it.
+    ctx["idle_units"] = _idle_units_start(fetch_status(case_id), {canary_unit(c) for c in others})
     if proto_target is not None:
         ok, msg = _pairing_patch(case_id, proto_target, extra=analysis_extra, comps=group)
         if not ok:
@@ -24766,6 +25032,8 @@ def _canary(case_id, yaml_file, desc, hdr):
             retarget = _retarget_record(st, canary_hash, fired_now, ctx["canary_hook"], now - ctx["trigger_ts"])
         _retarget_closed(retarget, st)
         _podkill_track(ctx, now - ctx["trigger_ts"])
+        _agerecord_tick(ctx.get("fault"), st, ctx["pod_state"], now)
+        _idle_units_track(ctx["idle_units"], st, now - ctx["trigger_ts"])
         if fired_now == "pairing":
             # The patch re-mints both pairing Components: the whole pair is
             # bumped from here, nothing may stay on a pre-re-target revision,
@@ -25022,10 +25290,14 @@ def _canary(case_id, yaml_file, desc, hdr):
                  f"{c} rolled {idle_new} Instance(s) off stable while only {primary} was canaried")
             u = canary_unit(c)
             if u != canary_unit(primary):
-                idle_run = ((idle_st.get("components") or {}).get(u) or {}).get("canary")
-                good(not idle_run,
+                # The record it started with (none, or a preroll's finished
+                # ladder) at every sample and at the end.
+                idle_run = _unit_run_identity(((idle_st.get("components") or {}).get(u) or {}).get("canary"))
+                start, moved = ctx["idle_units"]["start"].get(u), ctx["idle_units"]["moved"].get(u)
+                good(moved is None and idle_run == start,
                      f"{u} unit recorded no canary run of its own",
-                     f"{u} unit picked up a canary run it was never given: {idle_run}")
+                     f"{u} unit picked up a canary run it was never given: "
+                     + (f"{moved[1]} at t={moved[0]:.0f}s" if moved else f"{idle_run}"))
 
     for x in ctx.get("verb_notes", []):
         checks.append(f"  ⓘ {x}")
@@ -25052,6 +25324,8 @@ def _canary(case_id, yaml_file, desc, hdr):
         verdict = _repeat_checks(ctx["fault"], ctx["pods_per_inst"], group, op_pods, ctx["trigger_ts"], verdict, notes, checks)
         verdict = _repeat_end_checks(case_id, N, ctx["configured"], verdict, notes, checks, ctrl=ctx.get("fault"))
     verdict = _hook_fault_fired_checks(ctx.get("fault"), phases, verdict, notes, checks)
+    if (ctx.get("fault") or {}).get("kind") == RECORD_FAULT:
+        verdict = _agerecord_checks(ctx["fault"], fetch_status(case_id), _isvc_events(case_id), verdict, notes, checks)
     if _node_hook_fault(ctx.get("fault")):
         verdict = _node_hook_checks(ctx["fault"], "the canary", None, "", verdict, notes, checks)
     if gate_fault:

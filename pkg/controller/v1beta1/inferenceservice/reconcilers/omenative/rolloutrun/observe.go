@@ -32,6 +32,13 @@ type targetPair struct {
 	updated  int32
 }
 
+// straggling reports Instances still off the target revision. Paired with an
+// agreeing revision pair it marks a Component that owes a roll, as opposed to
+// one that has arrived.
+func (t targetPair) straggling() bool {
+	return t.replicas > 0 && t.updated < t.replicas
+}
+
 // observeGroupTargets reads the IR revision pair for every Component named in
 // any spec rollout group, via the live reader (the run decision must not act
 // on a cache-lagged target). fresh is false while any observed IR's status
@@ -259,7 +266,7 @@ func divergedMember(isvc *v1beta1.InferenceService, targets map[v1beta1.Componen
 			if groupKind(g) == v1beta1.RolloutProgressionCanary && t.target != "" && t.target == rejected[comp] {
 				continue
 			}
-			if t.replicas > 0 && t.updated < t.replicas {
+			if t.straggling() {
 				return true
 			}
 			if t.target == "" || t.target == t.current {
@@ -331,6 +338,24 @@ func revertInFlight(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup) boo
 		steps = len(g.Canary.Steps)
 	}
 	return rollout.StateOf(cs, isvc.Status.Components[primary].RolloutPhase, steps) == rollout.CanaryStateRollingBack
+}
+
+// unitLadderInFlight reports whether a canary group's own ladder is one a
+// run adopts: its primary carries a canary record short of the ladder's end,
+// or a revert still draining. A group whose unit is idle, or finished, has
+// nothing in flight whatever another group's ladder is doing.
+func unitLadderInFlight(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup) bool {
+	if g == nil || g.Canary == nil {
+		return false
+	}
+	cs := rollout.CanaryStatusFor(&isvc.Status, primaryOfGroup(g))
+	if cs == nil {
+		return false
+	}
+	if cs.RolledBackRevisionHash != "" {
+		return revertInFlight(isvc, g)
+	}
+	return int(cs.CurrentStep) < len(g.Canary.Steps)
 }
 
 // derivedProvenance parses the derive-time plan-source annotation

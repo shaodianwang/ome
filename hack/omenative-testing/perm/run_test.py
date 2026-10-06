@@ -21680,3 +21680,230 @@ class ScaleWatchUnderAnEvictionTest(unittest.TestCase):
         self.assertFalse(run._evict_admission_pending(dict(f, kind="podkill"), at_target, at_target + 1))
         self.assertFalse(run._evict_admission_pending(dict(f, infra_fail="x"), at_target, at_target + 1))
         self.assertFalse(run._evict_admission_pending(None, at_target, at_target + 1))
+
+
+class AgeRecordFaultTest(unittest.TestCase):
+    """fault=agerecord ages a Component's stable identity back to the revision
+    it rolled out before the current one, through the status subresource: at
+    idle the rolled-out record, under a pinned run also the run's pinned
+    stable for the Component and the unit's canary stable identity, every
+    copy a rollback reads."""
+
+    STATUS = {"components": {"engine": {"latestRolledoutRevision": "p1-engine-rev-bbbb",
+                                        "previousRolledoutRevision": "p1-engine-rev-aaaa"}}}
+
+    def test_header_forms_name_idle_or_a_canary_hook(self):
+        self.assertTrue(run._fault_ok("agerecord:idle"))
+        self.assertTrue(run._fault_ok("agerecord:canary-serving"))
+        self.assertTrue(run._fault_ok("agerecord:canary-serving@1"))
+        self.assertFalse(run._fault_ok("agerecord:settling"))
+        self.assertFalse(run._fault_ok("agerecord:new"))
+        idle = run._fault_new("p1", {"fault": "agerecord:idle", "victimcomp": "engine"})
+        self.assertTrue(run._fault_before_push(idle), "the idle form lands before the push")
+        hook = run._fault_new("p1", {"fault": "agerecord:canary-serving", "victimcomp": "engine"})
+        self.assertFalse(run._fault_before_push(hook))
+        self.assertIn(run.RECORD_FAULT, run.HOOK_FAULTS, "the hook form fires at its grid state")
+
+    def test_the_patch_ages_every_record_of_the_stable_identity(self):
+        ops = run._agerecord_ops(copy.deepcopy(self.STATUS), "engine", "p1-engine-rev-aaaa")
+        self.assertEqual([{"op": "replace", "path": "/status/components/engine/latestRolledoutRevision",
+                           "value": "p1-engine-rev-aaaa"}], ops, "at idle only the rolled-out record holds the identity")
+        status = copy.deepcopy(self.STATUS)
+        status["components"]["engine"]["canary"] = {"canaryRevisionHash": "cccc", "stableRevisionHash": "bbbb"}
+        status["rollout"] = {"activeRun": {"runID": "r1", "targetRevisions": [
+            {"component": "router", "revision": "r2", "stableRevision": "r1"},
+            {"component": "engine", "revision": "cccc", "stableRevision": "bbbb"}]}}
+        ops = run._agerecord_ops(status, "engine", "p1-engine-rev-aaaa")
+        self.assertIn({"op": "replace", "path": "/status/rollout/activeRun/targetRevisions/1/stableRevision", "value": "aaaa"}, ops)
+        self.assertIn({"op": "replace", "path": "/status/components/engine/canary/stableRevisionHash", "value": "aaaa"}, ops)
+        self.assertIn({"op": "replace", "path": "/status/components/engine/latestRolledoutRevision", "value": "p1-engine-rev-aaaa"}, ops)
+        self.assertEqual(3, len(ops))
+        # A decoder's identity is its own record, and its unit's canary is the engine's.
+        status["components"]["decoder"] = {"latestRolledoutRevision": "p1-decoder-rev-dddd", "previousRolledoutRevision": "p1-decoder-rev-cccc"}
+        ops = run._agerecord_ops(status, "decoder", "p1-decoder-rev-cccc")
+        self.assertEqual([{"op": "replace", "path": "/status/components/decoder/latestRolledoutRevision", "value": "p1-decoder-rev-cccc"}], ops,
+                         "a member the run does not pin and whose unit's canary is the engine's ages only its record")
+
+    def test_fire_patches_the_status_subresource(self):
+        calls = []
+
+        def fake_kubectl(*a, **k):
+            calls.append(a)
+            return subprocess.CompletedProcess(a, 0, stdout="", stderr="")
+        f = run._fault_new("p1", {"fault": "agerecord:idle", "victimcomp": "engine"})
+        with mock.patch.object(run, "kubectl", fake_kubectl), \
+                mock.patch.object(run, "fetch_status", lambda cid: copy.deepcopy(self.STATUS)):
+            run._fault_fire(f, {}, {"engine": 1}, {"bbbb"}, inv=None)
+        self.assertTrue(f["fired"])
+        self.assertIsNone(f["infra_fail"])
+        patch = next(c for c in calls if "patch" in c)
+        self.assertIn("--subresource=status", patch)
+        self.assertIn("/status/components/engine/latestRolledoutRevision", patch[-1])
+        self.assertEqual(("p1-engine-rev-bbbb", "p1-engine-rev-aaaa", "aaaa"), (f["aged_from"], f["aged_to"], f["aged_hash"]))
+        self.assertTrue(any("aged" in n for n in f["notes"]))
+
+    def test_a_member_with_no_previous_revision_is_an_apparatus_failure(self):
+        calls = []
+        never_rolled = {"components": {"engine": {"latestRolledoutRevision": "p1-engine-rev-bbbb"}}}
+        f = run._fault_new("p1", {"fault": "agerecord:idle", "victimcomp": "engine"})
+        with mock.patch.object(run, "kubectl", lambda *a, **k: calls.append(a)), \
+                mock.patch.object(run, "fetch_status", lambda cid: never_rolled):
+            run._fault_fire(f, {}, {"engine": 1}, {"bbbb"}, inv=None)
+        self.assertIn("no previous rolled-out revision", f["infra_fail"])
+        self.assertEqual([], calls, "nothing is patched")
+
+    def test_a_rejected_patch_is_an_apparatus_failure(self):
+        f = run._fault_new("p1", {"fault": "agerecord:canary-serving", "victimcomp": "engine"})
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="denied")), \
+                mock.patch.object(run, "fetch_status", lambda cid: copy.deepcopy(self.STATUS)):
+            run._fault_fire(f, {}, {"engine": 1}, {"bbbb"}, inv=None)
+        self.assertIn("status patch failed", f["infra_fail"])
+
+    def _fired(self, param):
+        f = run._fault_new("p1", {"fault": f"agerecord:{param}", "victimcomp": "engine"})
+        f.update(fired=True, aged_from="p1-engine-rev-bbbb", aged_to="p1-engine-rev-aaaa", aged_hash="aaaa")
+        return f
+
+    def test_tick_records_the_record_leveled_and_pods_on_the_aged_revision(self):
+        idle = self._fired("idle")
+        aged = {"components": {"engine": {"latestRolledoutRevision": "p1-engine-rev-aaaa"}}}
+        run._agerecord_tick(idle, aged, {}, 5.0)
+        self.assertIsNone(idle.get("leveled_at"))
+        level = {"components": {"engine": {"latestRolledoutRevision": "p1-engine-rev-bbbb"}}}
+        run._agerecord_tick(idle, level, {}, 9.0)
+        run._agerecord_tick(idle, level, {}, 11.0)
+        self.assertEqual(9.0, idle["leveled_at"], "the first sample that reads the record level")
+        hook = self._fired("canary-serving")
+        pods = {"engine-0": dict(pod("engine", 0), hash="aaaa"), "engine-1": dict(pod("engine", 1), hash="cccc"),
+                "router-0": dict(pod("router", 0), hash="aaaa")}
+        run._agerecord_tick(hook, {}, pods, 3.0)
+        self.assertEqual({"engine-0"}, hook["rebuilt_onto_aged"], "only the victim's pods on the aged revision count")
+
+    def test_the_idle_form_wants_the_record_level_with_the_replica_by_the_end(self):
+        f = self._fired("idle")
+        f["leveled_at"] = 40.0
+        level = {"components": {"engine": {"latestRolledoutRevision": "p1-engine-rev-bbbb"}}}
+        checks = []
+        self.assertEqual("PASS", run._agerecord_checks(f, level, [], "PASS", [], checks))
+        self.assertTrue(any("level" in c for c in checks), checks)
+        notes = []
+        still_aged = {"components": {"engine": {"latestRolledoutRevision": "p1-engine-rev-aaaa"}}}
+        self.assertEqual("FAIL", run._agerecord_checks(dict(f, leveled_at=None), still_aged, [], "PASS", notes, []))
+        self.assertTrue(any("still names" in n for n in notes), notes)
+
+    def test_the_hook_form_wants_a_park_with_the_warning_and_no_pod_on_the_aged_revision(self):
+        f = self._fired("canary-serving")
+        f["rebuilt_onto_aged"] = set()
+        parked = {"components": {"engine": {"rolloutPhase": "Failed", "canary": {
+            "canaryRevisionHash": "cccc", "failed": {"reason": run.STABLE_UNAVAILABLE_REASON}}}}}
+        events = [("CanaryStepAdvanced", "x"), (run.STABLE_EMPTY_EVENT, "engine is not rolled back on its own: engine (stable revision aaaa) runs no live Instance")]
+        checks = []
+        self.assertEqual("PASS", run._agerecord_checks(f, parked, events, "PASS", [], checks))
+        self.assertEqual(3, sum(1 for c in checks if c.startswith("  ✓")), checks)
+        notes = []
+        rolled = {"components": {"engine": {"rolloutPhase": "RollingBack", "canary": {"canaryRevisionHash": "cccc", "rolledBackRevisionHash": "cccc"}}}}
+        self.assertEqual("FAIL", run._agerecord_checks(dict(f, rebuilt_onto_aged={"engine-0", "engine-1"}), rolled, [], "PASS", notes, []))
+        self.assertTrue(any("rebuilt" in n for n in notes), notes)
+        self.assertTrue(any("parked" in n for n in notes), notes)
+        self.assertTrue(any(run.STABLE_EMPTY_EVENT in n for n in notes), notes)
+
+    def test_an_unfired_or_apparatus_failed_fault_adds_no_check(self):
+        f = run._fault_new("p1", {"fault": "agerecord:idle", "victimcomp": "engine"})
+        self.assertEqual("PASS", run._agerecord_checks(f, {}, [], "PASS", [], []))
+        self.assertEqual("PASS", run._agerecord_checks(None, {}, [], "PASS", [], []))
+
+
+class PrerollTest(unittest.TestCase):
+    """preroll=<members> rolls the named members once, through their own
+    ladder, before the case's own story, so the service has history: a
+    previous rolled-out revision whose ControllerRevision is retained and a
+    record naming the revision each member stands on."""
+
+    def _ctx(self, hashes, ready=True):
+        pods = {f"engine-{i}": dict(pod("engine", i, ready=ready, serving=ready), hash=h, uid=f"u{i}", node=f"n{i}")
+                for i, h in enumerate(hashes)}
+        pods["router-0"] = dict(pod("router", 0), hash="rrrr", uid="ur", node="n0")
+        return {"pod_state": pods, "pods_per_inst": {"engine": 1, "router": 1, "decoder": 1},
+                "N": {"engine": len(hashes), "router": 1, "decoder": 0}, "old_hashes": {"aaaa", "rrrr"},
+                "configured": {"engine", "router"}, "peaks": {"engine": 3, "router": 1, "decoder": 0},
+                "old_uids": {}, "old_nodes": {}, "trigger_ts": 123.0, "min_ready": {"engine": 1}, "floor_since": {},
+                "info": {"canary_groups": [{"unit": "engine", "members": ["engine"], "steps": [{}, {}]},
+                                           {"unit": "router", "members": ["router"], "steps": [{}, {}]}]}}
+
+    def test_header_names_members(self):
+        ok = run.HDR_VALIDATORS["preroll"]
+        self.assertTrue(ok("engine"))
+        self.assertTrue(ok("engine,decoder"))
+        self.assertFalse(ok("nginx"))
+        self.assertFalse(ok(""))
+
+    def test_pods_settled_wants_every_instance_whole_on_a_new_revision(self):
+        settled, why = run._preroll_pods_settled(self._ctx(["bbbb", "aaaa"]), {"engine"})
+        self.assertFalse(settled)
+        self.assertIn("engine", why)
+        settled, why = run._preroll_pods_settled(self._ctx(["bbbb", "bbbb"], ready=False), {"engine"})
+        self.assertFalse(settled, why)
+        self.assertTrue(run._preroll_pods_settled(self._ctx(["bbbb", "bbbb"]), {"engine"})[0])
+
+    def test_unit_done_reads_the_ladder_at_its_end(self):
+        ctx = self._ctx(["bbbb", "bbbb"])
+        done = {"components": {"engine": {"rolloutPhase": "Stable", "canary": {"currentStep": 2}}}}
+        self.assertTrue(run._preroll_unit_done(ctx, done, {"engine"})[0])
+        mid = {"components": {"engine": {"rolloutPhase": "Paused", "canary": {"currentStep": 1}}}}
+        ok, why = run._preroll_unit_done(ctx, mid, {"engine"})
+        self.assertFalse(ok)
+        self.assertIn("step 1", why)
+        plain = {"components": {"engine": {"rolloutPhase": "Stable"}}}
+        self.assertTrue(run._preroll_unit_done(ctx, plain, {"engine"})[0], "a member outside a ladder has no ladder to finish")
+
+    def test_rebaseline_starts_the_story_from_the_rolled_fleet(self):
+        ctx = self._ctx(["bbbb", "bbbb"])
+        run._rebaseline(ctx)
+        self.assertEqual({"bbbb", "rrrr"}, ctx["old_hashes"])
+        self.assertEqual({"u0", "u1"}, ctx["old_uids"]["engine"])
+        self.assertEqual("n1", ctx["old_nodes"][("engine", "1")])
+        self.assertEqual({"engine": 0, "router": 0, "decoder": 0}, ctx["peaks"])
+        self.assertIsNone(ctx["trigger_ts"])
+        self.assertNotIn("min_ready", ctx)
+        self.assertNotIn("floor_since", ctx)
+
+    def test_coverage_classifies_the_record_fault_and_the_preroll_key(self):
+        self.assertIn("preroll", coverage.HEADER_KEYS)
+        self.assertTrue(coverage.HEADER_CHECKS["fault"]("agerecord:idle"))
+        self.assertTrue(coverage.HEADER_CHECKS["fault"]("agerecord:canary-serving@1"))
+        self.assertFalse(coverage.HEADER_CHECKS["fault"]("agerecord:rotating"))
+        faults = coverage.classify_faults({"fault": "agerecord:idle", "victimcomp": "engine"}, "canary", "single", "SurgeThenDrain", set())
+        self.assertEqual([(coverage.STALE_RECORD_FAULT, "persistent", "-", "engine")], faults)
+        self.assertIn(coverage.STALE_RECORD_FAULT, coverage.UNBOUND_FAULTS)
+
+
+class IdleUnitRecordTest(unittest.TestCase):
+    """A unit the case does not drive must keep the canary record the story
+    started with, at every sample: none, or the finished ladder a preroll
+    left at its end. A ladder that arms and finishes between two samples is
+    a run the unit was never given."""
+
+    def test_identity_reads_the_fields_that_say_which_run_a_unit_is_in(self):
+        self.assertIsNone(run._unit_run_identity(None))
+        self.assertIsNone(run._unit_run_identity({}))
+        done = {"canaryRevisionHash": "bbbb", "currentStep": 2, "stepEnteredTime": "t", "observedTrafficWeight": 100}
+        self.assertEqual(("bbbb", 2, "", False), run._unit_run_identity(done))
+        self.assertEqual(run._unit_run_identity(done), run._unit_run_identity(dict(done, observedTrafficWeight=0, metricResults=[1])),
+                         "traffic and samples are not a different run")
+        self.assertNotEqual(run._unit_run_identity(done), run._unit_run_identity(dict(done, currentStep=0)))
+        self.assertNotEqual(run._unit_run_identity(done), run._unit_run_identity(dict(done, rolledBackRevisionHash="bbbb")))
+        self.assertNotEqual(run._unit_run_identity(done), run._unit_run_identity(dict(done, failed={"reason": "x"})))
+
+    def test_track_records_the_first_sample_off_the_starting_record(self):
+        done = {"canaryRevisionHash": "bbbb", "currentStep": 2}
+        track = run._idle_units_start({"components": {"engine": {"canary": done}, "router": {}}}, {"engine", "router"})
+        self.assertEqual({"engine": ("bbbb", 2, "", False), "router": None}, track["start"])
+        run._idle_units_track(track, {"components": {"engine": {"canary": done}}}, 4.0)
+        self.assertEqual({}, track["moved"])
+        armed = {"components": {"engine": {"canary": dict(done, currentStep=0)}, "router": {}}}
+        run._idle_units_track(track, armed, 6.0)
+        run._idle_units_track(track, {"components": {"engine": {"canary": done}}}, 60.0)
+        self.assertEqual({"engine": (6.0, ("bbbb", 0, "", False))}, track["moved"], "the first sample that moved, kept")
+        picked = {"components": {"engine": {"canary": done}, "router": {"canary": {"canaryRevisionHash": "r2", "currentStep": 0}}}}
+        run._idle_units_track(track, picked, 8.0)
+        self.assertEqual((8.0, ("r2", 0, "", False)), track["moved"]["router"])

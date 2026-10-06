@@ -1,0 +1,36 @@
+# p1960: canary engine analysis breach after the stable identity was aged to a revision with no Instance parks instead of rebuilding onto it  mode=canary preroll=engine analysis=breach failurelimit=1 terminal=Failed fault=agerecord:canary-serving victimcomp=engine Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto cell=canary/Serving[A]/sampleFails[staleStable] co=none topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1960 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-metrics, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        # The preroll walks the ladder once with healthy pods, so a previous
+        # rolled-out revision exists with its ControllerRevision retained and
+        # no Instance on it. The breaching push arms the ladder again; while
+        # the split serves, the engine's stable identity is aged back to that
+        # revision in the run and the canary record. The gate's rollback
+        # would rebuild every Instance onto it: the ladder must park instead,
+        # name the empty stable revision, and leave every Instance where it is.
+        - components: [engine]
+          canary:
+            steps:
+              - capacity: "50%"
+                traffic: 50
+                analysis:
+                  interval: "20s"
+                  failureLimit: 1
+                  initialDelay: "20s"
+                  metrics:
+                    - name: error_rate
+                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'
+                      operator: LTE
+                      threshold: "0.05"
+              - { capacity: "100%", traffic: 100 }

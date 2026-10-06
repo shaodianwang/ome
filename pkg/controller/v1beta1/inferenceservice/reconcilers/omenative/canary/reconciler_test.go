@@ -178,7 +178,7 @@ func TestReconcile_InitialConvergenceUsesReadyInstanceCount(t *testing.T) {
 
 func TestReconcile_CanaryingPaused(t *testing.T) {
 	isvc := canaryISVC(twoStep(), nil)
-	Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 2}))
+	Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 2, "old": 2}))
 	if phaseOf(isvc) != v1beta1.RolloutPhasePaused {
 		t.Fatalf("expected Paused at a manual paused step, got %q", phaseOf(isvc))
 	}

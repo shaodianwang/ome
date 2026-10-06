@@ -1,0 +1,37 @@
+# p1958: canary router change beside a settled engine unit with a fresh record leaves the engine idle  mode=canary unit=router preroll=engine Ne=2 Nd=0 Nr=2 ceil_e=2 ceil_d=0 ceil_r=3 canary=auto cell=canary/Idle/newTarget[settledUnit] co=none topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1958 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    # Two canary groups make no cross-group ordering promise; without this
+    # admission rejects the shape before the case under test is reached.
+    groupOrdering: Concurrent
+    groups:
+        # The preroll walks the engine's ladder once and lets it settle, so the
+        # engine stands on its second revision with a record naming it. The
+        # router's change then opens a run for the whole service: the engine
+        # must be pinned where it stands, arm no step state and keep every
+        # Instance, while the router's ladder completes.
+        - components: [router]
+          canary:
+            steps:
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }
