@@ -1,0 +1,59 @@
+tick=1 note the index is planned but pause holds the Create pass, so no row is written
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 pass result=none
+tick=2 note the pod template changes, and a new target allocates no row
+tick=2 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 pass result=none
+tick=3 note the update strategy changes, which the Create pass never reads
+tick=3 apply spec.strategy strategy=RecreatePod generation=2 now=t+0s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 pass result=none
+tick=4 note the restart policy changes, and nothing is persisted for a row that does not exist
+tick=4 apply spec.policyTuning[restartPolicy] restartPolicy=RecreateInstanceOnPodRestart generation=3 now=t+0s
+tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=4 pass result=none
+tick=5 note the roll is pinned to the first revision, and nothing is pinned on an index with no attempt
+tick=5 apply spec.rollbackTarget[set] rollbackTo=registry.example.com/runtime:v1 generation=4 now=t+0s
+tick=5 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=5 pass result=none
+tick=6 note the pin is released again
+tick=6 apply spec.rollbackTarget[clear] rollbackTo=nil generation=5 now=t+0s
+tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=6 pass result=none
+tick=7 note the gang is widened by one worker, which only changes the width the eventual create will use
+tick=7 apply spec.gangWidth[grow] workers=2 generation=6 now=t+0s
+tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=7 podgroup update name=svc-a-engine-0
+tick=7 pass result=none
+tick=8 note the index's PodGroup is deleted and the ensure pass re-creates it from the plan before any member exists
+tick=8 apply gang.podGroup[Deleted] podGroup=svc-a-engine-0 state=Deleted now=t+0s
+tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=8 podgroup create name=svc-a-engine-0
+tick=8 pass result=none
+tick=9 note the controller restarts, and an index with no row has no durable state to lose
+tick=9 apply ctrl.crash expectations=dropped now=t+0s
+tick=9 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=9 pass result=none
+tick=10 note a reconcile with nothing new re-derives the same empty plan
+tick=10 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=10 pass result=none
+tick=11 note the pause is cleared as the template moves once more and a second index is added, and one create batch materializes both indices at the current target and width
+tick=11 apply spec.unpause paused=false freeze=false generation=7 now=t+0s
+tick=11 apply spec.revision image=registry.example.com/runtime:v3 generation=8 now=t+0s
+tick=11 apply spec.replicasUp replicas=2 generation=9 now=t+0s
+tick=11 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=11 podgroup create name=svc-a-engine-1
+tick=11 hold cleared
+tick=11 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-1b9f8264 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=11 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#2{type=Create step=CreatePods target=svc-a-engine-1b9f8264 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=11 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 3 pod(s) requested
+tick=11 pod create name=svc-a-engine-0-leader-0 revision=1b9f8264 incarnation=1 ordinal=0
+tick=11 pod create name=svc-a-engine-0-worker-0 revision=1b9f8264 incarnation=1 ordinal=0
+tick=11 pod create name=svc-a-engine-0-worker-1 revision=1b9f8264 incarnation=1 ordinal=1
+tick=11 event Normal InstanceCreated OMENative component=engine instance=1 materialized; 3 pod(s) requested
+tick=11 pod create name=svc-a-engine-1-leader-0 revision=1b9f8264 incarnation=1 ordinal=0
+tick=11 pod create name=svc-a-engine-1-worker-0 revision=1b9f8264 incarnation=1 ordinal=0
+tick=11 pod create name=svc-a-engine-1-worker-1 revision=1b9f8264 incarnation=1 ordinal=1
+tick=11 pass result=after:5s

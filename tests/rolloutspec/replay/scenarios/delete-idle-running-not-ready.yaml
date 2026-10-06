@@ -1,0 +1,47 @@
+# A draining Instance's pod runs but never passed readiness, and the grace
+# an attempt would measure runs out on it. Readiness is no input to the
+# drain, which waits on rotation alone and completes on absence.
+scenario: delete-idle-running-not-ready
+arrows:
+  - T-ready-scaledown
+  - T-delete-done
+cells:
+  - instance/Delete/Drain/pod.runningNotReady[source]/before
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    stuckPodGrace: 1m
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 1, containersReady: true, serving: true, routed: true, node: node-1}
+timeline:
+  - tick: 1
+    note: the operator halves the replica count while the retired pod runs with its readiness probe failing, and the Instance is admitted into a Delete operation
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 2
+    note: the first drive takes the retired pod's serving gate down and finds it still in rotation, so the wave polls
+  - tick: 3
+    note: two minutes on, longer than the grace, the pod still runs without passing readiness, and the drain reads none of it
+    events:
+      - clock.advance: 2m
+  - tick: 4
+    note: the retired pod leaves rotation, so the wave issues the graceful delete
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 5
+    note: the pod is gone and the row leaves the owner's status
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}
+  - tick: 6
+    note: the Component is at rest with the retired Instance gone

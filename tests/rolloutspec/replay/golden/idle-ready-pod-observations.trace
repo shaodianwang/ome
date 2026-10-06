@@ -1,0 +1,43 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the pod's node binding, its container readiness and its Ready condition are re-observed, and a complete set consumes none of it
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-default-0 node=node-0 now=t+0s
+tick=2 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 hold cleared
+tick=2 row=0 write no-op precondition=no-change
+tick=2 pass result=none
+tick=3 note the pod reports it cannot be placed, which a bound pod cannot regress to and no pass of a Ready row reads
+tick=3 apply pod.unschedulable[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=3 hold cleared
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=none
+tick=4 note the pod's phase goes Unknown, which still counts toward the desired set, so nothing self-heals
+tick=4 apply pod.phaseTerminal[Unknown] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the pod's endpoint drops out of rotation and comes back, which moves the Component's counters and no per-Instance phase
+tick=5 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=5 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note the controller restarts, and Ready with its anchor is persisted status with nothing in memory to lose
+tick=6 apply ctrl.crash expectations=dropped now=t+0s
+tick=6 hold cleared
+tick=6 pass result=after:5s
+tick=7 note a reconcile with nothing new re-runs every trigger against unchanged evidence and writes nothing
+tick=7 hold cleared
+tick=7 pass result=after:5s
+tick=8 note something else deletes the pod, and a Terminating pod still counts as live, so neither the restart trigger nor the truth pass fires
+tick=8 apply pod.terminating[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=8 hold cleared
+tick=8 pass result=after:5s
+tick=9 note the kubelet behind the pod stops acknowledging the deletion, and with no force-delete policy the pod simply stays a live member
+tick=9 apply pod.stuckTerminating pod=svc-a-engine-0-default-0 deletionDeadline=t+0s now=t+0s
+tick=9 hold cleared
+tick=9 pass result=after:5s
+tick=10 note the row is still Ready
+tick=10 hold cleared
+tick=10 pass result=after:5s

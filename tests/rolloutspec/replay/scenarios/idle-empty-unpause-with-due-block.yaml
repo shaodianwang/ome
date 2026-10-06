@@ -1,0 +1,29 @@
+# A planned index with no row waits under a pause while its revision sits in
+# Backoff. The pause clears as the block comes due, and the create the
+# unpause releases flips the block to RetryInProgress as it stamps.
+scenario: idle-empty-unpause-with-due-block
+arrows:
+  - T-empty-unpause
+cells:
+  - instance/Empty/timer.retryAt/boundary@T-empty-unpause
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    paused: true
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+  retryBlocks:
+    - {revision: current, state: Backoff, attemptsStarted: 1, nextRetryAt: 2m, reason: ImagePullBackOff}
+timeline:
+  - tick: 1
+    note: the index is planned but pause holds the Create pass, so no row is written
+  - tick: 2
+    note: the pause clears as the block comes due, and the Create pass opens the attempt and takes the block into RetryInProgress
+    events:
+      - spec.unpause: {}
+      - timer.retryAt: {slack: 1s}

@@ -1,0 +1,56 @@
+# An Instance rebuilt at a new revision is pinned back to the old one as the
+# template moves again, in one observation. The recreate drains onto the
+# pinned revision; the new template is reported, not rolled.
+scenario: idle-ready-rollback-recreate-with-revision
+arrows:
+  - T-ready-recreate
+  - T-drain-ready
+  - T-ready-rollback-recreate
+cells:
+  - instance/Ready/spec.revision/boundary@T-ready-rollback-recreate
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the template moves to v2 and the strategy rebuilds in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the pod leaves rotation, so the rebuild may start
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the old pod is gone and Phase B rebuilds it at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the rebuilt pod becomes Ready and enters rotation, so the Instance is Ready on v2
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the roll is pinned back to v1 as the template moves to v3; the recreate drains onto the pinned revision, not the new template
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 7
+    note: the pod leaves rotation and the rebuild toward the pinned revision proceeds
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 8
+    note: the old pod is gone and the rebuild renders the pinned revision's stored template
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

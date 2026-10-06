@@ -1,0 +1,37 @@
+# A leftover pod off the current revision wedges on a Pending row past the
+# grace as the current revision's retry block comes due. The escalation
+# reads pod evidence, never the retry gate, and stamps Failed.
+scenario: idle-pending-retry-due-at-stuck-failed
+arrows:
+  - T-pending-stuck-failed
+cells:
+  - instance/Pending/timer.retryAt/boundary@T-pending-stuck-failed
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v2
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+  retryBlocks:
+    - {revision: current, state: Backoff, attemptsStarted: 1, nextRetryAt: 2m, reason: ImagePullBackOff}
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0, previousImage: registry.example.com/runtime:v1}
+timeline:
+  - tick: 1
+    note: the row is forming on a pod the Component's current revision no longer claims, and that revision sits in Backoff
+  - tick: 2
+    note: the leftover pod is two minutes old, longer than the grace, but that proves nothing on its own
+    events:
+      - clock.advance: 2m
+  - tick: 3
+    note: the pull wedges on a pod already older than the grace as the block comes due, and the escalation stamps Failed without reading the block
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}
+      - timer.retryAt: {slack: 1s}

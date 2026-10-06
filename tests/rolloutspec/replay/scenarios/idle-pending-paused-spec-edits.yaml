@@ -1,0 +1,57 @@
+# Owner edits land on a Pending row under a pause: a strategy change, a
+# scale-up, a restart policy change, a rollback pin set and cleared, and a
+# migration request. None of them moves a row with no operation.
+scenario: idle-pending-paused-spec-edits
+cells:
+  - instance/Pending/spec.strategy/before
+  - instance/Pending/spec.replicasUp/before
+  - instance/Pending/spec.policyTuning[restartPolicy]/before
+  - instance/Pending/spec.rollbackTarget[set]/before
+  - instance/Pending/spec.rollbackTarget[clear]/before
+  - instance/Pending/spec.migrateRequest/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+    paused: true
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+timeline:
+  - tick: 1
+    note: the row is Pending under a pause with its pod still forming, and the Create pass is parked
+  - tick: 2
+    note: the update strategy changes, and no operation owns this row for a mode to be re-resolved against
+    events:
+      - spec.strategy: {strategy: RecreatePod}
+  - tick: 3
+    note: the replica count climbs, which plans a fresh index and leaves this row to the Create pass
+    events:
+      - spec.replicasUp: {to: 2}
+  - tick: 4
+    note: the restart policy changes, and a row with no operation has nothing to re-arm from it
+    events:
+      - spec.policyTuning[restartPolicy]: {value: RecreateInstanceOnPodRestart}
+  - tick: 5
+    note: the roll is pinned to the revision the row records, and the update trigger declines below Ready
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+  - tick: 6
+    note: the pin is released again
+    events:
+      - spec.rollbackTarget[clear]: {}
+  - tick: 7
+    note: the operator asks the Pending Instance to migrate, and a row that is not steady Ready is never accepted as a source
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 8
+    note: the row is still Pending under the pause

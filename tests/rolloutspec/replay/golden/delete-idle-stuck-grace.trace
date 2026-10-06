@@ -1,0 +1,30 @@
+tick=1 note the operator halves the replica count, and the retired Instance is admitted into a Delete operation
+tick=1 apply spec.replicasDown replicas=1 generation=1 now=t+0s
+tick=1 row=1 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 pass result=requeue
+tick=2 note the first drive takes the retired pod's serving gate down and finds it still in rotation, so the wave polls
+tick=2 row=1 write no-op precondition=no-change
+tick=2 pod status-patch name=svc-a-engine-1-default-0 serving=True→False
+tick=2 pass result=after:30s
+tick=3 note the retired pod's container comes back up and wedges pulling its image, which moves nothing on a draining row
+tick=3 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-1-default-0 reason=ImagePullBackOff now=t+0s
+tick=3 row=1 write no-op precondition=no-change
+tick=3 pass result=after:30s
+tick=4 note the stuck-pod grace elapses on the wedged pod and no escalation reaches a Deleting row
+tick=4 apply timer.stuckPodGrace to=t+1m1s now=t+1m1s
+tick=4 row=1 write no-op precondition=no-change
+tick=4 pass result=after:30s
+tick=5 note the retired pod leaves rotation, so the wave issues the graceful delete
+tick=5 apply endpoint.rotationOut[source] pod=svc-a-engine-1-default-0 now=t+1m1s
+tick=5 row=1 write no-op precondition=no-change
+tick=5 pod delete name=svc-a-engine-1-default-0 grace=default uidPrecondition=set
+tick=5 pass result=after:30s
+tick=6 note the pod is gone and the row leaves the owner's status
+tick=6 apply pod.deleted[source] pod=svc-a-engine-1-default-0 now=t+1m1s
+tick=6 row=1 write no-op precondition=no-change
+tick=6 row=1 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=6 pass result=requeue
+tick=7 note the Component is at rest with the retired Instance gone
+tick=7 hold cleared
+tick=7 row=0 write no-op precondition=no-change
+tick=7 pass result=none

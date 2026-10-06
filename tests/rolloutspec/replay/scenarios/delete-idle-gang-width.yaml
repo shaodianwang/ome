@@ -1,0 +1,52 @@
+# The gang is widened while one Instance drains. An index on its way out is
+# never resized: the wave takes its two pods as they are and completes on
+# their absence; the widening reaches only the Instance that stays.
+scenario: delete-idle-gang-width
+arrows:
+  - T-ready-scaledown
+  - T-delete-done
+  - T-ready-gangwidth-create
+cells:
+  - instance/Delete/Drain/spec.gangWidth[grow]/before
+  - instance/Ready/spec.gangWidth[grow]/after@T-ready-scaledown
+initial:
+  spec:
+    replicas: 2
+    workers: 1
+    restartPolicy: None
+    topologyKey: topology.example.com/fabric-domain
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, runner: leader, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 0, runner: worker, ready: true, serving: true, node: node-1}
+    - {index: 1, runner: leader, ready: true, serving: true, routed: true, node: node-2}
+    - {index: 1, runner: worker, ready: true, serving: true, node: node-3}
+timeline:
+  - tick: 1
+    note: the operator halves the replica count, and the retired gang is admitted into a Delete operation
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 2
+    note: the gang is widened by one worker at an unchanged revision, and the draining Instance is not resized
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+  - tick: 3
+    note: the retired leader leaves rotation, so the wave deletes the two members it has
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1, runner: leader}}
+  - tick: 4
+    note: both members are gone and the row leaves the owner's status
+    events:
+      - pod.deleted[source]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 1, runner: worker}}
+  - tick: 5
+    note: with the wave clear, the Instance that stays is widened by the Create pass

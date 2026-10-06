@@ -30,7 +30,7 @@ cells:
     note: "the wave never reads pod scheduling; a newly bound pod is drained and deleted like every other member. The node binding matters only later as force-delete evidence, where an overdue Terminating pod with no node name is classified unscheduled and is never force-deleted"
     invariants: [delete.by.observed.uid]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-idle-pod-observations]}
     status: current
 
   - state: Delete/Drain
@@ -39,7 +39,7 @@ cells:
     outcome: ignore
     note: "readiness is not an input to the drain. The wave gates on EndpointSlice convergence for the pod's per-revision Service, never on container or pod readiness"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-idle-pod-observations]}
     status: current
 
   - state: Delete/Drain
@@ -115,7 +115,7 @@ cells:
     outcome: ignore
     note: "a force-deleted pod disappearing is counted like any other member loss. The wave always completes through the removal transition, never through the force-delete self-loop"
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-force-then-scale-up]}
     status: current
 
   - state: Delete/Drain
@@ -124,7 +124,7 @@ cells:
     note: "no waiting or terminated container reason can move a draining index. The escalation pass skips every row whose operation is Delete and the stuck-pod check refuses Phase=Deleting, so none of the eight reasons reaches a RetryBlock or Failed; the pod is drained and deleted on its own schedule"
     invariants: [one.operation.per.instance]
     placement: perm
-    coverage: {perm: [], unit: [TestReconcileDeleteOwnedReboundFinishesBeforeRecreate], kind: []}
+    coverage: {perm: [], unit: [TestReconcileDeleteOwnedReboundFinishesBeforeRecreate], kind: [], replay: [delete-idle-stuck-grace]}
     status: current
 
   - state: Delete/Drain
@@ -132,7 +132,7 @@ cells:
     outcome: ignore
     note: "restart triggers are explicitly blind to Deleting, which the trigger classifies as mid-flight through another pass's own drain. Even under RecreateInstanceOnPodRestart the restart pass is unreachable while a scale-down wave is in progress, because the pass returns at the scale-down step - an early return that withholds op work only, leaving the end-of-pass escalation and prune to run for the retained rows"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-idle-pod-observations]}
     status: current
 
   - state: Delete/Drain
@@ -219,7 +219,7 @@ cells:
     outcome: ignore
     note: "the update strategy has no bearing on a Delete operation. The wave drains, deletes and removes the row identically under every strategy and pod shape"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-idle-spec-edits]}
     status: current
 
   - state: Delete/Drain
@@ -260,7 +260,7 @@ cells:
     note: "force-deleting a wedged pod neither admits nor blocks the scale-up; the index is recreated only once the row is removed"
     invariants: [owned.wave.before.fresh]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-force-then-scale-up]}
     status: current
 
   - state: Delete/Drain
@@ -293,7 +293,7 @@ cells:
     outcome: ignore
     note: "unpause restores the rest of the pipeline but changes nothing for this row, which was never suspended. The passes below scale-down stay unreachable until the wave clears"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-idle-spec-edits]}
     status: current
 
   - state: Delete/Drain
@@ -312,7 +312,7 @@ cells:
     note: "acceptance does not inspect the Instance phase, so the request becomes an Accepted record. Driving it does not happen; the migration pass is unreachable while the wave is in progress, and a fresh record refuses to stamp a source that is not a steady Ready with no operation, so it defers without taking ownership and retries each pass"
     invariants: [one.operation.per.instance]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-migrate-request]}
     status: current
 
   - state: Delete/Drain
@@ -322,7 +322,7 @@ cells:
     outcome: defer
     note: "the removal commit ends the pass, so the record is still only deferred at the boundary"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-migrate-request]}
     status: current
 
   - state: Delete/Drain
@@ -332,7 +332,7 @@ cells:
     outcome: escalate
     note: "once the row is removed the migration pass runs and finds no source InstanceStatus, which fails the record terminally with that reason rather than leaving it Accepted forever. A migrate request aimed at an index being scaled down therefore always ends as a Failed record"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-migrate-request]}
     status: current
 
   - state: Delete/Drain
@@ -341,7 +341,7 @@ cells:
     outcome: defer
     note: "force-deleting a wedged pod does not change the record's fate; it stays deferred while the row exists"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-force-migrate-request]}
     status: current
 
   - state: Delete/Drain
@@ -445,7 +445,7 @@ cells:
     note: "the drain's real gate: driveDeleteBatch in delete_batch.go skips an already-Terminating pod in the graceful-delete loop yet still counts it in the pod set and still reads it for drain convergence, so it holds the row open and is handed to the force-delete escalation instead"
     invariants: [row.removed.only.after.pods.gone]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-idle-terminating-held]}
     status: current
 
   - state: Delete/Drain
@@ -454,7 +454,7 @@ cells:
     note: "the pod phase is never read on this path and the escalation pass skips every Delete-owned row (escalation.go), so Failed, Succeeded and Unknown alike leave a live pod object that must still be drained, deleted and observed absent before the row can go"
     invariants: [row.removed.only.after.pods.gone]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-idle-pod-observations]}
     status: current
 
   - state: Delete/Drain
@@ -492,7 +492,7 @@ cells:
     guard: "every pod of the index rotated out, and the index has no outstanding delete expectation"
     invariants: [serving.off.before.delete]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-idle-pod-observations]}
     status: current
 
   - state: Delete/Drain
@@ -502,7 +502,7 @@ cells:
     note: "a draining pod back in rotation un-drains the index: IsPodDrained in drain/drain.go reports false, the candidate is skipped for this pass and the wave polls, while the drive loop re-applies the DeleteDrain serving hold so the rotation is transient"
     invariants: [serving.off.before.delete]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-rotation-flap]}
     status: current
 
   - state: Delete/Drain
@@ -511,7 +511,7 @@ cells:
     note: "an index on its way out is never resized. The scale-down selection in delete_batch.go takes the delete-owned pool whole and costs it from the live pod snapshot, so a Runner size or Runner set change neither adds nor removes a pod of this row"
     invariants: [one.operation.per.instance]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-idle-gang-width]}
     status: current
 
   - state: Delete/Drain
@@ -520,7 +520,7 @@ cells:
     note: "the roll target is an Update input and a Delete-owned row is selected before the update pass ever runs, so setting or clearing the stored-revision override cannot put a draining index back into the desired set"
     invariants: [one.operation.per.instance]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-idle-spec-edits]}
     status: current
 
   - state: Delete/Drain
@@ -529,7 +529,7 @@ cells:
     note: "no lifecycle knob reaches a draining row: restartPolicy, migrationPolicy, minReadySeconds and markNotReady all gate passes that are unreachable while the wave runs, and instanceReadyTimeout is consumed only once, when admitDeleteBatch in delete_batch.go stamps the operation deadline nothing later consumes"
     invariants: [one.operation.per.instance]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-idle-spec-edits]}
     status: current
 
   - state: Delete/Drain
@@ -586,7 +586,7 @@ cells:
     note: "the wave's engine rather than a disturbance: every pass re-reads the live pod set, re-applies the serving holds, re-checks drain convergence and re-issues the UID-preconditioned deletes, so an otherwise empty reconcile is what carries a drain whose only remaining progress is a pod disappearing"
     invariants: [owned.wave.before.fresh]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-idle-pod-observations]}
     status: current
 
   # GAP: a 422 is permanent, but nothing on this path classifies it, so the
@@ -622,7 +622,7 @@ cells:
     note: "the fast escalator never arms for this row: ShouldCheckForStuckPods in escalation/escalation.go refuses Phase=Deleting outright and escalateFromEvidence in escalation.go skips every Delete-owned operation, so the grace elapsing produces neither a RetryBlock nor a Failed row"
     invariants: [one.operation.per.instance]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-idle-stuck-grace]}
     status: current
 
   - state: Delete/Drain
@@ -726,7 +726,7 @@ cells:
     outcome: ignore
     note: "a clock-driven force-delete disappearing is counted like any other member loss; the wave still completes through the removal transition, never through the force-delete self-loop"
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-force-clock-then-scale-up]}
     status: current
 
   - state: Delete/Drain
@@ -765,7 +765,7 @@ cells:
     note: "force-deleting a wedged pod on the clock neither admits nor blocks the scale-up; the index is recreated only once the row is removed"
     invariants: [owned.wave.before.fresh]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-force-clock-then-scale-up]}
     status: current
 
   - state: Delete/Drain
@@ -783,7 +783,7 @@ cells:
     outcome: defer
     note: "force-deleting a wedged pod on the clock does not change the record's fate; it stays deferred while the row exists"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-force-clock-migrate-request]}
     status: current
 
   - state: Delete/Drain
@@ -809,5 +809,5 @@ cells:
     outcome: ignore
     note: readiness is not an input to the drain; delete_batch.go gates on EndpointSlice convergence for the pod's per-revision Service, and a pod failing its probes only rotates out sooner
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [delete-idle-running-not-ready]}
     status: current

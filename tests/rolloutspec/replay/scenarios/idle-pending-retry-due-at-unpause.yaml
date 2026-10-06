@@ -1,0 +1,32 @@
+# A Pending row with no pod waits under a pause while its revision sits in
+# Backoff. The pause clears as the block comes due, and the create the
+# unpause releases flips the block to RetryInProgress as it stamps.
+scenario: idle-pending-retry-due-at-unpause
+arrows:
+  - T-pending-create
+cells:
+  - instance/Pending/timer.retryAt/boundary@T-pending-create
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    paused: true
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+  retryBlocks:
+    - {revision: current, state: Backoff, attemptsStarted: 1, nextRetryAt: 2m, reason: ImagePullBackOff}
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+timeline:
+  - tick: 1
+    note: the row is Pending with no pod under a pause, and its revision sits in Backoff
+  - tick: 2
+    note: the pause clears as the block comes due, and the Create pass rebuilds the row and takes the block into RetryInProgress
+    events:
+      - spec.unpause: {}
+      - timer.retryAt: {slack: 1s}

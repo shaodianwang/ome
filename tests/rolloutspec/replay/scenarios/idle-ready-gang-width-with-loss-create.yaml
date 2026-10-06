@@ -1,0 +1,33 @@
+# A Ready gang is widened as one of its workers is deleted, under a restart
+# policy that does not claim the row. The Create pass owns the shortfall,
+# and the lost ordinal joins the widening attempt's diff.
+scenario: idle-ready-gang-width-with-loss-create
+arrows:
+  - T-ready-gangwidth-create
+cells:
+  - instance/Ready/pod.deleted[source]/boundary@T-ready-gangwidth-create
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    restartPolicy: None
+    topologyKey: topology.example.com/fabric-domain
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, runner: leader, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 0, runner: worker, ready: true, serving: true, node: node-1}
+timeline:
+  - tick: 1
+    note: the Ready gang is steady on its two serving members
+  - tick: 2
+    note: the gang is widened by one worker as its existing worker is deleted, and the Create pass stamps Creating over the Ready row for both missing ordinals
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

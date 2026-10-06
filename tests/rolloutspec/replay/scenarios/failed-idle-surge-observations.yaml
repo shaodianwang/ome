@@ -1,0 +1,74 @@
+# A surge wedges on its image and the row is Failed with the source still
+# serving and the revision held. What the source and the owner then report
+# is observation only: the row waits on the held revision and nothing else.
+scenario: failed-idle-surge-observations
+arrows:
+  - T-ready-surge
+  - T-surge-stuck
+cells:
+  - instance/Failed/pod.scheduled[target]/before
+  - instance/Failed/pod.ready[source]/before
+  - instance/Failed/endpoint.rotationOut[source]/before
+  - instance/Failed/endpoint.rotationIn[source]/before
+  - instance/Failed/ctrl.resync/before
+  - instance/Failed/timer.minReady/before
+  - instance/Failed/spec.policyTuning[restartPolicy]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    minReadySeconds: 30
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the replacement is still booting two minutes on, which is longer than the grace but proves nothing on its own
+    events:
+      - clock.advance: 2m
+  - tick: 4
+    note: the pull wedges on a replacement already older than the grace, so the escalation disposes the surge and holds the revision
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, ordinal: 1}, message: "manifest unknown"}
+  - tick: 5
+    note: the retired replacement's node binding is observed, and where it landed is nothing the Failed row reads
+    events:
+      - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 6
+    note: the source re-reports Ready, which adds nothing to a row that reads ContainersReady and the serving gate
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the source's endpoint drops out of rotation, which moves the Component's counters and nothing on the row
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 8
+    note: and comes back, and the row is where it was
+    events:
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 9
+    note: a reconcile with nothing new re-reads the held revision and only re-arms the requeue
+  - tick: 10
+    note: a minute passes, longer than the minReadySeconds window, which guards promotions a Failed row has none of
+    events:
+      - clock.advance: 1m
+  - tick: 11
+    note: the restart policy is switched on, which arms a gang's partial rebuild for the next pass and writes nothing now
+    events:
+      - spec.policyTuning[restartPolicy]: {value: RecreateInstanceOnPodRestart}
+  - tick: 12
+    note: the row is still Failed on its serving source with the revision held

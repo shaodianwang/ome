@@ -1,0 +1,44 @@
+# An outside hand deletes a draining Instance's pod before the wave does.
+# The Terminating object still counts as a member: the wave issues no second
+# delete, holds the row open, and completes only once the object is gone.
+scenario: delete-idle-terminating-held
+arrows:
+  - T-ready-scaledown
+  - T-delete-done
+cells:
+  - instance/Delete/Drain/pod.terminating[source]/before
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 1, ready: true, serving: true, routed: true, node: node-1}
+timeline:
+  - tick: 1
+    note: the operator halves the replica count, and the retired Instance is admitted into a Delete operation
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 2
+    note: something else deletes the retired pod while it is still in rotation, so the wave finds a Terminating member it may not delete again and keeps waiting
+    events:
+      - pod.terminating[source]: {pod: {index: 1}}
+  - tick: 3
+    note: the retired pod leaves rotation, and the drain has nothing to delete that is not already on its way out
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 4
+    note: the pod is gone and the row leaves the owner's status
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}
+  - tick: 5
+    note: the Component is at rest with the retired Instance gone

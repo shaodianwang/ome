@@ -1,0 +1,11 @@
+tick=1 note the Ready gang is steady on its two serving members
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the gang is widened by one worker as its existing worker is deleted, and one Restart drains the survivor and rebuilds the gang at the new width
+tick=2 apply spec.gangWidth[grow] workers=2 generation=1 now=t+0s
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 1 below desired 3 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod count 1 below desired 3 (incarnation=2)
+tick=2 pod status-patch name=svc-a-engine-0-leader-0 serving=True→False
+tick=2 pass result=after:5s

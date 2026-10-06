@@ -1,0 +1,17 @@
+tick=1 note the Instance is parked at Failed with its pod present
+tick=1 hold cleared
+tick=1 pass result=after:5s
+tick=2 note the owner's deletion begins, so the Failed Instance becomes a scale-down extra and is admitted into a Delete operation
+tick=2 apply spec.teardown[deleted] teardown=true now=t+0s
+tick=2 row=0 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 pass result=requeue
+tick=3 note the deletion is observed again, which re-derives the same wave and stamps nothing new while the drain deletes the pod
+tick=3 apply spec.teardown[deleted] teardown=true now=t+0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pod delete name=svc-a-engine-0-default-0 grace=default uidPrecondition=set
+tick=3 pass result=after:30s
+tick=4 note the pod is gone and the teardown has nothing left to remove
+tick=4 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 row=0 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=4 pass result=requeue

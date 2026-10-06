@@ -1,0 +1,22 @@
+tick=1 note the gang's PodGroup is announced and the row is Pending under a pause with only its leader present
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 pass result=none
+tick=2 note the PodGroup is deleted out from under the gang, and the ensure pass re-creates it from the plan with the row untouched
+tick=2 apply gang.podGroup[Deleted] podGroup=svc-a-engine-0 state=Deleted now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 podgroup create name=svc-a-engine-0
+tick=2 pass result=none
+tick=3 note the gang is widened by one worker, which only changes the width the parked Create pass will use
+tick=3 apply spec.gangWidth[grow] workers=2 generation=1 now=t+0s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 podgroup update name=svc-a-engine-0
+tick=3 pass result=none
+tick=4 note the pause is cleared and the Create pass materializes the missing members at the current width
+tick=4 apply spec.unpause paused=false freeze=false generation=2 now=t+0s
+tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=4 hold cleared
+tick=4 row=0 write incarnation=1 phase=Creating runningRevision=svc-a-engine-3363fef6 readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=4 pod create name=svc-a-engine-0-worker-0 revision=3363fef6 incarnation=1 ordinal=0
+tick=4 pod create name=svc-a-engine-0-worker-1 revision=3363fef6 incarnation=1 ordinal=1
+tick=4 pass result=after:5s

@@ -1,0 +1,22 @@
+tick=1 note both Instances are Ready on their serving pods
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 row=1 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the operator halves the replica count as the retired pod disappears and the template moves; the retired index is admitted into a Delete with nothing left to drain, and no roll runs while the wave is in progress
+tick=2 apply spec.replicasDown replicas=1 generation=1 now=t+0s
+tick=2 apply pod.deleted[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=2 apply spec.revision image=registry.example.com/runtime:v2 generation=2 now=t+0s
+tick=2 row=1 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 pass result=requeue
+tick=3 note the retired row leaves the owner's status
+tick=3 row=1 write no-op precondition=no-change
+tick=3 row=1 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 pass result=requeue
+tick=4 note with the wave clear, the kept Instance surges toward the new template
+tick=4 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=4 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=4 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c (newOrdinal=1)
+tick=4 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
+tick=4 hold cleared
+tick=4 pass result=after:5s

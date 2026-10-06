@@ -1,0 +1,42 @@
+# A Failed gang with no operation and no held revision loses its PodGroup,
+# which is re-announced, and is then widened twice: the first widening is a
+# fresh Create for the missing names, the second lands on that attempt.
+scenario: failed-gang-width-grow
+cells:
+  - instance/Failed/gang.podGroup[Deleted]/before
+  - instance/Failed/spec.gangWidth[grow]/before
+  - instance/Failed/spec.gangWidth[grow]/after@T-failed-corrective
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    restartPolicy: None
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Failed, runningRevision: current}
+  pods:
+    - {index: 0, runner: leader, node: node-0}
+    - {index: 0, runner: worker, node: node-0}
+timeline:
+  - tick: 1
+    note: the gang is parked at Failed with both members present, and its PodGroup is announced
+  - tick: 2
+    note: the PodGroup is deleted out from under the gang, and the ensure pass re-creates it from the plan with the row untouched
+    events:
+      - gang.podGroup[Deleted]: {instance: 0}
+  - tick: 3
+    note: the gang is widened by one worker at an unchanged revision, so the missing name is a fresh Create over the Failed row
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+  - tick: 4
+    note: the gang is widened again a pass later, and the edit lands on the attempt that owns the row, not on a Failed one
+    events:
+      - spec.gangWidth[grow]: {to: 3}

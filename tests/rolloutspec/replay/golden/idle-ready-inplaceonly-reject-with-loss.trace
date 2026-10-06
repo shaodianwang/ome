@@ -1,0 +1,14 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the edit rewrites the environment, which the in-place-only update refuses, as the pod is deleted
+tick=2 apply spec.revision env=[LOG_LEVEL:debug] generation=1 now=t+0s
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 gate consult strategy=InPlaceOnly surge=0 unavail=0 verdict=allow
+tick=2 event Warning InPlaceUpdateNotPossible OMENative component=engine instance=0 rejected update: InPlaceOnly strategy but diff exceeds container images
+tick=2 pass result=none err:workload.Reconcile: update instance 0: choose update mode (instance=0): InPlaceOnly strategy but diff exceeds container images
+tick=3 note the next pass re-reads the same ineligible diff and refuses it again, and the lost pod stays unrebuilt because the row is off the roll target
+tick=3 gate consult strategy=InPlaceOnly surge=0 unavail=0 verdict=allow
+tick=3 event Warning InPlaceUpdateNotPossible OMENative component=engine instance=0 rejected update: InPlaceOnly strategy but diff exceeds container images
+tick=3 pass result=none err:workload.Reconcile: update instance 0: choose update mode (instance=0): InPlaceOnly strategy but diff exceeds container images

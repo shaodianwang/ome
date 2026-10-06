@@ -1,0 +1,43 @@
+tick=1 note the operator halves the replica count, and the retired Instance is admitted into a Delete operation
+tick=1 apply spec.replicasDown replicas=1 generation=1 now=t+0s
+tick=1 row=1 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 pass result=requeue
+tick=2 note the update strategy changes while the first drive takes the retired pod's serving gate down and finds it still in rotation
+tick=2 apply spec.strategy strategy=RecreatePod generation=2 now=t+0s
+tick=2 row=1 write no-op precondition=no-change
+tick=2 pod status-patch name=svc-a-engine-1-default-0 serving=True→False
+tick=2 pass result=after:30s
+tick=3 note the restart policy is switched off, which governs passes a draining row never reaches
+tick=3 apply spec.policyTuning[restartPolicy] restartPolicy=None generation=3 now=t+0s
+tick=3 row=1 write no-op precondition=no-change
+tick=3 pass result=after:30s
+tick=4 note the roll is pinned to the revision every Instance already runs, and a draining index is no candidate of the update pass under any roll target
+tick=4 apply spec.rollbackTarget[set] rollbackTo=registry.example.com/runtime:v1 generation=4 now=t+0s
+tick=4 row=1 write no-op precondition=no-change
+tick=4 pass result=after:30s
+tick=5 note the pin is released again and the wave keeps polling
+tick=5 apply spec.rollbackTarget[clear] rollbackTo=nil generation=5 now=t+0s
+tick=5 row=1 write no-op precondition=no-change
+tick=5 pass result=after:30s
+tick=6 note the operator pauses the Component, and the admitted drain is not an operation the pause holds
+tick=6 apply spec.pauseTrue paused=true freeze=false generation=6 now=t+0s
+tick=6 row=1 write no-op precondition=no-change
+tick=6 pass result=after:30s
+tick=7 note the pause is cleared, which restores passes this row never waited on
+tick=7 apply spec.unpause paused=false freeze=false generation=7 now=t+0s
+tick=7 row=1 write no-op precondition=no-change
+tick=7 pass result=after:30s
+tick=8 note the retired pod leaves rotation, so the wave issues the graceful delete
+tick=8 apply endpoint.rotationOut[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=8 row=1 write no-op precondition=no-change
+tick=8 pod delete name=svc-a-engine-1-default-0 grace=default uidPrecondition=set
+tick=8 pass result=after:30s
+tick=9 note the pod is gone and the row leaves the owner's status
+tick=9 apply pod.deleted[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=9 row=1 write no-op precondition=no-change
+tick=9 row=1 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=9 pass result=requeue
+tick=10 note the Component is at rest with the retired Instance gone
+tick=10 hold cleared
+tick=10 row=0 write no-op precondition=no-change
+tick=10 pass result=none

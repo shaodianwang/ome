@@ -1,0 +1,38 @@
+# The owner of a Pending row is deleted as its revision's retry block comes
+# due. Teardown runs the scale-down pipeline alone, so neither the create
+# gate nor the rebuild gate ever reads the block.
+scenario: idle-pending-retry-due-at-teardown
+arrows:
+  - T-pending-teardown
+  - T-delete-done
+cells:
+  - instance/Pending/timer.retryAt/boundary@T-pending-teardown
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+  retryBlocks:
+    - {revision: current, state: Backoff, attemptsStarted: 1, nextRetryAt: 2m, reason: ImagePullBackOff}
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+timeline:
+  - tick: 1
+    note: the row is Pending on a forming pod while its revision sits in Backoff
+  - tick: 2
+    note: the owner's deletion begins as the block comes due; the Instance is a scale-down extra and the wave deletes its pod without reading the block
+    events:
+      - spec.teardown[deleted]: {}
+      - timer.retryAt: {slack: 1s}
+  - tick: 3
+    note: the pod is gone and the teardown has nothing left to remove
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

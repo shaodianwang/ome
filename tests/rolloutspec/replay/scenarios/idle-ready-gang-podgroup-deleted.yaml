@@ -1,0 +1,34 @@
+# A Ready gang loses its PodGroup. The ensure pass re-creates it from the
+# plan on the next reconcile, and the running members are untouched because
+# the gang contract is enforced at scheduling time.
+scenario: idle-ready-gang-podgroup-deleted
+cells:
+  - instance/Ready/gang.podGroup[Deleted]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    restartPolicy: None
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, runner: leader, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 0, runner: worker, ready: true, serving: true, node: node-1}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced and the Ready gang is steady on its two serving members
+  - tick: 2
+    note: the PodGroup is deleted out from under the gang, and the ensure pass re-creates it with the running members untouched
+    events:
+      - gang.podGroup[Deleted]: {instance: 0}
+  - tick: 3
+    note: the row is still Ready

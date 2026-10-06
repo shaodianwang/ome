@@ -1,0 +1,34 @@
+# A Ready gang's worker dies as another worker is deleted, in one
+# observation. The terminal-phase trigger selects the Instance and one
+# Restart absorbs both the dead member and the lost one.
+scenario: idle-ready-gang-terminal-with-loss
+arrows:
+  - T-ready-restart-podterminal
+cells:
+  - instance/Ready/pod.deleted[source]/boundary@T-ready-restart-podterminal
+initial:
+  spec:
+    replicas: 1
+    workers: 2
+    restartPolicy: RecreateInstanceOnPodRestart
+    topologyKey: topology.example.com/fabric-domain
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, runner: leader, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 0, runner: worker, ordinal: 0, ready: true, serving: true, node: node-1}
+    - {index: 0, runner: worker, ordinal: 1, ready: true, serving: true, node: node-2}
+timeline:
+  - tick: 1
+    note: the Ready gang is steady on its three serving members
+  - tick: 2
+    note: one worker's phase goes Failed as the other worker is deleted, and one Restart rebuilds the gang around both losses
+    events:
+      - pod.phaseTerminal[Failed]: {pod: {index: 0, runner: worker, ordinal: 0}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker, ordinal: 1}}

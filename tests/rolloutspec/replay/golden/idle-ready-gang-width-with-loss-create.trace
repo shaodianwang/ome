@@ -1,0 +1,12 @@
+tick=1 note the Ready gang is steady on its two serving members
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the gang is widened by one worker as its existing worker is deleted, and the Create pass stamps Creating over the Ready row for both missing ordinals
+tick=2 apply spec.gangWidth[grow] workers=2 generation=1 now=t+0s
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=2 hold cleared
+tick=2 row=0 write incarnation=1 phase=Creating runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 pod create name=svc-a-engine-0-worker-0 revision=882059bb incarnation=1 ordinal=0
+tick=2 pod create name=svc-a-engine-0-worker-1 revision=882059bb incarnation=1 ordinal=1
+tick=2 pass result=after:5s

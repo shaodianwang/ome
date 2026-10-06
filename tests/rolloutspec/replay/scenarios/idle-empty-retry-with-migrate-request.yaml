@@ -1,0 +1,32 @@
+# A migration request names an index whose create is waiting on a retry
+# block, and lands as the block comes due. The request fails for want of a
+# source and the retried attempt owns the index; the record never claims it.
+scenario: idle-empty-retry-with-migrate-request
+arrows:
+  - T-empty-create-retry
+cells:
+  - instance/Empty/spec.migrateRequest/boundary@T-empty-create-retry
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+  retryBlocks:
+    - {revision: current, state: Backoff, attemptsStarted: 1, nextRetryAt: 2m, reason: ImagePullBackOff}
+timeline:
+  - tick: 1
+    note: both indices are planned but their revision sits in Backoff, so no row is allocated
+  - tick: 2
+    note: the block comes due as the operator asks an index that does not exist yet to migrate; the request finds no source to move and fails, which ends the pass
+    events:
+      - timer.retryAt: {slack: 1s}
+      - spec.migrateRequest: {instance: 1, fromNode: node-1, reason: NodeDrain}
+  - tick: 3
+    note: the retried create owns both indices on the next pass; the record never claimed one

@@ -1,0 +1,41 @@
+# A replica reduction lands with a rollback pin to the revision every
+# Instance already runs. The pin is re-read on every pass and never bound
+# into the wave that is committing; the kept Instance has nothing to roll.
+scenario: idle-ready-scaledown-with-pin
+arrows:
+  - T-ready-scaledown
+  - T-delete-done
+cells:
+  - instance/Ready/spec.rollbackTarget[set]/boundary@T-ready-scaledown
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 1, ready: true, serving: true, routed: true, node: node-1}
+timeline:
+  - tick: 1
+    note: both Instances are Ready on their serving pods
+  - tick: 2
+    note: the operator halves the replica count and pins the roll to the running revision in the same observation; the retired index is admitted into a Delete and the kept Instance has nothing to roll
+    events:
+      - spec.replicasDown: {to: 1}
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+  - tick: 3
+    note: the retired pod leaves rotation, so the wave issues the graceful delete
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 4
+    note: the pod is gone and the row leaves the owner's status
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}

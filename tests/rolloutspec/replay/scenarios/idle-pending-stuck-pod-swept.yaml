@@ -1,0 +1,43 @@
+# A Pending row's forming pod is deleted from outside and its kubelet goes
+# silent. The Component-wide sweep force-deletes it once it is overdue, the
+# row stays Pending under the pause, and the unpause re-materializes the name.
+scenario: idle-pending-stuck-pod-swept
+arrows:
+  - T-pending-create
+cells:
+  - instance/Pending/timer.forceDelete[overdueSlack]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    paused: true
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+timeline:
+  - tick: 1
+    note: the row is Pending under a pause with its pod still forming, and the Create pass is parked
+  - tick: 2
+    note: something else deletes the forming pod, and the Terminating pod still counts as present
+    events:
+      - pod.terminating[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the kubelet behind the pod stops acknowledging the deletion; inside the pod's own deadline plus the slack the sweep acts on nothing
+    events:
+      - pod.stuckTerminating: {pod: {index: 0}}
+  - tick: 4
+    note: the overdue clock lands on a pod whose node is gone, so the sweep force-deletes it ahead of the passes, and the row stays Pending under the pause
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+  - tick: 5
+    note: the pause is cleared and the Create pass re-materializes the freed name
+    events:
+      - spec.unpause: {}

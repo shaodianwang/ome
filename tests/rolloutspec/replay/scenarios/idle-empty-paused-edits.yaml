@@ -1,0 +1,76 @@
+# A planned gang index with no row under a pause takes every owner edit and
+# controller event without a row being allocated. When the pause clears, the
+# create pins whatever the spec says at that moment, added indices included.
+scenario: idle-empty-paused-edits
+arrows:
+  - T-empty-unpause
+cells:
+  - instance/Empty/spec.revision/before
+  - instance/Empty/spec.strategy/before
+  - instance/Empty/spec.policyTuning[restartPolicy]/before
+  - instance/Empty/spec.rollbackTarget[set]/before
+  - instance/Empty/spec.rollbackTarget[clear]/before
+  - instance/Empty/spec.gangWidth[grow]/before
+  - instance/Empty/gang.podGroup[Deleted]/before
+  - instance/Empty/ctrl.crash/before
+  - instance/Empty/ctrl.resync/before
+  - instance/Empty/spec.revision/boundary@T-empty-unpause
+  - instance/Empty/spec.replicasUp/boundary@T-empty-unpause
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    restartPolicy: None
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    paused: true
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned but pause holds the Create pass, so no row is written
+  - tick: 2
+    note: the pod template changes, and a new target allocates no row
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the update strategy changes, which the Create pass never reads
+    events:
+      - spec.strategy: {strategy: RecreatePod}
+  - tick: 4
+    note: the restart policy changes, and nothing is persisted for a row that does not exist
+    events:
+      - spec.policyTuning[restartPolicy]: {value: RecreateInstanceOnPodRestart}
+  - tick: 5
+    note: the roll is pinned to the first revision, and nothing is pinned on an index with no attempt
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+  - tick: 6
+    note: the pin is released again
+    events:
+      - spec.rollbackTarget[clear]: {}
+  - tick: 7
+    note: the gang is widened by one worker, which only changes the width the eventual create will use
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+  - tick: 8
+    note: the index's PodGroup is deleted and the ensure pass re-creates it from the plan before any member exists
+    events:
+      - gang.podGroup[Deleted]: {instance: 0}
+  - tick: 9
+    note: the controller restarts, and an index with no row has no durable state to lose
+    events:
+      - ctrl.crash: {}
+  - tick: 10
+    note: a reconcile with nothing new re-derives the same empty plan
+  - tick: 11
+    note: the pause is cleared as the template moves once more and a second index is added, and one create batch materializes both indices at the current target and width
+    events:
+      - spec.unpause: {}
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - spec.replicasUp: {to: 2}

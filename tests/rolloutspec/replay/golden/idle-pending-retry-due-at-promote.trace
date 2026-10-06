@@ -1,0 +1,11 @@
+tick=1 note the row is Pending on a forming pod while its revision sits in Backoff
+tick=1 hold gate=RetryBlock target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb in backoff after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=1 pass result=after:5s
+tick=2 note the pod reports Ready as the block comes due, and the row promotes with no operation stamped and no block consulted
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply timer.retryAt to=t+2m1s now=t+2m1s
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+2m1s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=2 pass result=none

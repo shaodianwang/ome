@@ -1,0 +1,38 @@
+# A Ready gang's leader crashes and restarts in place as its worker is
+# deleted, in one observation. The crash trigger selects the Instance and
+# one Restart absorbs both the crashed member and the lost one.
+scenario: idle-ready-gang-crash-with-loss
+arrows:
+  - T-ready-restart-crash
+cells:
+  - instance/Ready/pod.deleted[source]/boundary@T-ready-restart-crash
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    restartPolicy: RecreateInstanceOnPodRestart
+    topologyKey: topology.example.com/fabric-domain
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, runner: leader, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 0, runner: worker, ready: true, serving: true, node: node-1}
+timeline:
+  - tick: 1
+    note: the Ready gang is steady on its two serving members
+  - tick: 2
+    note: a minute of steady serving, so the restart that follows is unambiguously after Ready
+    events:
+      - clock.advance: 1m
+  - tick: 3
+    note: the leader's runner dies and comes back under the same pod as the worker is deleted, and one Restart rebuilds the gang around both losses
+    events:
+      - pod.containerRestart: {pod: {index: 0, runner: leader}, message: OOMKilled}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

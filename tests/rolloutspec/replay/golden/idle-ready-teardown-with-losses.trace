@@ -1,0 +1,14 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the owner's deletion begins as the pod disappears and the template moves; the Instance is a scale-down extra with nothing left to drain, and no roll starts
+tick=2 apply spec.teardown[deleted] teardown=true now=t+0s
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=2 row=0 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 pass result=requeue
+tick=3 note the teardown has nothing left to remove
+tick=3 row=0 write no-op precondition=no-change
+tick=3 row=0 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 pass result=requeue

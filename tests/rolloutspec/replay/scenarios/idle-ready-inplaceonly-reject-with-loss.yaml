@@ -1,0 +1,33 @@
+# An environment edit under InPlaceOnly is refused as the Instance's pod is
+# deleted, in one observation. The refusal leaves the row Ready with no
+# operation; the loss is re-read every pass and yielded to the refused roll.
+scenario: idle-ready-inplaceonly-reject-with-loss
+arrows:
+  - T-ready-inplaceonly-reject
+cells:
+  - instance/Ready/pod.deleted[source]/boundary@T-ready-inplaceonly-reject
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceOnly
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    env: {LOG_LEVEL: info}
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the edit rewrites the environment, which the in-place-only update refuses, as the pod is deleted
+    events:
+      - spec.revision: {env: {LOG_LEVEL: debug}}
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the next pass re-reads the same ineligible diff and refuses it again, and the lost pod stays unrebuilt because the row is off the roll target

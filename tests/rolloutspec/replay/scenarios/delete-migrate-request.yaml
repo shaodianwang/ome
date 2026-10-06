@@ -1,0 +1,56 @@
+# Migration requests aimed at an Instance being scaled down: before the
+# drain finishes, on the pass that removes the row, and after it. Each is
+# recorded and deferred while the row exists; once it is gone the records
+# fail one per pass for want of a source.
+scenario: delete-migrate-request
+arrows:
+  - T-ready-scaledown
+  - T-delete-done
+cells:
+  - instance/Delete/Drain/spec.migrateRequest/before
+  - instance/Delete/Drain/spec.migrateRequest/boundary@T-delete-done
+  - instance/Delete/Drain/spec.migrateRequest/after@T-delete-done
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    migrationAudit: {maxInFlight: 3, maxPerWindow: 4, window: 1h}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 1, ready: true, serving: true, routed: true, node: node-1}
+timeline:
+  - tick: 1
+    note: the operator halves the replica count, and the retired Instance is admitted into a Delete operation
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 2
+    note: the operator asks the draining Instance off its node; the request is recorded and nothing drives it while the wave runs
+    events:
+      - spec.migrateRequest: {instance: 1, fromNode: node-1, reason: NodeDrain}
+  - tick: 3
+    note: the retired pod leaves rotation, so the wave issues the graceful delete
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 4
+    note: the pod is gone and a second request lands on the pass that removes the row, which ends at the removal commit with both records still waiting
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}
+      - spec.migrateRequest: {instance: 1, fromNode: node-1, reason: NodeDrain}
+  - tick: 5
+    note: a third request lands after the row is gone; the migrate pass now runs and fails the first record for want of a source Instance
+    events:
+      - spec.migrateRequest: {instance: 1, fromNode: node-1, reason: NodeDrain}
+  - tick: 6
+    note: the next pass fails the second record the same way
+  - tick: 7
+    note: and the third, so no request aimed at the retired index is left Accepted

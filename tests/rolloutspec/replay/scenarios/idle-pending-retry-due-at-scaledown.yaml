@@ -1,0 +1,42 @@
+# A Pending row is retired by a replica reduction as its revision's retry
+# block comes due and its forming pod dies. An index leaving the plan is
+# never rebuilt, so no consumer reads the block; the wave takes the dead pod.
+scenario: idle-pending-retry-due-at-scaledown
+arrows:
+  - T-pending-scaledown
+  - T-delete-done
+cells:
+  - instance/Pending/timer.retryAt/boundary@T-pending-scaledown
+  - instance/Pending/pod.phaseTerminal[Failed]/boundary@T-pending-scaledown
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+  retryBlocks:
+    - {revision: current, state: Backoff, attemptsStarted: 1, nextRetryAt: 2m, reason: ImagePullBackOff}
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+    - {index: 1, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+    - {index: 1, node: node-1}
+timeline:
+  - tick: 1
+    note: both rows are Pending on forming pods while their revision sits in Backoff
+  - tick: 2
+    note: the operator halves the replica count as the block comes due and the retired pod dies; the wave admits the retired Instance and deletes the dead pod, and nothing reads the block for it
+    events:
+      - spec.replicasDown: {to: 1}
+      - timer.retryAt: {slack: 1s}
+      - pod.phaseTerminal[Failed]: {pod: {index: 1}}
+  - tick: 3
+    note: the pod is gone and the row leaves the owner's status
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}

@@ -1,0 +1,38 @@
+# The owner of a Failed Instance is deleted, and the deletion is observed
+# again on the next pass. The Delete stamp is committed once; the re-read
+# re-derives it and the row is already Deleting.
+scenario: failed-teardown-reobserved
+arrows:
+  - T-failed-teardown
+  - T-delete-done
+cells:
+  - instance/Failed/spec.teardown[deleted]/after@T-failed-teardown
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Failed, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+timeline:
+  - tick: 1
+    note: the Instance is parked at Failed with its pod present
+  - tick: 2
+    note: the owner's deletion begins, so the Failed Instance becomes a scale-down extra and is admitted into a Delete operation
+    events:
+      - spec.teardown[deleted]: {}
+  - tick: 3
+    note: the deletion is observed again, which re-derives the same wave and stamps nothing new while the drain deletes the pod
+    events:
+      - spec.teardown[deleted]: {}
+  - tick: 4
+    note: the pod is gone and the teardown has nothing left to remove
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

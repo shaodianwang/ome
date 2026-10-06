@@ -1,0 +1,52 @@
+# An Instance patched in place to a new revision is pinned back to the old
+# one as its pod is deleted, in one observation. The in-place attempt owns
+# the pod once stamped, and with no pod left it re-resolves to a recreate.
+scenario: idle-ready-rollback-inplace-with-loss
+arrows:
+  - T-ready-inplace
+  - T-inplace-ready
+  - T-ready-rollback-inplace
+  - T-inplace-podlost-recreate
+cells:
+  - instance/Ready/pod.deleted[source]/boundary@T-ready-rollback-inplace
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: only the image changes, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the source leaves rotation and reports Ready, so the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.ready[target]: {pod: {index: 0}}
+  - tick: 4
+    note: the image patch lands while the source is out of rotation
+  - tick: 5
+    note: the kubelet has rolled the container, so the pod returns to rotation on the target revision and the Instance promotes
+    events:
+      - pod.ready[target]: {pod: {index: 0}}
+  - tick: 6
+    note: the endpoint follows the pod back into rotation on v2
+    events:
+      - endpoint.rotationIn[target]: {pod: {index: 0}}
+  - tick: 7
+    note: the roll is pinned back to v1 as the pod is deleted; the in-place attempt the pin starts finds no pod to patch and re-resolves to a recreate at the pinned revision
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+      - pod.deleted[source]: {pod: {index: 0}}

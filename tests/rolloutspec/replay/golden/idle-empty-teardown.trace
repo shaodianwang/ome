@@ -1,0 +1,7 @@
+tick=1 note the index is planned but pause holds the Create pass, so no row is written
+tick=1 pass result=none
+tick=2 note the owner's deletion begins, and an index with no row has nothing to drain or finalize
+tick=2 apply spec.teardown[deleted] teardown=true now=t+0s
+tick=2 pass result=none
+tick=3 note the teardown has nothing left to do
+tick=3 pass result=none

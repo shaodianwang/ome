@@ -1,0 +1,18 @@
+tick=1 note the gang's PodGroup is announced and the Ready gang is steady on its two serving members
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the PodGroup is deleted out from under the gang, and the ensure pass re-creates it with the running members untouched
+tick=2 apply gang.podGroup[Deleted] podGroup=svc-a-engine-0 state=Deleted now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 podgroup create name=svc-a-engine-0
+tick=2 hold cleared
+tick=2 row=0 write no-op precondition=no-change
+tick=2 pass result=none
+tick=3 note the row is still Ready
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 hold cleared
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=none

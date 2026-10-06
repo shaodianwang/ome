@@ -1,0 +1,52 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the pod template changes, so the rollout surges a replacement
+tick=2 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=2 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=2 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c (newOrdinal=1)
+tick=2 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
+tick=2 hold cleared
+tick=2 pass result=after:5s
+tick=3 note the replacement is still booting two minutes on, which is longer than the grace but proves nothing on its own
+tick=3 apply clock.advance by=2m0s now=t+2m0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the pull wedges on a replacement already older than the grace, so the escalation disposes the surge and holds the revision
+tick=4 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-default-1 reason=ImagePullBackOff now=t+2m0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 hold cleared
+tick=4 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Held attempts=1 reason=ImagePullBackOff}
+tick=4 warn retryHeld target=svc-a-engine-6f8b1e6c attempts=1 reason=ImagePullBackOff
+tick=4 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
+tick=4 warn instanceFailed index=0 pod=svc-a-engine-0-default-1 reason=ImagePullBackOff: workload-caused failure; revision svc-a-engine-6f8b1e6c held for retry — fix the image/config and publish a corrected revision
+tick=4 pass result=after:5s
+tick=5 note the operator corrects the image; the gate admits the Instance the trigger selected and the corrective surge starts
+tick=5 apply spec.revision image=registry.example.com/runtime:v3 generation=2 now=t+2m0s
+tick=5 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=5 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-2dd013c9 readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-2dd013c9 strategy=SurgeThenDrain started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
+tick=5 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-2dd013c9 (newOrdinal=1)
+tick=5 pod delete name=svc-a-engine-0-default-1 grace=default
+tick=5 hold cleared
+tick=5 retryblock target=svc-a-engine-6f8b1e6c remove {state=Held attempts=1 reason=ImagePullBackOff}→nil
+tick=5 pass result=after:5s
+tick=6 note the operator corrects the image again, and the edit lands on a surge in flight, not on a Failed row
+tick=6 apply spec.revision image=registry.example.com/runtime:v4 generation=3 now=t+2m0s
+tick=6 hold cleared
+tick=6 pass result=after:5s
+tick=7 note the wedged replacement is gone, so the superseded surge is abandoned and the roll re-surges toward the latest correction
+tick=7 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+2m0s
+tick=7 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+2m0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
+tick=7 event Normal SurgeAbandoned OMENative component=engine instance=0 abandoned superseded surge to svc-a-engine-2dd013c9; re-surging toward svc-a-engine-604718e2
+tick=7 hold cleared
+tick=7 pass result=after:5s
+tick=8 note the surge toward the latest correction starts
+tick=8 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=8 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-604718e2 readySince=t+2m0s op=op#2{type=Update step=Surge target=svc-a-engine-604718e2 strategy=SurgeThenDrain started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
+tick=8 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-604718e2 (newOrdinal=1)
+tick=8 pod create name=svc-a-engine-0-default-1 revision=604718e2 incarnation=1 ordinal=1
+tick=8 hold cleared
+tick=8 pass result=after:5s

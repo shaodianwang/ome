@@ -1,0 +1,55 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 pass result=after:30s
+tick=2 note the pod template changes, so the rollout surges a replacement
+tick=2 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=2 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=2 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c (newOrdinal=1)
+tick=2 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
+tick=2 hold cleared
+tick=2 pass result=after:5s
+tick=3 note the replacement is still booting two minutes on, which is longer than the grace but proves nothing on its own
+tick=3 apply clock.advance by=2m0s now=t+2m0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the pull wedges on a replacement already older than the grace, so the escalation disposes the surge and holds the revision
+tick=4 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-default-1 reason=ImagePullBackOff now=t+2m0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 hold cleared
+tick=4 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Held attempts=1 reason=ImagePullBackOff}
+tick=4 warn retryHeld target=svc-a-engine-6f8b1e6c attempts=1 reason=ImagePullBackOff
+tick=4 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
+tick=4 warn instanceFailed index=0 pod=svc-a-engine-0-default-1 reason=ImagePullBackOff: workload-caused failure; revision svc-a-engine-6f8b1e6c held for retry — fix the image/config and publish a corrected revision
+tick=4 pass result=after:5s
+tick=5 note the retired replacement's node binding is observed, and where it landed is nothing the Failed row reads
+tick=5 apply pod.scheduled[target] pod=svc-a-engine-0-default-1 node=node-0 now=t+2m0s
+tick=5 hold gate=Held target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c held after 1 failed attempt(s): ImagePullBackOff
+tick=5 pass result=after:5s
+tick=6 note the source re-reports Ready, which adds nothing to a row that reads ContainersReady and the serving gate
+tick=6 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=6 hold gate=Held target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c held after 1 failed attempt(s): ImagePullBackOff
+tick=6 pass result=after:5s
+tick=7 note the source's endpoint drops out of rotation, which moves the Component's counters and nothing on the row
+tick=7 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=7 hold gate=Held target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c held after 1 failed attempt(s): ImagePullBackOff
+tick=7 pass result=after:5s
+tick=8 note and comes back, and the row is where it was
+tick=8 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=8 hold gate=Held target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c held after 1 failed attempt(s): ImagePullBackOff
+tick=8 pass result=after:5s
+tick=9 note a reconcile with nothing new re-reads the held revision and only re-arms the requeue
+tick=9 hold gate=Held target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c held after 1 failed attempt(s): ImagePullBackOff
+tick=9 pass result=after:5s
+tick=10 note a minute passes, longer than the minReadySeconds window, which guards promotions a Failed row has none of
+tick=10 apply clock.advance by=1m0s now=t+3m0s
+tick=10 hold gate=Held target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c held after 1 failed attempt(s): ImagePullBackOff
+tick=10 pass result=after:5s
+tick=11 note the restart policy is switched on, which arms a gang's partial rebuild for the next pass and writes nothing now
+tick=11 apply spec.policyTuning[restartPolicy] restartPolicy=RecreateInstanceOnPodRestart generation=2 now=t+3m0s
+tick=11 hold gate=Held target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c held after 1 failed attempt(s): ImagePullBackOff
+tick=11 pass result=after:5s
+tick=12 note the row is still Failed on its serving source with the revision held
+tick=12 hold gate=Held target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c held after 1 failed attempt(s): ImagePullBackOff
+tick=12 pass result=after:5s

@@ -70,7 +70,7 @@ cells:
     outcome: ignore
     note: the abandon and recycle paths key on the replacement pod existing, not on its node; a retired replacement being bound changes nothing
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-idle-surge-observations]}
     status: current
   - state: Failed
     event: pod.containersReady
@@ -104,7 +104,7 @@ cells:
     outcome: ignore
     note: PodReady adds nothing the Failed row reads; both the adoption path and the stuck-pod guard are written against ContainersReady plus the serving gate
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-idle-surge-observations]}
     status: current
   - state: Failed
     event: pod.ready
@@ -133,7 +133,7 @@ cells:
     outcome: ignore
     note: a retired replacement in rotation is still retired; the abandon path deletes it whatever its serving gate says
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-idle-parked-replacement]}
     status: current
   - state: Failed
     event: pod.servingOff
@@ -152,7 +152,7 @@ cells:
     outcome: ignore
     note: the replacement leaving rotation is part of its teardown; the abandon path is driven by the pods disappearing, not by the gate
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-idle-parked-replacement]}
     status: current
   - state: Failed
     event: pod.deleted
@@ -177,7 +177,7 @@ cells:
     outcome: ignore
     note: the loss is consumed once; the Restart stamp is idempotent on re-observation and after it lands the row is Restarting
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-gang-double-loss]}
     status: current
   - state: Failed
     event: pod.deleted
@@ -307,7 +307,7 @@ cells:
     outcome: ignore
     note: the corrective edit is consumed once; the same attempt stamp is re-derived idempotently at the boundary and after it lands the row no longer reads Failed
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-corrective-then-reedit]}
     status: current
   - state: Failed
     event: spec.annotationOnly
@@ -353,7 +353,7 @@ cells:
     outcome: ignore
     note: the admission is committed once per wave; a re-observed reduction re-derives the same Delete stamp
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-scaledown-reobserved]}
     status: current
   - state: Failed
     event: spec.pauseTrue
@@ -407,7 +407,7 @@ cells:
     outcome: ignore
     note: the Delete stamp is committed once; a re-observed teardown re-derives it and the row is then Deleting
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-teardown-reobserved]}
     status: current
   - state: Failed
     event: spec.migrateRequest
@@ -469,7 +469,7 @@ cells:
     outcome: ignore
     note: admission is consulted inside the pass that already decided to re-drive this row, so it only removes a denial; the state change is attributed to the trigger that caused it
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-corrective-then-reedit]}
     status: current
   - state: Failed
     event: gate.deny
@@ -522,7 +522,7 @@ cells:
     outcome: ignore
     note: the availability window is the last guard of the one promote bar every path shares; a Failed row has no promotion waiting on it
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-idle-surge-observations]}
     status: current
   - state: Failed
     event: timer.repairRetry
@@ -634,7 +634,7 @@ cells:
     outcome: defer
     note: a Terminating pod still holds its name, so ops/create.go missingPodTargets reports nothing missing and the re-create waits; the row only moves when the object disappears and pod.deleted is observed
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestRepairYieldsToTarget_LeavesASupersededGangSetToItsCleanup], kind: []}
     status: current
   - state: Failed
     event: pod.terminating
@@ -642,7 +642,7 @@ cells:
     outcome: defer
     note: the retired replacement entering Terminating is what the abandon path asked for; ops/update_gang.go skips a pod that already carries a deletionTimestamp and re-polls until the pod set is empty
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-idle-parked-replacement]}
     status: current
   - state: Failed
     event: pod.unschedulable
@@ -650,7 +650,7 @@ cells:
     note: the hold pass skips an already-Failed row, so the scheduler hold is never recorded here and the grace never arms; an unschedulable pod only keeps occupying its pod name until the recycle that re-materializes the index frees it
     invariants: [failed.is.sticky]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-idle-parked-replacement]}
     status: current
   - state: Failed
     event: pod.containersNotReady
@@ -739,7 +739,7 @@ cells:
     outcome: ignore
     note: the ensure pass re-creates the missing PodGroup from the plan in the same pass; the Failed row's own phase and operation are untouched by it
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-gang-width-grow]}
     status: current
   - state: Failed
     event: gang.podGroup
@@ -765,14 +765,14 @@ cells:
     outcome: ignore
     note: status/aggregate.go AvailablePodSet feeds the Component's Available counters; no exit from Failed reads them, and the adoption path proves readiness from ContainersReady instead
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-idle-surge-observations]}
     status: current
   - state: Failed
     event: endpoint.rotationOut
     outcome: ignore
     note: drain.IsPodDrained is consulted by the drain steps only, and a Failed row has none; leaving rotation moves the Available counters and nothing else
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-idle-surge-observations]}
     status: current
   - state: Failed
     event: spec.gangWidth
@@ -784,7 +784,7 @@ cells:
     note: Runner size is absent from revision.DataPayload so widening mints no revision; ops/create.go missingPodTargets simply reports the new names as missing and the Create pass stamps Creating for them, with the fresh-start retry gate still applying to a Failed row that carries no operation
     invariants: [retryblock.gates.fresh.attempts, one.operation.per.instance]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-gang-width-grow]}
     status: current
   - state: Failed
     event: spec.gangWidth
@@ -793,7 +793,7 @@ cells:
     outcome: ignore
     note: the backfill is selected once per wave; a re-observed width re-derives the same missing set and after the stamp lands the row is Creating
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-gang-width-grow]}
     status: current
   # GAP: nothing reaps a pod above the planned width. The Create pass only
   # fills missing names and scale-down works per Instance index, so the
@@ -824,7 +824,7 @@ cells:
     note: inferencereplica/reconciler.go swaps rollTarget to the stored ControllerRevision (or back to the spec target when cleared) while UpdateRevision keeps reporting the spec target, so the row re-drives exactly as a corrective revision does and the destination resolves per pass — the Create pass when no pod remains, otherwise Surge, Drain or InPlace. A roll target that is the held subject is denied by its own block and the row stays Failed; a rollback revision already GC'd falls through to the spec target.
     invariants: [retryblock.gates.fresh.attempts, one.operation.per.instance]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-rollback-gang-cleanup]}
     status: current
   - state: Failed
     event: spec.rollbackTarget
@@ -832,7 +832,7 @@ cells:
     outcome: ignore
     note: the override is consumed once; the same attempt stamp is re-derived idempotently at the boundary and after it lands the row no longer reads Failed
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-corrective-then-pin]}
     status: current
   - state: Failed
     event: spec.policyTuning
@@ -840,7 +840,7 @@ cells:
     outcome: defer
     note: ops/restart.go instanceLostGangMember fires only under RestartPolicyRecreateInstance, so the knob arms or disarms the partial-gang rebuild for the next pass without writing anything now
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-idle-surge-observations]}
     status: current
   - state: Failed
     event: spec.policyTuning
@@ -905,7 +905,7 @@ cells:
     outcome: defer
     note: the requeue cadences are the whole level-triggered surface for this row — a tick re-reads the roll target, re-evaluates the RetryBlock due time, a parked repair's due time and the scale-down wave, and re-arms the requeue with the remaining wait — but by itself it changes nothing; what a tick observes about the pods or the clocks is those events' own cells
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-idle-surge-observations]}
     status: current
   - state: Failed
     event: api.invalid

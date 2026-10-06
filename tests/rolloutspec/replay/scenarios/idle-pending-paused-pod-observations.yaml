@@ -1,0 +1,66 @@
+# A Pending row under a pause, its pod still forming. Everything the pod and
+# its endpoint report, a controller restart, an empty reconcile and the
+# minReadySeconds window leave the row as it is; so does an outside delete.
+scenario: idle-pending-paused-pod-observations
+cells:
+  - instance/Pending/pod.scheduled[source]/before
+  - instance/Pending/pod.phaseTerminal[Unknown]/before
+  - instance/Pending/endpoint.rotationIn[source]/before
+  - instance/Pending/endpoint.rotationOut[source]/before
+  - instance/Pending/timer.minReady/before
+  - instance/Pending/ctrl.crash/before
+  - instance/Pending/ctrl.resync/before
+  - instance/Pending/pod.terminating[source]/before
+  - instance/Pending/pod.stuckTerminating/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    minReadySeconds: 30
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    paused: true
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+timeline:
+  - tick: 1
+    note: the row is Pending under a pause with its pod still forming, and the Create pass is parked
+  - tick: 2
+    note: the pod's node binding is re-observed, which the Create pass consumes nothing of
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod's phase goes Unknown, which still counts as a live member
+    events:
+      - pod.phaseTerminal[Unknown]: {pod: {index: 0}}
+  - tick: 4
+    note: the pod's endpoint is published and withdrawn again, which moves the Component's counters and no per-Instance phase
+    events:
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: a minute passes, longer than the minReadySeconds window, which guards a promotion a row with no operation is not waiting on
+    events:
+      - clock.advance: 1m
+  - tick: 6
+    note: the controller restarts, and Pending is persisted status with nothing in memory to lose
+    events:
+      - ctrl.crash: {}
+  - tick: 7
+    note: a reconcile with nothing new re-lists the pod and writes nothing
+  - tick: 8
+    note: something else deletes the forming pod, and a Terminating pod still counts as present, so no duplicate is issued
+    events:
+      - pod.terminating[source]: {pod: {index: 0}}
+  - tick: 9
+    note: the kubelet behind the pod stops acknowledging the deletion, and with no force-delete policy the pod simply stays a live member
+    events:
+      - pod.stuckTerminating: {pod: {index: 0}}
+  - tick: 10
+    note: the row is still Pending under the pause

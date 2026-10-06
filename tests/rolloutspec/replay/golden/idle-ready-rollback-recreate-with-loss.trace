@@ -1,0 +1,42 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the template moves to v2 and the strategy rebuilds in place of surging
+tick=2 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=2 gate consult strategy=RecreatePod surge=0 unavail=0 verdict=allow
+tick=2 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Drain target=svc-a-engine-6f8b1e6c reason=revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Normal RecreateUpdateStarted OMENative component=engine instance=0 recreate (revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c, incarnation=2)
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=2 hold cleared
+tick=2 pass result=after:5s
+tick=3 note the pod leaves rotation, so the rebuild may start
+tick=3 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the old pod is gone and Phase B rebuilds it at the bumped incarnation
+tick=4 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod create name=svc-a-engine-0-default-0 revision=6f8b1e6c incarnation=2 ordinal=0
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the rebuilt pod becomes Ready and enters rotation, so the Instance is Ready on v2
+tick=5 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=5 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=5 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil precondition=ok
+tick=5 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 recreate to revision svc-a-engine-6f8b1e6c complete
+tick=5 hold cleared
+tick=5 pass result=requeue
+tick=6 note the roll is pinned back to v1 as the v2 pod is deleted; the recreate the pin starts was about to delete it anyway, and the loss is folded into its drain
+tick=6 apply spec.rollbackTarget[set] rollbackTo=registry.example.com/runtime:v1 generation=2 now=t+0s
+tick=6 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=6 gate consult strategy=RecreatePod surge=0 unavail=0 verdict=allow
+tick=6 row=0 write incarnation=3 phase=Updating runningRevision=svc-a-engine-6f8b1e6c targetRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Update step=Drain target=svc-a-engine-882059bb reason=revision svc-a-engine-6f8b1e6c -> svc-a-engine-882059bb strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=6 event Normal RecreateUpdateStarted OMENative component=engine instance=0 recreate (revision svc-a-engine-6f8b1e6c -> svc-a-engine-882059bb, incarnation=3)
+tick=6 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=3 ordinal=0
+tick=6 hold cleared
+tick=6 pass result=after:5s

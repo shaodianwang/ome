@@ -1,0 +1,40 @@
+# A replica reduction lands with the retired pod already gone and the
+# template moving. The retired index is never a candidate of the update
+# pass and its wave consumes the loss; the kept Instance rolls afterwards.
+scenario: idle-ready-scaledown-with-losses
+arrows:
+  - T-ready-scaledown
+  - T-delete-done
+  - T-ready-surge
+cells:
+  - instance/Ready/pod.deleted[source]/boundary@T-ready-scaledown
+  - instance/Ready/spec.revision/boundary@T-ready-scaledown
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 1, ready: true, serving: true, routed: true, node: node-1}
+timeline:
+  - tick: 1
+    note: both Instances are Ready on their serving pods
+  - tick: 2
+    note: the operator halves the replica count as the retired pod disappears and the template moves; the retired index is admitted into a Delete with nothing left to drain, and no roll runs while the wave is in progress
+    events:
+      - spec.replicasDown: {to: 1}
+      - pod.deleted[source]: {pod: {index: 1}}
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the retired row leaves the owner's status
+  - tick: 4
+    note: with the wave clear, the kept Instance surges toward the new template

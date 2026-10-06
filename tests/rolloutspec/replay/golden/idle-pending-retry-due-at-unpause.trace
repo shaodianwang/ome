@@ -1,0 +1,10 @@
+tick=1 note the row is Pending with no pod under a pause, and its revision sits in Backoff
+tick=1 pass result=none
+tick=2 note the pause clears as the block comes due, and the Create pass rebuilds the row and takes the block into RetryInProgress
+tick=2 apply spec.unpause paused=false freeze=false generation=1 now=t+0s
+tick=2 apply timer.retryAt to=t+2m1s now=t+2m1s
+tick=2 hold cleared
+tick=2 row=0 write incarnation=1 phase=Creating runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+2m1s lastProgressAt=t+2m1s deadline=t+32m1s} precondition=ok
+tick=2 retryblock target=svc-a-engine-882059bb persist {state=Backoff attempts=1 nextRetryAt=t+2m0s reason=ImagePullBackOff}→{state=RetryInProgress attempts=1 nextRetryAt=t+2m0s reason=ImagePullBackOff}
+tick=2 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=2 pass result=after:5s

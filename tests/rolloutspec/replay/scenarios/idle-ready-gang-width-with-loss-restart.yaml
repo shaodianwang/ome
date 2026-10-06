@@ -1,0 +1,33 @@
+# A Ready gang is widened as one of its workers is deleted, under
+# RecreateInstanceOnPodRestart. The restart detector claims the row ahead
+# of the Create pass and rebuilds the whole gang at the new width.
+scenario: idle-ready-gang-width-with-loss-restart
+arrows:
+  - T-ready-gangwidth-restart
+cells:
+  - instance/Ready/pod.deleted[source]/boundary@T-ready-gangwidth-restart
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    restartPolicy: RecreateInstanceOnPodRestart
+    topologyKey: topology.example.com/fabric-domain
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, runner: leader, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 0, runner: worker, ready: true, serving: true, node: node-1}
+timeline:
+  - tick: 1
+    note: the Ready gang is steady on its two serving members
+  - tick: 2
+    note: the gang is widened by one worker as its existing worker is deleted, and one Restart drains the survivor and rebuilds the gang at the new width
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

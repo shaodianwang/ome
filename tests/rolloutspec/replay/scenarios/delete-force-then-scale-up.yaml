@@ -1,0 +1,55 @@
+# A retired gang's leader is stuck Terminating behind a dead kubelet and is
+# force-deleted on the pass that reads it, while the replica count climbs
+# back. The row stays Deleting until the worker is gone; the index is then
+# created fresh rather than resurrected.
+scenario: delete-force-then-scale-up
+arrows:
+  - T-ready-scaledown
+  - T-delete-force
+  - T-delete-done
+  - T-empty-create
+cells:
+  - instance/Delete/Drain/spec.replicasUp/boundary@T-delete-force
+  - instance/Delete/Drain/pod.deleted[source]/after@T-delete-force
+initial:
+  spec:
+    replicas: 2
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, runner: leader, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 0, runner: worker, ready: true, serving: true, node: node-1}
+    - {index: 1, runner: leader, ready: true, serving: true, routed: true, node: node-2}
+    - {index: 1, runner: worker, ready: true, serving: true, node: node-3}
+timeline:
+  - tick: 1
+    note: the operator halves the replica count, and the retired gang is admitted into a Delete operation
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 2
+    note: the retired leader leaves rotation, so the wave deletes both members
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1, runner: leader}}
+  - tick: 3
+    note: five minutes on the leader is still there behind a kubelet that is gone, and the replica count climbs back in the same observation; the sweep force-deletes the leader, and the index stays Deleting on its terminating worker rather than being recreated
+    events:
+      - clock.advance: 5m
+      - pod.stuckTerminating: {pod: {index: 1, runner: leader}}
+      - spec.replicasUp: {to: 2}
+  - tick: 4
+    note: the worker is gone, which is the ordinary completion, and the row leaves the owner's status
+    events:
+      - pod.deleted[source]: {pod: {index: 1, runner: worker}}
+  - tick: 5
+    note: with the row gone the planned index is created fresh

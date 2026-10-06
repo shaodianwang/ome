@@ -1,0 +1,13 @@
+tick=1 note the row is Pending on a forming pod while its revision sits in Backoff
+tick=1 hold gate=RetryBlock target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb in backoff after 1 failed attempt(s): ImagePullBackOff; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=1 pass result=after:5s
+tick=2 note the owner's deletion begins as the block comes due; the Instance is a scale-down extra and the wave deletes its pod without reading the block
+tick=2 apply spec.teardown[deleted] teardown=true now=t+0s
+tick=2 apply timer.retryAt to=t+2m1s now=t+2m1s
+tick=2 row=0 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Delete step=Drain started=t+2m1s lastProgressAt=t+2m1s deadline=t+32m1s} precondition=ok
+tick=2 pass result=requeue
+tick=3 note the pod is gone and the teardown has nothing left to remove
+tick=3 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+2m1s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 row=0 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Delete step=Drain started=t+2m1s lastProgressAt=t+2m1s deadline=t+32m1s} precondition=ok
+tick=3 pass result=requeue

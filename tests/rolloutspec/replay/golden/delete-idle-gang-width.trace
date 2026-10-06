@@ -1,0 +1,27 @@
+tick=1 note the operator halves the replica count, and the retired gang is admitted into a Delete operation
+tick=1 apply spec.replicasDown replicas=1 generation=1 now=t+0s
+tick=1 row=1 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 pass result=requeue
+tick=2 note the gang is widened by one worker at an unchanged revision, and the draining Instance is not resized
+tick=2 apply spec.gangWidth[grow] workers=2 generation=2 now=t+0s
+tick=2 row=1 write no-op precondition=no-change
+tick=2 pod status-patch name=svc-a-engine-1-leader-0 serving=True→False
+tick=2 pod status-patch name=svc-a-engine-1-worker-0 serving=True→False
+tick=2 pass result=after:30s
+tick=3 note the retired leader leaves rotation, so the wave deletes the two members it has
+tick=3 apply endpoint.rotationOut[source] pod=svc-a-engine-1-leader-0 now=t+0s
+tick=3 row=1 write no-op precondition=no-change
+tick=3 pod delete name=svc-a-engine-1-leader-0 grace=default uidPrecondition=set
+tick=3 pod delete name=svc-a-engine-1-worker-0 grace=default uidPrecondition=set
+tick=3 pass result=after:30s
+tick=4 note both members are gone and the row leaves the owner's status
+tick=4 apply pod.deleted[source] pod=svc-a-engine-1-leader-0 now=t+0s
+tick=4 apply pod.deleted[source] pod=svc-a-engine-1-worker-0 now=t+0s
+tick=4 row=1 write no-op precondition=no-change
+tick=4 row=1 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=4 pass result=requeue
+tick=5 note with the wave clear, the Instance that stays is widened by the Create pass
+tick=5 hold cleared
+tick=5 row=0 write incarnation=1 phase=Creating runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#2{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=5 pod create name=svc-a-engine-0-worker-1 revision=882059bb incarnation=1 ordinal=1
+tick=5 pass result=after:5s

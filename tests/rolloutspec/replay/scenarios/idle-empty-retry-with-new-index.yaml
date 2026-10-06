@@ -1,0 +1,35 @@
+# Indices are added while their revision sits in Backoff. The block denies
+# every create; when it comes due, one batch admits the indices that waited
+# and the one added in the same observation.
+scenario: idle-empty-retry-with-new-index
+arrows:
+  - T-empty-create-retry
+  - T-empty-create
+cells:
+  - instance/Empty/spec.replicasUp/before
+  - instance/Empty/spec.replicasUp/boundary@T-empty-create-retry
+  - instance/Empty/timer.retryAt/boundary@T-empty-create
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+  retryBlocks:
+    - {revision: current, state: Backoff, attemptsStarted: 1, nextRetryAt: 2m, reason: ImagePullBackOff}
+timeline:
+  - tick: 1
+    note: the index is planned but its revision sits in Backoff, so no row is allocated
+  - tick: 2
+    note: a second index is planned, and the block denies that attempt too
+    events:
+      - spec.replicasUp: {to: 2}
+  - tick: 3
+    note: the block comes due as a third index is planned, and one create batch admits all three
+    events:
+      - timer.retryAt: {slack: 1s}
+      - spec.replicasUp: {to: 3}

@@ -1,0 +1,37 @@
+tick=1 note the operator halves the replica count, and the retired gang is admitted into a Delete operation
+tick=1 apply spec.replicasDown replicas=1 generation=1 now=t+0s
+tick=1 row=1 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 pass result=requeue
+tick=2 note the retired leader leaves rotation, so the wave deletes both members
+tick=2 apply endpoint.rotationOut[source] pod=svc-a-engine-1-leader-0 now=t+0s
+tick=2 row=1 write no-op precondition=no-change
+tick=2 pod status-patch name=svc-a-engine-1-leader-0 serving=True→False
+tick=2 pod status-patch name=svc-a-engine-1-worker-0 serving=True→False
+tick=2 pod delete name=svc-a-engine-1-leader-0 grace=default uidPrecondition=set
+tick=2 pod delete name=svc-a-engine-1-worker-0 grace=default uidPrecondition=set
+tick=2 pass result=after:30s
+tick=3 note the kubelet behind the leader stops acknowledging the deletion; inside the pod's own deadline plus the slack the sweep acts on nothing
+tick=3 apply pod.stuckTerminating pod=svc-a-engine-1-leader-0 deletionDeadline=t+0s now=t+0s
+tick=3 row=1 write no-op precondition=no-change
+tick=3 pass result=after:30s
+tick=4 note the overdue clock lands as the replica count climbs back; the sweep force-deletes the leader and the index stays Deleting on its terminating worker rather than being recreated
+tick=4 apply timer.forceDelete[overdueSlack] to=t+1m1s now=t+1m1s
+tick=4 apply spec.replicasUp replicas=2 generation=2 now=t+1m1s
+tick=4 pod delete name=svc-a-engine-1-leader-0 grace=0 uidPrecondition=set
+tick=4 event Warning PodForceDeleted OMENative component=engine instance=1: force-deleted stuck-Terminating pod svc-a-engine-1-leader-0 on node node-2 (evidence=node-gone, 1m1s past the pod's own deletion deadline)
+tick=4 event Warning PodDeleteBlockedByFinalizer OMENative component=engine instance=1: pod svc-a-engine-1-worker-0 is 1m1s past its own deletion deadline but pinned by finalizers [replay.workload.ome.io/pod-lifecycle]; OME never strips another controller's finalizer — the finalizer owner must resolve it
+tick=4 row=1 write no-op precondition=no-change
+tick=4 pass result=after:30s
+tick=5 note the worker is gone, which is the ordinary completion, and the row leaves the owner's status
+tick=5 apply pod.deleted[source] pod=svc-a-engine-1-worker-0 now=t+1m1s
+tick=5 row=1 write no-op precondition=no-change
+tick=5 row=1 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=5 pass result=requeue
+tick=6 note with the row gone the planned index is created fresh
+tick=6 hold cleared
+tick=6 row=0 write no-op precondition=no-change
+tick=6 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#2{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+1m1s lastProgressAt=t+1m1s deadline=t+31m1s} precondition=ok
+tick=6 event Normal InstanceCreated OMENative component=engine instance=1 materialized; 2 pod(s) requested
+tick=6 pod create name=svc-a-engine-1-leader-0 revision=882059bb incarnation=1 ordinal=0
+tick=6 pod create name=svc-a-engine-1-worker-0 revision=882059bb incarnation=1 ordinal=0
+tick=6 pass result=after:5s

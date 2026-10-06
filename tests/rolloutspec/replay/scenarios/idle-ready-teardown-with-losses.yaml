@@ -1,0 +1,35 @@
+# The owner is deleted as the serving pod disappears and the template moves.
+# Teardown runs the scale-down pipeline alone: the update pass never runs
+# and the wave consumes the loss as its own completion.
+scenario: idle-ready-teardown-with-losses
+arrows:
+  - T-ready-teardown
+  - T-delete-done
+cells:
+  - instance/Ready/pod.deleted[source]/boundary@T-ready-teardown
+  - instance/Ready/spec.revision/boundary@T-ready-teardown
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the owner's deletion begins as the pod disappears and the template moves; the Instance is a scale-down extra with nothing left to drain, and no roll starts
+    events:
+      - spec.teardown[deleted]: {}
+      - pod.deleted[source]: {pod: {index: 0}}
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the teardown has nothing left to remove

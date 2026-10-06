@@ -1,0 +1,25 @@
+# The owner of a planned index that never got a row is deleted. Teardown
+# treats observed rows as scale-down extras, and an index with no row owns
+# nothing to finalize, so the pass has nothing to do.
+scenario: idle-empty-teardown
+cells:
+  - instance/Empty/spec.teardown[deleted]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    paused: true
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned but pause holds the Create pass, so no row is written
+  - tick: 2
+    note: the owner's deletion begins, and an index with no row has nothing to drain or finalize
+    events:
+      - spec.teardown[deleted]: {}
+  - tick: 3
+    note: the teardown has nothing left to do

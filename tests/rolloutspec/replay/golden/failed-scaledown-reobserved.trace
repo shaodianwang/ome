@@ -1,0 +1,18 @@
+tick=1 note one Instance serves and the second is parked at Failed
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=after:5s
+tick=2 note the operator halves the replica count, retiring the Failed Instance
+tick=2 apply spec.replicasDown replicas=1 generation=1 now=t+0s
+tick=2 row=1 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 pass result=requeue
+tick=3 note the same replica count is observed again, which re-derives the admitted wave and stamps nothing new while the drain deletes the pod
+tick=3 apply spec.replicasDown replicas=1 generation=2 now=t+0s
+tick=3 row=1 write no-op precondition=no-change
+tick=3 pod delete name=svc-a-engine-1-default-0 grace=default uidPrecondition=set
+tick=3 pass result=after:30s
+tick=4 note the pod is gone and the row leaves the owner's status
+tick=4 apply pod.deleted[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=4 row=1 write no-op precondition=no-change
+tick=4 row=1 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=4 pass result=requeue

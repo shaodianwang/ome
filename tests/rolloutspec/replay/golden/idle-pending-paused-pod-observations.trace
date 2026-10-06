@@ -1,0 +1,36 @@
+tick=1 note the row is Pending under a pause with its pod still forming, and the Create pass is parked
+tick=1 pass result=none
+tick=2 note the pod's node binding is re-observed, which the Create pass consumes nothing of
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-default-0 node=node-0 now=t+0s
+tick=2 pass result=none
+tick=3 note the pod's phase goes Unknown, which still counts as a live member
+tick=3 apply pod.phaseTerminal[Unknown] pod=svc-a-engine-0-default-0 now=t+0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=none
+tick=4 note the pod's endpoint is published and withdrawn again, which moves the Component's counters and no per-Instance phase
+tick=4 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pass result=none
+tick=5 note a minute passes, longer than the minReadySeconds window, which guards a promotion a row with no operation is not waiting on
+tick=5 apply clock.advance by=1m0s now=t+1m0s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pass result=none
+tick=6 note the controller restarts, and Pending is persisted status with nothing in memory to lose
+tick=6 apply ctrl.crash expectations=dropped now=t+1m0s
+tick=6 row=0 write no-op precondition=no-change
+tick=6 pass result=none
+tick=7 note a reconcile with nothing new re-lists the pod and writes nothing
+tick=7 row=0 write no-op precondition=no-change
+tick=7 pass result=none
+tick=8 note something else deletes the forming pod, and a Terminating pod still counts as present, so no duplicate is issued
+tick=8 apply pod.terminating[source] pod=svc-a-engine-0-default-0 now=t+1m0s
+tick=8 row=0 write no-op precondition=no-change
+tick=8 pass result=none
+tick=9 note the kubelet behind the pod stops acknowledging the deletion, and with no force-delete policy the pod simply stays a live member
+tick=9 apply pod.stuckTerminating pod=svc-a-engine-0-default-0 deletionDeadline=t+1m0s now=t+1m0s
+tick=9 row=0 write no-op precondition=no-change
+tick=9 pass result=none
+tick=10 note the row is still Pending under the pause
+tick=10 row=0 write no-op precondition=no-change
+tick=10 pass result=none

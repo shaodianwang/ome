@@ -1,0 +1,68 @@
+# A Ready Instance's pod keeps reporting: re-bound, containers ready, Ready
+# again, unplaceable, an Unknown phase, an endpoint flap, a controller
+# restart, an empty reconcile, an outside delete gone silent. None moves it.
+scenario: idle-ready-pod-observations
+cells:
+  - instance/Ready/pod.scheduled[source]/before
+  - instance/Ready/pod.containersReady[source]/before
+  - instance/Ready/pod.ready[source]/before
+  - instance/Ready/pod.unschedulable[source]/before
+  - instance/Ready/pod.phaseTerminal[Unknown]/before
+  - instance/Ready/endpoint.rotationOut[source]/before
+  - instance/Ready/endpoint.rotationIn[source]/before
+  - instance/Ready/ctrl.crash/before
+  - instance/Ready/ctrl.resync/before
+  - instance/Ready/pod.terminating[source]/before
+  - instance/Ready/pod.stuckTerminating/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod's node binding, its container readiness and its Ready condition are re-observed, and a complete set consumes none of it
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}}
+      - pod.containersReady[source]: {pod: {index: 0}}
+      - pod.ready[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod reports it cannot be placed, which a bound pod cannot regress to and no pass of a Ready row reads
+    events:
+      - pod.unschedulable[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the pod's phase goes Unknown, which still counts toward the desired set, so nothing self-heals
+    events:
+      - pod.phaseTerminal[Unknown]: {pod: {index: 0}}
+  - tick: 5
+    note: the pod's endpoint drops out of rotation and comes back, which moves the Component's counters and no per-Instance phase
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the controller restarts, and Ready with its anchor is persisted status with nothing in memory to lose
+    events:
+      - ctrl.crash: {}
+  - tick: 7
+    note: a reconcile with nothing new re-runs every trigger against unchanged evidence and writes nothing
+  - tick: 8
+    note: something else deletes the pod, and a Terminating pod still counts as live, so neither the restart trigger nor the truth pass fires
+    events:
+      - pod.terminating[source]: {pod: {index: 0}}
+  - tick: 9
+    note: the kubelet behind the pod stops acknowledging the deletion, and with no force-delete policy the pod simply stays a live member
+    events:
+      - pod.stuckTerminating: {pod: {index: 0}}
+  - tick: 10
+    note: the row is still Ready

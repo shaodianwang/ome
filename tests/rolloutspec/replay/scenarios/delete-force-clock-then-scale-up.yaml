@@ -1,0 +1,57 @@
+# The same stuck leader, with the overdue clock landing last: the sweep acts
+# when the clock lands while the replica count climbs back. The row stays
+# Deleting until the worker is gone, and the index is then created fresh.
+scenario: delete-force-clock-then-scale-up
+arrows:
+  - T-ready-scaledown
+  - T-delete-force-clock
+  - T-delete-done
+  - T-empty-create
+cells:
+  - instance/Delete/Drain/spec.replicasUp/boundary@T-delete-force-clock
+  - instance/Delete/Drain/pod.deleted[source]/after@T-delete-force-clock
+initial:
+  spec:
+    replicas: 2
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, runner: leader, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 0, runner: worker, ready: true, serving: true, node: node-1}
+    - {index: 1, runner: leader, ready: true, serving: true, routed: true, node: node-2}
+    - {index: 1, runner: worker, ready: true, serving: true, node: node-3}
+timeline:
+  - tick: 1
+    note: the operator halves the replica count, and the retired gang is admitted into a Delete operation
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 2
+    note: the retired leader leaves rotation, so the wave deletes both members
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1, runner: leader}}
+  - tick: 3
+    note: the kubelet behind the leader stops acknowledging the deletion; inside the pod's own deadline plus the slack the sweep acts on nothing
+    events:
+      - pod.stuckTerminating: {pod: {index: 1, runner: leader}}
+  - tick: 4
+    note: the overdue clock lands as the replica count climbs back; the sweep force-deletes the leader and the index stays Deleting on its terminating worker rather than being recreated
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+      - spec.replicasUp: {to: 2}
+  - tick: 5
+    note: the worker is gone, which is the ordinary completion, and the row leaves the owner's status
+    events:
+      - pod.deleted[source]: {pod: {index: 1, runner: worker}}
+  - tick: 6
+    note: with the row gone the planned index is created fresh

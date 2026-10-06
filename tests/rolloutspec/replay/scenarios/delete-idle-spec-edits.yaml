@@ -1,0 +1,69 @@
+# Owner edits land on a draining Instance: a strategy change, a restart
+# policy change, a rollback pin set and cleared, a pause and its release.
+# None reaches the wave, which drains and completes on absence as before.
+scenario: delete-idle-spec-edits
+arrows:
+  - T-ready-scaledown
+  - T-delete-done
+cells:
+  - instance/Delete/Drain/spec.strategy/before
+  - instance/Delete/Drain/spec.policyTuning[restartPolicy]/before
+  - instance/Delete/Drain/spec.rollbackTarget[set]/before
+  - instance/Delete/Drain/spec.rollbackTarget[clear]/before
+  - instance/Delete/Drain/spec.unpause/before
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 1, ready: true, serving: true, routed: true, node: node-1}
+timeline:
+  - tick: 1
+    note: the operator halves the replica count, and the retired Instance is admitted into a Delete operation
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 2
+    note: the update strategy changes while the first drive takes the retired pod's serving gate down and finds it still in rotation
+    events:
+      - spec.strategy: {strategy: RecreatePod}
+  - tick: 3
+    note: the restart policy is switched off, which governs passes a draining row never reaches
+    events:
+      - spec.policyTuning[restartPolicy]: {value: None}
+  - tick: 4
+    note: the roll is pinned to the revision every Instance already runs, and a draining index is no candidate of the update pass under any roll target
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+  - tick: 5
+    note: the pin is released again and the wave keeps polling
+    events:
+      - spec.rollbackTarget[clear]: {}
+  - tick: 6
+    note: the operator pauses the Component, and the admitted drain is not an operation the pause holds
+    events:
+      - spec.pauseTrue: {}
+  - tick: 7
+    note: the pause is cleared, which restores passes this row never waited on
+    events:
+      - spec.unpause: {}
+  - tick: 8
+    note: the retired pod leaves rotation, so the wave issues the graceful delete
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 9
+    note: the pod is gone and the row leaves the owner's status
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}
+  - tick: 10
+    note: the Component is at rest with the retired Instance gone

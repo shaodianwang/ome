@@ -1,0 +1,43 @@
+# A Pending gang under a pause loses its PodGroup, which is re-announced,
+# and is widened, which changes nothing while the Create pass is parked; the
+# unpause materializes the missing members at the current width.
+scenario: idle-pending-gang-edits
+arrows:
+  - T-pending-create
+cells:
+  - instance/Pending/gang.podGroup[Deleted]/before
+  - instance/Pending/spec.gangWidth[grow]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    restartPolicy: None
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    paused: true
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, runner: leader, node: node-0}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced and the row is Pending under a pause with only its leader present
+  - tick: 2
+    note: the PodGroup is deleted out from under the gang, and the ensure pass re-creates it from the plan with the row untouched
+    events:
+      - gang.podGroup[Deleted]: {instance: 0}
+  - tick: 3
+    note: the gang is widened by one worker, which only changes the width the parked Create pass will use
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+  - tick: 4
+    note: the pause is cleared and the Create pass materializes the missing members at the current width
+    events:
+      - spec.unpause: {}

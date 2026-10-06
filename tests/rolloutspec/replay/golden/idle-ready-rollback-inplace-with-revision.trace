@@ -1,0 +1,61 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note only the image changes, so the update is eligible to run in place
+tick=2 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=2 gate consult strategy=InPlaceIfPossible surge=0 unavail=0 verdict=allow
+tick=2 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=InPlace target=svc-a-engine-6f8b1e6c strategy=InPlaceIfPossible started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Normal InPlaceUpdateStarted OMENative component=engine instance=0 in-place update to revision svc-a-engine-6f8b1e6c
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=2 hold cleared
+tick=2 pass result=after:5s
+tick=3 note the source leaves rotation and reports Ready, so the transition marker is written
+tick=3 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=3 apply pod.ready[target] pod=svc-a-engine-0-default-0 now=t+0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pod patch name=svc-a-engine-0-default-0 annotations=[internal.ome.io/in-place-image-transition:nil→{"targetImages":{"main":"registry.example.com/runtime:v2"},"restartCounts":{"main":0}}]
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the image patch lands while the source is out of rotation
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod patch name=svc-a-engine-0-default-0 images=main=registry.example.com/runtime:v1→main=registry.example.com/runtime:v2
+tick=4 pod patch name=svc-a-engine-0-default-0 labels=[ome.io/revision-hash:882059bb→6f8b1e6c]
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the kubelet has rolled the container, so the pod returns to rotation on the target revision and the Instance promotes
+tick=5 apply pod.ready[target] pod=svc-a-engine-0-default-0 now=t+0s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod status-patch name=svc-a-engine-0-default-0 serving=False→True
+tick=5 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil precondition=ok
+tick=5 event Normal InPlaceUpdateCompleted OMENative component=engine instance=0 in-place update to revision svc-a-engine-6f8b1e6c complete
+tick=5 pod patch name=svc-a-engine-0-default-0 annotations=[internal.ome.io/in-place-image-transition:{"targetImages":{"main":"registry.example.com/runtime:v2"},"restartCounts":{"main":0}}→nil]
+tick=5 hold cleared
+tick=5 pass result=requeue
+tick=6 note the endpoint follows the pod back into rotation on v2
+tick=6 apply endpoint.rotationIn[target] pod=svc-a-engine-0-default-0 now=t+0s
+tick=6 hold cleared
+tick=6 row=0 write no-op precondition=no-change
+tick=6 pass result=none
+tick=7 note the roll is pinned back to v1 as the template moves to v3; the in-place attempt targets the pinned revision, not the new template
+tick=7 apply spec.rollbackTarget[set] rollbackTo=registry.example.com/runtime:v1 generation=2 now=t+0s
+tick=7 apply spec.revision image=registry.example.com/runtime:v3 generation=3 now=t+0s
+tick=7 gate consult strategy=InPlaceIfPossible surge=0 unavail=0 verdict=allow
+tick=7 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-6f8b1e6c targetRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Update step=InPlace target=svc-a-engine-882059bb strategy=InPlaceIfPossible started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=7 event Normal InPlaceUpdateStarted OMENative component=engine instance=0 in-place update to revision svc-a-engine-882059bb
+tick=7 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=7 hold cleared
+tick=7 pass result=after:5s
+tick=8 note the source leaves rotation and reports Ready, so the transition marker toward the pinned revision is written
+tick=8 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=8 apply pod.ready[target] pod=svc-a-engine-0-default-0 now=t+0s
+tick=8 row=0 write no-op precondition=no-change
+tick=8 pod patch name=svc-a-engine-0-default-0 annotations=[internal.ome.io/in-place-image-transition:nil→{"targetImages":{"main":"registry.example.com/runtime:v1"},"restartCounts":{"main":0}}]
+tick=8 hold cleared
+tick=8 pass result=after:5s
+tick=9 note the image patch lands, rewriting the container to the pinned revision's image
+tick=9 row=0 write no-op precondition=no-change
+tick=9 pod patch name=svc-a-engine-0-default-0 images=main=registry.example.com/runtime:v2→main=registry.example.com/runtime:v1
+tick=9 pod patch name=svc-a-engine-0-default-0 labels=[ome.io/revision-hash:6f8b1e6c→882059bb]
+tick=9 hold cleared
+tick=9 pass result=after:5s

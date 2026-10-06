@@ -1,0 +1,34 @@
+# A Failed gang loses two of its three members in one observation. The loss
+# is consumed once: with a survivor still holding capacity the gang re-arms
+# as a whole, and the second loss is absorbed by the same Restart.
+scenario: failed-gang-double-loss
+arrows:
+  - T-failed-restart
+cells:
+  - instance/Failed/pod.deleted[source]/boundary@T-failed-restart
+initial:
+  spec:
+    replicas: 1
+    workers: 2
+    restartPolicy: RecreateInstanceOnPodRestart
+    topologyKey: topology.example.com/fabric-domain
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Failed, runningRevision: current}
+  pods:
+    - {index: 0, runner: leader, node: node-0}
+    - {index: 0, runner: worker, ordinal: 0, node: node-0}
+    - {index: 0, runner: worker, ordinal: 1, node: node-0}
+timeline:
+  - tick: 1
+    note: the gang is parked at Failed with all three members present
+  - tick: 2
+    note: both workers are lost at once, leaving the leader below the desired count, so the gang re-arms as a whole under one Restart
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker, ordinal: 0}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker, ordinal: 1}}

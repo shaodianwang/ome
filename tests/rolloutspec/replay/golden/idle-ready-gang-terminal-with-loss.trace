@@ -1,0 +1,12 @@
+tick=1 note the Ready gang is steady on its three serving members
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note one worker's phase goes Failed as the other worker is deleted, and one Restart rebuilds the gang around both losses
+tick=2 apply pod.phaseTerminal[Failed] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-worker-1 now=t+0s
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod svc-a-engine-0-worker-0 container main failed (Failed, exit 1) started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-worker-0 reason=Failed container=main exitCode=1} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod svc-a-engine-0-worker-0 container main failed (Failed, exit 1) (incarnation=2)
+tick=2 pod status-patch name=svc-a-engine-0-leader-0 serving=True→False
+tick=2 pod status-patch name=svc-a-engine-0-worker-0 serving=True→False
+tick=2 pass result=after:5s

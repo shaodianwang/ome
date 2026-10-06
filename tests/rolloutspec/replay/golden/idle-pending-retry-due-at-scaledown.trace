@@ -1,0 +1,14 @@
+tick=1 note both rows are Pending on forming pods while their revision sits in Backoff
+tick=1 hold gate=RetryBlock target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb in backoff after 1 failed attempt(s): ImagePullBackOff; Instances 0, 1 on revision svc-a-engine-882059bb not serving
+tick=1 pass result=after:5s
+tick=2 note the operator halves the replica count as the block comes due and the retired pod dies; the wave admits the retired Instance and deletes the dead pod, and nothing reads the block for it
+tick=2 apply spec.replicasDown replicas=1 generation=1 now=t+0s
+tick=2 apply timer.retryAt to=t+2m1s now=t+2m1s
+tick=2 apply pod.phaseTerminal[Failed] pod=svc-a-engine-1-default-0 now=t+2m1s
+tick=2 row=1 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Delete step=Drain started=t+2m1s lastProgressAt=t+2m1s deadline=t+32m1s} precondition=ok
+tick=2 pass result=requeue
+tick=3 note the pod is gone and the row leaves the owner's status
+tick=3 apply pod.deleted[source] pod=svc-a-engine-1-default-0 now=t+2m1s
+tick=3 row=1 write no-op precondition=no-change
+tick=3 row=1 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=nil op=op#1{type=Delete step=Drain started=t+2m1s lastProgressAt=t+2m1s deadline=t+32m1s} precondition=ok
+tick=3 pass result=requeue
