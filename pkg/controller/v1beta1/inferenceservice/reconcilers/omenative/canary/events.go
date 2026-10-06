@@ -30,4 +30,12 @@ const (
 	// after its Instance was serving, a crash loop rather than a single
 	// restart, and the ladder parks at its step, naming the pod.
 	EventReasonCanaryPodCrashed = "CanaryPodCrashed"
+	// EventReasonCanaryStepForced is recorded when ome.io/rollout-promote-force
+	// opens a step's gate without its capacity: it names the step, the canary
+	// revision and the Ready canary capacity at that moment.
+	EventReasonCanaryStepForced = "CanaryStepForced"
+	// EventReasonCanaryForceIgnored is recorded when a forced promote is
+	// removed without effect: the rollout is paused or frozen, or the canary
+	// is parked Failed, rolling back or held rolled back.
+	EventReasonCanaryForceIgnored = "CanaryForceIgnored"
 )

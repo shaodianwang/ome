@@ -387,7 +387,15 @@ such as the recovery half of a podkill, carries both ids.
   (lifted after `verbhold=<s>`, default 45; the step index must not move while
   held), `promote` (the matching hash; with `skipsoak=<s>` the case asserts it
   beat a timed step's soak), `promote-stale` (a real hash token naming the
-  stable revision; the step must not move for 20 s), `rollback`, `rebump` (a
+  stable revision; the step must not move for 20 s), `promote-force` (the
+  matching hash on `ome.io/rollout-promote-force`: the step it meets, gated
+  or not, stops waiting for its capacity — no clock, no CapacityTimeout park,
+  the partition still asks for the staged count and traffic still follows
+  the pods that serve — and its gate, if any, opens; an ungated final step
+  keeps its drain open under it; the verdict expects the step to move after
+  the force and a `CanaryStepForced` event per force, and a forced final
+  step to open into its drain, where `release=rebump-fix` lands the fixed
+  image), `rollback`, `rebump` (a
   second revision bump of the bumped members), `rebump-fix` (a bump that also
   drops the runner image override), `rtedit` (a material edit, the runner env
   the runtime-rev cases bump, of the case's dedicated runtime named by

@@ -4085,6 +4085,9 @@ class CanaryHeaderTest(unittest.TestCase):
         self.assertEqual([], self._errs(base + " fault=podkill:canary-serving victim=stable"))
         self.assertEqual([], self._errs(base + " bump=decoder img=example.com/canary-test/missing:none terminal=Failed"))
         self.assertEqual([], self._errs(base + " during=canary-serving verb=promote skipsoak=90 cell=canary/Serving[T]/promote"))
+        self.assertEqual([], self._errs(base + " bump=engine img=example.com/canary-test/missing:none during=canary-staging@0 verb=promote-force"
+                                        " verb2=promote-force during2=canary-staging@1 release=rebump-fix releaseafter=150 nophase=Failed"
+                                        " cell=canary/Staging/promoteForce,canary/Staging[final]/promoteForce"))
         self.assertTrue(any("verb=" in e for e in self._errs(base + " verb=pause")))
         self.assertTrue(any("victim=" in e for e in self._errs(base + " victim=stable")))
         self.assertTrue(any("img=" in e for e in self._errs(base + " img=example.com/canary-test/missing:none")))
@@ -4724,6 +4727,12 @@ class CanaryWave2HooksTest(unittest.TestCase):
         self.assertTrue(run._plan_edit_untouched({0: 25, 1: 50, 2: 100}))
         self.assertFalse(run._plan_edit_untouched({0: 25, 1: run.PLANEDIT_TRAFFIC, 2: 100}))
 
+    def test_promote_force_names_the_live_canary_hash(self):
+        self.assertIn("promote-force", run.CANARY_VERBS)
+        calls = self._capture(self._ctx(), "promote-force", canary_hash="abc123")
+        self.assertTrue(any(f"{run.PROMOTE_FORCE_ANNO}=abc123" in c for c in calls))
+        self.assertFalse(any(f"{run.PROMOTE_ANNO}=abc123" in c for c in calls))
+
     def _capture(self, ctx, verb, canary_hash="abc123", spec=None):
         calls = []
         def fake_kubectl(*args, **kw):
@@ -4871,11 +4880,33 @@ class StagedPromoteTest(unittest.TestCase):
         self.assertTrue(run._promote_verb_advanced("promote", "canary-staging", True, 12.0))
         self.assertTrue(run._promote_verb_advanced("promote", "canary-staging@0", True, 12.0))
 
+    def test_a_force_fired_while_staging_counts_once_the_step_advanced(self):
+        self.assertTrue(run._promote_verb_advanced("promote-force", "canary-staging@0", True, 12.0))
+        self.assertFalse(run._promote_verb_advanced("promote-force", "canary-staging", True, None))
+        self.assertFalse(run._promote_verb_advanced("promote-force", "canary-serving", True, 12.0))
+
     def test_anything_else_keeps_the_manual_contract(self):
         self.assertFalse(run._promote_verb_advanced("promote", "canary-staging", True, None))
         self.assertFalse(run._promote_verb_advanced("promote", "canary-staging", False, 12.0))
         self.assertFalse(run._promote_verb_advanced("promote", "canary-serving", True, 12.0))
         self.assertFalse(run._promote_verb_advanced("pause", "canary-staging", True, 12.0))
+
+
+class ForcedHoldTest(unittest.TestCase):
+    """A forced final gate opens into its drain, so the release finds the
+    ladder one state past where the force found it; every other second verb
+    leaves the ladder where it was."""
+
+    def test_a_forced_final_gate_is_held_in_its_drain(self):
+        self.assertEqual("canary-draining", run._hold_hook_after("promote-force", "canary-staging"))
+        self.assertEqual("canary-prehold", run._hold_hook_after("repin", "canary-prehold"))
+        self.assertEqual("canary-prehold", run._hold_hook_after("scale", "canary-prehold"))
+
+    def test_a_second_promote_waits_for_the_first_record_to_clear(self):
+        self.assertFalse(run._second_verb_ready("promote-force", False))
+        self.assertFalse(run._second_verb_ready("promote", False))
+        self.assertTrue(run._second_verb_ready("promote-force", True))
+        self.assertTrue(run._second_verb_ready("repin", False))
 
 
 class PauseLiftTest(unittest.TestCase):

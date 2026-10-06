@@ -164,6 +164,8 @@ PAIRING_LABEL = "ome.io/pairing-protocol"  # P/D pairing cohort label (query.Lab
 TRIGGER_ANNO = "perm.test/rev"       # annotation we bump to trigger a rollout
 TRIGGER_VAL = "v2"
 PROMOTE_ANNO = "ome.io/rollout-promote"    # canary manual-promote verb (value = canary revision hash)
+PROMOTE_FORCE_ANNO = "ome.io/rollout-promote-force"  # the forced promote: a gated step advances without its capacity
+FORCE_EVENT = "CanaryStepForced"           # the event the controller records for every forced advance
 ROLLBACK_ANNO = "ome.io/rollout-rollback"  # canary rollback verb (drain to stable + sticky hold)
 STABILITY_S = 5     # require target sustained this many seconds before CONVERGED
 SEQ_TOL_S = 6       # ordering/soak slack (1Hz sampling + readiness jitter)
@@ -5331,7 +5333,7 @@ def _edit_held_break(case_id, yaml_file, desc, hdr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
-CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix", "rtedit",
+CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "promote-force", "rebump", "rebump-fix", "rtedit",
                 "rollback", "timeout-clear", "timeout-set", "scale", "repin", "resume",
                 "planedit", "planedit-repin", "groupremove", "runlost", "pairing", "quotalift", "podkill"}
 # Verbs that land a second revision on the bumped members while the first
@@ -5439,8 +5441,9 @@ def _rollback_probe_gate(verb, during, verb_fired, rebump_retargeted):
 def _promote_verb_advanced(verb, during, verb_fired, advanced_at):
     """A promote fired while Staging is the manual promotion itself: the step
     advances as soon as capacity lands, without a soak, so the ladder is never
-    observed Paused and no second promote is owed."""
-    return (verb == "promote" and verb_fired and advanced_at is not None
+    observed Paused and no second promote is owed. A forced promote advances
+    the staging step at once, capacity or not."""
+    return (verb in ("promote", "promote-force") and verb_fired and advanced_at is not None
             and str(during or "").partition("@")[0] == "canary-staging")
 
 
@@ -5575,6 +5578,20 @@ def _release_due(release, verb2_fired, anchor_ts, released, now, after_s, awaiti
     that verb is a pause the anchor is its lift, so the release lands on the
     hold and not on the pause."""
     return bool(release) and verb2_fired and not released and not awaiting_lift and now - anchor_ts >= after_s
+
+
+def _hold_hook_after(verb2, hook_at_verb2):
+    """The state the release expects to find the ladder in: where the second
+    verb found it, except that a forced promote at the final gate opens it
+    into its drain, where the release waits on the capacity the force did not."""
+    return "canary-draining" if verb2 == "promote-force" else hook_at_verb2
+
+
+def _second_verb_ready(verb2, promote_ready):
+    """A second promote, forced or not, carries the same hash as the first;
+    it is inert until the first one's durable record has cleared, so it
+    waits for that. Any other second verb fires as soon as its hook is due."""
+    return verb2 not in ("promote", "promote-force") or promote_ready
 
 
 def _prehold_survived(step_at_verb2, hook_at_release, step_at_release, hook_at_verb2="canary-prehold"):
@@ -23499,6 +23516,10 @@ def _canary_verb(ctx, verb, canary_hash, primary):
         # one. Admission accepts the shape; the executor must ignore the value.
         stale = sorted(ctx["old_hashes"])[0]
         kubectl("-n", NS, "annotate", "isvc", cid, f"{PROMOTE_ANNO}={stale}", "--overwrite")
+    elif verb == "promote-force":
+        # The forced promote: the promote's hash token on its own annotation,
+        # advancing a gated step without waiting for the step's capacity.
+        kubectl("-n", NS, "annotate", "isvc", cid, f"{PROMOTE_FORCE_ANNO}={canary_hash}", "--overwrite")
     elif verb == "rollback":
         kubectl("-n", NS, "annotate", "isvc", cid, f"{ROLLBACK_ANNO}=true", "--overwrite")
     elif verb == "rebump":
@@ -24593,6 +24614,7 @@ def _canary(case_id, yaml_file, desc, hdr):
     verb_ts = verb2_ts = release_anchor_ts = 0.0
     step_at_verb = step_at_verb2 = hook_at_verb2 = step_at_lift = step_at_lift2 = None
     stale_held = None   # promote-stale: did the step hold 20s after the stale promote
+    ready_at_advance = None   # promote-force: the Ready canary pods when the forced step moved
     advanced_at = None  # first poll that saw the step past the one the verb fired at
     # When the case's verb or fault landed (nophase= window); a pre-armed
     # verb lands with the bump itself.
@@ -24688,7 +24710,7 @@ def _canary(case_id, yaml_file, desc, hdr):
             verb_fired, verb_ts, step_at_verb, fired_now = True, now, step, verb
             _canary_verb(ctx, verb, canary_hash, primary)
         elif (verb2 and verb_fired and not verb2_fired and _hook_due(during2, ctx["canary_hook"], step)
-              and (verb != "quotalift" or capacity_landed)):
+              and (verb != "quotalift" or capacity_landed) and _second_verb_ready(verb2, promote_ready)):
             verb2_fired, verb2_ts, step_at_verb2, hook_at_verb2, fired_now = True, now, step, ctx["canary_hook"], verb2
             release_anchor_ts = now
             _canary_verb(ctx, verb2, canary_hash, primary)
@@ -24762,6 +24784,7 @@ def _canary(case_id, yaml_file, desc, hdr):
             stale_held = (step == step_at_verb)
         if verb_fired and advanced_at is None and step is not None and step_at_verb is not None and step > step_at_verb:
             advanced_at = now
+            ready_at_advance = canary_ready_pods()
         runlost = ctx.get("runlost")
         if runlost and now > runlost["removed_at"]:
             # Samples fetched after the removal (this pass's predates the
@@ -25066,8 +25089,9 @@ def _canary(case_id, yaml_file, desc, hdr):
         good(released, f"release {release} fired {release_after}s after {verb2}",
              f"release {release} never fired: {verb2} did not fire or the budget ended first")
         if released:
-            good(_prehold_survived(step_at_verb2, hook_at_release, step_at_release, hook_at_verb2),
-                 f"the hold survived {verb2}: still held at step {step_at_verb2} ({hook_at_verb2}) when {release} fired",
+            held_hook = _hold_hook_after(verb2, hook_at_verb2)
+            good(_prehold_survived(step_at_verb2, hook_at_release, step_at_release, held_hook),
+                 f"the hold survived {verb2}: still held at step {step_at_verb2} ({held_hook}) when {release} fired",
                  f"the hold did not survive {verb2}: step {step_at_verb2} → {step_at_release}, state {hook_at_release} at the release")
     if "podkill" in (verb, verb2):
         verdict = _podkill_truth_checks(ctx.get("podkill"), verdict, notes, checks)
@@ -25160,6 +25184,25 @@ def _canary(case_id, yaml_file, desc, hdr):
         good(stale_held is True,
              f"a promote naming the stable revision left the step at {step_at_verb}",
              f"a promote naming the stable revision moved the step off {step_at_verb}")
+    # A forced promote advances a gated step without its capacity: the step
+    # moves after the force, every force is announced, and a forced final
+    # gate opens into its drain, where the stable revision keeps serving
+    # until the capacity lands (the traffic-gap invariant holds the split to
+    # the pods that serve).
+    forces = [v for v, fired in ((verb, verb_fired), (verb2, verb2_fired)) if v == "promote-force" and fired]
+    if forces:
+        announced = [m for r, m in _isvc_events(case_id) if r == FORCE_EVENT]
+        good(len(announced) >= len(forces),
+             f"every forced promote was announced ({len(announced)} {FORCE_EVENT} event(s) for {len(forces)} force(s))",
+             f"a forced promote went unannounced ({len(announced)} {FORCE_EVENT} event(s) for {len(forces)} force(s))")
+    if verb == "promote-force" and verb_fired:
+        good(advanced_at is not None,
+             f"the forced step advanced {(advanced_at or 0) - verb_ts:.0f}s after the force with {ready_at_advance} Ready canary pod(s)",
+             f"the forced step never moved off step {step_at_verb}")
+    if verb2 == "promote-force" and verb2_fired and step_at_verb2 == nsteps - 1:
+        good("Promoting" in after_hook_phases,
+             "the forced final gate opened into its drain (Promoting) to wait on its capacity",
+             f"the forced final gate never opened (saw {sorted(after_hook_phases)})")
 
     good(state == "CONVERGED",
          f"reached {expect} in {ctx.get('converged_at')}s",

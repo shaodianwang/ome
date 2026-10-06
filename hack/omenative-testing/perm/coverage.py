@@ -193,7 +193,7 @@ COMPONENTS = ("engine", "decoder", "router")
 CANARY_HOOKS = {"canary-staging", "canary-serving", "canary-prehold", "canary-draining", "canary-done",
                 "canary-rollingback", "canary-rolledback", "canary-failed"}
 FAULT_PHASES = {"settling", "rotating", "migrating", "draining"}
-CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix", "rtedit", "podkill",
+CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "promote-force", "rebump", "rebump-fix", "rtedit", "podkill",
                 "rollback", "timeout-clear", "timeout-set", "scale", "repin", "resume",
                 "planedit", "planedit-repin", "groupremove", "runlost", "pairing", "quotalift"}
 PREARM_VERBS = {"rollback", "pause", "promote", "repin", "resume", "timeout-set",
@@ -916,7 +916,7 @@ def classify_canary_steps(h, step_chunks, verbs):
             kinds.add("timed soak")
         if "analysis:" in chunk:
             kinds.add("analysis gate")
-    if verbs & {"promote", "promote-stale"} or h.get("canary") == "manual":
+    if verbs & {"promote", "promote-stale", "promote-force"} or h.get("canary") == "manual":
         kinds.add("promote")
     if h.get("terminal") == "Failed" or (h.get("analysis") == "inconclusive" and h.get("oninconclusive") == "hold"):
         kinds.add("abort")

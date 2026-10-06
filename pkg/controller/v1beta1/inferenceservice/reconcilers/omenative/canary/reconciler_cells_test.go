@@ -128,6 +128,26 @@ func fixtureDrainingHeld(t *testing.T) (*v1beta1.InferenceService, ReconcileInpu
 	return isvc, in
 }
 
+// fixtureStagingFinal is the final step of a manual ladder short of its
+// capacity before it ever served: the first step's canary pods are gone by
+// the time the final step stages, so no canary pod serves while it waits.
+func fixtureStagingFinal(t *testing.T) (*v1beta1.InferenceService, ReconcileInputs) {
+	steps := []v1beta1.RolloutGroupStep{
+		{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{}},
+		{Capacity: intstr.FromString("100%"), Traffic: 100, Pause: &v1beta1.RolloutPause{}},
+	}
+	isvc := pinActiveRun(canaryISVC(steps, nil))
+	in := baseInputs(isvc, map[string]int32{"new": 2, "old": 2})
+	in.TargetID = "t1"
+	mustReconcile(t, isvc, in) // arms, gate met, split serving, manual hold
+	isvc.Annotations = map[string]string{constants.RolloutPromoteAnnotation: "new"}
+	mustReconcile(t, isvc, in) // the promote advances to the final step
+	delete(isvc.Annotations, constants.RolloutPromoteAnnotation)
+	in.PerRevisionPods = map[string]int32{"new": 0, "old": 4}
+	mustReconcile(t, isvc, in) // the record clears; the final step waits on its capacity
+	return isvc, in
+}
+
 // fixtureDrainingShort is the final step held on capacity past its drain
 // window: 100% traffic landed on three canary instances, the window elapsed,
 // and a canary pod is gone when the release would be read. The stable
@@ -262,6 +282,19 @@ func evPromoteMatch(isvc *v1beta1.InferenceService, in *ReconcileInputs) {
 }
 func evPromoteStale(isvc *v1beta1.InferenceService, _ *ReconcileInputs) {
 	annotate(isvc, constants.RolloutPromoteAnnotation, "stale")
+}
+func evForceMatch(isvc *v1beta1.InferenceService, in *ReconcileInputs) {
+	annotate(isvc, constants.RolloutPromoteForceAnnotation, in.CanaryRevisionHash)
+}
+func evForceStale(isvc *v1beta1.InferenceService, _ *ReconcileInputs) {
+	annotate(isvc, constants.RolloutPromoteForceAnnotation, "stale")
+}
+
+// evForcePastReadyTimeout: the force lands once the capacity wait has already
+// outlived the ready timeout.
+func evForcePastReadyTimeout(isvc *v1beta1.InferenceService, in *ReconcileInputs) {
+	evForceMatch(isvc, in)
+	in.Now = in.Now.Add(cellReadyTimeout + time.Second)
 }
 func evRollback(isvc *v1beta1.InferenceService, _ *ReconcileInputs) {
 	annotate(isvc, constants.RolloutRollbackAnnotation, "true")
@@ -477,6 +510,35 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/RolledBack/promote", fixtureRolledBack, evPromoteMatch, cellWant{state: rolledBack, phase: v1beta1.RolloutPhaseRolledBack, active: true, rolledBk: true}},
 		{"canary/Failed/promote", fixtureFailed, evPromoteMatch, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
 		{"canary/Failed[release]/promote", fixtureFailedAtTheRelease, evPromoteMatch, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, step: 1, active: true}},
+		// A final gate short of its capacity is not reached by a promote: the capacity
+		// gate in front of it holds, and the promote stays for the pass that meets it.
+		{"canary/Staging[final]/promote", fixtureStagingFinal, evPromoteMatch, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, step: 1, active: true}},
+		// promoteForce: a promote that also lifts the step's capacity wait. It applies
+		// at every step of an armed ladder, capacity met or not; where the ladder is
+		// held (a park, a rollback, a pause) it is consumed with the reason.
+		{"canary/Idle/promoteForce", fixtureIdle, evForceMatch, cellWant{state: idle, phase: v1beta1.RolloutPhaseStable}},
+		{"canary/Staging/promoteForce", fixtureStaging, evForceMatch, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, step: 1, active: true, consume: []string{constants.RolloutPromoteForceAnnotation}}},
+		{"canary/Staging/promoteForce[stale]", fixtureStaging, evForceStale, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
+		{"canary/Serving/promoteForce[match]", fixtureServingManual, evForceMatch, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, step: 1, active: true, consume: []string{constants.RolloutPromoteForceAnnotation}}},
+		{"canary/Serving/promoteForce[stale]", fixtureServingManual, evForceStale, cellWant{state: serving, phase: v1beta1.RolloutPhasePaused, active: true}},
+		{"canary/Serving[T]/promoteForce", fixtureServingTimed, evForceMatch, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, step: 1, active: true, consume: []string{constants.RolloutPromoteForceAnnotation}}},
+		{"canary/PreHold/promoteForce", fixturePreHold, evForceMatch, cellWant{state: serving, phase: v1beta1.RolloutPhasePaused, active: true, consume: []string{constants.RolloutPromoteForceAnnotation}}},
+		// An ungated final step keeps its drain open under the force: no clock, no
+		// park, and the force stays live until the completion edge records it.
+		{"canary/Draining/promoteForce", fixtureDraining, evForceMatch, cellWant{state: draining, phase: v1beta1.RolloutPhasePromoting, step: 1, active: true}},
+		{"canary/Draining[capacityShort]/promoteForce", fixtureDrainingShort, evForceMatch, cellWant{state: draining, phase: v1beta1.RolloutPhasePromoting, step: 1, active: true}},
+		{"canary/Draining[capacityShort]/promoteForce[pastTimeout]", fixtureDrainingShort, evForcePastReadyTimeout, cellWant{state: draining, phase: v1beta1.RolloutPhasePromoting, step: 1, active: true}},
+		{"canary/Draining[M]/promoteForce", fixtureDrainingHeld, evForceMatch, cellWant{state: done, phase: v1beta1.RolloutPhasePromoting, step: 2, active: true, consume: []string{constants.RolloutPromoteForceAnnotation}}},
+		// A forced final gate opens into its drain with no canary pod serving: the stable
+		// revision carries everything, and the force stays live until the release.
+		{"canary/Staging[final]/promoteForce", fixtureStagingFinal, evForceMatch, cellWant{state: draining, phase: v1beta1.RolloutPhasePromoting, step: 1, active: true}},
+		{"canary/Done/promoteForce", fixtureDone, evForceMatch, cellWant{state: done, phase: v1beta1.RolloutPhaseStable, step: 2}},
+		{"canary/Done[rolling]/promoteForce", fixtureDoneRolling, evForceMatch, cellWant{state: done, phase: v1beta1.RolloutPhasePromoting, step: 2, active: true}},
+		{"canary/RollingBack/promoteForce", fixtureRollingBack, evForceMatch, cellWant{state: rollingBack, phase: v1beta1.RolloutPhaseRollingBack, active: true, rolledBk: true, consume: []string{constants.RolloutPromoteForceAnnotation}}},
+		{"canary/RolledBack/promoteForce", fixtureRolledBack, evForceMatch, cellWant{state: rolledBack, phase: v1beta1.RolloutPhaseRolledBack, active: true, rolledBk: true, consume: []string{constants.RolloutPromoteForceAnnotation}}},
+		{"canary/Failed/promoteForce", fixtureFailed, evForceMatch, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true, consume: []string{constants.RolloutPromoteForceAnnotation}}},
+		{"canary/Failed[stableMissing]/promoteForce", fixtureFailedStableMissing, evForceMatch, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true, consume: []string{constants.RolloutPromoteForceAnnotation}}},
+		{"canary/Failed[release]/promoteForce", fixtureFailedAtTheRelease, evForceMatch, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, step: 1, active: true, consume: []string{constants.RolloutPromoteForceAnnotation}}},
 		// rollback
 		{"canary/Idle/rollback", fixtureIdle, evRollback, cellWant{state: idle, phase: v1beta1.RolloutPhaseStable, consume: []string{constants.RolloutRollbackAnnotation}}},
 		{"canary/Staging/rollback", fixtureStaging, evRollback, cellWant{state: rolledBack, phase: v1beta1.RolloutPhaseRolledBack, active: true, rolledBk: true}},

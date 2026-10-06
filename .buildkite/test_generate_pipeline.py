@@ -2194,7 +2194,7 @@ class TestEvalTargeted(PipelineTestCase):
         self.assertEqual(gp._top_level_keys(batches[-1]), ["chart-ome-release"])
         # The fixture round, 5% sampled under the pinned commit: the pin
         # moves with the corpus like the full and smoke totals.
-        self.assertEqual(sum(gp._job_count(document) for document in batches), 420)
+        self.assertEqual(sum(gp._job_count(document) for document in batches), 421)
 
 
 class TestEvalVerdicts(unittest.TestCase):
