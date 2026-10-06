@@ -29,8 +29,12 @@ type ReconcileInputs struct {
 	// an applied verb from an inapplicable one. nil (tests) silences them.
 	Recorder record.EventRecorder
 	ISVC     *v1beta1.InferenceService
+	// Policies is the set of RolloutPolicy objects the run layer observed
+	// for this pass; the effective view resolves the spec's references
+	// through it outside a pinned run.
+	Policies rollout.Policies
 	// Group is the canary group being dispatched — the unit's own ladder. Nil
-	// resolves it from Component.
+	// resolves it from Component through the effective view.
 	Group              *v1beta1.RolloutGroup
 	Component          v1beta1.ComponentType
 	CanaryRevisionHash string
@@ -285,7 +289,7 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 
 	g := in.Group
 	if g == nil {
-		g = rollout.CanaryGroupFor(in.ISVC, in.Component)
+		g = rollout.CanaryGroupFor(in.ISVC, in.Policies, in.Component)
 	}
 	if g == nil || g.Canary == nil || len(g.Canary.Steps) == 0 {
 		return &Result{Active: false}, nil
@@ -822,8 +826,8 @@ func resolveReadyTimeout(in ReconcileInputs, plan *v1beta1.GroupCanary) time.Dur
 
 // effectiveCanaryPlan is the effective canary body for callers that hold only
 // ReconcileInputs (the plan indexing itself stays in Reconcile).
-func effectiveCanaryPlan(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) *v1beta1.GroupCanary {
-	g := rollout.CanaryGroupFor(isvc, component)
+func effectiveCanaryPlan(in ReconcileInputs) *v1beta1.GroupCanary {
+	g := rollout.CanaryGroupFor(in.ISVC, in.Policies, in.Component)
 	if g == nil {
 		return nil
 	}

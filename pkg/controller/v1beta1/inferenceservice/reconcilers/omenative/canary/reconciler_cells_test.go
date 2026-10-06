@@ -320,7 +320,7 @@ func evNewTargetAtRunOpen(isvc *v1beta1.InferenceService, in *ReconcileInputs) {
 	isvc.Status.Rollout.ActiveRun.TargetRevisions = []v1beta1.RolloutRunTarget{
 		{Component: v1beta1.EngineComponent, Revision: "newer", StableRevision: "old"},
 	}
-	g := rollout.CanaryGroup(isvc)
+	g := rollout.CanaryGroup(isvc, rollout.Policies{})
 	if err := BindRun(context.Background(), nil, isvc, g, false); err != nil {
 		panic(err)
 	}
@@ -347,7 +347,7 @@ func evOtherGroupRun(isvc *v1beta1.InferenceService, in *ReconcileInputs) {
 		{Component: v1beta1.RouterComponent, Revision: "rnew", StableRevision: "rold"},
 		{Component: v1beta1.EngineComponent, Revision: "old", StableRevision: "old"},
 	}
-	in.TargetID = activeCanaryTargetID(isvc, rollout.CanaryGroup(isvc))
+	in.TargetID = activeCanaryTargetID(isvc, rollout.CanaryGroup(isvc, rollout.Policies{}))
 }
 func evReplicasUp(_ *v1beta1.InferenceService, in *ReconcileInputs) { in.DesiredReplicas = 8 }
 func evCapacityDropped(_ *v1beta1.InferenceService, in *ReconcileInputs) {

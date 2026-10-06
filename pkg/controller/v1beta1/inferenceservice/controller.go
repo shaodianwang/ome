@@ -536,6 +536,9 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	var rolloutRunRequeue time.Duration
 	var rolloutConfig *controllerconfig.RolloutConfig
 	var metricProviders controllerconfig.MetricProvidersConfig
+	// The referenced RolloutPolicy objects as the run layer observed them this
+	// pass; every reader of the effective view resolves through the same set.
+	var policies rollout.Policies
 	if isvc.Spec.Rollout != nil || isvc.Status.Rollout != nil {
 		rolloutConfig, err = controllerconfig.NewRolloutConfigCached(r.ConfigCache, r.Clientset)
 		if err != nil {
@@ -562,11 +565,12 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return reconcile.Result{}, errors.Wrapf(runErr, "fails to reconcile rollout run")
 		}
 		rolloutRunRequeue = runOutcome.RequeueAfter
+		policies = runOutcome.Policies
 		if runOutcome.Opened {
 			// Bind/reset the canary state before persisting the run boundary so
 			// activeRun and its step state become visible atomically. Adoption is
 			// the exception: preserve the in-flight step and attach its target ID.
-			for _, g := range rollout.CanaryGroups(isvc) {
+			for _, g := range rollout.CanaryGroups(isvc, policies) {
 				if err := canary.BindRun(ctx, r.Client, isvc, g, runOutcome.Adopted); err != nil {
 					log.Error(err, "Failed to bind canary state to the rollout run")
 					return reconcile.Result{}, errors.Wrapf(err, "fails to bind canary state to the rollout run")
@@ -598,28 +602,28 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// lifecycle — and the engine's partition hold stages the old/new split
 	// from there. The step machine + traffic run in Step 6a below.
 	var enginePartition, decoderPartition, routerPartition *int32
-	if len(rollout.CanaryGroups(isvc)) > 0 {
+	if len(rollout.CanaryGroups(isvc, policies)) > 0 {
 		if mergedEngine != nil {
-			enginePartition = canary.StepPartition(isvc, v1beta1.EngineComponent, &mergedEngine.ComponentExtensionSpec)
+			enginePartition = canary.StepPartition(isvc, policies, v1beta1.EngineComponent, &mergedEngine.ComponentExtensionSpec)
 		}
 		if mergedDecoder != nil {
-			decoderPartition = canary.StepPartition(isvc, v1beta1.DecoderComponent, &mergedDecoder.ComponentExtensionSpec)
+			decoderPartition = canary.StepPartition(isvc, policies, v1beta1.DecoderComponent, &mergedDecoder.ComponentExtensionSpec)
 		}
 		if mergedRouter != nil {
-			routerPartition = canary.StepPartition(isvc, v1beta1.RouterComponent, &mergedRouter.ComponentExtensionSpec)
+			routerPartition = canary.StepPartition(isvc, policies, v1beta1.RouterComponent, &mergedRouter.ComponentExtensionSpec)
 		}
 	} else {
-		// A canary-KIND group with no resolvable plan (ref-only pre-open, or
-		// parked) projects a full hold instead of no partition, keeping the
-		// projected spec deterministic across run states.
+		// A canary-KIND group with no resolvable plan (a reference whose
+		// policy cannot be resolved) projects a full hold instead of no
+		// partition, keeping the projected spec deterministic across run states.
 		if mergedEngine != nil {
-			enginePartition = canary.PlanGateHoldPartition(isvc, v1beta1.EngineComponent, &mergedEngine.ComponentExtensionSpec)
+			enginePartition = canary.PlanGateHoldPartition(isvc, policies, v1beta1.EngineComponent, &mergedEngine.ComponentExtensionSpec)
 		}
 		if mergedDecoder != nil {
-			decoderPartition = canary.PlanGateHoldPartition(isvc, v1beta1.DecoderComponent, &mergedDecoder.ComponentExtensionSpec)
+			decoderPartition = canary.PlanGateHoldPartition(isvc, policies, v1beta1.DecoderComponent, &mergedDecoder.ComponentExtensionSpec)
 		}
 		if mergedRouter != nil {
-			routerPartition = canary.PlanGateHoldPartition(isvc, v1beta1.RouterComponent, &mergedRouter.ComponentExtensionSpec)
+			routerPartition = canary.PlanGateHoldPartition(isvc, policies, v1beta1.RouterComponent, &mergedRouter.ComponentExtensionSpec)
 		}
 	}
 
@@ -749,7 +753,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Operator annotations the canary passes applied this reconcile. They
 	// are removed after the status write that carries their effect lands.
 	var canaryConsume []string
-	if canaryGroups := rollout.CanaryGroups(isvc); len(canaryGroups) > 0 {
+	if canaryGroups := rollout.CanaryGroups(isvc, policies); len(canaryGroups) > 0 {
 		// Resolve the metrics source + query timeout per-reconcile from the
 		// canaryAnalysis operator config (so ConfigMap edits take effect without a
 		// restart); the sampler's structural tuning is fixed at startup. Only
@@ -786,6 +790,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				MetricProviders:          metricProviders,
 				DefaultProvider:          analysisConfig.DefaultProvider,
 				ComponentRunnerPorts:     componentRunnerPorts,
+				Policies:                 policies,
 				Group:                    g,
 			})
 			if err != nil {
@@ -811,8 +816,9 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return reconcile.Result{}, errors.Wrapf(err, "fails to load coordination config")
 	}
 	if _, err := coordination.Reconcile(ctx, coordination.ReconcileInputs{
-		ISVC:   isvc,
-		Client: r.Client,
+		ISVC:     isvc,
+		Policies: policies,
+		Client:   r.Client,
 		// The coordination gates decode per-Instance rows, so the live reader
 		// carries the configured row decoder.
 		Reader:                       irstatus.NewReader(r.APIReader, r.InstanceStatusDecoder),

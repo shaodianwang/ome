@@ -318,6 +318,13 @@ machine via `status.canary` + `status.components.<primary>.rolloutPhase` /
   every Instance back to the stable revision, holds there at `RolledBack`, and
   records the rejected revision in `status.canary.rolledBackRevisionHash`).
 
+A canary group carries its body inline or names a same-namespace
+`RolloutPolicy` through `policyRef`. The spec reader resolves the referenced
+body before anything reads the plan, so both forms drive the same steps and
+verdicts. The referenced twins of three inline cases (p1957, p1955 and p1956
+mirror p1836, p1825 and p1820) ship the policy as the case file's second
+document and name their cells with the `[policyRef]` variant.
+
 The harness asserts the **status-level** contract (phase progression, per-step
 traffic weights stepping to 100 on the canary revision) and **per-revision pod
 capacity** (the primary fully rolls to the canary revision). Gateway data-plane

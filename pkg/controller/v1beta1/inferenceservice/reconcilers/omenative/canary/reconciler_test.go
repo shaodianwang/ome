@@ -10,6 +10,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/analysis"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
+	"github.com/ome-projects/ome/pkg/rollout"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -1842,7 +1843,7 @@ func TestReconcile_PinnedPlanInertToSpecEdits(t *testing.T) {
 	if canaryPercent != 50 {
 		t.Fatalf("traffic must follow the pinned step (50), got %d", canaryPercent)
 	}
-	if p, ok := EffectivePartition(isvc, v1beta1.EngineComponent, 4); !ok || p == nil || *p != 2 {
+	if p, ok := EffectivePartition(isvc, rollout.Policies{}, v1beta1.EngineComponent, 4); !ok || p == nil || *p != 2 {
 		t.Fatalf("EffectivePartition must read the pinned plan, got %v ok=%v", p, ok)
 	}
 }

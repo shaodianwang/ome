@@ -486,6 +486,41 @@ def canary_unit_entrypoint(components):
     return ""
 
 
+def declares_canary(g):
+    """Whether a rollout group declares canary: an inline canary block, or a
+    policyRef declaring canary with no inline progression outranking it."""
+    if not isinstance(g, dict):
+        return False
+    if isinstance(g.get("canary"), dict):
+        return True
+    if any(isinstance(g.get(k), dict) for k in ("blueGreen", "rollingUpdate")):
+        return False
+    ref = g.get("policyRef")
+    return isinstance(ref, dict) and ref.get("progression") == "canary"
+
+
+def canary_body(g, policy_bodies):
+    """The canary body a group executes: its inline block, else the body of
+    the RolloutPolicy its policyRef names, read once per spec into
+    policy_bodies. None when the group declares no canary, or when its policy
+    cannot be read: an unresolved reference drives no ladder."""
+    if not declares_canary(g):
+        return None
+    if isinstance(g.get("canary"), dict):
+        return g["canary"]
+    name = str(g["policyRef"].get("name") or "")
+    if name not in policy_bodies:
+        body = None
+        r = kubectl("-n", NS, "get", "rolloutpolicy", name, "-o", "json")
+        if r.returncode == 0:
+            try:
+                body = json.loads(r.stdout).get("spec", {}).get("canary")
+            except (AttributeError, TypeError, ValueError):
+                body = None
+        policy_bodies[name] = body if isinstance(body, dict) else None
+    return policy_bodies[name]
+
+
 def get_spec_info(case_id):
     """Read spec.rollout.groups + per-Component update strategy from the live ISVC.
 
@@ -543,11 +578,15 @@ def get_spec_info(case_id):
     # policy). One group per canary UNIT — an ISVC may carry a router run and an
     # engine run at once — so every canary group is recorded, keyed by its unit.
     # info["canary"]/["members"] keep naming the first for the legacy readers;
-    # the canary handler selects its group out of canary_groups.
+    # the canary handler selects its group out of canary_groups. A group that
+    # declares canary through a policyRef carries its body in the named
+    # RolloutPolicy, read once per spec and used like an inline body.
+    policy_bodies = {}
     for g in groups:
-        if not (isinstance(g, dict) and isinstance(g.get("canary"), dict)):
+        can = canary_body(g, policy_bodies)
+        if can is None:
             continue
-        can, comps = g["canary"], (g.get("components", []) or [])
+        comps = g.get("components", []) or []
         cg = {
             "unit": canary_unit_entrypoint(comps),
             "members": comps,
@@ -561,8 +600,8 @@ def get_spec_info(case_id):
             info["canary"] = {"policy": cg["policy"], "steps": cg["steps"]}
             info["members"] = cg["members"]
             info["order"] = cg["order"]
-    # Coordination groups (the non-canary ones).
-    coord_groups = [g for g in groups if isinstance(g, dict) and not isinstance(g.get("canary"), dict)]
+    # Coordination groups: the ones that do not declare canary, by any form.
+    coord_groups = [g for g in groups if isinstance(g, dict) and not declares_canary(g)]
     bg_groups = [g for g in coord_groups if isinstance(g.get("blueGreen"), dict)]
     single_bg = [g for g in bg_groups if len(g.get("components", []) or []) == 1]
     if coord_groups and len(coord_groups) == len(single_bg) and len(single_bg) > 1:

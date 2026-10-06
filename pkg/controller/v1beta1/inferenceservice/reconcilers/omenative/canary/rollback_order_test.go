@@ -89,7 +89,7 @@ func TestDispatch_RollbackKeepsTrafficOffAnEmptyStableRevision(t *testing.T) {
 	isvc.Status.Rollout.ActiveRun.TargetRevisions = []v1beta1.RolloutRunTarget{
 		{Component: v1beta1.EngineComponent, Revision: "new", StableRevision: "old"},
 	}
-	g := rollout.CanaryGroup(isvc)
+	g := rollout.CanaryGroup(isvc, rollout.Policies{})
 	rollout.SetCanaryStatusFor(&isvc.Status, v1beta1.EngineComponent, &v1beta1.CanaryStatus{
 		TargetID:              activeCanaryTargetID(isvc, g),
 		CanaryRevisionHash:    "new",

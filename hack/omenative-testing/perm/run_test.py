@@ -363,6 +363,103 @@ class CanaryUnitTest(unittest.TestCase):
         self.assertEqual({}, run._canary_run({"components": {}}, "engine"))
 
 
+class ReferencedCanarySpecTest(unittest.TestCase):
+    """A canary group carries its body inline or names a same-namespace
+    RolloutPolicy. The spec reader resolves the referenced body, so the
+    canary handler drives both forms through the same steps and verdicts."""
+
+    STEPS = [{"capacity": "50%", "traffic": 50, "pause": {"duration": "20s"}},
+             {"capacity": "100%", "traffic": 100}]
+    # The committed referenced twins and the inline cases they mirror.
+    TWINS = {"p1957": "p1836", "p1955": "p1825", "p1956": "p1820"}
+
+    def _spec_info(self, group, policy_body=None, policy_rc=0):
+        calls = []
+
+        def fake_kubectl(*args, **_kwargs):
+            calls.append(args)
+            if args[3] == "isvc":
+                isvc = {"spec": {"engine": {}, "rollout": {"groups": [group]}}}
+                return subprocess.CompletedProcess(args, 0, json.dumps(isvc), "")
+            if policy_rc != 0:
+                return subprocess.CompletedProcess(args, policy_rc, "", "not found")
+            return subprocess.CompletedProcess(args, 0, json.dumps({"spec": policy_body}), "")
+
+        with mock.patch.object(run, "kubectl", fake_kubectl):
+            return run.get_spec_info("p1"), calls
+
+    def test_the_referenced_body_reads_like_the_inline_one(self):
+        inline, _ = self._spec_info({"components": ["engine"], "canary": {"steps": self.STEPS, "readyTimeout": "90s"}})
+        referenced, calls = self._spec_info(
+            {"components": ["engine"], "policyRef": {"name": "canary-standard", "progression": "canary"}},
+            policy_body={"canary": {"steps": self.STEPS, "readyTimeout": "90s"}})
+        self.assertEqual(inline, referenced)
+        self.assertEqual(("-n", run.NS, "get", "rolloutpolicy", "canary-standard", "-o", "json"), calls[1])
+        self.assertEqual(self.STEPS, referenced["canary"]["steps"])
+        self.assertEqual(["engine"], referenced["members"])
+        self.assertEqual("90s", referenced["canary_groups"][0]["readyTimeout"])
+        self.assertIsNone(referenced["policy"], "a canary group is not a coordination group")
+
+    def test_a_policy_named_by_two_groups_is_read_once(self):
+        calls = []
+
+        def fake_kubectl(*args, **_kwargs):
+            calls.append(args)
+            if args[3] == "isvc":
+                isvc = {"spec": {"engine": {}, "router": {}, "rollout": {"groups": [
+                    {"components": ["router"], "policyRef": {"name": "shared", "progression": "canary"}},
+                    {"components": ["engine"], "policyRef": {"name": "shared", "progression": "canary"}}]}}}
+                return subprocess.CompletedProcess(args, 0, json.dumps(isvc), "")
+            return subprocess.CompletedProcess(args, 0, json.dumps({"spec": {"canary": {"steps": self.STEPS}}}), "")
+
+        with mock.patch.object(run, "kubectl", fake_kubectl):
+            info = run.get_spec_info("p1")
+        self.assertEqual(2, len(calls))
+        self.assertEqual(["router", "engine"], [g["unit"] for g in info["canary_groups"]])
+
+    def test_an_inline_body_outranks_the_reference_without_a_read(self):
+        info, calls = self._spec_info({"components": ["engine"], "canary": {"steps": self.STEPS},
+                                       "policyRef": {"name": "shadowed", "progression": "canary"}})
+        self.assertEqual(1, len(calls))
+        self.assertEqual(self.STEPS, info["canary"]["steps"])
+
+    def test_a_reference_that_does_not_resolve_is_no_group_at_all(self):
+        info, _ = self._spec_info({"components": ["engine"], "policyRef": {"name": "absent", "progression": "canary"}},
+                                  policy_rc=1)
+        self.assertIsNone(info["canary"])
+        self.assertEqual([], info["canary_groups"])
+        self.assertIsNone(info["policy"], "a canary declared by reference is never a coordination group")
+        self.assertEqual([], info["members"])
+
+    def test_a_referenced_blue_green_group_stays_a_coordination_group(self):
+        info, calls = self._spec_info({"components": ["engine"], "policyRef": {"name": "bg", "progression": "blueGreen"}})
+        self.assertEqual(1, len(calls), "only a canary body is read off its policy")
+        self.assertIsNone(info["canary"])
+        self.assertEqual(["engine"], info["members"])
+
+    @staticmethod
+    def _ladder(path):
+        """The step lines of the case's canary body, wherever the body lives."""
+        lines = [line.strip() for line in Path(path).read_text().splitlines()]
+        return lines[lines.index("steps:") + 1:]
+
+    def test_each_referenced_twin_mirrors_its_inline_case(self):
+        for ref_id, inline_id in self.TWINS.items():
+            ref_path, inline_path = run.find_isvc(ref_id), run.find_isvc(inline_id)
+            self.assertIsNotNone(ref_path, ref_id)
+            _, ref_hdr = run.parse_header(ref_path)
+            _, inline_hdr = run.parse_header(inline_path)
+            self.assertEqual(inline_hdr["cell"] + "[policyRef]", ref_hdr["cell"], ref_id)
+            strip = lambda h: {k: v for k, v in h.items() if k != "cell"}
+            self.assertEqual(strip(inline_hdr), strip(ref_hdr), ref_id)
+            self.assertEqual(self._ladder(inline_path), self._ladder(ref_path), ref_id)
+            text = Path(ref_path).read_text()
+            self.assertIn(f"policyRef: {{ name: {ref_id}-policy, progression: canary }}", text, ref_id)
+            self.assertIn("kind: RolloutPolicy", text, ref_id)
+            self.assertNotIn("\n          canary:", text, f"{ref_id}: the group carries the reference alone")
+            self.assertEqual([], run.validate_case_file(ref_path), ref_id)
+
+
 class MaxUnavailableResolutionTest(unittest.TestCase):
     """The capacity floor is N minus the budget the engine resolves: an
     integer as it is, a percent rounded up and clamped to the fleet, the

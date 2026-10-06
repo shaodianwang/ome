@@ -131,7 +131,9 @@ func ResolveGateContextWithDefaults(ctx context.Context, reads client.Reader, is
 			Reads:      reads,
 		}
 	}
-	groups := ResolveGroups(rollout.Effective(isvc), defaults)
+	// The hold above covers every unpinned state of a grouped Component, so
+	// the view read here is the pinned plan, which needs no observed policies.
+	groups := ResolveGroups(rollout.Effective(isvc, rollout.Policies{}), defaults)
 	if len(groups) == 0 {
 		return GateContext{
 			ISVC:         isvc,

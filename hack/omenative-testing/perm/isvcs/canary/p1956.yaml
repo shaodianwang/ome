@@ -1,0 +1,30 @@
+# p1956: canary engine paused while staging holds the referenced ladder at the capacity gate  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto during=canary-staging verb=pause verbhold=45 cell=canary/Staging/pause[policyRef] co=none topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1956 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          policyRef: { name: p1956-policy, progression: canary }
+---
+apiVersion: ome.io/v1beta1
+kind: RolloutPolicy
+metadata:
+  name: p1956-policy
+  # Teardown deletes the case's documents in one pass, the policy with the
+  # service that still references it.
+  annotations: { ome.io/allow-in-use-delete: "true" }
+spec:
+  canary:
+    steps:
+      - { capacity: "25%", traffic: 25, pause: { duration: "20s" } }
+      - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+      - { capacity: "100%", traffic: 100 }
