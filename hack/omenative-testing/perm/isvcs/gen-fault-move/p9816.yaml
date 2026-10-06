@@ -10,6 +10,8 @@ spec:
     minReplicas: 2
     maxReplicas: 2
     annotations: { ome.io/deploymentMode: OMENative }
+    # The eval judges a case well inside the cluster's default pod grace; a pod that ignores its stop signal must not outlive the verdict.
+    terminationGracePeriodSeconds: 60
     leader: {}
     worker: { size: 1 }
     lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
@@ -17,4 +19,6 @@ spec:
     minReplicas: 2
     maxReplicas: 2
     annotations: { ome.io/deploymentMode: OMENative }
+    # The eval judges a case well inside the cluster's default pod grace; a pod that ignores its stop signal must not outlive the verdict.
+    terminationGracePeriodSeconds: 60
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

@@ -1097,12 +1097,12 @@ def _hostname_exclusions(spec):
 
 def _pod_lifecycle(obj):
     """Lifecycle fields every watcher record carries, whichever loop builds
-    it: the kubelet's pod phase and the deletion timestamp once a delete was
-    issued. Invariant I reads them to tell a live pod from a terminal or a
-    leaving one and to age a Terminating pod; a record without them is read
-    on `alive` alone."""
+    it: the kubelet's pod phase, the deletion timestamp once a delete was
+    issued (invariant I ages a Terminating pod by it) and the termination
+    grace the spec declares, which that stamp already includes."""
     return {"phase": str((obj.get("status") or {}).get("phase") or ""),
-            "deleted_at": str((obj.get("metadata") or {}).get("deletionTimestamp") or "")}
+            "deleted_at": str((obj.get("metadata") or {}).get("deletionTimestamp") or ""),
+            "grace": (obj.get("spec") or {}).get("terminationGracePeriodSeconds")}
 
 
 def _pod_template(obj):
@@ -7681,7 +7681,7 @@ def _node_lift_tick(ctx, f, now):
         return
     if now - f.get("node_poll_ts", 0.0) < 2.0:
         return
-    f["node_poll_ts"] = now
+    f["node_poll_ts"] = f["last_tick_ts"] = now
     comp, inst, node = f["crash_comp"], f["crash_inst"], f["node"]
     pods = _instance_pods(ctx["pod_state"], comp, inst)
     if f.get("bite_ts") is None:
@@ -7695,6 +7695,8 @@ def _node_lift_tick(ctx, f, now):
         lost = f.get("lost_uids") or set()
         if f.get("reaped_at") is None and not _uids_present(ctx["pod_state"], lost):
             f["reaped_at"] = now
+        if f.get("reaped_at") is None:
+            f["sweep_due_at"] = _node_sweep_due(ctx, f, now)
         if f.get("relocated_at") is None and f.get("hook_op_kind") != "delete":
             if _instance_relocated(pods, lost, node):
                 f["relocated_at"], f["relocated_where"] = now, "at its own index"
@@ -7716,15 +7718,62 @@ def _node_lift_tick(ctx, f, now):
         f["infra_fail"] = f"node: starting the kubelet of {node} again failed"
 
 
+def _node_policy_seconds(ctx):
+    """(overdueSlack, nodeUnreachableThreshold) in seconds of the force-delete
+    policy the case runs against; None without one."""
+    return _inv_force_delete_policy({FORCE_DELETE_KEY: (ctx or {}).get("force_delete")})
+
+
+def _node_sweep_due(ctx, f, now):
+    """When the force-delete policy must have swept the pods the stopped node
+    held that are still in the API: per pod the later of deletionTimestamp +
+    overdueSlack and bite + nodeUnreachableThreshold, the latest of those plus
+    INV_I_SWEEP_S for the sweep's wake. None without a policy or once none remains."""
+    policy = _node_policy_seconds(ctx)
+    lost = f.get("lost_uids") or set()
+    if policy is None or not lost:
+        return None
+    slack, threshold = policy
+    dead_at = f.get("bite_ts") or f.get("fired_ts") or now
+    due = None
+    for p in ctx["pod_state"].values():
+        if not p or p.get("uid") not in lost:
+            continue
+        boundary = dead_at + threshold
+        deleted_at = _event_epoch(p.get("deleted_at")) if p.get("deleted_at") else None
+        if deleted_at is not None:
+            boundary = max(boundary, deleted_at + slack)
+        due = boundary if due is None else max(due, boundary)
+    return None if due is None else due + INV_I_SWEEP_S
+
+
+def _node_lift_pending(f):
+    """True while a node loss fired at a hook has not been lifted: the terminal
+    is judged after the lift, so the relocation and the sweep get the policy's
+    own window rather than the moment the operation finished. Apparatus never holds it."""
+    return _node_hook_fault(f) and bool(f.get("fired")) and f.get("lifted_at") is None and not f.get("infra_fail")
+
+
+def _drained_pod_window_s(ctx, comp):
+    """How long the force-delete policy may take over a pod of comp deleted
+    before its node's evidence matured: the longest termination grace a pod
+    of comp declares plus the overdue slack; 0 without a policy or such a pod."""
+    policy = _node_policy_seconds(ctx)
+    graces = [int(p["grace"]) for p in (ctx.get("pod_state") or {}).values()
+              if p and p.get("comp") == comp and p.get("grace") is not None]
+    if policy is None or not graces:
+        return 0
+    return int(max(graces) + policy[0])
+
+
 def _node_hook_budget(ctx, f, budget):
     """The watch budget of an operation with a node loss at its hook: the
-    operation's own, plus the cluster's NotReady grace and the settle window
-    before the kubelet is started again, or the relocation budget while it
-    stays down, plus one base rotate budget for what the lift leaves to
-    finish; within MAX_BUDGET_S."""
+    operation's own, plus the NotReady grace and the settle window before the
+    kubelet restarts, or the relocation budget while it stays down and a drained
+    pod's own window, plus one base rotate budget for the rest; within MAX_BUDGET_S."""
     comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
     if f.get("lift") == "after-recover":
-        extra = _relocation_budget(ctx, comp, ctx.get("force_delete"))
+        extra = _relocation_budget(ctx, comp, ctx.get("force_delete")) + _drained_pod_window_s(ctx, comp)
     else:
         extra = NODE_NOTREADY_GRACE_S + LIFT_SETTLE_S
     return min(MAX_BUDGET_S, budget + extra + ROTATE_BASE_S)
@@ -7789,6 +7838,12 @@ def _node_hook_checks(f, what, completed, state, verdict, notes, checks):
             checks.append(f"  ✓ {kind}: {comp} Instance {inst} back Ready and serving on other nodes {relocated - t0:.0f}s "
                           f"after the stop{where}, while the node was still down")
         if swept is None:
+            due, ended = f.get("sweep_due_at"), f.get("last_tick_ts")
+            if due is not None and ended is not None and ended < due:
+                checks.append(f"  ⓘ {kind}: pods the node held were still in the API when the watch ended, {due - ended:.0f}s "
+                              f"inside the policy's own window (a drained pod keeps its declared grace plus the overdue "
+                              f"slack before the sweep may act): the sweep and the lift were not judged")
+                return verdict
             verdict = "FAIL"
             notes.append(f"{kind}: pods the node held were still in the API")
             checks.append(f"  ✗ {kind}: pods the node held were still in the API (the policy's sweep must leave nothing "
@@ -24804,6 +24859,8 @@ def _canary(case_id, yaml_file, desc, hdr):
             pods_settled = False   # the hold is judged at the release
         if oneshot_new and oneshot["bitten_at"] is not None and oneshot["lifted_at"] is None and not fault.get("infra_fail"):
             pods_settled = False   # the cause is taken away before the terminal is judged
+        if _node_lift_pending(fault):
+            pods_settled = False   # the node loss is lifted (its sweep and relocation in) before the terminal is judged
         if window and _canary_window_holds(window, win):
             pods_settled = False   # the window is closed before the terminal is judged
         if _fault_repeats(fault) and fault.get("fired_count") and int(fault["fired_count"]) < int(fault["repeat"]) \

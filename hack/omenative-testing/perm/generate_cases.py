@@ -669,6 +669,7 @@ knob: documented, deliberately not emitted until this lane has baked in.
 import argparse
 import functools
 import math
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -2432,7 +2433,7 @@ def _add_node_cell(add, topo, n, w, rp, mig, co, outcome, lift, life, d_life):
         kv["needs"] = NODE_NEEDS[outcome]
     meta = dict(strat="SurgeThenDrain", verb=f"node:{outcome}", rp=rp, mig=mig)
     desc = f"{GEN_MARK} node notready {shape_tag(topo, w)} N={n} rp {rp} mig {mig} co {co} {outcome}"
-    add("gen-node", desc, kv, comps(topo, n, w, life, d_life=d_life),
+    add("gen-node", desc, kv, node_lift_comps(comps(topo, n, w, life, d_life=d_life), lift),
         _node_reason(outcome, rp, mig, co), meta,
         cell=("node", outcome, topo, w, rp, mig, co), coord=_node_group(topo, co))
 
@@ -2544,7 +2545,7 @@ def _add_node_hook(add, topo, n, w, nr, op, form, lift):
             + f" {form} lift {lift}")
     meta = dict(strat=strat if op in NODE_HOOK_ROLLS else "(dormant: nothing rolls)", verb=f"node:{op}",
                 faultop=f"node {op}", op=op, form=form, lift=lift, hook=hook)
-    add("gen-node", desc, kv, _node_hook_comps(op, topo, n, w, nr),
+    add("gen-node", desc, kv, node_lift_comps(_node_hook_comps(op, topo, n, w, nr), lift),
         _node_hook_reason(op, form, shape_words(topo, w, nr), topo, is_mn(topo)) + _op_controls(topo, nr, op),
         meta, cell=("node-hook", op, form, topo, w, nr), dedicated=(op == "runtime"))
 
@@ -2566,7 +2567,7 @@ def emit_node_hooks(add):
             desc = f"{GEN_MARK} node canary {_canary_shape(topo, w, nr)} N={n} {form} lift {lift}"
             meta = dict(strat="SurgeThenDrain", verb="node:canary", faultop="node canary", op="canary", form=form,
                         lift=lift, hook=hook, shape=family)
-            add("gen-node", desc, kv, gate_comps(topo, n, w, nr, GATE_RP),
+            add("gen-node", desc, kv, node_lift_comps(gate_comps(topo, n, w, nr, GATE_RP), lift),
                 _node_hook_reason("canary", form, _gate_shape_words(family, n, w), topo, is_mn(topo)), meta,
                 cell=("node-hook", "canary", form, topo, w, nr),
                 coord=lib.canary_block(story_ladder("auto"), components=gate_group(topo)))
@@ -2809,6 +2810,26 @@ PODKILL_PAUSE_HOLD_S, PODKILL_GATE_HOLD_S, PODKILL_RELEASE_AFTER_S = 45, 30, 60
 CSR_SINGLE_TEXT = (HERE / "runtime" / "csr.yaml").read_text()
 CSR_GANG_TEXT = (HERE / "runtime" / "csr-multinode.yaml").read_text()
 CSR_METRICS_TEXT = (HERE / "runtime" / "csr-metrics.yaml").read_text()
+# The termination grace a node case kept down until the policy relocates the
+# Instance (lift=after-recover, in gen-node and under a move) pins on every
+# component: a pod a drain
+# deleted on the dead node waits out its grace plus the overdue slack before
+# the force-delete sweep may act, and the chart's deploy default would make
+# that wait most of the case. The single-pod runtime fixture's value, read off
+# it so the two never drift.
+_GRACE_MATCH = re.search(r"terminationGracePeriodSeconds:\s*(\d+)", CSR_SINGLE_TEXT)
+if not _GRACE_MATCH:
+    sys.exit("csr.yaml: the runtime fixture does not pin terminationGracePeriodSeconds as the generator expects")
+NODE_RECOVER_GRACE_S = int(_GRACE_MATCH.group(1))
+
+
+def node_lift_comps(cs, lift):
+    """The fleet of a node case: under lift=after-recover every component
+    pins the fixture's termination grace."""
+    if lift == "after-recover":
+        for c in cs:
+            c["grace"] = NODE_RECOVER_GRACE_S
+    return cs
 METRICS_ENV_HEAD = '      env:\n        - { name: TEST_STARTUP_DELAY, value: "15" }'
 
 
@@ -7231,7 +7252,7 @@ def emit_fault_move(add):
                 desc = f"{GEN_MARK} fault-move node at {at} on moved {shape_tag(topo, w, nr)} N={n} rp {rp}"
                 life = lib.lifecycle(restart=RP_FULL[rp])
                 d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
-                add("gen-fault-move", desc, kv, comps(topo, n, w, life, d_life=d_life, nr=nr),
+                add("gen-fault-move", desc, kv, node_lift_comps(comps(topo, n, w, life, d_life=d_life, nr=nr), kv["lift"]),
                     _move_node_reason(at, rp, topo), meta,
                     cell=("fault-move", "node", None, at, "moved", topo, w, rp, nr))
     # The router as the broken sibling on the engine+router shapes: a break
@@ -9253,7 +9274,8 @@ def _emit_leftover_singles(add):
             if outcome in NODE_NEEDS:
                 kv["needs"] = NODE_NEEDS[outcome]
             add("gen-node", f"{GEN_MARK} node notready {tag} N={n} rp {rp} mig {mig} co none {outcome}", kv,
-                comps(topo, n, w, life, nr=nr), _node_reason(outcome, rp, mig, "none") + _single_router_control(),
+                node_lift_comps(comps(topo, n, w, life, nr=nr), lift),
+                _node_reason(outcome, rp, mig, "none") + _single_router_control(),
                 dict(strat="SurgeThenDrain", verb=f"node:{outcome}", rp=rp, mig=mig, single=True),
                 cell=("single", "node", outcome, topo, w, nr))
         # The running revision's key removed and put back once its wait has shown.

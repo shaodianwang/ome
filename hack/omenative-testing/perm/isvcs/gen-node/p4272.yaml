@@ -10,14 +10,20 @@ spec:
     minReplicas: 4
     maxReplicas: 4
     annotations: { ome.io/deploymentMode: OMENative }
+    # The eval judges a case well inside the cluster's default pod grace; a pod that ignores its stop signal must not outlive the verdict.
+    terminationGracePeriodSeconds: 60
     lifecycle: { restartPolicy: "None", migrationPolicy: { mode: "Auto" }, updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   decoder:
     minReplicas: 4
     maxReplicas: 4
     annotations: { ome.io/deploymentMode: OMENative }
+    # The eval judges a case well inside the cluster's default pod grace; a pod that ignores its stop signal must not outlive the verdict.
+    terminationGracePeriodSeconds: 60
     lifecycle: { restartPolicy: "None", migrationPolicy: { mode: "Auto" }, updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   router:
     minReplicas: 2
     maxReplicas: 2
     annotations: { ome.io/deploymentMode: OMENative }
+    # The eval judges a case well inside the cluster's default pod grace; a pod that ignores its stop signal must not outlive the verdict.
+    terminationGracePeriodSeconds: 60
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

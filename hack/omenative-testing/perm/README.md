@@ -1967,7 +1967,11 @@ cell on the six shape families (the surge strategy, the env edit):
   is Ready and serving on other nodes with every pod the node held
   replaced (under a delete, until those pods are gone), which is the
   force-delete policy's doing (`needs=forcedelete`, the policy twin); then
-  the kubelet is started again. That form runs under every operation: a
+  the kubelet is started again. A pod a drain deleted before the node's
+  evidence matured keeps its own termination grace plus the overdue slack
+  before the sweep may act, so the watch stays open for that window within
+  its budget, and a watch that ends inside it leaves the sweep unjudged
+  rather than failed. That form runs under every operation: a
   rollback, an edit, a runtime edit, a scale-down and the canary keep the
   victim Instance and rebuild it elsewhere, a push and a scale-up rebuild
   it elsewhere on the revision they owe it, and a delete has the pods the

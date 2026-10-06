@@ -736,13 +736,13 @@ class PodRecordBuilders(unittest.TestCase):
 
 def pod_object(name, component, index, revision, image, anno, *, runner="default",
                test_rev="v1", cpu="50m", ready=True, serving=True, container_ready=None,
-               phase="Running", deletion=None, node=""):
+               phase="Running", deletion=None, node="", grace=None):
     """A pod as kubectl -w hands it to the watcher: the labels, annotation,
     container spec and conditions the record builders and invariants read.
     `ready` is the pod's Ready condition; the main container's own status
     follows it unless `container_ready` says otherwise. `phase` is the
     kubelet's, `deletion` a deletionTimestamp once a delete was issued,
-    `node` the binding."""
+    `node` the binding, `grace` the termination grace the spec declares."""
     return {
         "metadata": {"name": name, "uid": f"uid-{name}",
                      "labels": {"component": component, "ome.io/instance-index": str(index),
@@ -750,7 +750,8 @@ def pod_object(name, component, index, revision, image, anno, *, runner="default
                                 run.REV_LABEL: revision},
                      "annotations": {run.TRIGGER_ANNO: anno} if anno else {},
                      **({"deletionTimestamp": deletion} if deletion else {})},
-        "spec": {**({"nodeName": node} if node else {}), "containers": [{
+        "spec": {**({"nodeName": node} if node else {}),
+                 **({"terminationGracePeriodSeconds": grace} if grace is not None else {}), "containers": [{
             "name": run.MAIN_CONTAINER, "image": image,
             "env": [{"name": "TEST_REV", "value": test_rev},
                     {"name": "OME_INSTANCE_INDEX", "value": str(index)},
@@ -1613,13 +1614,13 @@ class OperationProgressInvariantTest(unittest.TestCase):
         self.assertTrue(any("invariant I (operation-progress) never saw" in c for c in checks), checks)
         self.assertFalse(any("continuous invariants held" in c and "operation-progress" in c for c in checks), checks)
 
-    def test_watcher_records_carry_the_pod_phase_deletion_and_node(self):
+    def test_watcher_records_carry_the_pod_phase_deletion_node_and_grace(self):
         rec = watcher_record(pod_object("engine-0", "engine", 0, self.REV, "img:1", "v1", phase="Pending",
-                                        deletion="2026-01-01T00:00:00Z", node="worker-1", ready=False))
-        self.assertEqual(("Pending", "2026-01-01T00:00:00Z", "worker-1", False),
-                         (rec["phase"], rec["deleted_at"], rec["node"], rec["alive"]))
+                                        deletion="2026-01-01T00:00:00Z", node="worker-1", ready=False, grace=600))
+        self.assertEqual(("Pending", "2026-01-01T00:00:00Z", "worker-1", False, 600),
+                         (rec["phase"], rec["deleted_at"], rec["node"], rec["alive"], rec["grace"]))
         rec = watcher_record(pod_object("engine-0", "engine", 0, self.REV, "img:1", "v1"))
-        self.assertEqual(("Running", "", True), (rec["phase"], rec["deleted_at"], rec["alive"]))
+        self.assertEqual(("Running", "", True, None), (rec["phase"], rec["deleted_at"], rec["alive"], rec["grace"]))
 
 
 class GangSchedulingInvariantTest(unittest.TestCase):
@@ -7741,6 +7742,44 @@ class GeneratedNodeHookFamilyTest(unittest.TestCase):
                 self.assertEqual([], run.validate_case_file(path), name)
 
 
+class GeneratedNodeGraceTest(unittest.TestCase):
+    """A node-loss row kept down until the policy relocates the Instance
+    (lift=after-recover, in gen-node and under a move) pins the single-pod
+    fixture's termination grace on every component: a pod a drain deleted on
+    the dead node waits out its grace plus the overdue slack before the sweep
+    may act, and the chart's deploy default would make that wait most of the
+    case."""
+
+    FAMILIES = {"gen-node": 82, "gen-fault-move": 24}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.rows = [(folder, n, kv) for folder, n, kv, _m in rows if folder in cls.FAMILIES]
+
+    def test_the_grace_is_the_single_pod_fixtures(self):
+        fixture = re.search(r"terminationGracePeriodSeconds:\s*(\d+)", generate_cases.CSR_SINGLE_TEXT)
+        self.assertEqual(int(fixture.group(1)), generate_cases.NODE_RECOVER_GRACE_S)
+
+    def test_every_after_recover_row_pins_the_grace_on_every_component_and_no_other_row_does(self):
+        line = f"    terminationGracePeriodSeconds: {generate_cases.NODE_RECOVER_GRACE_S}\n"
+        recover = collections.Counter()
+        for folder, name, kv in self.rows:
+            isvc = self.outputs[f"{folder}/{name}.yaml"].split("\n---\n")[-1]   # a dedicated runtime rides ahead of it
+            comps = sum(1 for k in ("Ne", "Nd", "Nr") if int(kv.get(k) or 0) > 0)
+            pinned = isvc.count(line)
+            if kv.get("lift") == "after-recover":
+                recover[folder] += 1
+                self.assertTrue(str(kv.get("fault", "")).startswith("node:"), name)
+                self.assertEqual(comps, pinned, name)
+                self.assertEqual(comps, isvc.count(f"    # {generate_cases.lib.GRACE_WHY}\n"), name)
+            else:
+                self.assertEqual(0, pinned, name)
+        self.assertEqual(self.FAMILIES, dict(recover),
+                         "gen-node: the idle relocations, the persistent hook rows and the router-shape single; "
+                         "gen-fault-move: the node lost for good under a move")
+
+
 class NodeHookHeaderTest(unittest.TestCase):
     """fault=node:<hook>: the operations and hooks it takes, the lifts that
     name its two forms, the lane the persistent form reads, and the knobs
@@ -7901,6 +7940,75 @@ class NodeHookLiftAndVerdictTest(unittest.TestCase):
             self.assertEqual(100 + run.NODE_NOTREADY_GRACE_S + run.LIFT_SETTLE_S + run.ROTATE_BASE_S,
                              run._node_hook_budget(ctx, self._fault("after-settle"), 100))
             self.assertEqual(100 + 300 + run.ROTATE_BASE_S, run._node_hook_budget(ctx, self._fault("after-recover"), 100))
+
+    POLICY = {"overdueSlack": "30s", "nodeUnreachableThreshold": "90s"}
+
+    @staticmethod
+    def _stamp(epoch):
+        return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def test_after_recover_records_the_window_the_policy_has_to_sweep_the_pods_the_node_held(self):
+        # A drain deleted the pod the dead node held before the node evidence matured: the sweep owes it
+        # its own grace (already inside the deletionTimestamp) plus the overdue slack, then its wake.
+        f = self._fault("after-recover", bite_ts=120.0, node_poll_ts=0.0)
+        drained = {"e-3-old": {"comp": "engine", "inst": "3", "node": "worker-1", "ready": False, "serving": False,
+                               "uid": "u-old", "alive": False, "deleted_at": self._stamp(750.0)}}
+        ctx = dict(self._ctx(drained), force_delete=self.POLICY)
+        with mock.patch.object(run, "_node_ready", return_value=False), mock.patch.object(run, "_node_restore") as restore:
+            run._node_lift_tick(ctx, f, 160.0)
+            restore.assert_not_called()
+        self.assertEqual((160.0, 750.0 + 30.0 + run.INV_I_SWEEP_S), (f["last_tick_ts"], f["sweep_due_at"]))
+        # A pod nobody has deleted is freed on the node evidence alone.
+        held = {"e-3": {"comp": "engine", "inst": "3", "node": "worker-1", "ready": False, "serving": False,
+                        "uid": "u-old", "alive": True, "deleted_at": ""}}
+        ctx = dict(self._ctx(held), force_delete=self.POLICY)
+        with mock.patch.object(run, "_node_ready", return_value=False), mock.patch.object(run, "_node_restore"):
+            run._node_lift_tick(ctx, f, 162.0)
+        self.assertEqual(120.0 + 90.0 + run.INV_I_SWEEP_S, f["sweep_due_at"])
+        # Without the policy there is no window to read.
+        ctx = dict(self._ctx(held), force_delete=None)
+        with mock.patch.object(run, "_node_ready", return_value=False), mock.patch.object(run, "_node_restore"):
+            run._node_lift_tick(ctx, f, 164.0)
+        self.assertIsNone(f["sweep_due_at"])
+
+    def test_the_sweep_is_judged_only_once_the_policy_window_has_closed(self):
+        base = self._fault("after-recover", bite_ts=140.0, relocated_at=200.0, relocated_where="at another index",
+                           reset_used=False, sweep_due_at=900.0)
+        verdict, notes, text = self._verdict(dict(base, last_tick_ts=300.0))
+        self.assertEqual(("PASS", []), (verdict, notes))
+        self.assertIn("600s inside the policy's own window", text)
+        self.assertIn("not judged", text)
+        verdict, notes, text = self._verdict(dict(base, last_tick_ts=950.0))
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("still in the API", text)
+        verdict, notes, text = self._verdict(dict(base, last_tick_ts=950.0, reaped_at=880.0, lifted_at=881.0))
+        self.assertEqual(("PASS", []), (verdict, notes))
+        self.assertIn("swept 780s after the stop", text)
+
+    def test_the_canary_terminal_waits_for_the_node_lift(self):
+        f = self._fault("after-recover", param="canary-serving@0")
+        self.assertTrue(run._node_lift_pending(f))
+        self.assertFalse(run._node_lift_pending(dict(f, lifted_at=300.0)))
+        self.assertFalse(run._node_lift_pending(dict(f, fired=False)))
+        self.assertFalse(run._node_lift_pending(dict(f, infra_fail="node: apparatus")))
+        self.assertFalse(run._node_lift_pending(None))
+        self.assertFalse(run._node_lift_pending({"kind": "podkill", "param": "settling", "fired": True}))
+        self.assertIn("_node_lift_pending(", inspect.getsource(run._canary), "the canary judges its terminal after the lift")
+
+    def test_the_budget_adds_a_drained_pods_own_grace_under_after_recover(self):
+        pods = {"e-0": {"comp": "engine", "grace": 600, "alive": True}, "e-1": {"comp": "engine", "grace": 30, "alive": True},
+                "r-0": {"comp": "router", "grace": 900, "alive": True}}
+        ctx = {"force_delete": self.POLICY, "pods_per_inst": {"engine": 1}, "N": {"engine": 4}, "configured": {"engine"},
+               "pod_state": pods}
+        with mock.patch.object(run, "_idle_budget", return_value=600), mock.patch.object(run, "_relocation_budget", return_value=300):
+            self.assertEqual(100 + 300 + 600 + 30 + run.ROTATE_BASE_S,
+                             run._node_hook_budget(ctx, self._fault("after-recover", victimcomp="engine"), 100))
+            self.assertEqual(100 + 300 + run.ROTATE_BASE_S,
+                             run._node_hook_budget(ctx, self._fault("after-recover", victimcomp="decoder"), 100),
+                             "no pod of the Component, no grace to add")
+            self.assertEqual(100 + 300 + run.ROTATE_BASE_S,
+                             run._node_hook_budget(dict(ctx, force_delete=None), self._fault("after-recover", victimcomp="engine"), 100),
+                             "no policy, no window")
 
     def _verdict(self, f, completed=True, state="CONVERGED"):
         notes, checks = [], []

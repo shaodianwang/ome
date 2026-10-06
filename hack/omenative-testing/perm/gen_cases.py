@@ -104,13 +104,21 @@ def strat_ceil(strat, n):
     return n + 1 if strat == "SurgeThenDrain" else n
 
 
-def comp(name, n, w=0, life=None, ann=None, runner=None):
+# Why a case pins terminationGracePeriodSeconds on a component; the single-pod
+# runtime fixture carries the same line.
+GRACE_WHY = ("The eval judges a case well inside the cluster's default pod grace; a pod that ignores its "
+             "stop signal must not outlive the verdict.")
+
+
+def comp(name, n, w=0, life=None, ann=None, runner=None, grace=None):
     # ann: extra pod annotations merged after ome.io/deploymentMode (analysis
     # cases use it for the Downward-API health knobs + prometheus.io/scrape).
     # runner: an inline runner override, merged into the runtime container by
     # env name; on a gang it rides under leader.runner.
+    # grace: the termination grace pinned on the component's pods (the fold
+    # into leader and worker carries it), else the deploy default's.
     return {"comp": name, "n": n, "w": w, "life": life if life is not None else lifecycle(), "ann": ann,
-            "runner": runner}
+            "runner": runner, "grace": grace}
 
 
 def configmap_env(cm_name, key, var, gang=False):
@@ -223,6 +231,8 @@ def render(name, comps, coord=None, runtime=None, meta_ann=None, docs=()):
             ann_str = "{ ome.io/deploymentMode: OMENative }"
         out += [f"  {c['comp']}:", f"    minReplicas: {c['n']}", f"    maxReplicas: {c['n']}",
                 f"    annotations: {ann_str}"]
+        if c.get("grace") is not None:
+            out += [f"    # {GRACE_WHY}", f"    terminationGracePeriodSeconds: {c['grace']}"]
         runner = c.get("runner")
         if c["w"] > 0:
             leader = f"    leader: {flow({'runner': runner})}" if runner else "    leader: {}"
