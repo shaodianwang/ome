@@ -152,7 +152,6 @@ func TestAllZeroFloorMovement(t *testing.T) {
 			source := f.reconcile(t)
 			accepted := source.Status.Placement.Plan.DeepCopy()
 			selectHome(source, "member-b")
-			source.Spec.Placement.MaxSurge = ptr.To[int32](3)
 			source.Generation++
 			if err := f.reconciler.Update(t.Context(), source); err != nil {
 				t.Fatal(err)

@@ -4,7 +4,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
-	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -59,22 +58,6 @@ var _ = ginkgo.Describe("Single persisted admission race (KIND)", func() {
 			g.Expect(readyEnginePodsOn(g, winner.c, env.isvcNS, env.isvcName)).To(gomega.Equal(1))
 			g.Expect(enginePodsOn(g, loser.c, env.isvcNS, env.isvcName)).To(gomega.BeEmpty())
 			g.Expect(derivedSweptOn(loser.c, env.isvcNS, env.isvcName)).To(gomega.BeTrue())
-		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
-		ginkgo.By("holding a healthy affinity move without a surge allowance")
-		env.grantQuota(loser, env.cpuForReplicas(2))
-		gomega.Eventually(func(g gomega.Gomega) {
-			g.Expect(controlCluster.client.Get(controlCluster.ctx, key, source)).To(gomega.Succeed())
-			source.Spec.Placement.ClusterAffinity = []v1beta1.ClusterAffinityTerm{{MatchFields: []v1beta1.ClusterSelectorRequirement{{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{loser.wcName}}}}}
-			g.Expect(controlCluster.client.Update(controlCluster.ctx, source)).To(gomega.Succeed())
-		}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
-		gomega.Eventually(func(g gomega.Gomega) {
-			g.Expect(controlCluster.client.Get(controlCluster.ctx, key, source)).To(gomega.Succeed())
-			condition := source.Status.GetCondition(v1beta1.PlacementConverged)
-			g.Expect(condition).NotTo(gomega.BeNil())
-			g.Expect(cmp.Diff("MigrationBlocked", condition.Reason)).To(gomega.BeEmpty())
-			g.Expect(cmp.Diff(winner.wcName, source.Status.Placement.Plan.Winner)).To(gomega.BeEmpty())
-			g.Expect(readyEnginePodsOn(g, winner.c, env.isvcNS, env.isvcName)).To(gomega.Equal(1))
-			g.Expect(enginePodsOn(g, loser.c, env.isvcNS, env.isvcName)).To(gomega.BeEmpty())
 		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
 	})
 })

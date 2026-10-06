@@ -9,8 +9,8 @@ its admission race, overlapping weighted terms add, capacity means total
 eligible hardware, and static Split preserves ratios during an admission
 shortfall. Cluster changes trigger bounded, gradual rebalancing. The confirmed
 implementation contracts require OMENative members, nominal whole-replica
-capacity, and a shared surge allowance that pauses new rollout and autoscaler
-growth during moves. General autoscaling redesign remains deferred.
+capacity, and a derived surge allowance of one full desired allocation that
+pauses new rollout and autoscaler growth during moves. General autoscaling redesign remains deferred.
 Outstanding review and operational decisions are in
 [Open Questions](#open-questions); this status does not claim deployment or
 production graduation.
@@ -653,15 +653,26 @@ utilization do not rebalance them. A stable accepted snapshot and unchanged N
 produce a stable plan.
 
 For any deliberate move between healthy homes, retain the old serving replicas
-until replacements are ready and routable, within an explicit configured
-transition surge budget. Then drain and reduce the old allocation. The plan
-records old and new assignments separately so transient surge is visible.
-Absent a transition budget, hold a disruptive move with `MigrationBlocked`;
-do not invent a hidden make-before-break allowance. Operators can perform a
-manual maintenance-window migration if spare capacity does not exist.
+until replacements are ready and routable. Then drain and reduce the old
+allocation. The plan records old and new assignments separately so transient
+surge is visible.
 
-The per-service allowance is `spec.placement.maxSurge`, a nonnegative whole
-replica count shared with existing rollout reservations and occupied replicas.
+The transition allowance is one full copy of the desired allocation. A move may
+occupy at most `max(original floor, desired floor) + desired floor` whole
+replicas, counting existing rollout reservations and replicas whose removal is
+still in progress. The allowance is derived, not configured, because a
+configured count could not be chosen reliably. The limit is anchored at the
+larger floor, so a move that shrinks the total gets the difference as free
+headroom, and one value is inert for one move and a crawl for another. Under a
+count of two, moving 12 replicas on two homes to 8 on four retires the 4
+surplus replicas first and then grows both new homes in full. Moving the same 12
+to four homes instead takes three grow-then-ready cycles of two.
+With one copy of the desired allocation, a Split or All move grows every new
+home to its target at once, and old homes shrink as replacements become ready.
+`spec.placement.maxSurge` is deprecated: admission warns and the placer ignores
+it. When a destination lacks capacity, its replacements stay pending and the
+original homes keep serving.
+
 Before moving replicas, the source persists the plan and waits for member
 acknowledgements that new rollout surge and autoscaler-driven growth are paused.
 Placement-authorized growth and physical cleanup can continue. Existing
@@ -671,10 +682,12 @@ already promised to the move. Releasing the pause requires a new accepted plan
 revision after the allocation and cleanup have converged.
 
 For Single, a **replacement probe** is a complete candidate home started while
-the current winner continues serving. Probes share `spec.placement.maxSurge`
+the current winner continues serving. Probes share the transition allowance
 with existing rollout reservations and occupied replicas. With an original
-floor of two and `maxSurge: 2`, only one additional two-replica home can race at
-a time. A smaller allowance holds the move; it cannot create a partial home.
+floor of two and two-replica candidates, the limit is four, so one replacement
+races at a time beside a serving original. Once the original is verified
+absent, its floor funds a second probe. A probe that does not fit waits; the
+allowance cannot create a partial home.
 For different candidate floors, each grant must fit the budget of every active
 probe that could become the winner.
 
@@ -1021,8 +1034,8 @@ arithmetic, and the generated OEP status index.
   been exercised. Autoscaling redesign is not an Alpha dependency.
 - **Beta:** concurrent placement, restart, real multi-cluster gang scheduling,
   bounded transitions, and routing regressions pass under member/report failures.
-- **Stable:** fleet measurements establish configured freshness/stability and
-  transition budgets, with runbooks for missing reports, quota shortfalls, and
+- **Stable:** fleet measurements establish configured freshness/stability
+  windows and transition durations, with runbooks for missing reports, quota shortfalls, and
   workloads needing removed Packed/anti-sliver behavior.
 
 ## Drawbacks

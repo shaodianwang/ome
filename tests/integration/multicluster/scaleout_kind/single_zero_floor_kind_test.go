@@ -119,7 +119,6 @@ var _ = ginkgo.Describe("Single zero-floor placement (KIND)", func() {
 		gomega.Eventually(func(g gomega.Gomega) {
 			g.Expect(controlCluster.client.Get(controlCluster.ctx, key, source)).To(gomega.Succeed())
 			source.Spec.Placement.ClusterAffinity = []v1beta1.ClusterAffinityTerm{{MatchFields: []v1beta1.ClusterSelectorRequirement{{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{replacement.wcName}}}}}
-			source.Spec.Placement.MaxSurge = ptr.To[int32](2)
 			g.Expect(controlCluster.client.Update(controlCluster.ctx, source)).To(gomega.Succeed())
 		}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
 		gomega.Eventually(func(g gomega.Gomega) {

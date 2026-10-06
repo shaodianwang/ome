@@ -10210,7 +10210,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementSpec(ref common.ReferenceCallback) com
 					},
 					"maxSurge": {
 						SchemaProps: spec.SchemaProps{
-							Description: "MaxSurge is the whole-replica allowance shared by placement transitions and local rollout surge. Omission blocks disruptive movement between homes.",
+							Description: "Deprecated: MaxSurge is ignored. A placement move may hold one extra full copy of the desired allocation; admission warns when this is set.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},

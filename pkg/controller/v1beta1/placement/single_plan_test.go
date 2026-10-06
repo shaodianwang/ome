@@ -306,14 +306,14 @@ func TestSingleRetainedWinnerHolds(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		{name: "healthy affinity change requires bounded move", reason: "MigrationBlocked", edit: func(t *testing.T, f *backendFixture, s *v1beta1.InferenceService) {
+		{name: "affinity change keeps the winner until routing is known", edit: func(t *testing.T, f *backendFixture, s *v1beta1.InferenceService) {
 			s.Spec.Placement.ClusterAffinity = testAffinity("metadata.name=member-b")
 			s.Generation++
 			if err := f.reconciler.Update(t.Context(), s); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{name: "no matching peers retains healthy winner", reason: "MigrationBlocked", edit: func(t *testing.T, f *backendFixture, s *v1beta1.InferenceService) {
+		{name: "no matching peers retains healthy winner", edit: func(t *testing.T, f *backendFixture, s *v1beta1.InferenceService) {
 			s.Spec.Placement.ClusterAffinity = testAffinity("metadata.name=member-c")
 			s.Generation++
 			if err := f.reconciler.Update(t.Context(), s); err != nil {

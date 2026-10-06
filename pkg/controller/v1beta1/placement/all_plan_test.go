@@ -225,18 +225,11 @@ func TestAllPlanWholeHomeBudget(t *testing.T) {
 		reason string
 	}{
 		{name: "complete home fits", wantB: 3, reason: "AwaitingMemberConvergence"},
-		{name: "partial home is forbidden", edit: func(s *v1beta1.InferenceService, _ map[string]plannedHomeObservation) {
-			s.Spec.Placement.MaxSurge = ptr.To[int32](2)
-		}, reason: "SurgeBudgetExhausted"},
 		{name: "existing rollout shares allowance", edit: func(_ *v1beta1.InferenceService, o map[string]plannedHomeObservation) {
 			h := o["a"]
 			h.RolloutReserved = 1
 			o["a"] = h
 		}, reason: "SurgeBudgetExhausted"},
-		{name: "unset allowance blocks move", edit: func(s *v1beta1.InferenceService, _ map[string]plannedHomeObservation) {
-			s.Spec.Placement.MaxSurge = nil
-			s.Status.Placement.Plan.PauseSurge = false
-		}, reason: "MigrationBlocked"},
 		{name: "pause required on standing home", edit: func(_ *v1beta1.InferenceService, o map[string]plannedHomeObservation) {
 			h := o["a"]
 			h.PauseAcknowledged = false
@@ -255,7 +248,6 @@ func TestAllPlanWholeHomeBudget(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			home := &v1beta1.PlacementHomePolicy{InputDigest: "intent", ReplicaFloors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent, Replicas: 3}}}
 			s := srcISVCMode(v1beta1.PlacementModeAll, "")
-			s.Spec.Placement.MaxSurge = ptr.To[int32](3)
 			s.Status.Placement = &v1beta1.PlacementStatus{Plan: &v1beta1.PlacementPlanStatus{Mode: v1beta1.PlacementModeAll, InputDigest: "intent", AssignedReplicas: 3, PauseSurge: true}, Candidates: []v1beta1.CandidatePlacement{
 				{Cluster: "a", Allocation: &v1beta1.CandidateAllocationStatus{CurrentHome: home.DeepCopy(), OriginalReplicas: 3, CurrentReplicas: 3}},
 				{Cluster: "b", Allocation: &v1beta1.CandidateAllocationStatus{DesiredHome: home.DeepCopy(), DesiredReplicas: 3, Matched: true}},

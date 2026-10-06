@@ -5,7 +5,6 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -54,7 +53,6 @@ var _ = ginkgo.Describe("All full-policy movement (KIND)", func() {
 			g.Expect(controlCluster.client.Get(controlCluster.ctx, key, source)).To(gomega.Succeed())
 			before := source.DeepCopy()
 			source.Spec.Placement.ClusterAffinity = []v1beta1.ClusterAffinityTerm{{MatchFields: []v1beta1.ClusterSelectorRequirement{{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{replacement.wcName}}}}}
-			source.Spec.Placement.MaxSurge = ptr.To[int32](3)
 			g.Expect(controlCluster.client.Patch(controlCluster.ctx, source, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))).To(gomega.Succeed())
 		}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
 		gomega.Eventually(func(g gomega.Gomega) {
@@ -136,21 +134,6 @@ var _ = ginkgo.Describe("All full-policy movement (KIND)", func() {
 		gomega.Eventually(func(g gomega.Gomega) {
 			g.Expect(controlCluster.client.Get(controlCluster.ctx, key, source)).To(gomega.Succeed())
 			selectHome(replacement.wcName)
-			source.Spec.Placement.MaxSurge = ptr.To[int32](1)
-			g.Expect(controlCluster.client.Update(controlCluster.ctx, source)).To(gomega.Succeed())
-		}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
-		gomega.Eventually(func(g gomega.Gomega) {
-			publish(g)
-			g.Expect(controlCluster.client.Get(controlCluster.ctx, key, source)).To(gomega.Succeed())
-			condition := source.Status.GetCondition(v1beta1.PlacementConverged)
-			g.Expect(condition).NotTo(gomega.BeNil())
-			g.Expect(condition.Reason).To(gomega.Equal("SurgeBudgetExhausted"))
-			g.Expect(readyEnginePodsOn(g, first.c, env.isvcNS, env.isvcName)).To(gomega.Equal(2))
-			g.Expect(enginePodsOn(g, replacement.c, env.isvcNS, env.isvcName)).To(gomega.BeEmpty())
-		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
-		gomega.Eventually(func(g gomega.Gomega) {
-			g.Expect(controlCluster.client.Get(controlCluster.ctx, key, source)).To(gomega.Succeed())
-			source.Spec.Placement.MaxSurge = ptr.To[int32](2)
 			g.Expect(controlCluster.client.Update(controlCluster.ctx, source)).To(gomega.Succeed())
 		}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
 		peak, lostCoverage := 0, false

@@ -42,7 +42,6 @@ var _ = ginkgo.Describe("Hardware capacity placement (KIND)", func() {
 		model, runtime := env.seedModelRuntimeOnMembers()
 		source := runnableSourceISVC(env.isvcNS, env.isvcName, model, runtime, v1beta1.PlacementModeSplitByCapacity, 3)
 		source.Spec.Placement.Split = &v1beta1.SplitSpec{Replicas: ptr.To[int32](3)}
-		source.Spec.Placement.MaxSurge = ptr.To[int32](1)
 		source.Spec.Engine.NodeSelector = map[string]string{syntheticAccelerator: label}
 		resources := corev1.ResourceList{syntheticAccelerator: resource.MustParse("1")}
 		source.Spec.Engine.Containers[0].Resources = corev1.ResourceRequirements{Requests: resources.DeepCopy(), Limits: resources}
@@ -94,7 +93,7 @@ var _ = ginkgo.Describe("Hardware capacity placement (KIND)", func() {
 			g.Expect(runningEnginePodsOn(g, env.members[0].c, env.isvcNS, env.isvcName)).To(gomega.Equal(1))
 			g.Expect(runningEnginePodsOn(g, env.members[1].c, env.isvcNS, env.isvcName)).To(gomega.Equal(2))
 		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
-		gomega.Expect(maxOccupied).To(gomega.BeNumerically("<=", 4), "shared surge is one whole replica")
+		gomega.Expect(maxOccupied).To(gomega.BeNumerically("<=", 4), "the reshard adds one replica before retiring one")
 		await(map[string]int32{env.members[0].wcName: 1, env.members[1].wcName: 2})
 		ginkgo.By("retiring a home while the source rendering changes")
 		gomega.Eventually(func(g gomega.Gomega) {

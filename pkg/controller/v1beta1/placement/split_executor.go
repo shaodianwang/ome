@@ -57,7 +57,7 @@ func (r *Reconciler) reconcileSplit(ctx context.Context, source *v1beta1.Inferen
 }
 
 func (r *Reconciler) executePlannedAllocation(ctx context.Context, source *v1beta1.InferenceService, eligible []string, standing *placementObservations, proposal plan.Proposal) (ctrl.Result, error) {
-	proposal.PauseSurge = splitPauseRequired(source, proposal)
+	proposal.PauseSurge = splitPauseRequired(proposal)
 	if proposal.AdoptionDigest != "" {
 		proposal.PauseSurge = false
 	}
@@ -193,7 +193,7 @@ func (r *Reconciler) executePlannedAllocation(ctx context.Context, source *v1bet
 	return r.writeSplitObservations(ctx, next, observations, step.Reason, "")
 }
 
-func splitPauseRequired(source *v1beta1.InferenceService, proposal plan.Proposal) bool {
+func splitPauseRequired(proposal plan.Proposal) bool {
 	if proposal.SingleMove != nil {
 		return true
 	}
@@ -202,12 +202,6 @@ func splitPauseRequired(source *v1beta1.InferenceService, proposal plan.Proposal
 		grow = grow || assignment.DesiredReplicas > assignment.CurrentReplicas
 		shrink = shrink || assignment.DesiredReplicas < assignment.CurrentReplicas
 		drain = drain || assignment.DrainRequested
-	}
-	active := source.Status.Placement != nil && source.Status.Placement.Plan != nil && source.Status.Placement.Plan.PauseSurge
-	// An unconfigured move cannot begin. Leave member rollouts and scaling
-	// available unless an accepted transition already owns their allowance.
-	if source.Spec.Placement.MaxSurge == nil && grow && shrink && !active {
-		return false
 	}
 	return proposal.PauseSurge || grow || shrink || drain
 }
@@ -325,7 +319,9 @@ func advanceSplitPlan(source *v1beta1.InferenceService, observations map[string]
 	input := allocation.Transition{
 		From:    allocation.Plan{Targets: map[string]int32{}, Unassigned: accepted.OriginalUnassignedReplicas},
 		Current: map[string]int32{}, Desired: allocation.Plan{Targets: map[string]int32{}, Unassigned: accepted.UnassignedReplicas},
-		Homes: map[string]allocation.Home{}, MaxSurge: source.Spec.Placement.MaxSurge,
+		Homes: map[string]allocation.Home{},
+		// A move may hold one extra full copy of the desired allocation.
+		Surge: int64(accepted.UnassignedReplicas),
 	}
 	var reserved, occupied int64
 	pauseAcknowledged := true
@@ -334,6 +330,7 @@ func advanceSplitPlan(source *v1beta1.InferenceService, observations map[string]
 		input.From.Targets[candidate.Cluster] = assignment.OriginalReplicas
 		input.Current[candidate.Cluster] = assignment.CurrentReplicas
 		input.Desired.Targets[candidate.Cluster] = assignment.DesiredReplicas
+		input.Surge += int64(assignment.DesiredReplicas)
 		input.Homes[candidate.Cluster] = observed.Home
 		reserved += int64(observed.RolloutReserved)
 		occupied += int64(observed.Home.Occupied)

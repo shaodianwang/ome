@@ -351,7 +351,6 @@ func TestSingleZeroFloorMovementRequiresPositiveFloor(t *testing.T) {
 			source := f.reconcile(t)
 			acknowledgeSingleFloor(t, f, "member-a", 3)
 			accepted := source.Status.Placement.Plan.DeepCopy()
-			source.Spec.Placement.MaxSurge = ptr.To[int32](3)
 			source.Spec.Placement.ClusterAffinity = []v1beta1.ClusterAffinityTerm{{MatchFields: []v1beta1.ClusterSelectorRequirement{{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{"member-b"}}}}}
 			source.Generation++
 			if err := f.reconciler.Update(t.Context(), source); err != nil {

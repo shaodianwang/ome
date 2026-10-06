@@ -6,7 +6,6 @@ import (
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -26,7 +25,6 @@ var _ = ginkgo.Describe("Single placement recovery after home loss (KIND)", func
 			source.Spec.Placement.ClusterAffinity = []v1beta1.ClusterAffinityTerm{{MatchFields: []v1beta1.ClusterSelectorRequirement{{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{name}}}}}
 		}
 		selectHome(original.wcName)
-		source.Spec.Placement.MaxSurge = ptr.To[int32](1)
 		env.applyEngineResources(source)
 		env.routeToSpecQueue(source)
 		mustCreate(controlCluster, source)

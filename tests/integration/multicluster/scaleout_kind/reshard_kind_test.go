@@ -10,7 +10,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -235,7 +234,6 @@ var _ = ginkgo.Describe("Placement move with route publication (KIND)", func() {
 
 		gomega.Eventually(func(g gomega.Gomega) {
 			g.Expect(cl.Get(controlCluster.ctx, key, source)).To(gomega.Succeed())
-			source.Spec.Placement.MaxSurge = ptr.To[int32](1)
 			source.Spec.Placement.ClusterAffinity = []v1beta1.ClusterAffinityTerm{{MatchFields: []v1beta1.ClusterSelectorRequirement{{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{replacement.wcName}}}}}
 			g.Expect(cl.Update(controlCluster.ctx, source)).To(gomega.Succeed())
 		}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
@@ -259,7 +257,7 @@ var _ = ginkgo.Describe("Placement move with route publication (KIND)", func() {
 			g.Expect(cl.Get(controlCluster.ctx, key, source)).To(gomega.Succeed())
 			g.Expect(source.Status.Placement.Plan.PauseSurge).To(gomega.BeFalse())
 		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
-		gomega.Expect(maxOccupied).To(gomega.BeNumerically("<=", 2), "one shared surge replica")
+		gomega.Expect(maxOccupied).To(gomega.BeNumerically("<=", 2), "one extra copy of the one-replica floor")
 		gomega.Expect(cmp.Diff(false, lostCoverage)).To(gomega.BeEmpty(), "original home must survive until its replacement is ready")
 	})
 })

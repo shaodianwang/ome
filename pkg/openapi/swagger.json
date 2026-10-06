@@ -5770,7 +5770,7 @@
           "x-kubernetes-list-type": "atomic"
         },
         "maxSurge": {
-          "description": "MaxSurge is the whole-replica allowance shared by placement transitions and local rollout surge. Omission blocks disruptive movement between homes.",
+          "description": "Deprecated: MaxSurge is ignored. A placement move may hold one extra full copy of the desired allocation; admission warns when this is set.",
           "type": "integer",
           "format": "int32"
         },
