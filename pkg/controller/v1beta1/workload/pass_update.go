@@ -24,7 +24,8 @@ import (
 // update pass's position — after earlier passes' effects (a restart
 // completion, a finished scale-down) have landed — to observe the same
 // state the pass pipeline showed it. stop=true means the pass consumed
-// the reconcile (the caller returns res without running Create).
+// the reconcile (the caller returns res without running the full Create
+// pass).
 func executeUpdatePass(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, selection *UpdateSelection, retryBlockWait time.Duration) (res ctrl.Result, stop bool, err error) {
 	anyUpdating := false
 	anyGated := false
@@ -144,24 +145,6 @@ func executeUpdatePass(ctx context.Context, deps types.Deps, input types.Reconci
 	}
 	if input.RecordRolloutHold != nil {
 		input.RecordRolloutHold(firstDenial)
-	}
-	if anyUpdating || anyGated || anyUpdateRan {
-		// About to requeue without the full Create pass. Surge-free
-		// indices — brand-new ones, and rows demoted for losing every
-		// pod — legitimately bypass the skip-Create gate above: no
-		// Update this pass could have moved their ordinal or their
-		// running revision, so the stale-observation hazard above does
-		// not apply — see ops.CreateFreshIndices. Materialize them now
-		// so a concurrent scale-up isn't starved behind the in-flight
-		// rollout, and so a row that lost its pods is rebuilt whether
-		// or not a start is admitted around it: a podless row on the
-		// target holds a slot in the budget that denies the start, and
-		// nothing but its rebuild releases it. The full Create pass
-		// still owns surge-sensitive (touched) indices once the rollout
-		// drains.
-		if _, createErr := createPass(ctx, deps, input, plan, target, createScopeFresh); createErr != nil {
-			return ctrl.Result{}, false, createErr
-		}
 	}
 	if anyUpdating {
 		return types.PassRequeue(workloadops.UpdateRequeueInterval(input), retryBlockWait), true, nil

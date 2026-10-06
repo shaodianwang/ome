@@ -471,3 +471,85 @@ func TestParkedAttemptStamps_KeepTheAttemptAndFollowTheSet(t *testing.T) {
 		t.Fatal("a wait already named, a token that is no gate, and an attempt in flight all write nothing")
 	}
 }
+
+// TestEntryStamps_LadderFlipFollowsTheAttempt pins the RetryBlock half of
+// the update entry stamps, which run again on every pass of their
+// attempt: the pass that opens an attempt flips a due Backoff block to
+// RetryInProgress, a later pass of an attempt opened once the block was
+// due lands that flip if it is still owed, and a later pass of an attempt
+// open since before the block's failure starts nothing on the ladder, so
+// the block keeps counting that failure's wave.
+func TestEntryStamps_LadderFlipFollowsTheAttempt(t *testing.T) {
+	const target = "rev-b"
+	now := time.Date(2026, time.August, 15, 12, 0, 0, 0, time.UTC)
+	stamps := []struct {
+		name  string
+		step  string
+		stamp func(types.ReconcileInput) error
+	}{
+		{name: "surge", step: types.UpdateStepSurge, stamp: func(in types.ReconcileInput) error {
+			return StampSurging(context.Background(), in, 0, target, types.UpdateStrategySurgeThenDrain, time.Hour)
+		}},
+		{name: "recreate", step: types.UpdateStepDrain, stamp: func(in types.ReconcileInput) error {
+			_, err := StampRecreating(context.Background(), in, 0, target, "revision rev-a -> rev-b", types.UpdateStrategyRecreatePod, time.Hour)
+			return err
+		}},
+		{name: "in-place", step: types.UpdateStepInPlace, stamp: func(in types.ReconcileInput) error {
+			return StampUpdatingInPlace(context.Background(), in, 0, target, types.UpdateStrategyInPlaceIfPossible, time.Hour)
+		}},
+	}
+	cases := []struct {
+		name string
+		// openedAgo is how long before now the attempt in flight opened;
+		// zero leaves the row Ready, so the stamp opens the attempt.
+		openedAgo time.Duration
+		// dueIn is when the Backoff block becomes due, relative to now.
+		dueIn    time.Duration
+		wantFlip bool
+	}{
+		{name: "the pass that opens the attempt flips the due block", dueIn: -time.Second, wantFlip: true},
+		{name: "an attempt opened once the block was due lands the owed flip", openedAgo: 5 * time.Second, dueIn: -10 * time.Second, wantFlip: true},
+		{name: "an attempt open since before the failure leaves the block in Backoff", openedAgo: 10 * time.Minute, dueIn: 20 * time.Second},
+	}
+	for _, st := range stamps {
+		for _, tc := range cases {
+			t.Run(st.name+"/"+tc.name, func(t *testing.T) {
+				row := types.InstanceStatus{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "rev-a"}
+				if tc.openedAgo > 0 {
+					opened := metav1.NewTime(now.Add(-tc.openedAgo))
+					row.Phase = types.InstancePhaseUpdating
+					row.TargetRevision = target
+					row.Operation = &types.InstanceOperation{
+						ID: "update-0", Type: types.InstanceOperationUpdate, Step: st.step, TargetRevision: target,
+						StartedAt: opened, LastProgressAt: opened, Deadline: metav1.NewTime(now.Add(time.Hour)),
+					}
+				}
+				due := metav1.NewTime(now.Add(tc.dueIn))
+				failed := metav1.NewTime(now.Add(-time.Minute))
+				block := types.RetryBlock{TargetRevision: target, State: types.RetryBlockBackoff, AttemptsStarted: 1,
+					NextRetryAt: &due, FirstFailureAt: &failed, LastFailureAt: &failed}
+				in := types.ReconcileInput{
+					Clock: clocktesting.NewFakeClock(now),
+					MutateInstance: func(_ context.Context, _ int32, mutate func(*types.InstanceStatus) bool) error {
+						mutate(&row)
+						return nil
+					},
+					MutateRetryBlock: func(_ context.Context, _ string, mutate func(*types.RetryBlock) types.RetryBlockDisposition) error {
+						mutate(&block)
+						return nil
+					},
+				}
+
+				if err := st.stamp(in); err != nil {
+					t.Fatalf("stamp: %v", err)
+				}
+				if flipped := block.State == types.RetryBlockRetryInProgress; flipped != tc.wantFlip {
+					t.Fatalf("block state = %s, want flipped=%v", block.State, tc.wantFlip)
+				}
+				if block.AttemptsStarted != 1 {
+					t.Fatalf("a stamp counts no failure, got AttemptsStarted=%d", block.AttemptsStarted)
+				}
+			})
+		}
+	}
+}

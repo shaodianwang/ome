@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -287,6 +289,210 @@ func TestReconcile_PausedRestart_DoesNotCreateFreshIndices(t *testing.T) {
 	}
 	if s := instanceStatusByIndex(f.client, f.isvc, v1beta1.EngineComponent, 1); s != nil {
 		t.Errorf("paused reconcile must not allocate status for absent index 1; got %+v", s)
+	}
+}
+
+const (
+	repairBesideRollPrior  = "llama-70b-engine-priorrev"
+	repairBesideRollTarget = "llama-70b-engine-newtarget"
+)
+
+// repairBesideRollRows are Instance 0 at Step=Surge on its way to the
+// target and Instance 1 rebuilding on the target under an open repair.
+func repairBesideRollRows(now time.Time) []workloadtypes.InstanceStatus {
+	return []workloadtypes.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseUpdating, RunningRevision: repairBesideRollPrior,
+			TargetRevision: repairBesideRollTarget, PodCount: 2, ServingPodCount: 1,
+			Operation: &workloadtypes.InstanceOperation{
+				ID: "update-0", Type: workloadtypes.InstanceOperationUpdate, Step: workloadtypes.UpdateStepSurge,
+				TargetRevision: repairBesideRollTarget, Strategy: workloadtypes.UpdateStrategySurgeThenDrain,
+				StartedAt: metav1.NewTime(now.Add(-40 * time.Minute)), LastProgressAt: metav1.NewTime(now.Add(-40 * time.Minute)),
+				Deadline: metav1.NewTime(now.Add(time.Hour)),
+			}},
+		repairBesideRollRepairRow(now),
+	}
+}
+
+func repairBesideRollRepairRow(now time.Time) workloadtypes.InstanceStatus {
+	return workloadtypes.InstanceStatus{
+		Index: 1, Incarnation: 2, Phase: workloadtypes.InstancePhaseRestarting, RunningRevision: repairBesideRollTarget,
+		Operation: &workloadtypes.InstanceOperation{
+			ID: "restart-1", Type: workloadtypes.InstanceOperationRestart, Step: workloadtypes.RestartStepDrain,
+			StartedAt: metav1.NewTime(now.Add(-30 * time.Minute)), LastProgressAt: metav1.NewTime(now.Add(-30 * time.Minute)),
+		},
+	}
+}
+
+// repairBesideRollRebuiltPod is the repair's rebuilt pod, created at the
+// bumped incarnation and still Pending: nothing has started in it.
+func repairBesideRollRebuiltPod(now time.Time) *corev1.Pod {
+	pod := liveEnginePod("llama-70b", "prod", 1, 0, "newtarget", now.Add(-30*time.Minute))
+	pod.Labels[query.LabelInstanceIncarnation] = "2"
+	return pod
+}
+
+// repairBesideRollFixture is the Component the two rows describe, with
+// Instance 0's source serving and the replacement and rebuilt pods given.
+func repairBesideRollFixture(t *testing.T, now time.Time, maxSurge, maxUnavailable int, rows []workloadtypes.InstanceStatus, pods ...*corev1.Pod) *terminatingSurgeFixture {
+	t.Helper()
+	planned := make([]int32, 0, len(rows))
+	for _, row := range rows {
+		planned = append(planned, row.Index)
+	}
+	f := newTerminatingSurgeFixture(t, rows, planned, []int32{0}, pods...)
+	f.in.DesiredSpec.Replicas = int32(len(rows))
+	f.plan.Replicas = int32(len(rows))
+	f.plan.RestartPolicy = workloadtypes.RestartPolicyRecreateInstance
+	f.plan.UpdateStrategy.RollingUpdate = &workloadtypes.RollingUpdate{MaxSurge: intOrStringInt(maxSurge), MaxUnavailable: intOrStringInt(maxUnavailable)}
+	for i := range f.plan.Instances {
+		if row := f.in.ObservedState.Instance(f.plan.Instances[i].Index); row != nil {
+			f.plan.Instances[i].Incarnation = row.Incarnation
+		}
+	}
+	f.in.DrainHolds = &workloadtypes.DrainHolds{}
+	return f
+}
+
+// An open repair whose rebuilt pod has not started consumes the pass, and
+// the update attempts already in flight on other Instances still advance
+// in it, under the rules a full pass applies: a ContainersReady
+// replacement gets its serving gate, one past the promote bar takes its
+// source out of rotation, and an Instance rebuilding on the target holds
+// the floor like any rolled Instance that does not serve it.
+//
+// Cells: instance/Update/Surge/pod.containersReady[target]/before
+func TestReconcile_RepairInFlight_UpdateAttemptsInFlightAdvance(t *testing.T) {
+	cases := []struct {
+		name string
+		// promotable has the replacement Ready and serving since before the
+		// pass, past the promote bar; otherwise it is ContainersReady only.
+		promotable     bool
+		maxUnavailable int
+		wantStep       string
+		wantSourceOut  bool
+		wantFloorHold  bool
+	}{
+		{name: "a ContainersReady replacement gets its serving gate", wantStep: workloadtypes.UpdateStepSurge},
+		{name: "a replacement past the promote bar takes its source out of rotation", promotable: true, maxUnavailable: 1,
+			wantStep: workloadtypes.UpdateStepSurgeDrain, wantSourceOut: true},
+		{name: "the Instance under repair holds the floor and the source stays in rotation", promotable: true,
+			wantStep: workloadtypes.UpdateStepSurge, wantFloorHold: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			replacement := liveEnginePod("llama-70b", "prod", 0, 1, "newtarget", now.Add(-40*time.Minute))
+			replacement.Status.Phase = corev1.PodRunning
+			replacement.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name: constants.MainContainerName, Ready: true,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(now.Add(-30 * time.Minute))}},
+			}}
+			replacement.Status.Conditions = []corev1.PodCondition{
+				{Type: corev1.ContainersReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(now.Add(-10 * time.Minute))},
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse, Reason: "ReadinessGatesNotReady", LastTransitionTime: metav1.NewTime(now.Add(-10 * time.Minute))},
+			}
+			if tc.promotable {
+				servingSince(replacement, now.Add(-4*time.Minute))
+			}
+			rebuilt := repairBesideRollRebuiltPod(now)
+			f := repairBesideRollFixture(t, now, 1, tc.maxUnavailable, repairBesideRollRows(now), replacement, rebuilt)
+			var asked [][]string
+			f.in.DrainGate = func(sourcePods []string) (bool, workloadtypes.RolloutHoldGate, string) {
+				asked = append(asked, sourcePods)
+				return true, "", ""
+			}
+
+			if res := f.pass(); res.RequeueAfter == 0 && !res.Requeue { //nolint:staticcheck // the bare backoff has no non-deprecated spelling
+				t.Fatalf("a pass with a repair and an update in flight must ask for another; got %+v", res)
+			}
+
+			read := func(pod *corev1.Pod) *corev1.Pod {
+				t.Helper()
+				stored := &corev1.Pod{}
+				if err := f.c.Get(context.Background(), client.ObjectKeyFromObject(pod), stored); err != nil {
+					t.Fatalf("get %s: %v", pod.Name, err)
+				}
+				return stored
+			}
+			if !podreadiness.IsServing(read(replacement)) {
+				t.Fatalf("the ContainersReady replacement %s must carry %s while Instance 1's repair is open", replacement.Name, query.ServingConditionType)
+			}
+			if row := f.in.ObservedState.Instance(0); row == nil || row.Operation == nil || row.Operation.Step != tc.wantStep {
+				t.Fatalf("Instance 0 must be at Step=%s, got %+v", tc.wantStep, row)
+			}
+			// A drained source is deleted in the pass that drains it.
+			source := &corev1.Pod{}
+			err := f.c.Get(context.Background(), client.ObjectKeyFromObject(servingEnginePod(0)), source)
+			if err != nil && !apierrors.IsNotFound(err) {
+				t.Fatalf("get the source: %v", err)
+			}
+			if sourceOut := err != nil || !podreadiness.IsServing(source); sourceOut != tc.wantSourceOut {
+				t.Fatalf("source out of rotation = %v, want %v", sourceOut, tc.wantSourceOut)
+			}
+			if tc.wantSourceOut && len(asked) != 1 {
+				t.Fatalf("the drain gate must be consulted once with the source, got %v", asked)
+			}
+			if tc.wantFloorHold {
+				if len(asked) != 0 {
+					t.Fatalf("the drain gate was consulted below the floor: %v", asked)
+				}
+				hold := f.lastHold()
+				if hold == nil || hold.Gate != workloadtypes.RolloutHoldGateBudget || !strings.Contains(hold.Reason, "no source leaves rotation") || !holdNamesInstance(hold, 1) {
+					t.Fatalf("the Component must report the floor's Budget hold naming Instance 1, got %+v", hold)
+				}
+			}
+			if row := f.in.ObservedState.Instance(1); row == nil || row.Phase != workloadtypes.InstancePhaseRestarting || row.Incarnation != 2 {
+				t.Fatalf("Instance 1's repair must stay open at incarnation 2, got %+v", row)
+			}
+			if pod := read(rebuilt); podreadiness.IsServing(pod) {
+				t.Fatalf("the repair's rebuilt pod %s must not serve before it starts", pod.Name)
+			}
+		})
+	}
+}
+
+// A pass an open repair consumes begins no update: the fresh start the
+// budget would admit on a full pass, as the control shows, waits until no
+// repair consumes the pass.
+func TestReconcile_RepairInFlight_StartsNoFreshUpdate(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		repairing bool
+	}{
+		{name: "control: no repair open, the start opens"},
+		{name: "a repair open, no start opens", repairing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			rows := []workloadtypes.InstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady, RunningRevision: repairBesideRollPrior,
+					ReadySince: &metav1.Time{Time: now.Add(-time.Hour)}, PodCount: 1, ServingPodCount: 1},
+			}
+			var pod1 *corev1.Pod
+			if tc.repairing {
+				rows = append(rows, repairBesideRollRepairRow(now))
+				pod1 = repairBesideRollRebuiltPod(now)
+			} else {
+				rows = append(rows, workloadtypes.InstanceStatus{Index: 1, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady,
+					RunningRevision: repairBesideRollTarget, ReadySince: &metav1.Time{Time: now.Add(-time.Hour)}, PodCount: 1, ServingPodCount: 1})
+				pod1 = servingEnginePod(1)
+				pod1.Labels[query.LabelRevisionHash] = "newtarget"
+			}
+			f := repairBesideRollFixture(t, now, 2, 1, rows, pod1)
+
+			f.pass()
+
+			row := f.in.ObservedState.Instance(0)
+			started := row != nil && row.Operation != nil && row.Operation.Type == workloadtypes.InstanceOperationUpdate
+			replacement := query.PodName("llama-70b", workloadtypes.ComponentEngine, 0, "default", 1)
+			created := slices.Contains(f.listedPods(), replacement)
+			if tc.repairing && (started || created) {
+				t.Fatalf("a pass the repair consumed began an update on Instance 0: row %+v, pods %v", row, f.listedPods())
+			}
+			if !tc.repairing && (!started || !created) {
+				t.Fatalf("the control pass must start the update on Instance 0: row %+v, pods %v", row, f.listedPods())
+			}
+		})
 	}
 }
 

@@ -25,12 +25,11 @@ cells:
   - instance/Ready/pod.containerRestart/boundary@T-ready-surge
   - instance/Update/Surge/spec.revision/boundary@T-surge-target-ready
 intentional: >-
-  the passes the restart pass consumes report the hold the roll stands
-  behind where the update pass would have reported it, from the pass that
-  finds the crashed set out of rotation; the pass that opens the repair
-  reads the set it drains still in rotation, reports nothing, and the
-  drain hold the pass before recorded stands as written; the second Instance's
-  surge toward the broken revision is abandoned when the fix is pushed,
+  the passes the restart pass consumes still advance the update attempt in
+  flight on the second Instance and report the update pass's verdict, so
+  the pass that opens the repair reports the floor hold the crashed set
+  stands for; the second Instance's surge toward the broken revision is
+  abandoned on the pass the fix is pushed, while the repair is still open,
   since a Ready replacement whose revision the desired state withdrew has
   nothing to promote to while its source stands
 initial:
@@ -93,15 +92,15 @@ timeline:
     events:
       - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
   - tick: 11
-    note: the fix is pushed while the rebuilt set is still coming up; the repair finishes on the revision its pod carries and nothing of the broken revision is created from here on
+    note: the fix is pushed while the rebuilt set is still coming up; the repair finishes on the revision its pod carries and nothing of the broken revision is created from here on; the second Instance's surge toward the broken revision is superseded, so its Ready replacement leaves rotation while the source keeps serving
     events:
       - spec.revision: {image: registry.example.com/runtime:v3}
   - tick: 12
-    note: the rebuilt pod reports Ready, so the repair completes on the broken revision; the second Instance's surge toward the broken revision is superseded, so its Ready replacement leaves rotation while the source keeps serving, and the first Instance waits on the surge budget
+    note: the rebuilt pod reports Ready, so the repair completes on the broken revision and the unrouted replacement is deleted on its own grace; the first Instance waits on the surge budget
     events:
       - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
   - tick: 13
-    note: the unrouted replacement is deleted on its own grace
+    note: the abandoned replacement is still terminating, so nothing moves
   - tick: 14
     note: the abandoned replacement is gone, so the second Instance is reset to Ready on the revision it never stopped running; both Instances now owe a roll to the fix and the surge budget admits one at a time
     events:

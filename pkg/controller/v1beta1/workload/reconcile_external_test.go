@@ -1441,6 +1441,10 @@ type recoveryHarness struct {
 	// places them on the pass after the hold lifts.
 	placementHeld    bool
 	placementMessage string
+	// unplaceable names the pods the scheduler model refuses while every
+	// other pod places: no node has room for that pod set. A pod already
+	// placed runs on; a pod created under the name is refused.
+	unplaceable map[string]bool
 	// exitsCleanOnStop names the pods whose process exits 0 on SIGTERM:
 	// the kubelet model reports them Succeeded while they terminate and
 	// removes them on the pass after, as a kubelet publishes a pod it
@@ -1645,7 +1649,7 @@ func (h *recoveryHarness) kubelet() {
 			}
 		}
 		if h.unplaced(pod) {
-			if h.placementHeld {
+			if h.placementHeld || h.unplaceable[pod.Name] {
 				h.reportUnschedulable(pod)
 				continue
 			}
@@ -9995,6 +9999,141 @@ func TestRunnerKilledOnceAfterReady_IsNeverACrashOfTheRevision(t *testing.T) {
 	}
 }
 
+// A repair whose rebuilt pod no node has room for stays open for as long
+// as the scheduler refuses it, its deadline parked by the scheduler hold.
+// The update attempt already in flight on another Instance keeps
+// advancing beside it: its replacement gets the serving gate once it is
+// ContainersReady, so the attempt never runs out its deadline with a
+// healthy replacement held out of rotation and no row reads Failed. Under
+// maxUnavailable 1 the attempt completes while the repair waits; under
+// maxUnavailable 0 the Instance under repair holds the floor, so the
+// replacement serves beside its source. Once the rebuilt pod places, the
+// repair completes and the roll lands on every Instance.
+
+// TestRepairWaitingOnPlacement_UpdateInFlightKeepsAdvancing pins that
+// rule under both budgets, past the operation deadline.
+//
+// Cells: instance/Update/Surge/pod.containersReady[target]/before
+func TestRepairWaitingOnPlacement_UpdateInFlightKeepsAdvancing(t *testing.T) {
+	const replicas = int32(3)
+	const deadline = 4 * recoveryStepFloor
+	for _, tc := range []struct {
+		name           string
+		maxUnavailable int
+		// completes: the attempt reaches Ready on the target while the
+		// repair waits; otherwise its replacement serves beside its source.
+		completes bool
+	}{
+		{name: "maxUnavailable 1, the attempt completes while the repair waits", maxUnavailable: 1, completes: true},
+		{name: "maxUnavailable 0, the replacement serves beside its source", maxUnavailable: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryHarnessFor(t, false, constants.MainContainerName)
+			h.recorder = record.NewFakeRecorder(256)
+			h.replicas = replicas
+			policy := workloadtypes.RestartPolicyRecreateInstance
+			h.lifecycle.RestartPolicy = &policy
+			h.lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: deadline}
+			h.useRollingBudget(workloadtypes.UpdateStrategySurgeThenDrain)
+			maxUnavailable := intstr.FromInt(tc.maxUnavailable)
+			h.lifecycle.UpdateStrategy.RollingUpdate.MaxUnavailable = &maxUnavailable
+			if !h.run(80, func() bool { return h.settledOn(h.revV1, replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+			}
+
+			h.setTarget(h.revFixed, fixedImage)
+			hash := query.RevisionOf(h.revFixed).Hash()
+			// The repair opens on the pass that first reads a replacement
+			// ContainersReady: the runner of an Instance already promoted
+			// onto the target dies on the kubelet step that starts the
+			// replacement, and no node has room for its rebuilt pod.
+			var victim, replacement *corev1.Pod
+			h.runWithInvariant(60, func() bool { return victim != nil }, func() {
+				if victim != nil {
+					return
+				}
+				var promoted, starting *corev1.Pod
+				for _, pod := range h.livePods() {
+					if pod.Labels[query.LabelRevisionHash] != hash {
+						continue
+					}
+					switch {
+					case h.promotedOn(pod):
+						promoted = pod
+					case pod.Status.Phase == "":
+						starting = pod
+					}
+				}
+				if promoted == nil || starting == nil {
+					return
+				}
+				victim, replacement = promoted, starting
+				h.killRunnerOnce(victim)
+				h.unplaceable = map[string]bool{victim.Name: true}
+			})
+			if victim == nil {
+				h.dumpState("no trigger")
+				t.Fatalf("the roll never started a replacement beside an Instance promoted onto the target")
+			}
+			repairIdx, surgeIdx := instanceIndexOf(victim), instanceIndexOf(replacement)
+			row := func(idx int32) *workloadtypes.InstanceStatus {
+				for _, s := range h.irStatuses() {
+					if s.Index == idx {
+						return &s
+					}
+				}
+				return nil
+			}
+
+			until := h.clk.Now().Add(3 * deadline)
+			h.runWithInvariant(60, func() bool { return !h.clk.Now().Before(until) }, func() {
+				for _, s := range h.irStatuses() {
+					if s.Phase == workloadtypes.InstancePhaseFailed {
+						h.dumpState("failed row")
+						t.Fatalf("Instance %d reads Failed while the repair of Instance %d waits on placement (warnings=%v)", s.Index, repairIdx, h.failedWarnings)
+					}
+				}
+			})
+			if h.clk.Now().Before(until) {
+				h.dumpState("deadline not crossed")
+				t.Fatalf("the story stopped at %s, before the operation deadline had passed", h.clk.Now())
+			}
+			if r := row(repairIdx); r == nil || r.Phase != workloadtypes.InstancePhaseRestarting {
+				h.dumpState("repair closed")
+				t.Fatalf("the repair of Instance %d must stay open while its rebuilt pod has no room; got %+v", repairIdx, r)
+			}
+			stored := &corev1.Pod{}
+			if err := h.c.Get(h.ctx, client.ObjectKeyFromObject(replacement), stored); err != nil || !podreadiness.IsServing(stored) {
+				h.dumpState("replacement out of rotation")
+				t.Fatalf("the replacement %s must serve while the repair waits (err=%v)", replacement.Name, err)
+			}
+			r := row(surgeIdx)
+			if tc.completes {
+				if r == nil || r.Phase != workloadtypes.InstancePhaseReady || r.Operation != nil || r.RunningRevision != h.revFixed.Name {
+					h.dumpState("attempt not complete")
+					t.Fatalf("Instance %d must complete its update while the repair waits; got %+v", surgeIdx, r)
+				}
+			} else {
+				if r == nil || r.Operation == nil || r.Operation.Step != workloadtypes.UpdateStepSurge {
+					h.dumpState("attempt moved past the floor")
+					t.Fatalf("Instance %d must hold at Step=Surge below the floor; got %+v", surgeIdx, r)
+				}
+				if h.instancesServingOn(goodImage) < int(replicas)-1 {
+					h.dumpState("source out of rotation")
+					t.Fatalf("the source of Instance %d must stay in rotation below the floor", surgeIdx)
+				}
+			}
+
+			delete(h.unplaceable, victim.Name)
+			if !h.run(80, func() bool { return h.settledOn(h.revFixed, replicas) && !h.repairInFlight() }) {
+				h.dumpState("after placement")
+				t.Fatalf("the repair did not complete and the roll did not land once the rebuilt pod placed")
+			}
+		})
+	}
+}
+
 // TestRunnerKilledTwiceAfterPromotion_ServesTheWindowAndTheRollResumes
 // pins the floor's release for a promoted runner killed more than once
 // under restart policy None: the row never leaves Ready, so its anchor
@@ -11571,12 +11710,15 @@ func TestCrashAfterPromotion_FullyRolledGangSaysWhyWithinACadence(t *testing.T) 
 		saysWhy := hold.Gate == workloadtypes.RolloutHoldGateBudget || hold.Gate == workloadtypes.RolloutHoldGateRetryBlock || hold.Gate == workloadtypes.RolloutHoldGateHeld
 		return saysWhy && strings.Contains(hold.Reason, "not serving") && strings.Contains(hold.Reason, fmt.Sprintf("Instance %d", crashedIndex))
 	}
+	// holdsBeforeCrash counts the holds reported before the pass that
+	// first reads the crash, so that pass's own report counts.
 	holdsBeforeCrash, stepsSinceCrash, namedAfter := 0, -1, -1
 	h.runWithInvariant(120, func() bool { return namedAfter >= 0 }, func() {
 		if crashedIndex < 0 {
-			holdsBeforeCrash = len(h.holds)
 			if idx := crashedGang(); idx >= 0 {
 				crashedIndex, stepsSinceCrash = idx, 0
+			} else {
+				holdsBeforeCrash = len(h.holds)
 			}
 		} else {
 			stepsSinceCrash++

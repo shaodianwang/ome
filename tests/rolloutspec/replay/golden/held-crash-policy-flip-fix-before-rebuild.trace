@@ -74,28 +74,32 @@ tick=9 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-c
 tick=9 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod svc-a-engine-0-default-1 container ome-container restarted after Ready: Error (exit 1) (incarnation=2)
 tick=9 pod status-patch name=svc-a-engine-0-default-1 serving=True→False
 tick=9 pod delete name=svc-a-engine-0-default-1 grace=default
+tick=9 row=1 write no-op precondition=no-change
+tick=9 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving; no source leaves rotation
 tick=9 pass result=after:5s
-tick=10 note the fix is pushed while the crashed pod is still terminating, so the repair has nothing to rebuild yet and waits for the name to free
+tick=10 note the fix is pushed while the crashed pod is still terminating, so the repair has nothing to rebuild yet and waits for the name to free; the second Instance's surge toward the broken revision is superseded, so its Ready replacement leaves rotation while the source keeps serving
 tick=10 apply spec.revision image=registry.example.com/runtime:v3 generation=3 now=t+30s
 tick=10 row=0 write no-op precondition=no-change
+tick=10 pod status-patch name=svc-a-engine-1-default-1 serving=True→False
+tick=10 hold cleared
 tick=10 pass result=after:5s
-tick=11 note the crashed pod is gone, so the repair records the fix as the revision it rebuilds at and creates the set on it
+tick=11 note the crashed pod is gone, so the repair records the fix as the revision it rebuilds at and creates the set on it; the unrouted replacement is deleted on its own grace
 tick=11 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+30s
 tick=11 row=0 write no-op precondition=no-change
 tick=11 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-a3dc9719 activeOrdinal=1 readySince=t+0s op=op#5{type=Restart step=Drain reason=pod svc-a-engine-0-default-1 container ome-container restarted after Ready: Error (exit 1) started=t+30s lastProgressAt=t+30s deadline=t+30m30s} lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
 tick=11 pod create name=svc-a-engine-0-default-1 revision=a3dc9719 incarnation=2 ordinal=1
+tick=11 pod delete name=svc-a-engine-1-default-1 grace=default
+tick=11 hold cleared
 tick=11 pass result=after:5s
-tick=12 note the rebuilt pod reports Ready, so the repair completes with the first Instance on the fix; the second Instance's surge toward the broken revision is superseded, so its Ready replacement leaves rotation while the source keeps serving
+tick=12 note the rebuilt pod reports Ready, so the repair completes with the first Instance on the fix
 tick=12 apply pod.ready[target] pod=svc-a-engine-0-default-1 now=t+30s
 tick=12 row=0 write no-op precondition=no-change
 tick=12 pod status-patch name=svc-a-engine-0-default-1 serving=absent→True
 tick=12 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-a3dc9719 activeOrdinal=1 readySince=t+30s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
 tick=12 event Normal RestartCompleted OMENative component=engine instance=0 restart complete (incarnation=2)
-tick=12 pod status-patch name=svc-a-engine-1-default-1 serving=True→False
 tick=12 hold gate=Budget target=svc-a-engine-a3dc9719 reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-a3dc9719 not serving; no source leaves rotation
 tick=12 pass result=after:5s
-tick=13 note the unrouted replacement is deleted on its own grace
-tick=13 pod delete name=svc-a-engine-1-default-1 grace=default
+tick=13 note the abandoned replacement is still terminating, so nothing moves
 tick=13 hold cleared
 tick=13 pass result=after:5s
 tick=14 note the abandoned replacement is gone, so the second Instance is reset to Ready on the revision it never stopped running

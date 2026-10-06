@@ -296,12 +296,18 @@ func StampDeadline(ctx context.Context, input types.ReconcileInput, idx int32, d
 // flight: a new attempt opens over it with its own identity and deadline.
 func StampUpdatingInPlace(ctx context.Context, input types.ReconcileInput, idx int32, targetRev string, strategy types.UpdateStrategyType, timeout time.Duration) error {
 	now := metav1.NewTime(input.Now())
+	var openSince *metav1.Time
 	err := input.MutateInstance(ctx, idx, func(s *types.InstanceStatus) bool {
+		openSince = nil
 		inFlight := types.Owner(s) == types.OwnerUpdate && s.Operation.Type == types.InstanceOperationUpdate
 		if inFlight && s.Operation.Step == types.UpdateStepInPlace && s.TargetRevision == targetRev {
+			started := s.Operation.StartedAt
+			openSince = &started
 			return false
 		}
 		if inFlight && s.Operation.TargetRevision == targetRev && s.TargetRevision == targetRev {
+			started := s.Operation.StartedAt
+			openSince = &started
 			op := *s.Operation
 			op.Step = types.UpdateStepInPlace
 			op.LastProgressAt = now
@@ -325,7 +331,7 @@ func StampUpdatingInPlace(ctx context.Context, input types.ReconcileInput, idx i
 	if err != nil {
 		return err
 	}
-	return RetryBlockAttemptStarted(ctx, input, targetRev)
+	return entryStampAttemptStarted(ctx, input, targetRev, openSince)
 }
 
 // StampRecreating is the recreate entry point: bumps Incarnation (like
@@ -339,12 +345,16 @@ func StampUpdatingInPlace(ctx context.Context, input types.ReconcileInput, idx i
 // the bump makes the parked set the one it drains.
 func StampRecreating(ctx context.Context, input types.ReconcileInput, idx int32, targetRev, reason string, strategy types.UpdateStrategyType, timeout time.Duration) (int64, error) {
 	var observedIncarnation int64
+	var openSince *metav1.Time
 	err := input.MutateInstance(ctx, idx, func(s *types.InstanceStatus) bool {
+		openSince = nil
 		if s.Phase == types.InstancePhaseUpdating &&
 			s.Operation != nil && s.Operation.Type == types.InstanceOperationUpdate &&
 			s.Operation.Step == types.UpdateStepDrain &&
 			s.TargetRevision == targetRev && s.Incarnation > 0 {
 			observedIncarnation = s.Incarnation
+			started := s.Operation.StartedAt
+			openSince = &started
 			return false
 		}
 		if s.Incarnation == 0 {
@@ -371,7 +381,7 @@ func StampRecreating(ctx context.Context, input types.ReconcileInput, idx int32,
 	if err != nil {
 		return observedIncarnation, err
 	}
-	return observedIncarnation, RetryBlockAttemptStarted(ctx, input, targetRev)
+	return observedIncarnation, entryStampAttemptStarted(ctx, input, targetRev, openSince)
 }
 
 // StampRestarting idempotently stamps Phase=Restarting + Restart/Drain
@@ -505,7 +515,9 @@ func StampRecreateFromInPlace(ctx context.Context, input types.ReconcileInput, i
 // but a different Step namespace).
 func StampSurging(ctx context.Context, input types.ReconcileInput, idx int32, targetRev string, strategy types.UpdateStrategyType, timeout time.Duration) error {
 	now := metav1.NewTime(input.Now())
+	var openSince *metav1.Time
 	err := input.MutateInstance(ctx, idx, func(s *types.InstanceStatus) bool {
+		openSince = nil
 		// Already surging toward this target — no-op, whether the row is
 		// still Updating or the escalator has since failed it. A Failed
 		// row is not resurrected toward the same target; only a new
@@ -514,6 +526,8 @@ func StampSurging(ctx context.Context, input types.ReconcileInput, idx int32, ta
 			SurgeUpdateStep(s.Operation.Step) &&
 			s.TargetRevision == targetRev &&
 			(s.Phase == types.InstancePhaseUpdating || s.Phase == types.InstancePhaseFailed) {
+			started := s.Operation.StartedAt
+			openSince = &started
 			return false
 		}
 		s.Phase = types.InstancePhaseUpdating
@@ -533,7 +547,7 @@ func StampSurging(ctx context.Context, input types.ReconcileInput, idx int32, ta
 	if err != nil {
 		return err
 	}
-	return RetryBlockAttemptStarted(ctx, input, targetRev)
+	return entryStampAttemptStarted(ctx, input, targetRev, openSince)
 }
 
 // StampSurgeDrainStep moves the surge operation from Step=Surge to
@@ -725,6 +739,33 @@ func RetryBlockStartAttempt(rb *types.RetryBlock) types.RetryBlockDisposition {
 	}
 	rb.State = types.RetryBlockRetryInProgress
 	return types.RetryBlockPersist
+}
+
+// entryStampAttemptStarted is the RetryBlock half of an update entry
+// stamp, which runs again on every pass of its attempt. openSince is nil
+// on the pass that opened the attempt, and otherwise the time it opened.
+// An attempt open since before the block was due belongs to the wave the
+// block already counts and starts nothing on the ladder; one opened once
+// it was due is the attempt the ladder admitted, so a later pass lands
+// the flip an earlier one did not.
+func entryStampAttemptStarted(ctx context.Context, input types.ReconcileInput, targetRev string, openSince *metav1.Time) error {
+	if openSince == nil {
+		return RetryBlockAttemptStarted(ctx, input, targetRev)
+	}
+	if input.MutateRetryBlock == nil {
+		return nil
+	}
+	since := *openSince
+	err := input.MutateRetryBlock(ctx, targetRev, func(rb *types.RetryBlock) types.RetryBlockDisposition {
+		if rb.NextRetryAt != nil && since.Before(rb.NextRetryAt) {
+			return types.RetryBlockUnchanged
+		}
+		return RetryBlockStartAttempt(rb)
+	})
+	if err != nil {
+		return fmt.Errorf("mark retry in progress (rev=%s): %w", targetRev, err)
+	}
+	return nil
 }
 
 // RowRemembersCrashOn reports whether a row Ready on rev records a
