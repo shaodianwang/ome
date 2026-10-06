@@ -36,8 +36,8 @@ import (
 //
 // Evidence only. Whether the repair may actually open — the RetryBlock
 // held against the revision, the unavailability budget, the coordination
-// gate, the restart policy an unready pod answers to — belongs to the
-// restart pass that reads this.
+// gate, whether the row's set is one the unready shape is read for —
+// belongs to the restart pass that reads this.
 func CrashLoopWedge(input types.ReconcileInput, s *types.InstanceStatus, expected int32, pods []*corev1.Pod) (string, bool, time.Duration) {
 	pod, reason, graceLeft := CrashLoopWedgedPod(input, s, expected, pods, true)
 	if pod == nil {

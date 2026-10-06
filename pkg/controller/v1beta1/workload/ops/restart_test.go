@@ -3180,6 +3180,10 @@ type pushedCrashLoop struct {
 	plan   workload.ComponentPlan
 	blocks []workload.RetryBlock
 	wake   *workload.PassWake
+	// readySince is when the row entered Ready and crashedAt when its
+	// promoted pod's runner last died.
+	readySince metav1.Time
+	crashedAt  metav1.Time
 }
 
 func newPushedCrashLoop(t *testing.T, policy workload.RestartPolicy) *pushedCrashLoop {
@@ -3210,7 +3214,7 @@ func newPushedCrashLoop(t *testing.T, policy workload.RestartPolicy) *pushedCras
 	row.ReadySince = &readySince
 	row.RunningRevision = crashLoopRevision
 	c := newFakeClient(t, isvc, ir, pod)
-	h := &pushedCrashLoop{t: t, isvc: isvc, c: c, clk: clocktesting.NewFakeClock(now), pod: pod}
+	h := &pushedCrashLoop{t: t, isvc: isvc, c: c, clk: clocktesting.NewFakeClock(now), pod: pod, readySince: readySince, crashedAt: crashedAt}
 	h.plan = buildPlanSinglePodEngineForRestart(c, isvc)
 	h.plan.RestartPolicy = policy
 	return h
@@ -3456,6 +3460,37 @@ func TestLadderAttemptRebuilds_NamesTheRestartThatIsTheAttempt(t *testing.T) {
 	}
 }
 
+// setPodConditionAt writes one pod condition, replacing any of its type.
+func setPodConditionAt(pod *corev1.Pod, kind corev1.PodConditionType, status corev1.ConditionStatus, at metav1.Time) {
+	for i := range pod.Status.Conditions {
+		if pod.Status.Conditions[i].Type == kind {
+			pod.Status.Conditions[i].Status = status
+			pod.Status.Conditions[i].LastTransitionTime = at
+			return
+		}
+	}
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{Type: kind, Status: status, LastTransitionTime: at})
+}
+
+// markUnreadyAfterServing takes a promoted pod out of rotation the way the
+// kubelet reports a failing readiness probe: Running, its runner's status
+// not ready, ContainersReady and Ready False since the given instant.
+func markUnreadyAfterServing(pod *corev1.Pod, since time.Time) {
+	pod.Status.Phase = corev1.PodRunning
+	if len(pod.Status.ContainerStatuses) == 0 {
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  constants.MainContainerName,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}
+	}
+	for i := range pod.Status.ContainerStatuses {
+		pod.Status.ContainerStatuses[i].Ready = false
+	}
+	at := metav1.NewTime(since)
+	setPodConditionAt(pod, corev1.ContainersReady, corev1.ConditionFalse, at)
+	setPodConditionAt(pod, corev1.PodReady, corev1.ConditionFalse, at)
+}
+
 // unreadyAfterServingInput wires a Ready, operation-free row on
 // crashLoopRevision whose promoted pod stopped passing readiness
 // unreadyFor ago, under the named restart policy and a one-minute
@@ -3467,20 +3502,7 @@ func unreadyAfterServingInput(t *testing.T, policy workload.RestartPolicy, unrea
 	ir.Status.InstanceStatuses[0].RunningRevision = crashLoopRevision
 	pod := podForInstance(isvc, 0, true /* ready */, true /* serving */)
 	pod.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour))
-	pod.Status.Phase = corev1.PodRunning
-	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-		Name:  constants.MainContainerName,
-		Ready: false,
-		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
-	}}
-	since := metav1.NewTime(time.Now().Add(-unreadyFor))
-	for i := range pod.Status.Conditions {
-		if pod.Status.Conditions[i].Type == corev1.ContainersReady {
-			pod.Status.Conditions[i].Status = corev1.ConditionFalse
-			pod.Status.Conditions[i].LastTransitionTime = since
-		}
-	}
-	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionFalse, LastTransitionTime: since})
+	markUnreadyAfterServing(pod, time.Now().Add(-unreadyFor))
 	c := newFakeClient(t, isvc, ir, pod)
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	input.StuckPodGrace = time.Minute
@@ -3490,41 +3512,82 @@ func unreadyAfterServingInput(t *testing.T, policy workload.RestartPolicy, unrea
 	return input, plan, pod
 }
 
-// A promoted pod unready past the stuck-pod grace is rebuilt under
-// RecreateInstanceOnPodRestart the way a wedged pod is: the trigger opens
-// a repair naming the pod and the kubelet's reason, and the repair of a
-// set that serves nothing is charged to no budget.
-//
-// Cells: instance/Ready/pod.runningNotReady[source]/before
-func TestDetectRestartTrigger_UnreadyPastGraceRepairsUnderRecreateInstance(t *testing.T) {
-	input, plan, pod := unreadyAfterServingInput(t, workload.RestartPolicyRecreateInstance, 2*time.Minute)
-	pods := []*corev1.Pod{pod}
+// restartPolicies are the restart policies a row is read under.
+var restartPolicies = []workload.RestartPolicy{workload.RestartPolicyNone, workload.RestartPolicyRecreateInstance}
 
-	needs, reason := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], pods)
-	if !needs {
-		t.Fatalf("expected a repair of a promoted pod unready past the grace under RecreateInstanceOnPodRestart")
+// requireNoRepairOpens asserts the restart pass leaves the plan's one
+// Instance alone: no trigger, nothing counted against the repair batch or
+// put to the budget, and no attempt charged to a ladder.
+func requireNoRepairOpens(t *testing.T, input workload.ReconcileInput, plan workload.ComponentPlan, pods []*corev1.Pod) {
+	t.Helper()
+	inst := plan.Instances[0]
+	if needs, reason := ops.DetectRestartTriggerWithPods(input, plan, inst, pods); needs {
+		t.Fatalf("no policy rebuilds a pod that runs but fails readiness; got reason %q", reason)
 	}
-	if !strings.Contains(reason, pod.Name) || !strings.Contains(reason, evidence.ReasonContainersNotReady) {
-		t.Errorf("reason must name the pod and the kubelet's reason; got %q", reason)
+	if ops.RestartOpensRepair(input, plan, inst, pods) || ops.RestartOpensUnavailability(input, plan, inst, pods) {
+		t.Fatal("nothing opens on the row, so nothing is counted against the repair batch or put to the budget")
 	}
-	if !ops.RestartOpensRepair(input, plan, plan.Instances[0], pods) {
-		t.Error("the rebuild is a fresh repair, bounded by the repair batch")
-	}
-	if ops.RestartOpensUnavailability(input, plan, plan.Instances[0], pods) {
-		t.Error("the set serves nothing, so its rebuild removes no serving capacity and is not charged")
+	if rev := ops.RestartOpensLadderAttempt(input, plan, inst, pods); rev != "" {
+		t.Fatalf("no attempt is charged to a ladder; got %q", rev)
 	}
 }
 
-// Under RestartPolicy=None a promoted pod that stops passing readiness is
-// left alone however long it stays unready: readiness is the runtime's
-// own out-of-rotation signal, so only a roll replaces the pod.
+// An idle row — Ready, no operation, no crash of its promoted set counted
+// on a ladder — whose pod runs but has failed readiness past the
+// stuck-pod grace is dark and left alone under every policy: readiness is
+// the runtime's own out-of-rotation signal, and RecreateInstanceOnPodRestart
+// answers a runner restart, which did not happen. The set reads as
+// serving nothing for the budgets, nothing opens or is charged, and only
+// a roll replaces the pod.
+//
+// Cells: instance/Ready/pod.runningNotReady[source]/before, instance/Ready/timer.stuckPodGrace/before
+func TestDetectRestartTrigger_IdleRowUnreadyPastGraceIsDarkAndRebuiltByNoPolicy(t *testing.T) {
+	for _, policy := range restartPolicies {
+		t.Run(string(policy), func(t *testing.T) {
+			input, plan, pod := unreadyAfterServingInput(t, policy, 2*time.Hour)
+			pods := []*corev1.Pod{pod}
+			if !evidence.PodSetServesNothing(pods, input.Now(), input.StuckPodGrace) {
+				t.Fatal("a pod unready past the grace is dark: its set serves nothing")
+			}
+			requireNoRepairOpens(t, input, plan, pods)
+		})
+	}
+}
+
+// A gang reads the same way under RecreateInstanceOnPodRestart, its
+// default: a leader or a worker that runs but has failed readiness past
+// the grace beside a serving peer opens no repair.
 //
 // Cells: instance/Ready/pod.runningNotReady[source]/before
-func TestDetectRestartTrigger_UnreadyPastGraceStaysSilentUnderPolicyNone(t *testing.T) {
-	input, plan, pod := unreadyAfterServingInput(t, workload.RestartPolicyNone, 2*time.Hour)
-
-	if needs, reason := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], []*corev1.Pod{pod}); needs {
-		t.Fatalf("policy None rebuilds nothing for a pod that stopped passing readiness; got reason %q", reason)
+func TestDetectRestartTrigger_IdleGangMemberUnreadyPastGraceOpensNoRepair(t *testing.T) {
+	for _, dark := range []string{"leader", "worker"} {
+		t.Run(dark, func(t *testing.T) {
+			resetExpectations(t)
+			isvc := minimalISVC("llama-70b", "prod", 1)
+			ir := seedReadyInstance(isvc, 0, 2)
+			ir.Status.InstanceStatuses[0].RunningRevision = crashLoopRevision
+			objs := []client.Object{isvc, ir}
+			var pods []*corev1.Pod
+			for _, runner := range []string{"leader", "worker"} {
+				pod := gangPod(isvc, 0, runner, 0, 2, true /* ready */, true /* serving */)
+				pod.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour))
+				pod.Status.Phase = corev1.PodRunning
+				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+					Name: constants.MainContainerName, Ready: true,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				}}
+				if runner == dark {
+					markUnreadyAfterServing(pod, time.Now().Add(-2*time.Hour))
+				}
+				pods = append(pods, pod)
+				objs = append(objs, pod)
+			}
+			c := newFakeClient(t, objs...)
+			input := buildTestInput(isvc, c, workload.ComponentEngine)
+			input.StuckPodGrace = time.Minute
+			input.ObservedState.CurrentRevision = crashLoopRevision
+			requireNoRepairOpens(t, input, buildPlanGangEngine(workload.RestartPolicyRecreateInstance), pods)
+		})
 	}
 }
 
@@ -3541,4 +3604,94 @@ func TestDetectRestartTrigger_UnreadyInsideGraceStaysSilent(t *testing.T) {
 			}
 		})
 	}
+}
+
+// newPushedUnreadyAfterCrash is newPushedCrashLoop with the pushed pod
+// running again after two crashes inside the crash window, the serving
+// gate True from its promotion and its containers unready since the last
+// restart for longer than the stuck-pod grace: the promoted set came up
+// and went dark.
+func newPushedUnreadyAfterCrash(t *testing.T, policy workload.RestartPolicy) *pushedCrashLoop {
+	t.Helper()
+	h := newPushedCrashLoop(t, policy)
+	cs := &h.pod.Status.ContainerStatuses[0]
+	cs.RestartCount = 2
+	// The run that crashed last had itself started after Ready: the set's
+	// second crash, which reads as a loop.
+	cs.LastTerminationState.Terminated.StartedAt = metav1.NewTime(h.readySince.Add(10 * time.Second))
+	runAgain := metav1.NewTime(h.crashedAt.Add(5 * time.Second))
+	cs.State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: runAgain}}
+	setPodConditionAt(h.pod, query.ServingConditionType, corev1.ConditionTrue, h.readySince)
+	markUnreadyAfterServing(h.pod, runAgain.Time)
+	if err := h.c.Status().Update(context.Background(), h.pod); err != nil {
+		t.Fatalf("update the pushed pod's status: %v", err)
+	}
+	// The grace is measured from the containers' last transition out of
+	// ready, so the pass that reads the set dark comes this much later.
+	h.clk.Step(crashLoopWindow)
+	return h
+}
+
+// The pushed set is the ladder's attempt at the revision the row runs,
+// and a set that came up after its crash and then went dark is that
+// attempt's failure: under RecreateInstanceOnPodRestart the restart pass
+// reads the unready pod as the wedge, counts the crash on the pushed
+// revision's ladder, and once the backoff is due rebuilds the set as the
+// ladder's next attempt. Under None the crash is counted and the dark set
+// is left to the roll, as a pod that runs but fails readiness always is.
+//
+// Cells: instance/Ready/pod.containerRestart/before, instance/Ready/pod.runningNotReady[source]/before
+func TestRestart_PushedSetDarkAfterItsCrashIsTheLaddersWedge(t *testing.T) {
+	t.Run("under RecreateInstanceOnPodRestart the rebuild is the ladder's next attempt", func(t *testing.T) {
+		h := newPushedUnreadyAfterCrash(t, workload.RestartPolicyRecreateInstance)
+		pods := []*corev1.Pod{h.pod}
+		needs, reason := ops.DetectRestartTriggerWithPods(h.input(), h.plan, h.plan.Instances[0], pods)
+		if !needs || !strings.Contains(reason, h.pod.Name) || !strings.Contains(reason, evidence.ReasonContainersNotReady) {
+			t.Fatalf("the dark pushed set is the row's wedge, named by the kubelet's reason; got needs=%v reason %q", needs, reason)
+		}
+		if selected, done := h.pass(); !selected || done {
+			t.Fatalf("the first sighting counts the crash and leaves the rebuild to the backoff; got selected=%v done=%v", selected, done)
+		}
+		if row := h.row(); row.Phase != v1beta1.OMENativeInstanceReady || row.Operation != nil || row.LastFailure == nil {
+			t.Fatalf("row = %+v, want Ready with the crash remembered and nothing open", row)
+		}
+		if b := h.ladder(); b == nil || b.State != workload.RetryBlockBackoff || b.AttemptsStarted != 1 {
+			t.Fatalf("the crash must count as the pushed revision's failed attempt; got %+v", b)
+		}
+
+		h.clk.Step(20 * time.Second)
+		if rev := ops.RestartOpensLadderAttempt(h.input(), h.plan, h.plan.Instances[0], pods); rev != crashLoopRevision {
+			t.Fatalf("the rebuild is the ladder's attempt at %s; got %q", crashLoopRevision, rev)
+		}
+		if selected, done := h.pass(); !selected || done {
+			t.Fatalf("the backoff is due, so the rebuild must open; got selected=%v done=%v", selected, done)
+		}
+		if row := h.row(); row.Phase != v1beta1.OMENativeInstanceRestarting || row.Incarnation != 2 {
+			t.Fatalf("row = %s incarnation %d, want Restarting at the bumped incarnation", row.Phase, row.Incarnation)
+		}
+		if b := h.ladder(); b == nil || b.State != workload.RetryBlockRetryInProgress {
+			t.Fatalf("the rebuild must be started as the ladder's attempt; got %+v", b)
+		}
+	})
+	t.Run("under None the crash is counted and the dark set is left to the roll", func(t *testing.T) {
+		h := newPushedUnreadyAfterCrash(t, workload.RestartPolicyNone)
+		pods := []*corev1.Pod{h.pod}
+		if selected, done := h.pass(); !selected || done {
+			t.Fatalf("the first sighting counts the crash; got selected=%v done=%v", selected, done)
+		}
+		if b := h.ladder(); b == nil || b.State != workload.RetryBlockBackoff || b.AttemptsStarted != 1 {
+			t.Fatalf("the crash must count on the pushed revision's ladder; got %+v", b)
+		}
+
+		h.clk.Step(20 * time.Second)
+		if rev := ops.RestartOpensLadderAttempt(h.input(), h.plan, h.plan.Instances[0], pods); rev != "" {
+			t.Fatalf("None rebuilds nothing for a pod that runs; got a ladder attempt at %q", rev)
+		}
+		if selected, _ := h.pass(); selected {
+			t.Fatal("None rebuilds nothing for a pod that runs but fails readiness")
+		}
+		if row := h.row(); row.Phase != v1beta1.OMENativeInstanceReady || row.Operation != nil || row.Incarnation != 1 {
+			t.Fatalf("row = %+v, want the row left Ready on its pod", row)
+		}
+	})
 }

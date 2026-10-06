@@ -11587,18 +11587,37 @@ func TestCrashAfterPromotion_FullyRolledGangLadderSaysWhyFromItsFirstRebuild(t *
 	}
 }
 
+// unreadyRollPolicies are the restart policies a roll over an unready
+// Instance is driven under.
+var unreadyRollPolicies = []workloadtypes.RestartPolicy{workloadtypes.RestartPolicyNone, workloadtypes.RestartPolicyRecreateInstance}
+
 // unreadyVictimHarness converges replicas single-pod Instances on v1 under
-// the named strategy and budget with restart policy None, fails the
-// readiness probe of the highest Instance's pod, and lets the kubelet
-// report it: the row stays Ready with its pod out of rotation. The
-// stuck-pod grace outlasts a step, so the fault is read inside its
-// window first.
-func unreadyVictimHarness(t *testing.T, strategy workloadtypes.UpdateStrategyType, surge, unavail, replicas int32) (*recoveryHarness, int32) {
+// the named strategy, budget and restart policy, fails the readiness probe
+// of the highest Instance's pod, and lets the kubelet report it: the row
+// stays Ready with its pod out of rotation. The stuck-pod grace outlasts
+// a step, so the fault is read inside its window first.
+func unreadyVictimHarness(t *testing.T, policy workloadtypes.RestartPolicy, strategy workloadtypes.UpdateStrategyType, surge, unavail, replicas int32) (*recoveryHarness, int32) {
 	t.Helper()
-	h := offTargetCrashHarness(t, false, strategy, surge, unavail, workloadtypes.RestartPolicyNone, replicas)
+	return unreadyVictimHarnessUnder(t, false, &policy, "", strategy, surge, unavail, replicas)
+}
+
+// unreadyVictimHarnessUnder is unreadyVictimHarness over the Instance's
+// shape, with a nil policy left to the plan to resolve to the shape's
+// default and the fault confined to the named runner (every pod when "").
+func unreadyVictimHarnessUnder(t *testing.T, gang bool, policy *workloadtypes.RestartPolicy, runner string, strategy workloadtypes.UpdateStrategyType, surge, unavail, replicas int32) (*recoveryHarness, int32) {
+	t.Helper()
+	converge := workloadtypes.RestartPolicyNone
+	if policy != nil {
+		converge = *policy
+	}
+	h := offTargetCrashHarness(t, gang, strategy, surge, unavail, converge, replicas)
+	if policy == nil {
+		h.lifecycle.RestartPolicy = nil
+		h.setTarget(h.revV1, goodImage)
+	}
 	h.stuckGrace = 5 * time.Minute
 	victim := replicas - 1
-	h.failReadiness(victim, "")
+	h.failReadiness(victim, runner)
 	h.step()
 	row := h.instance(victim)
 	if row == nil || row.Phase != workloadtypes.InstancePhaseReady || row.Operation != nil || row.ServingPodCount >= row.PodCount {
@@ -11616,42 +11635,45 @@ func unreadyVictimHarness(t *testing.T, strategy workloadtypes.UpdateStrategyTyp
 // the group's one unavailable slot and the gate denies every start. Once
 // the pod has been unready for the grace it is dark: its start skips the
 // gate consult, lands the fix first at no cost in capacity, and the peers
-// roll after it within the budget; no repair opens under policy None.
-// RecreatePod and InPlaceIfPossible.
+// roll after it within the budget; no repair opens under either restart
+// policy. RecreatePod and InPlaceIfPossible, under None and
+// RecreateInstanceOnPodRestart.
 //
 // Cells: instance/Ready/pod.runningNotReady[source]/boundary@T-ready-recreate, instance/Ready/pod.runningNotReady[source]/boundary@T-ready-inplace, instance/Ready/pod.containersNotReady[source]/before, instance/Ready/spec.revision/before
 func TestReconcile_UnreadyVictimPastTheWindow_DrainFirstRollTakesItFirst(t *testing.T) {
 	const replicas = 4
-	for _, sc := range offTargetStrategies[1:3] {
-		t.Run(string(sc.strategy), func(t *testing.T) {
-			h, victim := unreadyVictimHarness(t, sc.strategy, sc.surge, sc.unavail, replicas)
-			consults := 0
-			h.gate = coordinationUnavailabilityGate(h, replicas, sc.unavail, &consults)
-			h.events = nil
-			h.setTarget(h.revFixed, fixedImage)
+	for _, policy := range unreadyRollPolicies {
+		for _, sc := range offTargetStrategies[1:3] {
+			t.Run(string(policy)+"/"+string(sc.strategy), func(t *testing.T) {
+				h, victim := unreadyVictimHarness(t, policy, sc.strategy, sc.surge, sc.unavail, replicas)
+				consults := 0
+				h.gate = coordinationUnavailabilityGate(h, replicas, sc.unavail, &consults)
+				h.events = nil
+				h.setTarget(h.revFixed, fixedImage)
 
-			// Inside the window nothing changes: the push is held at the gate.
-			for i := 0; i < 3; i++ {
-				h.step()
-				for idx := int32(0); idx < replicas; idx++ {
-					if !h.untouchedOn(idx, h.revV1) {
-						h.dumpState("inside the window")
-						t.Fatalf("instance %d moved while the unready pod was inside its window", idx)
+				// Inside the window nothing changes: the push is held at the gate.
+				for i := 0; i < 3; i++ {
+					h.step()
+					for idx := int32(0); idx < replicas; idx++ {
+						if !h.untouchedOn(idx, h.revV1) {
+							h.dumpState("inside the window")
+							t.Fatalf("instance %d moved while the unready pod was inside its window", idx)
+						}
 					}
 				}
-			}
-			if h.verdict == nil || h.verdict.Gate != workloadtypes.RolloutHoldGateBudget {
-				t.Fatalf("hold inside the window = %+v, want the gate's budget denial", h.verdict)
-			}
+				if h.verdict == nil || h.verdict.Gate != workloadtypes.RolloutHoldGateBudget {
+					t.Fatalf("hold inside the window = %+v, want the gate's budget denial", h.verdict)
+				}
 
-			h.clk.Step(h.stuckGrace)
-			requireDarkInstanceRollsFirst(t, h, victim, []int32{0, 1, 2}, nil, sc.strategy, sc.surge, sc.unavail,
-				func() bool { return h.settledOn(h.revFixed, replicas) })
-			if n := h.servingInstances(); n != replicas {
-				h.dumpState("after the roll")
-				t.Fatalf("%d Instances serve after the roll, want %d: the roll replaced the unready pod", n, replicas)
-			}
-		})
+				h.clk.Step(h.stuckGrace)
+				requireDarkInstanceRollsFirst(t, h, victim, []int32{0, 1, 2}, nil, sc.strategy, sc.surge, sc.unavail,
+					func() bool { return h.settledOn(h.revFixed, replicas) })
+				if n := h.servingInstances(); n != replicas {
+					h.dumpState("after the roll")
+					t.Fatalf("%d Instances serve after the roll, want %d: the roll replaced the unready pod", n, replicas)
+				}
+			})
+		}
 	}
 }
 
@@ -11664,53 +11686,129 @@ func TestReconcile_UnreadyVictimPastTheWindow_DrainFirstRollTakesItFirst(t *test
 // starting revision is never held behind the unready pod, no pod of the
 // new revision remains, the capacity floor the fault lowered holds
 // throughout, and the Instance the roll replaced serves again. No repair
-// opens under policy None. Standalone and listed in a rollout group.
+// opens under either restart policy. Standalone and listed in a rollout
+// group, under None and RecreateInstanceOnPodRestart.
 //
 // Cells: instance/Ready/pod.runningNotReady[source]/boundary@T-ready-surge, instance/Update/Surge/spec.revision/before, instance/Ready/spec.revision/before
 func TestRollback_OverAnUnreadyVictimPastTheWindow_SettlesOnTheStartingRevision(t *testing.T) {
 	const replicas = 4
-	for _, roll := range rollShapes {
-		t.Run(roll.name, func(t *testing.T) {
-			h, victim := unreadyVictimHarness(t, workloadtypes.UpdateStrategySurgeThenDrain, 1, 0, replicas)
-			if roll.gated {
-				consults := 0
-				h.gate = rollingGroupGate(h, replicas, 1, 0, &consults)
-			}
-			h.clk.Step(h.stuckGrace)
-			h.events = nil
-			h.setTarget(h.revFixed, fixedImage)
-
-			floorHolds := func() {
-				if h.repairInFlight() || h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
-					h.dumpState("repair")
-					t.Fatalf("a repair opened on the unready Instance under policy None: %v", h.events)
+	for _, policy := range unreadyRollPolicies {
+		for _, roll := range rollShapes {
+			t.Run(string(policy)+"/"+roll.name, func(t *testing.T) {
+				h, victim := unreadyVictimHarness(t, policy, workloadtypes.UpdateStrategySurgeThenDrain, 1, 0, replicas)
+				if roll.gated {
+					consults := 0
+					h.gate = rollingGroupGate(h, replicas, 1, 0, &consults)
 				}
-				if n := h.servingInstances(); n < replicas-1 {
-					h.dumpState("floor")
-					t.Fatalf("%d Instances in rotation, floor %d", n, replicas-1)
-				}
-			}
-			if !h.runWithInvariant(40, func() bool { return len(h.landedOn(h.revFixed)) > 0 }, floorHolds) {
-				h.dumpState("push")
-				t.Fatalf("no Instance landed the new revision")
-			}
-			if landed := h.landedOn(h.revFixed); landed[0] != victim {
-				t.Fatalf("instances on the new revision = %v, want the dark instance %d to land first", landed, victim)
-			}
+				h.clk.Step(h.stuckGrace)
+				h.events = nil
+				h.setTarget(h.revFixed, fixedImage)
 
-			h.setTarget(h.revV1, goodImage)
-			if !h.runWithInvariant(80, func() bool { return h.settledOn(h.revV1, replicas) }, floorHolds) {
-				h.dumpState("after the rollback")
-				t.Fatalf("the rollback did not settle on %s: %d of %d Instances Ready on it", h.revV1.Name, len(h.landedOn(h.revV1)), replicas)
-			}
-			if h.livePodOnImage(fixedImage) {
-				t.Fatalf("a pod of the rolled-back revision is still alive after the rollback settled")
-			}
-			if n := h.servingInstances(); n != replicas {
-				h.dumpState("after the rollback")
-				t.Fatalf("%d Instances serve after the rollback, want %d: the roll replaced the unready pod", n, replicas)
-			}
-		})
+				floorHolds := func() {
+					if h.repairInFlight() || h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+						h.dumpState("repair")
+						t.Fatalf("a repair opened on the unready Instance under policy None: %v", h.events)
+					}
+					if n := h.servingInstances(); n < replicas-1 {
+						h.dumpState("floor")
+						t.Fatalf("%d Instances in rotation, floor %d", n, replicas-1)
+					}
+				}
+				if !h.runWithInvariant(40, func() bool { return len(h.landedOn(h.revFixed)) > 0 }, floorHolds) {
+					h.dumpState("push")
+					t.Fatalf("no Instance landed the new revision")
+				}
+				if landed := h.landedOn(h.revFixed); landed[0] != victim {
+					t.Fatalf("instances on the new revision = %v, want the dark instance %d to land first", landed, victim)
+				}
+
+				h.setTarget(h.revV1, goodImage)
+				if !h.runWithInvariant(80, func() bool { return h.settledOn(h.revV1, replicas) }, floorHolds) {
+					h.dumpState("after the rollback")
+					t.Fatalf("the rollback did not settle on %s: %d of %d Instances Ready on it", h.revV1.Name, len(h.landedOn(h.revV1)), replicas)
+				}
+				if h.livePodOnImage(fixedImage) {
+					t.Fatalf("a pod of the rolled-back revision is still alive after the rollback settled")
+				}
+				if n := h.servingInstances(); n != replicas {
+					h.dumpState("after the rollback")
+					t.Fatalf("%d Instances serve after the rollback, want %d: the roll replaced the unready pod", n, replicas)
+				}
+			})
+		}
+	}
+}
+
+// podUIDsOf is the sorted UIDs of pods: the identity of a pod set.
+func podUIDsOf(pods []*corev1.Pod) string {
+	uids := make([]string, 0, len(pods))
+	for _, pod := range pods {
+		uids = append(uids, string(pod.UID))
+	}
+	sort.Strings(uids)
+	return strings.Join(uids, ",")
+}
+
+// TestReconcile_IdleInstanceUnreadyPastTheWindow_NoPolicyRebuildsIt: an
+// Instance at rest whose pod keeps running but stops passing readiness
+// leaves rotation at once and, once unready for the stuck-pod grace, is
+// dark: its row stays Ready with the serving count down, the Component's
+// floor drops by that Instance, and nothing rebuilds it under any restart
+// policy — readiness is the runtime's own signal, not a runner restart —
+// so the same pod stays, no repair opens, no restart event is raised, no
+// attempt is charged to the running revision's ladder and the peers are
+// untouched. Single-pod and gang Instances, under each policy and under
+// the shape's default.
+//
+// Cells: instance/Ready/pod.runningNotReady[source]/before, instance/Ready/pod.containersNotReady[source]/before, instance/Ready/timer.stuckPodGrace/before
+func TestReconcile_IdleInstanceUnreadyPastTheWindow_NoPolicyRebuildsIt(t *testing.T) {
+	const replicas = 3
+	none, recreate := workloadtypes.RestartPolicyNone, workloadtypes.RestartPolicyRecreateInstance
+	policies := []struct {
+		name   string
+		policy *workloadtypes.RestartPolicy
+	}{{string(none), &none}, {string(recreate), &recreate}, {"default", nil}}
+	shapes := []struct {
+		name   string
+		gang   bool
+		runner string
+	}{{"single", false, ""}, {"gang leader", true, "leader"}, {"gang worker", true, "worker"}}
+	for _, shape := range shapes {
+		for _, pc := range policies {
+			t.Run(shape.name+"/"+pc.name, func(t *testing.T) {
+				h, victim := unreadyVictimHarnessUnder(t, shape.gang, pc.policy, shape.runner, workloadtypes.UpdateStrategySurgeThenDrain, 1, 0, replicas)
+				before := podUIDsOf(h.podsOf(victim))
+				h.events = nil
+				h.clk.Step(h.stuckGrace)
+				for i := 0; i < 6; i++ {
+					h.step()
+					if h.repairInFlight() || h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+						h.dumpState("repair")
+						t.Fatalf("a repair opened on the dark Instance: %v", h.events)
+					}
+					row := h.instance(victim)
+					if row == nil || row.Phase != workloadtypes.InstancePhaseReady || row.Operation != nil || row.ServingPodCount >= row.PodCount || row.RunningRevision != h.revV1.Name {
+						h.dumpState("row")
+						t.Fatalf("instance %d = %+v, want Ready on v1 with its serving count down and nothing open", victim, row)
+					}
+					if after := podUIDsOf(h.podsOf(victim)); after != before {
+						h.dumpState("pods")
+						t.Fatalf("instance %d's pods changed from %s to %s: a pod that fails readiness is not replaced", victim, before, after)
+					}
+					if b := h.findBlock(h.revV1.Name); b != nil {
+						t.Fatalf("no attempt is charged to the running revision's ladder; got %+v", b)
+					}
+					if n := h.servingInstances(); n != replicas-1 {
+						t.Fatalf("%d Instances serve, want %d: the dark Instance is out and its peers untouched", n, replicas-1)
+					}
+					for peer := int32(0); peer < victim; peer++ {
+						if !h.untouchedOn(peer, h.revV1) {
+							t.Fatalf("instance %d moved while nothing was pushed", peer)
+						}
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -11736,7 +11834,7 @@ func TestReconcile_UnreadyVictimInsideTheWindow_RollTakesItFirst(t *testing.T) {
 				continue
 			}
 			t.Run(fmt.Sprintf("%s/%s", sc.strategy, roll.name), func(t *testing.T) {
-				h, victim := unreadyVictimHarness(t, sc.strategy, sc.surge, sc.unavail, replicas)
+				h, victim := unreadyVictimHarness(t, workloadtypes.RestartPolicyNone, sc.strategy, sc.surge, sc.unavail, replicas)
 				if roll.gated {
 					consults := 0
 					h.gate = rollingGroupGate(h, replicas, sc.surge, sc.unavail, &consults)

@@ -122,9 +122,9 @@ func DetectRestartTriggerWithPods(input workload.ReconcileInput, plan workload.C
 	}
 	// A pod wedged in a terminal kubelet waiting reason cannot recover on
 	// its own and no other pass owns an operation-free Ready row, so the
-	// repair starts regardless of the restart policy; a promoted pod
-	// unready past the grace is repaired under RecreateInstanceOnPodRestart
-	// alone (rebuildsUnready).
+	// repair starts regardless of the restart policy; a pod that runs but
+	// fails readiness is no wedge of an idle row under any policy
+	// (readCrashLoopRepair).
 	if reason, wedged := crashLoopRepairReason(input, plan, s, expected, instancePods); wedged {
 		return true, reason
 	}
@@ -809,10 +809,10 @@ func RunnerRestartedAgainSinceReady(pod *corev1.Pod, readySince *metav1.Time) bo
 // wedge with no such restart answers to the RetryBlock as a repair of a
 // never-Ready Instance does.
 
-// rebuildsUnready reports whether the restart policy rebuilds a promoted pod
-// unready past the stuck-pod grace as it rebuilds a wedged one. Readiness is the
-// runtime's own out-of-rotation signal, so None leaves such a pod to the roll.
-func rebuildsUnready(plan workload.ComponentPlan) bool {
+// ladderReadsUnready reports whether the running revision's ladder reads a
+// promoted pod unready past the stuck-pod grace as the wedge of the crash it
+// counts: the set came up after a restart the policy answers and went dark.
+func ladderReadsUnready(plan workload.ComponentPlan) bool {
 	return plan.RestartPolicy == workload.RestartPolicyRecreateInstance
 }
 
@@ -1069,7 +1069,7 @@ func rememberCrash(ctx context.Context, input workload.ReconcileInput, idx int32
 // there: a roll promotes that revision ahead of the Component's current
 // one, and a pushed set rebuilds on its ladder as a current one does.
 func crashRebuildWarranted(input workload.ReconcileInput, plan workload.ComponentPlan, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) bool {
-	if pod, _, _ := evidence.CrashLoopWedgedPodOn(input, s, expected, pods, s.RunningRevision, rebuildsUnready(plan)); pod != nil {
+	if pod, _, _ := evidence.CrashLoopWedgedPodOn(input, s, expected, pods, s.RunningRevision, ladderReadsUnready(plan)); pod != nil {
 		return true
 	}
 	return plan.RestartPolicy == workload.RestartPolicyRecreateInstance && runnerRestartedSinceReady(pods, s.ReadySince)
@@ -1120,16 +1120,19 @@ type crashLoopLadder struct {
 // wait the same way. A crash the ladder counts is the promoted set's on
 // the revision the row runs, and its wedge is read there; a wedge no
 // counted crash is behind is repaired on the Component's current revision
-// alone, and an off-current one is the escalation's.
+// alone, and an off-current one is the escalation's. A pod that runs but
+// fails readiness is read as a wedge only with the ladder (ladderReadsUnready):
+// on an idle row it is the runtime's own out-of-rotation signal, dark for
+// the budgets and the roll and rebuilt by no policy.
 func readCrashLoopRepair(input workload.ReconcileInput, plan workload.ComponentPlan, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) crashLoopRepair {
 	ladder := readCrashLadder(input, s, expected, pods)
 	var pod *corev1.Pod
 	var reason string
 	var graceLeft time.Duration
 	if ladder != nil {
-		pod, reason, graceLeft = evidence.CrashLoopWedgedPodOn(input, s, expected, pods, s.RunningRevision, rebuildsUnready(plan))
+		pod, reason, graceLeft = evidence.CrashLoopWedgedPodOn(input, s, expected, pods, s.RunningRevision, ladderReadsUnready(plan))
 	} else {
-		pod, reason, graceLeft = evidence.CrashLoopWedgedPod(input, s, expected, pods, rebuildsUnready(plan))
+		pod, reason, graceLeft = evidence.CrashLoopWedgedPod(input, s, expected, pods, false)
 	}
 	if pod == nil {
 		if graceLeft > 0 {
