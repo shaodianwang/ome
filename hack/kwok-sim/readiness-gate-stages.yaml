@@ -1,0 +1,72 @@
+# Pod Ready as kubelet computes it: ContainersReady and every
+# spec.readinessGates condition True. stage-fast's pod-ready Stage stamps the
+# gates True when a pod starts and never re-evaluates Ready, so without these a
+# gate turned False leaves the pod a ready endpoint.
+apiVersion: kwok.x-k8s.io/v1alpha1
+kind: Stage
+metadata:
+  name: pod-readiness-gates-not-ready
+spec:
+  resourceRef:
+    apiGroup: v1
+    kind: Pod
+  selector:
+    matchExpressions:
+    - key: '.metadata.deletionTimestamp'
+      operator: 'DoesNotExist'
+    - key: '.status.phase'
+      operator: 'In'
+      values: ['Running']
+    - key: '.spec.readinessGates'
+      operator: 'Exists'
+    - key: '.status.conditions.[] | select( .type == "Ready" ) | .status'
+      operator: 'In'
+      values: ['True']
+    - key: '. as $pod | [.spec.readinessGates[]?.conditionType] | any(. as $t | [$pod.status.conditions[]? | select(.type == $t and .status == "True")] | length == 0)'
+      operator: 'In'
+      values: ['true']
+  next:
+    statusTemplate: |
+      {{ $now := Now }}
+      conditions:
+      - lastTransitionTime: {{ $now | Quote }}
+        status: "False"
+        type: Ready
+        reason: ReadinessGatesNotReady
+        message: 'a pod readiness gate is not "True"'
+---
+apiVersion: kwok.x-k8s.io/v1alpha1
+kind: Stage
+metadata:
+  name: pod-readiness-gates-ready
+spec:
+  resourceRef:
+    apiGroup: v1
+    kind: Pod
+  selector:
+    matchExpressions:
+    - key: '.metadata.deletionTimestamp'
+      operator: 'DoesNotExist'
+    - key: '.status.phase'
+      operator: 'In'
+      values: ['Running']
+    - key: '.spec.readinessGates'
+      operator: 'Exists'
+    - key: '.status.conditions.[] | select( .type == "Ready" ) | .status'
+      operator: 'NotIn'
+      values: ['True']
+    - key: '.status.conditions.[] | select( .type == "ContainersReady" ) | .status'
+      operator: 'In'
+      values: ['True']
+    - key: '. as $pod | [.spec.readinessGates[]?.conditionType] | all(. as $t | [$pod.status.conditions[]? | select(.type == $t and .status == "True")] | length > 0)'
+      operator: 'In'
+      values: ['true']
+  next:
+    statusTemplate: |
+      {{ $now := Now }}
+      conditions:
+      - lastTransitionTime: {{ $now | Quote }}
+        status: "True"
+        type: Ready
+        reason: null
+        message: null

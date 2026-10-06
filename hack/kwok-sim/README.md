@@ -700,6 +700,10 @@ There is no kubelet, so kwok fakes pod status outright:
 - **Termination is instant.** `stage-fast`'s `pod-delete` force-deletes on
   `deletionTimestamp`, so `terminationGracePeriodSeconds` is effectively 0 and
   drain races, preStop windows and slow-terminate ordering are invisible.
+- **A new pod enters rotation at once.** `stage-fast`'s `pod-ready` stamps every
+  readiness gate `True` as the pod starts. On a real node OME holds the pod out
+  until its Instance siblings are ready, so that wait is not modelled. Later
+  gate changes do reach `Ready`; see the install notes.
 - **`kubectl top` and CPU/memory HPA never work.** An HPA is created regardless
   (the default autoscaler class is HPA), and reports `<unknown>` forever. Noise,
   not a fault.
@@ -759,6 +763,7 @@ it here.
 | `render-runtimes.sh` | prints the runtimes adjusted for one `--topology` mode |
 | `gen-tpu-nodes.sh` | emits the node manifest; no cluster contact |
 | `apply-tpu-nodes.sh` | creates them (`--delete` to remove) |
+| `readiness-gate-stages.yaml` | kwok Stages that recompute Pod `Ready` from its readiness gates; applied by `up.sh` |
 | `status.sh` | fleet, gang placement, chip utilisation, pending pods, quota tree |
 | `fixtures/00-model.yaml` | `ClusterBaseModel` needing no bytes on disk |
 | `fixtures/10-runtime-tpu.yaml` | multi-node `ClusterServingRuntime`, one per carve |
@@ -830,6 +835,14 @@ Things `up.sh` does that are not obvious, if you are reproducing it by hand:
   (without it OME stamps `GangSchedulingUnavailable=True` and a gang can land
   partially); the Kueue CRDs are required for `ome-quota-manager`, which cannot
   attribute capacity to a flavor it cannot read.
+- **Two extra kwok Stages make `Ready` follow the readiness gates.** kubelet
+  computes `Ready` as `ContainersReady` and every `spec.readinessGates`
+  condition `True`; `stage-fast` stamps the gates `True` at start and never
+  recomputes `Ready`. Without `readiness-gate-stages.yaml`, a pod OME drains by
+  turning `ome.io/serving` `False` stays a ready endpoint, and drain-gated
+  operations — scale-down, restart, recreate, migration — stall on it. kwok
+  re-evaluates a pod only when the pod changes, so one drained before the Stages
+  were applied needs one more update, such as an annotation, to catch up.
 
 ## Refreshing the node shape
 

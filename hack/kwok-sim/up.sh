@@ -270,6 +270,9 @@ helm upgrade --install kwok-stages kwok/stage-fast --version "$KWOK_CHART_VERSIO
 # change once kubectl has written a last-applied annotation.
 kubectl --context "$KCTX" patch stage.kwok.x-k8s.io pod-complete --type=merge -p \
   '{"spec":{"delay":{"durationMilliseconds":30000,"durationFrom":{"expressionFrom":".metadata.annotations[\"pod-complete.stage.kwok.x-k8s.io/delay\"]"}}}}' >/dev/null
+# stage-fast never recomputes Ready after start, so a pod OME drains through its
+# ome.io/serving gate would stay a ready endpoint and the drain would stall.
+kubectl --context "$KCTX" apply -f hack/kwok-sim/readiness-gate-stages.yaml >/dev/null
 
 echo "==> simulated TPU nodes (${CUBES})"
 KWOK_SIM_CONTEXT="$KCTX" hack/kwok-sim/apply-tpu-nodes.sh --context "$KCTX" \
