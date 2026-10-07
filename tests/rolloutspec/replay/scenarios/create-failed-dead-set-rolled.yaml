@@ -1,0 +1,52 @@
+# A gang's Create attempt is ended by the gang verdict with its Create
+# operation kept, and every member then dies - one exits, one is refused
+# by its node, one is evicted - under a restart policy that repairs nothing. A dead
+# pod is absent for the Create pass's missing-pod diff, but the update
+# trigger reads the set first: dead members on the target are a set that is
+# not runtime-ready, so the roll takes the row as a fresh start - a gang
+# surge onto a free index - with the kept Create replaced, and the dead
+# occupants are left to the source's eventual drain rather than recycled.
+scenario: create-failed-dead-set-rolled
+cells:
+  - instance/Failed/Create/pod.phaseTerminal[Failed]/before
+  - instance/Failed/Create/pod.admissionRejected[OutOfResource]/before
+  - instance/Failed/Create/pod.evicted/before
+initial:
+  spec:
+    replicas: 1
+    workers: 2
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes all three
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the leader exits, one worker is refused by its node and the other is evicted; the roll reads a dead set on the target and takes the row as a gang surge at the same target onto index 1, leaving the occupants where they are
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker, ordinal: 1}, message: node-0}
+      - pod.phaseTerminal[Failed]: {pod: {index: 0, runner: leader}}
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 0, runner: worker}, resource: cpu, message: "Node didn't have enough resource: cpu"}
+      - pod.evicted: {pod: {index: 0, runner: worker, ordinal: 1}, message: "The node was low on resource: memory"}
+  - tick: 4
+    note: the replacement gang is announced under a free name and its members are created; the source row is the surge's from here
+  - tick: 5
+    note: the dead occupants are collected; nothing of the surge waits on them
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker, ordinal: 1}}

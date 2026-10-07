@@ -1,0 +1,126 @@
+# A gang's Create attempt is ended by the gang verdict with its Create
+# operation kept, and the operator pauses the Component so the row rests
+# instead of being rolled. What its members then report - binding, a
+# readiness that comes and goes on one member, the serving gate and the
+# rotation moving, a runner restart, a pull that wedges past the stuck-pod
+# grace, a kubelet that stops reporting, a new UID, a lost node, a queue
+# gate entered and left, a member on its way out, the availability window and the kept operation's deadline elapsing, a stale
+# cache and a controller restart - writes nothing: no clock runs on a Failed
+# row, the escalation pass skips it, and the adoption needs every member
+# ContainersReady. The unpause lets the roll take the unready set.
+scenario: create-failed-paused-set-observations
+cells:
+  - instance/Failed/Create/pod.scheduled[source]/before
+  - instance/Failed/Create/pod.ready[source]/before
+  - instance/Failed/Create/pod.servingOn[source]/before
+  - instance/Failed/Create/pod.servingOff[source]/before
+  - instance/Failed/Create/endpoint.rotationIn[source]/before
+  - instance/Failed/Create/endpoint.rotationOut[source]/before
+  - instance/Failed/Create/pod.containersNotReady[source]/before
+  - instance/Failed/Create/pod.containerRestart/before
+  - instance/Failed/Create/pod.waiting[ImagePullBackOff]/before
+  - instance/Failed/Create/timer.stuckPodGrace/before
+  - instance/Failed/Create/pod.uidRotated/before
+  - instance/Failed/Create/pod.phaseTerminal[Unknown]/before
+  - instance/Failed/Create/pod.terminating[source]/before
+  - instance/Failed/Create/pod.nodeLost[NodeGone]/before
+  - instance/Failed/Create/pod.schedulingGated/before
+  - instance/Failed/Create/pod.admitted/before
+  - instance/Failed/Create/pod.runningNotReady[source]/before
+  - instance/Failed/Create/timer.minReady/before
+  - instance/Failed/Create/timer.operationDeadline/before
+  - instance/Failed/Create/ctrl.staleRead/before
+  - instance/Failed/Create/ctrl.crash/before
+  - instance/Failed/Create/spec.unpause/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    minReadySeconds: 30
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the Component is paused, so the roll that would take the unready set is parked and the row rests
+    events:
+      - spec.pauseTrue: {}
+  - tick: 4
+    note: both members are bound; binding is observation only
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+  - tick: 5
+    note: the leader alone reports ContainersReady and PodReady, enters the rotation and has its serving gate written by another writer; the adoption needs every member ContainersReady, so nothing is written
+    events:
+      - pod.containersReady[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 6
+    note: the leader's gate is withdrawn, it leaves the rotation, drops out of readiness and its runner restarts; restart evidence is read only on a Ready row
+    events:
+      - pod.servingOff[source]: {pod: {index: 0, runner: leader}}
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - pod.containersNotReady[source]: {pod: {index: 0, runner: leader}}
+      - pod.containerRestart: {pod: {index: 0, runner: leader}, message: Error}
+  - tick: 7
+    note: the worker's pull wedges and the stuck-pod grace elapses on it; the fast escalator skips a row already stamped Failed
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, runner: worker}, message: "manifest unknown"}
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 8
+    note: the worker's kubelet stops reporting, so its phase reads Unknown; such a pod is neither terminal nor lost, and the name is freed only by the force-delete sweep on proven node death
+    events:
+      - pod.phaseTerminal[Unknown]: {pod: {index: 0, runner: worker}}
+  - tick: 9
+    note: the worker reappears under a new UID and the leader's node is removed; identity is re-read from the live list and node loss reaches the row only through its pods
+    events:
+      - pod.uidRotated: {pod: {index: 0, runner: worker}}
+      - pod.nodeLost[NodeGone]: {pod: {index: 0, runner: leader}}
+  - tick: 10
+    note: a queue admission gates the worker; the deadline parking step applies to a transient phase only
+    events:
+      - pod.schedulingGated: {pod: {index: 0, runner: worker}}
+  - tick: 11
+    note: the gate is removed; the deadline reconciler restarts a parked clock only for a transient phase
+    events:
+      - pod.admitted: {pod: {index: 0, runner: worker}}
+  - tick: 12
+    note: the worker is deleted by someone else and holds its name on its way out; the Create pass reads nothing missing
+    events:
+      - pod.terminating[source]: {pod: {index: 0, runner: worker}}
+  - tick: 13
+    note: two minutes pass, longer than the availability window and the stuck-pod grace, while the leader runs without readiness; no clock runs on a Failed row and no promote waits on the set
+    events:
+      - clock.advance: 2m
+  - tick: 14
+    note: the kept operation's deadline elapses; the escalation pass skips a Failed row
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 15
+    note: the cache lags a tick behind; every mutation out of Failed re-reads the row, and under the pause none is attempted
+    events:
+      - ctrl.staleRead: {}
+  - tick: 16
+    note: the controller restarts; the kept operation and the recorded verdict are persisted, so the next manager reads the same resting row
+    events:
+      - ctrl.crash: {}
+  - tick: 17
+    note: the pause is cleared, and the roll takes the unready set on the target as a fresh start - a gang surge at the same target onto index 1 - with the kept Create replaced
+    events:
+      - spec.unpause: {}

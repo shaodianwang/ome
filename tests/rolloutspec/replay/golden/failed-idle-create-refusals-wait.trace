@@ -1,0 +1,45 @@
+tick=1 note the index is planned and no row exists, so the Create pass opens the attempt
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the pull wedges immediately, but the pod is younger than the grace, so the attempt keeps polling
+tick=2 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-default-0 reason=ImagePullBackOff now=t+0s
+tick=2 hold cleared
+tick=2 pass result=after:5s
+tick=3 note the grace elapses, and with a retry budget the revision goes into Backoff instead of being held
+tick=3 apply timer.stuckPodGrace to=t+1m1s now=t+1m1s
+tick=3 hold cleared
+tick=3 row=0 write no-op precondition=no-change
+tick=3 retryblock target=svc-a-engine-882059bb persist nil→{state=Backoff attempts=1 nextRetryAt=t+3m1s reason=ImagePullBackOff}
+tick=3 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
+tick=3 warn instanceFailed index=0 pod=svc-a-engine-0-default-0 reason=ImagePullBackOff: workload-caused failure; revision svc-a-engine-882059bb held for retry — fix the image/config and publish a corrected revision
+tick=3 pass result=after:5s
+tick=4 note the wedged pod is recycled, so nothing of the failed attempt remains
+tick=4 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+1m1s
+tick=4 hold gate=RetryBlock target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb in backoff after 1 failed attempt(s): ImagePullBackOff
+tick=4 pass result=after:2m0s
+tick=5 note a shed write and an invalid-spec refusal are armed for the next pod creates; the Failed row issues no create of its own, so neither is consumed
+tick=5 apply api.throttled[TooManyRequests] verb=create resource=pods count=1 retryAfter=30s now=t+1m1s
+tick=5 apply api.invalid verb=create resource=pods count=1 now=t+1m1s
+tick=5 hold gate=RetryBlock target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb in backoff after 1 failed attempt(s): ImagePullBackOff
+tick=5 pass result=after:2m0s
+tick=6 note a further pass while the block runs consumes nothing either
+tick=6 hold gate=RetryBlock target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb in backoff after 1 failed attempt(s): ImagePullBackOff
+tick=6 pass result=after:2m0s
+tick=7 note the block comes due; the Create pass stamps Creating and its create is shed, which paces the pass on the server's delay
+tick=7 apply timer.retryAt to=t+3m2s now=t+3m2s
+tick=7 hold cleared
+tick=7 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#2{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+3m2s lastProgressAt=t+3m2s deadline=t+33m2s} lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
+tick=7 retryblock target=svc-a-engine-882059bb persist {state=Backoff attempts=1 nextRetryAt=t+3m1s reason=ImagePullBackOff}→{state=RetryInProgress attempts=1 nextRetryAt=t+3m1s reason=ImagePullBackOff}
+tick=7 pod create-rejected name=svc-a-engine-0-default-0 rejection=api.throttled[TooManyRequests]
+tick=7 pass result=after:30s
+tick=8 note the create after meets the invalid-spec refusal, which disposes that attempt on its own state
+tick=8 hold cleared
+tick=8 row=0 write no-op precondition=no-change
+tick=8 pod create-rejected name=svc-a-engine-0-default-0 rejection=api.invalid
+tick=8 retryblock target=svc-a-engine-882059bb persist {state=RetryInProgress attempts=1 nextRetryAt=t+3m1s reason=ImagePullBackOff}→{state=Backoff attempts=2 nextRetryAt=t+7m2s reason=InvalidPodSpec}
+tick=8 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=nil lastFailure={pod= reason=InvalidPodSpec message=Pod "svc-a" is invalid: spec.containers[0].resources.limits: Invalid value: "-1": must be greater than or equal to 0} precondition=ok
+tick=8 event Warning InstanceRejected OMENative component=engine instance=0: apiserver rejected pod svc-a-engine-0-default-0 (InvalidPodSpec: Pod "svc-a" is invalid: spec.containers[0].resources.limits: Invalid value: "-1": must be greater than or equal to 0); revision svc-a-engine-882059bb held for retry
+tick=8 pass result=after:5s

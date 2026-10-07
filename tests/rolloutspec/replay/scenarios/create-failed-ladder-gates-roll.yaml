@@ -1,0 +1,48 @@
+# A sibling gang's first attempt at the revision wedges on its image and is
+# disposed, which puts the revision's retry ladder into Backoff, and the
+# gang verdict then ends this gang's Create attempt with its Create kept.
+# The kept attempt is no fresh start the ladder admits or denies on its own,
+# but the roll that would take its unready set is one: the Backoff block
+# denies it with the remaining wait as the requeue, and the block coming due
+# admits it, flipping the ladder to one attempt in flight.
+scenario: create-failed-ladder-gates-roll
+cells:
+  - instance/Failed/Create/gate.deny[RetryBlock]/before
+  - instance/Failed/Create/timer.retryAt/before
+initial:
+  spec:
+    replicas: 2
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 2h, maxDelay: 4h, multiplier: 2}
+timeline:
+  - tick: 1
+    note: both gangs are announced and materialized
+  - tick: 2
+    note: the second gang's leader wedges on its image
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 1, runner: leader}, message: "manifest unknown"}
+  - tick: 3
+    note: the stuck-pod grace elapses, so the second gang's attempt is disposed and the revision's ladder enters Backoff
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 4
+    note: the first gang's group is rewritten to another owner; the gang verdict ends its attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 5
+    note: the roll that would take the first gang's unready set is a fresh start the Backoff block denies, with the remaining wait as the requeue; the kept attempt itself consults no ladder
+  - tick: 6
+    note: the block comes due, so the roll is admitted - a gang surge at the same target onto a free index - and the ladder flips to one attempt in flight
+    events:
+      - timer.retryAt: {slack: 1s}

@@ -1,0 +1,90 @@
+# Spec and config edits land on a gang's verdict-ended Create attempt that
+# rests under a pause. A label the hasher derives, a replica increase, a
+# wider then narrower gang, a strategy change, the lifecycle knobs outside
+# the template, the operator configuration knobs and a partition write
+# nothing on the row: each is read by the next decision that consults it,
+# and under a policy that repairs nothing a wider gang is not a loss. The
+# unpause lets the roll take the unready set under the edited strategy - a
+# recreate now, which drains the set in place - beside the fresh index the
+# replica increase added, once the partition releases the row.
+scenario: create-failed-paused-spec-and-config-edits
+cells:
+  - instance/Failed/Create/spec.annotationOnly/before
+  - instance/Failed/Create/spec.replicasUp/before
+  - instance/Failed/Create/spec.gangWidth[grow]/before
+  - instance/Failed/Create/spec.gangWidth[shrink]/before
+  - instance/Failed/Create/spec.strategy/before
+  - instance/Failed/Create/spec.policyTuning[instanceReadyTimeout]/before
+  - instance/Failed/Create/spec.policyTuning[migrationPolicy]/before
+  - instance/Failed/Create/spec.policyTuning[minReadySeconds]/before
+  - instance/Failed/Create/spec.policyTuning[markNotReady]/before
+  - instance/Failed/Create/config.changed[stuckPodGrace]/before
+  - instance/Failed/Create/config.changed[updateRetry]/before
+  - instance/Failed/Create/config.changed[requeue]/before
+  - instance/Failed/Create/spec.partition/before
+  - instance/Failed/Create/spec.pauseFreeze/before
+  - instance/Failed/Create/spec.unpause/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    containerName: ome-container
+    podLabels: {kueue.x-k8s.io/queue-name: queue-a}
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the Component is paused, so the roll is parked and the row rests
+    events:
+      - spec.pauseTrue: {}
+  - tick: 4
+    note: the queue label is re-pointed, which the hasher derives rather than reads, so the target stands; the row rests
+    events:
+      - spec.annotationOnly: {labels: {kueue.x-k8s.io/queue-name: queue-b}}
+  - tick: 5
+    note: the gang is widened by one worker, then the strategy is changed to a recreate and the ready timeout, migration mode, availability window and mark-not-ready knobs are edited; nothing reads them on a row that holds no attempt in flight
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+      - spec.strategy: {strategy: RecreatePod}
+      - spec.policyTuning[instanceReadyTimeout]: {value: 10m}
+      - spec.policyTuning[migrationPolicy]: {value: Never}
+      - spec.policyTuning[minReadySeconds]: {value: "15"}
+      - spec.policyTuning[markNotReady]: {value: "false"}
+  - tick: 6
+    note: the gang is narrowed back to one worker and the operator configuration is re-tuned - the stuck-pod grace, the retry ladder and the requeue cadence - which writes nothing on the row
+    events:
+      - spec.gangWidth[shrink]: {to: 1}
+      - config.changed[stuckPodGrace]: {config: {stuckPodGrace: 2m}}
+      - config.changed[updateRetry]: {config: {updateRetry: {maxAttempts: 3, initialDelay: 1m, maxDelay: 10m, multiplier: 2}}}
+      - config.changed[requeue]: {config: {requeueOperation: 7s, requeueGate: 4s}}
+  - tick: 7
+    note: the pause becomes a freeze, which would additionally suspend the lost-member repair; the row rests
+    events:
+      - spec.pauseFreeze: {}
+  - tick: 8
+    note: the replica count rises and a partition of one is set, which holds this row - off the target by its empty running revision - on the revision it runs; the freeze still parks the Create pass, so the fresh index waits
+    events:
+      - spec.replicasUp: {to: 2}
+      - spec.partition: {to: 1}
+  - tick: 9
+    note: the pause is cleared; the partition still holds this row, so the roll does not take it, and the Create pass materializes the fresh index beside it
+    events:
+      - spec.unpause: {}
+  - tick: 10
+    note: the partition is released, so the roll takes the unready set under the edited strategy - a recreate, which bumps the incarnation and takes the serving gates down - with the kept Create replaced
+    events:
+      - spec.partition: {to: 0}

@@ -1,0 +1,34 @@
+tick=1 note the gang's PodGroup is announced before its first member, and the Create pass materializes both
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 2 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-leader-0 revision=4c292506 incarnation=1 ordinal=0
+tick=1 pod create name=svc-a-engine-0-worker-0 revision=4c292506 incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+tick=2 apply gang.podGroup[OwnershipConflict] podGroup=svc-a-engine-0 state=OwnershipConflict now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 hold cleared
+tick=2 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=2 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
+tick=2 pass result=after:5s
+tick=3 note the worker exits and the leader is on its way out; neither frees its name to the Create pass, and the roll takes the set on the target as a gang surge at the same target onto index 1
+tick=3 apply pod.phaseTerminal[Failed] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=3 apply pod.terminating[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=3 row=0 write incarnation=1 phase=Updating runningRevision=nil targetRevision=svc-a-engine-4c292506 readySince=nil op=op#2{type=Update step=Surge target=svc-a-engine-4c292506 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=3 row=1 write incarnation=1 phase=Creating runningRevision=nil targetRevision=svc-a-engine-4c292506 readySince=nil op=op#3{type=Update step=GangSurgeTarget target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 gang surge to revision svc-a-engine-4c292506 (surge-index=1)
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the replacement gang is announced and its members are created; the source row is the surge's from here
+tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=4 podgroup create name=svc-a-engine-1
+tick=4 row=1 write no-op precondition=no-change
+tick=4 pod create name=svc-a-engine-1-leader-0 revision=4c292506 incarnation=1 ordinal=0
+tick=4 pod create name=svc-a-engine-1-worker-0 revision=4c292506 incarnation=1 ordinal=0
+tick=4 hold cleared
+tick=4 pass result=after:5s

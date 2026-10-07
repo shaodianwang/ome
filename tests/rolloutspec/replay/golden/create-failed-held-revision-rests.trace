@@ -1,0 +1,50 @@
+tick=1 note both gangs are announced and materialized
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 podgroup create name=svc-a-engine-1
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#2{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 2 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-leader-0 revision=4c292506 incarnation=1 ordinal=0
+tick=1 pod create name=svc-a-engine-0-worker-0 revision=4c292506 incarnation=1 ordinal=0
+tick=1 event Normal InstanceCreated OMENative component=engine instance=1 materialized; 2 pod(s) requested
+tick=1 pod create name=svc-a-engine-1-leader-0 revision=4c292506 incarnation=1 ordinal=0
+tick=1 pod create name=svc-a-engine-1-worker-0 revision=4c292506 incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the second gang's leader wedges on its image
+tick=2 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-1-leader-0 reason=ImagePullBackOff now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 hold cleared
+tick=2 pass result=after:5s
+tick=3 note the stuck-pod grace elapses, so the second gang's attempt is disposed and the revision is Held after its one attempt
+tick=3 apply timer.stuckPodGrace to=t+1m1s now=t+1m1s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 hold cleared
+tick=3 row=1 write no-op precondition=no-change
+tick=3 retryblock target=svc-a-engine-4c292506 persist nil→{state=Held attempts=1 reason=ImagePullBackOff}
+tick=3 warn retryHeld target=svc-a-engine-4c292506 attempts=1 reason=ImagePullBackOff
+tick=3 row=1 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=nil lastFailure={pod=svc-a-engine-1-leader-0 reason=ImagePullBackOff container=ome-container message=manifest unknown} precondition=ok
+tick=3 warn instanceFailed index=1 pod=svc-a-engine-1-leader-0 reason=ImagePullBackOff: workload-caused failure; revision svc-a-engine-4c292506 held for retry — fix the image/config and publish a corrected revision
+tick=3 pass result=after:5s
+tick=4 note the first gang's group is rewritten to another owner; the gang verdict ends its attempt, Failed with its Create operation kept
+tick=4 apply gang.podGroup[OwnershipConflict] podGroup=svc-a-engine-0 state=OwnershipConflict now=t+1m1s
+tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=4 hold gate=Held target=svc-a-engine-4c292506 reason=update to svc-a-engine-4c292506 held after 1 failed attempt(s): ImagePullBackOff
+tick=4 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=4 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
+tick=4 pass result=after:5s
+tick=5 note the Held block denies the roll that would take the first gang's unready set, with no time bound; the row rests
+tick=5 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=5 hold gate=Held target=svc-a-engine-4c292506 reason=update to svc-a-engine-4c292506 held after 1 failed attempt(s): ImagePullBackOff
+tick=5 pass result=after:5s
+tick=6 note both members of the first gang are lost; with no pod standing the Create pass would restamp the kept attempt, and the Held block denies that too
+tick=6 apply pod.deleted[source] pod=svc-a-engine-0-leader-0 now=t+1m1s
+tick=6 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+1m1s
+tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=6 hold gate=Held target=svc-a-engine-4c292506 reason=update to svc-a-engine-4c292506 held after 1 failed attempt(s): ImagePullBackOff
+tick=6 pass result=after:5s
+tick=7 note a further pass changes nothing; only a release, a reset or a corrected revision moves the row
+tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=7 hold gate=Held target=svc-a-engine-4c292506 reason=update to svc-a-engine-4c292506 held after 1 failed attempt(s): ImagePullBackOff
+tick=7 pass result=after:5s

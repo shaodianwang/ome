@@ -1,0 +1,43 @@
+# A migration is requested for a gang whose Create attempt the gang verdict
+# ended with its Create operation kept. A source that is not steady Ready
+# defers the move without taking ownership: the record stays Accepted while
+# the roll takes the unready set, and it closes at its own deadline naming
+# a surge that was never allocated.
+scenario: create-failed-migrate-request-waits
+cells:
+  - instance/Failed/Create/spec.migrateRequest/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    migrationMode: Auto
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members are bound, and the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the operator asks the Instance off node-0; a source that is not steady Ready defers the move without taking ownership, the record stays Accepted, and the roll takes the unready set as a gang surge onto index 1
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the replacement gang is created; the record still waits
+  - tick: 5
+    note: the record's deadline elapses with no surge ever allocated for it, so the expiry closes it Failed naming that wait
+    events:
+      - timer.migrationDeadline: {slack: 1s}

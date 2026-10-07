@@ -1,0 +1,41 @@
+# A gang's Create attempt is ended by the gang verdict with its Create
+# operation kept while its members stand short of readiness. The update
+# trigger reads a Failed row with no running revision through its pods: a
+# set on the target that is not runtime-ready is a row to recover, so the
+# very next pass rolls it as a fresh start at the same target - under
+# SurgeThenDrain a gang surge onto a free index, whose PodGroup name the
+# foreign owner does not hold - with the kept Create replaced by the surge.
+# The coordination gate is consulted inside that roll and only removes a
+# denial; the collision itself stands unread.
+scenario: create-failed-unready-set-rolled
+cells:
+  - instance/Failed/Create/ctrl.resync/before
+  - instance/Failed/Create/gate.allow/before
+  - instance/Failed/Create/gang.podGroup[OwnershipConflict]/before
+  - instance/Failed/Create/timer.retryAt/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: a pass with nothing new reads two members on the target that are not runtime-ready, so the roll takes the row as a fresh start - a gang surge at the same target onto index 1 - and the kept Create is replaced
+  - tick: 4
+    note: the replacement gang is announced under a name the foreign owner does not hold and its members are created; the source row is the surge's from here

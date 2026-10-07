@@ -677,3 +677,74 @@ func TestParseResetInstancesValue(t *testing.T) {
 		g.Expect(err).To(gomega.HaveOccurred(), "value %q must be rejected", bad)
 	}
 }
+
+// TestConsumeResetInstances_ParkedAndKeptCreate_RedeliveryIsNoOp pins the
+// mailbox's at-most-once effect on the rows a reset owns besides a parked
+// repair: an attempt parked after its disposition in either phase its set
+// gives it, and a Create attempt kept by the gang verdict. The request is
+// consumed only after its effects commit, so a re-delivery that finds the
+// pods gone and the operations cleared deletes nothing, writes no status
+// and reports the targets as having nothing to reset.
+//
+// Cells: instance/Update/Parked/spec.resetInstances[indexList]/boundary@T-parked-reset, instance/Failed/Parked/spec.resetInstances[indexList]/boundary@T-failedparked-reset, instance/Failed/Create/spec.resetInstances[indexList]/boundary@T-failedcreate-reset
+func TestConsumeResetInstances_ParkedAndKeptCreate_RedeliveryIsNoOp(t *testing.T) {
+	g := gomega.NewWithT(t)
+	crash := true
+	deletes := 0
+	funcs := &interceptor.Funcs{
+		Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*v1beta1.InferenceReplica); ok && crash {
+				return errors.New("simulated crash before the annotation delete")
+			}
+			return cl.Update(ctx, obj, opts...)
+		},
+		Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			deletes++
+			return cl.Delete(ctx, obj, opts...)
+		},
+	}
+	seed := resetIR("2,5,6")
+	seed.Status.InstanceStatuses = append(seed.Status.InstanceStatuses,
+		parkedAttemptRow(5, v1beta1.OMENativeInstanceUpdating),
+		parkedAttemptRow(6, v1beta1.OMENativeInstanceFailed))
+	pods := append(resetPods(seed),
+		podForIR(seed, 5, "default", 0, false, false),
+		podForIR(seed, 6, "default", 0, false, false))
+	r, c, rec, ir := newResetFixture(t, seed, pods, funcs)
+	wants := map[int32]v1beta1.OMENativeInstanceStatus{}
+	for _, idx := range []int32{2, 5, 6} {
+		wants[idx] = instanceStatusAt(t, ir, idx)
+	}
+
+	_, err := r.consumeResetInstancesRequest(context.Background(), r.Log, ir, nil)
+	g.Expect(err).To(gomega.HaveOccurred(), "a failed annotation delete must surface so the request re-drives")
+	g.Expect(deletes).To(gomega.Equal(3), "the kept Create's pod and both parked pods are deleted before the annotation is touched")
+	for _, idx := range []int32{2, 5, 6} {
+		assertInstanceReset(t, g, c, ir, idx, wants[idx])
+	}
+	fresh := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(ir), fresh)).To(gomega.Succeed())
+	g.Expect(fresh.Annotations).To(gomega.HaveKeyWithValue(constants.ResetInstancesAnnotationKey, "2,5,6"),
+		"the effects commit before the annotation is removed")
+	g.Expect(eventsContaining(drainEvents(rec), string(workloadtypes.EventReasonInstancesReset)+" ")).To(gomega.HaveLen(1))
+	afterCrash := fresh.Status.DeepCopy()
+
+	crash = false
+	requeue, err := r.consumeResetInstancesRequest(context.Background(), r.Log, ir, nil)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(requeue).To(gomega.BeFalse())
+
+	g.Expect(deletes).To(gomega.Equal(3), "re-delivery must issue no further deletes")
+	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(ir), fresh)).To(gomega.Succeed())
+	g.Expect(fresh.Status).To(gomega.Equal(*afterCrash), "re-delivery must write no status")
+	assertResetAnnotationConsumed(t, g, c, ir)
+
+	events := drainEvents(rec)
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonInstancesReset)+" ")).To(gomega.BeEmpty(),
+		"re-delivery must not report a second reset")
+	skips := eventsContaining(events, string(workloadtypes.EventReasonInstancesResetSkipped))
+	g.Expect(skips).To(gomega.HaveLen(1))
+	for _, idx := range []string{"2", "5", "6"} {
+		g.Expect(skips[0]).To(gomega.ContainSubstring(idx + " (nothing to reset)"))
+	}
+}

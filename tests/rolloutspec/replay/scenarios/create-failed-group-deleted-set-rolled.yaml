@@ -1,0 +1,37 @@
+# A gang's Create attempt is ended by the gang verdict with its Create
+# operation kept, and the foreign PodGroup is then deleted while the members
+# stand short of readiness. The PodGroup pass announces the name under this
+# owner again, and in the same pass the roll takes the unready set on the
+# target as a fresh start - a gang surge onto a free index - with the kept
+# Create replaced.
+scenario: create-failed-group-deleted-set-rolled
+cells:
+  - instance/Failed/Create/gang.podGroup[Deleted]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the foreign PodGroup is deleted; the ensure pass re-creates the name under this owner, and the roll takes the unready set as a gang surge at the same target onto index 1
+    events:
+      - gang.podGroup[Deleted]: {instance: 0}
+  - tick: 4
+    note: the replacement gang is announced and its members are created; the source row is the surge's from here

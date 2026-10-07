@@ -1,0 +1,59 @@
+# Apiserver answers armed while a gang's verdict-ended Create attempt rests
+# under a pause are consumed by nobody: the row issues no pod create and no
+# pod delete of its own, so a refused quota, an invalid pod spec, a shed
+# write, a name already taken, a terminating namespace and a delete answered
+# not found all wait. The roll the unpause admits is what meets them, on the
+# replacement gang it creates.
+scenario: create-failed-api-answers-wait
+cells:
+  - instance/Failed/Create/api.quotaDenied/before
+  - instance/Failed/Create/api.invalid/before
+  - instance/Failed/Create/api.throttled[TooManyRequests]/before
+  - instance/Failed/Create/api.alreadyExists/before
+  - instance/Failed/Create/api.namespaceTerminating/before
+  - instance/Failed/Create/api.notFound/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the Component is paused, so the roll is parked and the row rests
+    events:
+      - spec.pauseTrue: {}
+  - tick: 4
+    note: six answers are armed - five for a pod create, one for a pod delete; the resting row issues neither, so none is consumed
+    events:
+      - api.throttled[TooManyRequests]: {retryAfter: 30s}
+      - api.quotaDenied: {}
+      - api.invalid: {}
+      - api.alreadyExists: {}
+      - api.namespaceTerminating: {}
+      - api.notFound: {verb: delete}
+  - tick: 5
+    note: a further pass under the pause consumes nothing either
+  - tick: 6
+    note: the pause is cleared and the roll takes the unready set as a gang surge onto index 1; the surge's first create is the write the armed answers wait for
+    events:
+      - spec.unpause: {}
+  - tick: 7
+    note: the replacement gang's first create is shed, which paces the pass on the server's delay and leaves the other answers armed for the creates that follow
+  - tick: 8
+    note: the next create meets the quota refusal, recorded on the replacement's own operation

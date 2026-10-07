@@ -1,0 +1,52 @@
+# A sibling gang's only attempt at the revision wedges on its image under a
+# ladder of one attempt, so the revision is Held, and the gang verdict then
+# ends this gang's Create attempt with its Create kept. A Held block has no
+# time bound: it denies the roll that would take the unready set, and once
+# the set is gone it denies the Create pass's restamp of the kept attempt as
+# well, so the row rests until an operator releases the block, resets the
+# Instance or publishes a corrected revision.
+scenario: create-failed-held-revision-rests
+cells:
+  - instance/Failed/Create/gate.deny[Held]/before
+  - instance/Failed/Create/pod.deleted[source]/before
+  - instance/Failed/Create/timer.retryAt/before
+initial:
+  spec:
+    replicas: 2
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 1, initialDelay: 2h, maxDelay: 4h, multiplier: 2}
+timeline:
+  - tick: 1
+    note: both gangs are announced and materialized
+  - tick: 2
+    note: the second gang's leader wedges on its image
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 1, runner: leader}, message: "manifest unknown"}
+  - tick: 3
+    note: the stuck-pod grace elapses, so the second gang's attempt is disposed and the revision is Held after its one attempt
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 4
+    note: the first gang's group is rewritten to another owner; the gang verdict ends its attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 5
+    note: the Held block denies the roll that would take the first gang's unready set, with no time bound; the row rests
+  - tick: 6
+    note: both members of the first gang are lost; with no pod standing the Create pass would restamp the kept attempt, and the Held block denies that too
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 7
+    note: a further pass changes nothing; only a release, a reset or a corrected revision moves the row

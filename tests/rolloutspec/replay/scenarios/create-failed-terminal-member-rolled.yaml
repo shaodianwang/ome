@@ -1,0 +1,41 @@
+# A gang's Create attempt is ended by the gang verdict with its Create
+# operation kept, and one member then exits under a restart policy that
+# repairs nothing. The dead pod is not recycled by the Create pass: the
+# update trigger reads the set first, a dead member beside a live one is a
+# set on the target that is not runtime-ready, and the roll takes the row
+# as a fresh start - a gang surge onto a free index - with the kept Create
+# replaced; the dead occupant is left to the source's eventual drain.
+scenario: create-failed-terminal-member-rolled
+cells:
+  - instance/Failed/Create/pod.phaseTerminal[Failed]/before
+  - instance/Failed/Create/pod.terminating[source]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the worker exits and the leader is on its way out; neither frees its name to the Create pass, and the roll takes the set on the target as a gang surge at the same target onto index 1
+    events:
+      - pod.phaseTerminal[Failed]: {pod: {index: 0, runner: worker}}
+      - pod.terminating[source]: {pod: {index: 0, runner: leader}}
+  - tick: 4
+    note: the replacement gang is announced and its members are created; the source row is the surge's from here

@@ -1,0 +1,54 @@
+# An Instance failed on a stuck create, in Backoff with no pod left, with
+# an invalid-spec refusal and a shed write armed. The rejection classifier
+# is reached only from a pod create, and a Failed row issues none of its
+# own, so neither answer is consumed while the row waits on its ladder;
+# both land on the attempt that stamps Creating when the block comes due,
+# where the shed write paces the pass on the server's delay and the
+# refusal on the create after disposes that attempt.
+scenario: failed-idle-create-refusals-wait
+arrows:
+  - T-empty-create
+  - T-create-stuckgrace
+  - T-failed-retry
+cells:
+  - instance/Failed/api.throttled[TooManyRequests]/before
+  - instance/Failed/api.invalid/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pull wedges immediately, but the pod is younger than the grace, so the attempt keeps polling
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}
+  - tick: 3
+    note: the grace elapses, and with a retry budget the revision goes into Backoff instead of being held
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 4
+    note: the wedged pod is recycled, so nothing of the failed attempt remains
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 5
+    note: a shed write and an invalid-spec refusal are armed for the next pod creates; the Failed row issues no create of its own, so neither is consumed
+    events:
+      - api.throttled[TooManyRequests]: {retryAfter: 30s}
+      - api.invalid: {}
+  - tick: 6
+    note: a further pass while the block runs consumes nothing either
+  - tick: 7
+    note: the block comes due; the Create pass stamps Creating and its create is shed, which paces the pass on the server's delay
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 8
+    note: the create after meets the invalid-spec refusal, which disposes that attempt on its own state

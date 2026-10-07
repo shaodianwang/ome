@@ -1,0 +1,40 @@
+# A corrective revision arrives on a gang whose Create attempt the gang
+# verdict ended with its Create operation kept. The superseded-attempt
+# retirement reads only a Creating row, so the kept Create is not retired;
+# the update trigger rolls the row through its pods instead. The row keeps
+# its operation, so it is not read as a disposed start with no source, and
+# under SurgeThenDrain the roll is a gang surge at the corrective revision
+# onto a free index, the kept Create replaced; a second pass finds the edit
+# consumed and the row the surge's.
+scenario: create-failed-corrective-surge
+cells:
+  - instance/Failed/Create/spec.revision/before
+  - instance/Failed/Create/spec.revision/after@T-failedcreate-corrective
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the pod template changes; the roll opens a gang surge at the corrective revision onto index 1 and the kept Create is replaced
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the edit was consumed once; the replacement gang is announced and created, and the source row is the surge's

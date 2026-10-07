@@ -1,0 +1,49 @@
+# A gang's Create attempt is ended by the gang verdict with its Create
+# operation kept and rests under a pause while the template moves on and
+# is then pinned back to the revision the attempt built. The pin only moves
+# the roll target: the row leaves through the roll the unready set on the
+# target already owes, at the pinned revision, once the pause is cleared.
+scenario: create-failed-rollback-pin-rolls
+cells:
+  - instance/Failed/Create/spec.rollbackTarget[set]/before
+  - instance/Failed/Create/spec.rollbackTarget[set]/after@T-failedcreate-corrective
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the Component is paused, so the roll is parked and the row rests
+    events:
+      - spec.pauseTrue: {}
+  - tick: 4
+    note: the pod template moves to a second revision under the pause; the row rests
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 5
+    note: the roll target is pinned back to the stored first revision, the one the kept attempt built; the override writes nothing on the row
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+  - tick: 6
+    note: the pause is cleared, and the roll takes the unready set at the pinned revision as a gang surge onto index 1
+    events:
+      - spec.unpause: {}
+  - tick: 7
+    note: the override was consumed once; the replacement gang is created and the source row is the surge's
