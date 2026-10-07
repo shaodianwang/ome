@@ -1,0 +1,186 @@
+# Two gang Instances roll under SurgeThenDrain with one surge at a time. The
+# first gang is rebuilt at index 2 and its freed index 0 is claimed by the
+# second gang's replacement. The pushed revision crashes after Ready, so its
+# ladder is spent and the revision is held: the promoted gang parks Failed
+# on its own pod set at index 2, and the second gang's wedged replacement is
+# abandoned, its marker at index 0 removed and the source reset Ready on the
+# revision it never stopped running. A migration request naming index 0,
+# filed while the marker still stands, finds no Instance there once the
+# abandon lands and is closed naming the missing source; the Instances keep
+# their rows and their pods.
+scenario: migrate-held-gang-freed-index-rejected
+cells:
+  - instance/Failed/GangSurgeTargetCleanup/spec.migrateRequest/before
+initial:
+  spec:
+    replicas: 2
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    maxSurge: "1"
+    maxUnavailable: "0"
+    migrationMode: Auto
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1m, maxDelay: 10m, multiplier: 2}
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: cold start announces both PodGroups and materializes both gangs on the starting revision
+  - tick: 2
+    note: both gangs are placed and Ready and both leaders enter rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 1, runner: leader}, message: node-1}
+      - pod.scheduled[source]: {pod: {index: 1, runner: worker}, message: node-1}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - pod.ready[source]: {pod: {index: 1, runner: leader}}
+      - pod.ready[source]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+      - endpoint.rotationIn[source]: {pod: {index: 1, runner: leader}}
+  - tick: 3
+    note: a broken revision is pushed, so the first gang claims index 2 as its replacement and the second waits on the surge budget
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement gang is placed, Ready and its leader in rotation, so the first source advances to the drain and leaves the serving gate
+    events:
+      - pod.scheduled[target]: {pod: {index: 2, runner: leader}, message: node-2}
+      - pod.scheduled[target]: {pod: {index: 2, runner: worker}, message: node-2}
+      - pod.ready[target]: {pod: {index: 2, runner: leader}}
+      - pod.ready[target]: {pod: {index: 2, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 2, runner: leader}}
+  - tick: 6
+    note: the first source leader leaves rotation, so the whole source gang is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 7
+    note: the first source is gone, so its row is removed and the Instance goes on at index 2; the surge budget frees
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 8
+    note: the second gang claims the freed index 0 as its replacement
+  - tick: 9
+    note: the second replacement's PodGroup is announced and its members are created
+  - tick: 10
+    note: half a minute later the promoted leader at index 2 crashes under load and drops out of readiness and rotation; the policy rebuilds the gang around the restarted runner and the budget holds the second source in rotation
+    events:
+      - clock.advance: 30s
+      - pod.containerRestart: {pod: {index: 2, runner: leader}, message: Error}
+      - pod.containersNotReady: {pod: {index: 2, runner: leader}}
+      - endpoint.rotationOut[target]: {pod: {index: 2, runner: leader}}
+  - tick: 11
+    note: the second replacement is placed and Ready with its leader in rotation, but no source leaves rotation while the rebuilt gang is down; the crashed members are gone, so the rebuild creates the set anew
+    events:
+      - pod.deleted[source]: {pod: {index: 2, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 2, runner: worker}}
+      - pod.scheduled[target]: {pod: {index: 0, runner: leader}, message: node-3}
+      - pod.scheduled[target]: {pod: {index: 0, runner: worker}, message: node-3}
+      - pod.ready[target]: {pod: {index: 0, runner: leader}}
+      - pod.ready[target]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, runner: leader}}
+  - tick: 12
+    note: the rebuilt gang is placed and Ready and its leader back in rotation, so the repair promotes it; in the same breath the second replacement's leader crashes and leaves readiness and rotation, so the second source is not drained
+    events:
+      - pod.scheduled[source]: {pod: {index: 2, runner: leader}, message: node-2}
+      - pod.scheduled[source]: {pod: {index: 2, runner: worker}, message: node-2}
+      - pod.ready[source]: {pod: {index: 2, runner: leader}}
+      - pod.ready[source]: {pod: {index: 2, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 2, runner: leader}}
+      - pod.containerRestart: {pod: {index: 0, runner: leader}, message: Error}
+      - pod.containersNotReady: {pod: {index: 0, runner: leader}}
+      - endpoint.rotationOut[target]: {pod: {index: 0, runner: leader}}
+  - tick: 13
+    note: half a minute later the rebuilt leader at index 2 crashes again, the revision's first counted failure; the ladder backs off and the rebuild waits
+    events:
+      - clock.advance: 30s
+      - pod.containerRestart: {pod: {index: 2, runner: leader}, message: Error}
+      - pod.containersNotReady: {pod: {index: 2, runner: leader}}
+      - endpoint.rotationOut[source]: {pod: {index: 2, runner: leader}}
+  - tick: 14
+    note: the backoff elapses, so the ladder admits the rebuild of the crashed gang as its next attempt
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 15
+    note: the crashed members are gone, so the attempt creates the set anew
+    events:
+      - pod.deleted[source]: {pod: {index: 2, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 2, runner: worker}}
+  - tick: 16
+    note: the rebuilt gang is placed and Ready and its leader back in rotation, so the attempt promotes it
+    events:
+      - pod.scheduled[source]: {pod: {index: 2, runner: leader}, message: node-2}
+      - pod.scheduled[source]: {pod: {index: 2, runner: worker}, message: node-2}
+      - pod.ready[source]: {pod: {index: 2, runner: leader}}
+      - pod.ready[source]: {pod: {index: 2, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 2, runner: leader}}
+  - tick: 17
+    note: half a minute later the rebuilt leader at index 2 crashes again, the revision's second counted failure; the ladder backs off and the rebuild waits
+    events:
+      - clock.advance: 30s
+      - pod.containerRestart: {pod: {index: 2, runner: leader}, message: Error}
+      - pod.containersNotReady: {pod: {index: 2, runner: leader}}
+      - endpoint.rotationOut[source]: {pod: {index: 2, runner: leader}}
+  - tick: 18
+    note: the backoff elapses, so the ladder admits the rebuild as its last attempt
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 19
+    note: the crashed members are gone, so the attempt creates the set anew
+    events:
+      - pod.deleted[source]: {pod: {index: 2, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 2, runner: worker}}
+  - tick: 20
+    note: the rebuilt gang is placed and Ready and its leader back in rotation, so the attempt promotes it
+    events:
+      - pod.scheduled[source]: {pod: {index: 2, runner: leader}, message: node-2}
+      - pod.scheduled[source]: {pod: {index: 2, runner: worker}, message: node-2}
+      - pod.ready[source]: {pod: {index: 2, runner: leader}}
+      - pod.ready[source]: {pod: {index: 2, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 2, runner: leader}}
+  - tick: 21
+    note: half a minute later the leader at index 2 crashes a third time; the ladder is spent and holds the revision, and the gang parks Failed on its own pod set
+    events:
+      - clock.advance: 30s
+      - pod.containerRestart: {pod: {index: 2, runner: leader}, message: Error}
+      - pod.containersNotReady: {pod: {index: 2, runner: leader}}
+      - endpoint.rotationOut[source]: {pod: {index: 2, runner: leader}}
+  - tick: 22
+    note: the second replacement's leader is reported parked in CrashLoopBackOff, long past the stuck-pod grace, so the second gang's surge attempt is disposed under the hold and its retirement begins
+    events:
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0, runner: leader}, message: "back-off restarting failed container"}
+  - tick: 23
+    note: the operator asks index 0 off its node while the marker of the retiring replacement still stands there; no Instance stands at that index, so nothing takes ownership of the move while the retirement goes on
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-3, reason: NodeDrain}
+  - tick: 24
+    note: the retired replacement's members are gone, so the marker row is removed and the second source is reset Ready on the revision it never stopped running
+    events:
+      - pod.deleted[target]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 0, runner: worker}}
+  - tick: 25
+    note: the pass that picks the record finds no row at index 0, so the move is closed naming the missing source; the gang at index 2 keeps its row and its pods under the hold
+  - tick: 26
+    note: a minute later nothing has moved
+    events:
+      - clock.advance: 1m
+  - tick: 27
+    note: five minutes later the hold still stands, the second gang serves on its revision and the parked gang still holds its row and pods
+    events:
+      - clock.advance: 5m
+  - tick: 28
+    note: twenty minutes later the same
+    events:
+      - clock.advance: 20m

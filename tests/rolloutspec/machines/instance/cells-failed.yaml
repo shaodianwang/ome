@@ -421,6 +421,7 @@ cells:
       perm: [p11700, p11742, p11780, p11818, p11858, p11902]
       unit: [TestPlan_Migrate_SelectsOldestManualRecord, TestMigrate_SourceFailedOnARevisionThatHasNotStarted_RejectedAtOnce, TestMigrate_SourceParkedOnARevisionThatHasNotStarted_RejectedAtOnce, TestMigrationSourceRevisionNotStarted, TestMigrate_SourceRunsAHeldRevision_RejectedAtOnce, TestMigrate_SourceFailedAtItsRunningRevision_WaitsNamingTheParkedRepair, TestMigrateExpiry_AcceptedRecordNamesTheCauseItWaitedOn]
       kind: []
+      replay: [migrate-held-source-rejected]
     status: decided
   - state: Failed
     event: spec.resetInstances

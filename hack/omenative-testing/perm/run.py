@@ -14992,18 +14992,30 @@ def _window_expected(ctx, op, acting, target, mcomp):
     return out
 
 
+GANG_SURGE_MARKER_STEPS = ("GangSurgeTarget", "GangSurgeTargetCleanup")
+
+
+def _row_is_instance(row):
+    """True when a status row is an Instance a move can name: any row but
+    the marker a gang surge claims its replacement's index with, live or in
+    cleanup. The marker runs no revision and is removed when the replacement
+    is promoted or abandoned, so a move filed at it names nothing."""
+    return bool(row) and (row.get("operation") or {}).get("step") not in GANG_SURGE_MARKER_STEPS
+
+
 def _window_move_source(ctx, mcomp, inst):
-    """The index the move is filed against: the header's while a status row
-    stands there, else the index the roll's gang surges moved that Instance
-    to (a gang under a surge push is rebuilt at a fresh index and its old
-    index freed for another gang's surge). The rows are read live before
+    """The index the move is filed against: the header's while an Instance
+    row stands there, else the index the roll's gang surges moved that
+    Instance to (a gang under a surge push is rebuilt at a fresh index and
+    its old index freed for another gang's surge, whose replacement marker
+    is not an Instance and is skipped). The rows are read live before
     filing; with none readable the header's index stands."""
     rows = _ir_rows_by_index(ctx["case_id"], [mcomp])
-    if not rows or (mcomp, inst) in rows:
+    if not rows or _row_is_instance(rows.get((mcomp, inst))):
         return inst
     events = _isvc_events_since(ctx["case_id"], ctx.get("trigger_ts") or 0)
     chain = _follow_gang_surges(inst, _gang_surge_replacements(events, mcomp))
-    live = [i for i in chain if (mcomp, i) in rows]
+    live = [i for i in chain if _row_is_instance(rows.get((mcomp, i)))]
     return live[-1] if live else inst
 
 

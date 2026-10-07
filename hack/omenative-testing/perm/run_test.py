@@ -5747,6 +5747,40 @@ class CrashloopFaultTest(unittest.TestCase):
         self.assertEqual("FAIL", verdict, "the verdict reads the victim's own replacement, not the other gang's")
         self.assertTrue(any("read at Instance 0" in n for n in notes), notes)
 
+    def test_move_source_skips_a_surge_marker_at_the_header_index(self):
+        # Gang 0 was rebuilt at index 2 and gang 1's surge claimed the freed
+        # index 0 with its replacement marker. A move of Instance 0 is filed
+        # where that Instance stands, index 2, never at the marker, which
+        # runs nothing and is removed when the surge ends.
+        events = [
+            ("RecreateUpdateStarted", "OMENative component=engine instance=0 gang surge to revision engine-new (surge-index=2)"),
+            ("RecreateUpdateCompleted", "OMENative component=engine instance=0 gang surge complete: instance 2 promoted to revision engine-new"),
+            ("RecreateUpdateStarted", "OMENative component=engine instance=1 gang surge to revision engine-new (surge-index=0)"),
+        ]
+        marker = {"index": 0, "phase": "Failed", "operation": {"type": "Update", "step": "GangSurgeTarget"}}
+        source = {"index": 1, "phase": "Failed", "runningRevision": "engine-old",
+                  "operation": {"type": "Update", "step": "Surge", "surgeIndex": 0}}
+        moved = {"index": 2, "phase": "Failed", "runningRevision": "engine-new"}
+        ctx = {"case_id": "p999", "trigger_ts": 0}
+
+        def filed_at(rows):
+            with mock.patch.object(run, "_ir_rows_by_index", lambda case_id, comps: rows), \
+                    mock.patch.object(run, "_isvc_events_since", lambda case_id, since, **kw: events):
+                return run._window_move_source(ctx, "engine", "0")
+
+        rows = {("engine", "0"): marker, ("engine", "1"): source, ("engine", "2"): moved}
+        self.assertEqual("2", filed_at(rows), "a gang-surge marker at the header index is not the Instance")
+        cleanup = dict(marker, operation={"type": "Update", "step": "GangSurgeTargetCleanup"})
+        self.assertEqual("2", filed_at({**rows, ("engine", "0"): cleanup}), "nor is a marker in cleanup")
+        self.assertEqual("2", filed_at({("engine", "1"): source, ("engine", "2"): moved}),
+                         "with the marker gone the chain lands on the same Instance")
+        promoted = {"index": 0, "phase": "Ready", "runningRevision": "engine-new"}
+        self.assertEqual("0", filed_at({**rows, ("engine", "0"): promoted}),
+                         "an Instance standing at the header index is where the move is filed")
+        self.assertEqual("0", filed_at({}), "with no row readable the header's index stands")
+        self.assertEqual("0", filed_at({("engine", "0"): marker, ("engine", "1"): source}),
+                         "with no Instance anywhere on the chain the header's index stands")
+
     def test_verdict_follows_a_gang_surge_to_the_replacement_index(self):
         # The victim gang at index 1 was replaced at index 2 and its own
         # index retired: the roll landed the fix on it.

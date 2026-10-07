@@ -1,0 +1,158 @@
+# The single-pod twin of migrate-held-gang-freed-index-rejected. A single-pod
+# Instance surges inside its own index, so the push never moves an Instance
+# to another index and never frees one: index 0 stays the first Instance
+# through the roll. The pushed revision crashes after Ready, the ladder is
+# spent and the revision held, and the Instance parks Failed on its own pod.
+# A migration request naming index 0 lands on that Instance and is rejected
+# at once naming the held revision; the Instance keeps its row and its pod,
+# and the second Instance keeps serving on the revision it never stopped
+# running.
+scenario: migrate-held-source-rejected
+cells:
+  - instance/Failed/spec.migrateRequest/before
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    maxSurge: "1"
+    maxUnavailable: "0"
+    migrationMode: Auto
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1m, maxDelay: 10m, multiplier: 2}
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: cold start materializes both Instances on the starting revision
+  - tick: 2
+    note: both pods are placed and Ready and enter rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, ordinal: 0}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 1, ordinal: 0}, message: node-1}
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - pod.ready[source]: {pod: {index: 1, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 1, ordinal: 0}}
+  - tick: 3
+    note: a broken revision is pushed, so the first Instance surges a replacement inside its own index and the second waits on the surge budget
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is placed, Ready and in rotation beside its source, so the source leaves the serving gate
+    events:
+      - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}, message: node-2}
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the source leaves rotation, so it is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 6
+    note: the source is gone, so the first Instance promotes onto the pushed revision at its own index; the surge budget frees and the second Instance surges its replacement
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the surge budget is free, so the second Instance surges its replacement
+  - tick: 8
+    note: the second replacement is placed and Ready beside its source; half a minute later the promoted runner at index 0 crashes under load, leaves readiness and rotation and parks in CrashLoopBackOff, so no source leaves rotation
+    events:
+      - pod.scheduled[target]: {pod: {index: 1, ordinal: 1}, message: node-3}
+      - pod.ready[target]: {pod: {index: 1, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, ordinal: 1}}
+      - clock.advance: 30s
+      - pod.containerRestart: {pod: {index: 0, ordinal: 1}, message: Error}
+      - pod.containersNotReady: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationOut[target]: {pod: {index: 0, ordinal: 1}}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0, ordinal: 1}, message: "back-off restarting failed container"}
+  - tick: 9
+    note: the crash loop outlives the stuck-pod grace, so it is the revision's first counted failure; the ladder backs off and the rebuild waits
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 10
+    note: the backoff elapses, so the ladder admits the rebuild of the crashed pod as its next attempt
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 11
+    note: the crashed pod is gone, so the attempt creates the pod anew
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 12
+    note: the rebuilt pod is placed, Ready and in rotation, so the attempt promotes it
+    events:
+      - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}, message: node-2}
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 13
+    note: half a minute later the rebuilt runner crashes again and parks in CrashLoopBackOff
+    events:
+      - clock.advance: 30s
+      - pod.containerRestart: {pod: {index: 0, ordinal: 1}, message: Error}
+      - pod.containersNotReady: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationOut[target]: {pod: {index: 0, ordinal: 1}}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0, ordinal: 1}, message: "back-off restarting failed container"}
+  - tick: 14
+    note: the crash loop outlives the stuck-pod grace, the revision's second counted failure; the ladder backs off and the rebuild waits
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 15
+    note: the backoff elapses, so the ladder admits the rebuild as its last attempt
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 16
+    note: the crashed pod is gone, so the attempt creates the pod anew
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 17
+    note: the rebuilt pod is placed, Ready and in rotation, so the attempt promotes it
+    events:
+      - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}, message: node-2}
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 18
+    note: half a minute later the runner crashes a third time and parks in CrashLoopBackOff
+    events:
+      - clock.advance: 30s
+      - pod.containerRestart: {pod: {index: 0, ordinal: 1}, message: Error}
+      - pod.containersNotReady: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationOut[target]: {pod: {index: 0, ordinal: 1}}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0, ordinal: 1}, message: "back-off restarting failed container"}
+  - tick: 19
+    note: the crash loop outlives the stuck-pod grace; the ladder is spent and holds the revision, and the first Instance parks Failed on its own pod
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 20
+    note: the second replacement's runner crashes under load on the held revision and parks in CrashLoopBackOff beside its serving source
+    events:
+      - pod.containerRestart: {pod: {index: 1, ordinal: 1}, message: Error}
+      - pod.containersNotReady: {pod: {index: 1, ordinal: 1}}
+      - endpoint.rotationOut[target]: {pod: {index: 1, ordinal: 1}}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 1, ordinal: 1}, message: "back-off restarting failed container"}
+  - tick: 21
+    note: a minute later the crash loop has outlived the stuck-pod grace, so the second Instance's surge attempt is disposed under the hold; the wedged replacement is left standing beside the source, which keeps serving on its revision
+    events:
+      - clock.advance: 1m
+  - tick: 22
+    note: a further pass finds both rows where the hold left them
+  - tick: 23
+    note: the operator asks the first Instance off its node; it runs the held revision, so the move is rejected at once naming that revision, and the Instance keeps its row and its pod
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-2, reason: NodeDrain}
+  - tick: 24
+    note: the pass after the rejection changes nothing
+  - tick: 25
+    note: a minute later nothing has moved
+    events:
+      - clock.advance: 1m
+  - tick: 26
+    note: five minutes later the hold still stands and the first Instance still holds its row and pod
+    events:
+      - clock.advance: 5m
+  - tick: 27
+    note: twenty minutes later the same
+    events:
+      - clock.advance: 20m

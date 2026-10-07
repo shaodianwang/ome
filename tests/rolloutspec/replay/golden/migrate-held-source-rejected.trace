@@ -1,0 +1,214 @@
+tick=1 note cold start materializes both Instances on the starting revision
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-8aa14b8b started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#2{type=Create step=CreatePods target=svc-a-engine-8aa14b8b started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=8aa14b8b incarnation=1 ordinal=0
+tick=1 event Normal InstanceCreated OMENative component=engine instance=1 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-1-default-0 revision=8aa14b8b incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note both pods are placed and Ready and enter rotation
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-default-0 node=node-0 now=t+0s
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-1-default-0 node=node-1 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 pod status-patch name=svc-a-engine-1-default-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-8aa14b8b readySince=t+0s op=nil precondition=ok
+tick=2 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-8aa14b8b readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=2 event Normal InstanceReady OMENative component=engine instance=1 is Ready (1 pod(s) serving)
+tick=2 pass result=none
+tick=3 note a broken revision is pushed, so the first Instance surges a replacement inside its own index and the second waits on the surge budget
+tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=3 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=3 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-8aa14b8b targetRevision=svc-a-engine-c500c9bc readySince=t+0s op=op#3{type=Update step=Surge target=svc-a-engine-c500c9bc strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-c500c9bc (newOrdinal=1)
+tick=3 pod create name=svc-a-engine-0-default-1 revision=c500c9bc incarnation=1 ordinal=1
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the replacement is placed, Ready and in rotation beside its source, so the source leaves the serving gate
+tick=4 apply pod.scheduled[target] pod=svc-a-engine-0-default-1 node=node-2 now=t+0s
+tick=4 apply pod.ready[target] pod=svc-a-engine-0-default-1 now=t+0s
+tick=4 apply endpoint.rotationIn[target] pod=svc-a-engine-0-default-1 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod status-patch name=svc-a-engine-0-default-1 serving=absent→True
+tick=4 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-8aa14b8b targetRevision=svc-a-engine-c500c9bc readySince=t+0s op=op#3{type=Update step=SurgeDrain target=svc-a-engine-c500c9bc strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=4 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the source leaves rotation, so it is deleted
+tick=5 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note the source is gone, so the first Instance promotes onto the pushed revision at its own index; the surge budget frees and the second Instance surges its replacement
+tick=6 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=6 row=0 write no-op precondition=no-change
+tick=6 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-c500c9bc activeOrdinal=1 readySince=t+0s op=nil precondition=ok
+tick=6 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 surge to revision svc-a-engine-c500c9bc complete (activeOrdinal=1)
+tick=6 hold cleared
+tick=6 pass result=after:3s
+tick=7 note the surge budget is free, so the second Instance surges its replacement
+tick=7 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=7 row=1 write incarnation=1 phase=Updating runningRevision=svc-a-engine-8aa14b8b targetRevision=svc-a-engine-c500c9bc readySince=t+0s op=op#4{type=Update step=Surge target=svc-a-engine-c500c9bc strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=7 event Normal RecreateUpdateStarted OMENative component=engine instance=1 surge to revision svc-a-engine-c500c9bc (newOrdinal=1)
+tick=7 pod create name=svc-a-engine-1-default-1 revision=c500c9bc incarnation=1 ordinal=1
+tick=7 hold cleared
+tick=7 pass result=after:5s
+tick=8 note the second replacement is placed and Ready beside its source; half a minute later the promoted runner at index 0 crashes under load, leaves readiness and rotation and parks in CrashLoopBackOff, so no source leaves rotation
+tick=8 apply pod.scheduled[target] pod=svc-a-engine-1-default-1 node=node-3 now=t+0s
+tick=8 apply pod.ready[target] pod=svc-a-engine-1-default-1 now=t+0s
+tick=8 apply endpoint.rotationIn[target] pod=svc-a-engine-1-default-1 now=t+0s
+tick=8 apply clock.advance by=30s now=t+30s
+tick=8 apply pod.containerRestart pod=svc-a-engine-0-default-1 container=ome-container reason=Error now=t+30s
+tick=8 apply pod.containersNotReady pod=svc-a-engine-0-default-1 now=t+30s
+tick=8 apply endpoint.rotationOut[target] pod=svc-a-engine-0-default-1 now=t+30s
+tick=8 apply pod.waiting[CrashLoopBackOff] pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff now=t+30s
+tick=8 retryblock target=svc-a-engine-c500c9bc persist nil→{state=Backoff attempts=1 nextRetryAt=t+1m30s reason=CrashLoopBackOff}
+tick=8 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-c500c9bc activeOrdinal=1 readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
+tick=8 row=1 write no-op precondition=no-change
+tick=8 pod status-patch name=svc-a-engine-1-default-1 serving=absent→True
+tick=8 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving; no source leaves rotation
+tick=8 pass result=after:5s
+tick=9 note the crash loop outlives the stuck-pod grace, so it is the revision's first counted failure; the ladder backs off and the rebuild waits
+tick=9 apply timer.stuckPodGrace to=t+1m31s now=t+1m31s
+tick=9 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-c500c9bc activeOrdinal=1 readySince=t+0s op=op#5{type=Restart step=Drain reason=pod svc-a-engine-0-default-1 wedged in CrashLoopBackOff past the stuck-pod grace started=t+1m31s lastProgressAt=t+1m31s deadline=t+31m31s} lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
+tick=9 retryblock target=svc-a-engine-c500c9bc persist {state=Backoff attempts=1 nextRetryAt=t+1m30s reason=CrashLoopBackOff}→{state=RetryInProgress attempts=1 nextRetryAt=t+1m30s reason=CrashLoopBackOff}
+tick=9 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod svc-a-engine-0-default-1 wedged in CrashLoopBackOff past the stuck-pod grace (incarnation=2)
+tick=9 pod status-patch name=svc-a-engine-0-default-1 serving=True→False
+tick=9 pod delete name=svc-a-engine-0-default-1 grace=default
+tick=9 row=1 write no-op precondition=no-change
+tick=9 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving; no source leaves rotation
+tick=9 row=0 write no-op precondition=no-change
+tick=9 pass result=after:5s
+tick=10 note the backoff elapses, so the ladder admits the rebuild of the crashed pod as its next attempt
+tick=10 apply timer.retryAt to=t+1m31s now=t+1m31s
+tick=10 row=0 write no-op precondition=no-change
+tick=10 row=1 write no-op precondition=no-change
+tick=10 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving; no source leaves rotation
+tick=10 pass result=after:5s
+tick=11 note the crashed pod is gone, so the attempt creates the pod anew
+tick=11 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+1m31s
+tick=11 row=0 write no-op precondition=no-change
+tick=11 pod create name=svc-a-engine-0-default-1 revision=c500c9bc incarnation=2 ordinal=1
+tick=11 row=1 write no-op precondition=no-change
+tick=11 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving; no source leaves rotation
+tick=11 pass result=after:5s
+tick=12 note the rebuilt pod is placed, Ready and in rotation, so the attempt promotes it
+tick=12 apply pod.scheduled[target] pod=svc-a-engine-0-default-1 node=node-2 now=t+1m31s
+tick=12 apply pod.ready[target] pod=svc-a-engine-0-default-1 now=t+1m31s
+tick=12 apply endpoint.rotationIn[target] pod=svc-a-engine-0-default-1 now=t+1m31s
+tick=12 row=0 write no-op precondition=no-change
+tick=12 pod status-patch name=svc-a-engine-0-default-1 serving=absent→True
+tick=12 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-c500c9bc activeOrdinal=1 readySince=t+1m31s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
+tick=12 event Normal RestartCompleted OMENative component=engine instance=0 restart complete (incarnation=2)
+tick=12 row=1 write no-op precondition=no-change
+tick=12 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving; no source leaves rotation
+tick=12 pass result=after:5s
+tick=13 note half a minute later the rebuilt runner crashes again and parks in CrashLoopBackOff
+tick=13 apply clock.advance by=30s now=t+2m1s
+tick=13 apply pod.containerRestart pod=svc-a-engine-0-default-1 container=ome-container reason=Error now=t+2m1s
+tick=13 apply pod.containersNotReady pod=svc-a-engine-0-default-1 now=t+2m1s
+tick=13 apply endpoint.rotationOut[target] pod=svc-a-engine-0-default-1 now=t+2m1s
+tick=13 apply pod.waiting[CrashLoopBackOff] pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff now=t+2m1s
+tick=13 retryblock target=svc-a-engine-c500c9bc persist {state=RetryInProgress attempts=1 nextRetryAt=t+1m30s reason=CrashLoopBackOff}→{state=Backoff attempts=2 nextRetryAt=t+4m1s reason=CrashLoopBackOff}
+tick=13 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-c500c9bc activeOrdinal=1 readySince=t+1m31s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
+tick=13 row=1 write no-op precondition=no-change
+tick=13 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving; no source leaves rotation
+tick=13 pass result=after:5s
+tick=14 note the crash loop outlives the stuck-pod grace, the revision's second counted failure; the ladder backs off and the rebuild waits
+tick=14 apply timer.stuckPodGrace to=t+3m2s now=t+3m2s
+tick=14 row=1 write no-op precondition=no-change
+tick=14 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving; no source leaves rotation
+tick=14 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-c500c9bc activeOrdinal=1 readySince=t+1m31s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
+tick=14 warn instanceFailed index=0 pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff
+tick=14 pass result=after:5s
+tick=15 note the backoff elapses, so the ladder admits the rebuild as its last attempt
+tick=15 apply timer.retryAt to=t+4m2s now=t+4m2s
+tick=15 row=1 write no-op precondition=no-change
+tick=15 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving; no source leaves rotation
+tick=15 pass result=after:5s
+tick=16 note the crashed pod is gone, so the attempt creates the pod anew
+tick=16 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+4m2s
+tick=16 row=1 write no-op precondition=no-change
+tick=16 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving; no source leaves rotation
+tick=16 row=0 write incarnation=2 phase=Creating runningRevision=svc-a-engine-c500c9bc activeOrdinal=1 readySince=t+1m31s op=op#6{type=Create step=CreatePods target=svc-a-engine-c500c9bc started=t+4m2s lastProgressAt=t+4m2s deadline=t+34m2s} lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
+tick=16 retryblock target=svc-a-engine-c500c9bc persist {state=Backoff attempts=2 nextRetryAt=t+4m1s reason=CrashLoopBackOff}→{state=RetryInProgress attempts=2 nextRetryAt=t+4m1s reason=CrashLoopBackOff}
+tick=16 pod create name=svc-a-engine-0-default-1 revision=c500c9bc incarnation=2 ordinal=1
+tick=16 pass result=after:5s
+tick=17 note the rebuilt pod is placed, Ready and in rotation, so the attempt promotes it
+tick=17 apply pod.scheduled[target] pod=svc-a-engine-0-default-1 node=node-2 now=t+4m2s
+tick=17 apply pod.ready[target] pod=svc-a-engine-0-default-1 now=t+4m2s
+tick=17 apply endpoint.rotationIn[target] pod=svc-a-engine-0-default-1 now=t+4m2s
+tick=17 row=1 write no-op precondition=no-change
+tick=17 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving; no source leaves rotation
+tick=17 pod status-patch name=svc-a-engine-0-default-1 serving=absent→True
+tick=17 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-c500c9bc activeOrdinal=1 readySince=t+4m2s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
+tick=17 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=17 pass result=after:5s
+tick=18 note half a minute later the runner crashes a third time and parks in CrashLoopBackOff
+tick=18 apply clock.advance by=30s now=t+4m32s
+tick=18 apply pod.containerRestart pod=svc-a-engine-0-default-1 container=ome-container reason=Error now=t+4m32s
+tick=18 apply pod.containersNotReady pod=svc-a-engine-0-default-1 now=t+4m32s
+tick=18 apply endpoint.rotationOut[target] pod=svc-a-engine-0-default-1 now=t+4m32s
+tick=18 apply pod.waiting[CrashLoopBackOff] pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff now=t+4m32s
+tick=18 retryblock target=svc-a-engine-c500c9bc persist {state=RetryInProgress attempts=2 nextRetryAt=t+4m1s reason=CrashLoopBackOff}→{state=Held attempts=3 reason=CrashLoopBackOff}
+tick=18 warn retryHeld target=svc-a-engine-c500c9bc attempts=3 reason=CrashLoopBackOff
+tick=18 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-c500c9bc activeOrdinal=1 readySince=t+4m2s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
+tick=18 row=1 write no-op precondition=no-change
+tick=18 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving; no source leaves rotation
+tick=18 pass result=after:5s
+tick=19 note the crash loop outlives the stuck-pod grace; the ladder is spent and holds the revision, and the first Instance parks Failed on its own pod
+tick=19 apply timer.stuckPodGrace to=t+5m33s now=t+5m33s
+tick=19 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-c500c9bc activeOrdinal=1 readySince=t+4m2s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
+tick=19 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-c500c9bc activeOrdinal=1 readySince=t+4m2s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} announced=[InstanceFailed@#2] precondition=ok
+tick=19 warn instanceFailed index=0 pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff: crash after promotion; revision svc-a-engine-c500c9bc held after 3 failed attempts
+tick=19 row=1 write no-op precondition=no-change
+tick=19 hold gate=Budget target=svc-a-engine-c500c9bc reason=per-Component unavailability budget 0 exhausted; Instance 0 on revision svc-a-engine-c500c9bc not serving; no source leaves rotation
+tick=19 row=0 write no-op precondition=no-change
+tick=19 pass result=after:5s
+tick=20 note the second replacement's runner crashes under load on the held revision and parks in CrashLoopBackOff beside its serving source
+tick=20 apply pod.containerRestart pod=svc-a-engine-1-default-1 container=ome-container reason=Error now=t+5m33s
+tick=20 apply pod.containersNotReady pod=svc-a-engine-1-default-1 now=t+5m33s
+tick=20 apply endpoint.rotationOut[target] pod=svc-a-engine-1-default-1 now=t+5m33s
+tick=20 apply pod.waiting[CrashLoopBackOff] pod=svc-a-engine-1-default-1 reason=CrashLoopBackOff now=t+5m33s
+tick=20 row=1 write no-op precondition=no-change
+tick=20 hold gate=Held target=svc-a-engine-c500c9bc reason=update to svc-a-engine-c500c9bc held after 3 failed attempt(s): CrashLoopBackOff; Instance 0 on revision svc-a-engine-c500c9bc not serving
+tick=20 pass result=after:5s
+tick=21 note a minute later the crash loop has outlived the stuck-pod grace, so the second Instance's surge attempt is disposed under the hold; the wedged replacement is left standing beside the source, which keeps serving on its revision
+tick=21 apply clock.advance by=1m0s now=t+6m33s
+tick=21 row=1 write no-op precondition=no-change
+tick=21 hold gate=Held target=svc-a-engine-c500c9bc reason=update to svc-a-engine-c500c9bc held after 3 failed attempt(s): CrashLoopBackOff; Instance 0 on revision svc-a-engine-c500c9bc not serving
+tick=21 row=1 write no-op precondition=no-change
+tick=21 row=1 write incarnation=1 phase=Failed runningRevision=svc-a-engine-8aa14b8b targetRevision=svc-a-engine-c500c9bc readySince=t+0s op=nil lastFailure={pod=svc-a-engine-1-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
+tick=21 warn instanceFailed index=1 pod=nil reason=CrashLoopBackOff: attempt disposed terminal (no workload-caused evidence, relocation unavailable) and counted on the revision's retry ladder
+tick=21 pass result=after:5s
+tick=22 note a further pass finds both rows where the hold left them
+tick=22 hold gate=Held target=svc-a-engine-c500c9bc reason=update to svc-a-engine-c500c9bc held after 3 failed attempt(s): CrashLoopBackOff; Instance 0 on revision svc-a-engine-c500c9bc not serving
+tick=22 pass result=after:5s
+tick=23 note the operator asks the first Instance off its node; it runs the held revision, so the move is rejected at once naming that revision, and the Instance keeps its row and its pod
+tick=23 apply spec.migrateRequest uuid=uid#7 instance=0 fromNode=node-2 now=t+6m33s
+tick=23 migration uuid=uid#7 write phase=Accepted→Failed message=nil→source component=engine instance=0 runs revision svc-a-engine-c500c9bc, which is held after its attempts (retry block Held after 3 failed attempt(s): CrashLoopBackOff); the move would rebuild that revision elsewhere; correct or release the revision, then request the move again completedAt=nil→t+6m33s
+tick=23 event Warning MigrationRequestRejected OMENative migration uuid=uid#7 rejected: source component=engine instance=0 runs revision svc-a-engine-c500c9bc, which is held after its attempts (retry block Held after 3 failed attempt(s): CrashLoopBackOff); the move would rebuild that revision elsewhere; correct or release the revision, then request the move again
+tick=23 pass result=requeue
+tick=24 note the pass after the rejection changes nothing
+tick=24 hold gate=Held target=svc-a-engine-c500c9bc reason=update to svc-a-engine-c500c9bc held after 3 failed attempt(s): CrashLoopBackOff; Instance 0 on revision svc-a-engine-c500c9bc not serving
+tick=24 pass result=after:5s
+tick=25 note a minute later nothing has moved
+tick=25 apply clock.advance by=1m0s now=t+7m33s
+tick=25 hold gate=Held target=svc-a-engine-c500c9bc reason=update to svc-a-engine-c500c9bc held after 3 failed attempt(s): CrashLoopBackOff; Instance 0 on revision svc-a-engine-c500c9bc not serving
+tick=25 pass result=after:5s
+tick=26 note five minutes later the hold still stands and the first Instance still holds its row and pod
+tick=26 apply clock.advance by=5m0s now=t+12m33s
+tick=26 hold gate=Held target=svc-a-engine-c500c9bc reason=update to svc-a-engine-c500c9bc held after 3 failed attempt(s): CrashLoopBackOff; Instance 0 on revision svc-a-engine-c500c9bc not serving
+tick=26 pass result=after:5s
+tick=27 note twenty minutes later the same
+tick=27 apply clock.advance by=20m0s now=t+32m33s
+tick=27 hold gate=Held target=svc-a-engine-c500c9bc reason=update to svc-a-engine-c500c9bc held after 3 failed attempt(s): CrashLoopBackOff; Instance 0 on revision svc-a-engine-c500c9bc not serving
+tick=27 pass result=after:5s
