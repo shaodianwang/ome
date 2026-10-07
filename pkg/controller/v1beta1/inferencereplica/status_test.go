@@ -3174,6 +3174,7 @@ func TestIRLabelSelectorStringForAStandaloneReplica(t *testing.T) {
 			constants.InferenceServicePodLabelKey: namePrefix,
 			constants.OMEComponentLabel:           string(v1beta1.EngineComponent),
 			query.LabelManagedBy:                  query.ManagedByOMENative,
+			query.LabelRunner:                     workloadtypes.RunnerDefault,
 		}
 	}
 	if !sel.Matches(podLabels("pool-a")) {
@@ -3239,5 +3240,34 @@ func TestCurrentRevisionWithdrawalRecord(t *testing.T) {
 				t.Fatalf("condition present=%v, want %v", present, tc.want != "")
 			}
 		})
+	}
+}
+
+// The HPA multiplies its ratio by the Ready pods the selector matches and
+// writes the product as an Instance count, so the selector matches exactly
+// one pod per Instance whatever the runner shape.
+func TestIRLabelSelectorStringMatchesOnePodPerInstance(t *testing.T) {
+	got := irLabelSelectorString("llama", v1beta1.EngineComponent)
+	sel, err := labels.Parse(got)
+	if err != nil {
+		t.Fatalf("selector %q does not parse: %v", got, err)
+	}
+	for _, tc := range []struct {
+		runner string
+		want   bool
+	}{
+		{runner: workloadtypes.RunnerDefault, want: true},
+		{runner: workloadtypes.RunnerLeader, want: true},
+		{runner: workloadtypes.RunnerWorker, want: false},
+	} {
+		pod := labels.Set{
+			constants.InferenceServicePodLabelKey: "llama",
+			constants.OMEComponentLabel:           string(v1beta1.EngineComponent),
+			query.LabelManagedBy:                  query.ManagedByOMENative,
+			query.LabelRunner:                     tc.runner,
+		}
+		if sel.Matches(pod) != tc.want {
+			t.Errorf("selector %q matching a %s pod = %v, want %v", got, tc.runner, !tc.want, tc.want)
+		}
 	}
 }

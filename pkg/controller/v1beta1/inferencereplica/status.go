@@ -846,13 +846,17 @@ func computeReadyCondition(status *v1beta1.InferenceReplicaStatus, desiredReplic
 	return cond
 }
 
-// irLabelSelectorString returns the "k=v,k=v" selector the HPA scale
-// subresource reads from IR.status.labelSelector: the name-prefix,
-// component and managed-by labels every pod of the replica carries.
+// irLabelSelectorString returns the selector the HPA scale subresource reads
+// from IR.status.labelSelector: the name-prefix, component and managed-by
+// labels, narrowed to the runners an Instance has exactly one of. The HPA
+// multiplies a Value or Utilization ratio by the Ready pods this selects and
+// writes the result as an Instance count, so it must select one pod per
+// Instance: the "default" pod of a single-pod Instance, the leader of a
+// multi-pod one.
 func irLabelSelectorString(namePrefix string, component v1beta1.ComponentType) string {
 	return labels.SelectorFromSet(labels.Set{
 		constants.InferenceServicePodLabelKey: namePrefix,
 		constants.OMEComponentLabel:           string(component),
 		query.LabelManagedBy:                  query.ManagedByOMENative,
-	}).String()
+	}).String() + "," + query.LabelRunner + " in (" + workloadtypes.RunnerDefault + "," + workloadtypes.RunnerLeader + ")"
 }

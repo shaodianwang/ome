@@ -880,10 +880,12 @@ func TestReconcile_Create_MaterializesPods(t *testing.T) {
 		"LabelSelector must be set for HPA scale subresource")
 	// LabelSelector must encode the OMENative pod-selector trio (name
 	// prefix, component, managed-by) so the HPA's scale selector matches
-	// the replica's pods.
+	// the replica's pods, narrowed to the default and leader runners so
+	// it counts one pod per Instance.
 	g.Expect(got.Status.LabelSelector).To(gomega.ContainSubstring("component=engine"))
 	g.Expect(got.Status.LabelSelector).To(gomega.ContainSubstring("ome.io/inferenceservice=llama"))
 	g.Expect(got.Status.LabelSelector).To(gomega.ContainSubstring("ome.io/managed-by=OMENative"))
+	g.Expect(got.Status.LabelSelector).To(gomega.ContainSubstring("ome.io/runner in (default,leader)"))
 	// UpdateRevision should be stamped off the freshly-ensured CR.
 	g.Expect(got.Status.UpdateRevision).NotTo(gomega.BeEmpty(),
 		"UpdateRevision must point at the target ControllerRevision")
