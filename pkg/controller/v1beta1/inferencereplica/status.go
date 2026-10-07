@@ -59,6 +59,15 @@ const InferenceReplicaConditionRolloutStalled = "RolloutStalled"
 // overdue.
 const InferenceReplicaConditionDrainOverdue = "DrainOverdue"
 
+// InferenceReplicaConditionCurrentRevisionWithdrawn is present, True, while
+// status.currentRevision stands withdrawn; the rollup reads it to restore
+// the current revision once every Instance is back on that revision.
+const InferenceReplicaConditionCurrentRevisionWithdrawn = "CurrentRevisionWithdrawn"
+
+// ReasonInstanceOffRevision is the CurrentRevisionWithdrawn reason: an
+// Instance still runs, or is pinned to, another revision.
+const ReasonInstanceOffRevision = "InstanceOffRevision"
+
 const (
 	// ReasonInstancesFailing — RolloutStalled=True: >=1 Instance recorded a
 	// terminal failure while not yet on the target revision.
@@ -281,7 +290,9 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		if target != nil {
 			fresh.Status.UpdatedReplicas = counters.UpdatedReplicas
 			fresh.Status.UpdatedReadyReplicas = counters.UpdatedReadyReplicas
+			withdrawn := withdrawnRevisionFor(&fresh.Status)
 			fresh.Status.UpdateRevision = target.Name
+			recordCurrentRevisionWithdrawal(&fresh.Status, withdrawn, fresh.Status.CurrentRevision)
 		}
 		irstatus.ClearPodDerivedObservations(fresh.Status.InstanceStatuses)
 
@@ -502,6 +513,32 @@ func hasFailedInstance(insts []v1beta1.OMENativeInstanceStatus) bool {
 		}
 	}
 	return false
+}
+
+// withdrawnRevisionFor names the revision the current revision was
+// withdrawn from while the status still records the withdrawal: the
+// recorded update revision, which the withdrawal left current equal to.
+func withdrawnRevisionFor(st *v1beta1.InferenceReplicaStatus) string {
+	if st.CurrentRevision != "" || !apimeta.IsStatusConditionTrue(st.Conditions, InferenceReplicaConditionCurrentRevisionWithdrawn) {
+		return ""
+	}
+	return st.UpdateRevision
+}
+
+// recordCurrentRevisionWithdrawal keeps the CurrentRevisionWithdrawn
+// condition in step with the revision pair a write is about to persist,
+// given the withdrawal on record and the current revision it replaces.
+func recordCurrentRevisionWithdrawal(st *v1beta1.InferenceReplicaStatus, before, oldCurrent string) {
+	if workloadstatus.WithdrawnRevisionAfter(before, oldCurrent, st.CurrentRevision, st.UpdateRevision) == "" {
+		apimeta.RemoveStatusCondition(&st.Conditions, InferenceReplicaConditionCurrentRevisionWithdrawn)
+		return
+	}
+	apimeta.SetStatusCondition(&st.Conditions, metav1.Condition{
+		Type:    InferenceReplicaConditionCurrentRevisionWithdrawn,
+		Status:  metav1.ConditionTrue,
+		Reason:  ReasonInstanceOffRevision,
+		Message: "current revision withdrawn while an Instance still runs, or is pinned to, another revision",
+	})
 }
 
 // computeReadyCondition derives the Ready condition for the IR from

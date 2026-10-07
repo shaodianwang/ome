@@ -305,10 +305,17 @@ func RolloutComplete(insts []types.InstanceStatus, targetRevName string) bool {
 // update operation: a fleet rolled back onto its last promoted revision
 // is in flight until the last superseded Instance returns and the last
 // withdrawn replacement is gone, and current equal to update is what
-// every reader takes for "no rollout in flight". Any other row shape
-// leaves current as recorded, so a repair on the current revision never
-// moves it.
-func CurrentRevisionFor(insts []types.InstanceStatus, current, update string, blocks []types.RetryBlock) string {
+// every reader takes for "no rollout in flight". A withdrawn current is
+// restored to the update revision once no Instance is off it any more,
+// whatever the rows read and whatever the ladder holds: the Instances are
+// back where they were promoted, and a block on that revision gates the
+// next attempt, not the rollup. withdrawn names the revision the current
+// revision was withdrawn from while the status still records it, "" when
+// nothing was withdrawn or the update revision has moved on since, so the
+// restore reaches only that revision and a pushed revision whose attempts
+// failed stays unlanded. Any other row shape leaves current as recorded,
+// so a repair on the current revision never moves it.
+func CurrentRevisionFor(insts []types.InstanceStatus, current, update string, blocks []types.RetryBlock, withdrawn string) string {
 	if update == "" {
 		return current
 	}
@@ -318,7 +325,25 @@ func CurrentRevisionFor(insts []types.InstanceStatus, current, update string, bl
 	if current == update && anyInstanceOffRevision(insts, update) {
 		return ""
 	}
+	if current == "" && withdrawn != "" && withdrawn == update && !anyInstanceOffRevision(insts, update) {
+		return update
+	}
 	return current
+}
+
+// WithdrawnRevisionAfter is the revision a write leaves current withdrawn
+// from: update when the write empties a current that named it, before
+// while current stays empty on the same update, and none otherwise.
+func WithdrawnRevisionAfter(before, oldCurrent, current, update string) string {
+	switch {
+	case current != "":
+		return ""
+	case oldCurrent != "" && oldCurrent == update:
+		return update
+	case before != "" && before == update:
+		return before
+	}
+	return ""
 }
 
 // anyInstanceOffRevision reports whether some Instance is off rev: it runs

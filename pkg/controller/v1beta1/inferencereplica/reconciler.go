@@ -353,6 +353,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// so the deferred status-write can log on real transitions
 	// (CurrentRevision promotion, first Phase=Failed escalation).
 	priorCurrentRevision := ir.Status.CurrentRevision
+	priorWithdrawnRevision := withdrawnRevisionFor(&ir.Status)
 	priorAnyFailed := hasFailedInstance(ir.Status.InstanceStatuses)
 
 	// Resolve the parent ISVC for the event stream. Best-effort: an
@@ -611,6 +612,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// the non-nil-primary-error path).
 		r.sweepRevisions(ctx, ir)
 		switch {
+		case priorWithdrawnRevision != "" && ir.Status.CurrentRevision == priorWithdrawnRevision:
+			log.Info("Rollout closed; CurrentRevision restored once every Instance was back on the revision it was withdrawn from",
+				"currentRevision", ir.Status.CurrentRevision)
 		case priorCurrentRevision != ir.Status.CurrentRevision && ir.Status.CurrentRevision != "":
 			log.Info("Rollout complete; CurrentRevision promoted",
 				"previousCurrentRevision", priorCurrentRevision,

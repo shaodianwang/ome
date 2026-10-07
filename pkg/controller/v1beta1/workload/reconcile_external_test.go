@@ -10777,9 +10777,11 @@ func TestRollbackOverGangSurge_ResumedManagerKeepsTheRolloutOpenUntilTheReplacem
 	// stands; rollup is the current revision the adapter would publish,
 	// carried from pass to pass as the persisted value is.
 	h.setTarget(h.revV1, goodImage)
-	rollup := h.currentRevision
+	rollup, withdrawn := h.currentRevision, ""
 	readRollup := func() string {
-		rollup = status.CurrentRevisionFor(h.irStatuses(), rollup, h.target.Name, h.blocks)
+		next := status.CurrentRevisionFor(h.irStatuses(), rollup, h.target.Name, h.blocks, withdrawn)
+		withdrawn = status.WithdrawnRevisionAfter(withdrawn, rollup, next, h.target.Name)
+		rollup = next
 		return rollup
 	}
 	openWhilePinned := func() {

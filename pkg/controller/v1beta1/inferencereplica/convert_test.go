@@ -16,6 +16,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -3011,4 +3012,43 @@ func TestComposedFieldsAnnotationIsHashNeutral(t *testing.T) {
 		g.Expect(stripExcludedAnnotations(inherited, excluded).Annotations).To(gomega.Equal(map[string]string{"ome.io/declared": "1"}),
 			"the inherited annotation is stripped before hashing while declared template annotations stay")
 	})
+}
+
+// TestPromoteCurrentRevision_WithdrawalIsRecordedUntilEveryInstanceIsBack:
+// the rollup write that withdraws the current revision raises the
+// CurrentRevisionWithdrawn condition beside the empty current; while an
+// Instance is off the revision nothing changes; the write that restores
+// the current revision once every Instance is back on it, Ready or not,
+// removes the condition.
+func TestPromoteCurrentRevision_WithdrawalIsRecordedUntilEveryInstanceIsBack(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 2)
+	ir.Status.CurrentRevision = promotePriorRev
+	ir.Status.UpdateRevision = promotePriorRev
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Phase: v1beta1.OMENativeInstanceUpdating, RunningRevision: promotePriorRev, Operation: &v1beta1.InstanceOperation{
+			Type: v1beta1.InstanceOperationUpdate, Step: "InPlace", TargetRevision: promoteTargetRev}},
+		{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: promotePriorRev},
+	}
+	r, c := newReconciler(t, ir)
+
+	g.Expect(buildPromoteCurrentRevision(r.statusWriter(), r.Client, ir)(context.Background(), promotePriorRev)).To(gomega.Succeed())
+	fresh := getFreshIR(t, r, ir)
+	g.Expect(fresh.Status.CurrentRevision).To(gomega.BeEmpty(), "an Instance pinned to another revision withdraws the current revision")
+	g.Expect(apimeta.IsStatusConditionTrue(fresh.Status.Conditions, InferenceReplicaConditionCurrentRevisionWithdrawn)).To(gomega.BeTrue(),
+		"the withdrawing write must record the withdrawal")
+
+	// The attempt is retargeted onto the prior revision and disposed there:
+	// the Instance is Failed on the revision every other Instance runs.
+	fresh.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceFailed
+	fresh.Status.InstanceStatuses[0].Operation.TargetRevision = promotePriorRev
+	fresh.Status.RetryBlocks = []v1beta1.RetryBlock{{TargetRevision: promotePriorRev, State: v1beta1.RetryBlockHeld, AttemptsStarted: 1}}
+	g.Expect(c.Status().Update(context.Background(), fresh)).To(gomega.Succeed())
+
+	g.Expect(buildPromoteCurrentRevision(r.statusWriter(), r.Client, fresh)(context.Background(), promotePriorRev)).To(gomega.Succeed())
+	back := getFreshIR(t, r, ir)
+	g.Expect(back.Status.CurrentRevision).To(gomega.Equal(promotePriorRev),
+		"every Instance is back on the withdrawn revision and none is pinned to another: the current revision comes back, the Held block notwithstanding")
+	g.Expect(apimeta.FindStatusCondition(back.Status.Conditions, InferenceReplicaConditionCurrentRevisionWithdrawn)).To(gomega.BeNil(),
+		"the restoring write must drop the record")
 }

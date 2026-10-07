@@ -1041,9 +1041,12 @@ func mirrorInstanceStatuses(ir *v1beta1.InferenceReplica, statuses []v1beta1.OME
 //     does not promote — the Staged Ready reason derives downstream from
 //     the CurrentRevision != UpdateRevision skew; a revision whose ladder
 //     still records a failure has not landed, whatever the rows read
-//     between crashes), and withdrawn while it names targetName but an
+//     between crashes), withdrawn while it names targetName but an
 //     Instance still runs another revision, the shape a rollback onto the
-//     last promoted revision leaves behind;
+//     last promoted revision leaves behind, and restored to targetName
+//     once every Instance is back on the revision it was withdrawn from,
+//     which the CurrentRevisionWithdrawn condition records beside the
+//     empty current and this write raises or clears with it;
 //   - an unchanged value short-circuits with no write (a converged steady
 //     state performs ZERO writes);
 //   - retry.RetryOnConflict mirrors buildMutateInstance.
@@ -1078,11 +1081,14 @@ func buildPromoteCurrentRevision(writer statusWriter, reads client.Reader, ir *v
 				return workloadtypes.ErrStatusMutationPrecondition
 			}
 			insts := v1beta1convert.InstanceStatusSliceToWorkload(fresh.Status.InstanceStatuses)
-			want := workloadstatus.CurrentRevisionFor(insts, fresh.Status.CurrentRevision, targetName, retryBlocksFromIR(fresh))
-			if want == fresh.Status.CurrentRevision {
+			withdrawn := withdrawnRevisionFor(&fresh.Status)
+			recorded := fresh.Status.CurrentRevision
+			want := workloadstatus.CurrentRevisionFor(insts, recorded, targetName, retryBlocksFromIR(fresh), withdrawn)
+			if want == recorded {
 				return nil
 			}
 			fresh.Status.CurrentRevision = want
+			recordCurrentRevisionWithdrawal(&fresh.Status, withdrawn, recorded)
 			if err := updateInferenceReplicaStatus(ctx, writer, fresh, source); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
@@ -1141,9 +1147,12 @@ func buildRecordUpdateRevision(writer statusWriter, reads client.Reader, ir *v1b
 				return nil
 			}
 			insts := v1beta1convert.InstanceStatusSliceToWorkload(fresh.Status.InstanceStatuses)
-			current := workloadstatus.CurrentRevisionFor(insts, fresh.Status.CurrentRevision, targetName, retryBlocksFromIR(fresh))
+			withdrawn := withdrawnRevisionFor(&fresh.Status)
+			recorded := fresh.Status.CurrentRevision
+			current := workloadstatus.CurrentRevisionFor(insts, recorded, targetName, retryBlocksFromIR(fresh), withdrawn)
 			fresh.Status.UpdateRevision = targetName
 			fresh.Status.CurrentRevision = current
+			recordCurrentRevisionWithdrawal(&fresh.Status, withdrawn, recorded)
 			if err := updateInferenceReplicaStatus(ctx, writer, fresh, source); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone

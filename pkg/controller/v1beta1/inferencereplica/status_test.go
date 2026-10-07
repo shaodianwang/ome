@@ -3176,3 +3176,61 @@ func TestIRLabelSelectorStringForAStandaloneReplica(t *testing.T) {
 		t.Fatalf("selector %q matches pods labeled pool-a-engine", got)
 	}
 }
+
+// TestCurrentRevisionWithdrawalRecord pins the condition that carries a
+// withdrawal across passes: raised by the write that empties the current
+// revision, kept while the pair stays put, removed by the write that
+// records a current revision again or moves the update revision on, and
+// read back as the recorded update revision only while it stands.
+func TestCurrentRevisionWithdrawalRecord(t *testing.T) {
+	const prior, next = "llama-engine-aaaaaaaa", "llama-engine-bbbbbbbb"
+	withdrawn := func() *v1beta1.InferenceReplicaStatus {
+		st := &v1beta1.InferenceReplicaStatus{CurrentRevision: prior, UpdateRevision: prior}
+		st.CurrentRevision = ""
+		recordCurrentRevisionWithdrawal(st, "", prior)
+		return st
+	}
+	cases := []struct {
+		name  string
+		write func() *v1beta1.InferenceReplicaStatus
+		want  string
+	}{
+		{"the withdrawing write raises the record and reads it back as the update revision", withdrawn, prior},
+		{"a later write with the pair unchanged keeps it", func() *v1beta1.InferenceReplicaStatus {
+			st := withdrawn()
+			recordCurrentRevisionWithdrawal(st, withdrawnRevisionFor(st), "")
+			return st
+		}, prior},
+		{"the write that moves the update revision on removes it", func() *v1beta1.InferenceReplicaStatus {
+			st := withdrawn()
+			before := withdrawnRevisionFor(st)
+			st.UpdateRevision = next
+			recordCurrentRevisionWithdrawal(st, before, "")
+			return st
+		}, ""},
+		{"the write that records a current revision again removes it", func() *v1beta1.InferenceReplicaStatus {
+			st := withdrawn()
+			before := withdrawnRevisionFor(st)
+			st.CurrentRevision = prior
+			recordCurrentRevisionWithdrawal(st, before, "")
+			return st
+		}, ""},
+		{"a current revision that was never recorded is no withdrawal", func() *v1beta1.InferenceReplicaStatus {
+			st := &v1beta1.InferenceReplicaStatus{UpdateRevision: prior}
+			recordCurrentRevisionWithdrawal(st, "", "")
+			return st
+		}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := tc.write()
+			if got := withdrawnRevisionFor(st); got != tc.want {
+				t.Fatalf("withdrawnRevisionFor = %q, want %q (conditions %+v)", got, tc.want, st.Conditions)
+			}
+			present := apimeta.FindStatusCondition(st.Conditions, InferenceReplicaConditionCurrentRevisionWithdrawn) != nil
+			if present != (tc.want != "") {
+				t.Fatalf("condition present=%v, want %v", present, tc.want != "")
+			}
+		})
+	}
+}

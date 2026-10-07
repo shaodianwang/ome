@@ -4755,3 +4755,243 @@ func TestReconcile_GangRollbackPassCutAfterTheTargetRecordLeavesTheRolloutReadin
 		t.Fatalf("%d pod(s) of the withdrawn revision %s remain after the rollback settled", n, next)
 	}
 }
+
+// cutAtTheRetargetStamp wraps base so the pass dies at the status write
+// that pins Instance index's update operation to revisionName: that write
+// and every pod write after it fail with a canceled context, as the writes
+// of a manager stopped mid-pass fail. Status writes after it go through, so
+// the pass's deferred publication lands over the stored rows, which still
+// carry the pin the previous pass left.
+func cutAtTheRetargetStamp(base client.WithWatch, index int32, revisionName string) client.WithWatch {
+	cut := false
+	deny := func() error {
+		if cut {
+			return context.Canceled
+		}
+		return nil
+	}
+	return interceptor.NewClient(base, interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if err := deny(); err != nil {
+				return err
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if err := deny(); err != nil {
+				return err
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if err := deny(); err != nil {
+				return err
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if err := deny(); err != nil {
+				return err
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if ir, isIR := obj.(*v1beta1.InferenceReplica); isIR && !cut && pinnedTo(rowAt(ir, index), revisionName) {
+				cut = true
+				return context.Canceled
+			}
+			return c.SubResource(subResourceName).Update(ctx, obj, opts...)
+		},
+	})
+}
+
+// conditionOf returns the IR's condition of the given type, or an empty one.
+func conditionOf(ir *v1beta1.InferenceReplica, condType string) metav1.Condition {
+	for _, cond := range ir.Status.Conditions {
+		if cond.Type == condType {
+			return cond
+		}
+	}
+	return metav1.Condition{}
+}
+
+// TestReconcile_RollbackOverABrokenInstanceRestoresTheCurrentRevisionOnceEveryInstanceIsBackOnIt:
+// four single-pod Instances promoted on the starting revision under
+// InPlaceIfPossible with maxUnavailable 1, Instance 0's pod dark on a
+// configuration error that is never fixed. A push opens the in-place
+// attempt on the dark Instance first. The spec rolls back to the starting
+// revision a pass later and that pass is cut before it retargets the
+// attempt, so the rollup withdraws the current revision while the attempt
+// is still pinned to the pushed one. The next pass retargets the attempt
+// onto the starting revision: every Instance is then on that revision and
+// none is pinned elsewhere, so the current revision comes back, while the
+// attempt is still open and the Instance is not Ready. The stuck-pod grace
+// then elapses, the Instance escalates Failed with a Held block on the
+// starting revision, and the current revision stays: Ready reads False on
+// the Failed Instance and RolloutStalled reports no rollout in flight.
+//
+// Cells: instance/Update/InPlace/spec.revision/before
+func TestReconcile_RollbackOverABrokenInstanceRestoresTheCurrentRevisionOnceEveryInstanceIsBackOnIt(t *testing.T) {
+	const replicas = 4
+	ir := baselineIR("llama-engine", "prod", replicas)
+	ir.Spec.Lifecycle = &v1beta1.LifecycleSpec{UpdateStrategy: &v1beta1.UpdateStrategy{
+		Type:          v1beta1.UpdateStrategyInPlaceIfPossible,
+		RollingUpdate: &v1beta1.RollingUpdate{MaxUnavailable: ptr.To(intstr.FromInt32(1))},
+	}}
+	prior := targetRevisionNameFor(t, ir)
+	pushed := ir.DeepCopy()
+	pushed.Spec.Runners[0].Template.Spec.Containers[0].Image = "sgl:2.0"
+	pushed.Generation = 2
+	next := targetRevisionNameFor(t, pushed)
+	if next == prior {
+		t.Fatalf("the image edit must cut a new revision; both resolve to %s", prior)
+	}
+	ir.Status.CurrentRevision, ir.Status.UpdateRevision, ir.Status.ObservedGeneration = prior, prior, 1
+	objs := []client.Object{ir}
+	for idx := int32(0); idx < replicas; idx++ {
+		dark := idx == 0
+		ir.Status.InstanceStatuses = append(ir.Status.InstanceStatuses, v1beta1.OMENativeInstanceStatus{
+			Index: idx, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+			RunningRevision: prior, PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1,
+		})
+		pod := podForIR(ir, idx, "default", 0, !dark, !dark)
+		pod.Labels[query.LabelRevisionHash] = query.RevisionFromName(prior).Hash()
+		if dark {
+			pod.CreationTimestamp = metav1.NewTime(time.Now().Add(-10 * time.Minute))
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "ome-container",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerConfigError"}}}}
+		}
+		objs = append(objs, pod, sliceForIRPod(ir, pod, !dark))
+	}
+	r, c := newReconcilerWithGrace(t, time.Hour, objs...)
+	r.Recorder = record.NewFakeRecorder(256)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+	pass := func(label string) (*v1beta1.InferenceReplica, error) {
+		t.Helper()
+		r.Expectations = workloadtypes.NewExpectations()
+		_, err := r.Reconcile(context.Background(), request)
+		got := &v1beta1.InferenceReplica{}
+		if gerr := c.Get(context.Background(), client.ObjectKeyFromObject(ir), got); gerr != nil {
+			t.Fatalf("get IR after %s: %v", label, gerr)
+		}
+		return got, err
+	}
+	mustPass := func(label string) *v1beta1.InferenceReplica {
+		t.Helper()
+		got, err := pass(label)
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		return got
+	}
+	setImage := func(image string, generation int64) {
+		t.Helper()
+		live := &v1beta1.InferenceReplica{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), live); err != nil {
+			t.Fatalf("get IR: %v", err)
+		}
+		live.Spec.Runners[0].Template.Spec.Containers[0].Image = image
+		live.Generation = generation
+		if err := c.Update(context.Background(), live); err != nil {
+			t.Fatalf("edit the spec to %s: %v", image, err)
+		}
+	}
+
+	// The push opens the in-place attempt on the dark Instance, the only
+	// one the unavailability budget lets it touch.
+	setImage("sgl:2.0", 2)
+	var rolling *v1beta1.InferenceReplica
+	for i := 0; i < 4 && podsOnRevision(t, c, ir.Namespace, next) == 0; i++ {
+		rolling = mustPass("push")
+	}
+	if rolling == nil || rolling.Status.CurrentRevision != prior || rolling.Status.UpdateRevision != next || !pinnedTo(rowAt(rolling, 0), next) ||
+		podsOnRevision(t, c, ir.Namespace, next) != 1 {
+		t.Fatalf("the push must pin Instance 0 to %s and patch its pod while current=%s: got %+v", next, prior, rolling)
+	}
+
+	// The rollback lands; the pass that observes it dies at the retarget
+	// stamp, so its rollup reads the pin on the pushed revision and
+	// withdraws the current revision.
+	setImage("sgl:1.0", 3)
+	r.Client = cutAtTheRetargetStamp(c.(client.WithWatch), 0, prior)
+	withdrawn, _ := pass("rollback")
+	r.Client = c
+	if withdrawn.Status.UpdateRevision != prior || withdrawn.Status.CurrentRevision != "" || !pinnedTo(rowAt(withdrawn, 0), next) {
+		t.Fatalf("the cut pass must leave current withdrawn beside update=%s with Instance 0 still pinned to %s, got current=%q update=%q row=%+v",
+			prior, next, withdrawn.Status.CurrentRevision, withdrawn.Status.UpdateRevision, rowAt(withdrawn, 0))
+	}
+
+	// The attempt retargets onto the starting revision and its pod is
+	// patched back: every Instance is on the starting revision and none is
+	// pinned elsewhere, so the current revision comes back although the
+	// attempt is still open on a pod that is not Ready.
+	var back *v1beta1.InferenceReplica
+	for i := 0; i < 6; i++ {
+		back = mustPass("retarget")
+		if row := rowAt(back, 0); pinnedTo(row, prior) && row.PodCount == 1 && podsOnRevision(t, c, ir.Namespace, next) == 0 &&
+			back.Status.CurrentRevision == prior {
+			break
+		}
+	}
+	row := rowAt(back, 0)
+	if !pinnedTo(row, prior) || row.Phase != v1beta1.OMENativeInstanceUpdating || row.PodCount != 1 || podsOnRevision(t, c, ir.Namespace, next) != 0 {
+		t.Fatalf("the retarget must pin Instance 0 to %s and rebuild its pod off %s while the attempt stays open, got row=%+v pods on %s=%d",
+			prior, next, row, next, podsOnRevision(t, c, ir.Namespace, next))
+	}
+	if back.Status.CurrentRevision != prior {
+		t.Fatalf("currentRevision=%q want %s: every Instance is back on the withdrawn revision and none is pinned to another, so the withdrawal is over",
+			back.Status.CurrentRevision, prior)
+	}
+
+	// The break is kept: the pod the attempt rebuilt is dark too. No kubelet
+	// stands behind the fake client, so the test stands the rebuilt pod up
+	// as a broken one reports itself, older than the grace. The attempt is
+	// disposed, the Instance escalates Failed with a Held block on the
+	// starting revision, and the restored current revision stays.
+	stoodUp := 0
+	for _, pod := range listPods(t, c, ir.Namespace) {
+		if pod.Labels[query.LabelInstanceIdx] != intToLabel(0) {
+			continue
+		}
+		stoodUp++
+		dark := pod.DeepCopy()
+		dark.ResourceVersion, dark.UID = "", ""
+		dark.CreationTimestamp = metav1.NewTime(time.Now().Add(-10 * time.Minute))
+		dark.Status = corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "ome-container",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerConfigError"}}}}}
+		if err := c.Delete(context.Background(), &pod); err != nil {
+			t.Fatalf("replace %s: %v", pod.Name, err)
+		}
+		if err := c.Create(context.Background(), dark); err != nil {
+			t.Fatalf("stand %s up broken: %v", pod.Name, err)
+		}
+	}
+	if stoodUp != 1 {
+		t.Fatalf("Instance 0 must run exactly one rebuilt pod, found %d", stoodUp)
+	}
+	withLifecycleConfig(r, `{"stuckPodGracePeriod":"1m","instanceReadyTimeout":"30m"}`)
+	var failed *v1beta1.InferenceReplica
+	for i := 0; i < 4; i++ {
+		failed = mustPass("escalation")
+		if row := rowAt(failed, 0); row != nil && row.Phase == v1beta1.OMENativeInstanceFailed {
+			break
+		}
+	}
+	row = rowAt(failed, 0)
+	blk := failed.Status.RetryBlocks
+	if row == nil || row.Phase != v1beta1.OMENativeInstanceFailed || len(blk) != 1 || blk[0].TargetRevision != prior || blk[0].State != v1beta1.RetryBlockHeld {
+		t.Fatalf("the grace must escalate Instance 0 to Failed with a Held block on %s, got row=%+v blocks=%+v", prior, row, blk)
+	}
+	settled := mustPass("settle")
+	ready, stalled := conditionOf(settled, InferenceReplicaConditionReady), conditionOf(settled, InferenceReplicaConditionRolloutStalled)
+	if settled.Status.CurrentRevision != prior || settled.Status.UpdateRevision != prior {
+		t.Fatalf("current=%q update=%q want both %s once every Instance is on the withdrawn revision: the Held block gates the next attempt, not the rollup (Ready %s/%s, RolloutStalled %q)",
+			settled.Status.CurrentRevision, settled.Status.UpdateRevision, prior, ready.Status, ready.Reason, stalled.Message)
+	}
+	if ready.Status != metav1.ConditionFalse || ready.Reason != ReasonInstanceFailed {
+		t.Fatalf("Ready=%s/%s want False/%s: the Failed Instance is what the fleet is missing", ready.Status, ready.Reason, ReasonInstanceFailed)
+	}
+	if stalled.Status != metav1.ConditionFalse || stalled.Message != "no rollout in flight" {
+		t.Fatalf("RolloutStalled=%s %q: with current back on %s there is no rollout to report", stalled.Status, stalled.Message, prior)
+	}
+}
