@@ -22,6 +22,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/clock"
+	"k8s.io/utils/ptr"
 	"knative.dev/pkg/apis"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -249,9 +250,30 @@ type Reconciler struct {
 func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
 	res, err := r.reconcile(ctx, request)
 	if apierrors.IsConflict(err) {
-		return ctrl.Result{Requeue: true}, nil
+		res, err = ctrl.Result{Requeue: true}, nil
 	}
-	return res, err
+	return normalizeRetryPriority(res, err), err
+}
+
+// retryPriority is the queue priority every re-enqueue of a placement request
+// carries. The priority queue serves higher priorities first with no aging, and
+// a request keeps the priority it entered with unless the result sets one, so a
+// source listed at startup at the informer's low priority whose first pass met a
+// transient failure would otherwise wait behind the live fleet's events for as
+// long as those keep coming.
+const retryPriority = 0
+
+// normalizeRetryPriority gives a result that re-enqueues the request (a retry
+// after a delay, an immediate requeue, or an error) the normal queue priority,
+// unless the pass chose one itself.
+func normalizeRetryPriority(res ctrl.Result, err error) ctrl.Result {
+	if res.Priority != nil {
+		return res
+	}
+	if err != nil || res.Requeue || res.RequeueAfter > 0 {
+		res.Priority = ptr.To(retryPriority)
+	}
+	return res
 }
 
 func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
