@@ -988,6 +988,74 @@ func evBakeElapsedNoSample(_ *v1beta1.InferenceService, in *ReconcileInputs) {
 	in.Sampler = missingSample{}
 }
 
+// repinLadder replaces the pinned ladder with steps, as a repin renders the
+// spec into the pin, and clamps the record the way the run layer's clamp
+// does: a unit done under the old ladder stays done at the new ladder's
+// length, an index past the new ladder's end lands on its last step, and a
+// clamped step whose traffic exceeds the recorded weight arms the pre-step
+// hold.
+func repinLadder(isvc *v1beta1.InferenceService, steps []v1beta1.RolloutGroupStep) {
+	old := len(isvc.Spec.Rollout.Groups[0].Canary.Steps)
+	isvc.Spec.Rollout.Groups[0].Canary.Steps = steps
+	isvc.Status.Rollout.ActiveRun.Plan.Groups[0].Group.Canary.Steps = append([]v1beta1.RolloutGroupStep(nil), steps...)
+	cs := rollout.CanaryStatusFor(&isvc.Status, v1beta1.EngineComponent)
+	if old > 0 && int(cs.CurrentStep) >= old {
+		cs.CurrentStep = int32(len(steps))
+		return
+	}
+	if int(cs.CurrentStep) >= len(steps) {
+		cs.CurrentStep = int32(len(steps)) - 1
+	}
+	if steps[cs.CurrentStep].Traffic > cs.ObservedTrafficWeight {
+		cs.PreStepHold = true
+	}
+}
+
+// evRepinShorter: the ladder is repinned to its final step alone, so the
+// index clamps onto a step at the recorded weight; evRepinShorterHeld is the
+// same with a bare pause on that step.
+func evRepinShorter(isvc *v1beta1.InferenceService, _ *ReconcileInputs) {
+	repinLadder(isvc, []v1beta1.RolloutGroupStep{{Capacity: intstr.FromString("100%"), Traffic: 100}})
+}
+func evRepinShorterHeld(isvc *v1beta1.InferenceService, _ *ReconcileInputs) {
+	repinLadder(isvc, []v1beta1.RolloutGroupStep{{Capacity: intstr.FromString("100%"), Traffic: 100, Pause: &v1beta1.RolloutPause{}}})
+}
+
+// evRepinLonger: a longer ladder whose step at the record's index carries no
+// more traffic than the recorded weight, so the clamp arms no hold.
+func evRepinLonger(isvc *v1beta1.InferenceService, _ *ReconcileInputs) {
+	repinLadder(isvc, []v1beta1.RolloutGroupStep{
+		{Capacity: intstr.FromString("25%"), Traffic: 0, Pause: &v1beta1.RolloutPause{}},
+		{Capacity: intstr.FromString("50%"), Traffic: 50, Pause: &v1beta1.RolloutPause{}},
+		{Capacity: intstr.FromString("100%"), Traffic: 100},
+	})
+}
+
+// evRepinRaise: the clamped step would raise traffic above the recorded
+// weight, so the clamp arms the pre-step hold.
+func evRepinRaise(isvc *v1beta1.InferenceService, _ *ReconcileInputs) {
+	repinLadder(isvc, []v1beta1.RolloutGroupStep{{Capacity: intstr.FromString("100%"), Traffic: 100}})
+}
+
+// evRepinPastDone: a unit that finished under the old ladder is repinned
+// onto a longer one; done stays done at the new ladder's length.
+func evRepinPastDone(isvc *v1beta1.InferenceService, _ *ReconcileInputs) {
+	repinLadder(isvc, threeStep())
+}
+
+// evResumeReshownAcrossSecondPark: the resume lands and re-arms the park, the
+// re-armed step's capacity wait outlives the ready timeout and parks the
+// unit again, and a lagging cache then shows the same resume once more.
+func evResumeReshownAcrossSecondPark(isvc *v1beta1.InferenceService, in *ReconcileInputs) {
+	evResumeOwn(isvc, in)
+	reconcileOnce(isvc, in) // the resume re-arms the unit at step 0
+	in.PerRevisionPods = map[string]int32{"old": 4}
+	reconcileOnce(isvc, in) // the re-armed step clocks its capacity wait
+	in.Now = in.Now.Add(cellReadyTimeout + time.Second)
+	reconcileOnce(isvc, in) // the wait outlives the timeout: a second park
+	evResumeOwn(isvc, in)
+}
+
 func TestReconcileCells(t *testing.T) {
 	const (
 		idle        = rollout.CanaryStateIdle
@@ -1654,6 +1722,39 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/Failed[stableMissing]/record[stableEqualsCanary]", fixtureFailedStableMissing, evRecordStableEqualsCanary, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
 		{"canary/Failed[stableMissing]/record[noStable]", fixtureFailedStableMissing, evRecordNoStable, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
 		{"canary/Failed[stableMissing]/record[negativeStep]", fixtureFailedStableMissing, evRecordNegativeStep, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
+		// --- Legacy record shapes and repins the fixtures above do not drive:
+		// a negative step on a record past step 0 is clamped to 0, which
+		// re-runs step 0 as a live step; an equal pair at the sentinel is
+		// repaired and the cutover re-recorded; a phase-only Failed over a
+		// recorded rejection reads as the revert; a repin clamps the index
+		// under every hold without moving it, and done stays done.
+		{"canary/Draining/record[negativeStep]", fixtureDraining, evRecordNegativeStep, cellWant{state: serving, phase: v1beta1.RolloutPhasePaused, step: 0, active: true}},
+		{"canary/Draining/repin[holdOrTighten]", fixtureDraining, evRepinShorter, cellWant{state: draining, phase: v1beta1.RolloutPhasePromoting, step: 0, active: true}},
+		{"canary/Draining[M]/record[negativeStep]", fixtureDrainingHeld, evRecordNegativeStep, cellWant{state: serving, phase: v1beta1.RolloutPhasePaused, step: 0, active: true}},
+		{"canary/Draining[M]/repin[holdOrTighten]", fixtureDrainingHeld, evRepinShorterHeld, cellWant{state: draining, phase: v1beta1.RolloutPhasePaused, step: 0, active: true}},
+		{"canary/Draining[capacityShort,inWindow]/record[negativeStep]", fixtureDrainingShortInWindow, evRecordNegativeStep, cellWant{state: serving, phase: v1beta1.RolloutPhasePaused, step: 0, active: true}},
+		{"canary/Draining[capacityShort,inWindow]/repin[holdOrTighten]", fixtureDrainingShortInWindow, evRepinShorter, cellWant{state: draining, phase: v1beta1.RolloutPhasePromoting, step: 0, active: true}},
+		{"canary/Draining[capacityShort]/record[negativeStep]", fixtureDrainingShort, evRecordNegativeStep, cellWant{state: serving, phase: v1beta1.RolloutPhasePaused, step: 0, active: true}},
+		{"canary/Draining[capacityShort]/repin[holdOrTighten]", fixtureDrainingShort, evRepinShorter, cellWant{state: draining, phase: v1beta1.RolloutPhasePromoting, step: 0, active: true}},
+		{"canary/Done[rolling]/record[negativeStep]", fixtureDoneRolling, evRecordNegativeStep, cellWant{state: serving, phase: v1beta1.RolloutPhasePaused, step: 0, active: true}},
+		{"canary/Done[rolling]/repin[pastDone]", fixtureDoneRolling, evRepinPastDone, cellWant{state: done, phase: v1beta1.RolloutPhasePromoting, step: 3, active: true}},
+		{"canary/Done/record[negativeStep]", fixtureDone, evRecordNegativeStep, cellWant{state: serving, phase: v1beta1.RolloutPhasePaused, step: 0, active: true}},
+		{"canary/Done/record[stableEqualsCanary]", fixtureDone, evRecordStableEqualsCanary, cellWant{state: done, phase: v1beta1.RolloutPhaseStable, step: 2, active: true, complete: true}},
+		{"canary/Done/repin[pastDone]", fixtureDone, evRepinPastDone, cellWant{state: done, phase: v1beta1.RolloutPhaseStable, step: 3}},
+		{"canary/RollingBack/repin[holdOrTighten]", fixtureRollingBack, evRepinLonger, cellWant{state: rollingBack, phase: v1beta1.RolloutPhaseRollingBack, active: true, rolledBk: true}},
+		{"canary/RollingBack/repin[raise]", fixtureRollingBack, evRepinRaise, cellWant{state: rollingBack, phase: v1beta1.RolloutPhaseRollingBack, active: true, rolledBk: true}},
+		{"canary/RolledBack/repin[holdOrTighten]", fixtureRolledBack, evRepinLonger, cellWant{state: rolledBack, phase: v1beta1.RolloutPhaseRolledBack, active: true, rolledBk: true}},
+		{"canary/RolledBack/repin[raise]", fixtureRolledBack, evRepinRaise, cellWant{state: rolledBack, phase: v1beta1.RolloutPhaseRolledBack, active: true, rolledBk: true}},
+		{"canary/Failed/repin[holdOrTighten]", fixtureFailed, evRepinLonger, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
+		{"canary/Failed/repin[raise]", fixtureFailed, evRepinRaise, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
+		{"canary/Failed[stableMissing]/repin[holdOrTighten]", fixtureFailedStableMissing, evRepinLonger, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
+		{"canary/Failed[stableMissing]/repin[raise]", fixtureFailedStableMissing, evRepinRaise, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
+		{"canary/Failed[stableMissing]/record[failedPhaseNoMarker]", fixtureFailedStableMissing, evPhaseFailedNoMarker, cellWant{state: rollingBack, phase: v1beta1.RolloutPhaseRollingBack, active: true, rolledBk: true}},
+		// A resume leaves no record in status: a copy re-shown after the
+		// re-armed ladder parks again re-arms it a second time.
+		{"canary/Failed/resume[reshown]", fixtureFailed, evResumeReshownAcrossSecondPark, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true, consume: []string{constants.RolloutResumeAnnotation}}},
+		{"canary/Failed[stableMissing]/resume[reshown]", fixtureFailedStableMissing, evResumeReshownAcrossSecondPark, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true, consume: []string{constants.RolloutResumeAnnotation}}},
+		{"canary/RolledBack/resume[reshown]", fixtureRolledBack, evResumeReshownAcrossSecondPark, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true, consume: []string{constants.RolloutResumeAnnotation}}},
 	}
 	for _, c := range cells {
 		t.Run(c.id, func(t *testing.T) {

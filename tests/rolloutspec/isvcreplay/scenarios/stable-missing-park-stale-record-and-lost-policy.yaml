@@ -1,0 +1,65 @@
+scenario: stable-missing-park-stale-record-and-lost-policy
+cells:
+  - canary/Failed/StableMissing/pass.staleRecord/before
+  - canary/Failed/StableMissing/plan.unresolved/before
+intentional: >-
+  a rollback finds no retained ControllerRevision for the stable revision and
+  the dispatch parks the unit with the stable revision missing; a pass that
+  reads the copy from before the park re-decides from the serving record and
+  the flush keeps the live one, and once the policy stops resolving the unit
+  is not dispatched: the park stands as recorded
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        policyRef: {name: canary-policy, progression: canary}
+  policies:
+    - name: canary-policy
+      spec:
+        canary:
+          scaleDownDelaySeconds: 600
+          steps:
+            - {capacity: "50%", traffic: 10, pause: {}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m, defaultReadyTimeout: 10m, rolloutPolicyEnabled: true}
+timeline:
+  - tick: 1
+    note: a settled service; the policy resolves and the unit reads Stable
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens from the live policy and the unit arms at step 0
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the staged Instance is Ready; the split serves at 10% under the manual pause
+    events:
+      - capacity.reached: {component: engine}
+  - tick: 5
+    note: the stable revision's ControllerRevision passes to another controller while the held floor still runs it
+    events:
+      - clock.advance: 1m
+      - stable.crMissing: {component: engine, image: registry.example.com/runtime:v1}
+  - tick: 6
+    note: the operator rolls back; the executor records the rejection and the dispatch parks the unit because no retained revision it controls carries the stable hash
+    events:
+      - verb.rollback[stableServes]
+  - tick: 7
+    note: the pass reads the copy from before the park; it decides from that record and the flush keeps the live one, so the pass requeues without writing its decision
+    events:
+      - pass.staleRecord
+  - tick: 8
+    note: the pin is lost and the policy is deleted in the same tick; with no body to execute the run layer parks the plan and the unit is not dispatched, so its record, phase and split freeze in the park
+    events:
+      - clock.advance: 1m
+      - run.lost
+      - plan.unresolved: {name: canary-policy}
+  - tick: 9
+    note: a later pass finds the same park; nothing moves the unit
+    events:
+      - clock.advance: 1m
+      - ctrl.resync

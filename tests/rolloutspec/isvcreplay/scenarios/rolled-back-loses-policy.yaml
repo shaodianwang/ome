@@ -1,0 +1,60 @@
+scenario: rolled-back-loses-policy
+cells:
+  - canary/RolledBack/plan.unresolved/before
+intentional: >-
+  the revert completed and the run closed RolledBack; once the policy stops
+  resolving the unit is not dispatched, and a settled hold has nothing left to
+  drive
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        policyRef: {name: canary-policy, progression: canary}
+  policies:
+    - name: canary-policy
+      spec:
+        canary:
+          scaleDownDelaySeconds: 600
+          steps:
+            - {capacity: "50%", traffic: 10, pause: {}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m, defaultReadyTimeout: 10m, rolloutPolicyEnabled: true}
+timeline:
+  - tick: 1
+    note: a settled service; the policy resolves and the unit reads Stable
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens from the live policy and the unit arms at step 0
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the staged Instance is Ready; the split serves at 10% under the manual pause
+    events:
+      - capacity.reached: {component: engine}
+  - tick: 5
+    note: the operator rolls back; the rejection is recorded and the replica is pointed at its stable ControllerRevision
+    events:
+      - verb.rollback
+  - tick: 6
+    note: the rejected pods are gone; the revert reads complete and the unit holds RolledBack
+    events:
+      - pod.rejectedGone: {component: engine}
+  - tick: 7
+    note: the run closes RolledBack on the settled hold
+    events:
+      - ctrl.resync
+  - tick: 8
+    note: the policy is deleted after the run closed; with no pin to fall back on the run layer parks the plan and the unit is not dispatched, which a settled hold does not notice
+    events:
+      - clock.advance: 1m
+      - plan.unresolved: {name: canary-policy}
+  - tick: 9
+    note: a later pass finds the same park; nothing moves the unit
+    events:
+      - clock.advance: 1m
+      - ctrl.resync

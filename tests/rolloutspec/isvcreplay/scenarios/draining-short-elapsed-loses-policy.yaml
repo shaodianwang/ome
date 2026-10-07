@@ -1,0 +1,63 @@
+scenario: draining-short-elapsed-loses-policy
+cells:
+  - canary/Draining/ShortElapsed/plan.unresolved/before
+intentional: >-
+  the drain window elapsed while a canary pod of the drain is not Ready, so
+  the release waits for the capacity with the stable Instance held, and once
+  the policy stops resolving the unit is not dispatched: the release is never
+  read and the wait clock stands
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        policyRef: {name: canary-policy, progression: canary}
+  policies:
+    - name: canary-policy
+      spec:
+        canary:
+          scaleDownDelaySeconds: 600
+          steps:
+            - {capacity: "50%", traffic: 10, pause: {}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m, defaultReadyTimeout: 10m, rolloutPolicyEnabled: true}
+timeline:
+  - tick: 1
+    note: a settled service; the policy resolves and the unit reads Stable
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens from the live policy and the unit arms at step 0
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the staged Instance is Ready; the split serves at 10% under the manual pause
+    events:
+      - capacity.reached: {component: engine}
+  - tick: 5
+    note: the operator promotes; the record advances to the final step and waits on its capacity
+    events:
+      - verb.promote: {component: engine}
+  - tick: 6
+    note: the final step's capacity already stands, so 100% shifts onto it; the held stable Instance drains through the window
+    events:
+      - ctrl.resync
+  - tick: 7
+    note: the window elapsed and a canary pod is not Ready when the release would be read; the stable Instance stays held and the capacity wait is clocked
+    events:
+      - clock.advance: 11m
+      - capacity.dropped: {component: engine, index: 1}
+  - tick: 8
+    note: the pin is lost and the policy is deleted in the same tick; with no body to execute the run layer parks the plan and the unit is not dispatched, so its record, phase and split freeze in the held release
+    events:
+      - clock.advance: 1m
+      - run.lost
+      - plan.unresolved: {name: canary-policy}
+  - tick: 9
+    note: a later pass finds the same park; nothing moves the unit
+    events:
+      - clock.advance: 1m
+      - ctrl.resync

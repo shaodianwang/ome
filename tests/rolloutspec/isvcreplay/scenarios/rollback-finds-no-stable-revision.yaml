@@ -1,6 +1,8 @@
 scenario: rollback-finds-no-stable-revision
 cells:
   - canary/RollingBack/stable.crMissing/before
+  - canary/Failed/StableMissing/stable.crMissing/before
+  - canary/Failed/StableMissing/pass.resync/before
   - canary/Serving/Manual/verb.rollback[stableServes]/before
   - run/Open/canary.parked/before
   - revision/Empty/write.canarySettled/before
