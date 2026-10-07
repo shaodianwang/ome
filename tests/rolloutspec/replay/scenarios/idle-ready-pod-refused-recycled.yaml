@@ -1,0 +1,40 @@
+# A Ready Instance whose pod is refused by its node under a restart policy
+# that never rebuilds it. A rejected pod is terminal, so the Create pass
+# reads its name as free: it commits a Create attempt on the Ready row,
+# recycles the dead occupant with the kubelet's reason on LastFailure, and
+# recreates the pod once the delete is observed.
+scenario: idle-ready-pod-refused-recycled
+arrows:
+  - T-create-ready
+cells:
+  - instance/Ready/pod.admissionRejected[OutOfResource]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the node refuses the pod; a rejected pod is terminal, so the Create pass commits its attempt on the row and recycles the dead occupant with the kubelet's reason
+    events:
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 0}, resource: nvidia.com/gpu, message: "Node didn't have enough resource: nvidia.com/gpu, requested: 1, used: 8, capacity: 8"}
+  - tick: 3
+    note: the dead pod is gone, so the attempt recreates it at the same incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the recreated pod reports Ready and enters rotation, so the Instance promotes on its running revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}

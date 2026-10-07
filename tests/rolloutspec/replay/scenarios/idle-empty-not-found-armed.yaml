@@ -1,0 +1,28 @@
+# A not-found answer armed while an index has no row. An index with no row
+# issues no delete for the answer to meet, so the arm sits unconsumed and
+# the Create pass materializes the index as on any pass.
+scenario: idle-empty-not-found-armed
+arrows:
+  - T-empty-create
+  - T-create-ready
+cells:
+  - instance/Empty/api.notFound/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: a not-found answer is armed, but an index with no row issues no delete to meet it, and the Create pass opens the attempt as usual
+    events:
+      - api.notFound: {}
+  - tick: 2
+    note: the pod reports Ready and enters rotation, so the Instance promotes with the answer still unconsumed
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}

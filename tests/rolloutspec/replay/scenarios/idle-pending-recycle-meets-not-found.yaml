@@ -1,0 +1,39 @@
+# A demoted Instance whose evicted pod is already gone when the recycle's
+# delete reaches the apiserver. The not-found answer is read as the delete
+# having landed: the attempt stays committed, and the next pass finds the
+# name free and recreates the pod.
+scenario: idle-pending-recycle-meets-not-found
+arrows:
+  - T-pending-recycle-evicted
+  - T-create-ready
+cells:
+  - instance/Pending/api.notFound/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+timeline:
+  - tick: 1
+    note: the demoted row sits with its pod present, so the Create pass creates nothing
+  - tick: 2
+    note: the pod is evicted and the recycle's delete meets a not-found answer, behind which the pod is already gone; the attempt stays committed
+    events:
+      - pod.evicted: {pod: {index: 0}, message: "The node was low on resource: memory."}
+      - api.notFound: {}
+  - tick: 3
+    note: the name is free, so the attempt recreates the pod
+  - tick: 4
+    note: the recreated pod reports Ready and enters rotation, so the Instance promotes on its running revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}

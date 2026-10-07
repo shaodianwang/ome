@@ -1,0 +1,19 @@
+tick=1 note the Ready row serves the old revision and the roll to the new one is held by its Backoff block
+tick=1 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): ImagePullBackOff
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=after:2m0s
+tick=2 note the block comes due as the operator asks the Instance off node-0; the migrate pass runs ahead of the roll and claims index 1 as the surge at the source's running revision, asking the block nothing
+tick=2 apply timer.retryAt to=t+2m1s now=t+2m1s
+tick=2 apply spec.migrateRequest uuid=uid#2 instance=0 fromNode=node-0 now=t+2m1s
+tick=2 condition type=MigrationPolicyUnconfigured status=False reason=MigrationCapacityConfigured message=Migration capacity policy is configured
+tick=2 migration uuid=uid#2 write phase=Accepted→SurgePending surge=nil→1 message=nil→surge allocated; waiting for surge pods allocatedAt=nil→t+2m1s
+tick=2 row=0 write incarnation=1 phase=Migrating runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Migrate step=CreateSurge surgeIndex=1 started=t+2m1s lastProgressAt=t+2m1s deadline=t+32m1s} precondition=ok
+tick=2 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#2{type=Migrate step=CreateSurge surgeIndex=0 started=t+2m1s lastProgressAt=t+2m1s deadline=t+32m1s} precondition=ok
+tick=2 event Normal MigrationRequestAccepted OMENative component=engine instance=0 migration accepted (uuid=uid#2, source-node=node-0, surge-index=1)
+tick=2 pod create name=svc-a-engine-1-default-0 revision=882059bb incarnation=1 ordinal=0 image=registry.example.com/runtime:v1
+tick=2 pass result=after:5s
+tick=3 note the block is still due and the claimed index stays the migration's own
+tick=3 apply timer.retryAt to=t+2m1s now=t+2m1s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 row=1 write no-op precondition=no-change
+tick=3 pass result=after:5s

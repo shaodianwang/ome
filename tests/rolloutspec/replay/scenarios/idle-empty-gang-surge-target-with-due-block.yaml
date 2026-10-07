@@ -1,0 +1,44 @@
+# A gang runs the old revision while the new one sits in Backoff from an
+# earlier failed attempt; the block comes due. The due block releases the
+# source's surge, and the replacement-gang marker it claims on the next
+# free index is stamped by the source on that same pass without asking
+# the block anything; a block still due on the next pass changes nothing
+# about the claimed index.
+scenario: idle-empty-gang-surge-target-with-due-block
+arrows:
+  - T-empty-gang-surge-target
+cells:
+  - instance/Empty/timer.retryAt/boundary@T-empty-gang-surge-target
+  - instance/Empty/timer.retryAt/after@T-empty-gang-surge-target
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v2
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+  retryBlocks:
+    - {revision: registry.example.com/runtime:v2, state: Backoff, attemptsStarted: 1, nextRetryAt: 2m, reason: ImagePullBackOff}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: registry.example.com/runtime:v1, readySince: 0s}
+  pods:
+    - {index: 0, runner: leader, previousImage: registry.example.com/runtime:v1, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 0, runner: worker, previousImage: registry.example.com/runtime:v1, ready: true, serving: true, node: node-1}
+timeline:
+  - tick: 1
+    note: the gang serves the old revision and the roll to the new one is held by its Backoff block
+  - tick: 2
+    note: the block comes due, which releases the surge; with no free ordinal inside the gang the source claims index 1 as its replacement on this pass, and the marker's stamp asks the block nothing
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 3
+    note: the block is still due and the claimed index stands as the surge target
+    events:
+      - timer.retryAt: {slack: 1s}

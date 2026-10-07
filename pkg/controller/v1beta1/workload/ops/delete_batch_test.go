@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/record"
 	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
@@ -807,6 +808,7 @@ func TestDeleteBatchAdmissionAPIErrorsFailBeforeExternalEffects(t *testing.T) {
 		err  error
 	}{
 		{name: "413", err: apierrors.NewRequestEntityTooLargeError("status object too large")},
+		{name: "422", err: apierrors.NewInvalid(schema.GroupKind{Group: "ome.io", Kind: "InferenceReplica"}, "owner", field.ErrorList{field.Invalid(field.NewPath("status", "instances"), "", "rejected")})},
 		{name: "429", err: apierrors.NewTooManyRequests("status write throttled", 1)},
 		{name: "5xx", err: apierrors.NewServiceUnavailable("status storage unavailable")},
 		{name: "context cancellation", err: context.Canceled},

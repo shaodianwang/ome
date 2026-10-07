@@ -1,0 +1,48 @@
+# A demoted Instance under a pause whose leftover pod is evicted. The Create
+# pass is parked by the pause, so the dead occupant stands until the pause
+# clears; the unpause that releases the pass is the observation on which
+# the recycle commits, and an unpause observed again adds nothing to the
+# attempt already committed.
+scenario: idle-pending-evicted-recycled-at-unpause
+arrows:
+  - T-pending-recycle-evicted
+  - T-create-ready
+cells:
+  - instance/Pending/spec.unpause/boundary@T-pending-recycle-evicted
+  - instance/Pending/spec.unpause/after@T-pending-recycle-evicted
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    paused: true
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+timeline:
+  - tick: 1
+    note: the demoted row sits under the pause with its pod present, and the Create pass is parked
+  - tick: 2
+    note: the pod is evicted under memory pressure; the pause parks the Create pass, so the dead occupant stands
+    events:
+      - pod.evicted: {pod: {index: 0}, message: "The node was low on resource: memory."}
+  - tick: 3
+    note: the pause clears, so the Create pass commits its attempt and recycles the dead occupant on the same pass
+    events:
+      - spec.unpause: {}
+  - tick: 4
+    note: the unpause is observed again as the evicted pod is gone; the attempt already committed recreates the pod
+    events:
+      - spec.unpause: {}
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the recreated pod reports Ready and enters rotation, so the Instance promotes on its running revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}

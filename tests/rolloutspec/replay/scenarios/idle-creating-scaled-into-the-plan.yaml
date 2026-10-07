@@ -1,0 +1,59 @@
+# A scale-up reaches a migration surge row left Creating with no operation
+# while its pod still runs. Inside the desired set the Create pass reads
+# the row as a slot of its own: the leftover pod, rendered for the source's
+# revision, holds the only name the index expects, so the pass adopts it,
+# writes its serving gate, and promotes the Instance on that revision once
+# the pod reports Ready.
+scenario: idle-creating-scaled-into-the-plan
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-migrate-deadline-restore
+  - T-migratetarget-expired
+cells:
+  - instance/Creating/spec.replicasUp/before
+  - instance/Creating/pod.containersReady[source]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the surge pod is bound and comes up on its node while the migration waits on its promote
+    events:
+      - pod.scheduled[target]: {pod: {index: 1}, message: node-1}
+      - pod.containersReady[target]: {pod: {index: 1}}
+  - tick: 5
+    note: the record's deadline elapses with the source healthy, so expiry restores the source and unpins the surge, whose row is left Creating with no operation beyond the desired set
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 6
+    note: the replica count climbs and the Creating row is inside the desired set; the Create pass reads it as its own slot, finds its only expected name held by the runtime-ready leftover pod, and writes the pod's serving gate ahead of the promote
+    events:
+      - spec.replicasUp: {to: 2}
+      - pod.containersReady[source]: {pod: {index: 1}}
+  - tick: 7
+    note: the adopted pod reports Ready and enters rotation, so the Instance promotes on the revision the pod was rendered for
+    events:
+      - pod.ready[source]: {pod: {index: 1}}
+      - endpoint.rotationIn[source]: {pod: {index: 1}}

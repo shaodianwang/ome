@@ -1,0 +1,25 @@
+tick=1 note the gang serves the old revision and the roll to the new one is held by its Backoff block
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 hold gate=RetryBlock target=svc-a-engine-367ef4b7 reason=update to svc-a-engine-367ef4b7 in backoff after 1 failed attempt(s): ImagePullBackOff
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=after:2m0s
+tick=2 note the block comes due, which releases the surge; with no free ordinal inside the gang the source claims index 1 as its replacement on this pass, and the marker's stamp asks the block nothing
+tick=2 apply timer.retryAt to=t+2m1s now=t+2m1s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=2 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#1{type=Update step=Surge target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 started=t+2m1s lastProgressAt=t+2m1s deadline=t+32m1s} precondition=ok
+tick=2 row=1 write incarnation=1 phase=Creating runningRevision=nil targetRevision=svc-a-engine-367ef4b7 readySince=nil op=op#2{type=Update step=GangSurgeTarget target=svc-a-engine-367ef4b7 started=t+2m1s lastProgressAt=t+2m1s deadline=t+32m1s} precondition=ok
+tick=2 retryblock target=svc-a-engine-367ef4b7 persist {state=Backoff attempts=1 nextRetryAt=t+2m0s reason=ImagePullBackOff}→{state=RetryInProgress attempts=1 nextRetryAt=t+2m0s reason=ImagePullBackOff}
+tick=2 event Normal RecreateUpdateStarted OMENative component=engine instance=0 gang surge to revision svc-a-engine-367ef4b7 (surge-index=1)
+tick=2 hold cleared
+tick=2 pass result=after:5s
+tick=3 note the block is still due and the claimed index stands as the surge target
+tick=3 apply timer.retryAt to=t+2m1s now=t+2m1s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 podgroup create name=svc-a-engine-1
+tick=3 row=1 write no-op precondition=no-change
+tick=3 pod create name=svc-a-engine-1-leader-0 revision=367ef4b7 incarnation=1 ordinal=0
+tick=3 pod create name=svc-a-engine-1-worker-0 revision=367ef4b7 incarnation=1 ordinal=0
+tick=3 hold cleared
+tick=3 pass result=after:5s
