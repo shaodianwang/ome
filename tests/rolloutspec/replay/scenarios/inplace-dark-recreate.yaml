@@ -1,0 +1,76 @@
+# Two single-pod Instances under InPlaceIfPossible with maxUnavailable 1.
+# The second Instance's promoted pod keeps running and fails its readiness
+# for the stuck-pod grace, and the push that follows changes the pod
+# template's annotations alone: a diff an in-place step would patch
+# without replacing a container, leaving the pod exactly as dark as it
+# found it with the one unavailable slot spent on the wait. The roll takes
+# the dark Instance first as a recreate, its replacement serves on the
+# target, and the healthy Instance is patched in place after it.
+scenario: inplace-dark-recreate
+arrows:
+  - T-ready-recreate
+  - T-drain-ready
+  - T-ready-inplace
+  - T-inplace-ready
+cells:
+  - instance/Ready/pod.runningNotReady[source]/boundary@T-ready-recreate
+  - instance/Ready/spec.revision/boundary@T-ready-recreate
+intentional: >-
+  an in-place step that replaces no container cannot bring a pod that fails
+  readiness back into rotation, so over a pod set dark on readiness the roll
+  replaces the set at the target instead of waiting out the attempt's
+  deadline with the unavailability slot spent
+initial:
+  spec:
+    replicas: 2
+    strategy: InPlaceIfPossible
+    maxUnavailable: "1"
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    podAnnotations: {release: one}
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start on v1 materializes both Instances
+  - tick: 2
+    note: both pods become Ready and enter rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+      - pod.ready[source]: {pod: {index: 1}}
+      - endpoint.rotationIn[source]: {pod: {index: 1}}
+  - tick: 3
+    note: the second Instance's pod stops passing readiness while it keeps running, and leaves rotation
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 1}}
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 4
+    note: the pod has been unready for the stuck-pod grace; the row stays Ready with its serving count down and nothing rebuilds it under policy None
+    events:
+      - clock.advance: 2m
+  - tick: 5
+    note: the template's annotations change, a diff an in-place step patches without replacing a container; the dark Instance is taken first, as a recreate, and the healthy one waits behind the one unavailable slot
+    events:
+      - spec.revision: {annotations: {release: two}}
+  - tick: 6
+    note: the dark pod is gone and Phase B renders its replacement at the target revision
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}
+  - tick: 7
+    note: the replacement reports Ready and enters rotation, so the dark Instance is Ready on the target and the healthy Instance's in-place patch may start
+    events:
+      - pod.ready[target]: {pod: {index: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 1}}
+  - tick: 8
+    note: the healthy Instance's source leaves rotation for the patch
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 9
+    note: the patched pod reports Ready and returns to rotation on the target revision, so every Instance is on the target and the roll is complete
+    events:
+      - pod.ready[target]: {pod: {index: 0}}
+      - endpoint.rotationIn[target]: {pod: {index: 0}}

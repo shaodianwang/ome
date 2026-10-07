@@ -841,6 +841,16 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 				return UpdateSelection{}, 0, fmt.Errorf("workload.Reconcile: resolve update mechanism (instance=%d): %w", inst.Index, ferr)
 			}
 			recreateFallback = fallback || workloadops.SurgeHasNoSource(row)
+			// A step that replaces no container cannot restore a pod set dark
+			// on readiness, so such an in-place start runs as a recreate and
+			// is consulted as the drain-first start it is.
+			if !recreateFallback && strategy == types.UpdateStrategyInPlaceIfPossible {
+				running, rerr := snapshot.RunningRevisionPodSpec(ctx, inst.Index)
+				if rerr != nil {
+					return UpdateSelection{}, 0, fmt.Errorf("workload.Reconcile: resolve update mechanism (instance=%d): %w", inst.Index, rerr)
+				}
+				recreateFallback = workloadops.InPlaceCannotRestore(running, input.DesiredSpec.PodSpec, pods, input.Now(), input.StuckPodGrace)
+			}
 		}
 		mechanism := strategy
 		if recreateFallback {

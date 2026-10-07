@@ -151,7 +151,7 @@ transitions:
   - id: T-ready-recreate
     from: Ready
     event: spec.revision
-    guard: strategy RecreatePod, or an in-place strategy whose diff is not image-only or whose Instance is multi-pod, with the unavailability budget and the gate admitting
+    guard: strategy RecreatePod, or an in-place strategy whose diff is not image-only or whose Instance is multi-pod, or InPlaceIfPossible over a pod set dark on readiness with a diff that replaces no container, with the unavailability budget and the gate admitting
     to: Update/Drain
     effects: [Incarnation bumped, Phase Updating with the Drain step and the revision-pair cause recorded, source serving gate off]
     decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go

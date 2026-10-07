@@ -183,6 +183,30 @@ func PodSetOutOfRotation(pods []*corev1.Pod) bool {
 	return live > 0
 }
 
+// PodSetDarkOnReadiness reports whether a non-empty pod set is dark on its
+// kubelet readiness alone: every live routed pod runs with ContainersReady
+// False for the stuck-pod grace (ContainersUnreadyPastGrace), whatever its
+// serving gate reads. It is the reading for a pod set a pass has already
+// drained, which PodSetServesNothing no longer tells from the drain. A gang
+// reads its routed members alone, as PodSetServesNothing does.
+func PodSetDarkOnReadiness(pods []*corev1.Pod, now time.Time, grace time.Duration) bool {
+	live, routed := 0, 0
+	for _, pod := range pods {
+		if pod == nil || pod.DeletionTimestamp != nil {
+			continue
+		}
+		live++
+		if query.IsTerminalPod(pod) || !query.RoutedRunner(pod) {
+			continue
+		}
+		routed++
+		if !ContainersUnreadyPastGrace(pod, now, grace) {
+			return false
+		}
+	}
+	return live > 0 && routed > 0
+}
+
 // PodSetUnavailableOnParkedMember reports whether a pod set is out of
 // the coordination gate's serving count because a member is out of
 // service: fewer than desired live pods are in rotation, and a live pod

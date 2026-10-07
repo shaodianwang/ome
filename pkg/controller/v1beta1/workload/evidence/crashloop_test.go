@@ -545,3 +545,39 @@ func TestPodSetOutOfRotation(t *testing.T) {
 		})
 	}
 }
+
+// TestPodSetDarkOnReadiness pins the set reading a pass takes over pods it
+// may itself have drained: every live routed pod running with its kubelet
+// readiness failing for the grace reads dark, gate on or off; a pod in
+// rotation, one inside its grace, an empty set and a set of workers alone
+// do not.
+func TestPodSetDarkOnReadiness(t *testing.T) {
+	grace := time.Minute
+	worker := func(pod *corev1.Pod) *corev1.Pod {
+		if pod.Labels == nil {
+			pod.Labels = map[string]string{}
+		}
+		pod.Labels[query.LabelRunner] = "worker"
+		return pod
+	}
+	for _, tc := range []struct {
+		name string
+		pods []*corev1.Pod
+		want bool
+	}{
+		{name: "promoted pod dark", pods: []*corev1.Pod{unreadyAfterServingPod("engine-0-default-0", tNow.Add(-2*time.Minute))}, want: true},
+		{name: "drained pod dark", pods: []*corev1.Pod{runningNotReadyPod("engine-0-default-0", tNow.Add(-2*time.Minute))}, want: true},
+		{name: "gang leader dark beside a serving worker", pods: []*corev1.Pod{
+			unreadyAfterServingPod("engine-0-leader-0", tNow.Add(-2*time.Minute)), worker(servingPod("engine-0-worker-0"))}, want: true},
+		{name: "inside the grace", pods: []*corev1.Pod{unreadyAfterServingPod("engine-0-default-0", tNow.Add(-10*time.Second))}},
+		{name: "serving", pods: []*corev1.Pod{servingPod("engine-0-default-0")}},
+		{name: "workers alone", pods: []*corev1.Pod{worker(runningNotReadyPod("engine-0-worker-0", tNow.Add(-2*time.Minute)))}},
+		{name: "empty", pods: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := evidence.PodSetDarkOnReadiness(tc.pods, tNow, grace); got != tc.want {
+				t.Fatalf("PodSetDarkOnReadiness = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

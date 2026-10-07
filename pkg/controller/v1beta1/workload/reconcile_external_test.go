@@ -12827,3 +12827,210 @@ func TestCrashBeforePromotion_DisposedRollAttemptFollowsItsPods(t *testing.T) {
 		})
 	}
 }
+
+// ensureRevisionWithMeta is ensureRevision with the pod template's own
+// metadata folded into the hash: a metadata-only edit mints a revision an
+// in-place step lands by patching the pod, replacing no container.
+func (h *recoveryHarness) ensureRevisionWithMeta(spec *corev1.PodSpec, meta *metav1.ObjectMeta) *appsv1.ControllerRevision {
+	h.t.Helper()
+	var workerSpec *corev1.PodSpec
+	if h.multiPod {
+		workerSpec = spec.DeepCopy()
+	}
+	cr, _, err := revision.EnsureControllerRevisionWithWorker(
+		h.ctx, h.c, h.c, h.isvc,
+		v1beta1.SchemeGroupVersion.WithKind("InferenceService"),
+		h.revisionKey(), spec, workerSpec, meta, nil, h.isvc.UID,
+	)
+	if err != nil {
+		h.t.Fatalf("EnsureControllerRevision: %v", err)
+	}
+	if cr.CreationTimestamp.IsZero() {
+		cr.CreationTimestamp = metav1.NewTime(h.clk.Now())
+		if err := h.c.Update(h.ctx, cr); err != nil {
+			h.t.Fatalf("stamp ControllerRevision creation: %v", err)
+		}
+	}
+	return cr
+}
+
+// pushMetadataRevision publishes a revision that differs from the running
+// template by the pod's release annotation alone and points the loop at
+// it: the push an in-place step lands by patching metadata.
+func (h *recoveryHarness) pushMetadataRevision(release string) *appsv1.ControllerRevision {
+	h.t.Helper()
+	meta := &metav1.ObjectMeta{Annotations: map[string]string{"release": release}}
+	rev := h.ensureRevisionWithMeta(h.podSpec(goodImage), meta)
+	h.setTarget(rev, goodImage)
+	h.desired.PodTemplateObjectMeta = meta
+	return rev
+}
+
+// livePodOnRevision reports whether a live pod carries rev's hash label.
+func (h *recoveryHarness) livePodOnRevision(rev *appsv1.ControllerRevision) bool {
+	hash := query.RevisionOf(rev).Hash()
+	for _, pod := range h.livePods() {
+		if pod.Labels[query.LabelRevisionHash] == hash {
+			return true
+		}
+	}
+	return false
+}
+
+// TestReconcile_MetadataPushOverADarkInstance_InPlaceStepRecreatesIt: four
+// Instances serve v1 under InPlaceIfPossible with maxUnavailable 1, and
+// the highest Instance's promoted pod has failed readiness past the
+// stuck-pod grace while its row stays Ready. A push that changes the pod
+// template's metadata alone is a diff an in-place step patches without
+// replacing a container, which would leave that pod exactly as dark as it
+// found it with the one unavailable slot spent on the wait. The roll takes
+// the dark Instance first as a recreate: its pod is replaced at the target
+// and serves again, the peers are patched in place after it within the
+// budget, and the roll completes with every Instance serving on the new
+// revision; no repair opens under policy None. Standalone and listed in a
+// rollout group whose gate waives an in-place start.
+//
+// Cells: instance/Ready/pod.runningNotReady[source]/boundary@T-ready-recreate, instance/Ready/spec.revision/boundary@T-ready-recreate, instance/Update/InPlace/timer.stuckPodGrace/before
+func TestReconcile_MetadataPushOverADarkInstance_InPlaceStepRecreatesIt(t *testing.T) {
+	const replicas = 4
+	for _, shape := range []struct {
+		name  string
+		gated bool
+	}{{"standalone", false}, {"rolling group", true}} {
+		t.Run(shape.name, func(t *testing.T) {
+			h, victim := unreadyVictimHarness(t, workloadtypes.RestartPolicyNone, workloadtypes.UpdateStrategyInPlaceIfPossible, 0, 1, replicas)
+			if shape.gated {
+				consults := 0
+				h.gate = rollingGroupGate(h, replicas, 0, 1, &consults)
+			}
+			h.clk.Step(h.stuckGrace)
+			h.events = nil
+			before := map[int32]string{}
+			for idx := int32(0); idx < replicas; idx++ {
+				before[idx] = podUIDsOf(h.podsOf(idx))
+			}
+			rev := h.pushMetadataRevision("two")
+			var firstLanded []int32
+			invariant := func() {
+				if h.repairInFlight() || h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+					h.dumpState("repair")
+					t.Fatalf("a repair opened on the dark Instance under policy None: %v", h.events)
+				}
+				if n := escalation.CurrentUnavailableInFlight(h.irStatuses()); n > 1 {
+					h.dumpState("budget")
+					t.Fatalf("%d Instances offline for the roll, budget 1", n)
+				}
+				if n := h.servingInstances(); n < replicas-2 {
+					h.dumpState("floor")
+					t.Fatalf("%d Instances in rotation, floor %d", n, replicas-2)
+				}
+				if firstLanded != nil {
+					return
+				}
+				if landed := h.landedOn(rev); len(landed) > 0 {
+					firstLanded = landed
+					for peer := int32(0); peer < victim; peer++ {
+						if !h.untouchedOn(peer, h.revV1) {
+							h.dumpState("first landing")
+							t.Fatalf("instance %d was rolled before the dark instance %d landed (landed %v)", peer, victim, landed)
+						}
+					}
+				}
+			}
+			if !h.runWithInvariant(100, func() bool { return h.settledOn(rev, replicas) }, invariant) {
+				h.dumpState("roll")
+				t.Fatalf("the roll never completed over the dark Instance; last hold %+v", h.lastHold())
+			}
+			if firstLanded == nil || firstLanded[0] != victim {
+				t.Fatalf("instances landed first = %v, want the dark instance %d", firstLanded, victim)
+			}
+			if podUIDsOf(h.podsOf(victim)) == before[victim] {
+				t.Fatalf("instance %d keeps its dark pod: a patch that replaces no container cannot restore it", victim)
+			}
+			for peer := int32(0); peer < victim; peer++ {
+				if podUIDsOf(h.podsOf(peer)) != before[peer] {
+					t.Fatalf("instance %d was rebuilt; a serving peer is patched in place", peer)
+				}
+			}
+			if n := h.servingInstances(); n != replicas {
+				h.dumpState("after the roll")
+				t.Fatalf("%d Instances serve after the roll, want %d", n, replicas)
+			}
+			if !h.sawEvent(workloadtypes.EventReasonInPlaceUpdateNotPossible) {
+				t.Fatalf("the fallback to recreate must be announced: %v", h.events)
+			}
+		})
+	}
+}
+
+// TestRollback_AtTheLastStepOfAMetadataRollOverADarkInstance_Lands: the
+// metadata push above, rolled back once every Instance but one has landed
+// it. The dark Instance was replaced first, so the roll reaches that step
+// instead of stalling on it; the rollback settles every Instance on the
+// starting revision with no pod of the new revision left and the capacity
+// floor held. With the readiness cause lifted by the replacement the
+// Instance serves on the start; with the cause outliving every pod of the
+// Instance, each fresh set serves and goes dark again, and the row ends
+// Ready with its serving count below its pod count, held behind by nothing.
+//
+// Cells: instance/Ready/pod.runningNotReady[source]/after@T-ready-recreate, instance/Ready/pod.runningNotReady[source]/after@T-ready-rollback-recreate, instance/Ready/spec.revision/before
+func TestRollback_AtTheLastStepOfAMetadataRollOverADarkInstance_Lands(t *testing.T) {
+	const replicas = 4
+	for _, cause := range []struct {
+		name string
+		kept bool
+	}{{"cause lifted with the pod", false}, {"cause kept", true}} {
+		t.Run(cause.name, func(t *testing.T) {
+			h, victim := unreadyVictimHarness(t, workloadtypes.RestartPolicyNone, workloadtypes.UpdateStrategyInPlaceIfPossible, 0, 1, replicas)
+			h.clk.Step(h.stuckGrace)
+			h.events = nil
+			passAt := h.clk.Now()
+			invariant := func() {
+				readAt := passAt
+				passAt = h.clk.Now()
+				if cause.kept {
+					h.keepReadinessCause(victim)
+				}
+				if h.repairInFlight() || h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+					h.dumpState("repair")
+					t.Fatalf("a repair opened on the dark Instance: %v", h.events)
+				}
+				if n := h.servingInstances(); n < replicas-2 {
+					h.dumpState("floor")
+					t.Fatalf("%d Instances in rotation, floor %d", n, replicas-2)
+				}
+				if holdNamesInstance(h.verdict, victim) && !h.unreadyInsideGraceAt(victim, readAt) {
+					h.dumpState("held on the dark Instance")
+					t.Fatalf("the roll is held on the dark Instance %d: %q", victim, h.verdict.Reason)
+				}
+			}
+			rev := h.pushMetadataRevision("two")
+			if !h.runWithInvariant(120, func() bool { return int32(len(h.landedOn(rev))) >= replicas-1 }, invariant) {
+				h.dumpState("roll")
+				t.Fatalf("the roll never reached its last step; last hold %+v", h.lastHold())
+			}
+
+			h.setTarget(h.revV1, goodImage)
+			landed := func() bool {
+				if !h.settledOn(h.revV1, replicas) {
+					return false
+				}
+				row := h.instance(victim)
+				if cause.kept {
+					return row != nil && row.ServingPodCount < row.PodCount && row.ReadyPodCount < row.PodCount
+				}
+				return h.servingInstances() == replicas
+			}
+			if !h.runWithInvariant(120, landed, invariant) {
+				h.dumpState("after the rollback")
+				t.Fatalf("the rollback did not settle on %s; victim = %+v", h.revV1.Name, h.instance(victim))
+			}
+			if h.livePodOnRevision(rev) {
+				t.Fatalf("a pod of the rolled-back revision is still alive after the rollback settled")
+			}
+			if cause.kept && h.instanceServes(victim) {
+				t.Fatalf("instance %d serves while its cause stays", victim)
+			}
+		})
+	}
+}

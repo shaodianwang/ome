@@ -1,0 +1,77 @@
+tick=1 note cold start on v1 materializes both Instances
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4ad645bd started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#2{type=Create step=CreatePods target=svc-a-engine-4ad645bd started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=4ad645bd incarnation=1 ordinal=0
+tick=1 event Normal InstanceCreated OMENative component=engine instance=1 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-1-default-0 revision=4ad645bd incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note both pods become Ready and enter rotation
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 pod status-patch name=svc-a-engine-1-default-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-4ad645bd readySince=t+0s op=nil precondition=ok
+tick=2 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-4ad645bd readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=2 event Normal InstanceReady OMENative component=engine instance=1 is Ready (1 pod(s) serving)
+tick=2 pass result=none
+tick=3 note the second Instance's pod stops passing readiness while it keeps running, and leaves rotation
+tick=3 apply pod.containersNotReady[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=3 apply endpoint.rotationOut[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=3 hold cleared
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=after:5s
+tick=4 note the pod has been unready for the stuck-pod grace; the row stays Ready with its serving count down and nothing rebuilds it under policy None
+tick=4 apply clock.advance by=2m0s now=t+2m0s
+tick=4 hold cleared
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pass result=after:5s
+tick=5 note the template's annotations change, a diff an in-place step patches without replacing a container; the dark Instance is taken first, as a recreate, and the healthy one waits behind the one unavailable slot
+tick=5 apply spec.revision annotations=[release:two] generation=1 now=t+2m0s
+tick=5 row=1 write no-op precondition=no-change
+tick=5 event Warning InPlaceUpdateNotPossible OMENative component=engine instance=1 has failed readiness for the stuck-pod grace and the in-place update to revision svc-a-engine-1039264b replaces no container; recreating instead
+tick=5 row=1 write incarnation=2 phase=Updating runningRevision=svc-a-engine-4ad645bd targetRevision=svc-a-engine-1039264b readySince=t+0s op=op#3{type=Update step=Drain target=svc-a-engine-1039264b reason=revision svc-a-engine-4ad645bd -> svc-a-engine-1039264b strategy=RecreatePod started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} precondition=ok
+tick=5 event Normal RecreateUpdateStarted OMENative component=engine instance=1 recreate (revision svc-a-engine-4ad645bd -> svc-a-engine-1039264b, incarnation=2)
+tick=5 pod status-patch name=svc-a-engine-1-default-0 serving=True→False
+tick=5 pod delete name=svc-a-engine-1-default-0 grace=default
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note the dark pod is gone and Phase B renders its replacement at the target revision
+tick=6 apply pod.deleted[source] pod=svc-a-engine-1-default-0 now=t+2m0s
+tick=6 row=1 write no-op precondition=no-change
+tick=6 pod create name=svc-a-engine-1-default-0 revision=1039264b incarnation=2 ordinal=0
+tick=6 hold cleared
+tick=6 pass result=after:5s
+tick=7 note the replacement reports Ready and enters rotation, so the dark Instance is Ready on the target and the healthy Instance's in-place patch may start
+tick=7 apply pod.ready[target] pod=svc-a-engine-1-default-0 now=t+2m0s
+tick=7 apply endpoint.rotationIn[target] pod=svc-a-engine-1-default-0 now=t+2m0s
+tick=7 row=1 write no-op precondition=no-change
+tick=7 pod status-patch name=svc-a-engine-1-default-0 serving=absent→True
+tick=7 row=1 write incarnation=2 phase=Ready runningRevision=svc-a-engine-1039264b readySince=t+2m0s op=nil precondition=ok
+tick=7 event Normal RecreateUpdateCompleted OMENative component=engine instance=1 recreate to revision svc-a-engine-1039264b complete
+tick=7 hold cleared
+tick=7 pass result=after:3s
+tick=8 note the healthy Instance's source leaves rotation for the patch
+tick=8 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=8 gate consult strategy=InPlaceIfPossible surge=0 unavail=0 verdict=allow
+tick=8 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-4ad645bd targetRevision=svc-a-engine-1039264b readySince=t+0s op=op#4{type=Update step=InPlace target=svc-a-engine-1039264b strategy=InPlaceIfPossible started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} precondition=ok
+tick=8 event Normal InPlaceUpdateStarted OMENative component=engine instance=0 in-place update to revision svc-a-engine-1039264b
+tick=8 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=8 pod patch name=svc-a-engine-0-default-0 annotations=[release:one→two]
+tick=8 pod patch name=svc-a-engine-0-default-0 labels=[ome.io/revision-hash:4ad645bd→1039264b]
+tick=8 hold cleared
+tick=8 pass result=after:5s
+tick=9 note the patched pod reports Ready and returns to rotation on the target revision, so every Instance is on the target and the roll is complete
+tick=9 apply pod.ready[target] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=9 apply endpoint.rotationIn[target] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=9 row=0 write no-op precondition=no-change
+tick=9 pod status-patch name=svc-a-engine-0-default-0 serving=False→True
+tick=9 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-1039264b readySince=t+2m0s op=nil precondition=ok
+tick=9 event Normal InPlaceUpdateCompleted OMENative component=engine instance=0 in-place update to revision svc-a-engine-1039264b complete
+tick=9 hold cleared
+tick=9 pass result=requeue

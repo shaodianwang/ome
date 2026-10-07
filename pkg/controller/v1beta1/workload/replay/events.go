@@ -909,8 +909,8 @@ func invalidPodSpec(resource, name string) error {
 // and the two are spelled apart so a scenario says which kind of edit it
 // is making.
 func applySpecRevision(ctx context.Context, d *driver, ev TimelineEvent) (string, error) {
-	if ev.Args.Image == "" && ev.Args.Env == nil {
-		return "", fmt.Errorf("replay: spec.revision needs a template edit: the new image, the new env, or both")
+	if ev.Args.Image == "" && ev.Args.Env == nil && ev.Args.Annotations == nil {
+		return "", fmt.Errorf("replay: spec.revision needs a template edit: the new image, the new env, the new annotations, or several")
 	}
 	detail := ""
 	if ev.Args.Image != "" {
@@ -920,6 +920,10 @@ func applySpecRevision(ctx context.Context, d *driver, ev TimelineEvent) (string
 	if ev.Args.Env != nil {
 		d.spec.Env = ev.Args.Env
 		detail += "env=" + renderEnv(ev.Args.Env) + " "
+	}
+	if ev.Args.Annotations != nil {
+		d.spec.PodAnnotations = ev.Args.Annotations
+		detail += "annotations=" + renderMap(ev.Args.Annotations) + " "
 	}
 	if err := d.bumpGeneration(ctx); err != nil {
 		return "", err

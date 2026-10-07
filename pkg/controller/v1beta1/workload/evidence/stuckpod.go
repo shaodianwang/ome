@@ -91,6 +91,25 @@ func PodUnreadyPastGrace(pod *corev1.Pod, now time.Time, grace time.Duration) bo
 	return unready && now.Sub(since) >= grace
 }
 
+// ContainersUnreadyPastGrace reports whether a live Running pod's kubelet
+// readiness has been failing for at least grace: ContainersReady False
+// since then, whatever the serving gate reads. A pass that drains a pod
+// turns its gate off, so this is how a drained pod's break is still told
+// from the drain. No grace configured means no such window.
+func ContainersUnreadyPastGrace(pod *corev1.Pod, now time.Time, grace time.Duration) bool {
+	if grace <= 0 || pod == nil || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type != corev1.ContainersReady {
+			continue
+		}
+		return cond.Status == corev1.ConditionFalse && !cond.LastTransitionTime.IsZero() &&
+			now.Sub(cond.LastTransitionTime.Time) >= grace
+	}
+	return false
+}
+
 // UnreadyGraceLeft is how much of grace a promoted unready pod has left before
 // PodUnreadyPastGrace reads it as dark, zero once past or for any other pod.
 // The grace ending raises no event, so a pass that read it owes itself the wait.

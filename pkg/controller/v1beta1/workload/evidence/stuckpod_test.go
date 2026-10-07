@@ -464,3 +464,46 @@ func TestUnreadyGraceLeft(t *testing.T) {
 		})
 	}
 }
+
+// TestContainersUnreadyPastGrace pins the gate-agnostic reading: a running
+// pod whose kubelet readiness has failed for the grace reads unready
+// whether its serving gate is on, as a promoted break leaves it, or off,
+// as a drain leaves it; inside the grace, with no grace, serving, deleting,
+// terminal or with Ready alone withdrawn it does not.
+func TestContainersUnreadyPastGrace(t *testing.T) {
+	grace := time.Minute
+	nodeLost := servingPod("engine-0-default-0")
+	for i := range nodeLost.Status.Conditions {
+		if nodeLost.Status.Conditions[i].Type == corev1.PodReady {
+			nodeLost.Status.Conditions[i].Status = corev1.ConditionFalse
+			nodeLost.Status.Conditions[i].LastTransitionTime = metav1.NewTime(tNow.Add(-2 * time.Minute))
+		}
+	}
+	deleting := unreadyAfterServingPod("engine-0-default-0", tNow.Add(-2*time.Minute))
+	ts := metav1.NewTime(tNow)
+	deleting.DeletionTimestamp = &ts
+	terminal := unreadyAfterServingPod("engine-0-default-0", tNow.Add(-2*time.Minute))
+	terminal.Status.Phase = corev1.PodFailed
+	for _, tc := range []struct {
+		name  string
+		pod   *corev1.Pod
+		grace time.Duration
+		want  bool
+	}{
+		{name: "promoted, unready past the grace", pod: unreadyAfterServingPod("engine-0-default-0", tNow.Add(-2*time.Minute)), grace: grace, want: true},
+		{name: "drained, unready past the grace", pod: runningNotReadyPod("engine-0-default-0", tNow.Add(-2*time.Minute)), grace: grace, want: true},
+		{name: "unready inside the grace", pod: unreadyAfterServingPod("engine-0-default-0", tNow.Add(-30*time.Second)), grace: grace},
+		{name: "no grace configured", pod: unreadyAfterServingPod("engine-0-default-0", tNow.Add(-2*time.Minute))},
+		{name: "node stopped reporting", pod: nodeLost, grace: grace},
+		{name: "serving", pod: servingPod("engine-0-default-0"), grace: grace},
+		{name: "deleting", pod: deleting, grace: grace},
+		{name: "terminal", pod: terminal, grace: grace},
+		{name: "nil", pod: nil, grace: grace},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := evidence.ContainersUnreadyPastGrace(tc.pod, tNow, tc.grace); got != tc.want {
+				t.Fatalf("ContainersUnreadyPastGrace = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

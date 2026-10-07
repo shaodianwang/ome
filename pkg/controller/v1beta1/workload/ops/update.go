@@ -220,6 +220,23 @@ func UpdateWithPods(ctx context.Context, deps workload.Deps, input workload.Reco
 		plan.UpdateStrategy.Type = workload.UpdateStrategyRecreatePod
 	}
 
+	// InPlaceIfPossible patches where the patch can do the work. A step
+	// that replaces no container cannot bring a pod that fails readiness
+	// back into rotation, so over a pod set dark on readiness the roll
+	// replaces the set at the target; a patch already in flight moves to
+	// the Drain step on the same operation, as it does when its pod is lost.
+	if mode == updateModeInPlace && strategy == workload.UpdateStrategyInPlaceIfPossible &&
+		InPlaceCannotRestore(runningSpec, targetSpec, pods, input.Now(), input.StuckPodGrace) {
+		if _, err := status.StampRecreateFromInPlace(ctx, input, inst.Index, target.Name); err != nil {
+			return false, fmt.Errorf("re-resolve in-place roll over a dark pod set to recreate (instance=%d): %w", inst.Index, err)
+		}
+		workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonInPlaceUpdateNotPossible,
+			"OMENative %s has failed readiness for the stuck-pod grace and the in-place update to revision %s replaces no container; recreating instead",
+			workload.InstanceKey(input.Key.Component, inst.Index), target.Name)
+		mode = updateModeRecreate
+		plan.UpdateStrategy.Type = workload.UpdateStrategyRecreatePod
+	}
+
 	// Status stamping is per-mode: recreate bumps Incarnation atomically
 	// with the Updating transition; in-place must NOT bump (same
 	// materialization); surge advances ActiveOrdinal (single-pod) or
@@ -313,6 +330,25 @@ func InPlaceFallsBackToRecreate(strategy workload.UpdateStrategyType, multiPod b
 		return !inPlaceEligible(runningSpec, target), nil
 	}
 	return false, nil
+}
+
+// InPlaceCannotRestore reports whether an in-place step has nothing that
+// could return the Instance's pods to rotation: its diff against the
+// running revision replaces no container, every live pod already runs the
+// target images, and the pod set is dark on its kubelet readiness
+// (evidence.PodSetDarkOnReadiness). Such a patch leaves readiness exactly
+// as it found it, so the step could only wait out its deadline; the roll
+// replaces the set at the target instead, as it does when the pod is gone.
+func InPlaceCannotRestore(running, target *corev1.PodSpec, pods []*corev1.Pod, now time.Time, grace time.Duration) bool {
+	if target == nil || len(evidence.ChangedContainerImages(running, target)) > 0 {
+		return false
+	}
+	for _, pod := range pods {
+		if len(imagePatchTargets(pod, target)) > 0 {
+			return false
+		}
+	}
+	return evidence.PodSetDarkOnReadiness(pods, now, grace)
 }
 
 // chooseUpdateModeForInstance is chooseUpdateMode with the fallback rule

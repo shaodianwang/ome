@@ -3141,3 +3141,62 @@ func TestPlan_Update_DarkInstanceOnTheTargetHoldsNoSlot(t *testing.T) {
 		}
 	}
 }
+
+// TestPlan_Update_InPlaceStartOverADarkPodIsAFallbackRecreate: a fresh
+// InPlaceIfPossible start whose diff against the running revision replaces
+// no container, over an Instance whose pod has failed readiness for the
+// stuck-pod grace, is selected as a fallback recreate: the mechanism the
+// admission consults, since the patch would leave the pod as dark as it
+// found it. A diff that changes the image keeps the in-place mechanism,
+// because the kubelet's restart is what the step waits on, and so does a
+// pod still inside its grace.
+//
+// Cells: instance/Ready/pod.runningNotReady[source]/boundary@T-ready-recreate, instance/Ready/spec.revision/boundary@T-ready-inplace
+func TestPlan_Update_InPlaceStartOverADarkPodIsAFallbackRecreate(t *testing.T) {
+	target := updateTarget()
+	const grace = time.Minute
+	cases := []struct {
+		name         string
+		runningImage string
+		unreadyFor   time.Duration
+		recreate     bool
+	}{
+		{"metadata diff over a dark pod", "test:v1", 2 * grace, true},
+		{"image diff over a dark pod", "test:v0", 2 * grace, false},
+		{"metadata diff inside the grace", "test:v1", grace / 4, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := minimalInput(t)
+			forbidMutations(t, &in)
+			in.StuckPodGrace = grace
+			in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: 1, ServingPodCount: 0, RunningRevision: crashLoopRepairRevision},
+			}
+			plan := types.ComponentPlan{
+				Component: types.ComponentEngine,
+				Replicas:  1,
+				UpdateStrategy: types.UpdateStrategy{
+					Type:          types.UpdateStrategyInPlaceIfPossible,
+					RollingUpdate: &types.RollingUpdate{MaxSurge: intOrStringInt(0), MaxUnavailable: intOrStringInt(1)},
+				},
+				Instances: []types.InstancePlan{
+					{Index: 0, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+				},
+			}
+			running := in.DesiredSpec.PodSpec.DeepCopy()
+			running.Containers[0].Image = tc.runningImage
+			dark := unreadyEnginePod(0, tc.unreadyFor)
+			dark.Spec.Containers[0].Image = tc.runningImage
+			d := planTargetOrFail(t, in, plan, target, planSnapshotWithRevisions(in,
+				map[int32][]*corev1.Pod{0: {dark}}, map[string]*corev1.PodSpec{crashLoopRepairRevision: running}))
+			ua := findAction(d, workload.ActionUpdate)
+			if ua == nil || len(ua.Update.Items) != 1 || !ua.Update.Items[0].StartingFresh {
+				t.Fatalf("want the one fresh start on Instance 0; actions = %v", actionKinds(d))
+			}
+			if got := ua.Update.Items[0].RecreateFallback; got != tc.recreate {
+				t.Fatalf("RecreateFallback = %v, want %v", got, tc.recreate)
+			}
+		})
+	}
+}

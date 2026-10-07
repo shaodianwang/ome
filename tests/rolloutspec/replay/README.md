@@ -354,8 +354,10 @@ from what it says.
 
 - `spec.revision` edits the pod template: `image:` rewrites the container
   image (the in-place-eligible diff), `env:` rewrites its environment (a
-  diff the in-place strategies refuse), and an edit must name at least one
-  of them.
+  diff the in-place strategies refuse), `annotations:` rewrites the pod
+  template's annotations with ones the hasher reads as intent (a diff an
+  in-place step patches without replacing a container), and an edit must
+  name at least one of them.
 - `spec.annotationOnly` rewrites the pod template's `labels:` and
   `annotations:` (`initial.spec.podLabels` / `podAnnotations` seed them)
   with an edit the revision hasher derives rather than reads as intent —

@@ -334,8 +334,9 @@ type EventArgs struct {
 	// template edit a spec.revision makes when the edit is not an image
 	// rewrite.
 	Env map[string]string `json:"env,omitempty"`
-	// Labels and Annotations rewrite the pod template's metadata, the
-	// edit spec.annotationOnly makes.
+	// Labels and Annotations rewrite the pod template's metadata: the
+	// edit spec.annotationOnly makes, or, for an annotation the hasher
+	// reads as intent, the template edit a spec.revision makes.
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 	// Verb and Resource scope an injected apiserver rejection; RetryAfter
@@ -470,7 +471,7 @@ var eventArgKeys = map[string][]string{
 	"api.throttled":            {"verb", "resource", "count", "retryAfter"},
 	"api.namespaceTerminating": {"verb", "resource", "count"},
 	"api.conflict":             {"verb", "resource", "count", "write"},
-	"spec.revision":            {"image", "env"},
+	"spec.revision":            {"image", "env", "annotations"},
 	"spec.annotationOnly":      {"labels", "annotations"},
 	"spec.strategy":            {"strategy"},
 	"spec.replicasUp":          {"to"},
