@@ -525,13 +525,11 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		if err := status.StampSurgeDrainStep(ctx, input, inst.Index); err != nil {
 			return false, fmt.Errorf("transition surge step to drain (instance=%d): %w", inst.Index, err)
 		}
-		for _, pod := range oldPods {
-			if !podreadiness.IsServing(pod) {
-				continue
-			}
-			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterUpdateSurgeDrain, surgeDrainKey(inst.Index, newOrdinal)); err != nil {
-				return false, fmt.Errorf("mark old not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
-			}
+		// The flip reads the pass's pod list, which the stuck-pod sweep
+		// ran ahead of: a source it force-deleted is out of rotation
+		// already and is skipped like any pod that has gone.
+		if _, err := unroutePodsUnder(ctx, deps, oldPods, podreadiness.WriterUpdateSurgeDrain, surgeDrainKey(inst.Index, newOrdinal)); err != nil {
+			return false, fmt.Errorf("mark old not serving (instance=%d): %w", inst.Index, err)
 		}
 		// Live drain check via per-revision routed Service — the
 		// headless slice would lie because of PublishNotReadyAddresses.

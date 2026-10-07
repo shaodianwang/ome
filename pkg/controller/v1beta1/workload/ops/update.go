@@ -1320,19 +1320,26 @@ func CleanupWreckage(ctx context.Context, deps workload.Deps, input workload.Rec
 }
 
 // unrouteServingPods takes the pods of idx that are still in rotation out of
-// it, ahead of a deletion the caller issues on a later pass: deleting in the
-// pass that unrouted gives the endpoint controllers no window to act on the
-// withdrawal, and a bare delete drops the connections the pod carries. A pod
-// that has vanished, or come back under a new UID, is out of rotation by
-// other means already. Reports whether any pod left rotation this pass.
+// it under the delete-drain key, ahead of a deletion the caller issues on a
+// later pass: deleting in the pass that unrouted gives the endpoint
+// controllers no window to act on the withdrawal, and a bare delete drops
+// the connections the pod carries. Reports whether any pod left rotation
+// this pass.
 func unrouteServingPods(ctx context.Context, deps workload.Deps, idx int32, pods []*corev1.Pod) (bool, error) {
+	return unroutePodsUnder(ctx, deps, pods, podreadiness.WriterDeleteDrain, deleteDrainKey(idx))
+}
+
+// unroutePodsUnder takes every pod of pods still in rotation out of it under
+// the caller's writer key. A pod already terminating, one that has vanished,
+// or one that came back under a new UID is out of rotation by other means
+// already and is left alone. Reports whether any pod left rotation this pass.
+func unroutePodsUnder(ctx context.Context, deps workload.Deps, pods []*corev1.Pod, writer, key string) (bool, error) {
 	unrouted := false
 	for _, pod := range pods {
 		if pod == nil || pod.DeletionTimestamp != nil || !podreadiness.IsServing(pod) {
 			continue
 		}
-		if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod,
-			podreadiness.WriterDeleteDrain, deleteDrainKey(idx)); err != nil {
+		if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod, writer, key); err != nil {
 			if !apierrors.IsNotFound(err) && !errors.Is(err, podreadiness.ErrPodIdentityChanged) {
 				return false, fmt.Errorf("%s/%s: %w", pod.Namespace, pod.Name, err)
 			}

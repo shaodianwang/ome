@@ -4035,3 +4035,90 @@ func TestSurgeUpdate_DrainGateHoldsTheSourceUntilAllowed(t *testing.T) {
 		t.Fatalf("an admitted drain must move the row to Step=SurgeDrain, got %q", got)
 	}
 }
+
+// TestSurgeUpdate_DrainFlipToleratesASourceTheSweepRemoved: the stuck-pod
+// sweep runs over the pass's pod list ahead of the surge step, and the
+// surge is then handed that same list. A source wedged Terminating on a
+// dead node is force-deleted by the sweep, and a replacement that clears
+// the promote bar on the same pass takes the step to the drain, whose flip
+// meets a source already gone. A pod that is terminating or has vanished
+// is out of rotation by other means, so the flip leaves it alone and the
+// pass runs on without error; the next pass promotes the replacement.
+//
+// Cells: instance/Update/Surge/pod.ready[target]/boundary@T-surge-force-clock
+func TestSurgeUpdate_DrainFlipToleratesASourceTheSweepRemoved(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// stage returns the source as the pass lists it and arranges for
+		// the API to have lost it by the time the flip reads it back.
+		stage func(t *testing.T, f *midSurgeFixture, in *workload.ReconcileInput) *corev1.Pod
+	}{
+		{
+			name: "the sweep force-deletes the source wedged on a dead node",
+			stage: func(t *testing.T, f *midSurgeFixture, in *workload.ReconcileInput) *corev1.Pod {
+				t.Helper()
+				if err := f.client.Create(context.Background(), fdNodeUnreachable("dead-node", 10*time.Minute)); err != nil {
+					t.Fatalf("seed dead node: %v", err)
+				}
+				in.ForceDelete = fdPolicy()
+				// The listed source is Terminating past its grace on the
+				// dead node; the stored object carries no deletionTimestamp,
+				// which is how the fake client shows a pod the apiserver has
+				// not collected.
+				stuck := f.sourcePod.DeepCopy()
+				dt := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+				stuck.DeletionTimestamp = &dt
+				stuck.Spec.NodeName = "dead-node"
+				return stuck
+			},
+		},
+		{
+			name: "the source vanished between the list and the flip",
+			stage: func(t *testing.T, f *midSurgeFixture, _ *workload.ReconcileInput) *corev1.Pod {
+				t.Helper()
+				listed := f.sourcePod.DeepCopy()
+				if err := f.client.Delete(context.Background(), f.sourcePod); err != nil {
+					t.Fatalf("lose the source: %v", err)
+				}
+				return listed
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMidSurgeFixture(t, workload.UpdateStepSurge, true /* surgeReady */, true /* sourceServing */)
+			in := legacyTestInput(f.isvc, f.client, workload.ComponentEngine)
+			in.ObservedState.UpdateRevision = f.targetCR.Name
+			source := tc.stage(t, f, &in)
+			replacement, alive := f.livePod(t, f.surgePod)
+			if !alive {
+				t.Fatalf("fixture: the replacement is gone")
+			}
+			plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
+			deps := workload.Deps{Client: f.client, Recorder: record.NewFakeRecorder(16)}
+
+			done, err := UpdateWithPods(context.Background(), deps, in, plan, plan.Instances[0],
+				f.targetCR, f.targetSpec, []*corev1.Pod{source, replacement})
+			if err != nil {
+				t.Fatalf("UpdateWithPods: %v (a source already gone must not fail the drain flip)", err)
+			}
+			if done {
+				t.Fatalf("done: got true want false (the promote reads the source gone on the next pass)")
+			}
+			if _, alive := f.livePod(t, f.sourcePod); alive {
+				t.Fatalf("the source is still in the API after the pass")
+			}
+			row := legacyInstanceStatusesOnIR(f.client, f.isvc, workload.ComponentEngine)[0]
+			if row.Operation == nil || row.Operation.Step != workload.UpdateStepSurgeDrain {
+				t.Fatalf("step: got %+v want the drain step", row.Operation)
+			}
+			if fresh, _ := f.livePod(t, f.surgePod); !podreadiness.IsServing(fresh) {
+				t.Fatalf("the replacement must keep serving across the flip")
+			}
+
+			got := runSurgePass(t, f, nil)
+			if !got.done || got.phase != v1beta1.OMENativeInstanceReady || got.activeOrdinal != 1 || !got.targetAlive || !got.targetServing {
+				t.Fatalf("next pass: got %+v want the replacement promoted at ordinal 1", got)
+			}
+		})
+	}
+}

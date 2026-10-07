@@ -671,9 +671,9 @@ cells:
     event: pod.terminating
     variants: [source]
     outcome: defer
-    note: the promote waits on an EMPTY source pod set and LiveListPodsForInstance in pkg/controller/v1beta1/workload/query/discover.go still returns a terminating pod, so a deletion in flight holds the pair
+    note: the promote waits on an EMPTY source pod set and LiveListPodsForInstance in pkg/controller/v1beta1/workload/query/discover.go still returns a terminating pod, so a deletion in flight holds the pair; the drain flip leaves a terminating member to its exit, as it does one gone since the list, and takes only the members still in rotation out of it
     placement: kind
-    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-source-terminating-holds-promote]}
+    coverage: {perm: [], unit: [TestGangSurgeDrain_SkipsSourceMembersAlreadyOutOfRotation], kind: [], replay: [gang-target-source-terminating-holds-promote]}
     status: current
   # GAP: a doomed replacement member is counted as present and healthy.
   - state: Update/GangSurgeTarget

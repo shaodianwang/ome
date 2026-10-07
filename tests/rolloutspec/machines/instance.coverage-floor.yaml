@@ -2,5 +2,5 @@
 # never up. Lower a number when rows gain coverage or are decided, and
 # refresh set_on. TestCoverageFloorHolds in tests/rolloutspec enforces it.
 uncovered: 203
-undecided: 1662
+undecided: 1661
 set_on: "2026-10-06"

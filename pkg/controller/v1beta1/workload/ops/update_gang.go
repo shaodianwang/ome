@@ -351,15 +351,10 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 	}
 	if len(sourcePods) > 0 {
 		// Remove the source from rotation before deletion so termination grace
-		// does not leave both generations serving.
-		for _, pod := range sourcePods {
-			if !podreadiness.IsServing(pod) {
-				continue
-			}
-			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod,
-				podreadiness.WriterUpdateSurgeDrain, gangSurgeDrainKey(sourceIdx)); err != nil {
-				return false, fmt.Errorf("drain source gang pod %s: %w", pod.Name, err)
-			}
+		// does not leave both generations serving; a member already on its
+		// way out, or gone since the list, is out of rotation by other means.
+		if _, err := unroutePodsUnder(ctx, deps, sourcePods, podreadiness.WriterUpdateSurgeDrain, gangSurgeDrainKey(sourceIdx)); err != nil {
+			return false, fmt.Errorf("drain source gang pod %w", err)
 		}
 		// Flipping the gate only starts the drain: the endpoint controller has
 		// to publish the withdrawal before kube-proxy stops routing. Deleting

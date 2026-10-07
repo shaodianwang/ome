@@ -6,6 +6,10 @@ arrows:
   - T-ready-inplaceonly-reject
 cells:
   - instance/Ready/pod.deleted[source]/boundary@T-ready-inplaceonly-reject
+intentional: >-
+  a push the strategy refuses withholds nothing: the loss is yielded to
+  the refused roll every pass and no pod is rebuilt at the running
+  revision, so the Instance stays podless until a corrective push
 initial:
   spec:
     replicas: 1

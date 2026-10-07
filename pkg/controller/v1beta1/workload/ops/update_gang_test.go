@@ -17,6 +17,7 @@ import (
 	clocktesting "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -3257,5 +3258,127 @@ func TestGangSurge_PromotionRebindsPendingMovesToTheReplacement(t *testing.T) {
 	}
 	if rebound != 1 {
 		t.Errorf("one event names the rebound move; got %d in %v", rebound, events)
+	}
+}
+
+// TestGangSurgeDrain_SkipsSourceMembersAlreadyOutOfRotation: the source
+// gang's drain flip reads the members it listed, and a member can be out
+// of rotation before the flip writes: already terminating, or gone between
+// the list and the write. Such a member is left alone instead of failing
+// the pass, and the members still in rotation are taken out of it as
+// before.
+//
+// Cells: instance/Update/GangSurgeTarget/pod.terminating[source]/before
+func TestGangSurgeDrain_SkipsSourceMembersAlreadyOutOfRotation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// leave takes the source leader out of rotation by other means and
+		// returns the pod as the pass lists it.
+		leave func(t *testing.T, c client.Client, leader *corev1.Pod) *corev1.Pod
+		// gone is true when the leader is no longer in the API.
+		gone bool
+	}{
+		{
+			name: "a member already terminating is left to its exit",
+			leave: func(t *testing.T, c client.Client, leader *corev1.Pod) *corev1.Pod {
+				t.Helper()
+				return terminatingPod(t, c, leader)
+			},
+		},
+		{
+			name: "a member gone between the list and the flip",
+			gone: true,
+			leave: func(t *testing.T, c client.Client, leader *corev1.Pod) *corev1.Pod {
+				t.Helper()
+				listed := &corev1.Pod{}
+				if err := c.Get(context.Background(), client.ObjectKeyFromObject(leader), listed); err != nil {
+					t.Fatalf("re-read leader: %v", err)
+				}
+				if err := c.Delete(context.Background(), listed); err != nil {
+					t.Fatalf("lose the leader: %v", err)
+				}
+				return listed
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			legacyResetExpectations(t)
+			isvc, _ := surgeISVCReady("llama-70b", "prod", 1)
+			plan := gangSurgePlan()
+			v1Name := "llama-70b-engine-rev-v1hash"
+			v2Name := "llama-70b-engine-rev-v2hash"
+			v1Hash := query.RevisionHashFromControllerRevisionName(v1Name)
+			v2Hash := query.RevisionHashFromControllerRevisionName(v2Name)
+
+			base := legacyNewFakeClient(t, isvc, gangSurgeInFlightIR(isvc, v1Name, v2Name))
+			makeCR(t, base, isvc, v2Name)
+			leader := gangPodAt(isvc, 0, "leader", v1Hash, true, true)
+			worker := gangPodAt(isvc, 0, "worker", v1Hash, true, true)
+			for _, pod := range []*corev1.Pod{leader, worker} {
+				if err := base.Create(context.Background(), pod); err != nil {
+					t.Fatalf("seed source gang pod %s: %v", pod.Name, err)
+				}
+			}
+			for _, runner := range []string{"leader", "worker"} {
+				p := gangPodAt(isvc, 1, runner, v2Hash, true, true)
+				p.Status.Conditions = append(p.Status.Conditions, corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionTrue})
+				if err := base.Create(context.Background(), p); err != nil {
+					t.Fatalf("seed replacement gang pod %s: %v", runner, err)
+				}
+			}
+			listed := tc.leave(t, base, leader)
+			// The pass lists the source gang itself; a member gone since is
+			// still in that list, as a pod the API lost after the list is.
+			c := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+				List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if err := cl.List(ctx, list, opts...); err != nil {
+						return err
+					}
+					if pods, ok := list.(*corev1.PodList); ok && tc.gone {
+						for _, p := range pods.Items {
+							if p.Name == worker.Name {
+								pods.Items = append(pods.Items, *listed.DeepCopy())
+								break
+							}
+						}
+					}
+					return nil
+				},
+			})
+			// An outstanding expectation holds the pass at the post-drain gate,
+			// so the flip is observable on the worker before its deletion.
+			workload.DefaultExpectations.ExpectDeletes("prod", "llama-70b", workload.ComponentEngine, 0, 1)
+
+			input := gangInputWithRemove(isvc, c)
+			v2 := &appsv1.ControllerRevision{}
+			if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: v2Name}, v2); err != nil {
+				t.Fatalf("get v2 CR: %v", err)
+			}
+			done, err := surgeUpdate(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], v2, nil)
+			if err != nil {
+				t.Fatalf("gang surge drain pass: %v (a member already out of rotation must not fail the flip)", err)
+			}
+			if done {
+				t.Fatalf("done: got true want false (the source is still draining)")
+			}
+
+			fresh := &corev1.Pod{}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(worker), fresh); err != nil {
+				t.Fatalf("re-read worker: %v", err)
+			}
+			if podreadiness.IsServing(fresh) {
+				t.Fatalf("the worker, still in rotation, must be taken out of it by the flip")
+			}
+			if tc.gone {
+				return
+			}
+			left := &corev1.Pod{}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(leader), left); err != nil {
+				t.Fatalf("the terminating leader must be left to its exit: %v", err)
+			}
+			if !podreadiness.IsServing(left) {
+				t.Fatalf("a member already terminating is out of rotation by its exit; its gate is not rewritten")
+			}
+		})
 	}
 }
