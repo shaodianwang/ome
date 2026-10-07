@@ -72,7 +72,12 @@ func DeleteBatch(
 	if input.OwnerObject == nil || input.OwnerObject.GetUID() == "" {
 		return DeleteBatchResult{}, fmt.Errorf("DeleteBatch: owner with UID is required")
 	}
-	selection, err := selectDeleteBatch(input.ObservedState.InstanceStatuses, extras, podsByInstance, input.ScaleDownPodBatchSize)
+	footprint := workload.ScaleDownPodFootprint(input.ObservedState.InstanceStatuses, podsByInstance)
+	budget, err := workload.ResolveScaleDownPodBatchSize(input.ScaleDownPodBatchSize, footprint)
+	if err != nil {
+		return DeleteBatchResult{}, fmt.Errorf("DeleteBatch: resolve scale-down Pod batch size: %w", err)
+	}
+	selection, err := selectDeleteBatch(input.ObservedState.InstanceStatuses, extras, podsByInstance, budget)
 	if err != nil {
 		return DeleteBatchResult{}, err
 	}
@@ -89,14 +94,20 @@ func DeleteBatch(
 	admittedInstances := 0
 	defer func() {
 		budgetValue := any("unbounded")
+		if budget != nil {
+			budgetValue = *budget
+		}
+		configuredBudget := any("unbounded")
 		if input.ScaleDownPodBatchSize != nil {
-			budgetValue = *input.ScaleDownPodBatchSize
+			configuredBudget = input.ScaleDownPodBatchSize.String()
 		}
 		logf.FromContext(ctx).Info("OMENative scale-down wave",
 			"namespace", input.Key.Namespace,
 			"isvc", input.Key.OwnerName,
 			"component", plan.Component,
 			"podBudget", budgetValue,
+			"configuredPodBudget", configuredBudget,
+			"podFootprint", footprint,
 			"activePodCost", result.SelectedPodCost,
 			"activeInstances", len(selection.candidates),
 			"admittedInstances", admittedInstances,

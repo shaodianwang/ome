@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
@@ -112,9 +114,9 @@ type Reconciler struct {
 	// compatibility behavior when the field is absent.
 	ScaleUpPodBatchSize *int32
 	// ScaleDownPodBatchSize is the startup-validated active delete budget in
-	// Pod-equivalent units. It is immutable for the manager process lifetime;
-	// nil preserves unbounded candidate selection when the field is absent.
-	ScaleDownPodBatchSize *int32
+	// Pod-equivalent units, as a count or percentage of the current Component.
+	// It is immutable for the manager process lifetime; nil is unbounded.
+	ScaleDownPodBatchSize *intstr.IntOrString
 	// ScaleDownRequeueInterval is the startup-validated poll cadence for an
 	// active delete wave. Zero disables cadence polling; watches and configured
 	// lifecycle deadlines still schedule progress.
@@ -987,6 +989,21 @@ func (r *Reconciler) reconcileStaleSinglePodGroups(
 	if podsByInstance == nil {
 		podsByInstance = query.BucketPodsByInstanceIdx(input.AuthoritativePods.Pods)
 	}
+	footprint := workloadtypes.ScaleDownPodFootprint(input.ObservedState.InstanceStatuses, podsByInstance)
+	statusIndices := make(map[int32]struct{}, len(input.ObservedState.InstanceStatuses))
+	for _, row := range input.ObservedState.InstanceStatuses {
+		statusIndices[row.Index] = struct{}{}
+	}
+	for _, group := range groups {
+		_, hasStatus := statusIndices[group.index]
+		if !hasStatus && len(podsByInstance[group.index]) == 0 && footprint < math.MaxInt32 {
+			footprint++
+		}
+	}
+	budget, err := workloadtypes.ResolveScaleDownPodBatchSize(input.ScaleDownPodBatchSize, footprint)
+	if err != nil {
+		return false, fmt.Errorf("InferenceReplica reconciler: resolve stale PodGroup cleanup budget: %w", err)
+	}
 	pending := int32(0)
 	for _, entry := range inventory.OwnedEntries() {
 		if entry.PodGroup.DeletionTimestamp != nil || inventory.DeleteAccepted(entry.Name) {
@@ -1009,7 +1026,7 @@ func (r *Reconciler) reconcileStaleSinglePodGroups(
 		if len(podsByInstance[group.index]) > 0 {
 			continue
 		}
-		if input.ScaleDownPodBatchSize != nil && pending+deleted >= *input.ScaleDownPodBatchSize {
+		if budget != nil && pending+deleted >= *budget {
 			blocked = true
 			continue
 		}

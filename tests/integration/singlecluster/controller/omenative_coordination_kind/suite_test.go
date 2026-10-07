@@ -6,11 +6,14 @@ package omenative_coordination_kind
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"testing"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -56,6 +59,18 @@ func setupOMENativeCoordinationManager(ctx context.Context, mgr ctrl.Manager) er
 		configMap.Data = map[string]string{}
 	}
 	configMap.Data[controllerconfig.LifecycleConfigName] = kindLifecycleConfig
+	if policy := os.Getenv("OME_TEST_SCALE_DOWN_POD_BATCH_SIZE"); policy != "" {
+		var lifecycle map[string]any
+		if err := json.Unmarshal([]byte(kindLifecycleConfig), &lifecycle); err != nil {
+			return err
+		}
+		lifecycle["scaleDownPodBatchSize"] = intstr.Parse(policy)
+		data, err := json.Marshal(lifecycle)
+		if err != nil {
+			return err
+		}
+		configMap.Data[controllerconfig.LifecycleConfigName] = string(data)
+	}
 	if err := directClient.Update(ctx, configMap); err != nil {
 		return err
 	}

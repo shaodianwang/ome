@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/intstr"
+
 	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -127,7 +129,7 @@ func TestDeleteBatchAdmissionCommitsBeforeEffects(t *testing.T) {
 	store := newDeleteMutationStore(owner, statuses)
 	budget := int32(2)
 	input := deleteBatchInput(owner, statuses)
-	input.ScaleDownPodBatchSize = &budget
+	input.ScaleDownPodBatchSize = ptr.To(intstr.FromInt32(budget))
 	input.ApplyInstanceMutationsWithRetryBlock = store.apply
 
 	result, err := DeleteBatch(context.Background(), workload.Deps{Client: c, Expectations: workload.NewExpectations()},
@@ -439,7 +441,7 @@ func TestDeleteBatchAdmissionMetricsRequireConfirmedCommit(t *testing.T) {
 	plan := deleteBatchPlan()
 	plan.Component = component
 	budget := int32(1)
-	input.ScaleDownPodBatchSize = &budget
+	input.ScaleDownPodBatchSize = ptr.To(intstr.FromInt32(budget))
 	pods := map[int32][]*corev1.Pod{4: deleteSelectionPods(4, 2)}
 	client := fake.NewClientBuilder().WithScheme(deleteBatchScheme(t)).Build()
 
@@ -1278,107 +1280,133 @@ func TestDeleteBatchWithoutPollReturnsForceDeleteEvidenceReadError(t *testing.T)
 }
 
 func TestDeleteBatchHighScaleBudgetBoundsEffectsAndUsesOneDrainObservation(t *testing.T) {
-	const replicas = int32(2000)
-	const budget = int32(100)
-	owner := deleteBatchOwner()
-	started := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
-	statuses := make([]workload.InstanceStatus, 0, replicas)
-	pods := make(map[int32][]*corev1.Pod, replicas)
-	endpoints := make([]discoveryv1.Endpoint, 0, replicas)
-	for index := int32(0); index < replicas; index++ {
-		statuses = append(statuses, deleteOwnedStatus(index, started))
-		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-			Namespace: "prod",
-			Name:      fmt.Sprintf("pod-%04d", index),
-			UID:       types.UID(fmt.Sprintf("pod-%04d-uid", index)),
-			Labels:    map[string]string{query.LabelRevisionHash: "rev-scale"},
-		}}
-		pods[index] = []*corev1.Pod{pod}
-		endpoints = append(endpoints, deleteFailureEndpoint(pod, false))
-	}
-	service := query.PerRevisionServiceName("llama", workload.ComponentEngine, "rev-scale")
-	slice := deleteFailureSlice("prod", "rev-scale-slice", service, endpoints...)
-	base := newDeleteFailureBaseClient(t, slice)
-	c := &deleteFailureClient{Client: base}
-	c.deleteHook = func(context.Context, client.Object, ...client.DeleteOption) error { return nil }
-	reads := &deleteFailureReader{Reader: base}
-	store := newDeleteMutationStore(owner, statuses)
-	input := deleteBatchInput(owner, statuses)
-	input.ScaleDownPodBatchSize = ptr.To(budget)
-	input.ApplyInstanceMutationsWithRetryBlock = store.apply
+	for _, test := range []struct {
+		name   string
+		policy intstr.IntOrString
+		want   int32
+	}{
+		{name: "absolute", policy: intstr.FromInt32(100), want: 100},
+		{name: "ten percent", policy: intstr.FromString("10%"), want: 200},
+		{name: "quarter", policy: intstr.FromString("25%"), want: 500},
+		{name: "whole Component", policy: intstr.FromString("100%"), want: 2000},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const replicas = int32(2000)
+			budget := test.want
+			owner := deleteBatchOwner()
+			started := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+			statuses := make([]workload.InstanceStatus, 0, replicas)
+			pods := make(map[int32][]*corev1.Pod, replicas)
+			endpoints := make([]discoveryv1.Endpoint, 0, replicas)
+			for index := int32(0); index < replicas; index++ {
+				statuses = append(statuses, deleteOwnedStatus(index, started))
+				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Namespace: "prod",
+					Name:      fmt.Sprintf("pod-%04d", index),
+					UID:       types.UID(fmt.Sprintf("pod-%04d-uid", index)),
+					Labels:    map[string]string{query.LabelRevisionHash: "rev-scale"},
+				}}
+				pods[index] = []*corev1.Pod{pod}
+				endpoints = append(endpoints, deleteFailureEndpoint(pod, false))
+			}
+			service := query.PerRevisionServiceName("llama", workload.ComponentEngine, "rev-scale")
+			slice := deleteFailureSlice("prod", "rev-scale-slice", service, endpoints...)
+			base := newDeleteFailureBaseClient(t, slice)
+			c := &deleteFailureClient{Client: base}
+			c.deleteHook = func(context.Context, client.Object, ...client.DeleteOption) error { return nil }
+			reads := &deleteFailureReader{Reader: base}
+			store := newDeleteMutationStore(owner, statuses)
+			input := deleteBatchInput(owner, statuses)
+			input.ScaleDownPodBatchSize = &test.policy
+			input.ApplyInstanceMutationsWithRetryBlock = store.apply
 
-	result, err := DeleteBatch(context.Background(), workload.Deps{
-		Client: c, APIReader: reads, Expectations: workload.NewExpectations(),
-	}, input, deleteBatchPlan(), nil, pods)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.SelectedPodCost != budget || result.Deferred != int(replicas-budget) || !result.InProgress {
-		t.Fatalf("result = %+v", result)
-	}
-	if reads.endpointSliceLists != 1 || reads.serviceGets != 0 {
-		t.Fatalf("drain reads = slices:%d services:%d, want 1/0", reads.endpointSliceLists, reads.serviceGets)
-	}
-	if got := len(c.deleteCalls); got != int(budget) {
-		t.Fatalf("Pod delete calls = %d, want %d", got, budget)
-	}
-	for index := int32(0); index < replicas-budget; index++ {
-		if slices.Contains(c.deleteCalls, fmt.Sprintf("pod-%04d", index)) {
-			t.Fatalf("deferred Pod %04d received a delete effect", index)
-		}
-	}
-	if store.writes != 0 {
-		t.Fatalf("resuming an owned wave wrote status %d times", store.writes)
+			result, err := DeleteBatch(context.Background(), workload.Deps{
+				Client: c, APIReader: reads, Expectations: workload.NewExpectations(),
+			}, input, deleteBatchPlan(), nil, pods)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.SelectedPodCost != budget || result.Deferred != int(replicas-budget) || !result.InProgress {
+				t.Fatalf("result = %+v", result)
+			}
+			if reads.endpointSliceLists != 1 || reads.serviceGets != 0 {
+				t.Fatalf("drain reads = slices:%d services:%d, want 1/0", reads.endpointSliceLists, reads.serviceGets)
+			}
+			if got := len(c.deleteCalls); got != int(budget) {
+				t.Fatalf("Pod delete calls = %d, want %d", got, budget)
+			}
+			for index := int32(0); index < replicas-budget; index++ {
+				if slices.Contains(c.deleteCalls, fmt.Sprintf("pod-%04d", index)) {
+					t.Fatalf("deferred Pod %04d received a delete effect", index)
+				}
+			}
+			if store.writes != 0 {
+				t.Fatalf("resuming an owned wave wrote status %d times", store.writes)
+			}
+		})
 	}
 }
 
 func TestDeleteBatchHighScaleFreshAdmissionWritesOnceBeforeEffects(t *testing.T) {
-	const replicas = int32(2000)
-	const budget = int32(100)
-	owner := deleteBatchOwner()
-	statuses := make([]workload.InstanceStatus, 0, replicas)
-	extras := make([]int32, 0, replicas-1)
-	pods := make(map[int32][]*corev1.Pod, replicas)
-	for index := int32(0); index < replicas; index++ {
-		statuses = append(statuses, workload.InstanceStatus{Index: index, Incarnation: 1, Phase: workload.InstancePhaseReady})
-		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: fmt.Sprintf("pod-%04d", index)}}
-		pods[index] = []*corev1.Pod{pod}
-		if index > 0 {
-			extras = append(extras, index)
-		}
-	}
-	base := newDeleteFailureBaseClient(t)
-	c := &deleteFailureClient{Client: base}
-	reads := &deleteFailureReader{Reader: base}
-	store := newDeleteMutationStore(owner, statuses)
-	input := deleteBatchInput(owner, statuses)
-	input.ScaleDownPodBatchSize = ptr.To(budget)
-	input.ApplyInstanceMutationsWithRetryBlock = store.apply
+	for _, test := range []struct {
+		name   string
+		policy intstr.IntOrString
+		want   int32
+	}{
+		{name: "absolute", policy: intstr.FromInt32(100), want: 100},
+		{name: "ten percent", policy: intstr.FromString("10%"), want: 200},
+		{name: "quarter", policy: intstr.FromString("25%"), want: 500},
+		{name: "whole Component", policy: intstr.FromString("100%"), want: 1999},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const replicas = int32(2000)
+			budget := test.want
+			owner := deleteBatchOwner()
+			statuses := make([]workload.InstanceStatus, 0, replicas)
+			extras := make([]int32, 0, replicas-1)
+			pods := make(map[int32][]*corev1.Pod, replicas)
+			for index := int32(0); index < replicas; index++ {
+				statuses = append(statuses, workload.InstanceStatus{Index: index, Incarnation: 1, Phase: workload.InstancePhaseReady})
+				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: fmt.Sprintf("pod-%04d", index)}}
+				pods[index] = []*corev1.Pod{pod}
+				if index > 0 {
+					extras = append(extras, index)
+				}
+			}
+			base := newDeleteFailureBaseClient(t)
+			c := &deleteFailureClient{Client: base}
+			reads := &deleteFailureReader{Reader: base}
+			store := newDeleteMutationStore(owner, statuses)
+			input := deleteBatchInput(owner, statuses)
+			input.ScaleDownPodBatchSize = &test.policy
+			input.ApplyInstanceMutationsWithRetryBlock = store.apply
 
-	result, err := DeleteBatch(context.Background(), workload.Deps{
-		Client: c, APIReader: reads, Expectations: workload.NewExpectations(),
-	}, input, deleteBatchPlan(), extras, pods)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result.ImmediateRequeue || result.SelectedPodCost != budget || result.Deferred != 1899 {
-		t.Fatalf("result = %+v", result)
-	}
-	if store.writes != 1 || len(store.mutations) != 1 || store.mutations[0] != int(budget) {
-		t.Fatalf("status commits/mutations = %d/%v, want one 100-Instance admission", store.writes, store.mutations)
-	}
-	for index := int32(0); index < replicas; index++ {
-		status := store.statuses[index]
-		selected := index >= replicas-budget
-		if selected && (status.Phase != workload.InstancePhaseDeleting || status.Operation == nil || status.Operation.Type != workload.InstanceOperationDelete) {
-			t.Fatalf("selected Instance %d was not admitted: %+v", index, status)
-		}
-		if !selected && (status.Phase != workload.InstancePhaseReady || status.Operation != nil) {
-			t.Fatalf("retained/deferred Instance %d was mutated: %+v", index, status)
-		}
-	}
-	if len(c.deleteCalls) != 0 || reads.endpointSliceLists != 0 || reads.serviceGets != 0 {
-		t.Fatalf("admission external effects: deletes=%d slices=%d services=%d", len(c.deleteCalls), reads.endpointSliceLists, reads.serviceGets)
+			result, err := DeleteBatch(context.Background(), workload.Deps{
+				Client: c, APIReader: reads, Expectations: workload.NewExpectations(),
+			}, input, deleteBatchPlan(), extras, pods)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.ImmediateRequeue || result.SelectedPodCost != budget || result.Deferred != int(replicas-1-budget) {
+				t.Fatalf("result = %+v", result)
+			}
+			if store.writes != 1 || len(store.mutations) != 1 || store.mutations[0] != int(budget) {
+				t.Fatalf("status commits/mutations = %d/%v, want one admission for the selected Instances", store.writes, store.mutations)
+			}
+			for index := int32(0); index < replicas; index++ {
+				status := store.statuses[index]
+				selected := index >= replicas-budget
+				if selected && (status.Phase != workload.InstancePhaseDeleting || status.Operation == nil || status.Operation.Type != workload.InstanceOperationDelete) {
+					t.Fatalf("selected Instance %d was not admitted: %+v", index, status)
+				}
+				if !selected && (status.Phase != workload.InstancePhaseReady || status.Operation != nil) {
+					t.Fatalf("retained/deferred Instance %d was mutated: %+v", index, status)
+				}
+			}
+			if len(c.deleteCalls) != 0 || reads.endpointSliceLists != 0 || reads.serviceGets != 0 {
+				t.Fatalf("admission external effects: deletes=%d slices=%d services=%d", len(c.deleteCalls), reads.endpointSliceLists, reads.serviceGets)
+			}
+		})
 	}
 }
 
@@ -1576,7 +1604,7 @@ func TestDeleteBatchTwoThousandWaveAndWriteBounds(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			waves, passes, writes := driveImmediateDeleteConvergence(t, 1999, test.podCost, 100, test.withPodGroups)
+			waves, passes, writes := driveImmediateDeleteConvergence(t, 1999, test.podCost, intstr.FromInt32(100), test.withPodGroups)
 			if waves != test.wantWaves || passes != test.wantPasses || writes != test.wantWrites {
 				t.Fatalf("waves/passes/writes = %d/%d/%d, want %d/%d/%d",
 					waves, passes, writes, test.wantWaves, test.wantPasses, test.wantWrites)
@@ -1585,7 +1613,48 @@ func TestDeleteBatchTwoThousandWaveAndWriteBounds(t *testing.T) {
 	}
 }
 
-func driveImmediateDeleteConvergence(t *testing.T, instances, podCost int, budgetValue int32, withPodGroups bool) (waves, passes, writes int) {
+func TestDeleteBatchLargePercentageConverges(t *testing.T) {
+	for _, podCost := range []int{1, 8} {
+		t.Run(fmt.Sprintf("%d Pods per Instance", podCost), func(t *testing.T) {
+			waves, passes, writes := driveImmediateDeleteConvergence(t, 2000, podCost, intstr.FromString("25%"), true)
+			if waves >= 40 || writes < 2*waves {
+				t.Fatalf("percentage convergence waves/passes/writes = %d/%d/%d", waves, passes, writes)
+			}
+			t.Logf("2000 Instances, %d Pods each: %d waves, %d passes, %d status writes", podCost, waves, passes, writes)
+		})
+	}
+}
+
+func TestDeleteBatchPercentageKeepsActiveWaveClosed(t *testing.T) {
+	owner := deleteBatchOwner()
+	statuses := []workload.InstanceStatus{
+		{Index: 0, Phase: workload.InstancePhaseReady},
+		{Index: 1, Phase: workload.InstancePhaseReady},
+		deleteOwnedStatus(2, time.Now()),
+	}
+	store := newDeleteMutationStore(owner, statuses)
+	input := deleteBatchInput(owner, statuses)
+	input.ScaleDownPodBatchSize = ptr.To(intstr.FromString("100%"))
+	input.ApplyInstanceMutationsWithRetryBlock = store.apply
+	input.FinalizeInstanceResources = func(context.Context, int32) (bool, error) { return false, nil }
+	pods := map[int32][]*corev1.Pod{0: deleteSelectionPods(0, 1), 1: deleteSelectionPods(1, 1)}
+	base := newDeleteFailureBaseClient(t)
+	c := &deleteFailureClient{Client: base}
+
+	result, err := DeleteBatch(context.Background(), workload.Deps{Client: c, Expectations: workload.NewExpectations()},
+		input, deleteBatchPlan(), []int32{1}, pods)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.InProgress || result.SelectedPodCost != 1 || result.Deferred != 1 || store.writes != 0 || len(c.deleteCalls) != 0 {
+		t.Fatalf("active Podless cleanup admitted fresh work: result=%+v writes=%d deletes=%v", result, store.writes, c.deleteCalls)
+	}
+	if row := store.statuses[1]; row.Operation != nil || row.Phase != workload.InstancePhaseReady {
+		t.Fatalf("deferred Instance was mutated: %+v", row)
+	}
+}
+
+func driveImmediateDeleteConvergence(t *testing.T, instances, podCost int, budgetValue intstr.IntOrString, withPodGroups bool) (waves, passes, writes int) {
 	t.Helper()
 	owner := deleteBatchOwner()
 	statuses := make([]workload.InstanceStatus, 0, instances)
@@ -1648,6 +1717,13 @@ func driveImmediateDeleteConvergence(t *testing.T, instances, podCost int, budge
 		}
 		if fresh {
 			waves++
+			budget, err := workload.ResolveScaleDownPodBatchSize(&budgetValue, workload.ScaleDownPodFootprint(observed, pods))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.SelectedPodCost%int32(podCost) != 0 || (result.SelectedPodCost > *budget && !result.Oversized) {
+				t.Fatalf("wave %d violates Pod budget or gang atomicity: %+v budget=%d", waves, result, *budget)
+			}
 			if !result.ImmediateRequeue {
 				t.Fatalf("wave %d admission did not end the pass: %+v", waves, result)
 			}
@@ -2123,7 +2199,7 @@ func TestDeleteBatchOverdueDrainAnnouncesDeferredRows(t *testing.T) {
 	rec := record.NewFakeRecorder(16)
 	budget := int32(1)
 	input := overdueDrainInput(statuses, now)
-	input.ScaleDownPodBatchSize = &budget
+	input.ScaleDownPodBatchSize = ptr.To(intstr.FromInt32(budget))
 	input.ApplyInstanceMutationsWithRetryBlock = store.apply
 
 	result, err := DeleteBatch(context.Background(),

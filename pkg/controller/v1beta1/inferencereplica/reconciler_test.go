@@ -636,7 +636,7 @@ func TestReconcile_GangScaleDownWaitsForPodGroupAbsence(t *testing.T) {
 	r.APIReader = base
 	r.GangSchedulingAvailable = true
 	budget := int32(2)
-	r.ScaleDownPodBatchSize = &budget
+	r.ScaleDownPodBatchSize = ptr.To(intstr.FromInt32(budget))
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
 
 	result, err := r.Reconcile(context.Background(), req)
@@ -1110,7 +1110,7 @@ func TestReconcile_ScaleDownTwoThousandUsesOneAuthoritativePodList(t *testing.T)
 	reader := &teardownListReader{Reader: base}
 	r.APIReader = reader
 	budget := int32(100)
-	r.ScaleDownPodBatchSize = &budget
+	r.ScaleDownPodBatchSize = ptr.To(intstr.FromInt32(budget))
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
 
 	result, err := r.Reconcile(context.Background(), req)
@@ -1471,63 +1471,67 @@ func TestReconcile_MultiToSinglePodGroupCleanupGatesWorkload(t *testing.T) {
 }
 
 func TestReconcile_MultiToSinglePodGroupCleanupUsesScaleDownBudget(t *testing.T) {
-	const replicas = int32(5)
-	ir := baselineIR("llama-engine", "podgroup-transition-bounded", replicas)
-	ir.Finalizers = []string{TeardownFinalizer}
-	objects := make([]client.Object, 0, replicas+1)
-	objects = append(objects, ir)
-	for index := int32(0); index < replicas; index++ {
-		name := query.PodGroupName(ir.Spec.ParentRef.Name,
-			v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), index)
-		objects = append(objects, ownedPodGroupForIR(ir, name, index))
-	}
-
-	r, base := newReconciler(t, objects...)
-	deleted := make([]string, 0, replicas)
-	r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
-		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-			if pg, ok := obj.(*schedulingv1alpha1.PodGroup); ok {
-				deleted = append(deleted, pg.Name)
+	for _, policy := range []intstr.IntOrString{intstr.FromInt32(2), intstr.FromString("40%")} {
+		t.Run(policy.String(), func(t *testing.T) {
+			const replicas = int32(5)
+			ir := baselineIR("llama-engine", "podgroup-transition-bounded", replicas)
+			ir.Finalizers = []string{TeardownFinalizer}
+			objects := make([]client.Object, 0, replicas+1)
+			objects = append(objects, ir)
+			for index := int32(0); index < replicas; index++ {
+				name := query.PodGroupName(ir.Spec.ParentRef.Name,
+					v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), index)
+				objects = append(objects, ownedPodGroupForIR(ir, name, index))
 			}
-			return c.Delete(ctx, obj, opts...)
-		},
-	})
-	r.APIReader = base
-	r.GangSchedulingAvailable = true
-	budget := int32(2)
-	r.ScaleDownPodBatchSize = &budget
-	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
 
-	for pass, wantRemaining := range []int{3, 1, 0} {
-		before := len(deleted)
-		result, err := r.Reconcile(context.Background(), req)
-		if err != nil {
-			t.Fatalf("cleanup pass %d: %v", pass+1, err)
-		}
-		if result.RequeueAfter != testScaleDownRequeueInterval {
-			t.Fatalf("cleanup pass %d must poll for authoritative absence, got %+v", pass+1, result)
-		}
-		if passDeletes := len(deleted) - before; passDeletes < 1 || passDeletes > int(budget) {
-			t.Fatalf("cleanup pass %d deleted %d PodGroups, want 1..%d", pass+1, passDeletes, budget)
-		}
-		groups := &schedulingv1alpha1.PodGroupList{}
-		if err := base.List(context.Background(), groups, client.InNamespace(ir.Namespace)); err != nil {
-			t.Fatalf("cleanup pass %d list PodGroups: %v", pass+1, err)
-		}
-		if len(groups.Items) != wantRemaining {
-			t.Fatalf("cleanup pass %d remaining PodGroups = %d, want %d", pass+1, len(groups.Items), wantRemaining)
-		}
-		stored := &v1beta1.InferenceReplica{}
-		if err := base.Get(context.Background(), client.ObjectKeyFromObject(ir), stored); err != nil {
-			t.Fatalf("cleanup pass %d get IR: %v", pass+1, err)
-		}
-		if len(stored.Status.InstanceStatuses) != 0 {
-			t.Fatalf("cleanup pass %d admitted workload before stale PodGroups were absent: %+v",
-				pass+1, stored.Status.InstanceStatuses)
-		}
-	}
-	if len(deleted) != int(replicas) {
-		t.Fatalf("deleted PodGroups = %d, want %d", len(deleted), replicas)
+			r, base := newReconciler(t, objects...)
+			deleted := make([]string, 0, replicas)
+			r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					if pg, ok := obj.(*schedulingv1alpha1.PodGroup); ok {
+						deleted = append(deleted, pg.Name)
+					}
+					return c.Delete(ctx, obj, opts...)
+				},
+			})
+			r.APIReader = base
+			r.GangSchedulingAvailable = true
+			budget := int32(2)
+			r.ScaleDownPodBatchSize = &policy
+			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+
+			for pass, wantRemaining := range []int{3, 1, 0} {
+				before := len(deleted)
+				result, err := r.Reconcile(context.Background(), req)
+				if err != nil {
+					t.Fatalf("cleanup pass %d: %v", pass+1, err)
+				}
+				if result.RequeueAfter != testScaleDownRequeueInterval {
+					t.Fatalf("cleanup pass %d must poll for authoritative absence, got %+v", pass+1, result)
+				}
+				if passDeletes := len(deleted) - before; passDeletes < 1 || passDeletes > int(budget) {
+					t.Fatalf("cleanup pass %d deleted %d PodGroups, want 1..%d", pass+1, passDeletes, budget)
+				}
+				groups := &schedulingv1alpha1.PodGroupList{}
+				if err := base.List(context.Background(), groups, client.InNamespace(ir.Namespace)); err != nil {
+					t.Fatalf("cleanup pass %d list PodGroups: %v", pass+1, err)
+				}
+				if len(groups.Items) != wantRemaining {
+					t.Fatalf("cleanup pass %d remaining PodGroups = %d, want %d", pass+1, len(groups.Items), wantRemaining)
+				}
+				stored := &v1beta1.InferenceReplica{}
+				if err := base.Get(context.Background(), client.ObjectKeyFromObject(ir), stored); err != nil {
+					t.Fatalf("cleanup pass %d get IR: %v", pass+1, err)
+				}
+				if len(stored.Status.InstanceStatuses) != 0 {
+					t.Fatalf("cleanup pass %d admitted workload before stale PodGroups were absent: %+v",
+						pass+1, stored.Status.InstanceStatuses)
+				}
+			}
+			if len(deleted) != int(replicas) {
+				t.Fatalf("deleted PodGroups = %d, want %d", len(deleted), replicas)
+			}
+		})
 	}
 }
 
@@ -1549,7 +1553,7 @@ func TestReconcile_MultiToSinglePodGroupCleanupCountsTerminatingAgainstBudget(t 
 	r.APIReader = c
 	r.GangSchedulingAvailable = true
 	budget := int32(2)
-	r.ScaleDownPodBatchSize = &budget
+	r.ScaleDownPodBatchSize = ptr.To(intstr.FromInt32(budget))
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
 
 	for pass := 1; pass <= 2; pass++ {

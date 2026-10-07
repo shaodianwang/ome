@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -105,11 +106,12 @@ type ReconcileInput struct {
 	ScaleUpPodBatchSize *int32
 
 	// ScaleDownPodBatchSize bounds active delete work in Pod-equivalent units.
+	// Percentages resolve against the current Component footprint, rounding up.
 	// Selection remains atomic at the Instance boundary, so a gang is either
 	// selected in full or deferred. The first eligible Instance may exceed a
 	// positive budget and proceeds alone. A nil pointer preserves unbounded
 	// candidate selection. A non-nil zero value fails closed.
-	ScaleDownPodBatchSize *int32
+	ScaleDownPodBatchSize *intstr.IntOrString
 
 	// ScaleDownRequeueInterval is the configured poll cadence while a delete
 	// wave is waiting on drain or resource disappearance. Zero disables cadence

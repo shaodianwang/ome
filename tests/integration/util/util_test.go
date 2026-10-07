@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/intstr"
+
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -94,7 +96,7 @@ var _ = ginkgo.Describe("util.SeedDefaultConfigMaps", func() {
 		lifecycle := &controllerconfig.LifecycleConfig{}
 		Expect(json.Unmarshal([]byte(cm.Data["lifecycle"]), lifecycle)).To(Succeed())
 		Expect(lifecycle.ToScaleUpPodBatchSize()).To(HaveValue(Equal(int32(100))))
-		Expect(lifecycle.ToScaleDownPodBatchSize()).To(HaveValue(Equal(int32(100))))
+		Expect(lifecycle.ToScaleDownPodBatchSize()).To(HaveValue(Equal(intstr.FromInt32(100))))
 		Expect(lifecycle.ToRevisionHistoryLimit()).To(HaveValue(Equal(int32(10))))
 		Expect(lifecycle.ToRetryBlockHistoryLimit()).To(HaveValue(Equal(int32(3))))
 		Expect(lifecycle.GangScheduleTimeout.ToClamp()).To(HaveValue(Equal(workloadtypes.GangScheduleTimeoutClamp{

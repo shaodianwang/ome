@@ -1,0 +1,26 @@
+title: "Percentage scale-down configuration"
+oep-number: "0007.6"
+authors:
+  - "OME contributors"
+status: provisional
+# state: ConfigMap count/percentage pacing; no workload API field.
+creation-date: 2026-09-15
+reviewers:
+  - TBD
+approvers:
+  - TBD
+see-also:
+  - "/oeps/0007.3-bounded-scale-down"
+stage: alpha
+latest-milestone: "TBD"
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+feature-gates: []
+disable-supported: true
+metrics:
+  - ome_omenative_scale_down_batch_pods
+  - ome_omenative_scale_down_active_pods
+  - ome_omenative_scale_down_deferred_instances
+  - ome_omenative_scale_down_oversized_batch_total
