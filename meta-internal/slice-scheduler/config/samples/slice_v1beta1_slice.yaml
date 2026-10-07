@@ -1,0 +1,14 @@
+apiVersion: accelerator.gke.io/v1beta1
+kind: Slice
+metadata:
+  name: slice-sample
+  labels:
+    app.kubernetes.io/name: slice-scheduler
+  annotations:
+    cloud.google.com/managed-by: slice-scheduler
+    cloud.google.com/slice-group-name: my-workload
+    cloud.google.com/num-slices: "1"
+spec:
+  type: v6e
+  topology: 4x4
+  partitionIds: []

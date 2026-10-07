@@ -1,0 +1,13 @@
+apiVersion: accelerator.gke.io/v1beta1
+kind: Slice
+metadata:
+  name: slice-4x4-1
+  annotations:
+    cloud.google.com/slice-priority: "10"
+    cloud.google.com/managed-by: slice-scheduler
+    cloud.google.com/slice-group-name: trillium-lp
+    cloud.google.com/num-slices: "1"
+spec:
+  type: v6e
+  topology: 4x4
+  partitionIds: []

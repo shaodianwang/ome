@@ -1,0 +1,28 @@
+apiVersion: partition.tpu.google.com/v1beta1
+kind: PartitionTree
+metadata:
+  name: pt-node-pool-1
+  labels:
+    cloud.google.com/gke-nodepool: np-t1
+status:
+  root:
+    partitionId: np-t1
+    topology: 4x4x4
+    state: Healthy
+    nodeNames:
+    - kwok-node-1
+    - kwok-node-2
+    - kwok-node-3
+    - kwok-node-4
+    - kwok-node-5
+    - kwok-node-6
+    - kwok-node-7
+    - kwok-node-8
+    - kwok-node-9
+    - kwok-node-10
+    - kwok-node-11
+    - kwok-node-12
+    - kwok-node-13
+    - kwok-node-14
+    - kwok-node-15
+    - kwok-node-16

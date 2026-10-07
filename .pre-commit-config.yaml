@@ -1,4 +1,7 @@
 default_stages: [pre-commit, pre-push, manual]
+# meta-internal/slice-scheduler is a separate Go module kept identical to its
+# external source; hooks leave it as imported.
+exclude: ^meta-internal/slice-scheduler/
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -31,7 +34,8 @@ repos:
             config/crd/.*|
             site/assets/.*\.svg$|
             .*go\.sum$|
-            .*package-lock\.json$
+            .*package-lock\.json$|
+            meta-internal/slice-scheduler/.*
           )$
 
   - repo: local

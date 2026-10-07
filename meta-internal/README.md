@@ -8,8 +8,9 @@ not a working build.
 
 ## The deletion contract
 
-A default build never compiles this tree. Every file here carries the
-`meta_internal` build tag, and the only reference from outside is one
+A default build never compiles this tree. Every OME file here carries the
+`meta_internal` build tag (`slice-scheduler/` is a separate Go module that OME
+never compiles; see below), and the only reference from outside is one
 build-tagged file in the manager's composition root:
 
 ```
@@ -278,3 +279,26 @@ lifecycle can prove that its external overrides were cleaned. An annotation on
 another owner is not treated as a target claim. The same drain rule applies
 before switching between xDS and Gateway API: the selected publisher can
 finalize only journals it owns.
+
+### `slice-scheduler/` — the TPU slice scheduler, as its own module
+
+The controller that assigns TPU partitions to `Slice` objects on
+`PROVISION_ONLY` tpu7x node pools and binds the pods that run on them. OME's
+slice provisioning creates those `Slice` objects; this scheduler places them.
+
+It is a copy of an external repository with its own `go.mod` (module
+`tpu.google.com/slice-scheduler`), chart, Dockerfile and Makefile:
+
+- Go package patterns stop at a module boundary, so `go build ./...`,
+  `go vet ./...`, `make ci-lint`, `make test-no-xet` and
+  `make test-meta-internal` never load it, and it carries no `meta_internal`
+  tag. Deleting the directory changes no OME build.
+- It is kept identical to its source apart from `gofmt`. Codespell and the
+  pre-commit hooks skip it (`.pre-commit-config.yaml`).
+- Build and test it from its own directory:
+
+  ```sh
+  cd meta-internal/slice-scheduler
+  go build ./...
+  go test ./...
+  ```

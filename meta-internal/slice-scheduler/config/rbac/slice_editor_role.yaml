@@ -1,0 +1,27 @@
+# permissions for end users to edit slices.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: slice-scheduler
+    app.kubernetes.io/managed-by: kustomize
+  name: slice-editor-role
+rules:
+- apiGroups:
+  - slice.tpu.google.com
+  resources:
+  - slices
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - slice.tpu.google.com
+  resources:
+  - slices/status
+  verbs:
+  - get

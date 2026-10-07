@@ -1,0 +1,64 @@
+apiVersion: accelerator.gke.io/v1beta1
+kind: Slice
+metadata:
+  name: slice-8x16-1
+  annotations:
+    cloud.google.com/managed-by: slice-scheduler
+    cloud.google.com/slice-group-name: trillium-test
+    cloud.google.com/num-slices: "5"
+spec:
+  type: v6e
+  topology: 8x16
+  partitionIds: []
+---
+apiVersion: accelerator.gke.io/v1beta1
+kind: Slice
+metadata:
+  name: slice-8x16-2
+  annotations:
+    cloud.google.com/managed-by: slice-scheduler
+    cloud.google.com/slice-group-name: trillium-test
+    cloud.google.com/num-slices: "5"
+spec:
+  type: v6e
+  topology: 8x16
+  partitionIds: []
+---
+apiVersion: accelerator.gke.io/v1beta1
+kind: Slice
+metadata:
+  name: slice-8x16-3
+  annotations:
+    cloud.google.com/managed-by: slice-scheduler
+    cloud.google.com/slice-group-name: trillium-test
+    cloud.google.com/num-slices: "5"
+spec:
+  type: v6e
+  topology: 8x16
+  partitionIds: []
+---
+apiVersion: accelerator.gke.io/v1beta1
+kind: Slice
+metadata:
+  name: slice-16x16-1
+  annotations:
+    cloud.google.com/managed-by: slice-scheduler
+    cloud.google.com/slice-group-name: trillium-test
+    cloud.google.com/num-slices: "5"
+spec:
+  type: v6e
+  topology: 16x16
+  partitionIds: []
+---
+apiVersion: accelerator.gke.io/v1beta1
+kind: Slice
+metadata:
+  name: slice-16x16-2
+  annotations:
+    cloud.google.com/managed-by: slice-scheduler
+    cloud.google.com/slice-group-name: trillium-test
+    cloud.google.com/num-slices: "5"
+spec:
+  type: v6e
+  topology: 16x16
+  partitionIds: []

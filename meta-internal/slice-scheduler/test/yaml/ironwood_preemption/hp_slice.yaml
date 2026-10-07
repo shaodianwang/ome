@@ -1,0 +1,13 @@
+apiVersion: accelerator.gke.io/v1beta1
+kind: Slice
+metadata:
+  name: iw-hp-slice-1
+  annotations:
+    cloud.google.com/slice-priority: "30"
+    cloud.google.com/managed-by: slice-scheduler
+    cloud.google.com/slice-group-name: ironwood-hp
+    cloud.google.com/num-slices: "1"
+spec:
+  type: tpu7x
+  topology: 16x24x24
+  partitionIds: []

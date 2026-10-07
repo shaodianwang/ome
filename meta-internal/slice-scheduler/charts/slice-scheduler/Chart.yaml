@@ -1,0 +1,6 @@
+apiVersion: v2
+name: slice-scheduler
+description: Schedules TPU Slices onto PartitionTree partitions with priority, preemption, and multi-cube support
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

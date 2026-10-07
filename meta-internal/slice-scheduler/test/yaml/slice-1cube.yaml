@@ -1,0 +1,12 @@
+apiVersion: accelerator.gke.io/v1beta1
+kind: Slice
+metadata:
+  name: slice-1cube
+  annotations:
+    cloud.google.com/managed-by: slice-scheduler
+    cloud.google.com/slice-group-name: my-workload
+    cloud.google.com/num-slices: "1"
+spec:
+  topology: 4x4x4
+  type: tpu7x
+  partitionIds: []

@@ -1,0 +1,14 @@
+apiVersion: accelerator.gke.io/v1beta1
+kind: Slice
+metadata:
+  generateName: slice-
+  annotations:
+    cloud.google.com/managed-by: slice-scheduler
+    cloud.google.com/slice-group-name: my-workload
+    cloud.google.com/num-slices: "1"
+spec:
+  # Type of the TPU accelerator, e.g., "v6e", "tpu7x"
+  type: v6e
+  # Topology of the TPU slice, e.g., "2x2".
+  topology: 8x8
+  partitionIds: []
