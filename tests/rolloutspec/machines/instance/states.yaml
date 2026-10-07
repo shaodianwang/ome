@@ -395,7 +395,7 @@ states:
     applies: {strategies: [SurgeThenDrain], shape: [gang]}
     planned: true
     decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
-    note: a gang-surge source failed before its replacement was promoted, the operation kept with its SurgeIndex so the abandon path can consume it. The engine resolves this shape to Failed. The row still claims the update verb, so the update pass re-drives it as a continuation - under a pause too, never budget-charged or gated - and the abandon retires the replacement, charges the pinned revision's ladder by the recorded cause, and resets the source to Ready on its running revision; the source's own pods keep serving throughout. A failed pair pins nothing in the plan and competes for the steady budget as one unit
+    note: a gang-surge source failed before its replacement was promoted, the operation kept with its SurgeIndex so the abandon path can consume it. The engine resolves this shape to Failed. The row still claims the update verb, so the update pass re-drives it as a continuation - under a pause too, never budget-charged or gated - and the abandon retires the replacement, charges the pinned revision's ladder by the recorded cause, and resets the source to Ready on its running revision, or to the fresh-start Failed shape when it never ran one; a promoted source's own pods keep serving throughout. A failed pair pins nothing in the plan and competes for the steady budget as one unit
     not_applicable:
       timer.repairRetry: a parked repair's re-arm is measured from a Restart parking at Failed, and this row holds no parked repair
       timer.migrationDeadline: no operation pins this index to a migration record

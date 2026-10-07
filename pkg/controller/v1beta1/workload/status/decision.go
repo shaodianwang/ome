@@ -605,6 +605,47 @@ func ReadyOnRevisionMutation(idx int32, rev string, now time.Time) types.Instanc
 	}}
 }
 
+// AbandonedSurgeSourceMutation resets the source of an abandoned gang
+// surge: Ready on the revision it runs, or the fresh-start Failed shape
+// when it never ran one, since Ready with no revision would count a gang
+// that never served as capacity. LastFailure is kept either way.
+func AbandonedSurgeSourceMutation(idx int32, rev string, now time.Time) types.InstanceMutation {
+	if rev != "" {
+		return ReadyOnRevisionMutation(idx, rev, now)
+	}
+	return types.InstanceMutation{Index: idx, Mutate: func(s *types.InstanceStatus) bool {
+		if s.Phase == "" || AbandonedSurgeSourceSettled(s, rev) {
+			return false
+		}
+		s.Phase = types.InstancePhaseFailed
+		s.TargetRevision = ""
+		s.Operation = nil
+		return true
+	}}
+}
+
+// AbandonedSurgeSourceSettled reports whether the row already reads as
+// the reset of an abandoned surge's source leaves it for rev.
+func AbandonedSurgeSourceSettled(s *types.InstanceStatus, rev string) bool {
+	if s == nil || s.Operation != nil || s.TargetRevision != "" {
+		return false
+	}
+	if rev == "" {
+		return s.Phase == types.InstancePhaseFailed
+	}
+	return s.Phase == types.InstancePhaseReady && s.RunningRevision == rev
+}
+
+// StampAbandonedSurgeSource writes AbandonedSurgeSourceMutation through
+// the single-row seam and prunes rev's RetryBlock when there is one.
+func StampAbandonedSurgeSource(ctx context.Context, input types.ReconcileInput, idx int32, rev string) error {
+	mutation := AbandonedSurgeSourceMutation(idx, rev, input.Now())
+	if err := input.MutateInstance(ctx, mutation.Index, mutation.Mutate); err != nil {
+		return err
+	}
+	return RetryBlockPruneOnPromote(ctx, input, rev)
+}
+
 // StampReadyAtOrdinal is the surge-promote terminator: clears
 // Operation, advances ActiveOrdinal to the new slot, stamps
 // RunningRevision=rev and Phase=Ready. Surge needs the ordinal advance

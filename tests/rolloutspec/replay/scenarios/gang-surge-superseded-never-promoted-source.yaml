@@ -1,0 +1,63 @@
+# A gang surge resumed from persisted status whose source was never
+# promoted: the source row carries the Update/Surge operation with no
+# running revision over a gang that never served, and the replacement
+# index carries the GangSurgeTarget marker. The template then moves on,
+# so the pinned surge is superseded while the replacement is not
+# runtime-ready: the marker takes the cleanup claim, the replacement's
+# members are deleted, and once they are gone the marker is removed and
+# the source is reset. A source that never ran a revision has nothing to
+# be Ready on, so the reset leaves it in the fresh-start Failed shape and
+# the next pass re-enters it as a recreate.
+scenario: gang-surge-superseded-never-promoted-source
+arrows:
+  - T-gangtarget-cleanup-superseded
+  - T-gangcleanup-done
+cells:
+  - instance/Update/Surge/spec.revision/before
+  - instance/Update/GangSurgeTargetCleanup/pod.deleted[target]/before
+intentional: >-
+  the abandon of a superseded gang surge resets a source that has no
+  running revision to the fresh-start Failed shape, never to Ready: a
+  Ready row with no revision would count a gang that never served as
+  capacity
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v2
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - index: 0
+      phase: Updating
+      targetRevision: current
+      operation: {type: Update, step: Surge, strategy: SurgeThenDrain, surgeIndex: 1}
+    - index: 1
+      phase: Creating
+      targetRevision: current
+      operation: {type: Update, step: GangSurgeTarget}
+  pods:
+    - {index: 0, runner: leader, previousImage: registry.example.com/runtime:v1, phase: Pending}
+    - {index: 0, runner: worker, previousImage: registry.example.com/runtime:v1, phase: Pending}
+    - {index: 1, runner: leader, phase: Pending}
+    - {index: 1, runner: worker, phase: Pending}
+timeline:
+  - tick: 1
+    note: the resumed pass announces the PodGroups behind both gangs' members and finds the replacement not yet Ready, so it waits
+  - tick: 2
+    note: the template moves on while the replacement is not runtime-ready, so the pinned surge is superseded; the marker takes the cleanup claim and the replacement's members are deleted
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 3
+    note: the replacement's members are gone, so the marker is removed and the source is reset; it never ran a revision, so it is left in the fresh-start Failed shape with its failure record kept rather than Ready on nothing
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 4
+    note: a pass with nothing new reads the Failed row through its pods; a never-promoted row has no source for a surge to keep, so it re-enters as a recreate at the moved target and its never-served members are drained

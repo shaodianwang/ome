@@ -353,7 +353,7 @@ transitions:
     variant: target
     guard: a failed gang surge source whose replacement pods are gone and whose cleanup marker is claimed
     to: Ready
-    effects: [replacement index finalized and its row removed, source reset to Ready on its running revision, the failed revision's RetryBlock charged toward Held only when the source's LastFailure reason is workload-caused and otherwise entered into Backoff at the current rung with AttemptsStarted unchanged, so no number of environment-caused waves reaches Held, GangSurgeAbandoned warning event]
+    effects: [replacement index finalized and its row removed, source reset to Ready on its running revision or to the fresh-start Failed shape when it never ran one, the failed revision's RetryBlock charged toward Held only when the source's LastFailure reason is workload-caused and otherwise entered into Backoff at the current rung with AttemptsStarted unchanged, so no number of environment-caused waves reaches Held, GangSurgeAbandoned warning event]
     decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
   - id: T-failed-adopt-revision
     from: Failed
@@ -730,7 +730,7 @@ transitions:
     variant: target
     guard: every pod of the retired replacement is gone and its instance resources are finalized
     to: Empty
-    effects: [the marker row removed and the source reset to Ready in one transaction, expectations forgotten, the RetryBlock recorded when the retirement was a failure and charged toward Held only when the source's LastFailure reason is workload-caused, otherwise paced at the current rung with AttemptsStarted unchanged]
+    effects: [the marker row removed and the source reset in one transaction - Ready on its running revision, or the fresh-start Failed shape with its failure record kept when it never ran one - expectations forgotten, the RetryBlock recorded when the retirement was a failure and charged toward Held only when the source's LastFailure reason is workload-caused, otherwise paced at the current rung with AttemptsStarted unchanged]
     decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
   - id: T-gangcleanup-deadline
     from: Update/GangSurgeTargetCleanup
@@ -1587,7 +1587,7 @@ transitions:
     variant: target
     guard: every pod of the retired replacement is gone and its instance resources are finalized
     to: Empty
-    effects: [the marker row removed and the source reset to Ready in one transaction, expectations forgotten, the RetryBlock recorded when the retirement was a failure]
+    effects: [the marker row removed and the source reset in one transaction - Ready on its running revision, or the fresh-start Failed shape with its failure record kept when it never ran one - expectations forgotten, the RetryBlock recorded when the retirement was a failure]
     decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
   - id: T-failedgangcleanup-scaledown
     from: Failed/GangSurgeTargetCleanup

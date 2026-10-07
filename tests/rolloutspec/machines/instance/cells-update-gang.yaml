@@ -1036,7 +1036,8 @@ cells:
   # --- Update/GangSurgeTargetCleanup -------------------------------------
   # A retired replacement gang. The marker holds ownership of its pods and
   # PodGroup until they are gone, then the row is removed in the same status
-  # transaction that resets the source to Ready on its running revision. The
+  # transaction that resets the source: Ready on its running revision, or the
+  # fresh-start Failed shape when it never ran one. The
   # claim is sticky: the cleanup predicates match on revision and step, so
   # neither a returning desired revision nor a pod that finally comes up
   # revives the replacement.
@@ -1134,10 +1135,10 @@ cells:
     outcome: transition
     to: Empty
     guard: every pod of the retired replacement is gone and the per-Instance resource finalization reports complete
-    note: the marker row removal and the source reset are ONE status transaction, so marker absence can never be mistaken for an interrupted stamp and restored as active work; a failed revision records its RetryBlock in the same write and expectations for the index are forgotten
+    note: the marker row removal and the source reset are ONE status transaction, so marker absence can never be mistaken for an interrupted stamp and restored as active work; a failed revision records its RetryBlock in the same write and expectations for the index are forgotten. The reset is Ready on the source's running revision; a source that never ran one is left in the fresh-start Failed shape with its failure record kept, since Ready with no revision would count a gang that never served as capacity
     invariants: [marker.owns.its.pods.until.removed]
     placement: kind
-    coverage: {perm: [], unit: [TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource, TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone, TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy], kind: [], replay: [gangtarget-deadline]}
+    coverage: {perm: [], unit: [TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource, TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone, TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy, TestAbandonFailedGangSurge_NeverPromotedSourceEndsFailed, TestResetGangSurgeSourceAndRemoveMarker_NeverPromotedSourceEndsFailed], kind: [], replay: [gangtarget-deadline, gang-surge-superseded-never-promoted-source]}
     status: decided
   - state: Update/GangSurgeTargetCleanup
     event: pod.deleted

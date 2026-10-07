@@ -1,0 +1,38 @@
+tick=1 note the resumed pass announces the PodGroups behind both gangs' members and finds the replacement not yet Ready, so it waits
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 podgroup create name=svc-a-engine-1
+tick=1 row=0 write incarnation=1 phase=Updating runningRevision=nil targetRevision=svc-a-engine-367ef4b7 readySince=nil op=op#1{type=Update step=Surge target=svc-a-engine-367ef4b7 waiting=SourceUnrouted strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-leader-0 reason=SourceUnrouted message=SourceUnrouted: source pod svc-a-engine-0-leader-0 is out of the routed Service while its surge replacement is not serving yet; the surge did not take it out} precondition=ok
+tick=1 row=1 write no-op precondition=no-change
+tick=1 hold cleared
+tick=1 pass result=after:5s
+tick=2 note the template moves on while the replacement is not runtime-ready, so the pinned surge is superseded; the marker takes the cleanup claim and the replacement's members are deleted
+tick=2 apply spec.revision image=registry.example.com/runtime:v3 generation=1 now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 row=0 write no-op precondition=no-change
+tick=2 row=1 write no-op precondition=no-change
+tick=2 row=1 write incarnation=1 phase=Creating runningRevision=nil targetRevision=svc-a-engine-367ef4b7 readySince=nil op=op#2{type=Update step=GangSurgeTargetCleanup target=svc-a-engine-367ef4b7 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 pod delete name=svc-a-engine-1-leader-0 grace=default
+tick=2 pod delete name=svc-a-engine-1-worker-0 grace=default
+tick=2 hold cleared
+tick=2 pass result=after:5s
+tick=3 note the replacement's members are gone, so the marker is removed and the source is reset; it never ran a revision, so it is left in the fresh-start Failed shape with its failure record kept rather than Ready on nothing
+tick=3 apply pod.deleted[target] pod=svc-a-engine-1-leader-0 now=t+0s
+tick=3 apply pod.deleted[target] pod=svc-a-engine-1-worker-0 now=t+0s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 row=0 write no-op precondition=no-change
+tick=3 row=1 write no-op precondition=no-change
+tick=3 row=0 write no-op precondition=no-change
+tick=3 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=nil lastFailure={pod=svc-a-engine-0-leader-0 reason=SourceUnrouted message=SourceUnrouted: source pod svc-a-engine-0-leader-0 is out of the routed Service while its surge replacement is not serving yet; the surge did not take it out} precondition=ok
+tick=3 row=1 remove incarnation=1 phase=Creating runningRevision=nil targetRevision=svc-a-engine-367ef4b7 readySince=nil op=op#2{type=Update step=GangSurgeTargetCleanup target=svc-a-engine-367ef4b7 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal GangSurgeAbandoned OMENative component=engine instance=0 abandoned superseded gang surge (surge-index=1); the source never ran a revision and re-enters as a fresh start
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note a pass with nothing new reads the Failed row through its pods; a never-promoted row has no source for a surge to keep, so it re-enters as a recreate at the moved target and its never-served members are drained
+tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=4 row=0 write incarnation=2 phase=Updating runningRevision=nil targetRevision=svc-a-engine-1b9f8264 readySince=nil op=op#1{type=Update step=Drain target=svc-a-engine-1b9f8264 reason=revision  -> svc-a-engine-1b9f8264 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-leader-0 reason=SourceUnrouted message=SourceUnrouted: source pod svc-a-engine-0-leader-0 is out of the routed Service while its surge replacement is not serving yet; the surge did not take it out} precondition=ok
+tick=4 event Normal RecreateUpdateStarted OMENative component=engine instance=0 recreate (revision  -> svc-a-engine-1b9f8264, incarnation=2)
+tick=4 pod delete name=svc-a-engine-0-leader-0 grace=default
+tick=4 pod delete name=svc-a-engine-0-worker-0 grace=default
+tick=4 hold cleared
+tick=4 pass result=after:5s

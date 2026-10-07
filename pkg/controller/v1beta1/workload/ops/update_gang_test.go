@@ -257,6 +257,110 @@ func TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone(t *testing.T) {
 	}
 }
 
+// A superseded gang surge whose source never ran a revision ends in the
+// fresh-start Failed shape: the operation and target cleared, LastFailure
+// kept, no running revision. Ready would record capacity nothing serves,
+// since the source's own pods were never promoted. Both abandon tails
+// write the same shape.
+//
+// Cells: instance/Update/Surge/spec.revision/before
+func TestAbandonFailedGangSurge_NeverPromotedSourceEndsFailed(t *testing.T) {
+	const isvcName, namespace = "gang-never-promoted", "test-ns"
+	const targetRevision = "gang-never-promoted-engine-newrev"
+	surgeIndex := int32(2)
+	failure := &workload.InstanceTermination{Reason: workload.PodGroupOwnershipConflictReason, Message: "PodGroup held by another owner"}
+	wantFreshStart := func(t *testing.T, got workload.InstanceStatus) {
+		t.Helper()
+		if got.Phase != workload.InstancePhaseFailed || got.Operation != nil || got.RunningRevision != "" || got.TargetRevision != "" {
+			t.Errorf("source = %+v, want Failed with no operation, target or running revision", got)
+		}
+		if got.LastFailure == nil || got.LastFailure.Reason != failure.Reason {
+			t.Errorf("LastFailure = %+v, want the recorded failure kept", got.LastFailure)
+		}
+	}
+
+	t.Run("standalone writer", func(t *testing.T) {
+		legacyResetExpectations(t)
+		c := legacyNewFakeClient(t) // the replacement's members are already gone
+		src := &workload.InstanceStatus{
+			Index: 0, Phase: workload.InstancePhaseUpdating, TargetRevision: targetRevision,
+			Operation: &workload.InstanceOperation{
+				Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepSurge,
+				TargetRevision: targetRevision, SurgeIndex: &surgeIndex,
+			},
+			LastFailure: failure,
+		}
+		var removed []int32
+		input := gangAbandonInput(isvcName, namespace, src, &removed)
+		blockCalls := recordRetryBlockCalls(&input, nil)
+		plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
+		if _, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, surgeIndex,
+			src.RunningRevision, "", "", workload.CauseUnattributed); err != nil {
+			t.Fatalf("abandonFailedGangSurge: %v", err)
+		}
+		if len(removed) != 1 || removed[0] != surgeIndex {
+			t.Errorf("RemoveInstance calls: got %v want [%d]", removed, surgeIndex)
+		}
+		wantFreshStart(t, *src)
+		if len(*blockCalls) != 0 {
+			t.Errorf("MutateRetryBlock calls: got %d want none (no revision to prune, no failure to record)", len(*blockCalls))
+		}
+	})
+
+	t.Run("atomic tail", func(t *testing.T) {
+		legacyResetExpectations(t)
+		source := workload.InstanceStatus{
+			Index: 0, Incarnation: 1, Phase: workload.InstancePhaseUpdating, TargetRevision: targetRevision,
+			Operation: &workload.InstanceOperation{
+				ID: "gang-update-0", Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepSurge,
+				TargetRevision: targetRevision, SurgeIndex: &surgeIndex,
+			},
+			LastFailure: failure,
+		}
+		marker := workload.InstanceStatus{
+			Index: surgeIndex, Incarnation: 1, Phase: workload.InstancePhaseCreating, TargetRevision: targetRevision,
+			Operation: &workload.InstanceOperation{
+				ID: "gang-update-target-2", Type: workload.InstanceOperationUpdate,
+				Step: workload.UpdateStepGangSurgeTargetCleanup, TargetRevision: targetRevision,
+			},
+		}
+		store := &terminalMutationStore{
+			ownerUID: "owner-a",
+			statuses: map[int32]workload.InstanceStatus{
+				source.Index: cloneTerminalStatus(source),
+				marker.Index: cloneTerminalStatus(marker),
+			},
+		}
+		input := workload.ReconcileInput{
+			OwnerObject: &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{UID: "owner-a"}},
+			Key: workload.Key{
+				Namespace: namespace,
+				OwnerName: isvcName,
+				Component: workload.ComponentEngine,
+				SelectorLabels: map[string]string{
+					constants.InferenceServicePodLabelKey: isvcName,
+					constants.OMEComponentLabel:           string(workload.ComponentEngine),
+					query.LabelManagedBy:                  query.ManagedByOMENative,
+				},
+			},
+			ObservedState: workload.WorkloadObservedState{
+				InstanceStatuses: []workload.InstanceStatus{cloneTerminalStatus(source), cloneTerminalStatus(marker)},
+			},
+			ApplyInstanceMutationsWithRetryBlock: store.apply,
+			FinalizeInstanceResources:            func(context.Context, int32) (bool, error) { return true, nil },
+		}
+		plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
+		if _, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(legacyNewFakeClient(t)), input, plan,
+			source.Index, surgeIndex, source.RunningRevision, "", "", workload.CauseUnattributed); err != nil {
+			t.Fatalf("abandonFailedGangSurge: %v", err)
+		}
+		if _, found := store.statuses[surgeIndex]; found {
+			t.Error("the cleanup marker must be removed with the reset")
+		}
+		wantFreshStart(t, store.statuses[source.Index])
+	})
+}
+
 // TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy drives the reset
 // pass with a configured RetryPolicy and asserts the recorded block is a
 // counted Backoff wave: AttemptsStarted=1, NextRetryAt = now + initial

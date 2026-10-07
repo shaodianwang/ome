@@ -298,7 +298,8 @@ func StampGangSurgeTargetReady(
 
 // ResetGangSurgeSource releases a source claim whose target slot turned
 // out to be occupied: the source goes back to Ready on its running
-// revision and the occupied target is not touched. The strong path
+// revision, or to the fresh-start Failed shape when it never ran one, and
+// the occupied target is not touched. The strong path
 // guards both lifecycle identities in one authoritative snapshot;
 // compatibility adapters confirm the target and source independently
 // through their fresh mutation reads. Reports whether this pass reset.
@@ -310,13 +311,11 @@ func ResetGangSurgeSource(
 ) (bool, error) {
 	sourceIdentity := Capture(source)
 	targetIdentity := Capture(target)
-	reset := ReadyOnRevisionMutation(source.Index, source.RunningRevision, input.Now())
+	reset := AbandonedSurgeSourceMutation(source.Index, source.RunningRevision, input.Now())
 	reset.Postcondition = func(row *types.InstanceStatus) bool {
 		return row != nil && row.Index == source.Index &&
 			row.Incarnation == source.Incarnation &&
-			row.Phase == types.InstancePhaseReady &&
-			row.RunningRevision == source.RunningRevision &&
-			row.TargetRevision == "" && row.Operation == nil &&
+			AbandonedSurgeSourceSettled(row, source.RunningRevision) &&
 			row.ActiveOrdinal == source.ActiveOrdinal
 	}
 
@@ -537,7 +536,8 @@ func RestoreGangSurgeTargetCleanup(
 }
 
 // ResetGangSurgeSourceAndRemoveMarker ends an abandoned gang surge in
-// one batch: the SOURCE goes back to Ready on sourceRunningRev and the
+// one batch: the SOURCE goes back to Ready on sourceRunningRev, or to the
+// fresh-start Failed shape when it never ran a revision, and the
 // TARGET's cleanup marker is removed, with the failed revision's
 // RetryBlock disposition committed in the same write. Fenced on both
 // identities, proved once before the adapter finalizes the surge index's
@@ -605,14 +605,12 @@ func ResetGangSurgeSourceAndRemoveMarker(
 	}
 
 	committed := false
-	reset := ReadyOnRevisionMutation(source.Index, sourceRunningRev, input.Now())
+	reset := AbandonedSurgeSourceMutation(source.Index, sourceRunningRev, input.Now())
 	reset.BatchPrecondition = guard
 	reset.Postcondition = func(row *types.InstanceStatus) bool {
 		return row != nil && row.Index == source.Index &&
 			row.Incarnation == source.Incarnation &&
-			row.Phase == types.InstancePhaseReady &&
-			row.RunningRevision == sourceRunningRev &&
-			row.TargetRevision == "" && row.Operation == nil &&
+			AbandonedSurgeSourceSettled(row, sourceRunningRev) &&
 			row.ActiveOrdinal == source.ActiveOrdinal
 	}
 	reset.OnCommit = func(_, _ *types.InstanceStatus) {

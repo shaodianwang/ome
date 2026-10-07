@@ -565,7 +565,8 @@ func cloneInstanceTopologyKeys(in map[int32]string) map[int32]string {
 }
 
 // abandonFailedGangSurge drains and finalizes a retired replacement, then
-// atomically removes its marker and resets the source. A failed revision also
+// atomically removes its marker and resets the source: Ready on its running
+// revision, or the fresh-start Failed shape when it never ran one. A failed revision also
 // records its RetryBlock in that status transition: cause (the source's
 // LastFailure evidence, see instanceFailureCause) decides how the wave
 // reaches the revision's retry ladder, and both abandon tails apply that
@@ -658,18 +659,22 @@ func abandonFailedGangSurge(ctx context.Context, deps workload.Deps, input workl
 		if err := recordUpdateFailureInRetryBlock(ctx, input, failedTargetRev, failureReason, cause); err != nil {
 			return false, fmt.Errorf("record retry block for failed gang surge (rev=%s): %w", failedTargetRev, err)
 		}
-		if err := status.StampReadyOnRevision(ctx, input, sourceIdx, sourceRunningRev); err != nil {
+		if err := status.StampAbandonedSurgeSource(ctx, input, sourceIdx, sourceRunningRev); err != nil {
 			return false, fmt.Errorf("reset failed gang surge source (instance=%d): %w", sourceIdx, err)
 		}
 	}
+	reset := fmt.Sprintf("resetting to revision %s for a fresh rollout", sourceRunningRev)
+	if sourceRunningRev == "" {
+		reset = "the source never ran a revision and re-enters as a fresh start"
+	}
 	if failedTargetRev != "" {
 		workload.RecordWarning(deps.Recorder, workload.EventTarget(input), eventReasonGangSurgeAbandoned,
-			"OMENative %s abandoned failed gang surge (surge-index=%d); resetting to revision %s for a fresh rollout",
-			workload.InstanceKey(comp, sourceIdx), surgeIdx, sourceRunningRev)
+			"OMENative %s abandoned failed gang surge (surge-index=%d); %s",
+			workload.InstanceKey(comp, sourceIdx), surgeIdx, reset)
 	} else {
 		workload.RecordNormal(deps.Recorder, workload.EventTarget(input), eventReasonGangSurgeAbandoned,
-			"OMENative %s abandoned superseded gang surge (surge-index=%d); resetting to revision %s for a fresh rollout",
-			workload.InstanceKey(comp, sourceIdx), surgeIdx, sourceRunningRev)
+			"OMENative %s abandoned superseded gang surge (surge-index=%d); %s",
+			workload.InstanceKey(comp, sourceIdx), surgeIdx, reset)
 	}
 	return false, nil
 }
