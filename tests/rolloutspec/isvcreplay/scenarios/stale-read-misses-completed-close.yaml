@@ -1,0 +1,45 @@
+scenario: stale-read-misses-completed-close
+cells:
+  - run/Closed/ctrl.staleRead[missesClose]/before
+intentional: >-
+  the pass after a Completed close reads a copy of the service that still
+  shows the run pinned; it re-judges the pin against the converged
+  replica, closes it Completed again with a later close time, and the
+  flush keeps that record as the newer clock, so the recorded outcome
+  reads the same and nothing reopens
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service records no run
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens on the live replica pair
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the engine converges in one tick and the run closes Completed
+    events:
+      - clock.advance: 1m
+      - member.surgePodCreated: {component: engine}
+      - member.readyOnTarget: {component: engine}
+      - member.oldPodsGone: {component: engine}
+      - member.converged: {component: engine}
+  - tick: 5
+    note: a minute later the pass reads the copy from before the close; it closes the run again with a later close time and the flush keeps it
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[missesClose]
+  - tick: 6
+    note: the next pass reads the re-closed record and opens nothing
+    events:
+      - ctrl.resync

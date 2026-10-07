@@ -1,0 +1,93 @@
+tick=0 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=1 replicas=2 ready=2 serving=2 updated=2 updatedReady=2 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=1 note a settled service records no run
+tick=1 pass cache=live generation=1
+tick=1 run outcome=none policies=disabled
+tick=1 run active=nil
+tick=1 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=1 service create name=svc-a-engine-rev-f332566b stage=coordination
+tick=1 service create name=svc-a-engine-rev-f332566b-headless stage=coordination
+tick=1 coordination group=0 before=nil after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil}
+tick=1 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=1 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=1 flush which=final result=written statusWrites=1 run=desired groups=0:added
+tick=1 pass result=none
+tick=2 note the template edit lands
+tick=2 apply spec.revision[new] component=engine image=registry.example.com/runtime:v2 generation=2 now=t+0s
+tick=2 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-46e64ada observedGeneration=1 replicas=2 ready=2 serving=2 updated=0 updatedReady=0 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=2 pass cache=live generation=2
+tick=2 run outcome=none requeueAfter=10s policies=disabled
+tick=2 run active=nil
+tick=2 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=2 ir patch name=svc-a-engine stage=project image=registry.example.com/runtime:v1→registry.example.com/runtime:v2 parentGen=1→2 generation=1→2
+tick=2 event Normal CoordinationGroupSurging coordination group 0 surging: creating new-revision pods
+tick=2 coordination group=0 before={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil} after={phase=Surging composite=Surging current=nil previous=nil transition=t+0s anchor=nil}
+tick=2 coordination conditions RolloutCoordinationReady=False(InProgress)
+tick=2 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=2 flush which=final result=written statusWrites=1 run=same groups=0:updated{phase:Idle→Surging composite:Idle→Surging}
+tick=2 pass result=after:10s
+tick=3 note the run opens on the live replica pair
+tick=3 apply ctrl.resync now=t+0s
+tick=3 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-46e64ada observedGeneration=2 replicas=2 ready=2 serving=2 updated=0 updatedReady=0 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=3 pass cache=live generation=2
+tick=3 event Normal RolloutRunOpened run svc-a-e2931de6a354 opened (rp1:8aa97d86f011)
+tick=3 run outcome=opened stateChanged=true requeueAfter=10s policies=disabled
+tick=3 run active id=svc-a-e2931de6a354 openedAt=t+0s pinnedAt=t+0s targets=[engine=46e64ada/stable=f332566b] digests=[Inline:rp1:cca45ec1fb0f]
+tick=3 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=False(InSync)
+tick=3 flush which=boundary result=written statusWrites=1 run=desired groups=0:unchanged
+tick=3 coordination group=0 before={phase=Surging composite=Surging current=nil previous=nil transition=t+0s anchor=nil} after={phase=Surging composite=Surging current=nil previous=nil transition=t+0s anchor=nil}
+tick=3 coordination conditions RolloutCoordinationReady=False(InProgress)
+tick=3 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=3 flush which=final result=short-circuit
+tick=3 pass result=after:10s
+tick=4 note the engine converges in one tick and the run closes Completed
+tick=4 apply clock.advance by=1m0s now=t+1m0s
+tick=4 apply member.surgePodCreated component=engine instances=2 revision=registry.example.com/runtime:v2 now=t+1m0s
+tick=4 apply member.readyOnTarget component=engine pods=2 now=t+1m0s
+tick=4 apply member.oldPodsGone component=engine removed=2 now=t+1m0s
+tick=4 apply member.converged component=engine revision=registry.example.com/runtime:v2 now=t+1m0s
+tick=4 publish component=engine current=svc-a-engine-46e64ada update=svc-a-engine-46e64ada observedGeneration=2 replicas=2 ready=2 serving=2 updated=2 updatedReady=2 rows=[0:Ready@46e64ada 1:Ready@46e64ada]
+tick=4 pass cache=live generation=2
+tick=4 event Normal RolloutRunClosed run svc-a-e2931de6a354 closed: Completed
+tick=4 run outcome=stateChanged stateChanged=true policies=disabled
+tick=4 run active=nil
+tick=4 run last outcome=Completed openedAt=t+0s closedAt=t+1m0s targets=[engine=46e64ada/stable=f332566b]
+tick=4 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=4 flush which=boundary result=written statusWrites=1 run=desired groups=0:unchanged
+tick=4 service create name=svc-a-engine-rev-46e64ada stage=coordination
+tick=4 service create name=svc-a-engine-rev-46e64ada-headless stage=coordination
+tick=4 service delete name=svc-a-engine-rev-f332566b stage=coordination
+tick=4 service delete name=svc-a-engine-rev-f332566b-headless stage=coordination
+tick=4 event Normal CoordinationGroupCompleted coordination group 0 idle: no rollout in flight
+tick=4 coordination group=0 before={phase=Surging composite=Surging current=nil previous=nil transition=t+0s anchor=nil} after={phase=Idle composite=Idle current=nil previous=nil transition=t+1m0s anchor=nil}
+tick=4 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=4 revisions component=engine ready=46e64ada latest=46e64ada previous=f332566b phase=nil
+tick=4 flush which=final result=written statusWrites=1 run=same groups=0:updated{phase:Surging→Idle composite:Surging→Idle transition:t+0s→t+1m0s}
+tick=4 pass result=none
+tick=5 note a minute later the pass reads the copy from before the close; it closes the run again with a later close time and the flush keeps it
+tick=5 apply clock.advance by=1m0s now=t+2m0s
+tick=5 apply ctrl.staleRead[missesClose] cache=before-pass-4 now=t+2m0s
+tick=5 pass cache=before-pass-4 generation=2
+tick=5 event Normal RolloutRunClosed run svc-a-e2931de6a354 closed: Completed
+tick=5 run outcome=stateChanged stateChanged=true policies=disabled
+tick=5 run active=nil
+tick=5 run last outcome=Completed openedAt=t+0s closedAt=t+2m0s targets=[engine=46e64ada/stable=f332566b]
+tick=5 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=5 flush which=boundary result=written statusWrites=1 run=desired(overwrote-live) groups=0:overwrote-newer-live{phase:Idle→Surging composite:Idle→Surging transition:t+1m0s→t+0s}
+tick=5 event Normal CoordinationGroupCompleted coordination group 0 idle: no rollout in flight
+tick=5 coordination group=0 before={phase=Surging composite=Surging current=nil previous=nil transition=t+0s anchor=nil} after={phase=Idle composite=Idle current=nil previous=nil transition=t+2m0s anchor=nil}
+tick=5 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=5 revisions component=engine ready=46e64ada latest=46e64ada previous=f332566b phase=nil
+tick=5 flush which=final result=written statusWrites=1 run=same groups=0:updated{phase:Surging→Idle composite:Surging→Idle transition:t+0s→t+2m0s}
+tick=5 pass result=none
+tick=6 note the next pass reads the re-closed record and opens nothing
+tick=6 apply ctrl.resync now=t+2m0s
+tick=6 pass cache=live generation=2
+tick=6 run outcome=none policies=disabled
+tick=6 run active=nil
+tick=6 run last outcome=Completed openedAt=t+0s closedAt=t+2m0s targets=[engine=46e64ada/stable=f332566b]
+tick=6 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=6 coordination group=0 before={phase=Idle composite=Idle current=nil previous=nil transition=t+2m0s anchor=nil} after={phase=Idle composite=Idle current=nil previous=nil transition=t+2m0s anchor=nil}
+tick=6 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=6 revisions component=engine ready=46e64ada latest=46e64ada previous=f332566b phase=nil
+tick=6 flush which=final result=written statusWrites=1 run=same groups=0:unchanged
+tick=6 pass result=none

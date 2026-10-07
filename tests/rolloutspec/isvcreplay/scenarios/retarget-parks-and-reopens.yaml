@@ -1,0 +1,73 @@
+scenario: retarget-parks-and-reopens
+cells:
+  - run/Open/spec.revision[new]/before
+  - run/Parked/ctrl.staleRead[missesClose]/before
+  - run/Parked/api.flushFailed[afterOpen]/boundary@T-parked-open
+intentional: >-
+  a retarget whose plan no longer composes closes the pinned run
+  Superseded and parks; a pass that reads the copy from before that close
+  re-closes the run with a later clock and parks again, and the persisted
+  record ends the same; when the plan renders again the open that lifts
+  the park loses its flush and the next pass opens again under a new run
+  id
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m, rolloutPolicyEnabled: true}
+timeline:
+  - tick: 1
+    note: a settled service records no run
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens and pins the blueGreen plan
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the group is pointed at a policy that does not exist; the pinned plan continues under drift
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[groupShape]:
+          groups:
+            - components: [engine]
+              policyRef: {name: missing-policy, progression: canary}
+  - tick: 5
+    note: a second template edit lands
+    events:
+      - clock.advance: 1m
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v3}
+  - tick: 6
+    note: the retarget closes the run Superseded and the open that follows cannot compose, so the service parks on the missing policy
+    events:
+      - clock.advance: 1m
+      - ctrl.resync
+  - tick: 7
+    note: a minute later the pass reads the copy from before the park; it re-closes the run with a later clock and parks again
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[missesClose]
+  - tick: 8
+    note: the group is edited back to an inline progression; the projection catches up one pass later
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[groupShape]:
+          groups:
+            - components: [engine]
+              blueGreen: {}
+  - tick: 9
+    note: the open that lifts the park is computed and its boundary flush fails; the park condition stays persisted
+    events:
+      - clock.advance: 1m
+      - api.flushFailed[afterOpen]
+      - ctrl.resync
+  - tick: 10
+    note: the next pass opens again under a new run id
+    events:
+      - clock.advance: 1m
+      - ctrl.resync

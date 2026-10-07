@@ -1,0 +1,43 @@
+scenario: repin-written-on-a-stale-copy
+cells:
+  - run/RepinPending/ctrl.staleRead[missesOpen]/before
+intentional: >-
+  the repin verb is written in the same tick as a pass whose cached copy
+  predates the open; that pass never reaches the verb, which is read only
+  under a pinned run, opens the same roll again under a new run id that
+  the newer clock keeps, and leaves the annotation for the pass after,
+  which applies the repin against the re-minted pin
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service records no run
+  - tick: 2
+    note: the template edit lands and the projection catches up one pass later
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens on the live replica pair and the boundary flush pins it
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the group's progression is edited and the operator repins while the pass reads the copy from before the open; the verb is not reached, the roll is opened again under a new run id and the annotation stays
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[inlineBody]:
+          groups:
+            - components: [engine]
+              rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+      - verb.repin[matching]
+      - ctrl.staleRead[missesOpen]
+  - tick: 5
+    note: the next pass finds the re-minted pin and the verb, and applies the repin to it before it reads the replicas
+    events:
+      - clock.advance: 1m
+      - ctrl.resync

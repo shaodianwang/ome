@@ -16,23 +16,17 @@ cells:
   note: "an adopted run retargets like a fresh one: it closes Superseded and a fresh run opens under a new RunID; the adopted unit, whose targets moved, is reset by BindRun to step zero and its ladder restarts. A plan that no longer composes parks instead (T-adopted-retarget-park)"
   invariants: [one.active.run, decision.reads.live.replicas]
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestAPinnedRunRetargetsAndTheNextPassFindsTheFreshPin/Adopted/new], kind: []}
+  status: decided
 - state: Adopted
   event: spec.revision
   variants: [new]
   windows: [boundary, after]
   outcome: ignore
   note: "the superseding pin is in memory from one live read; a target that moves again is the next pass's retarget against that pin"
-  placement: sim
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  placement: unit
+  coverage: {perm: [], unit: [TestATargetThatMovesAfterTheReadIsTheNextPassesRetarget/Adopted, TestAPinnedRunRetargetsAndTheNextPassFindsTheFreshPin/Adopted/new], kind: []}
+  status: decided
 - state: Adopted
   event: spec.revision
   variants: [revert]
@@ -43,23 +37,17 @@ cells:
   note: a revert of an adopted unit closes the run Superseded and reopens toward the restored revision while Instances trail it; with nothing trailing and the adopted ladder no longer in flight the close settles with no fresh run (T-adopted-revert-settle)
   invariants: [one.active.run]
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestAPinnedRunRetargetsAndTheNextPassFindsTheFreshPin/Adopted/revert], kind: []}
+  status: decided
 - state: Adopted
   event: spec.revision
   variants: [revert]
   windows: [boundary, after]
   outcome: ignore
   note: the revert was read once against the pin; the fresh run or the settled close is what the next pass finds
-  placement: sim
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  placement: unit
+  coverage: {perm: [], unit: [TestAPinnedRunRetargetsAndTheNextPassFindsTheFreshPin/Adopted/revert], kind: []}
+  status: decided
 - state: Adopted
   event: spec.revision
   variants: [rejected]
@@ -67,11 +55,8 @@ cells:
   note: "a target that lands on its unit's rejected revision is a hold, not a retarget: the retarget check skips it and the run continues on its pin; the plan gate keeps that member's Instances on the stable revision"
   invariants: [rejected.target.is.a.hold]
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestATargetOnItsUnitsRejectedRevisionIsAHoldUnderAPinnedRun/Adopted], kind: []}
+  status: decided
 - state: Adopted
   event: spec.planEdit
   variants: [inlineBody]
@@ -79,11 +64,8 @@ cells:
   note: the pinned plan continues; RolloutPlanDrift reads True with reason SpecNewerThanRun until the next open or an applied repin
   invariants: [plan.executes.only.pinned]
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: ["TestAPinnedRunContinuesOnItsPin/Adopted/spec.planEdit[inlineBody]"], kind: []}
+  status: decided
 - state: Adopted
   event: spec.planEdit
   variants: [groupShape]
@@ -91,11 +73,8 @@ cells:
   note: the pinned plan continues under RolloutPlanDrift SpecNewerThanRun; a canary group that left the spec gets a RolloutGroupRemovedMidRun warning, since deleting a group never aborts a pinned run
   invariants: [plan.executes.only.pinned]
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: ["TestAPinnedRunContinuesOnItsPin/Adopted/spec.planEdit[groupShape]"], kind: []}
+  status: decided
 - state: Adopted
   event: spec.planEdit
   variants: [allGroupsRemoved]
@@ -103,64 +82,46 @@ cells:
   note: the pinned plan continues under RolloutPlanDrift SpecNewerThanRun with a RolloutGroupRemovedMidRun warning and a ten-second requeue; with no spec groups the pass never reaches the convergence check, so only the rollback verb or a repin to the empty plan ends this run
   invariants: [plan.executes.only.pinned]
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: ["TestAPinnedRunContinuesOnItsPin/Adopted/spec.planEdit[allGroupsRemoved]"], kind: []}
+  status: decided
 - state: Adopted
   event: policy.changed
   outcome: ignore
   note: the pinned body keeps executing; RolloutPlanDrift reads True with reason PolicyNewerThanRun and the next open composes the new body from a live read
   invariants: [plan.executes.only.pinned]
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestAPinnedRunReportsPolicyDriftAndKeepsExecuting/Adopted], kind: []}
+  status: decided
 - state: Adopted
   event: policy.unresolved
   outcome: ignore
   note: "a reference that stops resolving mid-run does not park a pinned run: the live digest reads unresolvable, RolloutPlanDrift reads True, and the pin keeps executing"
   invariants: [plan.executes.only.pinned]
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestAPinnedRunReportsPolicyDriftAndKeepsExecuting/Adopted], kind: []}
+  status: decided
 - state: Adopted
   event: policy.resolved
   outcome: ignore
   note: RolloutPlanDrift returns to InSync when the live digest equals the pinned one again
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestAPinnedRunReportsPolicyDriftAndKeepsExecuting/Adopted], kind: []}
+  status: decided
 - state: Adopted
   event: ir.stale
   outcome: defer
   note: "no retarget or close is judged on a replica whose status trails its spec or whose projection trails the service's generation; the pass requeues in ten seconds"
   invariants: [decision.reads.live.replicas]
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestAnAdoptedRunClosesOnceItsUnitIsDone], kind: []}
+  status: decided
 - state: Adopted
   event: ir.missing
   outcome: defer
   note: "a member with no replica reads as an empty pair: never retargeted, never converged; the run stays pinned until the replica reappears"
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestAPinnedRunContinuesOnItsPin/Adopted/ir.missing], kind: []}
+  status: decided
 - state: Adopted
   event: ir.converged
   windows: [before]
@@ -169,42 +130,30 @@ cells:
   guard: "every pinned member's current and target revisions equal its pinned revision with no Instance trailing, and every canary unit is done and reads Stable"
   note: the close keeps a bounded record with the targets and per-group provenance; a member that converged while another still rolls keeps the run open
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestAnAdoptedRunClosesOnceItsUnitIsDone], kind: []}
+  status: decided
 - state: Adopted
   event: ir.converged
   windows: [boundary, after]
   outcome: ignore
   note: the close consumed the convergence; a converged member is what Closed reads
-  placement: sim
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  placement: unit
+  coverage: {perm: [], unit: [TestAnAdoptedRunClosesOnceItsUnitIsDone], kind: []}
+  status: decided
 - state: Adopted
   event: ir.straggling
   outcome: defer
   note: "the close waits for every Instance to reach the pinned revision; the canary's done sentinel can lead the replica counters by a pass and closing early would reopen at once through the straggler trigger"
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestAnAdoptedRunClosesOnceItsUnitIsDone], kind: []}
+  status: decided
 - state: Adopted
   event: canary.progress
   outcome: ignore
   note: "the step counter is read only at the close; a step short of the ladder's end keeps the run pinned"
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestAPinnedRunContinuesOnItsPin/Adopted/canary.progress], kind: []}
+  status: decided
 - state: Adopted
   event: canary.completed
   windows: [before]
@@ -223,12 +172,9 @@ cells:
   windows: [boundary, after]
   outcome: ignore
   note: the close consumed the completion; the done sentinel stays on the record
-  placement: sim
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  placement: unit
+  coverage: {perm: [], unit: [TestAnAdoptedRunClosesOnceItsUnitIsDone], kind: []}
+  status: decided
 - state: Adopted
   event: canary.rolledBack
   variants: [inFlight]
@@ -261,42 +207,30 @@ cells:
   windows: [boundary, after]
   outcome: ignore
   note: the close consumed the settled revert; the rejected hash stays on the record as the hold
-  placement: sim
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  placement: unit
+  coverage: {perm: [], unit: [TestRunLostWhileRollingBackIsAdopted], kind: []}
+  status: decided
 - state: Adopted
   event: canary.failed
   outcome: defer
   note: "a unit parked Failed is short of its ladder's end, so the run stays pinned while the stable revision serves; a rollback or resume verb or a new target ends the park, and nothing in the run layer closes on it"
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestAPinnedRunContinuesOnItsPin/Adopted/canary.failed], kind: []}
+  status: decided
 - state: Adopted
   event: canary.parked
-  outcome: DECIDE
-  note: a rollback that found no stable revision parks the unit with the rejected hash recorded and nothing draining; the run layer reads that record as a revert that never settles, so the run stays pinned indefinitely and neither a rolled-back nor a completed close can fire; only a retarget or a repin to the empty plan ends it. The owner must decide whether the run closes RolledBack on the park, closes under a new outcome, or stays pinned
+  outcome: defer
+  note: "today a rollback that found no stable revision parks the unit with the rejected hash recorded and nothing draining, and the run layer reads that record as a revert that never settles: the run stays pinned until a retarget or a repin ends it and neither a rolled-back nor a completed close can fire; which is wrong because the park is terminal for the unit, so the run is left with no closing path of its own"
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: review
+  coverage: {perm: [], unit: [TestAPinnedRunContinuesOnItsPin/Adopted/canary.parked], kind: []}
+  status: decided
 - state: Adopted
   event: canary.resumed
   outcome: ignore
   note: the executor re-arms the unit under the pin; the run continues on the same targets
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestAPinnedRunContinuesOnItsPin/Adopted/canary.resumed], kind: []}
+  status: decided
 - state: Adopted
   event: coord.staged
   windows: [before]
@@ -305,32 +239,23 @@ cells:
   guard: every member that has not converged belongs to a coordination group whose persisted phase is Staged, and every other pinned member converged
   note: "a lifecycle partition deliberately holds mixed revisions; keying the close on full convergence alone would pin such a run forever. The phase is read from the pass's cached copy of the InferenceService, one flush behind the coordination pass that wrote it"
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: [runtime_partition_sequential_kind_test.go]
-  status: current
+  coverage: {perm: [], unit: [TestAStagedGroupClosesAPinnedRun/Adopted], kind: [runtime_partition_sequential_kind_test.go]}
+  status: decided
 - state: Adopted
   event: coord.staged
   windows: [boundary, after]
   outcome: ignore
-  note: the close consumed the staged rest
-  placement: sim
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  note: "the close consumed the staged rest, but the staged member still diverges on its replica pair: the next pass opens a fresh run over it, so a service resting Staged alternates an open and a close on every pass; which is wrong because a partition held by design is not pending work"
+  placement: unit
+  coverage: {perm: [], unit: [TestAStagedGroupClosesAPinnedRun/Adopted], kind: []}
+  status: decided
 - state: Adopted
   event: coord.settled
   outcome: ignore
   note: the run layer reads the replica pairs, not the group phase; an Idle group with a converged member is ir.converged
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestAPinnedRunContinuesOnItsPin/Adopted/coord.settled], kind: []}
+  status: decided
 - state: Adopted
   event: verb.repin
   windows: [before]
@@ -338,97 +263,75 @@ cells:
   to: RepinPending
   note: the annotation is persisted metadata; the next pass consumes it before it reads freshness, retargets or closes
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestARepinOnAnAdoptedRunKeepsItsIdentity], kind: []}
+  status: decided
 - state: Adopted
   event: verb.repin
   windows: [boundary, after]
   outcome: ignore
   note: the annotation is already present; a rewrite of its value is what the consuming pass reads
-  placement: sim
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  placement: unit
+  coverage: {perm: [], unit: [TestARepinOnAnAdoptedRunKeepsItsIdentity], kind: []}
+  status: decided
 - state: Adopted
   event: verb.rollback
   outcome: ignore
   note: "the rollback verb is the canary executor's: it records the rejection on the unit and drives the revert; the run layer sees the result as canary.rolledBack"
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestAPinnedRunContinuesOnItsPin/Adopted/verb.rollback], kind: []}
+  status: decided
 - state: Adopted
   event: ctrl.staleRead
   variants: [missesOpen]
-  outcome: DECIDE
-  note: "a pass whose cached copy lacks the pin finds the record still mid-ladder and adopts it again under a new RunID; the newer clock wins at the flush. The same open-idempotence question as Open's cell"
+  outcome: transition
+  to: Adopted
+  note: "today a pass whose cached copy lacks the pin finds the record still mid-ladder and adopts it again under a new RunID and OpenedAt, which the newer clock keeps at the flush, with the unit bound by its unchanged TargetID and not reset; which is wrong because an adoption over an identical record re-mints the run's identity and fires a second RolloutPlanRepinned for the same ladder"
   invariants: [pin.newer.wins]
   placement: sim
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: review
+  coverage: {perm: [], unit: [], kind: [], replay: [adopted-run-stale-reads]}
+  status: decided
 - state: Adopted
   event: ctrl.staleRead
   variants: [missesClose]
-  outcome: DECIDE
-  note: "a cached copy that still shows the predecessor run pinned re-judges it against the live replicas, closes it again with a fresh ClosedAt and opens a successor; the preserve rule compares wall clocks, so this write replaces the newer live pin and overwrites the predecessor's recorded outcome with Superseded. The owner must decide whether the preserve rule should compare observations (RunID and targets) rather than clocks"
+  outcome: transition
+  to: Open
+  note: "today a cached copy that still shows the adopted run pinned re-judges it against the live replicas, closes it again Superseded with a fresh ClosedAt and opens a successor, and the flush keeps that write because the preserve rule compares wall clocks; which is wrong because a stale pass overwrites the newer live successor and the adopted run's recorded outcome"
   invariants: [pin.newer.wins]
   placement: sim
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: review
+  coverage: {perm: [], unit: [], kind: [], replay: [adopted-run-stale-reads]}
+  status: decided
 - state: Adopted
   event: ctrl.staleRead
   variants: [missesRepin]
-  outcome: DECIDE
-  note: "a cached copy with the old plan reports RolloutPlanDrift True for one pass against the live render, and the pass's desired status lacks the repin's pre-step hold; the flush keeps the live pin by its newer PinnedAt but re-arms the hold on the legacy alias record only, so the per-unit record every reader uses can lose the hold. The owner must decide where the hold is re-armed"
+  outcome: ignore
+  note: "a cached copy with the old plan reports RolloutPlanDrift True against the live render for that one pass; the flush keeps the live pin by its newer PinnedAt and the live unit record by its difference from the base, so the pre-step hold the repin armed stays on the per-unit record and the next pass reads the repinned plan again"
   invariants: [pin.newer.wins]
   placement: sim
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: review
+  coverage: {perm: [], unit: [], kind: [], replay: [adopted-run-stale-reads]}
+  status: decided
 - state: Adopted
   event: ctrl.resync
   outcome: ignore
   note: drift is re-evaluated from the cached policies and RolloutPlanReady Pinned is re-stamped only on change
   placement: unit
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [TestAPinnedRunContinuesOnItsPin/Adopted/ctrl.resync], kind: []}
+  status: decided
 - state: Adopted
   event: api.flushFailed
   variants: [afterOpen, afterClose]
   windows: [before, after]
   outcome: "n/a"
   reason: a boundary flush exists only while a retarget or a close is in memory and not yet persisted
-  status: current
+  status: decided
 - state: Adopted
   event: api.flushFailed
   variants: [afterOpen, afterClose]
   windows: [boundary]
   outcome: defer
-  note: the pass returns the error with nothing persisted; the next pass recomputes the same boundary from the persisted pin and the live replicas. A retarget re-mints its RunID; a close lands a later ClosedAt
+  note: "the pass returns the error with nothing persisted; the next pass recomputes the same boundary from the persisted pin and the live replicas, as for a fresh run: a retarget re-mints its RunID and a close lands a later ClosedAt"
   placement: sim
-  coverage:
-    perm: []
-    unit: []
-    kind: []
-  status: current
+  coverage: {perm: [], unit: [], kind: [], replay: [flush-fails-at-each-run-boundary]}
+  status: decided
 - state: Adopted
   event: api.conflict
   outcome: defer

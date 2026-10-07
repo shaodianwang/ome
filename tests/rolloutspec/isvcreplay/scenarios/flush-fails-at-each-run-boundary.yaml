@@ -1,0 +1,82 @@
+scenario: flush-fails-at-each-run-boundary
+cells:
+  - run/NoRun/api.flushFailed[afterOpen]/boundary@T-norun-open
+  - run/Open/api.flushFailed[afterOpen]/boundary@T-open-retarget
+  - run/Open/api.flushFailed[afterClose]/boundary@T-open-complete
+  - run/Closed/api.flushFailed[afterOpen]/boundary@T-closed-open
+intentional: >-
+  the status flush that follows a run boundary fails once at every
+  boundary a run has: the first open, a retarget, the close and the open
+  that follows a close; each pass returns the error with nothing
+  persisted and the next pass recomputes the same boundary from the
+  persisted state and the live replicas, re-minting the run id of an open
+  and landing a later close
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service records no run
+  - tick: 2
+    note: the template edit lands; the projection catches up one pass later
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the open is computed and its boundary flush fails; nothing is persisted
+    events:
+      - api.flushFailed[afterOpen]
+      - ctrl.resync
+  - tick: 4
+    note: the next pass opens again from the persisted state under a new run id
+    events:
+      - clock.advance: 1m
+      - ctrl.resync
+  - tick: 5
+    note: a second template edit lands before anything rolled
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v3}
+  - tick: 6
+    note: the retarget closes the run Superseded and opens a successor in memory; the boundary flush fails and the first run stays pinned
+    events:
+      - clock.advance: 1m
+      - api.flushFailed[afterOpen]
+      - ctrl.resync
+  - tick: 7
+    note: the next pass retargets again and the successor lands
+    events:
+      - clock.advance: 1m
+      - ctrl.resync
+  - tick: 8
+    note: the engine converges on the third revision; the Completed close is computed and its flush fails, so the successor stays pinned
+    events:
+      - clock.advance: 1m
+      - member.surgePodCreated: {component: engine}
+      - member.readyOnTarget: {component: engine}
+      - member.oldPodsGone: {component: engine}
+      - member.converged: {component: engine}
+      - api.flushFailed[afterClose]
+  - tick: 9
+    note: the next pass closes again with a later close time
+    events:
+      - clock.advance: 1m
+      - ctrl.resync
+  - tick: 10
+    note: a fourth template edit lands on the closed service
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v4}
+  - tick: 11
+    note: the open from Closed is computed and its flush fails; the record stays as it was
+    events:
+      - clock.advance: 1m
+      - api.flushFailed[afterOpen]
+      - ctrl.resync
+  - tick: 12
+    note: the next pass opens again under a new run id
+    events:
+      - clock.advance: 1m
+      - ctrl.resync

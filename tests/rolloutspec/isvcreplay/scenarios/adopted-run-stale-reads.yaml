@@ -1,0 +1,89 @@
+scenario: adopted-run-stale-reads
+cells:
+  - run/Adopted/ctrl.staleRead[missesOpen]/before
+  - run/Adopted/ctrl.staleRead[missesRepin]/before
+  - run/Adopted/ctrl.staleRead[missesClose]/before
+  - run/NoRun/ctrl.runLost/before
+intentional: >-
+  a run adopted around a serving canary meets each stale read in turn: a
+  copy from before the adoption finds the record still mid-ladder and
+  adopts it again under a new run id, which the newer clock keeps; a copy
+  from before a repin reports drift for one pass while the flush keeps
+  the live pin and record; a copy from before a retarget re-closes the
+  adopted run and mints another successor, which replaces the live one
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        canary:
+          steps:
+            - {capacity: "50%", traffic: 10, pause: {}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the unit reads Stable
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens and the unit arms at step 0
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the staged Instance is Ready; the split serves at 10% under the manual pause
+    events:
+      - capacity.reached: {component: engine}
+  - tick: 5
+    note: the pin is lost while the unit serves its step; the same pass adopts the ladder in place under a new run id without resetting the unit
+    events:
+      - clock.advance: 1m
+      - run.lost
+  - tick: 6
+    note: a minute later the pass reads the copy from before the adoption, with no pin and the record still mid-ladder; it adopts the same ladder again under another run id and the newer clock wins the flush
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[missesOpen]
+  - tick: 7
+    note: the inline ladder is edited to raise the first step to 20%; the pinned plan continues and drift is reported
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[inlineBody]:
+          groups:
+            - components: [engine]
+              canary:
+                steps:
+                  - {capacity: "50%", traffic: 20, pause: {}}
+                  - {capacity: "100%", traffic: 100}
+  - tick: 8
+    note: the repin applies under the adopted run's id; the clamped step would raise traffic, so the pre-step hold arms
+    events:
+      - clock.advance: 1m
+      - verb.repin[matching]
+  - tick: 9
+    note: a minute later the pass reads the status from before the repin with the verb already gone; drift reads True for this pass and the flush keeps the live pin and record
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[missesRepin]
+  - tick: 10
+    note: a third template edit lands
+    events:
+      - clock.advance: 1m
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v3}
+  - tick: 11
+    note: the retarget closes the adopted run Superseded and opens a fresh successor whose bind resets the unit
+    events:
+      - clock.advance: 1m
+      - ctrl.resync
+  - tick: 12
+    note: a minute later the pass reads the copy from before the retarget; it re-closes the adopted run and mints another successor, which replaces the live one
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[missesClose]
+  - tick: 13
+    note: the next pass reads the re-minted successor as the pinned one
+    events:
+      - ctrl.resync

@@ -1,0 +1,77 @@
+scenario: rollback-settles-then-stale-copy
+cells:
+  - run/RejectedSticky/ctrl.staleRead[missesClose]/before
+  - run/RejectedSticky/api.flushFailed[afterOpen]/boundary@T-rejected-open
+intentional: >-
+  a rollback settles and closes its run RolledBack, leaving the member
+  targeting the rejected revision as a hold; a pass that reads the copy
+  from before that close re-closes the run RolledBack with a later clock
+  and the hold reads the same; a different target then opens a run whose
+  flush fails, and the next pass opens it again under a new run id
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        canary:
+          steps:
+            - {capacity: "50%", traffic: 10, pause: {}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the unit reads Stable
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens and the unit arms at step 0
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the staged Instance is Ready; the split serves at 10% under the manual pause
+    events:
+      - capacity.reached: {component: engine}
+  - tick: 5
+    note: the operator rolls back; the executor records the rejection and the revert starts draining
+    events:
+      - clock.advance: 1m
+      - verb.rollback[stableServes]
+  - tick: 6
+    note: the rejected pod is gone and the rows stand on the stable revision; the dispatch still reads the revert draining
+    events:
+      - clock.advance: 1m
+      - pod.rejectedGone: {component: engine}
+  - tick: 7
+    note: the dispatch reports the unit RolledBack; the run layer ran before it and still holds the pin
+    events:
+      - clock.advance: 1m
+      - ctrl.resync
+  - tick: 8
+    note: the run closes RolledBack on the settled revert; the member still targets the rejected revision, which is now a hold
+    events:
+      - clock.advance: 1m
+      - ctrl.resync
+  - tick: 9
+    note: a minute later the pass reads the copy from before the close; it re-closes the run RolledBack with a later clock and the hold reads the same
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[missesClose]
+  - tick: 10
+    note: a third template edit lands; the different target is pending work again
+    events:
+      - clock.advance: 1m
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v3}
+  - tick: 11
+    note: the open is computed and its boundary flush fails; nothing is persisted
+    events:
+      - clock.advance: 1m
+      - api.flushFailed[afterOpen]
+      - ctrl.resync
+  - tick: 12
+    note: the next pass opens again under a new run id
+    events:
+      - clock.advance: 1m
+      - ctrl.resync
