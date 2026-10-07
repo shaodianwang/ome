@@ -540,3 +540,41 @@ func TestAllPodsRuntimeReady_TerminalPodNeverReady(t *testing.T) {
 		})
 	}
 }
+
+// A pod with a deletion timestamp is gone for every promote and hand-over
+// decision whatever its readiness says: the kubelet keeps a terminating
+// container answering its probe through the grace period while the pod is
+// already out of its Service. Both shared readings leave such a pod out of
+// the set they judge, so a set short because of it waits, and no later
+// instant is known to promote it.
+func TestPromoteBars_DeletingPodIsGone(t *testing.T) {
+	deleting := func(name string) *corev1.Pod {
+		pod := promotePod(name, true, promoteNow.Add(-time.Minute))
+		at := metav1.NewTime(promoteNow)
+		pod.DeletionTimestamp = &at
+		return pod
+	}
+	cases := []struct {
+		name string
+		pods []*corev1.Pod
+	}{
+		{"the only pod is being deleted", []*corev1.Pod{deleting("a")}},
+		{"one member of the set is being deleted", []*corev1.Pod{
+			promotePod("live", true, promoteNow.Add(-time.Minute)),
+			deleting("b"),
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if AllPodsRuntimeReady(tc.pods) {
+				t.Errorf("AllPodsRuntimeReady = true; a pod being deleted must not count as runtime-ready")
+			}
+			for _, window := range []int32{0, 20} {
+				promotable, wait := PodSetPromotable(tc.pods, window, promoteNow)
+				if promotable || wait != 0 {
+					t.Errorf("PodSetPromotable(window=%ds) = (%t, %s), want (false, 0)", window, promotable, wait)
+				}
+			}
+		})
+	}
+}

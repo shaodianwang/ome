@@ -1,0 +1,68 @@
+# A gang hand-over whose replacement is complete and Ready except that one
+# member is already being deleted: the kubelet keeps the terminating
+# container answering its probe while the pod is out of its Service. A pod
+# being deleted is excluded from the set the hand-over is judged on, so the
+# replacement gang reads short and the source keeps serving; nothing is
+# refilled while the object holds its name, and once it is gone the same
+# attempt refills the member, the whole gang clears the bar, and the
+# hand-over runs to the promote.
+scenario: gang-target-terminating-member-holds-handoff
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-surgedrain-gang-complete
+cells:
+  - instance/Update/GangSurgeTarget/pod.terminating[target]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: both replacement members report Ready and the worker is deleted from outside in the same tick; a member being deleted is gone for the hand-over whatever its readiness says, so the replacement reads short and the source keeps serving
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - pod.terminating[target]: {pod: {index: 1, runner: worker}}
+  - tick: 6
+    note: the worker still holds its name, so nothing is refilled and the source stays in rotation
+  - tick: 7
+    note: the worker is gone, so the same attempt refills it
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 8
+    note: the refilled worker reports Ready, so the whole gang clears the bar and the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 9
+    note: the source leader leaves the routed Service, so the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 10
+    note: the source pods are gone, so its row is removed and the replacement index is promoted as the Instance
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

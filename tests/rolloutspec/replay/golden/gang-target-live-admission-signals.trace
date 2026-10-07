@@ -89,30 +89,44 @@ tick=10 pod status-patch name=svc-a-engine-0-leader-0 serving=True→False
 tick=10 pod status-patch name=svc-a-engine-0-worker-0 serving=True→False
 tick=10 hold cleared
 tick=10 pass result=after:5s
-tick=11 note the replacement worker is deleted from outside while still runtime-ready; the missing-pod set and the readiness gate ignore the deletion timestamp, so nothing is recreated and the promote is not blocked
+tick=11 note the replacement worker is deleted from outside while still runtime-ready; a member being deleted is gone for the hand-over whatever its readiness says, so nothing is refilled while it holds its name and the drain waits on the short gang
 tick=11 apply pod.terminating[target] pod=svc-a-engine-1-worker-0 now=t+0s
 tick=11 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=11 row=1 write no-op precondition=no-change
-tick=11 row=0 write no-op precondition=no-change
 tick=11 hold cleared
 tick=11 pass result=after:5s
-tick=12 note the source leader leaves the routed Service, so the source pods are deleted
-tick=12 apply endpoint.rotationOut[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=12 note the worker is gone, so the same attempt refills it with the PodGroup ensured first
+tick=12 apply pod.deleted[target] pod=svc-a-engine-1-worker-0 now=t+0s
 tick=12 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=12 row=1 write no-op precondition=no-change
-tick=12 row=0 write no-op precondition=no-change
-tick=12 pod delete name=svc-a-engine-0-leader-0 grace=default
-tick=12 pod delete name=svc-a-engine-0-worker-0 grace=default
+tick=12 pod create name=svc-a-engine-1-worker-0 revision=367ef4b7 incarnation=1 ordinal=0
 tick=12 hold cleared
 tick=12 pass result=after:5s
-tick=13 note the source pods are gone, so the marker is promoted Ready on the pinned revision behind a worker that is itself going away, and the source row is removed
-tick=13 apply pod.deleted[source] pod=svc-a-engine-0-leader-0 now=t+0s
-tick=13 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=13 note the refilled worker reports Ready, so the whole gang clears the bar and the drain resumes; the source leader is still in the routed Service, so nothing is deleted yet
+tick=13 apply pod.ready[target] pod=svc-a-engine-1-worker-0 now=t+0s
 tick=13 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=13 row=1 write no-op precondition=no-change
+tick=13 pod status-patch name=svc-a-engine-1-worker-0 serving=absent→True
 tick=13 row=0 write no-op precondition=no-change
-tick=13 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-367ef4b7 readySince=t+0s op=nil precondition=ok
-tick=13 row=0 remove incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 retryCount=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-1-leader-0 reason=Evicted message=The node was low on resource: memory} precondition=ok
-tick=13 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 gang surge complete: instance 1 promoted to revision svc-a-engine-367ef4b7
 tick=13 hold cleared
-tick=13 pass result=requeue
+tick=13 pass result=after:5s
+tick=14 note the source leader leaves the routed Service, so the source pods are deleted
+tick=14 apply endpoint.rotationOut[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=14 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=14 row=1 write no-op precondition=no-change
+tick=14 row=0 write no-op precondition=no-change
+tick=14 pod delete name=svc-a-engine-0-leader-0 grace=default
+tick=14 pod delete name=svc-a-engine-0-worker-0 grace=default
+tick=14 hold cleared
+tick=14 pass result=after:5s
+tick=15 note the source pods are gone, so the marker is promoted Ready on the pinned revision behind a complete gang, and the source row is removed
+tick=15 apply pod.deleted[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=15 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=15 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=15 row=1 write no-op precondition=no-change
+tick=15 row=0 write no-op precondition=no-change
+tick=15 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-367ef4b7 readySince=t+0s op=nil precondition=ok
+tick=15 row=0 remove incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 retryCount=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-1-leader-0 reason=Evicted message=The node was low on resource: memory} precondition=ok
+tick=15 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 gang surge complete: instance 1 promoted to revision svc-a-engine-367ef4b7
+tick=15 hold cleared
+tick=15 pass result=requeue

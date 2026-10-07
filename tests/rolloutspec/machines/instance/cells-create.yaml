@@ -457,17 +457,14 @@ cells:
     coverage: {perm: [], unit: [], kind: [], replay: [create-pod-signals-mid-create]}
     status: current
 
-  # GAP: a doomed pod both blocks and can satisfy this state — nothing filters
-  # deletionTimestamp, so the same pod either holds its slot against a re-create
-  # or completes the promote on its way out.
   - state: Create/CreatePods
     event: pod.terminating
     variants: [source]
     outcome: defer
-    note: ops/create.go lists the Instance's pods without filtering deletionTimestamp, so a terminating pod still occupies its name slot and nothing is re-created until it is gone, and the shared promote predicate ignores deletionTimestamp too, so a terminating pod that is still PodReady and past its window can complete the promote
-    placement: kind
-    coverage: {perm: [], unit: [], kind: [], replay: [create-pod-signals-mid-create]}
-    status: current
+    note: a pod being deleted is gone for the promote whatever its readiness says - the kubelet keeps a terminating container answering its probe through the grace period while the pod is already out of its Service - so the shared promote readings (AllPodsRuntimeReady and PodSetPromotable in workload/query/discover.go) leave it out of the set they judge and the attempt waits on a short set; the object still holds its name, so nothing is re-created until it is gone, and then the same attempt re-creates it
+    placement: unit
+    coverage: {perm: [], unit: [TestCreate_TerminatingReadyPodIsNotPromoted], kind: [], replay: [create-pod-signals-mid-create, create-terminating-ready-pod-waits]}
+    status: decided
 
   - state: Create/CreatePods
     event: pod.phaseTerminal

@@ -1,10 +1,10 @@
 # A gang source fails on its deadline at the drain step with a replacement
 # member short of readiness, and a replacement member is then deleted from
-# outside while it still reports ContainersReady. A member on its way out
-# still passes the runtime-ready gate, so the drain deletes the source
-# behind it once the source has left rotation; the continuation rebuilds
-# the member once its name is free, and the hand-over finishes when the
-# rebuilt member comes up.
+# outside while it still reports ContainersReady. A member being deleted is
+# gone for the hand-over whatever its readiness says, so the continuation
+# reads the replacement as short and does not delete the source behind it;
+# it rebuilds the member once its name is free, and the hand-over finishes
+# when the rebuilt member comes up.
 scenario: gang-draindeadline-replacement-member-leaving-rebuilt
 arrows:
   - T-empty-gang-surge-target
@@ -58,12 +58,12 @@ timeline:
     events:
       - timer.operationDeadline: {slack: 1s}
   - tick: 8
-    note: the replacement worker comes back Ready and is then deleted from outside; a member on its way out still reports ContainersReady and passes the runtime-ready gate, so the continuation reads the replacement as whole
+    note: the replacement worker comes back Ready and is then deleted from outside; a member being deleted is gone for the hand-over whatever its readiness says, so the continuation reads the replacement as short
     events:
       - pod.ready[target]: {pod: {index: 1, runner: worker}}
       - pod.terminating[target]: {pod: {index: 1, runner: worker}}
   - tick: 9
-    note: the source leader leaves the routed Service, so the drain deletes the source pods behind the leaving member
+    note: the source leader leaves the routed Service; the drain does not delete the source pods behind a member that is going away
     events:
       - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
   - tick: 10

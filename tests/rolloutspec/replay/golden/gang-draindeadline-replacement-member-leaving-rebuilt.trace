@@ -64,21 +64,17 @@ tick=7 row=1 write incarnation=1 phase=Failed runningRevision=nil targetRevision
 tick=7 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/SurgeDrain exceeded InstanceReadyTimeout
 tick=7 warn instanceFailed index=1 pod=nil reason=DeadlineExceeded: Update/GangSurgeTarget exceeded InstanceReadyTimeout
 tick=7 pass result=after:5s
-tick=8 note the replacement worker comes back Ready and is then deleted from outside; a member on its way out still reports ContainersReady and passes the runtime-ready gate, so the continuation reads the replacement as whole
+tick=8 note the replacement worker comes back Ready and is then deleted from outside; a member being deleted is gone for the hand-over whatever its readiness says, so the continuation reads the replacement as short
 tick=8 apply pod.ready[target] pod=svc-a-engine-1-worker-0 now=t+30m1s
 tick=8 apply pod.terminating[target] pod=svc-a-engine-1-worker-0 now=t+30m1s
 tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=8 row=1 write no-op precondition=no-change
-tick=8 row=0 write no-op precondition=no-change
 tick=8 hold cleared
 tick=8 pass result=after:5s
-tick=9 note the source leader leaves the routed Service, so the drain deletes the source pods behind the leaving member
+tick=9 note the source leader leaves the routed Service; the drain does not delete the source pods behind a member that is going away
 tick=9 apply endpoint.rotationOut[source] pod=svc-a-engine-0-leader-0 now=t+30m1s
 tick=9 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=9 row=1 write no-op precondition=no-change
-tick=9 row=0 write no-op precondition=no-change
-tick=9 pod delete name=svc-a-engine-0-leader-0 grace=default
-tick=9 pod delete name=svc-a-engine-0-worker-0 grace=default
 tick=9 hold cleared
 tick=9 pass result=after:5s
 tick=10 note the terminating member is gone, so the continuation rebuilds it under the same name at the pinned revision; the pair is short a member until it comes up

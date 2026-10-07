@@ -3382,3 +3382,128 @@ func TestGangSurgeDrain_SkipsSourceMembersAlreadyOutOfRotation(t *testing.T) {
 		})
 	}
 }
+
+// TestGangSurgeUpdate_TerminatingReplacementMemberHoldsTheHandoff: a
+// replacement member being deleted is gone for the hand-over whatever its
+// readiness says. The kubelet keeps the terminating container answering its
+// probe while the pod is already out of its Service, so draining the source
+// behind it would hand the Instance to a gang about to be short. The source
+// keeps serving, nothing is refilled while the object holds its name, and
+// once it is gone the same attempt refills the member; the whole gang then
+// clears the bar and the source drains.
+//
+// Cells: instance/Update/GangSurgeTarget/pod.terminating[target]/before
+func TestGangSurgeUpdate_TerminatingReplacementMemberHoldsTheHandoff(t *testing.T) {
+	legacyResetExpectations(t)
+	ctx := context.Background()
+	isvc, _ := surgeISVCReady("gang-b", "prod", 1)
+	plan := gangSurgePlan()
+
+	v1Name := "gang-b-engine-rev-v1hash"
+	v2Name := "gang-b-engine-rev-v2hash"
+	ir := gangSurgeInFlightIR(isvc, v1Name, v2Name)
+	c := gangSchedClient(t, isvc, ir)
+	makeCR(t, c, isvc, v1Name)
+	makeCR(t, c, isvc, v2Name)
+	v1Hash := query.RevisionHashFromControllerRevisionName(v1Name)
+	v2Hash := query.RevisionHashFromControllerRevisionName(v2Name)
+
+	// Source gang (idx=0) fully in rotation.
+	for _, runner := range []string{"leader", "worker"} {
+		if err := c.Create(ctx, gangPodAt(isvc, 0, runner, v1Hash, true, true)); err != nil {
+			t.Fatalf("seed source pod (%s): %v", runner, err)
+		}
+	}
+	// Replacement gang (idx=1): every member ContainersReady, serving and
+	// PodReady, the shape that releases the source drain.
+	var worker *corev1.Pod
+	for _, runner := range []string{"leader", "worker"} {
+		pod := gangPodAt(isvc, 1, runner, v2Hash, true, true)
+		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+			Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now(),
+		})
+		if err := c.Create(ctx, pod); err != nil {
+			t.Fatalf("seed replacement pod (%s): %v", runner, err)
+		}
+		if runner == "worker" {
+			worker = pod
+		}
+	}
+	// The worker is deleted from outside while still Ready.
+	terminatingPod(t, c, worker)
+
+	deps := legacyTestDeps(c)
+	deps.EnsureGangPodGroup = gang.EnsureSurgePodGroup(deps)
+	v2 := &appsv1.ControllerRevision{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: "prod", Name: v2Name}, v2); err != nil {
+		t.Fatalf("get v2 CR: %v", err)
+	}
+	gangPods := func(idx int32) (present, serving int, pods []*corev1.Pod) {
+		t.Helper()
+		pods, err := query.LiveListPodsForInstance(ctx, c, "prod", "gang-b", workload.ComponentEngine, idx)
+		if err != nil {
+			t.Fatalf("list pods of instance %d: %v", idx, err)
+		}
+		for _, p := range pods {
+			present++
+			if podreadiness.IsServing(p) {
+				serving++
+			}
+		}
+		return present, serving, pods
+	}
+	pass := func(when string) {
+		t.Helper()
+		input := gangInputWithRemove(isvc, c)
+		input.DesiredSpec.GangSchedulingAvailable = true
+		if _, err := surgeUpdate(ctx, deps, input, plan, plan.Instances[0], v2, nil); err != nil {
+			t.Fatalf("gang surge pass (%s): %v", when, err)
+		}
+	}
+
+	// The replacement reads short: the source keeps serving, the step does
+	// not advance, and the Terminating worker holds its name.
+	pass("worker terminating")
+	if present, serving, _ := gangPods(0); present != 2 || serving != 2 {
+		t.Fatalf("source drained behind a replacement member that is being deleted (present=%d serving=%d)", present, serving)
+	}
+	if present, _, _ := gangPods(1); present != 2 {
+		t.Fatalf("replacement pods: got %d want 2 (the Terminating worker holds its name)", present)
+	}
+	if src := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]; src.Operation == nil || src.Operation.Step != workload.UpdateStepSurge {
+		t.Errorf("source operation: got %+v want Step=Surge (the hand-over must not advance)", src.Operation)
+	}
+
+	// The worker is gone: the same attempt refills it, and the source still
+	// serves while the refill is not Ready.
+	releaseTerminatingPod(t, c, worker)
+	pass("worker gone")
+	var refilled *corev1.Pod
+	if _, _, pods := gangPods(1); true {
+		for _, p := range pods {
+			if p.Name == worker.Name {
+				refilled = p
+			}
+		}
+	}
+	if refilled == nil || refilled.DeletionTimestamp != nil {
+		t.Fatalf("the worker was not refilled once its object was gone")
+	}
+	if present, serving, _ := gangPods(0); present != 2 || serving != 2 {
+		t.Fatalf("source drained while the refilled worker is not Ready (present=%d serving=%d)", present, serving)
+	}
+
+	// The refilled worker reports Ready: the whole gang clears the bar and
+	// the source leaves rotation (and, with no routed Service to wait on, is
+	// deleted in the same pass).
+	refilled.Status.Conditions = append(refilled.Status.Conditions,
+		corev1.PodCondition{Type: corev1.ContainersReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()},
+		corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()})
+	if err := c.Status().Update(ctx, refilled); err != nil {
+		t.Fatalf("mark refilled worker Ready: %v", err)
+	}
+	pass("worker ready")
+	if present, serving, _ := gangPods(0); serving != 0 {
+		t.Errorf("source still serving after the whole gang cleared the bar (present=%d serving=%d)", present, serving)
+	}
+}

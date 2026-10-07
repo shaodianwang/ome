@@ -4,9 +4,10 @@
 # deleted from outside. The drain reads none of them - the source's probes
 # are not consulted, an Updating row is no partition candidate, the deadline
 # was stamped at surge entry and the window applies at the Surge step only -
-# and a Terminating replacement that is still ContainersReady passes the
-# gate, so the drain deletes the source behind a pod that is itself going
-# away.
+# and a replacement being deleted is gone for the promote whatever its
+# readiness says, so the drain neither deletes the source behind it nor
+# promotes onto it: it waits for the object to go, rebuilds the replacement
+# and finishes on the rebuilt pod.
 scenario: surgedrain-edits-and-terminating-replacement
 arrows:
   - T-ready-surge
@@ -58,14 +59,22 @@ timeline:
     events:
       - clock.advance: 2m
   - tick: 7
-    note: the Ready replacement is deleted from outside and stays Terminating; the occupied slot suppresses the recreate, and a Terminating replacement that is still ContainersReady passes the gate
+    note: the Ready replacement is deleted from outside and stays Terminating; the occupied slot suppresses the recreate, and a replacement being deleted is gone for the promote whatever its readiness says, so the drain holds
     events:
       - pod.terminating[target]: {pod: {index: 0, ordinal: 1}}
   - tick: 8
-    note: the source leaves rotation, so the drain deletes it behind a replacement that is itself going away
+    note: the source leaves the routed Service; the drain does not delete it behind a replacement that is going away
     events:
       - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
   - tick: 9
-    note: the drained source is gone; what the promote does behind a Terminating replacement is read off the pass
+    note: the drained source is removed by another hand; the promote still waits on the replacement that is going away
     events:
       - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 10
+    note: the replacement is gone, so the same attempt rebuilds it at the surge ordinal
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 11
+    note: the rebuilt replacement reports Ready and the surge promotes onto it
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}

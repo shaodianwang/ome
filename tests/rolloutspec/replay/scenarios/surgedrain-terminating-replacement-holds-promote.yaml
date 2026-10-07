@@ -1,0 +1,62 @@
+# A single-pod surge at its drain step whose Ready replacement is deleted
+# from outside: the kubelet keeps the terminating container answering its
+# probe while the pod is already out of its Service. A pod being deleted is
+# excluded from the set the promote is judged on, so the drain neither
+# deletes the source behind it nor promotes onto it; the step waits while
+# the object holds its name, the same attempt rebuilds the replacement once
+# it is gone, and the drain finishes on the rebuilt pod.
+scenario: surgedrain-terminating-replacement-holds-promote
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/SurgeDrain/pod.terminating[target]/before
+  - instance/Update/SurgeDrain/pod.deleted[target]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation, so the step advances and the source leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the Ready replacement is deleted from outside; a pod being deleted is gone for the promote whatever its readiness says, so the drain holds
+    events:
+      - pod.terminating[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 6
+    note: the source leaves the routed Service; the drain does not delete it behind a replacement that is going away
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the replacement is gone, so the same attempt rebuilds it at the surge ordinal; the source still stands, out of rotation
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 8
+    note: the rebuilt replacement is serving and in rotation, and the source is already out of the routed Service, so the drain deletes the source
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 9
+    note: the drained source is gone and the surge promotes onto the rebuilt replacement
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

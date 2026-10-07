@@ -1,0 +1,40 @@
+# The only pod of a fresh Instance is deleted from outside in the same tick
+# it reports Ready: the kubelet keeps a terminating container answering its
+# probe through the grace period while the pod is already out of its
+# Service. A pod being deleted is excluded from the set the promote is
+# judged on, so the set is short and the attempt waits; nothing is
+# re-created while the object holds its name, and once it is gone the same
+# attempt re-creates it and promotes on the new pod.
+scenario: create-terminating-ready-pod-waits
+arrows:
+  - T-empty-create
+  - T-create-ready
+cells:
+  - instance/Create/CreatePods/pod.terminating[source]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod reports Ready and is deleted from outside in the same tick; a pod being deleted is gone for the promote whatever its readiness says, so no serving gate is written and the attempt waits
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - pod.terminating[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the object still holds its name, so nothing is re-created and nothing is promoted
+  - tick: 4
+    note: the pod is gone, so the same attempt re-creates its name
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 5
+    note: the new pod reports Ready, so it enters rotation and the Instance promotes
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}

@@ -4642,3 +4642,75 @@ func TestCreateFreshIndices_RebuildsADemotedPodlessRow(t *testing.T) {
 		t.Fatalf("expected the peer's pod plus the rebuilt pod, got %v", got)
 	}
 }
+
+// TestCreate_TerminatingReadyPodIsNotPromoted: a pod being deleted is gone
+// for the promote whatever its readiness says. The kubelet keeps a
+// terminating container answering its probe through the grace period while
+// the pod is already out of its Service, so stamping Ready on it would
+// publish an Instance with no capacity. The set is short, the attempt
+// waits, and once the object is gone the same attempt re-creates the name.
+//
+// Cells: instance/Create/CreatePods/pod.terminating[source]/before
+func TestCreate_TerminatingReadyPodIsNotPromoted(t *testing.T) {
+	resetExpectations(t)
+	ctx := context.Background()
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	pod := podForInstance(isvc, 0, true /* ready */, true /* serving */)
+	c := newFakeClient(t, isvc, pod)
+	makeNewPodReady(t, c, isvc.Namespace, pod.Name, 1)
+	// Delete through a finalizer so the object stays Terminating, which is
+	// how the live list hands it to the pass before the kubelet lets go.
+	live := &corev1.Pod{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), live); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if !podreadiness.IsPodReady(live) {
+		t.Fatalf("fixture: pod is not PodReady: %+v", live.Status.Conditions)
+	}
+	live.Finalizers = append(live.Finalizers, "ome.io/test-hold")
+	if err := c.Update(ctx, live); err != nil {
+		t.Fatalf("pin pod: %v", err)
+	}
+	if err := c.Delete(ctx, live); err != nil {
+		t.Fatalf("delete pod: %v", err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), live); err != nil || live.DeletionTimestamp == nil {
+		t.Fatalf("fixture: pod is not Terminating (err=%v)", err)
+	}
+	plan := buildPlanSinglePodEngine(1)
+
+	result, err := ops.Create(ctx, workload.Deps{Client: c}, buildTestInput(isvc, c, workload.ComponentEngine), plan, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Errorf("expected a requeue while the attempt waits on a short set, got %+v", result)
+	}
+	for _, is := range instanceStatusesOnIR(c, isvc, workload.ComponentEngine) {
+		if is.Phase == v1beta1.OMENativeInstanceReady {
+			t.Errorf("Ready stamped on a pod that is being deleted: %+v", is)
+		}
+	}
+	pods := &corev1.PodList{}
+	if err := c.List(ctx, pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 1 || pods.Items[0].DeletionTimestamp == nil {
+		t.Fatalf("the Terminating pod holds its name until it is gone; got %d pod(s)", len(pods.Items))
+	}
+
+	// The object goes, and the same attempt re-creates the name.
+	live.Finalizers = nil
+	if err := c.Update(ctx, live); err != nil {
+		t.Fatalf("release pod: %v", err)
+	}
+	if _, err := ops.Create(ctx, workload.Deps{Client: c}, buildTestInput(isvc, c, workload.ComponentEngine), plan, nil); err != nil {
+		t.Fatalf("Create after the pod is gone: %v", err)
+	}
+	if err := c.List(ctx, pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 1 || pods.Items[0].DeletionTimestamp != nil {
+		t.Fatalf("the name was not re-created once the pod was gone: got %d pod(s)", len(pods.Items))
+	}
+}

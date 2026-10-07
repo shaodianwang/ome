@@ -45,23 +45,32 @@ tick=6 row=0 write no-op precondition=no-change
 tick=6 row=0 write no-op precondition=no-change
 tick=6 hold cleared
 tick=6 pass result=after:5s
-tick=7 note the Ready replacement is deleted from outside and stays Terminating; the occupied slot suppresses the recreate, and a Terminating replacement that is still ContainersReady passes the gate
+tick=7 note the Ready replacement is deleted from outside and stays Terminating; the occupied slot suppresses the recreate, and a replacement being deleted is gone for the promote whatever its readiness says, so the drain holds
 tick=7 apply pod.terminating[target] pod=svc-a-engine-0-default-1 now=t+2m0s
-tick=7 row=0 write no-op precondition=no-change
 tick=7 row=0 write no-op precondition=no-change
 tick=7 hold cleared
 tick=7 pass result=after:5s
-tick=8 note the source leaves rotation, so the drain deletes it behind a replacement that is itself going away
+tick=8 note the source leaves the routed Service; the drain does not delete it behind a replacement that is going away
 tick=8 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+2m0s
 tick=8 row=0 write no-op precondition=no-change
-tick=8 row=0 write no-op precondition=no-change
-tick=8 pod delete name=svc-a-engine-0-default-0 grace=default
 tick=8 hold cleared
 tick=8 pass result=after:5s
-tick=9 note the drained source is gone; what the promote does behind a Terminating replacement is read off the pass
+tick=9 note the drained source is removed by another hand; the promote still waits on the replacement that is going away
 tick=9 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+2m0s
 tick=9 row=0 write no-op precondition=no-change
-tick=9 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-6f8b1e6c activeOrdinal=1 readySince=t+2m0s op=nil precondition=ok
-tick=9 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c complete (activeOrdinal=1)
 tick=9 hold cleared
-tick=9 pass result=requeue
+tick=9 pass result=after:5s
+tick=10 note the replacement is gone, so the same attempt rebuilds it at the surge ordinal
+tick=10 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+2m0s
+tick=10 row=0 write no-op precondition=no-change
+tick=10 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
+tick=10 hold cleared
+tick=10 pass result=after:5s
+tick=11 note the rebuilt replacement reports Ready and the surge promotes onto it
+tick=11 apply pod.ready[target] pod=svc-a-engine-0-default-1 now=t+2m0s
+tick=11 row=0 write no-op precondition=no-change
+tick=11 pod status-patch name=svc-a-engine-0-default-1 serving=absent→True
+tick=11 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-6f8b1e6c activeOrdinal=1 readySince=t+2m0s op=nil precondition=ok
+tick=11 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c complete (activeOrdinal=1)
+tick=11 hold cleared
+tick=11 pass result=requeue

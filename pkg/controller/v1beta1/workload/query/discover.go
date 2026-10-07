@@ -393,17 +393,27 @@ func ExcludeTerminalPods(pods []*corev1.Pod) []*corev1.Pod {
 	return out
 }
 
+// podCountsForPromote reports whether a pod may vouch for the set a promote
+// or hand-over is judged on: neither a terminal pod nor one being deleted is
+// a member, so a set relying on either is short and waits.
+func podCountsForPromote(pod *corev1.Pod) bool {
+	return pod != nil && !IsTerminalPod(pod) && pod.DeletionTimestamp == nil
+}
+
 // AllPodsRuntimeReady reports whether every pod has the ContainersReady
 // PodCondition. Empty input returns false (nothing is Ready). A terminal
 // pod is never runtime-ready whatever conditions it still carries: the
 // presence pass ahead of every readiness gate treats it as a missing
-// target, so answering true here would promote an incomplete set.
+// target, so answering true here would promote an incomplete set. A pod
+// being deleted is gone the same way whatever its readiness says: the
+// kubelet keeps a terminating container answering its probe through the
+// grace period while the pod is already out of its Service.
 func AllPodsRuntimeReady(pods []*corev1.Pod) bool {
 	if len(pods) == 0 {
 		return false
 	}
 	for _, pod := range pods {
-		if IsTerminalPod(pod) || !podreadiness.IsContainersReady(pod) {
+		if !podCountsForPromote(pod) || !podreadiness.IsContainersReady(pod) {
 			return false
 		}
 	}
@@ -412,12 +422,13 @@ func AllPodsRuntimeReady(pods []*corev1.Pod) bool {
 
 // PodSetPromotable reports whether a pod set clears the one bar every path
 // stamping an Instance Ready shares: the set is non-empty, no pod is
-// terminal, every pod is PodReady — the readiness gates the controller
-// writes are folded by kubelet into that condition, so a PodReady pod is
-// eligible for its Service — and every pod has held Ready for the
-// Component's minReadySeconds window. A window <= 0 reduces the bar to
-// PodReady. Each extra predicate is an additional per-path requirement on
-// every pod (the in-place roll confirms its runtime images there).
+// terminal or being deleted, every pod is PodReady — the readiness gates
+// the controller writes are folded by kubelet into that condition, so a
+// PodReady pod is eligible for its Service — and every pod has held Ready
+// for the Component's minReadySeconds window. A window <= 0 reduces the
+// bar to PodReady. Each extra predicate is an additional per-path
+// requirement on every pod (the in-place roll confirms its runtime images
+// there).
 //
 // The duration is how long until the last pod inside its window clears it,
 // so a caller waiting on the window wakes when it elapses instead of
@@ -432,7 +443,7 @@ func PodSetPromotable(pods []*corev1.Pod, minReadySeconds int32, now time.Time, 
 	}
 	var wait time.Duration
 	for _, pod := range pods {
-		if IsTerminalPod(pod) || !podreadiness.IsContainersReady(pod) {
+		if !podCountsForPromote(pod) || !podreadiness.IsContainersReady(pod) {
 			return false, 0
 		}
 		for _, satisfied := range extra {

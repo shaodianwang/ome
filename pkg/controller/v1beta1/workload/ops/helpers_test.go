@@ -1122,3 +1122,22 @@ func gangSurgeTargetMarkerAt(row *workload.InstanceStatus, revision string) bool
 		row.Operation.Step == workload.UpdateStepGangSurgeTarget &&
 		row.Operation.TargetRevision == revision
 }
+
+// releaseTerminatingPod drops the finalizer terminatingPod pinned, so the
+// fake client collects the object the way the apiserver does once the
+// kubelet has acknowledged the deletion.
+func releaseTerminatingPod(t *testing.T, c client.Client, pod *corev1.Pod) {
+	t.Helper()
+	ctx := context.Background()
+	live := &corev1.Pod{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), live); err != nil {
+		t.Fatalf("re-read terminating pod %s: %v", pod.Name, err)
+	}
+	live.Finalizers = nil
+	if err := c.Update(ctx, live); err != nil {
+		t.Fatalf("release pod %s: %v", pod.Name, err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("pod %s still exists after its finalizer was released: %v", pod.Name, err)
+	}
+}

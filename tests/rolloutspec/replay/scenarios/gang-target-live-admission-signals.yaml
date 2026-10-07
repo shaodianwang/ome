@@ -5,8 +5,10 @@
 # read as present, an evicted member is deleted at once by the source's
 # attempt with the eviction on its LastFailure and refilled once the delete
 # is observed with the PodGroup ensured first, a refill that finds its name
-# taken is adopted by name, and a member already being deleted neither
-# triggers a recreate nor blocks the promote.
+# taken is adopted by name, and a member already being deleted is gone for
+# the hand-over whatever its readiness says: nothing is refilled while it
+# holds its name, the drain waits on the short gang, and the refill lands
+# before the promote.
 scenario: gang-target-live-admission-signals
 arrows:
   - T-empty-gang-surge-target
@@ -82,15 +84,23 @@ timeline:
       - pod.ready[target]: {pod: {index: 1, runner: worker}}
       - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
   - tick: 11
-    note: the replacement worker is deleted from outside while still runtime-ready; the missing-pod set and the readiness gate ignore the deletion timestamp, so nothing is recreated and the promote is not blocked
+    note: the replacement worker is deleted from outside while still runtime-ready; a member being deleted is gone for the hand-over whatever its readiness says, so nothing is refilled while it holds its name and the drain waits on the short gang
     events:
       - pod.terminating[target]: {pod: {index: 1, runner: worker}}
   - tick: 12
+    note: the worker is gone, so the same attempt refills it with the PodGroup ensured first
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 13
+    note: the refilled worker reports Ready, so the whole gang clears the bar and the drain resumes; the source leader is still in the routed Service, so nothing is deleted yet
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 14
     note: the source leader leaves the routed Service, so the source pods are deleted
     events:
       - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
-  - tick: 13
-    note: the source pods are gone, so the marker is promoted Ready on the pinned revision behind a worker that is itself going away, and the source row is removed
+  - tick: 15
+    note: the source pods are gone, so the marker is promoted Ready on the pinned revision behind a complete gang, and the source row is removed
     events:
       - pod.deleted[source]: {pod: {index: 0, runner: leader}}
       - pod.deleted[source]: {pod: {index: 0, runner: worker}}

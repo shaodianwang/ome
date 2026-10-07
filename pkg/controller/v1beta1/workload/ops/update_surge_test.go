@@ -2314,7 +2314,7 @@ func TestSurge_OperatorConfigChangesDoNotChangeWhatItDecides(t *testing.T) {
 // the occupied slot, or moves the step. The operation deadline is what
 // bounds them.
 //
-// Cells: instance/Update/Surge/pod.containerRestart/before, instance/Update/Surge/pod.stuckTerminating/before, instance/Update/SurgeDrain/pod.stuckTerminating/before, instance/Update/SurgeDrain/pod.nodeLost[NodeGone]/before
+// Cells: instance/Update/Surge/pod.containerRestart/before, instance/Update/Surge/pod.stuckTerminating/before, instance/Update/Surge/pod.terminating[target]/before, instance/Update/SurgeDrain/pod.stuckTerminating/before, instance/Update/SurgeDrain/pod.nodeLost[NodeGone]/before, instance/Update/SurgeDrain/pod.terminating[target]/before
 func TestSurge_PodObservationsThatHoldTheStep(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -2361,6 +2361,24 @@ func TestSurge_PodObservationsThatHoldTheStep(t *testing.T) {
 				})
 			},
 		},
+		{
+			// A pod being deleted is gone for the promote whatever its
+			// readiness says: the source stays in rotation.
+			name: "the Ready replacement being deleted at the surge step",
+			step: workload.UpdateStepSurge, surgeReady: true, sourceServing: true,
+			observe: func(t *testing.T, f *midSurgeFixture) {
+				terminatingPod(t, f.client, f.surgePod)
+			},
+		},
+		{
+			// The drain neither deletes the source behind a replacement
+			// that is going away nor promotes onto it.
+			name: "the Ready replacement being deleted at the drain step",
+			step: workload.UpdateStepSurgeDrain, surgeReady: true,
+			observe: func(t *testing.T, f *midSurgeFixture) {
+				terminatingPod(t, f.client, f.surgePod)
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newMidSurgeFixture(t, tc.step, tc.surgeReady, tc.sourceServing)
@@ -2388,6 +2406,9 @@ func TestSurge_PodObservationsThatHoldTheStep(t *testing.T) {
 			}
 			if !got.sourceAlive {
 				t.Errorf("the source was deleted; nothing here converges a drain")
+			}
+			if tc.sourceServing && !got.sourceServing {
+				t.Errorf("the source left rotation; only the replacement clearing the bar drains it")
 			}
 			if !got.targetAlive {
 				t.Errorf("the occupied surge slot was recreated or collected")
@@ -4112,5 +4133,57 @@ func TestSurgeUpdate_DrainFlipToleratesASourceTheSweepRemoved(t *testing.T) {
 				t.Fatalf("next pass: got %+v want the replacement promoted at ordinal 1", got)
 			}
 		})
+	}
+}
+
+// TestSurgeUpdate_DeletingReplacementIsNotPromotedOnto: at the promote
+// step the drained source is gone and the only pod left is the Ready
+// replacement, which is being deleted. The kubelet keeps its container
+// answering the probe while the pod is already out of its Service, so
+// promoting onto it would stamp Ready on an Instance about to go dark. A
+// pod being deleted is gone for the promote whatever its readiness says:
+// the step waits while the object holds its name, the same attempt
+// rebuilds the replacement once it is gone, and the promote lands on the
+// rebuilt pod.
+//
+// Cells: instance/Update/SurgeDrain/pod.terminating[target]/before
+func TestSurgeUpdate_DeletingReplacementIsNotPromotedOnto(t *testing.T) {
+	f := newMidSurgeFixture(t, workload.UpdateStepSurgeDrain, true /* surgeReady */, false /* sourceServing */)
+	if err := f.client.Delete(context.Background(), f.sourcePod); err != nil {
+		t.Fatalf("lose the drained source: %v", err)
+	}
+	terminatingPod(t, f.client, f.surgePod)
+
+	got := runSurgePass(t, f, nil)
+	if got.done || got.phase != v1beta1.OMENativeInstanceUpdating || got.activeOrdinal != 0 {
+		t.Fatalf("promoted onto a replacement that is being deleted: %+v", got)
+	}
+	if got.step != workload.UpdateStepSurgeDrain {
+		t.Errorf("Operation.Step: got %q want SurgeDrain", got.step)
+	}
+	if !got.targetAlive {
+		t.Errorf("the Terminating replacement holds its name; it must not be recreated or collected")
+	}
+
+	// The object goes: the same attempt rebuilds the replacement at the
+	// surge ordinal, and the row still waits on it.
+	releaseTerminatingPod(t, f.client, f.surgePod)
+	got = runSurgePass(t, f, nil)
+	if got.done || got.activeOrdinal != 0 {
+		t.Fatalf("promoted with no Ready replacement: %+v", got)
+	}
+	rebuilt, alive := f.livePod(t, f.surgePod)
+	if !alive || rebuilt.DeletionTimestamp != nil {
+		t.Fatalf("the replacement was not rebuilt once its object was gone")
+	}
+	if podreadiness.IsContainersReady(rebuilt) {
+		t.Fatalf("fixture: the rebuilt replacement must start unready")
+	}
+
+	// The rebuilt replacement clears the bar and the promote lands on it.
+	f.markSurgePodReady(t)
+	got = runSurgePass(t, f, nil)
+	if !got.done || got.phase != v1beta1.OMENativeInstanceReady || got.activeOrdinal != 1 {
+		t.Fatalf("the promote must land on the rebuilt replacement: %+v", got)
 	}
 }
