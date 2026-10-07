@@ -573,3 +573,55 @@ func TestPartitionCache_UpdateLeafNodeCache(t *testing.T) {
 		t.Error("Expected leaf node 'h1' to be unready after update")
 	}
 }
+
+func TestPartitionCache_TracksCordonedNodes(t *testing.T) {
+	ctx := context.Background()
+	pc := NewPartitionCache(true)
+	tree := &partitiontreev1.PartitionTree{
+		ObjectMeta: metav1.ObjectMeta{Name: "tree-1"},
+		Status: partitiontreev1.PartitionTreeStatus{
+			Root: &partitiontreev1.PartitionInfo{
+				PartitionID: "root",
+				Topology:    "TRILLIUM_4_4",
+				State:       partitiontreev1.PartitionStateHealthy,
+				NodeNames:   []string{"h1"},
+			},
+		},
+	}
+	cordoned := func() bool {
+		t.Helper()
+		trees := NewPartitionWatcher(pc).GetState().GetPartitionTrees()
+		if len(trees) != 1 {
+			t.Fatalf("expected 1 tree, got %d", len(trees))
+		}
+		if trees[0].IsBroken {
+			t.Fatal("a cordoned node must not make its partition broken")
+		}
+		return trees[0].IsCordoned
+	}
+
+	node := newTestNode("h1", corev1.ConditionTrue)
+	node.Spec.Unschedulable = true
+	pc.UpdateTree(ctx, tree, []corev1.Node{*node})
+	if !cordoned() {
+		t.Fatal("expected the partition of a cordoned node to be cordoned")
+	}
+
+	// A tree update without nodes keeps what the cache knows about them.
+	pc.UpdateTree(ctx, tree, nil)
+	if !cordoned() {
+		t.Fatal("expected a tree update to keep the node cordoned")
+	}
+
+	node.Spec.Unschedulable = false
+	pc.UpdateLeafNodeCache(ctx, node)
+	if cordoned() {
+		t.Fatal("expected the partition to be schedulable once its node is uncordoned")
+	}
+
+	node.Spec.Unschedulable = true
+	pc.UpdateLeafNodeCache(ctx, node)
+	if !cordoned() {
+		t.Fatal("expected the partition to be cordoned once its node is cordoned")
+	}
+}

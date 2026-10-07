@@ -293,8 +293,14 @@ It is a copy of an external repository with its own `go.mod` (module
   `go vet ./...`, `make ci-lint`, `make test-no-xet` and
   `make test-meta-internal` never load it, and it carries no `meta_internal`
   tag. Deleting the directory changes no OME build.
-- It is kept identical to its source apart from `gofmt`. Codespell and the
-  pre-commit hooks skip it (`.pre-commit-config.yaml`).
+- It is kept identical to its source apart from `gofmt` and the local changes
+  below. Codespell and the pre-commit hooks skip it (`.pre-commit-config.yaml`).
+- Local changes, to carry forward when re-syncing from upstream:
+  - `--exclude-cordoned-nodes` (Helm value `excludeCordonedNodes`, default
+    off): new slices are not placed on partitions whose nodes are cordoned. A
+    cordoned node stays `Ready`, so without it the scheduler keeps handing out
+    partitions where no new pod can start. Slices already on a cordoned node
+    are left in place.
 - Build and test it from its own directory:
 
   ```sh

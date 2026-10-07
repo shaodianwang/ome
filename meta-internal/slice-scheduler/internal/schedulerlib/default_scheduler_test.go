@@ -18,6 +18,7 @@ package schedulerlib
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"testing"
 
@@ -835,5 +836,87 @@ func TestDefaultScheduler_SwapMinimization(t *testing.T) {
 		if gotIDs[i] != wantIDs[i] {
 			t.Errorf("Partition ID %d: got %q, want %q", i, gotIDs[i], wantIDs[i])
 		}
+	}
+}
+
+func createCordonScheduler(excludeCordoned bool) *DefaultScheduler {
+	filters := []interfaces.FilterPlugin{
+		&plugins.ExcludeDegradedFilter{},
+		&plugins.HealthyFilter{},
+		&plugins.ManagedFilter{},
+		&plugins.PriorityFilter{},
+	}
+	if excludeCordoned {
+		filters = append(filters, &plugins.ExcludeCordonedFilter{})
+	}
+	return NewDefaultScheduler(
+		[]interfaces.PlacementGenerator{generators.NewGroupGenerator(generators.GroupGeneratorConfig{BeamWidth: 10})},
+		filters,
+		[]interfaces.ScorePlugin{&plugins.PreemptionScorer{}, &plugins.TightestFitScorer{}},
+	)
+}
+
+func TestDefaultScheduler_ExcludeCordonedNodes(t *testing.T) {
+	const holder = "holder"
+	// cube c1: c1-a holds a free cordoned leaf and a used leaf; c1-b's leaves
+	// are free and schedulable unless usedB.
+	state := func(usedB bool) *testutil.MockClusterState {
+		b := testutil.NewStateBuilder().Pod("pod-a").Tree("4x4x4", "c1").
+			Child("2x2x2", "c1-a").
+			Child("2x2x1", "c1-a-1").Cordoned().ParentNode().
+			Child("2x2x1", "c1-a-2").UsedBy(holder, 255, interfaces.SliceSchedulerName).ParentNode().
+			ParentNode().
+			Child("2x2x2", "c1-b")
+		if usedB {
+			b = b.UsedBy(holder+"-b", 255, interfaces.SliceSchedulerName)
+		}
+		return b.Child("2x2x1", "c1-b-1").ParentNode().Child("2x2x1", "c1-b-2").Build()
+	}
+
+	tests := []struct {
+		name            string
+		topology        string
+		usedB           bool
+		excludeCordoned bool
+		// want is whether the slice is schedulable and the partitions it may
+		// be assigned.
+		wantSchedulable bool
+		wantOneOf       []string
+	}{
+		{
+			name:     "without the filter the cordoned leaf is the tightest fit",
+			topology: "2x2x1", excludeCordoned: false,
+			wantSchedulable: true, wantOneOf: []string{"c1-a-1"},
+		},
+		{
+			name:     "with the filter a leaf on a schedulable node is picked",
+			topology: "2x2x1", excludeCordoned: true,
+			wantSchedulable: true, wantOneOf: []string{"c1-b-1", "c1-b-2"},
+		},
+		{
+			name:     "a sub-cube covering a cordoned node is skipped",
+			topology: "2x2x2", excludeCordoned: true,
+			wantSchedulable: true, wantOneOf: []string{"c1-b"},
+		},
+		{
+			name:     "only cordoned capacity is left",
+			topology: "2x2x1", usedB: true, excludeCordoned: true,
+			wantSchedulable: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := createCordonScheduler(tt.excludeCordoned).Schedule(context.Background(), makeReq("slice1", tt.topology, TPU7x, 0), state(tt.usedB))
+			got := simplifyResult(res, "slice1")
+			if got.IsSchedulable != tt.wantSchedulable {
+				t.Fatalf("schedulable = %v (%s), want %v", got.IsSchedulable, res.FailureReason, tt.wantSchedulable)
+			}
+			if !tt.wantSchedulable {
+				return
+			}
+			if len(got.AssignedPartitions) != 1 || !slices.Contains(tt.wantOneOf, got.AssignedPartitions[0]) {
+				t.Fatalf("assigned %v, want one of %v", got.AssignedPartitions, tt.wantOneOf)
+			}
+		})
 	}
 }

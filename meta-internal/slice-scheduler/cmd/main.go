@@ -102,6 +102,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var enableNodeReadiness bool
+	var excludeCordonedNodes bool
 	var enablePodReconciler bool
 	var waitForSliceReady bool
 	var podReconcilerWorkers int
@@ -124,6 +125,9 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.BoolVar(&enableNodeReadiness, "enable-node-readiness", false,
 		"If set, the scheduler takes the k8s node presence and readiness into account.")
+	flag.BoolVar(&excludeCordonedNodes, "exclude-cordoned-nodes", false,
+		"If set, new slices are not placed on partitions whose k8s nodes are cordoned. "+
+			"Slices already on a cordoned node are left in place.")
 	flag.BoolVar(&enablePodReconciler, "enable-pod-reconciler", false, "Enable the pod reconciler for pod-to-node binding")
 	flag.BoolVar(&waitForSliceReady, "wait-for-slice-ready", true,
 		"If set, the pod-reconciler will wait for the associated slice to be in READY state before binding.")
@@ -232,6 +236,9 @@ func main() {
 		&plugins.HealthyFilter{},
 		&plugins.ManagedFilter{},
 		&plugins.PriorityFilter{},
+	}
+	if excludeCordonedNodes {
+		filters = append(filters, &plugins.ExcludeCordonedFilter{})
 	}
 
 	scorers := []interfaces.ScorePlugin{

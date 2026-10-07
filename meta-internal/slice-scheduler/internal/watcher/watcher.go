@@ -125,6 +125,7 @@ func (ps *partitionState) toInterfacePartitionInfo(node *PartitionNode, parentIn
 		IsAvailable: util.IsPartitionAvailable(node.Info),
 		IsOccupied:  util.IsPartitionOccupied(node.Info),
 		IsBroken:    node.isBroken(ps.cache.enableNodeReadiness),
+		IsCordoned:  node.isCordoned(),
 		InUseBy:     currentInUse,
 		PodName:     node.PodName,
 		State:       string(node.Info.State),

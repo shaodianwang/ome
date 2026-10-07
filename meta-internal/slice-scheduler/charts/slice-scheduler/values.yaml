@@ -80,6 +80,10 @@ pdb:
 
 enableNodeReadiness: false
 
+# If true, new slices are not placed on partitions whose k8s nodes are cordoned.
+# Slices already on a cordoned node are left in place.
+excludeCordonedNodes: false
+
 podReconciler:
   enabled: true
   workers: 4

@@ -54,6 +54,30 @@ func TestHealthyFilter(t *testing.T) {
 	}
 }
 
+func TestExcludeCordonedFilter(t *testing.T) {
+	filter := &ExcludeCordonedFilter{}
+	ctx := context.Background()
+	req := interfaces.GroupAllocationRequest{}
+
+	tests := []struct {
+		name     string
+		node     *interfaces.PartitionInfo
+		expected bool
+	}{
+		{name: "Schedulable node", node: &interfaces.PartitionInfo{}, expected: true},
+		{name: "Cordoned node", node: &interfaces.PartitionInfo{IsCordoned: true}, expected: false},
+		{name: "Nil node", node: nil, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := filter.Filter(ctx, req, tt.node); got != tt.expected {
+				t.Errorf("ExcludeCordonedFilter.Filter() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestManagedFilter(t *testing.T) {
 	filter := &ManagedFilter{}
 	ctx := context.Background()

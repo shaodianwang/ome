@@ -93,6 +93,7 @@ type PartitionInfo struct {
 	IsAvailable      bool // True if the partition itself is available (e.g. HEALTHY/EMPTY)
 	IsOccupied       bool // True if the partition is physically occupied
 	IsBroken         bool // True if the partition or its nodes are unhealthy/broken
+	IsCordoned       bool // True if the partition is a leaf whose node is cordoned (spec.unschedulable)
 	InUseBy          *SliceInfo
 	PodName          string
 	State            string // Raw CRD state for domain fallback

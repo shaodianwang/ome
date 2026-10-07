@@ -35,6 +35,21 @@ func (f *HealthyFilter) Filter(ctx context.Context, req interfaces.GroupAllocati
 	return !node.IsBroken
 }
 
+// ExcludeCordonedFilter prunes partitions whose node is cordoned. A candidate is
+// placed only if every partition in its subtree passes the filters, so a
+// candidate that covers a cordoned node is pruned as a whole. Slices already on
+// a cordoned node are not affected: the filter only runs when placing a slice.
+type ExcludeCordonedFilter struct{}
+
+func (f *ExcludeCordonedFilter) Name() string { return "ExcludeCordonedFilter" }
+
+func (f *ExcludeCordonedFilter) Filter(ctx context.Context, req interfaces.GroupAllocationRequest, node *interfaces.PartitionInfo) bool {
+	if node == nil {
+		return false
+	}
+	return !node.IsCordoned
+}
+
 // ManagedFilter prunes nodes occupied by slices not managed by the slice-scheduler.
 type ManagedFilter struct{}
 

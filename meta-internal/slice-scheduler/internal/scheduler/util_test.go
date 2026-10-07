@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	partitiontree "tpu.google.com/slice-scheduler/apis/partition/v1beta1"
 	slicev1beta1 "tpu.google.com/slice-scheduler/apis/slice/v1beta1"
@@ -272,5 +273,32 @@ func TestSliceInfo(t *testing.T) {
 	}
 	if len(info.PartitionIds) != 2 {
 		t.Errorf("PartitionIds len = %d, want 2", len(info.PartitionIds))
+	}
+}
+
+func TestNodeSchedulingChanged(t *testing.T) {
+	node := func(ready corev1.ConditionStatus, unschedulable bool, label string) *corev1.Node {
+		return &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "n1", Labels: map[string]string{"example": label}},
+			Spec:       corev1.NodeSpec{Unschedulable: unschedulable},
+			Status:     corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: ready}}},
+		}
+	}
+	tests := []struct {
+		name     string
+		old, new *corev1.Node
+		want     bool
+	}{
+		{"readiness changes", node(corev1.ConditionTrue, false, "a"), node(corev1.ConditionFalse, false, "a"), true},
+		{"node is cordoned", node(corev1.ConditionTrue, false, "a"), node(corev1.ConditionTrue, true, "a"), true},
+		{"node is uncordoned", node(corev1.ConditionTrue, true, "a"), node(corev1.ConditionTrue, false, "a"), true},
+		{"only a label changes", node(corev1.ConditionTrue, false, "a"), node(corev1.ConditionTrue, false, "b"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nodeSchedulingChanged(tt.old, tt.new); got != tt.want {
+				t.Errorf("nodeSchedulingChanged() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

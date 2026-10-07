@@ -1378,14 +1378,13 @@ func (r *SliceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return true
 			},
 			UpdateFunc: func(e event.UpdateEvent) bool {
-				// Only process updates if node readiness changed
+				// Only process updates if node readiness or cordon changed
 				oldNode, okOld := e.ObjectOld.(*corev1.Node)
 				newNode, okNew := e.ObjectNew.(*corev1.Node)
 				if !okOld || !okNew || nodeType(oldNode) != r.tpuType || nodeType(newNode) != r.tpuType {
 					return false // Not a node or not the right TPU node, don't process
 				}
-				// Compare old and new readiness status
-				return getNodeReadyStatus(oldNode) != getNodeReadyStatus(newNode)
+				return nodeSchedulingChanged(oldNode, newNode)
 			},
 			DeleteFunc: func(e event.DeleteEvent) bool {
 				// The original handler did nothing, so don't process deletes
@@ -1396,6 +1395,13 @@ func (r *SliceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			},
 		})).
 		Complete(r)
+}
+
+// nodeSchedulingChanged reports whether an update changes what the cache keeps
+// about a node: its readiness or whether it is cordoned.
+func nodeSchedulingChanged(oldNode, newNode *corev1.Node) bool {
+	return getNodeReadyStatus(oldNode) != getNodeReadyStatus(newNode) ||
+		oldNode.Spec.Unschedulable != newNode.Spec.Unschedulable
 }
 
 // getNodeReadyStatus is a helper function to extract the NodeReady condition.
@@ -1431,7 +1437,7 @@ func (r *SliceReconciler) handleNodeUpdate(ctx context.Context, e event.TypedUpd
 	r.schedulingMutex.Lock()
 	defer r.schedulingMutex.Unlock()
 
-	r.log.Info("Node updated", "node name", newNode.Name, "status", newNode.Status.Conditions, "labels", newNode.Labels)
+	r.log.Info("Node updated", "node name", newNode.Name, "unschedulable", newNode.Spec.Unschedulable, "status", newNode.Status.Conditions, "labels", newNode.Labels)
 	r.cache.UpdateLeafNodeCache(ctx, newNode)
 }
 

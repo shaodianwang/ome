@@ -26,6 +26,9 @@ import (
 type KubeNode struct {
 	Name  string
 	Ready bool
+	// Unschedulable mirrors the node's spec.unschedulable: the node is
+	// cordoned and takes no new pods.
+	Unschedulable bool
 }
 
 // PartitionNode is an in-memory representation of a partition, tracking its state and usage.

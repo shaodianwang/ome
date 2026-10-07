@@ -79,6 +79,13 @@ func (pn *PartitionNode) isPartitionNodeSchedulable(ctx context.Context, enableN
 	return true
 }
 
+// Returns true if the partition is a leaf whose k8s node is cordoned. Unlike
+// a node that is not ready, a cordoned node keeps the slices it already runs,
+// so this never makes a partition broken.
+func (pn *PartitionNode) isCordoned() bool {
+	return pn.isLeafPartitionNode() && pn.KubeNode != nil && pn.KubeNode.Unschedulable
+}
+
 func (p *PartitionNode) isLeafPartitionNode() bool {
 	return len(p.Info.NodeNames) == 1
 }

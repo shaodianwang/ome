@@ -259,7 +259,7 @@ func (pc *PartitionCache) preserveKubeNodeState(node *PartitionNode, kNodeMap ma
 	}
 	if node.isLeafPartitionNode() && node.KubeNode != nil {
 		if _, ok := kNodeMap[node.KubeNode.Name]; !ok {
-			kNodeMap[node.KubeNode.Name] = &KubeNode{Name: node.KubeNode.Name, Ready: node.KubeNode.Ready}
+			kNodeMap[node.KubeNode.Name] = &KubeNode{Name: node.KubeNode.Name, Ready: node.KubeNode.Ready, Unschedulable: node.KubeNode.Unschedulable}
 		}
 	}
 	for _, child := range node.Children {
@@ -349,8 +349,9 @@ func (pc *PartitionCache) UpdateTree(ctx context.Context, tree *partitiontreev1.
 	nodeMap := make(map[string]*KubeNode)
 	for _, node := range nodes {
 		nodeMap[node.Name] = &KubeNode{
-			Name:  node.Name,
-			Ready: isNodeReady(&node),
+			Name:          node.Name,
+			Ready:         isNodeReady(&node),
+			Unschedulable: node.Spec.Unschedulable,
 		}
 	}
 
@@ -382,7 +383,8 @@ func (pc *PartitionCache) UpdateLeafNodeCache(ctx context.Context, node *corev1.
 			kNode.KubeNode = &KubeNode{Name: node.Name}
 		}
 		kNode.KubeNode.Ready = isNodeReady(node)
-		logf.V(2).Info("Updating leaf node status in cache", "node name", node.Name, "status", kNode.KubeNode.Ready)
+		kNode.KubeNode.Unschedulable = node.Spec.Unschedulable
+		logf.V(2).Info("Updating leaf node status in cache", "node name", node.Name, "status", kNode.KubeNode.Ready, "unschedulable", kNode.KubeNode.Unschedulable)
 	}
 }
 

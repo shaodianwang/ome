@@ -43,6 +43,7 @@ type nodeBuilder struct {
 	topology         string
 	inUseBy          *interfaces.SliceInfo
 	isBroken         bool
+	isCordoned       bool
 	state            string
 	degradationState *interfaces.DegradationState
 	children         []*nodeBuilder
@@ -112,6 +113,12 @@ func (tc *TreeContext) Broken() *TreeContext {
 	return tc
 }
 
+// Cordoned marks the current node's k8s node as cordoned.
+func (tc *TreeContext) Cordoned() *TreeContext {
+	tc.node.isCordoned = true
+	return tc
+}
+
 // Degraded marks the current node as degraded with the given OCS domain.
 func (tc *TreeContext) Degraded(ocsName string) *TreeContext {
 	tc.node.degradationState = &interfaces.DegradationState{
@@ -167,6 +174,7 @@ func (b *MockStateBuilder) buildRecursive(nb *nodeBuilder, podName string, paren
 		PodName:          podName,
 		InUseBy:          currentInUse, // Propagate owner down
 		IsBroken:         nb.isBroken,
+		IsCordoned:       nb.isCordoned,
 		State:            nb.state,
 		DegradationState: nb.degradationState,
 	}
