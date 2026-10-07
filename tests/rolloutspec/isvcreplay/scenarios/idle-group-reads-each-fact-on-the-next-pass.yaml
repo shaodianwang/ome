@@ -1,0 +1,69 @@
+scenario: idle-group-reads-each-fact-on-the-next-pass
+cells:
+  - coordination/Unobserved/ctrl.resync/after@T-unobs-idle
+  - coordination/Idle/member.dark/before
+  - coordination/Idle/member.capacityLost[newRevision]/before
+  - coordination/Idle/spec.pause/after@T-idle-paused
+  - coordination/Paused/spec.unpause/after@T-paused-unpause-idle
+  - coordination/Idle/spec.groupEdited[groupRemoved]/after@T-idle-removed
+  - coordination/Idle/spec.partition[set]/before
+  - coordination/Idle/spec.partition[cleared]/before
+  - coordination/Idle/ir.stale/before
+intentional: >-
+  an Idle group is recomputed from its members on every pass: a dark
+  member, a trailing replica, a partition and a resync leave it Idle and
+  ready, the pause and its removal move it on the pass after each lands,
+  and a group edited away is pruned and re-observed from nothing when it
+  returns
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+      decoder: {replicas: 1, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine, decoder]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the group is first observed Idle
+  - tick: 2
+    note: the next pass reads the entry back as the group's memory; nothing changes
+    events:
+      - ctrl.resync
+  - tick: 3
+    note: the decoder goes dark with no Failed row; the group stays Idle and reads ready
+    events:
+      - member.dark: {component: decoder}
+  - tick: 4
+    note: the engine's pods leave readiness as well; still Idle
+    events:
+      - member.capacityLost[newRevision]: {component: engine}
+  - tick: 5
+    note: the decoder's replica publishes behind its generation; the observation applies no freshness rule and the group stays Idle
+    events:
+      - ir.stale: {component: decoder}
+  - tick: 6
+    note: a partition is set on an idle member; nothing rolls, so the group stays Idle
+    events:
+      - spec.partition[set]: {component: engine, to: 1}
+  - tick: 7
+    note: the partition is cleared; still Idle
+    events:
+      - spec.partition[cleared]: {component: engine}
+  - tick: 8
+    note: the pause lands after the Idle write; the next pass reads Paused
+    events:
+      - spec.pause
+  - tick: 9
+    note: the pause is removed after the Paused write; the next pass reads Idle again
+    events:
+      - spec.unpause
+  - tick: 10
+    note: the group is edited away; its entry is pruned and the status block cleared
+    events:
+      - spec.planEdit: {groups: []}
+  - tick: 11
+    note: the group is declared again; it starts Unobserved and is written Idle
+    events:
+      - spec.planEdit: {groups: [{components: [engine, decoder], blueGreen: {}}]}

@@ -1,0 +1,37 @@
+scenario: anchor-resnapshot-on-a-copy-without-one
+cells:
+  - coordination/Idle/ctrl.staleRead[anchorMissing]/before
+  - coordination/Idle/flush.staleOverwrite/before
+  - coordination/Idle/spec.replicas[up]/before
+intentional: >-
+  the ratio anchor is snapshotted from the replicas the pass sees whenever
+  its copy of the service carries none, and the flush copies the pass's
+  anchor over the live one with no preserve rule, so a pass whose cached
+  copy predates the anchor write moves the anchor to the shape the
+  members have by then
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+      decoder: {replicas: 1, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine, decoder]
+        blueGreen: {}
+        maintainRatio: {tolerance: 25}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the first observation writes the entry and snapshots the anchor at two to one
+  - tick: 2
+    note: the engine scales to three and the pass reads the copy from before the anchor write; the anchor is snapshotted again at three to one and copied over the live one
+    events:
+      - spec.replicas[up]: {component: engine, to: 3}
+      - ctrl.staleRead[anchorMissing]
+  - tick: 3
+    note: the next pass reads the moved anchor back and keeps it
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: a further scale with a current copy keeps the anchor
+    events:
+      - spec.replicas[up]: {component: engine, to: 4}

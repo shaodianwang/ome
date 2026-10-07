@@ -1,0 +1,75 @@
+scenario: sequential-soak-restarts-after-unpause
+cells:
+  - coordination/SeqAwaiting/spec.pause/after@T-await-paused
+  - coordination/Paused/timer.soak/before
+  - coordination/Paused/spec.unpause/after@T-paused-unpause-idle
+  - coordination/SeqAwaiting/timer.soak/after@T-await-soak
+  - coordination/SeqAwaiting/ctrl.resync/before
+intentional: >-
+  the Sequential soak is measured from the group's lastTransitionTime,
+  which moves on every base-phase change; a pause and its removal change
+  the base phase twice, so the soak's own deadline passes unread under the
+  pause and after the unpause the soak measures from the unpause rather
+  than from the previous member's completion
+initial:
+  service:
+    components:
+      decoder: {replicas: 1, image: registry.example.com/runtime:v1}
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [decoder]
+        soak: 5m
+      - components: [engine]
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the two single-Component groups collapse into one Sequential group
+  - tick: 2
+    note: both templates are edited at once
+    events:
+      - spec.revision[new]: {component: decoder, image: registry.example.com/runtime:v2}
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens; the decoder rolls first
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the decoder converges; the engine is next and the soak holds the group Awaiting from the hand-off
+    events:
+      - member.surgePodCreated: {component: decoder}
+      - member.readyOnTarget: {component: decoder}
+      - member.oldPodsGone: {component: decoder}
+      - member.converged: {component: decoder}
+  - tick: 5
+    note: a minute into the soak a resync keeps the group Awaiting and its transition time
+    events:
+      - clock.advance: 1m
+      - ctrl.resync
+  - tick: 6
+    note: the operator pauses the rollout two minutes into the soak; the group reads Paused and restamps its transition time
+    events:
+      - clock.advance: 1m
+      - spec.pause
+  - tick: 7
+    note: the soak's own deadline passes under the pause; the pause outranks the soak and the group keeps Paused
+    events:
+      - clock.advance: 4m
+      - ctrl.resync
+  - tick: 8
+    note: the pause is removed; the group returns to Awaiting with its transition time restamped at the unpause, so the soak runs again from there
+    events:
+      - spec.unpause
+  - tick: 9
+    note: a minute after the unpause the soak still holds, measured from the unpause
+    events:
+      - clock.advance: 1m
+      - ctrl.resync
+  - tick: 10
+    note: the soak measured from the unpause elapses; the engine is released
+    events:
+      - timer.soak: {slack: 1s}
+  - tick: 11
+    note: more time under Surging changes nothing about the soak
+    events:
+      - clock.advance: 10m
+      - ctrl.resync

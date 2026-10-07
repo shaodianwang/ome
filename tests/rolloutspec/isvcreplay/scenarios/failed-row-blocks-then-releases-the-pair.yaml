@@ -1,0 +1,73 @@
+scenario: failed-row-blocks-then-releases-the-pair
+cells:
+  - coordination/Surging/member.failed/after@T-surging-failed
+  - coordination/Failed/member.surgePodCreated/before
+  - coordination/Failed/member.readyOnTarget/before
+  - coordination/Failed/member.oldPodsGone/before
+  - coordination/Failed/member.converged/before
+  - coordination/Failed/member.recovered/after@T-failed-recover-idle
+  - coordination/Failed/ctrl.resync/before
+  - coordination/Failed/spec.pause/after@T-failed-paused
+  - coordination/Paused/spec.unpause/after@T-paused-unpause-failed
+  - coordination/Failed/member.rollback/before
+intentional: >-
+  Failed is a rollup of the rows: while one member's row reads Failed,
+  nothing another member does moves the group, and the pass that finds no
+  Failed row recomputes the phase from the members with nothing latched
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+      decoder: {replicas: 1, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine, decoder]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the group is first observed Idle
+  - tick: 2
+    note: both templates are edited; the group reads Surging
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+      - spec.revision[new]: {component: decoder, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: an engine row reads Failed after the Surging write; the next pass reads Failed
+    events:
+      - member.failed: {component: engine, index: 0}
+  - tick: 4
+    note: the decoder surges while the engine row is Failed; the group keeps Failed
+    events:
+      - member.surgePodCreated: {component: decoder}
+  - tick: 5
+    note: the decoder's new pod is Ready; still Failed
+    events:
+      - member.readyOnTarget: {component: decoder}
+  - tick: 6
+    note: the decoder's old pod is gone; still Failed
+    events:
+      - member.oldPodsGone: {component: decoder}
+  - tick: 7
+    note: the decoder converges; still Failed
+    events:
+      - member.converged: {component: decoder}
+  - tick: 8
+    note: a resync changes nothing
+    events:
+      - ctrl.resync
+  - tick: 9
+    note: the operator pauses the rollout; the pause outranks the failure
+    events:
+      - spec.pause
+  - tick: 10
+    note: the pause is removed with the row still Failed; the group reads Failed again
+    events:
+      - spec.unpause
+  - tick: 11
+    note: the engine's template returns to its current revision while the row is Failed; the revert clears no row
+    events:
+      - member.rollback: {component: engine}
+  - tick: 12
+    note: the row recovers after the Failed write; the next pass recomputes from the members and reads Idle, the engine no longer rolling
+    events:
+      - member.recovered: {component: engine, index: 0}

@@ -1,0 +1,62 @@
+tick=0 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=1 replicas=2 ready=2 serving=2 updated=2 updatedReady=2 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=0 publish component=decoder current=svc-a-decoder-f332566b update=svc-a-decoder-f332566b observedGeneration=1 replicas=1 ready=1 serving=1 updated=1 updatedReady=1 rows=[0:Ready@f332566b]
+tick=1 note a settled service; the first observation writes the entry and snapshots the anchor at two to one
+tick=1 pass cache=live generation=1
+tick=1 run outcome=none policies=disabled
+tick=1 run active=nil
+tick=1 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=1 service create name=svc-a-engine-rev-f332566b stage=coordination
+tick=1 service create name=svc-a-engine-rev-f332566b-headless stage=coordination
+tick=1 service create name=svc-a-decoder-rev-f332566b stage=coordination
+tick=1 service create name=svc-a-decoder-rev-f332566b-headless stage=coordination
+tick=1 coordination group=0 before=nil after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor={decoder:1 engine:2}}
+tick=1 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=1 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=1 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=1 flush which=final result=written statusWrites=1 run=desired groups=0:added
+tick=1 pass result=none
+tick=2 note the engine scales to three and the pass reads the copy from before the anchor write; the anchor is snapshotted again at three to one and copied over the live one
+tick=2 apply spec.replicas[up] component=engine to=3 generation=2 now=t+0s
+tick=2 apply ctrl.staleRead[anchorMissing] cache=before-pass-1 now=t+0s
+tick=2 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=1 replicas=3 ready=2 serving=2 updated=3 updatedReady=2 rows=[0:Ready@f332566b 1:Ready@f332566b 2:Pending@f332566b]
+tick=2 pass cache=before-pass-1 generation=1
+tick=2 run outcome=none policies=disabled
+tick=2 run active=nil
+tick=2 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=2 ir patch name=svc-a-engine stage=project replicas=2→3 generation=1→2
+tick=2 coordination group=0 before=nil after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor={decoder:1 engine:3}}
+tick=2 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=2 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=2 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=2 flush which=final result=written statusWrites=1 run=same groups=0:overwrote-newer-live{anchor:{decoder:1 engine:2}→{decoder:1 engine:3}}
+tick=2 pass result=none
+tick=3 note the next pass reads the moved anchor back and keeps it
+tick=3 apply ctrl.resync now=t+0s
+tick=3 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=2 replicas=3 ready=2 serving=2 updated=3 updatedReady=2 rows=[0:Ready@f332566b 1:Ready@f332566b 2:Pending@f332566b]
+tick=3 pass cache=live generation=2
+tick=3 run outcome=none requeueAfter=10s policies=disabled
+tick=3 run active=nil
+tick=3 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=3 ir patch name=svc-a-engine stage=project parentGen=1→2
+tick=3 ir patch name=svc-a-decoder stage=project parentGen=1→2
+tick=3 coordination group=0 before={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor={decoder:1 engine:3}} after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor={decoder:1 engine:3}}
+tick=3 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=3 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=3 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=3 flush which=final result=short-circuit
+tick=3 pass result=after:10s
+tick=4 note a further scale with a current copy keeps the anchor
+tick=4 apply spec.replicas[up] component=engine to=4 generation=3 now=t+0s
+tick=4 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=2 replicas=4 ready=2 serving=2 updated=4 updatedReady=2 rows=[0:Ready@f332566b 1:Ready@f332566b 2:Pending@f332566b 3:Pending@f332566b]
+tick=4 pass cache=live generation=3
+tick=4 run outcome=none requeueAfter=10s policies=disabled
+tick=4 run active=nil
+tick=4 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=4 ir patch name=svc-a-engine stage=project replicas=3→4 parentGen=2→3 generation=2→3
+tick=4 ir patch name=svc-a-decoder stage=project parentGen=2→3
+tick=4 coordination group=0 before={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor={decoder:1 engine:3}} after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor={decoder:1 engine:3}}
+tick=4 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=4 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=4 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=4 flush which=final result=short-circuit
+tick=4 pass result=after:10s

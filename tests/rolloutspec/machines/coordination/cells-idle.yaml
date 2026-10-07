@@ -22,10 +22,10 @@ cells:
     event: ctrl.resync
     windows: [boundary, after]
     outcome: ignore
-    note: "the entry is written once; the next pass reads it back as the group's memory"
+    note: "the entry is written once and read back by the next pass as the group's only memory; a resync that finds the same facts keeps it"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_EachPassWritesThePhaseItsOwnReadComputed, TestMergeGroupStatus_PreservesLastTransitionTimeOnSamePhase], kind: [], replay: [idle-group-reads-each-fact-on-the-next-pass, open-and-close]}
+    status: decided
   # --- Idle ------------------------------------------------------------------
   - state: Idle
     event: member.targetChanged
@@ -44,60 +44,60 @@ cells:
     variants: [first]
     windows: [boundary, after]
     outcome: ignore
-    note: "the phase is written once per pass from the facts the pass read; a fact that changes after the read is the next pass's"
+    note: "the phase is written once per pass from the facts the pass read; a fact that lands after that read is the next pass's, which recomputes the phase from it"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_EachPassWritesThePhaseItsOwnReadComputed], kind: [], replay: [open-and-close, stale-copy-restamps-every-phase]}
+    status: decided
   - state: Idle
     event: member.surgePodCreated
     windows: [before]
     outcome: transition
     to: Waiting
     guard: "the bump and its first new-revision pod are observed in one pass and not every new pod is Ready"
-    note: "a coordination pass that lags the replica sees the bump and the pod together; the phase is the facts', not the history's"
+    note: "a coordination pass that lags the replica sees the bump and an Instance already counted on the target together; the phase is the facts', not the history's"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/idle-surge-pod-observed-with-the-bump], kind: []}
+    status: decided
   - state: Idle
     event: member.surgePodCreated
     windows: [boundary, after]
     outcome: ignore
-    note: "the phase is written once per pass from the facts the pass read; a fact that changes after the read is the next pass's"
+    note: "the phase is written once per pass from the facts the pass read; a fact that lands after that read is the next pass's, which recomputes the phase from it"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_EachPassWritesThePhaseItsOwnReadComputed, TestComputeTransition_PhaseFollowsTheMembersFromEveryState/idle-surge-pod-observed-with-the-bump], kind: []}
+    status: decided
   - state: Idle
     event: member.readyOnTarget
     windows: [before]
     outcome: transition
     to: Shifting
     guard: "the bump and its Ready new-revision pods are observed in one pass while old pods remain"
-    note: "observed late, the group enters at Shifting; ScalingDown when no old pod remains"
+    note: "observed late, the group enters at Shifting while old pods remain and at ScalingDown when none does"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/idle-ready-target-observed-with-the-bump, TestComputeTransition_PhaseFollowsTheMembersFromEveryState/idle-ready-target-observed-with-no-old-pod], kind: []}
+    status: decided
   - state: Idle
     event: member.readyOnTarget
     windows: [boundary, after]
     outcome: ignore
-    note: "the phase is written once per pass from the facts the pass read; a fact that changes after the read is the next pass's"
+    note: "the phase is written once per pass from the facts the pass read; a fact that lands after that read is the next pass's, which recomputes the phase from it"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_EachPassWritesThePhaseItsOwnReadComputed, TestComputeTransition_PhaseFollowsTheMembersFromEveryState/idle-ready-target-observed-with-the-bump], kind: []}
+    status: decided
   - state: Idle
     event: member.capacityLost
     outcome: ignore
     note: "no roll is in flight; a readiness loss moves the pod-proportional traffic weights and the replica's own Ready condition, not the group phase"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/idle-capacity-lost-keeps-idle], kind: [], replay: [idle-group-reads-each-fact-on-the-next-pass]}
+    status: decided
   - state: Idle
     event: member.converged
     outcome: ignore
     note: "already Idle; nothing changes"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/idle-converged-members-keep-idle], kind: [], replay: [open-and-close]}
+    status: decided
   - state: Idle
     event: member.staged
     windows: [before]
@@ -113,10 +113,10 @@ cells:
     event: member.staged
     windows: [boundary, after]
     outcome: ignore
-    note: "the phase is written once per pass from the facts the pass read; a fact that changes after the read is the next pass's"
+    note: "the phase is written once per pass from the facts the pass read; a fact that lands after that read is the next pass's, which recomputes the phase from it"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_EachPassWritesThePhaseItsOwnReadComputed, TestComputeTransition_BlueGreenStaged], kind: []}
+    status: decided
   - state: Idle
     event: member.failed
     windows: [before]
@@ -132,17 +132,17 @@ cells:
     event: member.failed
     windows: [boundary, after]
     outcome: ignore
-    note: "the phase is written once per pass from the facts the pass read; a fact that changes after the read is the next pass's"
+    note: "the phase is written once per pass from the facts the pass read; a fact that lands after that read is the next pass's, which recomputes the phase from it"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_EachPassWritesThePhaseItsOwnReadComputed], kind: [], replay: [stale-copy-restamps-every-phase]}
+    status: decided
   - state: Idle
     event: member.dark
-    outcome: DECIDE
-    note: "a member with no serving pod and no Failed row leaves the phase at Idle: rows demoted to Pending are not failures, so the group and RolloutCoordinationReady read ready while the member is dark, and nothing in the group machine distinguishes a dark converged member from a healthy one. The owner must decide whether a dark member should fail or hold the group"
+    outcome: ignore
+    note: "the group phase keys on revisions, not on capacity: a dark member with no Failed row is not rolling and not failed, so the group stays Idle and RolloutCoordinationReady True while the replica's own Ready condition reports the loss"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: review
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/idle-dark-member-keeps-idle], kind: [], replay: [idle-group-reads-each-fact-on-the-next-pass]}
+    status: decided
   - state: Idle
     event: ratio.anchorMissing
     outcome: ignore
@@ -166,10 +166,10 @@ cells:
     event: spec.pause
     windows: [boundary, after]
     outcome: ignore
-    note: "the phase is written once per pass from the facts the pass read; a fact that changes after the read is the next pass's"
+    note: "the phase is written once per pass from the facts the pass read; a fact that lands after that read is the next pass's, which recomputes the phase from it"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_EachPassWritesThePhaseItsOwnReadComputed], kind: [], replay: [idle-group-reads-each-fact-on-the-next-pass]}
+    status: decided
   - state: Idle
     event: spec.groupEdited
     variants: [memberAdded]
@@ -192,10 +192,10 @@ cells:
     event: spec.groupEdited
     variants: [policyChanged]
     outcome: ignore
-    note: "the group is re-resolved from the effective plan every pass under the same index-derived name, so its entry, anchor and transition time carry over; under a pinned run the pinned body governs until the next open or a repin"
+    note: "the group is re-resolved from the effective plan every pass under the same index-derived name, so its entry, anchor and transition time carry over and the phase is recomputed under the new policy from the same facts; an Idle group reads Idle under every policy"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/idle-under-rollingupdate, TestComputeTransition_PhaseFollowsTheMembersFromEveryState/idle-under-independent, TestComputeTransition_PhaseFollowsTheMembersFromEveryState/idle-under-sequential], kind: []}
+    status: decided
   - state: Idle
     event: spec.groupEdited
     variants: [groupRemoved]
@@ -212,10 +212,10 @@ cells:
     variants: [groupRemoved]
     windows: [boundary, after]
     outcome: ignore
-    note: "the entry is gone; a redeclared group starts Unobserved"
+    note: "the entry is gone; a redeclared group starts Unobserved and is written at the phase its facts compute"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestMergeAndPersistGroupStatuses_PrunesRemovedGroups], kind: [], replay: [idle-group-reads-each-fact-on-the-next-pass]}
+    status: decided
   - state: Idle
     event: ir.readError
     outcome: defer
@@ -226,51 +226,54 @@ cells:
   - state: Idle
     event: ctrl.staleRead
     variants: [anchorMissing]
-    outcome: DECIDE
-    note: "the pass's cached copy carries no anchor, so the anchor is snapshotted again from today's replica counters (a row count that includes surge and migration indices) and the flush, which has no preserve rule for the group fields, overwrites the live anchor; the band moves mid-roll. The owner must decide whether the anchor is seeded from the replica spec and preserved from the live object at the flush"
+    outcome: transition
+    to: Idle
+    note: "today a copy with no anchor snapshots one from the replicas the pass sees and the flush copies it over the live anchor, so a scale between the anchor write and the stale pass moves the band to the new shape; which is wrong because anchor.kept.for.the.roll says the anchor is taken once and carried unchanged. Only the pass after the first observation can miss the anchor, which is written with the first entry"
     invariants: [anchor.kept.for.the.roll]
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: review
+    coverage: {perm: [], unit: [TestBuildRatioState_CopyWithoutAnchorSnapshotsTodaysReplicas], kind: [], replay: [anchor-resnapshot-on-a-copy-without-one]}
+    status: decided
   - state: Idle
     event: ctrl.staleRead
     variants: [phaseRegressed]
-    outcome: DECIDE
-    note: "the cached entry shows an older phase, so the merge sees a phase change, restamps lastTransitionTime to now, re-fires the transition event, the dwell metric and under Sequential restarts the state-side soak; the gate side keeps the replica's Ready transition time, so the two soak clocks disagree. The owner must decide which clock the soak reads and whether the transition time is preserved from the live object"
+    outcome: transition
+    to: Idle
+    note: "today the pass recomputes Idle from fresh facts, but the merge against a cached entry still at the previous phase sees the change again: it restamps lastTransitionTime to now, re-fires the transition event and the dwell metric, and the flush copies the restamped entry over the live one; under Sequential the restamp restarts the state-side soak; which is wrong because transition.time.marks.base.phase says the time moves only when the base phase changes"
     invariants: [transition.time.marks.base.phase]
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: review
+    coverage: {perm: [], unit: [TestMergeGroupStatus_NewPhaseUpdatesTransitionTime, TestEmitPhaseEvents_OnlyOnTransition], kind: [], replay: [stale-copy-restamps-every-phase]}
+    status: decided
   - state: Idle
     event: flush.staleOverwrite
-    outcome: DECIDE
-    note: "the flush copies the pass's rolloutCoordination over the live object's with no clock and no equality check, so a pass that read a stale copy rolls the live phase, anchor and transition time back by one pass; the owner must decide whether the group fields get a preserve rule like the run pin and the canary record"
+    outcome: transition
+    to: Idle
+    note: "today the flush copies the pass's group entry over the live one with no preserve rule and no clock, so the live phase, composite, current and previous component, transition time and anchor become the pass's: a pass that read a stale copy rolls the live entry back at its boundary flush and restamps it at its final flush; which is wrong because the run pin and the canary record are preserved against a stale writer and the group entry is not"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: review
+    coverage: {perm: [], unit: [], kind: [], replay: [stale-copy-restamps-every-phase, anchor-resnapshot-on-a-copy-without-one]}
+    status: decided
   - state: Idle
     event: api.serviceWriteFailed
     variants: [ensure]
     outcome: defer
-    note: "the per-revision Service write fails before the group is evaluated; the entry is untouched and the pass is retried"
+    note: "the per-revision Service write fails before the group is evaluated, whatever the phase; the pass fails for a retry and the entry stays as the previous pass wrote it"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_ServiceWriteFailureLeavesTheGroupEntry], kind: []}
+    status: decided
   - state: Idle
     event: api.serviceWriteFailed
     variants: [namespaceTerminating]
     outcome: ignore
-    note: "the pass returns cleanly without evaluating the group; the service is going away with its namespace"
+    note: "a create the apiserver refuses for a terminating namespace ends the pass cleanly before the group is evaluated; the entry stays as the previous pass wrote it and the service goes away with its namespace"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_NamespaceTerminatingStopsBeforeTheGroup], kind: []}
+    status: decided
   - state: Idle
     event: api.conflict
     outcome: defer
-    note: "the flush is rebased onto the live object and the group entry is taken from the pass's copy; the live Lifecycle, canary and run fields have preserve rules, the group fields do not"
+    note: "a 409 on the status write is rebased onto the live object inside the pass and the group entry lands from the pass's copy; the Lifecycle, canary and run fields have preserve rules, the group fields do not"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [], kind: [], replay: [apiserver-refusals-leave-the-group-entry]}
+    status: decided
   - state: Idle
     event: spec.replicas
     variants: [up]
@@ -293,19 +296,19 @@ cells:
     event: spec.partition
     variants: [set]
     outcome: ignore
-    note: "the partition takes effect through the replica, which stops the roll at the staged shape; the group then reads Staged on member.staged"
+    note: "the partition takes effect through the replica, which stops the roll at the staged shape; the phase keys on the rows and reads Staged only once the shape holds (member.staged)"
     invariants: [staged.is.rest]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/idle-partition-set-keeps-idle], kind: [], replay: [idle-group-reads-each-fact-on-the-next-pass]}
+    status: decided
   - state: Idle
     event: spec.partition
     variants: [cleared]
     outcome: ignore
-    note: "the held Instances roll on through the replica; the group leaves through member.converged"
+    note: "the held Instances roll on through the replica; the phase keys on the rows and the group leaves through member.converged"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/idle-partition-cleared-keeps-idle], kind: [], replay: [idle-group-reads-each-fact-on-the-next-pass]}
+    status: decided
   - state: Idle
     event: ir.missing
     outcome: ignore
@@ -318,8 +321,8 @@ cells:
     outcome: ignore
     note: "the observation applies no freshness rule; a trailing counter on an Idle group costs at most a late Surging"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestBuildComponentObservation_CountersTrailingThePodsReadTheCounters, TestComputeTransition_PhaseFollowsTheMembersFromEveryState/idle-counters-trailing-keep-idle], kind: [], replay: [idle-group-reads-each-fact-on-the-next-pass]}
+    status: decided
   - state: Idle
     event: ctrl.resync
     outcome: ignore
@@ -345,53 +348,49 @@ cells:
     variants: [first]
     windows: [boundary, after]
     outcome: ignore
-    note: "the phase is written once per pass from the facts the pass read; a fact that changes after the read is the next pass's"
+    note: "the phase is written once per pass from the facts the pass read; a fact that lands after that read is the next pass's, which recomputes the phase from it"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_EachPassWritesThePhaseItsOwnReadComputed, TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-soak-elapsed-enters-the-member-phase], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: member.surgePodCreated
     windows: [before]
-    outcome: transition
-    to: Waiting
-    guard: "the next member's bump and its first new pod are observed in one pass"
-    note: "observed late, the next member enters at Waiting"
+    outcome: ignore
+    note: "the soak hold is judged before the active member's pods, so an Instance counted on the target under the window (the replica-side gate releases on its own clock) leaves the group Awaiting; the member enters at Waiting when the soak elapses"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-surge-pod-under-the-soak-keeps-awaiting, TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-soak-elapsed-enters-the-member-phase], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: member.surgePodCreated
     windows: [boundary, after]
     outcome: ignore
-    note: "the phase is written once per pass from the facts the pass read; a fact that changes after the read is the next pass's"
+    note: "the phase is written once per pass from the facts the pass read; a fact that lands after that read is the next pass's, which recomputes the phase from it"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_EachPassWritesThePhaseItsOwnReadComputed, TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-surge-pod-under-the-soak-keeps-awaiting], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: member.readyOnTarget
     windows: [before]
-    outcome: transition
-    to: Shifting
-    guard: "the next member's bump and its Ready new pods are observed in one pass while old pods remain"
-    note: "observed late, the next member enters at Shifting"
+    outcome: ignore
+    note: "the soak hold is judged before the active member's pods, so pods Ready on the target under the window leave the group Awaiting; the member enters at the phase its pods compute when the soak elapses"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-ready-target-under-the-soak-keeps-awaiting, TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-soak-elapsed-enters-the-member-phase], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: member.readyOnTarget
     windows: [boundary, after]
     outcome: ignore
-    note: "the phase is written once per pass from the facts the pass read; a fact that changes after the read is the next pass's"
+    note: "the phase is written once per pass from the facts the pass read; a fact that lands after that read is the next pass's, which recomputes the phase from it"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_EachPassWritesThePhaseItsOwnReadComputed, TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-ready-target-under-the-soak-keeps-awaiting], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: member.capacityLost
     outcome: ignore
-    note: "no member rolls; a readiness loss on the completed member moves traffic weights, not the phase, unless a row reads Failed"
+    note: "the soak hold is judged before any pod fact; a readiness loss on the completed member moves traffic weights, not the phase, unless a row reads Failed"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-completed-member-capacity-lost-keeps-awaiting], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: member.converged
     windows: [before]
@@ -406,10 +405,10 @@ cells:
     event: member.converged
     windows: [boundary, after]
     outcome: ignore
-    note: "the phase is written once per pass from the facts the pass read; a fact that changes after the read is the next pass's"
+    note: "the phase is written once per pass from the facts the pass read; a fact that lands after that read is the next pass's, which recomputes the phase from it"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_EachPassWritesThePhaseItsOwnReadComputed, TestCompletedSequentialComponents_CountsAtDesiredShape], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: member.staged
     outcome: ignore
@@ -433,17 +432,17 @@ cells:
     event: member.failed
     windows: [boundary, after]
     outcome: ignore
-    note: "the phase is written once per pass from the facts the pass read; a fact that changes after the read is the next pass's"
+    note: "the phase is written once per pass from the facts the pass read; a fact that lands after that read is the next pass's, which recomputes the phase from it"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_EachPassWritesThePhaseItsOwnReadComputed, TestComputeTransition_PhaseFollowsTheMembersFromEveryState/failed-under-sequential], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: member.dark
     outcome: ignore
-    note: "a dark completed member with no Failed row does not hold the chain: the next member may start on it; the same gap as Idle's member.dark cell"
+    note: "a dark completed member with no Failed row does not hold the chain: the soak hold is judged before any pod fact and the next member starts when it elapses"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-completed-member-capacity-lost-keeps-awaiting], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: seq.nextTurn
     windows: [before]
@@ -459,10 +458,10 @@ cells:
     event: seq.nextTurn
     windows: [boundary, after]
     outcome: ignore
-    note: "the phase is written once per pass from the facts the pass read; a fact that changes after the read is the next pass's"
+    note: "the phase is written once per pass from the facts the pass read; a fact that lands after that read is the next pass's, which recomputes the phase from it"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_EachPassWritesThePhaseItsOwnReadComputed, TestComputeTransition_SequentialNoSoakRunsImmediately], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: timer.soak
     windows: [before]
@@ -477,12 +476,12 @@ cells:
   - state: SeqAwaiting
     event: timer.soak
     windows: [boundary, after]
-    outcome: DECIDE
-    note: "two clocks measure one soak: the group's lastTransitionTime, which a fast previous roll or a stale read can leave at the pre-rollout Idle entry so the state side releases at once, and the previous member's Ready transition on the replica, which the gate uses; a member can be admitted by the gate while the group still reads Awaiting, or the reverse. The owner must decide the one clock, and whether the handoff instant is persisted on the group status"
+    outcome: ignore
+    note: "once the soak elapsed and the next member's phase is written, a later reading of the clock changes nothing on the state side; the replica-side gate releases on the previous member's Ready transition, its own clock, so the two can admit the member on different passes, which is wrong because one soak is measured by two clocks"
     invariants: [transition.time.marks.base.phase]
     placement: sim
-    coverage: {perm: [], unit: [], kind: [], replay: [sequential-handoff-on-stale-copy]}
-    status: review
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-soak-long-elapsed-reads-the-member-phase, TestCheckSequentialGate_SoakReleasesAfterDuration], kind: [], replay: [sequential-handoff-on-stale-copy, sequential-soak-restarts-after-unpause]}
+    status: decided
   - state: SeqAwaiting
     event: spec.pause
     windows: [before]
@@ -498,10 +497,10 @@ cells:
     event: spec.pause
     windows: [boundary, after]
     outcome: ignore
-    note: "the phase is written once per pass from the facts the pass read; a fact that changes after the read is the next pass's"
+    note: "the phase is written once per pass from the facts the pass read; a fact that lands after that read is the next pass's, which recomputes the phase from it"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_EachPassWritesThePhaseItsOwnReadComputed], kind: [], replay: [sequential-soak-restarts-after-unpause]}
+    status: decided
   - state: SeqAwaiting
     event: spec.groupEdited
     variants: [memberAdded]
@@ -523,11 +522,12 @@ cells:
   - state: SeqAwaiting
     event: spec.groupEdited
     variants: [policyChanged]
-    outcome: ignore
-    note: "the group is re-resolved from the effective plan every pass under the same index-derived name, so its entry, anchor and transition time carry over; under a pinned run the pinned body governs until the next open or a repin"
+    outcome: transition
+    to: Surging
+    note: "the soak hold is a Sequential rule: a plan edit that collapses the pair into one BlueGreen or RollingUpdate group under the same index drops the hold and the group reads the rolling member's phase; the entry, anchor and transition time carry over"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-collapsed-to-bluegreen-reads-the-rolling-member], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: spec.groupEdited
     variants: [groupRemoved]
@@ -544,10 +544,10 @@ cells:
     variants: [groupRemoved]
     windows: [boundary, after]
     outcome: ignore
-    note: "the entry is gone; a redeclared group starts Unobserved"
+    note: "the entry is gone; a redeclared group starts Unobserved and is written at the phase its facts compute"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestMergeAndPersistGroupStatuses_PrunesRemovedGroups], kind: [], replay: [idle-group-reads-each-fact-on-the-next-pass]}
+    status: decided
   - state: SeqAwaiting
     event: ir.readError
     outcome: defer
@@ -558,51 +558,50 @@ cells:
   - state: SeqAwaiting
     event: ctrl.staleRead
     variants: [anchorMissing]
-    outcome: DECIDE
-    note: "the pass's cached copy carries no anchor, so the anchor is snapshotted again from today's replica counters (a row count that includes surge and migration indices) and the flush, which has no preserve rule for the group fields, overwrites the live anchor; the band moves mid-roll. The owner must decide whether the anchor is seeded from the replica spec and preserved from the live object at the flush"
-    invariants: [anchor.kept.for.the.roll]
-    placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: review
+    outcome: n/a
+    reason: "a Sequential group carries no ratio anchor, since RatioBalanced pacing is ignored on its single-member groups, so no copy can miss one"
+    status: decided
   - state: SeqAwaiting
     event: ctrl.staleRead
     variants: [phaseRegressed]
-    outcome: DECIDE
-    note: "the cached entry shows an older phase, so the merge sees a phase change, restamps lastTransitionTime to now, re-fires the transition event, the dwell metric and under Sequential restarts the state-side soak; the gate side keeps the replica's Ready transition time, so the two soak clocks disagree. The owner must decide which clock the soak reads and whether the transition time is preserved from the live object"
+    outcome: transition
+    to: SeqAwaiting
+    note: "today the pass recomputes the soak window from fresh facts, but the merge against a cached entry still at the previous phase sees the change again: it restamps lastTransitionTime to now, re-fires the transition event and the dwell metric, and the flush copies the restamped entry over the live one; the restamp restarts the state-side soak while the replica-side gate keeps the previous member's Ready transition; which is wrong because transition.time.marks.base.phase says the time moves only when the base phase changes"
     invariants: [transition.time.marks.base.phase]
     placement: sim
-    coverage: {perm: [], unit: [], kind: [], replay: [sequential-handoff-on-stale-copy]}
-    status: review
+    coverage: {perm: [], unit: [TestMergeGroupStatus_NewPhaseUpdatesTransitionTime, TestEmitPhaseEvents_OnlyOnTransition], kind: [], replay: [sequential-handoff-on-stale-copy]}
+    status: decided
   - state: SeqAwaiting
     event: flush.staleOverwrite
-    outcome: DECIDE
-    note: "the flush copies the pass's rolloutCoordination over the live object's with no clock and no equality check, so a pass that read a stale copy rolls the live phase, anchor and transition time back by one pass; the owner must decide whether the group fields get a preserve rule like the run pin and the canary record"
+    outcome: transition
+    to: SeqAwaiting
+    note: "today the flush copies the pass's group entry over the live one with no preserve rule and no clock, so the live phase, composite, current and previous component, transition time and anchor become the pass's: a pass that read a stale copy rolls the live entry back at its boundary flush and restamps it at its final flush; which is wrong because the run pin and the canary record are preserved against a stale writer and the group entry is not"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: review
+    coverage: {perm: [], unit: [], kind: [], replay: [sequential-handoff-on-stale-copy, stale-copy-restamps-every-phase]}
+    status: decided
   - state: SeqAwaiting
     event: api.serviceWriteFailed
     variants: [ensure]
     outcome: defer
-    note: "the per-revision Service write fails before the group is evaluated; the entry is untouched and the pass is retried"
+    note: "the per-revision Service write fails before the group is evaluated, whatever the phase; the pass fails for a retry and the entry stays as the previous pass wrote it"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_ServiceWriteFailureLeavesTheGroupEntry], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: api.serviceWriteFailed
     variants: [namespaceTerminating]
     outcome: ignore
-    note: "the pass returns cleanly without evaluating the group; the service is going away with its namespace"
+    note: "a create the apiserver refuses for a terminating namespace ends the pass cleanly before the group is evaluated; the entry stays as the previous pass wrote it and the service goes away with its namespace"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_NamespaceTerminatingStopsBeforeTheGroup], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: api.conflict
     outcome: defer
-    note: "the flush is rebased onto the live object and the group entry is taken from the pass's copy; the live Lifecycle, canary and run fields have preserve rules, the group fields do not"
+    note: "a 409 on the status write is rebased onto the live object inside the pass and the group entry lands from the pass's copy; the Lifecycle, canary and run fields have preserve rules, the group fields do not"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [], kind: [], replay: [apiserver-refusals-leave-the-group-entry]}
+    status: decided
   - state: SeqAwaiting
     event: spec.replicas
     variants: [up]
@@ -625,37 +624,38 @@ cells:
     event: spec.partition
     variants: [set]
     outcome: ignore
-    note: "the partition takes effect through the replica, which stops the roll at the staged shape; the group then reads Staged on member.staged"
+    note: "the partition takes effect through the replica, which stops the roll at the staged shape; the phase keys on the rows and reads Staged only once the shape holds (member.staged)"
     invariants: [staged.is.rest]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-partition-on-the-next-member-keeps-awaiting], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: spec.partition
     variants: [cleared]
     outcome: ignore
-    note: "the held Instances roll on through the replica; the group leaves through member.converged"
+    note: "the held Instances roll on through the replica; the phase keys on the rows and the group leaves through member.converged"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-partition-cleared-keeps-awaiting], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: ir.missing
-    outcome: ignore
-    note: "a member with no replica reads as a zero observation and counts as done for handoff"
+    outcome: transition
+    to: Idle
+    note: "a member with no replica reads as a zero observation and counts as done for handoff: with the next member gone the chain reads complete and the group Idle; with the completed member gone the hold keeps running for the next one"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-next-member-missing-reads-complete, TestReconcile_MissingReplicaReadsIdleOnTheNextPass], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: ir.stale
     outcome: ignore
     note: "the observation applies no freshness rule; the replica-side gate waits for a fresh replica before it releases the next member, so a trailing counter here costs a pass of Awaiting"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestBuildComponentObservation_CountersTrailingThePodsReadTheCounters, TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-counters-trailing-keep-awaiting], kind: []}
+    status: decided
   - state: SeqAwaiting
     event: ctrl.resync
     outcome: ignore
-    note: "the phase is recomputed and found unchanged; lastTransitionTime is kept, no event or metric fires, and the status write is skipped when nothing differs"
+    note: "the phase is recomputed unchanged and lastTransitionTime is kept; the message carries the remaining soak, so the entry is rewritten while the window runs and no event or metric fires"
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestComputeTransition_PhaseFollowsTheMembersFromEveryState/awaiting-resync-keeps-awaiting, TestMergeGroupStatus_PreservesLastTransitionTimeOnSamePhase], kind: [], replay: [sequential-soak-restarts-after-unpause]}
+    status: decided

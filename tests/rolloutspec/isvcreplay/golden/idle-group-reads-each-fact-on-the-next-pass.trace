@@ -1,0 +1,160 @@
+tick=0 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=1 replicas=2 ready=2 serving=2 updated=2 updatedReady=2 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=0 publish component=decoder current=svc-a-decoder-f332566b update=svc-a-decoder-f332566b observedGeneration=1 replicas=1 ready=1 serving=1 updated=1 updatedReady=1 rows=[0:Ready@f332566b]
+tick=1 note a settled service; the group is first observed Idle
+tick=1 pass cache=live generation=1
+tick=1 run outcome=none policies=disabled
+tick=1 run active=nil
+tick=1 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=1 service create name=svc-a-engine-rev-f332566b stage=coordination
+tick=1 service create name=svc-a-engine-rev-f332566b-headless stage=coordination
+tick=1 service create name=svc-a-decoder-rev-f332566b stage=coordination
+tick=1 service create name=svc-a-decoder-rev-f332566b-headless stage=coordination
+tick=1 coordination group=0 before=nil after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil}
+tick=1 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=1 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=1 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=1 flush which=final result=written statusWrites=1 run=desired groups=0:added
+tick=1 pass result=none
+tick=2 note the next pass reads the entry back as the group's memory; nothing changes
+tick=2 apply ctrl.resync now=t+0s
+tick=2 pass cache=live generation=1
+tick=2 run outcome=none policies=disabled
+tick=2 run active=nil
+tick=2 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=2 coordination group=0 before={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil} after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil}
+tick=2 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=2 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=2 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=2 flush which=final result=short-circuit
+tick=2 pass result=none
+tick=3 note the decoder goes dark with no Failed row; the group stays Idle and reads ready
+tick=3 apply member.dark component=decoder now=t+0s
+tick=3 publish component=decoder current=svc-a-decoder-f332566b update=svc-a-decoder-f332566b observedGeneration=1 replicas=1 ready=0 serving=0 updated=1 updatedReady=0 rows=[0:Pending@f332566b]
+tick=3 pass cache=live generation=1
+tick=3 run outcome=none policies=disabled
+tick=3 run active=nil
+tick=3 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=3 coordination group=0 before={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil} after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil}
+tick=3 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=3 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=3 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=3 flush which=final result=short-circuit
+tick=3 pass result=none
+tick=4 note the engine's pods leave readiness as well; still Idle
+tick=4 apply member.capacityLost[newRevision] component=engine revision=registry.example.com/runtime:v1 pods=2 now=t+0s
+tick=4 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=1 replicas=2 ready=0 serving=0 updated=2 updatedReady=0 rows=[0:Pending@f332566b 1:Pending@f332566b]
+tick=4 pass cache=live generation=1
+tick=4 run outcome=none policies=disabled
+tick=4 run active=nil
+tick=4 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=4 coordination group=0 before={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil} after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil}
+tick=4 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=4 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=4 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=4 flush which=final result=short-circuit
+tick=4 pass result=none
+tick=5 note the decoder's replica publishes behind its generation; the observation applies no freshness rule and the group stays Idle
+tick=5 apply ir.stale component=decoder now=t+0s
+tick=5 publish component=decoder current=svc-a-decoder-f332566b update=svc-a-decoder-f332566b observedGeneration=0 replicas=1 ready=0 serving=0 updated=1 updatedReady=0 rows=[0:Pending@f332566b]
+tick=5 pass cache=live generation=1
+tick=5 run outcome=none requeueAfter=10s policies=disabled
+tick=5 run active=nil
+tick=5 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=5 coordination group=0 before={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil} after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil}
+tick=5 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=5 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=5 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=5 flush which=final result=short-circuit
+tick=5 pass result=after:10s
+tick=6 note a partition is set on an idle member; nothing rolls, so the group stays Idle
+tick=6 apply spec.partition[set] component=engine to=1 generation=2 now=t+0s
+tick=6 publish component=decoder current=svc-a-decoder-f332566b update=svc-a-decoder-f332566b observedGeneration=1 replicas=1 ready=0 serving=0 updated=1 updatedReady=0 rows=[0:Pending@f332566b]
+tick=6 pass cache=live generation=2
+tick=6 run outcome=none requeueAfter=10s policies=disabled
+tick=6 run active=nil
+tick=6 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=6 ir patch name=svc-a-engine stage=project parentGen=1→2 generation=1→2
+tick=6 ir patch name=svc-a-decoder stage=project parentGen=1→2
+tick=6 coordination group=0 before={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil} after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil}
+tick=6 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=6 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=6 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=6 flush which=final result=short-circuit
+tick=6 pass result=after:10s
+tick=7 note the partition is cleared; still Idle
+tick=7 apply spec.partition[cleared] component=engine cleared generation=3 now=t+0s
+tick=7 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=2 replicas=2 ready=0 serving=0 updated=2 updatedReady=0 rows=[0:Pending@f332566b 1:Pending@f332566b]
+tick=7 pass cache=live generation=3
+tick=7 run outcome=none requeueAfter=10s policies=disabled
+tick=7 run active=nil
+tick=7 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=7 ir patch name=svc-a-engine stage=project parentGen=2→3 generation=2→3
+tick=7 ir patch name=svc-a-decoder stage=project parentGen=2→3
+tick=7 coordination group=0 before={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil} after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil}
+tick=7 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=7 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=7 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=7 flush which=final result=short-circuit
+tick=7 pass result=after:10s
+tick=8 note the pause lands after the Idle write; the next pass reads Paused
+tick=8 apply spec.pause ome.io/rollout-paused=true now=t+0s
+tick=8 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=3 replicas=2 ready=0 serving=0 updated=2 updatedReady=0 rows=[0:Pending@f332566b 1:Pending@f332566b]
+tick=8 pass cache=live generation=3
+tick=8 run outcome=none policies=disabled
+tick=8 run active=nil
+tick=8 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=8 ir patch name=svc-a-engine stage=project paused=false→true excluded=nil→ome.io/rollout-paused generation=3→4
+tick=8 ir patch name=svc-a-decoder stage=project paused=false→true excluded=nil→ome.io/rollout-paused generation=1→2
+tick=8 coordination group=0 before={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil} after={phase=Paused composite=Paused current=nil previous=nil transition=t+0s anchor=nil}
+tick=8 coordination conditions RolloutCoordinationReady=False(InProgress)
+tick=8 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=8 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=8 flush which=final result=written statusWrites=1 run=same groups=0:updated{phase:Idle→Paused composite:Idle→Paused}
+tick=8 pass result=none
+tick=9 note the pause is removed after the Paused write; the next pass reads Idle again
+tick=9 apply spec.unpause ome.io/rollout-paused=removed now=t+0s
+tick=9 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=4 replicas=2 ready=0 serving=0 updated=2 updatedReady=0 rows=[0:Pending@f332566b 1:Pending@f332566b]
+tick=9 publish component=decoder current=svc-a-decoder-f332566b update=svc-a-decoder-f332566b observedGeneration=2 replicas=1 ready=0 serving=0 updated=1 updatedReady=0 rows=[0:Pending@f332566b]
+tick=9 pass cache=live generation=3
+tick=9 run outcome=none policies=disabled
+tick=9 run active=nil
+tick=9 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=9 ir patch name=svc-a-engine stage=project paused=true→false excluded=ome.io/rollout-paused→nil generation=4→5
+tick=9 ir patch name=svc-a-decoder stage=project paused=true→false excluded=ome.io/rollout-paused→nil generation=2→3
+tick=9 event Normal CoordinationGroupCompleted coordination group 0 idle: no rollout in flight
+tick=9 coordination group=0 before={phase=Paused composite=Paused current=nil previous=nil transition=t+0s anchor=nil} after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil}
+tick=9 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=9 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=9 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=9 flush which=final result=written statusWrites=1 run=same groups=0:updated{phase:Paused→Idle composite:Paused→Idle}
+tick=9 pass result=none
+tick=10 note the group is edited away; its entry is pruned and the status block cleared
+tick=10 apply spec.planEdit groups=0 generation=4 now=t+0s
+tick=10 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=5 replicas=2 ready=0 serving=0 updated=2 updatedReady=0 rows=[0:Pending@f332566b 1:Pending@f332566b]
+tick=10 publish component=decoder current=svc-a-decoder-f332566b update=svc-a-decoder-f332566b observedGeneration=3 replicas=1 ready=0 serving=0 updated=1 updatedReady=0 rows=[0:Pending@f332566b]
+tick=10 pass cache=live generation=4
+tick=10 run outcome=none policies=disabled
+tick=10 run active=nil
+tick=10 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=10 ir patch name=svc-a-engine stage=project parentGen=3→4
+tick=10 ir patch name=svc-a-decoder stage=project parentGen=3→4
+tick=10 event Normal ConsiderCoordinationGroup InferenceService has 2 OMENative Components ([engine decoder]) but no spec.rollout.coordination block declared; consider adding a coord group to define rollout behavior across them
+tick=10 coordination conditions RolloutCoordinationReady=True(NoCoordinationGroups)
+tick=10 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=10 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=10 flush which=final result=written statusWrites=1 run=same groups=0:removed
+tick=10 pass result=none
+tick=11 note the group is declared again; it starts Unobserved and is written Idle
+tick=11 apply spec.planEdit groups=1 generation=5 now=t+0s
+tick=11 pass cache=live generation=5
+tick=11 run outcome=none requeueAfter=10s policies=disabled
+tick=11 run active=nil
+tick=11 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=11 ir patch name=svc-a-engine stage=project parentGen=4→5
+tick=11 ir patch name=svc-a-decoder stage=project parentGen=4→5
+tick=11 coordination group=0 before=nil after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil}
+tick=11 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=11 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=11 revisions component=decoder ready=f332566b latest=f332566b previous=nil phase=nil
+tick=11 flush which=final result=written statusWrites=1 run=same groups=0:added
+tick=11 pass result=after:10s

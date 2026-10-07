@@ -1,0 +1,100 @@
+scenario: stale-copy-restamps-every-phase
+cells:
+  - coordination/Surging/ctrl.staleRead[phaseRegressed]/before
+  - coordination/ScalingDown/ctrl.staleRead[phaseRegressed]/before
+  - coordination/Waiting/ctrl.staleRead[phaseRegressed]/before
+  - coordination/Idle/ctrl.staleRead[phaseRegressed]/before
+  - coordination/Failed/ctrl.staleRead[phaseRegressed]/before
+  - coordination/Paused/ctrl.staleRead[phaseRegressed]/before
+  - coordination/Surging/flush.staleOverwrite/before
+  - coordination/ScalingDown/flush.staleOverwrite/before
+  - coordination/Waiting/flush.staleOverwrite/before
+  - coordination/Idle/flush.staleOverwrite/before
+  - coordination/Failed/flush.staleOverwrite/before
+  - coordination/Paused/flush.staleOverwrite/before
+  - coordination/ScalingDown/member.capacityLost[newRevision]/after@T-sd-waiting
+  - coordination/Waiting/member.readyOnTarget/after@T-waiting-scalingdown
+  - coordination/Idle/member.failed/after@T-idle-failed
+  - coordination/Failed/spec.pause/after@T-failed-paused
+intentional: >-
+  in every phase the pass recomputes the same phase from fresh facts, but
+  the merge against a cached entry that still shows the previous phase
+  sees the change again: it restamps the transition time to now, re-fires
+  the transition event, and the flush copies the restamped entry over the
+  live one with no preserve rule
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the group is first observed Idle
+  - tick: 2
+    note: the template edit lands; the group reads Surging
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: a minute later the pass reads the copy from before the Surging write; Surging is computed again and the entry restamped
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[phaseRegressed]
+  - tick: 4
+    note: every Instance stands Ready on the target and the old pods are gone; ScalingDown until the replica promotes
+    events:
+      - member.surgePodCreated: {component: engine}
+      - member.readyOnTarget: {component: engine}
+      - member.oldPodsGone: {component: engine}
+  - tick: 5
+    note: the pass reads the copy from before the ScalingDown write; ScalingDown is computed again and the entry restamped
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[phaseRegressed]
+  - tick: 6
+    note: the new-revision pods leave readiness after the ScalingDown write; the next pass reads Waiting
+    events:
+      - member.capacityLost[newRevision]: {component: engine}
+  - tick: 7
+    note: the pass reads the copy from before the Waiting write; Waiting is computed again and the entry restamped
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[phaseRegressed]
+  - tick: 8
+    note: the pods are Ready again after the Waiting write; the next pass reads ScalingDown
+    events:
+      - member.readyOnTarget: {component: engine}
+  - tick: 9
+    note: the replica promotes its current revision; the group reads Idle
+    events:
+      - member.converged: {component: engine}
+  - tick: 10
+    note: the pass reads the copy from before the Idle write; the completion is seen again, the event re-fired and the entry restamped
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[phaseRegressed]
+  - tick: 11
+    note: a row reads Failed after the Idle write; the next pass reads Failed
+    events:
+      - member.failed: {component: engine, index: 0}
+  - tick: 12
+    note: the pass reads the copy from before the Failed write; the failure is seen again, the warning re-fired and the entry restamped
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[phaseRegressed]
+  - tick: 13
+    note: the operator pauses the rollout while the row is Failed; the pause outranks the failure
+    events:
+      - spec.pause
+  - tick: 14
+    note: the pass reads the copy from before the Paused write; Paused is computed again and the entry restamped
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[phaseRegressed]
+  - tick: 15
+    note: the row recovers and the pause is removed; the group reads Idle
+    events:
+      - member.recovered: {component: engine, index: 0}
+      - spec.unpause

@@ -1,0 +1,100 @@
+tick=0 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=1 replicas=2 ready=2 serving=2 updated=2 updatedReady=2 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=1 note a settled service; the group is first observed Idle
+tick=1 pass cache=live generation=1
+tick=1 run outcome=none policies=disabled
+tick=1 run active=nil
+tick=1 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=1 service create name=svc-a-engine-rev-f332566b stage=coordination
+tick=1 service create name=svc-a-engine-rev-f332566b-headless stage=coordination
+tick=1 coordination group=0 before=nil after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil}
+tick=1 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=1 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=1 flush which=final result=written statusWrites=1 run=desired groups=0:added
+tick=1 pass result=none
+tick=2 note the status flush of the Surging write hits a conflict; the write is rebased and the entry lands
+tick=2 apply spec.revision[new] component=engine image=registry.example.com/runtime:v2 generation=2 now=t+0s
+tick=2 apply api.conflict write=1 count=1 now=t+0s
+tick=2 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-46e64ada observedGeneration=1 replicas=2 ready=2 serving=2 updated=0 updatedReady=0 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=2 pass cache=live generation=2
+tick=2 run outcome=none requeueAfter=10s policies=disabled
+tick=2 run active=nil
+tick=2 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=2 ir patch name=svc-a-engine stage=project image=registry.example.com/runtime:v1→registry.example.com/runtime:v2 parentGen=1→2 generation=1→2
+tick=2 event Normal CoordinationGroupSurging coordination group 0 surging: creating new-revision pods
+tick=2 coordination group=0 before={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil} after={phase=Surging composite=Surging current=nil previous=nil transition=t+0s anchor=nil}
+tick=2 coordination conditions RolloutCoordinationReady=False(InProgress)
+tick=2 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=2 isvc status-conflict name=svc-a stage=aggregate write=1
+tick=2 flush which=final result=written statusWrites=1 run=same groups=0:updated{phase:Idle→Surging composite:Idle→Surging}
+tick=2 pass result=after:10s
+tick=3 note the first new-revision pod needs a per-revision Service; its create fails and the pass fails before the group is evaluated
+tick=3 apply member.surgePodCreated component=engine instances=1 revision=registry.example.com/runtime:v2 now=t+0s
+tick=3 apply api.serviceWriteFailed[ensure] verb=create resource=services count=1 now=t+0s
+tick=3 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-46e64ada observedGeneration=2 replicas=2 ready=1 serving=1 updated=0 updatedReady=0 rows=[0:Updating@f332566b 1:Ready@f332566b]
+tick=3 pass cache=live generation=2
+tick=3 event Normal RolloutRunOpened run svc-a-e2931de6a354 opened (rp1:8aa97d86f011)
+tick=3 run outcome=opened stateChanged=true requeueAfter=10s policies=disabled
+tick=3 run active id=svc-a-e2931de6a354 openedAt=t+0s pinnedAt=t+0s targets=[engine=46e64ada/stable=f332566b] digests=[Inline:rp1:cca45ec1fb0f]
+tick=3 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=False(InSync)
+tick=3 flush which=boundary result=written statusWrites=1 run=desired groups=0:unchanged
+tick=3 service create-rejected name=svc-a-engine-rev-46e64ada stage=coordination rejection=api.serviceWriteFailed[ensure]
+tick=3 pass result=none err:ensure per-revision service for engine/46e64ada: CreateOrUpdate per-revision service ns-a/svc-a-engine-rev-46e64ada: Internal error occurred: etcdserver: request timed out
+tick=4 note the retried create is refused by the terminating namespace; the pass ends cleanly before the group is evaluated
+tick=4 apply api.serviceWriteFailed[namespaceTerminating] verb=create resource=services count=1 now=t+0s
+tick=4 pass cache=live generation=2
+tick=4 run outcome=none policies=disabled
+tick=4 run active id=svc-a-e2931de6a354 openedAt=t+0s pinnedAt=t+0s targets=[engine=46e64ada/stable=f332566b] digests=[Inline:rp1:cca45ec1fb0f]
+tick=4 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=False(InSync)
+tick=4 service create-rejected name=svc-a-engine-rev-46e64ada stage=coordination rejection=api.serviceWriteFailed[namespaceTerminating]
+tick=4 coordination group=0 before={phase=Surging composite=Surging current=nil previous=nil transition=t+0s anchor=nil} after={phase=Surging composite=Surging current=nil previous=nil transition=t+0s anchor=nil}
+tick=4 coordination conditions RolloutCoordinationReady=False(InProgress)
+tick=4 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=4 flush which=final result=short-circuit
+tick=4 pass result=none
+tick=5 note the next pass creates the Service and evaluates the group
+tick=5 apply ctrl.resync now=t+0s
+tick=5 pass cache=live generation=2
+tick=5 run outcome=none policies=disabled
+tick=5 run active id=svc-a-e2931de6a354 openedAt=t+0s pinnedAt=t+0s targets=[engine=46e64ada/stable=f332566b] digests=[Inline:rp1:cca45ec1fb0f]
+tick=5 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=False(InSync)
+tick=5 service create name=svc-a-engine-rev-46e64ada stage=coordination
+tick=5 service create name=svc-a-engine-rev-46e64ada-headless stage=coordination
+tick=5 coordination group=0 before={phase=Surging composite=Surging current=nil previous=nil transition=t+0s anchor=nil} after={phase=Surging composite=Surging current=nil previous=nil transition=t+0s anchor=nil}
+tick=5 coordination conditions RolloutCoordinationReady=False(InProgress)
+tick=5 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=5 flush which=final result=short-circuit
+tick=5 pass result=none
+tick=6 note the second new-revision pod exists; nothing new to create
+tick=6 apply member.surgePodCreated component=engine instances=1 revision=registry.example.com/runtime:v2 now=t+0s
+tick=6 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-46e64ada observedGeneration=2 replicas=2 ready=0 serving=0 updated=0 updatedReady=0 rows=[0:Updating@f332566b 1:Updating@f332566b]
+tick=6 pass cache=live generation=2
+tick=6 run outcome=none policies=disabled
+tick=6 run active id=svc-a-e2931de6a354 openedAt=t+0s pinnedAt=t+0s targets=[engine=46e64ada/stable=f332566b] digests=[Inline:rp1:cca45ec1fb0f]
+tick=6 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=False(InSync)
+tick=6 coordination group=0 before={phase=Surging composite=Surging current=nil previous=nil transition=t+0s anchor=nil} after={phase=Surging composite=Surging current=nil previous=nil transition=t+0s anchor=nil}
+tick=6 coordination conditions RolloutCoordinationReady=False(InProgress)
+tick=6 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=nil
+tick=6 flush which=final result=short-circuit
+tick=6 pass result=none
+tick=7 note the roll completes and the flush of the Idle write hits a conflict; rebased, the entry lands
+tick=7 apply member.readyOnTarget component=engine pods=2 now=t+0s
+tick=7 apply member.oldPodsGone component=engine removed=2 now=t+0s
+tick=7 apply member.converged component=engine revision=registry.example.com/runtime:v2 now=t+0s
+tick=7 apply api.conflict write=1 count=1 now=t+0s
+tick=7 publish component=engine current=svc-a-engine-46e64ada update=svc-a-engine-46e64ada observedGeneration=2 replicas=2 ready=2 serving=2 updated=2 updatedReady=2 rows=[0:Ready@46e64ada 1:Ready@46e64ada]
+tick=7 pass cache=live generation=2
+tick=7 event Normal RolloutRunClosed run svc-a-e2931de6a354 closed: Completed
+tick=7 run outcome=stateChanged stateChanged=true policies=disabled
+tick=7 run active=nil
+tick=7 run last outcome=Completed openedAt=t+0s closedAt=t+0s targets=[engine=46e64ada/stable=f332566b]
+tick=7 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=7 isvc status-conflict name=svc-a stage=flush:boundary write=1
+tick=7 flush which=boundary result=written statusWrites=1 run=desired groups=0:unchanged
+tick=7 service delete name=svc-a-engine-rev-f332566b stage=coordination
+tick=7 service delete name=svc-a-engine-rev-f332566b-headless stage=coordination
+tick=7 event Normal CoordinationGroupCompleted coordination group 0 idle: no rollout in flight
+tick=7 coordination group=0 before={phase=Surging composite=Surging current=nil previous=nil transition=t+0s anchor=nil} after={phase=Idle composite=Idle current=nil previous=nil transition=t+0s anchor=nil}
+tick=7 coordination conditions RolloutCoordinationReady=True(Idle)
+tick=7 revisions component=engine ready=46e64ada latest=46e64ada previous=f332566b phase=nil
+tick=7 flush which=final result=written statusWrites=1 run=same groups=0:updated{phase:Surging→Idle composite:Surging→Idle}
+tick=7 pass result=none

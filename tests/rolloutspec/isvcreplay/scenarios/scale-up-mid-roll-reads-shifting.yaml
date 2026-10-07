@@ -1,0 +1,68 @@
+scenario: scale-up-mid-roll-reads-shifting
+cells:
+  - coordination/Surging/member.surgePodCreated/after@T-surging-waiting
+  - coordination/Waiting/member.readyOnTarget/after@T-waiting-shifting
+  - coordination/Shifting/ctrl.staleRead[phaseRegressed]/before
+  - coordination/Shifting/flush.staleOverwrite/before
+  - coordination/Shifting/member.readyOnTarget/before
+  - coordination/Shifting/member.oldPodsGone/after@T-shifting-scalingdown
+  - coordination/Shifting/ctrl.resync/before
+intentional: >-
+  the group phase counts Instances on the target revision, not pods: an
+  Instance added mid-roll is counted on the target before it has a pod, so
+  the group reads Waiting until that pod is Ready and Shifting while the
+  other Instances still serve the old revision; the surge pods those
+  Instances get are invisible to the phase until their rows switch
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the group is first observed Idle
+  - tick: 2
+    note: the template edit lands; the group reads Surging
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the operator scales to three; the new Instance is counted on the target with no pod yet, so the group reads Waiting
+    events:
+      - spec.replicas[up]: {component: engine, to: 3}
+  - tick: 4
+    note: the new Instance's pod exists and is not Ready; the group keeps Waiting
+    events:
+      - member.surgePodCreated: {component: engine, index: 2}
+  - tick: 5
+    note: the new Instance's pod is Ready while the two old Instances still serve the old revision; the group reads Shifting
+    events:
+      - member.readyOnTarget: {component: engine}
+  - tick: 6
+    note: the pass reads the copy from before the Shifting write; Shifting is computed again and the entry restamped
+    events:
+      - clock.advance: 1m
+      - ctrl.staleRead[phaseRegressed]
+  - tick: 7
+    note: a resync changes nothing
+    events:
+      - ctrl.resync
+  - tick: 8
+    note: the old Instances get surge pods, which the phase does not count until their rows switch; the group keeps Shifting
+    events:
+      - member.surgePodCreated: {component: engine, index: 0}
+      - member.surgePodCreated: {component: engine, index: 1}
+  - tick: 9
+    note: the surge pods turn Ready; the rows still run the old revision, so the group keeps Shifting
+    events:
+      - member.readyOnTarget: {component: engine}
+  - tick: 10
+    note: the old pods leave and every row switches to the target; the group reads ScalingDown
+    events:
+      - member.oldPodsGone: {component: engine}
+  - tick: 11
+    note: the replica promotes its current revision; the group reads Idle
+    events:
+      - member.converged: {component: engine}

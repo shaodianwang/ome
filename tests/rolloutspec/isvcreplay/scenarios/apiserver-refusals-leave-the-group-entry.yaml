@@ -1,0 +1,52 @@
+scenario: apiserver-refusals-leave-the-group-entry
+cells:
+  - coordination/Surging/api.serviceWriteFailed[ensure]/before
+  - coordination/Surging/api.serviceWriteFailed[namespaceTerminating]/before
+  - coordination/Surging/api.conflict/before
+  - coordination/Idle/api.conflict/before
+intentional: >-
+  a per-revision Service write that fails before the group is evaluated
+  ends the pass with the entry as the previous pass wrote it: an ordinary
+  error fails the pass for a retry, a create refused by a terminating
+  namespace ends it cleanly; a conflict on the status flush is rebased
+  onto the live object and the group entry lands from the pass's copy
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the group is first observed Idle
+  - tick: 2
+    note: the status flush of the Surging write hits a conflict; the write is rebased and the entry lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+      - api.conflict: {write: 1, count: 1}
+  - tick: 3
+    note: the first new-revision pod needs a per-revision Service; its create fails and the pass fails before the group is evaluated
+    events:
+      - member.surgePodCreated: {component: engine, index: 0}
+      - api.serviceWriteFailed[ensure]: {count: 1}
+  - tick: 4
+    note: the retried create is refused by the terminating namespace; the pass ends cleanly before the group is evaluated
+    events:
+      - api.serviceWriteFailed[namespaceTerminating]: {count: 1}
+  - tick: 5
+    note: the next pass creates the Service and evaluates the group
+    events:
+      - ctrl.resync
+  - tick: 6
+    note: the second new-revision pod exists; nothing new to create
+    events:
+      - member.surgePodCreated: {component: engine, index: 1}
+  - tick: 7
+    note: the roll completes and the flush of the Idle write hits a conflict; rebased, the entry lands
+    events:
+      - member.readyOnTarget: {component: engine}
+      - member.oldPodsGone: {component: engine}
+      - member.converged: {component: engine}
+      - api.conflict: {write: 1, count: 1}
