@@ -1,0 +1,39 @@
+# The operation deadline elapses on the pass that also reads the patched pod
+# ContainersReady. The escalation retracts only for a pod set that is PodReady
+# with the serving gate set at the desired count, and the in-place step drove
+# the gate off to drain the pod, so a pod held out of rotation does not
+# retract the escalation.
+scenario: inplace-deadline-while-ready-reported
+arrows:
+  - T-ready-inplace
+  - T-inplace-deadline
+cells:
+  - instance/Update/InPlace/pod.containersReady[source]/boundary@T-inplace-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod stays published, so the pre-patch drain never releases
+  - tick: 5
+    note: the operation deadline elapses as the pod reports ContainersReady, and a pod the step holds out of rotation does not retract the escalation
+    events:
+      - pod.containersReady[source]: {pod: {index: 0}}
+      - timer.operationDeadline: {slack: 1s}

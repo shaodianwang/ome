@@ -1463,3 +1463,66 @@ func TestUpdateWithPods_InPlaceStepOverAnUnreadyPodKeepsPatching(t *testing.T) {
 		})
 	}
 }
+
+// TestUpdateInPlace_ExpiredExpectationsReleaseThePass: the in-place step
+// seeds a delete expectation when it recycles a terminal pod, and an empty
+// pod set counts as evidence only once that delete has been observed; an
+// unobserved one holds the pass. The expectation is not held forever: past
+// its TTL the cache reads as satisfied, the next pass reads the pod set
+// afresh, and a set that is empty re-resolves the roll to recreate on the
+// same operation and renders the replacement.
+//
+// Cells: instance/Update/InPlace/timer.expectationsTTL/before
+func TestUpdateInPlace_ExpiredExpectationsReleaseThePass(t *testing.T) {
+	seed := func(t *testing.T) (*nonSurgeFixture, *workload.Expectations, *clocktesting.FakeClock) {
+		t.Helper()
+		f := inPlaceInFlightFixture(t)
+		// The recycle's delete landed - the pod is gone from the apiserver -
+		// but the watch event confirming it never arrived.
+		if err := f.c.Delete(context.Background(), f.pod); err != nil {
+			t.Fatalf("remove the recycled pod: %v", err)
+		}
+		fc := clocktesting.NewFakeClock(time.Now())
+		exp := workload.NewExpectationsWithClock(fc)
+		exp.ExpectDeletes(f.isvc.Namespace, f.isvc.Name, workload.ComponentEngine, 0, 1)
+		return f, exp, fc
+	}
+	run := func(t *testing.T, f *nonSurgeFixture, exp *workload.Expectations) (bool, v1beta1.OMENativeInstanceStatus, int) {
+		t.Helper()
+		in := f.input()
+		plan := legacyComponentPlan(f.strategy, nil)
+		deps := workload.Deps{Client: f.c, Recorder: record.NewFakeRecorder(32), Expectations: exp}
+		done, err := UpdateWithPods(context.Background(), deps, in, plan, plan.Instances[0], f.targetCR, f.targetSpec, nil)
+		if err != nil {
+			t.Fatalf("UpdateWithPods: %v", err)
+		}
+		pods := &corev1.PodList{}
+		if err := f.c.List(context.Background(), pods, client.InNamespace(f.isvc.Namespace)); err != nil {
+			t.Fatalf("list pods: %v", err)
+		}
+		return done, legacyInstanceStatusesOnIR(f.c, f.isvc, workload.ComponentEngine)[0], len(pods.Items)
+	}
+
+	t.Run("an outstanding delete holds the pass", func(t *testing.T) {
+		f, exp, _ := seed(t)
+		done, s, pods := run(t, f, exp)
+		if done || s.Operation == nil || s.Operation.Step != workload.UpdateStepInPlace || s.Incarnation != 1 {
+			t.Errorf("row moved on an empty set with a delete still unobserved: done=%v op=%+v incarnation=%d", done, s.Operation, s.Incarnation)
+		}
+		if pods != 0 {
+			t.Errorf("pods: got %d want none created while the delete is unobserved", pods)
+		}
+	})
+
+	t.Run("an expired delete lets the empty set re-resolve to recreate", func(t *testing.T) {
+		f, exp, fc := seed(t)
+		fc.Step(3 * time.Minute)
+		done, s, pods := run(t, f, exp)
+		if done || s.Operation == nil || s.Operation.Step != workload.UpdateStepDrain || s.Incarnation != 2 {
+			t.Errorf("row: got done=%v op=%+v incarnation=%d want the recreate restamped at the bumped incarnation", done, s.Operation, s.Incarnation)
+		}
+		if pods != 1 {
+			t.Errorf("pods: got %d want the replacement rendered at the target revision", pods)
+		}
+	})
+}

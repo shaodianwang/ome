@@ -1,0 +1,49 @@
+# The force-delete clock lands on the pass that also reads the patched pod
+# ContainersReady. The sweep acts on a pod already Terminating on a node the
+# cluster no longer holds; a readiness report from a kubelet the cluster has
+# lost is not its subject, so the wedged pod is force-deleted all the same.
+scenario: inplace-force-clock-while-ready-reported
+arrows:
+  - T-ready-inplace
+  - T-inplace-force-clock
+cells:
+  - instance/Update/InPlace/pod.containersReady[source]/boundary@T-inplace-force-clock
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod is bound to node-0, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation, so the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: node-0 is drained out from under the roll and its kubelet never confirms, so the patched pod is left Terminating with nothing holding it
+    events:
+      - pod.terminating: {pod: {index: 0}}
+      - pod.stuckTerminating: {pod: {index: 0}}
+  - tick: 6
+    note: the overdue clock lands as the pod reports ContainersReady, and the sweep at the top of the update pass force-deletes the wedged pod whatever it reports
+    events:
+      - pod.containersReady[source]: {pod: {index: 0}}
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+  - tick: 7
+    note: the pod set is empty, so the roll re-resolves to recreate rather than polling a pod that is gone

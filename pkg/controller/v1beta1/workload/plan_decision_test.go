@@ -2081,6 +2081,35 @@ func TestPlan_Paused_ReDrivesAFailedUpdateContinuation(t *testing.T) {
 	}
 }
 
+// TestPlan_PauseFreeze_ReDrivesAFailedUpdateContinuation: a frozen pause
+// deepens the hold onto the restart pass and nothing else, so a Failed
+// row whose preserved operation is an Update is still selected as a
+// continuation under it, exactly as under the default pause.
+//
+// Cells: instance/Failed/Drain/spec.pauseFreeze/before
+func TestPlan_PauseFreeze_ReDrivesAFailedUpdateContinuation(t *testing.T) {
+	in := minimalInput(t)
+	forbidMutations(t, &in)
+	in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+		{Index: 0, Incarnation: 2, Phase: types.InstancePhaseFailed, RunningRevision: "prior-rev",
+			Operation: &types.InstanceOperation{
+				ID: "update-0", Type: types.InstanceOperationUpdate, Step: "Drain",
+				TargetRevision: updateTarget().Name,
+			}},
+	}
+	plan := minimalPlan()
+	plan.Paused = true
+	plan.PauseFreeze = true
+	d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, nil))
+	ua := findAction(d, workload.ActionUpdate)
+	if ua == nil || len(ua.Update.Items) != 1 || ua.Update.Items[0].Instance.Index != 0 {
+		t.Fatalf("frozen decision = %v, want the Failed row's Update continuation selected", actionKinds(d))
+	}
+	if ua.Update.Items[0].StartingFresh {
+		t.Errorf("a Failed row with a preserved Update is a continuation, got %+v", ua.Update.Items[0])
+	}
+}
+
 // TestPlan_PauseFreeze_AdvancesOpenRepairOnly: a frozen pause suspends
 // the repair pass — a fresh pod-loss trigger is not selected — but a
 // repair already under way is still driven, so the pods it deleted are

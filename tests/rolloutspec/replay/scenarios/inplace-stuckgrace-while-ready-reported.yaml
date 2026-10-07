@@ -1,0 +1,53 @@
+# The wedge of inplace-stuckgrace, with the pod reporting ContainersReady
+# behind the cache on the pass that disposes the roll. The in-place step
+# re-reads the pod live, confirms the target image and restores the serving
+# gate; the fast escalation carries the same fully-serving guard as the
+# deadline path and judges the cached observation, where the pod still
+# holds its pull failure past the grace and is out of rotation, so the
+# readiness report retracts nothing: the attempt is parked and the revision
+# held while the pod serves the target image.
+scenario: inplace-stuckgrace-while-ready-reported
+arrows:
+  - T-ready-inplace
+  - T-inplace-stuckgrace
+cells:
+  - instance/Update/InPlace/pod.containersReady[source]/boundary@T-inplace-stuckgrace
+  - instance/Update/InPlace/ctrl.staleRead/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 5m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation and the new image wedges while it is still younger than the grace
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}
+  - tick: 5
+    note: the grace elapses, and the same pass issues the image patch and restamps the revision label
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 6
+    note: the pod reports ContainersReady behind the cache on the pass that reads the pull failure held past the grace, so the escalation charges the revision and disposes the roll on what it observed
+    events:
+      - ctrl.staleRead: {}
+      - pod.containersReady[source]: {pod: {index: 0}}
+  - tick: 7
+    note: the parked attempt follows its pod, which the live re-read had already put back in rotation, so the phase reads Updating with the attempt still parked and the revision held
