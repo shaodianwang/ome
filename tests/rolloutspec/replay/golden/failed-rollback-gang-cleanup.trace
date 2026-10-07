@@ -56,6 +56,7 @@ tick=7 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-leader-0 reason=Im
 tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=7 row=0 write no-op precondition=no-change
 tick=7 hold cleared
+tick=7 row=0 write no-op precondition=no-change
 tick=7 retryblock target=svc-a-engine-367ef4b7 persist nil→{state=Held attempts=1 reason=ImagePullBackOff}
 tick=7 warn retryHeld target=svc-a-engine-367ef4b7 attempts=1 reason=ImagePullBackOff
 tick=7 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Parked target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 waiting=Held strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-0-leader-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok

@@ -41,6 +41,7 @@ tick=6 apply timer.operationDeadline to=t+30m1s now=t+30m1s
 tick=6 row=0 write no-op precondition=no-change
 tick=6 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
 tick=6 hold cleared
+tick=6 row=0 write no-op precondition=no-change
 tick=6 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/SurgeDrain exceeded InstanceReadyTimeout} precondition=ok
 tick=6 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/SurgeDrain exceeded InstanceReadyTimeout: attempt disposed terminal (no workload-caused evidence, relocation unavailable); operation-specific recovery decides whether another attempt is safe
 tick=6 pass result=after:5s

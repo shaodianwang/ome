@@ -2,6 +2,7 @@ package escalation_test
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"testing"
@@ -541,7 +542,10 @@ func TestEscalation_DispositionFlushesPendingStamps(t *testing.T) {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	want := []string{"batch", "retryblock", "mutate"}
+	// The disposition reads the fresh row through the row seam before it
+	// writes anything (the first "mutate" commits nothing), then writes
+	// the block ahead of the row.
+	want := []string{"batch", "mutate", "retryblock", "mutate"}
 	if len(sequence) != len(want) {
 		t.Fatalf("write sequence: got %v want %v", sequence, want)
 	}
@@ -1010,6 +1014,102 @@ func TestEscalation_DrainingPodDoesNotMaskStuckReplacement(t *testing.T) {
 		{
 			name:     "drain in flight beside a terminal replacement",
 			pods:     []*corev1.Pod{deleting(servingPod("engine-0-default-0")), terminalPod("engine-0-default-1")},
+			escalate: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input, rec := escalationFixture(surgeDrainInstance())
+			if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
+				map[int32][]*corev1.Pod{0: tc.pods}); err != nil {
+				t.Fatalf("escalation pass: %v", err)
+			}
+			failed := rec.store[0].Phase == workloadtypes.InstancePhaseFailed
+			if failed != tc.escalate {
+				t.Fatalf("Phase: got %q (escalated=%v) want escalated=%v", rec.store[0].Phase, failed, tc.escalate)
+			}
+			want := 0
+			if tc.escalate {
+				want = 1
+			}
+			if len(rec.warns) != want {
+				t.Errorf("WarnInstanceFailed: got %v want %d call(s)", rec.warns, want)
+			}
+		})
+	}
+}
+
+// heldOutOfRotationBy is a pod whose serving gate the named writer holds
+// off: containers ready, out of rotation, not deleting.
+func heldOutOfRotationBy(name, userAgent, key string) *corev1.Pod {
+	writers, err := json.Marshal([]podreadiness.Message{{UserAgent: userAgent, Key: key}})
+	if err != nil {
+		panic(err)
+	}
+	pod := servingPod(name)
+	pod.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: podreadiness.ConditionType, Status: corev1.ConditionFalse, Message: string(writers)},
+		{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+	}
+	return pod
+}
+
+// TestEscalation_SourceTheSurgeDrainedCountsBesideItsServingReplacement
+// pins the drained-source rule of the fully-serving reading. The surge
+// takes its source out of rotation under its own writer a whole endpoint
+// convergence ahead of deleting it, so inside that window the source is
+// read like a deleting pod: it does not disqualify a set whose
+// replacement serves (a), covers no desired slot on its own (b), vouches
+// for no terminal replacement (c), and a source some other writer took
+// out is not the surge's drain (d). Only (a) suppresses escalation.
+//
+// Cells: instance/Update/SurgeDrain/timer.operationDeadline/before
+func TestEscalation_SourceTheSurgeDrainedCountsBesideItsServingReplacement(t *testing.T) {
+	now := time.Now()
+	const drainKey = "update-surge-drain-0-1"
+	terminalPod := func(name string) *corev1.Pod {
+		pod := servingPod(name)
+		pod.Status.Phase = corev1.PodFailed
+		return pod
+	}
+	surgeDrainInstance := func() []workloadtypes.InstanceStatus {
+		return []workloadtypes.InstanceStatus{{
+			Index:    0,
+			Phase:    workloadtypes.InstancePhaseUpdating,
+			PodCount: 1,
+			Operation: &workloadtypes.InstanceOperation{
+				Type:           workloadtypes.InstanceOperationUpdate,
+				Step:           workloadtypes.UpdateStepSurgeDrain,
+				TargetRevision: "own-engine-newhash",
+				Deadline:       metav1.NewTime(now.Add(-time.Hour)),
+			},
+		}}
+	}
+
+	cases := []struct {
+		name     string
+		pods     []*corev1.Pod
+		escalate bool
+	}{
+		{
+			name:     "source the surge drained beside its serving replacement",
+			pods:     []*corev1.Pod{heldOutOfRotationBy("engine-0-default-0", podreadiness.WriterUpdateSurgeDrain, drainKey), servingPod("engine-0-default-1")},
+			escalate: false,
+		},
+		{
+			name:     "source the surge drained cannot cover the desired count alone",
+			pods:     []*corev1.Pod{heldOutOfRotationBy("engine-0-default-0", podreadiness.WriterUpdateSurgeDrain, drainKey)},
+			escalate: true,
+		},
+		{
+			name:     "source the surge drained beside a terminal replacement",
+			pods:     []*corev1.Pod{heldOutOfRotationBy("engine-0-default-0", podreadiness.WriterUpdateSurgeDrain, drainKey), terminalPod("engine-0-default-1")},
+			escalate: true,
+		},
+		{
+			name:     "source another writer took out beside the serving replacement",
+			pods:     []*corev1.Pod{heldOutOfRotationBy("engine-0-default-0", podreadiness.WriterDeleteDrain, "0"), servingPod("engine-0-default-1")},
 			escalate: true,
 		},
 	}

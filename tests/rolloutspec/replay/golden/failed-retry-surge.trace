@@ -29,6 +29,7 @@ tick=5 note the pull wedges on a replacement already older than the grace, so th
 tick=5 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-default-1 reason=ImagePullBackOff now=t+2m0s
 tick=5 row=0 write no-op precondition=no-change
 tick=5 hold cleared
+tick=5 row=0 write no-op precondition=no-change
 tick=5 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Backoff attempts=1 nextRetryAt=t+4m0s reason=ImagePullBackOff}
 tick=5 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
 tick=5 warn instanceFailed index=0 pod=svc-a-engine-0-default-1 reason=ImagePullBackOff: workload-caused failure; revision svc-a-engine-6f8b1e6c held for retry — fix the image/config and publish a corrected revision

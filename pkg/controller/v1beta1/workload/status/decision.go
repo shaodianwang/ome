@@ -19,13 +19,14 @@ import (
 // leaves a Failed row that says nothing; no other stamp here touches an
 // evidence field.
 
-// StampFailed stamps Phase=Failed AND clears the in-flight
-// Operation in one write: the abandon-analogue for single-pod and
-// create attempts. Failed-with-no-Operation hands control back to
-// operation-specific recovery on a later reconcile, and clearing the
-// Operation is what stops the current attempt's stamper from extending
-// it. termination, when non-nil, is recorded on LastFailure in the same
-// write.
+// StampFailed stamps Phase=Failed AND clears whatever Operation the row
+// carries in one write, for a failure decided on the row itself rather
+// than on an attempt the pass observed: a rejected write of this pass, a
+// crash the retry ladder parks. Failed-with-no-Operation hands control
+// back to operation-specific recovery on a later reconcile, and clearing
+// the Operation is what stops the current attempt's stamper from
+// extending it. termination, when non-nil, is recorded on LastFailure in
+// the same write.
 //
 // A fresh-empty slot (Phase=="") from the writer's append path is a
 // sentinel for a slot deleted out from under us — don't resurrect.
@@ -45,6 +46,62 @@ func StampFailed(ctx context.Context, input types.ReconcileInput, idx int32, ter
 		}
 		return true
 	})
+}
+
+// StampFailedEndingAttempt is the disposition's clearing stamp: Phase=Failed
+// with the Operation cleared and termination recorded, landing only while
+// the fresh row still carries the attempt the pass observed (attemptOnRow).
+// It reports whether the row changed.
+func StampFailedEndingAttempt(ctx context.Context, input types.ReconcileInput, idx int32, attempt types.InstanceOperation, termination *types.InstanceTermination) (bool, error) {
+	return ApplyStamp(ctx, input, idx, func(s *types.InstanceStatus) bool {
+		if !attemptOnRow(s, attempt) {
+			return false
+		}
+		s.Phase = types.InstancePhaseFailed
+		s.Operation = nil
+		if termination != nil {
+			captured := *termination
+			s.LastFailure = &captured
+		}
+		return true
+	})
+}
+
+// AttemptStanding is how the fresh row relates to an attempt a pass
+// observed: still carrying it, re-opened under another attempt, or
+// concluded with no attempt left (an appended slot reads as concluded).
+type AttemptStanding int
+
+const (
+	AttemptOnRow AttemptStanding = iota
+	AttemptReopened
+	AttemptConcluded
+)
+
+// AttemptStandingOnFreshRow reads the row through the single-row seam, as
+// a write landing now would find it, and reports the attempt's standing
+// on it; nothing is written.
+func AttemptStandingOnFreshRow(ctx context.Context, input types.ReconcileInput, idx int32, attempt types.InstanceOperation) (AttemptStanding, error) {
+	standing := AttemptConcluded
+	err := input.MutateInstance(ctx, idx, func(s *types.InstanceStatus) bool {
+		switch {
+		case attemptOnRow(s, attempt):
+			standing = AttemptOnRow
+		case s.Phase != "" && s.Operation != nil:
+			standing = AttemptReopened
+		}
+		return false
+	})
+	return standing, err
+}
+
+// attemptOnRow reports whether the fresh row still carries the attempt a
+// pass observed and decided on. A row with no operation, or with another
+// attempt (SameAttempt), concluded or was re-opened since the observation
+// and is not that decision's to end; an appended slot (Phase=="") is a
+// deleted row and is never resurrected.
+func attemptOnRow(s *types.InstanceStatus, attempt types.InstanceOperation) bool {
+	return s.Phase != "" && s.Operation != nil && SameAttempt(*s.Operation, attempt)
 }
 
 // StampFailedKeepingOperation is the deadline backstop's stamp: Phase=Failed
@@ -117,16 +174,12 @@ func StampFailedOnStuckPod(termination *types.InstanceTermination, blamedIncarna
 // termination is recorded on LastFailure in the same write.
 //
 // attempt is the operation the disposition observed. The park lands only
-// on that attempt, read by its identity (SameAttempt): a row carrying
-// another Update attempt by the time the write lands — one opened over
-// the expired attempt since the pass observed it — is left alone, since
-// a fresh attempt is not the disposition's to end. A slot whose
-// operation is gone, or is not an Update, has nothing to park: the
-// attempt concluded or was disposed since the pass observed it. An
-// already parked Failed row is a no-op.
-func StampFailedParkingAttempt(ctx context.Context, input types.ReconcileInput, idx int32, attempt types.InstanceOperation, termination *types.InstanceTermination, waiting string) error {
-	return input.MutateInstance(ctx, idx, func(s *types.InstanceStatus) bool {
-		if s.Phase == "" || s.Operation == nil || s.Operation.Type != types.InstanceOperationUpdate || !SameAttempt(*s.Operation, attempt) {
+// while the fresh row still carries that Update attempt (attemptOnRow): a
+// row carrying another attempt, or none, has nothing to park. An already
+// parked Failed row is a no-op. It reports whether the row changed.
+func StampFailedParkingAttempt(ctx context.Context, input types.ReconcileInput, idx int32, attempt types.InstanceOperation, termination *types.InstanceTermination, waiting string) (bool, error) {
+	return ApplyStamp(ctx, input, idx, func(s *types.InstanceStatus) bool {
+		if !attemptOnRow(s, attempt) || s.Operation.Type != types.InstanceOperationUpdate {
 			return false
 		}
 		if s.Phase == types.InstancePhaseFailed && types.OperationParked(s.Operation) {

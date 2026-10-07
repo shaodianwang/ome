@@ -42,6 +42,7 @@ tick=5 note the operation deadline elapses; the attempt is disposed with a reloc
 tick=5 apply timer.operationDeadline to=t+30m1s now=t+30m1s
 tick=5 row=0 write no-op precondition=no-change
 tick=5 hold cleared
+tick=5 row=0 write no-op precondition=no-change
 tick=5 migration uuid=uid#5 append trigger=Auto phase=Relocated source=0 surge=nil fromNode=node-1 attempt=1 reason=AutoRecover message=relocation directive recorded; rebuild steered off node node-1 allocatedAt=nil deadline=t+30m1s completedAt=t+30m1s
 tick=5 event Normal AutoMigrationTriggered OMENative component=engine instance=0 relocation directive recorded: attempt 1/3, rebuild steered off node node-1 (uuid=uid#5)
 tick=5 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok

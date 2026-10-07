@@ -1,8 +1,10 @@
 # The replacement of a single-pod surge at its drain step crash-loops past
 # the stuck-pod grace with the source already out of rotation. The
 # replacement served before, so the grace runs from the regression; once
-# it elapses nothing suppresses the fast escalator past the drain claim, and
-# the attempt is failed on the ambiguous reason with its source unrouted.
+# it elapses nothing suppresses the fast escalator past the drain claim (the
+# drained source covers no slot and the wedged replacement is out of
+# rotation), and the attempt is failed on the ambiguous reason with its
+# source unrouted.
 scenario: surgedrain-replacement-crashloop-escalates
 arrows:
   - T-ready-surge
@@ -42,7 +44,7 @@ timeline:
     events:
       - pod.waiting[CrashLoopBackOff]: {pod: {index: 0, ordinal: 1}, message: "back-off 5m0s restarting failed container"}
   - tick: 6
-    note: the grace elapses on the wedged replacement; with the source out of rotation nothing suppresses the escalation, so the attempt is failed
+    note: the grace elapses on the wedged replacement; the drained source covers no slot and the replacement is out of rotation, so nothing suppresses the escalation and the attempt is failed
     events:
       - timer.stuckPodGrace: {slack: 1s}
   - tick: 7

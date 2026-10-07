@@ -34,10 +34,11 @@ tick=5 apply pod.waiting[CrashLoopBackOff] pod=svc-a-engine-0-default-1 reason=C
 tick=5 row=0 write no-op precondition=no-change
 tick=5 hold cleared
 tick=5 pass result=after:5s
-tick=6 note the grace elapses on the wedged replacement; with the source out of rotation nothing suppresses the escalation, so the attempt is failed
+tick=6 note the grace elapses on the wedged replacement; the drained source covers no slot and the replacement is out of rotation, so nothing suppresses the escalation and the attempt is failed
 tick=6 apply timer.stuckPodGrace to=t+1m1s now=t+1m1s
 tick=6 row=0 write no-op precondition=no-change
 tick=6 hold cleared
+tick=6 row=0 write no-op precondition=no-change
 tick=6 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff container=main message=back-off 5m0s restarting failed container} precondition=ok
 tick=6 warn instanceFailed index=0 pod=nil reason=CrashLoopBackOff: attempt disposed terminal (no workload-caused evidence, relocation unavailable); operation-specific recovery decides whether another attempt is safe
 tick=6 pass result=after:5s

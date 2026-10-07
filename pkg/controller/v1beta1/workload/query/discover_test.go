@@ -2,10 +2,12 @@ package query
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -574,6 +576,67 @@ func TestPromoteBars_DeletingPodIsGone(t *testing.T) {
 				if promotable || wait != 0 {
 					t.Errorf("PodSetPromotable(window=%ds) = (%t, %s), want (false, 0)", window, promotable, wait)
 				}
+			}
+		})
+	}
+}
+
+// The fully-serving reading skips a pod that is on its way out: one with a
+// deletion timestamp, and one the surge drain itself holds out of rotation
+// ahead of deleting it. Neither disqualifies a set whose replacement
+// serves, neither covers a desired slot, and a hold by any other writer
+// is not the surge's drain.
+func TestPodSetFullyServing_SkipsAPodTheSurgeDrained(t *testing.T) {
+	gated := func(name string, status corev1.ConditionStatus, writers ...podreadiness.Message) *corev1.Pod {
+		message := ""
+		if len(writers) > 0 {
+			raw, err := json.Marshal(writers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			message = string(raw)
+		}
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+					{Type: podreadiness.ConditionType, Status: status, Message: message},
+				},
+			},
+		}
+	}
+	surgeDrain := podreadiness.Message{UserAgent: podreadiness.WriterUpdateSurgeDrain, Key: "update-surge-drain-0-1"}
+	deleteDrain := podreadiness.Message{UserAgent: podreadiness.WriterDeleteDrain, Key: "0"}
+	serving := func(name string) *corev1.Pod { return gated(name, corev1.ConditionTrue) }
+	deleting := func(pod *corev1.Pod) *corev1.Pod {
+		ts := metav1.NewTime(time.Now())
+		pod.DeletionTimestamp = &ts
+		pod.Finalizers = []string{"ome.io/test"}
+		return pod
+	}
+	terminal := func(pod *corev1.Pod) *corev1.Pod {
+		pod.Status.Phase = corev1.PodFailed
+		return pod
+	}
+
+	for _, tc := range []struct {
+		name string
+		pods []*corev1.Pod
+		want bool
+	}{
+		{name: "surge-drained source beside a serving replacement", pods: []*corev1.Pod{gated("source", corev1.ConditionFalse, surgeDrain), serving("replacement")}, want: true},
+		{name: "deleting source beside a serving replacement", pods: []*corev1.Pod{deleting(serving("source")), serving("replacement")}, want: true},
+		{name: "surge-drained source alone covers nothing", pods: []*corev1.Pod{gated("source", corev1.ConditionFalse, surgeDrain)}, want: false},
+		{name: "surge-drained source beside a terminal replacement", pods: []*corev1.Pod{gated("source", corev1.ConditionFalse, surgeDrain), terminal(serving("replacement"))}, want: false},
+		{name: "surge-drained source beside a replacement not yet in rotation", pods: []*corev1.Pod{gated("source", corev1.ConditionFalse, surgeDrain), gated("replacement", corev1.ConditionFalse)}, want: false},
+		{name: "source another writer holds beside a serving replacement", pods: []*corev1.Pod{gated("source", corev1.ConditionFalse, deleteDrain), serving("replacement")}, want: false},
+		{name: "source held by the surge drain and another writer", pods: []*corev1.Pod{gated("source", corev1.ConditionFalse, deleteDrain, surgeDrain), serving("replacement")}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PodSetFullyServing(tc.pods, 1); got != tc.want {
+				t.Fatalf("PodSetFullyServing = %v, want %v", got, tc.want)
 			}
 		})
 	}

@@ -1460,6 +1460,15 @@ type recoveryHarness struct {
 	migrations []workloadtypes.MigrationRecord
 	// migrationAudit is the input's migration capacity policy.
 	migrationAudit *workloadtypes.MigrationAuditPolicy
+
+	// cacheLagOnce makes the next pass's first cached pod List answer with
+	// the pods the previous pass opened on: the informer-backed cache
+	// catching up only after the pass took its memoized opening read, so a
+	// pass that re-reads live acts on fresher pods than the end-of-pass
+	// bookkeeping judges. One pass, then off.
+	cacheLagOnce bool
+	// priorOpening is the pod list the previous pass opened on.
+	priorOpening []corev1.Pod
 }
 
 func recoveryPodSpec(image string) *corev1.PodSpec {
@@ -3006,7 +3015,7 @@ func (h *recoveryHarness) pass() (ctrl.Result, error) {
 	if h.kubeletLag > 0 {
 		h.clk.Step(h.kubeletLag)
 	}
-	deps := workloadtypes.Deps{Client: h.c, APIReader: h.c, Expectations: workloadtypes.NewExpectations()}
+	deps := workloadtypes.Deps{Client: h.cachedClient(), APIReader: h.c, Expectations: workloadtypes.NewExpectations()}
 	if h.recorder != nil {
 		deps.Recorder = h.recorder
 	}
@@ -3022,6 +3031,45 @@ func (h *recoveryHarness) pass() (ctrl.Result, error) {
 		h.currentRevision = h.target.Name
 	}
 	return res, err
+}
+
+// cachedClient is the informer-backed client a pass reads through: the
+// fake client itself or, for one pass after cacheLagOnce, a view whose
+// first pod List is the list the previous pass opened on.
+func (h *recoveryHarness) cachedClient() client.Client {
+	h.t.Helper()
+	pods := &corev1.PodList{}
+	if err := h.c.List(h.ctx, pods, client.InNamespace(recoveryNS)); err != nil {
+		h.t.Fatalf("list pods for the cache view: %v", err)
+	}
+	var cached client.Client = h.c
+	if h.cacheLagOnce && h.priorOpening != nil {
+		cached = &laggingPodListClient{Client: h.c, stale: h.priorOpening}
+	}
+	h.cacheLagOnce = false
+	h.priorOpening = pods.Items
+	return cached
+}
+
+// laggingPodListClient answers the first pod List with an older list and
+// every later read from the client it wraps.
+type laggingPodListClient struct {
+	client.Client
+	stale  []corev1.Pod
+	served bool
+}
+
+func (c *laggingPodListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	pods, ok := list.(*corev1.PodList)
+	if !ok || c.served {
+		return c.Client.List(ctx, list, opts...)
+	}
+	c.served = true
+	pods.Items = make([]corev1.Pod, 0, len(c.stale))
+	for i := range c.stale {
+		pods.Items = append(pods.Items, *c.stale[i].DeepCopy())
+	}
+	return nil
 }
 
 // runOnWakeUps is run for a controller that reconciles only when it is
@@ -13676,4 +13724,175 @@ func TestFailedSurgeSource_RolledBackReturnsToReadyWhileItsWreckageTerminates(t 
 		t.Fatalf("the Instance never returned to Ready on its serving pod while its drained replacement stood: %+v", h.instance(idx))
 	}
 	h.requireServingPodsKept(serving)
+}
+
+// The escalation judges an attempt on the observation the pass opened
+// with; a promote the same pass lands from a fresher read wins, and the
+// deadline stamp leaves the promoted row alone.
+//
+// Cells: instance/Update/InPlace/timer.operationDeadline/boundary@T-inplace-ready
+func TestDeadlineOnThePromotePass_InPlaceRowStaysReady(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.retryPolicy = nil
+	h.lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: 30 * time.Minute}
+	h.useStrategy(workloadtypes.UpdateStrategyInPlaceIfPossible)
+	h.driveToReadyOnV1()
+
+	h.setTarget(h.revFixed, fixedImage)
+	// The patched container is back up and the roll has restored the gate;
+	// the kubelet has not folded it into PodReady yet, so nothing promoted.
+	restored := func() bool {
+		row, pods := h.instance(0), h.podsOf(0)
+		return row != nil && row.Operation != nil && row.Operation.Step == workloadtypes.UpdateStepInPlace &&
+			len(pods) == 1 && pods[0].Spec.Containers[0].Image == fixedImage &&
+			podreadiness.IsContainersReady(pods[0]) && podreadiness.IsServing(pods[0]) && !podreadiness.IsPodReady(pods[0])
+	}
+	if !h.run(40, restored) {
+		h.dumpState("in-place gate restored")
+		t.Fatalf("the in-place roll never restored the serving gate on the patched pod")
+	}
+
+	h.clk.Step(31 * time.Minute)
+	h.cacheLagOnce = true
+	h.step()
+
+	row := h.instance(0)
+	if row == nil || row.Phase != workloadtypes.InstancePhaseReady || row.Operation != nil || row.RunningRevision != h.revFixed.Name {
+		h.dumpState("deadline on the promote pass")
+		t.Fatalf("row = %+v, want Ready on %s with no operation: the promote landed before the deadline stamp", row, h.revFixed.Name)
+	}
+	if len(h.failedWarnings) != 0 {
+		t.Fatalf("InstanceFailed warnings = %v, want none for a row the pass promoted", h.failedWarnings)
+	}
+}
+
+// Cells: instance/Update/SurgeDrain/timer.operationDeadline/boundary@T-surgedrain-promote
+func TestDeadlineOnThePromotePass_SinglePodSurgeRowStaysReady(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.routed = true
+	h.lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: 30 * time.Minute}
+	h.useStrategy(workloadtypes.UpdateStrategySurgeThenDrain)
+	h.driveToReadyOnV1()
+
+	h.setTarget(h.revFixed, fixedImage)
+	// The drained source is gone and the replacement is the only pod left;
+	// the next pass would promote it.
+	sourceGone := func() bool {
+		row, pods := h.instance(0), h.podsOf(0)
+		return row != nil && row.Operation != nil && row.Operation.Step == workloadtypes.UpdateStepSurgeDrain &&
+			len(pods) == 1 && pods[0].Labels[query.LabelPodOrdinal] == "1"
+	}
+	if !h.run(40, sourceGone) {
+		h.dumpState("surge drain")
+		t.Fatalf("the surge never deleted its drained source")
+	}
+	// The replacement is lost first, so the drain step rebuilds it and the
+	// rebuilt pod reaches ContainersReady on the pass the deadline elapses.
+	if err := h.c.Delete(h.ctx, h.podsOf(0)[0]); err != nil {
+		t.Fatalf("lose the replacement: %v", err)
+	}
+	h.step()
+	if pods := h.podsOf(0); len(pods) != 1 || podreadiness.IsServing(pods[0]) {
+		h.dumpState("replacement rebuilt")
+		t.Fatalf("pods = %d, want the one rebuilt replacement not yet serving", len(pods))
+	}
+
+	h.clk.Step(31 * time.Minute)
+	h.step()
+
+	row := h.instance(0)
+	if row == nil || row.Phase != workloadtypes.InstancePhaseReady || row.Operation != nil || row.RunningRevision != h.revFixed.Name {
+		h.dumpState("deadline on the promote pass")
+		t.Fatalf("row = %+v, want Ready on %s with no operation: the promote landed before the deadline stamp", row, h.revFixed.Name)
+	}
+	if len(h.failedWarnings) != 0 {
+		t.Fatalf("InstanceFailed warnings = %v, want none for a row the pass promoted", h.failedWarnings)
+	}
+	if b := h.findBlock(h.revFixed.Name); b != nil {
+		t.Fatalf("RetryBlock for %s = %+v, want none: an attempt that won its promote counts no wave on its revision's ladder", h.revFixed.Name, b)
+	}
+}
+
+// Cells: instance/Create/CreatePods/timer.operationDeadline/boundary@T-create-ready
+func TestDeadlineOnThePromotePass_CreateRowStaysReady(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: 30 * time.Minute}
+	h.setTarget(h.revV1, goodImage)
+	// The create pass has written the serving gate on the ContainersReady
+	// pod; the kubelet has not folded it into PodReady yet.
+	gated := func() bool {
+		row, pods := h.instance(0), h.podsOf(0)
+		return row != nil && row.Phase == workloadtypes.InstancePhaseCreating && len(pods) == 1 &&
+			podreadiness.IsServing(pods[0]) && !podreadiness.IsPodReady(pods[0])
+	}
+	if !h.run(10, gated) {
+		h.dumpState("create gate written")
+		t.Fatalf("the create pass never wrote the serving gate")
+	}
+
+	h.clk.Step(31 * time.Minute)
+	h.cacheLagOnce = true
+	h.step()
+
+	row := h.instance(0)
+	if row == nil || row.Phase != workloadtypes.InstancePhaseReady || row.Operation != nil || row.RunningRevision != h.revV1.Name {
+		h.dumpState("deadline on the promote pass")
+		t.Fatalf("row = %+v, want Ready on %s with no operation: the promote landed before the deadline stamp", row, h.revV1.Name)
+	}
+	if len(h.failedWarnings) != 0 {
+		t.Fatalf("InstanceFailed warnings = %v, want none for a row the pass promoted", h.failedWarnings)
+	}
+	if b := h.findBlock(h.revV1.Name); b != nil {
+		t.Fatalf("RetryBlock for %s = %+v, want none: an attempt that won its promote counts no wave on its revision's ladder", h.revV1.Name, b)
+	}
+}
+
+// A surge holds its source out of rotation under its own writer for the
+// endpoint-convergence window before deleting it; a deadline that elapses
+// inside that window, with the replacement Ready and routed, finds the
+// Instance serving and fails nothing.
+//
+// Cells: instance/Update/SurgeDrain/timer.operationDeadline/before
+func TestDeadlineInsideTheSurgeDrainWindow_DoesNotFailTheSurge(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.routed = true
+	h.lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: 30 * time.Minute}
+	h.useStrategy(workloadtypes.UpdateStrategySurgeThenDrain)
+	h.driveToReadyOnV1()
+
+	h.setTarget(h.revFixed, fixedImage)
+	// The step has advanced: the replacement serves and the source's gate
+	// is off under the surge's writer, with the source still routed.
+	draining := func() bool {
+		row := h.instance(0)
+		if row == nil || row.Operation == nil || row.Operation.Step != workloadtypes.UpdateStepSurgeDrain {
+			return false
+		}
+		for _, pod := range h.podsOf(0) {
+			if pod.Labels[query.LabelPodOrdinal] == "0" && podreadiness.HeldNotServing(pod) {
+				return true
+			}
+		}
+		return false
+	}
+	if !h.run(40, draining) {
+		h.dumpState("surge drain")
+		t.Fatalf("the surge never reached its drain step")
+	}
+
+	h.clk.Step(31 * time.Minute)
+	h.step()
+
+	row := h.instance(0)
+	if row == nil || row.Phase == workloadtypes.InstancePhaseFailed || row.LastFailure != nil {
+		h.dumpState("deadline inside the drain window")
+		t.Fatalf("row = %+v, want the surge still in flight or promoted, not Failed", row)
+	}
+	if len(h.failedWarnings) != 0 {
+		t.Fatalf("InstanceFailed warnings = %v, want none for a serving Instance", h.failedWarnings)
+	}
+	if !h.run(20, func() bool { return h.converged(h.revFixed.Name) }) {
+		h.dumpState("after the drain window")
+		t.Fatalf("the surge did not complete on %s after the deadline elapsed inside its drain window", h.revFixed.Name)
+	}
 }

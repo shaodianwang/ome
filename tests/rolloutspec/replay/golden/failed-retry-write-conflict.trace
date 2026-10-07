@@ -11,6 +11,7 @@ tick=2 pass result=after:5s
 tick=3 note the grace elapses, and with a retry budget the revision goes into Backoff instead of being held
 tick=3 apply timer.stuckPodGrace to=t+5m1s now=t+5m1s
 tick=3 hold cleared
+tick=3 row=0 write no-op precondition=no-change
 tick=3 retryblock target=svc-a-engine-882059bb persist nil→{state=Backoff attempts=1 nextRetryAt=t+7m1s reason=ImagePullBackOff}
 tick=3 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
 tick=3 warn instanceFailed index=0 pod=svc-a-engine-0-default-0 reason=ImagePullBackOff: workload-caused failure; revision svc-a-engine-882059bb held for retry — fix the image/config and publish a corrected revision

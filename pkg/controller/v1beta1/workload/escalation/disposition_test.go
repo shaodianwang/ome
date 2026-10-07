@@ -37,6 +37,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -964,6 +965,81 @@ func TestDispose_Terminal(t *testing.T) {
 			}
 			if len(rec.warns) != 1 {
 				t.Errorf("WarnInstanceFailed: got %+v want one call", rec.warns)
+			}
+		})
+	}
+}
+
+// The disposition decides on the pass's observation and lands on the
+// fresh row. A row the same pass promoted concluded the attempt, so
+// nothing is written or announced — no ladder wave, no row write —
+// whichever branch classified it and whether the end would have parked
+// or cleared the attempt. A row re-opened under another attempt is not
+// the observed attempt's to end either (the wave it earns is pinned by
+// TestDispose_AttemptReopenedSinceObservedIsNotParked).
+//
+// Cells: instance/Update/InPlace/timer.operationDeadline/boundary@T-inplace-ready
+func TestDispose_RowThatMovedOnSinceTheObservationIsLeftAlone(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	observed := types.InstanceStatus{
+		Index: 0, Incarnation: 1, Phase: types.InstancePhaseUpdating,
+		RunningRevision: "rev-a", TargetRevision: "rev-b",
+		Operation: &types.InstanceOperation{
+			ID: "update-0-1", Type: types.InstanceOperationUpdate, Step: types.UpdateStepInPlace,
+			TargetRevision: "rev-b", Deadline: metav1.NewTime(t0.Add(-time.Minute)),
+		},
+	}
+	promoted := types.InstanceStatus{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "rev-b"}
+	reopened := observed
+	reopened.Operation = &types.InstanceOperation{
+		ID: "update-0-2", Type: types.InstanceOperationUpdate, Step: types.UpdateStepInPlace,
+		TargetRevision: "rev-c", Deadline: metav1.NewTime(t0.Add(time.Hour)),
+	}
+	limbo := func() *corev1.Pod {
+		pod := runningNotReadyOnNode("engine-0-default-0", "node-a", t0.Add(-5*time.Minute))
+		pod.Labels = map[string]string{query.LabelRevisionHash: query.RevisionFromName("rev-b").Hash()}
+		return pod
+	}
+	const deadline = "DeadlineExceeded: Update/InPlace exceeded InstanceReadyTimeout"
+	for _, tc := range []struct {
+		name   string
+		fresh  types.InstanceStatus
+		policy *types.RetryPolicy
+		pod    *corev1.Pod
+		reason string
+	}{
+		{name: "promoted, cleared end", fresh: promoted, pod: limbo(), reason: deadline},
+		{name: "promoted, parked end", fresh: promoted, policy: ladderPolicy(), pod: limbo(), reason: deadline},
+		{name: "promoted, workload-caused reason", fresh: promoted, policy: ladderPolicy(),
+			pod: waitingPod("engine-0-default-0", "ImagePullBackOff", "node-a", t0.Add(-5*time.Minute)), reason: "ImagePullBackOff"},
+		{name: "re-opened under another attempt", fresh: reopened, pod: limbo(), reason: deadline},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := clocktesting.NewFakeClock(t0)
+			insts := []types.InstanceStatus{observed}
+			input, rec := dispositionFixtureInput(fc, &insts, "rev-b", tc.policy, nil)
+			insts[0] = tc.fresh
+
+			outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{}, input,
+				types.DispositionDeps{}, observed, []*corev1.Pod{tc.pod}, tc.reason)
+			if err != nil {
+				t.Fatalf("DisposeExpiredAttempt: %v", err)
+			}
+			if outcome != escalation.DispositionWithheld {
+				t.Fatalf("outcome: got %v want DispositionWithheld", outcome)
+			}
+			if len(rec.commits) != 0 {
+				t.Fatalf("commits: got %+v want none", rec.commits)
+			}
+			if len(rec.blockCalls) != 0 {
+				t.Fatalf("MutateRetryBlock calls: got %+v want none: a wave is not counted for an attempt that is no longer on the row", rec.blockCalls)
+			}
+			if got := insts[0]; got.Phase != tc.fresh.Phase || got.LastFailure != nil ||
+				(got.Operation == nil) != (tc.fresh.Operation == nil) {
+				t.Fatalf("row = %+v, want it left as the fresh row %+v", got, tc.fresh)
+			}
+			if len(rec.warns) != 0 {
+				t.Fatalf("WarnInstanceFailed: got %+v want none for a row the pass did not fail", rec.warns)
 			}
 		})
 	}

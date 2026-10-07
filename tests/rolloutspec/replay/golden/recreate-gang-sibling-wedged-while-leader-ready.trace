@@ -49,6 +49,7 @@ tick=7 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-worker-0 reason=Im
 tick=7 apply pod.ready[source] pod=svc-a-engine-0-leader-0 now=t+2m0s
 tick=7 row=0 write no-op precondition=no-change
 tick=7 hold cleared
+tick=7 row=0 write no-op precondition=no-change
 tick=7 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Held attempts=1 reason=ImagePullBackOff}
 tick=7 warn retryHeld target=svc-a-engine-6f8b1e6c attempts=1 reason=ImagePullBackOff
 tick=7 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Parked target=svc-a-engine-6f8b1e6c reason=revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c waiting=Held strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-0-worker-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok

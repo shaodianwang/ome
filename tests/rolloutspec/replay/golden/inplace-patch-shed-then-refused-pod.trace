@@ -55,6 +55,7 @@ tick=9 note the operation deadline elapses, so the attempt is disposed with no w
 tick=9 apply timer.operationDeadline to=t+30m1s now=t+30m1s
 tick=9 row=0 write no-op precondition=no-change
 tick=9 hold cleared
+tick=9 row=0 write no-op precondition=no-change
 tick=9 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/InPlace exceeded InstanceReadyTimeout} precondition=ok
 tick=9 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/InPlace exceeded InstanceReadyTimeout: attempt disposed terminal (no workload-caused evidence, relocation unavailable); operation-specific recovery decides whether another attempt is safe
 tick=9 pass result=after:5s

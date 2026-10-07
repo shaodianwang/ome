@@ -37,6 +37,7 @@ tick=5 pass result=after:5s
 tick=6 note the wedged pod now carries the target revision, so the escalation charges that revision and disposes the roll
 tick=6 row=0 write no-op precondition=no-change
 tick=6 hold cleared
+tick=6 row=0 write no-op precondition=no-change
 tick=6 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Held attempts=1 reason=ImagePullBackOff}
 tick=6 warn retryHeld target=svc-a-engine-6f8b1e6c attempts=1 reason=ImagePullBackOff
 tick=6 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Parked target=svc-a-engine-6f8b1e6c waiting=Held strategy=InPlaceIfPossible started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok

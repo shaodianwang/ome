@@ -44,6 +44,7 @@ tick=7 note the wedge has outlasted the grace, so the attempt is disposed on the
 tick=7 apply clock.advance by=2m0s now=t+4m0s
 tick=7 row=0 write no-op precondition=no-change
 tick=7 hold cleared
+tick=7 row=0 write no-op precondition=no-change
 tick=7 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Held attempts=1 reason=ImagePullBackOff}
 tick=7 warn retryHeld target=svc-a-engine-6f8b1e6c attempts=1 reason=ImagePullBackOff
 tick=7 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok

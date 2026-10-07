@@ -19,6 +19,7 @@ tick=4 note the grace elapses on the wedged replacement; the surge is disposed, 
 tick=4 apply timer.stuckPodGrace to=t+1m1s now=t+1m1s
 tick=4 row=0 write no-op precondition=no-change
 tick=4 hold cleared
+tick=4 row=0 write no-op precondition=no-change
 tick=4 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Backoff attempts=1 nextRetryAt=t+3m1s reason=ImagePullBackOff}
 tick=4 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
 tick=4 warn instanceFailed index=0 pod=svc-a-engine-0-default-1 reason=ImagePullBackOff: workload-caused failure; revision svc-a-engine-6f8b1e6c held for retry — fix the image/config and publish a corrected revision

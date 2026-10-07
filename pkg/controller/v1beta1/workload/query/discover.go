@@ -473,14 +473,16 @@ func PodSetPromotable(pods []*corev1.Pod, minReadySeconds int32, now time.Time, 
 // gate rather than the pod's Ready condition because the gate is written
 // in the same pass as the guards that read this, and the kubelet folds it
 // into Ready afterwards: a set admitted this pass is already healthy
-// capacity that no deadline or wedge check may punish. Deleting pods
-// are excluded rather than disqualifying — a completed surge leaves the
-// old pod draining next to the serving replacement. A terminal pod is
-// never live and disqualifies the set outright: it is failure evidence
-// that must reach the escalation pass even when stale conditions on it
-// still read healthy, or when a serving sibling would otherwise cover
-// the count. desired <= 0 never counts as serving (nothing is expected,
-// so nothing can prove health).
+// capacity that no deadline or wedge check may punish. A pod on its way
+// out is excluded rather than disqualifying: one with a deletion
+// timestamp, and one the surge drain holds out of rotation under its own
+// writer ahead of deleting it, since a surge leaves its source draining
+// next to the serving replacement for the endpoint-convergence window
+// first. A terminal pod is never live and disqualifies the set outright:
+// it is failure evidence that must reach the escalation pass even when
+// stale conditions on it still read healthy, or when a serving sibling
+// would otherwise cover the count. desired <= 0 never counts as serving
+// (nothing is expected, so nothing can prove health).
 func PodSetFullyServing(pods []*corev1.Pod, desired int32) bool {
 	return podSetAtBar(pods, desired, func(p *corev1.Pod) bool {
 		return podreadiness.IsContainersReady(p) && podreadiness.IsServing(p)
@@ -494,16 +496,17 @@ func PodSetReadyAndServing(pods []*corev1.Pod, desired int32) bool {
 	return podSetAtBar(pods, desired, podreadiness.ReadyAndServing)
 }
 
-// podSetAtBar is the set reading both bars share: deleting pods are
-// skipped, a terminal pod or a live pod short of bar disqualifies the set,
-// and at least desired (> 0) live pods must clear it.
+// podSetAtBar is the set reading both bars share: a pod on its way out
+// (deleting, or held out of rotation by the surge drain ahead of its
+// deletion) is skipped, a terminal pod or a live pod short of bar
+// disqualifies the set, and at least desired (> 0) live pods must clear it.
 func podSetAtBar(pods []*corev1.Pod, desired int32, bar func(*corev1.Pod) bool) bool {
 	if desired <= 0 {
 		return false
 	}
 	var live int32
 	for _, p := range pods {
-		if p == nil || p.DeletionTimestamp != nil {
+		if p == nil || p.DeletionTimestamp != nil || podreadiness.HeldNotServingBy(p, podreadiness.WriterUpdateSurgeDrain) {
 			continue
 		}
 		if IsTerminalPod(p) || !bar(p) {

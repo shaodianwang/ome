@@ -550,6 +550,50 @@ func TestApplyPartitionRewritesTheCanaryHold(t *testing.T) {
 	}
 }
 
+// TestApplyPodWaitingTakesPodReadyDown pins the kubelet's reading of a
+// waiting container: ContainersReady and PodReady go False together in
+// the same status, whatever the serving gate says, so a pod that served
+// never reads as in rotation while it wedges.
+func TestApplyPodWaitingTakesPodReadyDown(t *testing.T) {
+	const ready = `
+scenario: ready-pod
+arrows: [T-empty-create]
+initial:
+  spec: {replicas: 1, image: registry.example.com/runtime:v1}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+`
+	ctx := context.Background()
+	d := mustDriver(t, ready)
+	ref := &PodRef{Index: 0}
+	waiting := TimelineEvent{ID: "pod.waiting", Variant: "ImagePullBackOff", Args: EventArgs{Pod: ref, Message: "manifest unknown"}}
+	if _, err := applyPodWaiting(ctx, d, waiting); err != nil {
+		t.Fatalf("waiting: %v", err)
+	}
+	pod, err := d.getPod(ctx, d.podName(*ref))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conditions := map[corev1.PodConditionType]corev1.PodCondition{}
+	for _, c := range pod.Status.Conditions {
+		conditions[c.Type] = c
+	}
+	containers, podReady := conditions[corev1.ContainersReady], conditions[corev1.PodReady]
+	if containers.Status != corev1.ConditionFalse || podReady.Status != corev1.ConditionFalse {
+		t.Fatalf("ContainersReady=%s PodReady=%s, want both False while the container waits", containers.Status, podReady.Status)
+	}
+	if !podReady.LastTransitionTime.Equal(&containers.LastTransitionTime) {
+		t.Fatalf("PodReady transitioned at %v, ContainersReady at %v, want the same status", podReady.LastTransitionTime, containers.LastTransitionTime)
+	}
+	if got := conditions[query.ServingConditionType]; got.Status != corev1.ConditionTrue {
+		t.Fatalf("the serving gate is the controller's to write and stays %s, got %s", corev1.ConditionTrue, got.Status)
+	}
+}
+
 // TestApplyPodWaitingKeepsTheRunnersRestartRecord pins what a waiting
 // episode leaves on a container that restarted before it: the kubelet
 // keeps the restart count and the last termination while the container

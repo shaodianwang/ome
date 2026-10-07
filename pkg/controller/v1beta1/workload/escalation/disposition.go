@@ -52,6 +52,12 @@ const (
 	// (UpdateItem.CleanupOnly → ops.CleanupWreckage) when no revision diff
 	// exists to trigger one.
 	DispositionSkippedSuperseded
+	// DispositionWithheld — the fresh row no longer carries the attempt
+	// the pass observed, so its end was not written and nothing was
+	// announced. A row that concluded the attempt (a promote got there
+	// first) recorded nothing at all; a row re-opened under another
+	// attempt keeps the ladder wave the ended attempt earned.
+	DispositionWithheld
 )
 
 // DisposeExpiredAttempt classifies one expired / stuck Create-or-Update
@@ -107,17 +113,19 @@ const (
 // Failed-with-Operation continuation drives the gang abandon path.
 // Callers keep the plain Failed-preserving-Operation stamp for those.
 func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.ReconcileInput, dd types.DispositionDeps, inst types.InstanceStatus, pods []*corev1.Pod, reason string) (DispositionOutcome, error) {
+	if inst.Operation == nil {
+		return DispositionWithheld, nil
+	}
 	now := metav1.NewTime(input.Now())
 	causePod, matched := evidence.FirstWorkloadCausedPod(pods)
 
-	// Branch 1: workload-caused with a resolvable target revision.
+	// Branch 1: workload-caused with a resolvable target revision. Only
+	// the classification happens here; heldRev names the revision the
+	// branch holds, "" when it does not apply.
+	heldRev := ""
 	if pod := causePod; pod != nil {
-		targetRev := ""
-		unpinnedCreate := false
-		if inst.Operation != nil {
-			targetRev = inst.Operation.TargetRevision
-			unpinnedCreate = inst.Operation.Type == types.InstanceOperationCreate && targetRev == ""
-		}
+		targetRev := inst.Operation.TargetRevision
+		unpinnedCreate := inst.Operation.Type == types.InstanceOperationCreate && targetRev == ""
 		if targetRev == "" {
 			// An empty target is a supported persisted state. The pod label
 			// below decides whether the live rollout target can own its failure.
@@ -145,29 +153,49 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 			// Clear the attempt without charging either revision below.
 			targetRev = ""
 		}
-		if targetRev != "" {
-			// Writer ordering: RetryBlock upsert lands BEFORE the mutation
-			// that clears the failed attempt's Operation. Crash-safe: a
-			// re-entered disposition (block landed, clear didn't) refreshes
-			// the block via the writer's wave dedup without recounting.
-			// The wave's cause is read off the matched reason rather than
-			// asserted here, so this branch and the gang abandon classify it
-			// from the same set.
-			if err := types.RecordUpdateFailureInRetryBlock(ctx, input, targetRev, matched, types.FailureCauseOf(matched)); err != nil {
-				return DispositionHeldRevision, fmt.Errorf("record retry block for disposed attempt (instance=%d rev=%s): %w", inst.Index, targetRev, err)
-			}
-			termination := types.PodTerminationWithReason(pod, matched, now)
-			if err := endAttempt(ctx, input, inst, pods, termination, parkedWaitAfterWave(input, targetRev, matched, types.FailureCauseOf(matched), now)); err != nil {
-				return DispositionHeldRevision, fmt.Errorf("clear operation + stamp Failed (instance=%d): %w", inst.Index, err)
-			}
-			if input.WarnInstanceFailed != nil {
-				input.WarnInstanceFailed(inst.Index, pod.Name,
-					fmt.Sprintf("%s: workload-caused failure; revision %s held for retry — fix the image/config and publish a corrected revision", matched, targetRev))
-			}
-			return DispositionHeldRevision, nil
-		}
 		// No resolvable revision (degenerate: no op target AND empty
-		// UpdateRevision) — nothing to hold; dispose terminal below.
+		// UpdateRevision) leaves heldRev empty — nothing to hold; dispose
+		// terminal below.
+		heldRev = targetRev
+	}
+
+	// Every write from here on is the observed attempt's: the ladder wave
+	// and the directive recorded ahead of the end, and the end itself. A
+	// fresh row that concluded the attempt records nothing — it may have
+	// succeeded. One re-opened under another attempt keeps the wave the
+	// ended attempt earned; the stamps withhold the end themselves.
+	standing, err := status.AttemptStandingOnFreshRow(ctx, input, inst.Index, *inst.Operation)
+	if err != nil {
+		return DispositionWithheld, fmt.Errorf("read the row before disposing its attempt (instance=%d): %w", inst.Index, err)
+	}
+	if standing == status.AttemptConcluded {
+		return DispositionWithheld, nil
+	}
+
+	if heldRev != "" {
+		// Writer ordering: RetryBlock upsert lands BEFORE the mutation
+		// that clears the failed attempt's Operation. Crash-safe: a
+		// re-entered disposition (block landed, clear didn't) refreshes
+		// the block via the writer's wave dedup without recounting.
+		// The wave's cause is read off the matched reason rather than
+		// asserted here, so this branch and the gang abandon classify it
+		// from the same set.
+		if err := types.RecordUpdateFailureInRetryBlock(ctx, input, heldRev, matched, types.FailureCauseOf(matched)); err != nil {
+			return DispositionHeldRevision, fmt.Errorf("record retry block for disposed attempt (instance=%d rev=%s): %w", inst.Index, heldRev, err)
+		}
+		termination := types.PodTerminationWithReason(causePod, matched, now)
+		ended, err := endAttempt(ctx, input, inst, pods, termination, parkedWaitAfterWave(input, heldRev, matched, types.FailureCauseOf(matched), now))
+		if err != nil {
+			return DispositionHeldRevision, fmt.Errorf("clear operation + stamp Failed (instance=%d): %w", inst.Index, err)
+		}
+		if !ended {
+			return DispositionWithheld, nil
+		}
+		if input.WarnInstanceFailed != nil {
+			input.WarnInstanceFailed(inst.Index, causePod.Name,
+				fmt.Sprintf("%s: workload-caused failure; revision %s held for retry — fix the image/config and publish a corrected revision", matched, heldRev))
+		}
+		return DispositionHeldRevision, nil
 	}
 
 	// Branch 2: relocatable — the attempt's own pods occupy exactly one
@@ -283,8 +311,12 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 		parkedWait = parkedWaitAfterWave(input, chargeRev, waveReason, types.CauseUnattributed, now)
 		detail = "attempt disposed terminal (no workload-caused evidence, relocation unavailable) and counted on the revision's retry ladder"
 	}
-	if err := endAttempt(ctx, input, inst, pods, termination, parkedWait); err != nil {
+	ended, err := endAttempt(ctx, input, inst, pods, termination, parkedWait)
+	if err != nil {
 		return outcome, fmt.Errorf("clear operation + stamp Failed (instance=%d): %w", inst.Index, err)
+	}
+	if !ended {
+		return DispositionWithheld, nil
 	}
 	// Suppress the per-reconcile warn+event storm when an instance is stuck
 	// oscillating on the SAME unresolved failure — e.g. a same-target update
@@ -306,12 +338,15 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 // attempt is visible on the row and the phase can follow a set the
 // kubelet goes on retrying — a runner restarted in place serves between
 // its crashes, a wedged pod comes up once its cause is gone. An attempt
-// whose pods are gone, or that no ladder counted, is cleared.
-func endAttempt(ctx context.Context, input types.ReconcileInput, inst types.InstanceStatus, pods []*corev1.Pod, termination *types.InstanceTermination, wait string) error {
+// whose pods are gone, or that no ladder counted, is cleared. Either
+// stamp lands only while the fresh row still carries the observed
+// attempt; it reports whether the row changed, and a withheld stamp
+// announces nothing.
+func endAttempt(ctx context.Context, input types.ReconcileInput, inst types.InstanceStatus, pods []*corev1.Pod, termination *types.InstanceTermination, wait string) (bool, error) {
 	if wait != "" && attemptParkable(inst, pods) {
 		return status.StampFailedParkingAttempt(ctx, input, inst.Index, *inst.Operation, termination, wait)
 	}
-	return status.StampFailed(ctx, input, inst.Index, termination)
+	return status.StampFailedEndingAttempt(ctx, input, inst.Index, *inst.Operation, termination)
 }
 
 // attemptParkable reports whether a disposed attempt leaves a pod set the

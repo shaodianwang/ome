@@ -30,6 +30,7 @@ tick=5 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-default-1 reason=I
 tick=5 apply ctrl.crash expectations=dropped now=t+2m0s
 tick=5 row=0 write no-op precondition=no-change
 tick=5 hold cleared
+tick=5 row=0 write no-op precondition=no-change
 tick=5 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Held attempts=1 reason=ImagePullBackOff}
 tick=5 warn retryHeld target=svc-a-engine-6f8b1e6c attempts=1 reason=ImagePullBackOff
 tick=5 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok

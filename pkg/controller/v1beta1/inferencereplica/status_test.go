@@ -1350,21 +1350,28 @@ func TestAggregateStatus_BadImageSurge_EscalatesInstanceToFailed(t *testing.T) {
 	g := gomega.NewWithT(t)
 
 	ir := baselineIR("llama-engine", "prod", 1)
-	// Mid-surge state: Instance Phase=Updating with an in-flight Surge
-	// step. Status pre-seeded so the workload dispatcher's
-	// DetectUpdateTrigger sees the in-progress operation rather than
-	// firing a fresh surge.
+	// Mid-surge state: Instance Phase=Updating with the in-flight Surge
+	// attempt as the engine writes it, pinned to the reconciler's own
+	// target revision with its identity and start, so the update pass
+	// recognizes the attempt as its own rather than opening a fresh surge
+	// over it, and the escalation ends the attempt it observed.
+	target := targetRevisionNameFor(t, ir)
+	started := metav1.NewTime(time.Now().Add(-time.Minute))
 	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
 		{
 			Index:           0,
 			Incarnation:     1,
 			Phase:           v1beta1.OMENativeInstanceUpdating,
 			RunningRevision: "rev-a",
-			TargetRevision:  "rev-b",
+			TargetRevision:  target,
 			ActiveOrdinal:   0,
 			Operation: &v1beta1.InstanceOperation{
-				Type: v1beta1.InstanceOperationUpdate,
-				Step: "Surge",
+				ID:             "update-0-1",
+				Type:           v1beta1.InstanceOperationUpdate,
+				Step:           "Surge",
+				TargetRevision: target,
+				StartedAt:      started,
+				LastProgressAt: started,
 				// Far-future deadline so the slow-path expiry
 				// (production: 30 min) doesn't race the fast-path
 				// escalator we're verifying.

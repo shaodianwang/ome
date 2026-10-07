@@ -29,6 +29,7 @@ tick=5 note the replacement crashes on every start; the attempt is disposed and 
 tick=5 apply pod.waiting[CrashLoopBackOff] pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff now=t+2m0s
 tick=5 row=0 write no-op precondition=no-change
 tick=5 hold cleared
+tick=5 row=0 write no-op precondition=no-change
 tick=5 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Backoff attempts=1 nextRetryAt=t+4m0s reason=CrashLoopBackOff}
 tick=5 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
 tick=5 warn instanceFailed index=0 pod=nil reason=CrashLoopBackOff: attempt disposed terminal (no workload-caused evidence, relocation unavailable) and counted on the revision's retry ladder
@@ -45,6 +46,7 @@ tick=7 note the next pass disposes the second wave on the same crash loop, and t
 tick=7 apply clock.advance by=5m0s now=t+9m1s
 tick=7 row=0 write no-op precondition=no-change
 tick=7 hold cleared
+tick=7 row=0 write no-op precondition=no-change
 tick=7 retryblock target=svc-a-engine-6f8b1e6c persist {state=RetryInProgress attempts=1 nextRetryAt=t+4m0s reason=CrashLoopBackOff}→{state=Held attempts=2 reason=CrashLoopBackOff}
 tick=7 warn retryHeld target=svc-a-engine-6f8b1e6c attempts=2 reason=CrashLoopBackOff
 tick=7 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok

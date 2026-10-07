@@ -50,6 +50,7 @@ tick=6 apply timer.operationDeadline to=t+30m31s now=t+30m31s
 tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=6 row=0 write no-op precondition=no-change
 tick=6 hold cleared
+tick=6 row=0 write no-op precondition=no-change
 tick=6 retryblock target=svc-a-engine-f5f6d007 persist nil→{state=Backoff attempts=1 nextRetryAt=t+1h30m31s reason=ReadinessGateNotSatisfied}
 tick=6 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+30s op=op#2{type=Update step=Parked target=svc-a-engine-f5f6d007 reason=revision svc-a-engine-4c292506 -> svc-a-engine-f5f6d007 waiting=RetryBlock strategy=RecreatePod started=t+30s lastProgressAt=t+30s deadline=nil} lastFailure={pod=svc-a-engine-0-leader-0 reason=ReadinessGateNotSatisfied message=pod containers are ready but a readiness gate keeps it out of its Service; unsatisfied gates: ome.io/serving} precondition=ok
 tick=6 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout: attempt disposed terminal (no workload-caused evidence, relocation unavailable) and counted on the revision's retry ladder

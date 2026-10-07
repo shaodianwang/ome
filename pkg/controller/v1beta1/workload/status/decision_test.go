@@ -111,6 +111,79 @@ func TestStampFailed_NeverResurrectsAnEmptySlot(t *testing.T) {
 	}
 }
 
+// The disposition's clearing stamp ends only the attempt the pass
+// observed: a row that has no operation, or carries another attempt, by
+// the time the write lands concluded or re-opened since the observation
+// and is left exactly as it is.
+func TestStampFailedEndingAttempt_EndsOnlyTheAttemptObserved(t *testing.T) {
+	now := time.Date(2026, time.September, 21, 0, 0, 0, 0, time.UTC)
+	termination := &types.InstanceTermination{Reason: "DeadlineExceeded", Time: metav1.NewTime(now)}
+	observed := types.InstanceOperation{ID: "update-0-1", Type: types.InstanceOperationUpdate, Step: types.UpdateStepInPlace, TargetRevision: "rev-b"}
+
+	open := types.InstanceStatus{Index: 0, Phase: types.InstancePhaseUpdating, RunningRevision: "rev-a", Operation: &observed}
+	w := newRowWriter(open)
+	ended, err := StampFailedEndingAttempt(context.Background(), w.input(now), 0, observed, termination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := w.rows[0]; !ended || got.Phase != types.InstancePhaseFailed || got.Operation != nil || got.LastFailure == nil || got.LastFailure.Reason != "DeadlineExceeded" {
+		t.Fatalf("row = %+v (ended=%v), want Failed with the operation cleared and the record on it", got, ended)
+	}
+	ended, err = StampFailedEndingAttempt(context.Background(), w.input(now), 0, observed, termination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ended || w.writes != 1 {
+		t.Fatalf("ended=%v writes=%d, want the second end to be a no-op", ended, w.writes)
+	}
+
+	promoted := types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady, RunningRevision: "rev-b"}
+	reopened := types.InstanceStatus{Index: 0, Phase: types.InstancePhaseUpdating, RunningRevision: "rev-a",
+		Operation: &types.InstanceOperation{ID: "update-0-2", Type: types.InstanceOperationUpdate, Step: types.UpdateStepInPlace, TargetRevision: "rev-c"}}
+	for name, fresh := range map[string]types.InstanceStatus{"promoted": promoted, "re-opened": reopened} {
+		rw := newRowWriter(fresh)
+		ended, err := StampFailedEndingAttempt(context.Background(), rw.input(now), 0, observed, termination)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := rw.rows[0]; ended || rw.writes != 0 || got.Phase != fresh.Phase || got.LastFailure != nil {
+			t.Fatalf("%s row = %+v (ended=%v), want it left alone: the attempt observed is not on it", name, got, ended)
+		}
+	}
+
+	appended := newRowWriter()
+	if ended, err := StampFailedEndingAttempt(context.Background(), appended.input(now), 9, observed, termination); err != nil || ended || appended.writes != 0 {
+		t.Fatalf("ended=%v err=%v writes=%d, want a slot with no phase left unresurrected", ended, err, appended.writes)
+	}
+}
+
+// The fresh-row read tells an attempt still on the row from one re-opened
+// under another attempt and from one concluded with no attempt left, and
+// writes nothing while it reads.
+func TestAttemptStandingOnFreshRow_ReadsWithoutWriting(t *testing.T) {
+	now := time.Date(2026, time.September, 21, 0, 0, 0, 0, time.UTC)
+	observed := types.InstanceOperation{ID: "update-0-1", Type: types.InstanceOperationUpdate, Step: types.UpdateStepDrain, TargetRevision: "rev-b"}
+	for name, tc := range map[string]struct {
+		row  types.InstanceStatus
+		want AttemptStanding
+	}{
+		"on the row":  {row: types.InstanceStatus{Index: 0, Phase: types.InstancePhaseUpdating, Operation: &observed}, want: AttemptOnRow},
+		"re-opened":   {row: types.InstanceStatus{Index: 0, Phase: types.InstancePhaseUpdating, Operation: &types.InstanceOperation{ID: "update-0-2", Type: types.InstanceOperationUpdate, Step: types.UpdateStepDrain, TargetRevision: "rev-c"}}, want: AttemptReopened},
+		"promoted":    {row: types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady, RunningRevision: "rev-b"}, want: AttemptConcluded},
+		"appended":    {row: types.InstanceStatus{Index: 0}, want: AttemptConcluded},
+		"other index": {row: types.InstanceStatus{Index: 3, Phase: types.InstancePhaseUpdating, Operation: &observed}, want: AttemptConcluded},
+	} {
+		w := newRowWriter(tc.row)
+		got, err := AttemptStandingOnFreshRow(context.Background(), w.input(now), 0, observed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != tc.want || w.writes != 0 {
+			t.Fatalf("%s: standing = %v writes = %d, want %v with nothing written", name, got, w.writes, tc.want)
+		}
+	}
+}
+
 // The deadline backstop keeps the Operation, because an operator reading
 // the row wants to see what was in flight when the clock ran out.
 func TestStampFailedKeepingOperation_KeepsTheOperationOnTheRow(t *testing.T) {
@@ -409,7 +482,7 @@ func TestParkedAttemptStamps_KeepTheAttemptAndFollowTheSet(t *testing.T) {
 	}
 
 	w := newRowWriter(attempt)
-	if err := StampFailedParkingAttempt(context.Background(), w.input(now), 0, *attempt.Operation, termination, string(types.RolloutHoldGateRetryBlock)); err != nil {
+	if _, err := StampFailedParkingAttempt(context.Background(), w.input(now), 0, *attempt.Operation, termination, string(types.RolloutHoldGateRetryBlock)); err != nil {
 		t.Fatal(err)
 	}
 	row := w.rows[0]
@@ -418,7 +491,7 @@ func TestParkedAttemptStamps_KeepTheAttemptAndFollowTheSet(t *testing.T) {
 		!row.Operation.Deadline.IsZero() || row.LastFailure == nil || row.LastFailure.Reason != "CrashLoopBackOff" {
 		t.Fatalf("parked row = %+v, want Failed with the attempt kept on the parked step, its clock parked and the failure recorded", row)
 	}
-	if err := StampFailedParkingAttempt(context.Background(), w.input(now), 0, *attempt.Operation, termination, string(types.RolloutHoldGateRetryBlock)); err != nil {
+	if _, err := StampFailedParkingAttempt(context.Background(), w.input(now), 0, *attempt.Operation, termination, string(types.RolloutHoldGateRetryBlock)); err != nil {
 		t.Fatal(err)
 	}
 	if w.writes != 1 {
@@ -426,7 +499,7 @@ func TestParkedAttemptStamps_KeepTheAttemptAndFollowTheSet(t *testing.T) {
 	}
 
 	concluded := newRowWriter(types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady})
-	if err := StampFailedParkingAttempt(context.Background(), concluded.input(now), 0, *attempt.Operation, termination, string(types.RolloutHoldGateRetryBlock)); err != nil {
+	if _, err := StampFailedParkingAttempt(context.Background(), concluded.input(now), 0, *attempt.Operation, termination, string(types.RolloutHoldGateRetryBlock)); err != nil {
 		t.Fatal(err)
 	}
 	if concluded.writes != 0 {
@@ -440,7 +513,7 @@ func TestParkedAttemptStamps_KeepTheAttemptAndFollowTheSet(t *testing.T) {
 		reopened := attempt
 		reopened.Operation = fresh
 		rw := newRowWriter(reopened)
-		if err := StampFailedParkingAttempt(context.Background(), rw.input(now), 0, *attempt.Operation, termination, string(types.RolloutHoldGateRetryBlock)); err != nil {
+		if _, err := StampFailedParkingAttempt(context.Background(), rw.input(now), 0, *attempt.Operation, termination, string(types.RolloutHoldGateRetryBlock)); err != nil {
 			t.Fatal(err)
 		}
 		if got := rw.rows[0]; rw.writes != 0 || got.Phase != types.InstancePhaseUpdating || got.Operation != fresh || got.LastFailure != nil {

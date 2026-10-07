@@ -42,6 +42,7 @@ tick=7 note the operation deadline elapses with the pod still held out of rotati
 tick=7 apply timer.operationDeadline to=t+30m1s now=t+30m1s
 tick=7 row=0 write no-op precondition=no-change
 tick=7 hold cleared
+tick=7 row=0 write no-op precondition=no-change
 tick=7 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=DeadlineExceeded} precondition=ok
 tick=7 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/InPlace exceeded InstanceReadyTimeout: attempt disposed terminal (no workload-caused evidence, relocation unavailable); operation-specific recovery decides whether another attempt is safe
 tick=7 pass result=after:5s

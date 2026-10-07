@@ -1,14 +1,18 @@
 # The step has advanced to SurgeDrain and the source is still in the routed
 # Service, so the drain never converges and the operation deadline stamped at
-# surge entry elapses. The drained source's serving gate is already off, so
-# the fully-serving suppression cannot cover the row.
+# surge entry elapses inside the drain window. The source is out of rotation
+# under the surge's own drain and the replacement serves, so the Instance is
+# capacity and nothing escalates; the drain keeps waiting on the endpoint.
 scenario: surgedrain-deadline
 arrows:
   - T-ready-surge
   - T-surge-target-ready
-  - T-surgedrain-deadline
 cells:
   - instance/Update/SurgeDrain/timer.operationDeadline/before
+intentional: >-
+  a source the surge itself drained counts toward the fully-serving
+  suppression beside its serving replacement, exactly as a deleting source
+  does, so a deadline inside the drain window fails nothing
 initial:
   spec:
     replicas: 1
@@ -38,6 +42,6 @@ timeline:
   - tick: 5
     note: the source stays published, so the drain does not converge
   - tick: 6
-    note: the operation deadline elapses with the source still routed
+    note: the operation deadline elapses with the source still routed; the replacement serves and the source is the surge's own drain, so nothing escalates
     events:
       - timer.operationDeadline: {slack: 1s}

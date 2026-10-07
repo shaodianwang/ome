@@ -11,6 +11,7 @@ tick=2 pass result=after:5s
 tick=3 note the grace elapses on the wedged pod and the escalation disposes the attempt
 tick=3 apply timer.stuckPodGrace to=t+5m1s now=t+5m1s
 tick=3 hold cleared
+tick=3 row=0 write no-op precondition=no-change
 tick=3 retryblock target=svc-a-engine-882059bb persist nil→{state=Held attempts=1 reason=ImagePullBackOff}
 tick=3 warn retryHeld target=svc-a-engine-882059bb attempts=1 reason=ImagePullBackOff
 tick=3 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok

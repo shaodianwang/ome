@@ -21,6 +21,7 @@ tick=4 note the rebuilt pod is still booting when the deadline elapses; the ladd
 tick=4 apply timer.operationDeadline to=t+30m1s now=t+30m1s
 tick=4 row=0 write no-op precondition=no-change
 tick=4 hold cleared
+tick=4 row=0 write no-op precondition=no-change
 tick=4 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Backoff attempts=1 nextRetryAt=t+1h30m1s reason=DeadlineExceeded}
 tick=4 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Parked target=svc-a-engine-6f8b1e6c reason=revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c waiting=RetryBlock strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
 tick=4 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout: attempt disposed terminal (no workload-caused evidence, relocation unavailable) and counted on the revision's retry ladder

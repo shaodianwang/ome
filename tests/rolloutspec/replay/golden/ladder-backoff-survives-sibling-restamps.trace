@@ -84,6 +84,7 @@ tick=11 row=1 write no-op precondition=no-change
 tick=11 hold gate=RetryBlock target=svc-a-engine-c500c9bc reason=update to svc-a-engine-c500c9bc in backoff after 1 failed attempt(s): CrashLoopBackOff; Instance 0 on revision svc-a-engine-c500c9bc not serving; the attempt rebuilds Instance 0
 tick=11 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-c500c9bc activeOrdinal=1 readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
 tick=11 warn instanceFailed index=0 pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff
+tick=11 row=1 write no-op precondition=no-change
 tick=11 retryblock target=svc-a-engine-c500c9bc persist {state=Backoff attempts=1 nextRetryAt=t+2m20s reason=CrashLoopBackOff}→{state=Backoff attempts=1 nextRetryAt=t+2m20s reason=CrashLoopBackOff}
 tick=11 row=1 write incarnation=1 phase=Failed runningRevision=svc-a-engine-8aa14b8b targetRevision=svc-a-engine-c500c9bc readySince=t+0s op=nil lastFailure={pod=svc-a-engine-1-default-1 reason=CrashLoopBackOff container=ome-container message=back-off restarting failed container} precondition=ok
 tick=11 warn instanceFailed index=1 pod=nil reason=CrashLoopBackOff: attempt disposed terminal (no workload-caused evidence, relocation unavailable) and counted on the revision's retry ladder

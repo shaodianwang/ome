@@ -30,6 +30,7 @@ tick=5 note the replacement cannot have its container created, which the disposi
 tick=5 apply pod.waiting[CreateContainerError] pod=svc-a-engine-0-default-1 reason=CreateContainerError now=t+2m0s
 tick=5 row=0 write no-op precondition=no-change
 tick=5 hold cleared
+tick=5 row=0 write no-op precondition=no-change
 tick=5 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=CreateContainerError container=main message=failed to create containerd task} precondition=ok
 tick=5 warn instanceFailed index=0 pod=nil reason=CreateContainerError: attempt disposed terminal (no workload-caused evidence, relocation unavailable); operation-specific recovery decides whether another attempt is safe
 tick=5 pass result=after:5s

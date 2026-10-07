@@ -1,8 +1,9 @@
 # The replacement regresses into a terminal waiting reason after the step has
-# advanced to SurgeDrain. The source is already out of rotation, so the
-# fully-serving guard cannot suppress the escalation, and once the replacement
-# has held the reason for longer than the stuck-pod grace - measured from the
-# regression, not from the pod's creation - the fast path fires.
+# advanced to SurgeDrain. The drained source covers no slot on its own and the
+# wedged replacement is out of rotation, so the fully-serving guard cannot
+# suppress the escalation, and once the replacement has held the reason for
+# longer than the stuck-pod grace - measured from the regression, not from
+# the pod's creation - the fast path fires.
 scenario: surgedrain-stuck
 arrows:
   - T-ready-surge

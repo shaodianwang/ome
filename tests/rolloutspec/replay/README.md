@@ -92,6 +92,11 @@ they move the goldens of the scenarios that walk the fixed route, and
 only those, with the scenario's `intentional:` note and the machine cell
 rewritten in the same commit. `failed-runtime-ready-adopt` is one — the
 Failed row now adopts pods already on the target instead of re-surging.
+One such fix touches every disposition rather than one route: the
+deadline and stuck-pod disposition reads the fresh row through the row
+seam before it writes, and the trace renders that read as a
+`row=N write no-op precondition=no-change` line ahead of the
+disposition's writes in every scenario that reaches one.
 
 ## Changing a golden
 

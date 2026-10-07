@@ -554,12 +554,14 @@ func applyPodWaiting(ctx context.Context, d *driver, ev TimelineEvent) (string, 
 		pod.Status.Phase = corev1.PodPending
 		// A kubelet reports ContainersReady=False with a pod's first status,
 		// so a pod that never served has held it since its creation; only a
-		// pod that served transitions now.
+		// pod that served transitions now. PodReady follows ContainersReady
+		// down in the same status, whatever the gate says.
 		notReadySince := d.clock.Now()
 		if !hasPodCondition(pod, corev1.ContainersReady) && !pod.CreationTimestamp.IsZero() {
 			notReadySince = pod.CreationTimestamp.Time
 		}
 		setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, notReadySince)
+		setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, notReadySince)
 		waiting := corev1.ContainerStatus{
 			Name:  container,
 			Image: podImage(pod, container),

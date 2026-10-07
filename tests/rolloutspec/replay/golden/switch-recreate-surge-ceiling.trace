@@ -60,6 +60,7 @@ tick=8 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-default-0 reason=I
 tick=8 row=0 write no-op precondition=no-change
 tick=8 row=1 write no-op precondition=no-change
 tick=8 hold cleared
+tick=8 row=0 write no-op precondition=no-change
 tick=8 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Held attempts=1 reason=ImagePullBackOff}
 tick=8 warn retryHeld target=svc-a-engine-6f8b1e6c attempts=1 reason=ImagePullBackOff
 tick=8 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#3{type=Update step=Parked target=svc-a-engine-6f8b1e6c reason=revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c waiting=Held strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
@@ -69,6 +70,7 @@ tick=9 note the surge replacement wedges on the same image and the surge is disp
 tick=9 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-1-default-1 reason=ImagePullBackOff now=t+2m0s
 tick=9 row=1 write no-op precondition=no-change
 tick=9 hold cleared
+tick=9 row=1 write no-op precondition=no-change
 tick=9 retryblock target=svc-a-engine-6f8b1e6c persist {state=Held attempts=1 reason=ImagePullBackOff}→{state=Held attempts=1 reason=ImagePullBackOff}
 tick=9 row=1 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-1-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
 tick=9 warn instanceFailed index=1 pod=svc-a-engine-1-default-1 reason=ImagePullBackOff: workload-caused failure; revision svc-a-engine-6f8b1e6c held for retry — fix the image/config and publish a corrected revision
