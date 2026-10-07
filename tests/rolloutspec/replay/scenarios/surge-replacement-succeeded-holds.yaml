@@ -1,13 +1,21 @@
 # The replacement of a single-pod surge exits successfully before it was
-# ever Ready. The phase is read nowhere on the surge path, so runtime
-# readiness simply stays false and the step holds, with the source still in
-# rotation, until the operation deadline ends the attempt.
+# ever Ready. A Succeeded pod is as terminal as a Failed one, so the attempt
+# deletes it at once with the exit on LastFailure while the source serves
+# on. The deleted object is never collected here, and a deleting pod is
+# skipped at the serving bar, so the source alone keeps the set at bar: the
+# elapsed operation deadline is exempted as failed-while-serving and the
+# step holds on the outstanding delete.
 scenario: surge-replacement-succeeded-holds
 arrows:
   - T-ready-surge
   - T-surge-deadline
 cells:
   - instance/Update/Surge/pod.phaseTerminal[Succeeded]/before
+intentional: >-
+  a replacement that exited Succeeded is in a terminal phase and is replaced
+  at once, as a pod of any in-flight update attempt is; with its delete never
+  observed the serving source exempts the elapsed deadline, where the
+  undeleted terminal pod used to disqualify the set and fail the attempt
 initial:
   spec:
     replicas: 1
@@ -30,12 +38,12 @@ timeline:
     events:
       - spec.revision: {image: registry.example.com/runtime:v2}
   - tick: 4
-    note: the replacement exits with phase Succeeded; the phase is read nowhere on the surge path, so the step holds with the source in rotation
+    note: the replacement exits with phase Succeeded, which is as terminal as Failed, so the attempt deletes it at once with the exit on LastFailure and the source stays in rotation
     events:
       - pod.phaseTerminal[Succeeded]: {pod: {index: 0, ordinal: 1}}
   - tick: 5
-    note: a further pass finds the replacement still not runtime-ready and keeps holding
+    note: a further pass finds the delete still outstanding and keeps holding
   - tick: 6
-    note: the operation deadline elapses with the replacement never Ready, so the escalation pass ends the attempt
+    note: the operation deadline elapses with the replacement still deleting; a deleting pod is skipped at the serving bar, so the source alone keeps the set at bar and the escalation exempts the row as failed-while-serving
     events:
       - timer.operationDeadline: {slack: 1s}

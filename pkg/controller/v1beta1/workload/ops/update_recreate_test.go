@@ -187,11 +187,10 @@ func TestRecreateDrain_ReadyOldIncarnationPodIsNotThePromoteSignal(t *testing.T)
 // TestRecreateDrain_PodObservationsThatDecideNothing: the recreate
 // promotes over one bar — the bumped set complete, serving and PodReady
 // past its availability window — and re-derives it every wake-up. A pod
-// wedged Terminating, one whose node is gone, and one in a terminal phase
-// all fail that bar in the same way: the roll waits, and only its
-// operation deadline ends it.
+// wedged Terminating and one whose node is gone both fail that bar in the
+// same way: the roll waits, and only its operation deadline ends it.
 //
-// Cells: instance/Update/Drain/pod.stuckTerminating/before, instance/Update/Drain/pod.nodeLost[NodeGone]/before, instance/Update/Drain/pod.phaseTerminal[Failed]/before, instance/Update/Drain/pod.phaseTerminal[Succeeded]/before
+// Cells: instance/Update/Drain/pod.stuckTerminating/before, instance/Update/Drain/pod.nodeLost[NodeGone]/before
 func TestRecreateDrain_PodObservationsThatDecideNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -213,24 +212,6 @@ func TestRecreateDrain_PodObservationsThatDecideNothing(t *testing.T) {
 			observe: func(_ *testing.T, _ *nonSurgeFixture, pod *corev1.Pod) *corev1.Pod {
 				out := pod.DeepCopy()
 				out.Spec.NodeName = "node-that-no-longer-exists"
-				return out
-			},
-		},
-		{
-			name:        "a rebuilt pod in a terminal Failed phase",
-			incarnation: 2,
-			observe: func(_ *testing.T, _ *nonSurgeFixture, pod *corev1.Pod) *corev1.Pod {
-				out := pod.DeepCopy()
-				out.Status.Phase = corev1.PodFailed
-				return out
-			},
-		},
-		{
-			name:        "a rebuilt pod in a terminal Succeeded phase",
-			incarnation: 2,
-			observe: func(_ *testing.T, _ *nonSurgeFixture, pod *corev1.Pod) *corev1.Pod {
-				out := pod.DeepCopy()
-				out.Status.Phase = corev1.PodSucceeded
 				return out
 			},
 		},

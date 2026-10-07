@@ -63,10 +63,13 @@ tick=9 row=0 write no-op precondition=no-change
 tick=9 pod create-rejected name=svc-a-engine-0-default-1 rejection=api.alreadyExists
 tick=9 hold cleared
 tick=9 pass result=after:5s
-tick=10 note the adopted replacement is bound and evicted under node pressure; an evicted replacement is recreated at the surge ordinal once it is gone, the source staying out of rotation
+tick=10 note the adopted replacement is bound and evicted under node pressure; the attempt deletes the evicted occupant at once with the eviction on LastFailure, the source staying out of rotation
 tick=10 apply pod.scheduled[target] pod=svc-a-engine-0-default-1 node=node-2 now=t+0s
 tick=10 apply pod.evicted pod=svc-a-engine-0-default-1 reason=Evicted now=t+0s
 tick=10 row=0 write no-op precondition=no-change
+tick=10 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain retryCount=2 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-1 reason=Evicted message=The node was low on resource: memory} precondition=ok
+tick=10 pod delete name=svc-a-engine-0-default-1 grace=default
+tick=10 event Warning TerminalPodRecycled OMENative component=engine instance=0 deleted terminal pod(s) svc-a-engine-0-default-1 (Failed/Evicted) for recreate (Update recycle 2)
 tick=10 hold cleared
 tick=10 pass result=after:5s
 tick=11 note the evicted replacement is gone, so it is recreated at the surge ordinal
@@ -94,7 +97,7 @@ tick=13 pass result=after:5s
 tick=14 note the drained source is gone and the Instance promotes
 tick=14 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+2m0s
 tick=14 row=0 write no-op precondition=no-change
-tick=14 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-6f8b1e6c activeOrdinal=1 readySince=t+2m0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=OutOfnvidia.com/gpu message=Pod Node didn't have enough resource: nvidia.com/gpu} precondition=ok
+tick=14 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-6f8b1e6c activeOrdinal=1 readySince=t+2m0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=Evicted message=The node was low on resource: memory} precondition=ok
 tick=14 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c complete (activeOrdinal=1)
 tick=14 hold cleared
 tick=14 pass result=requeue

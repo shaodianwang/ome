@@ -401,12 +401,12 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		Runner:  runner,
 		Ordinal: newOrdinal,
 	}}
-	// A replacement the kubelet refused to admit never ran and never
-	// will, yet it still holds the surge name. Free it now rather than
-	// polling its readiness to the operation deadline.
-	if recycling, rerr := recycleAdmissionRejectedTargets(ctx, deps, input, inst.Index, inst.Index,
+	// A replacement in a terminal phase — crashed, exited, evicted or
+	// refused by its node — still holds the surge name and will never
+	// clear the promote bar; free it now rather than poll it to the deadline.
+	if recycling, rerr := recycleTerminalTargets(ctx, deps, input, inst.Index, inst.Index,
 		workload.InstanceOperationUpdate, surgePods, targets); rerr != nil {
-		return false, fmt.Errorf("recycle rejected surge target (instance=%d): %w", inst.Index, rerr)
+		return false, fmt.Errorf("recycle terminal surge target (instance=%d): %w", inst.Index, rerr)
 	} else if recycling {
 		return false, nil
 	}

@@ -1,10 +1,12 @@
 # The replacement gang's PodGroup is taken over by another controller while
 # the surge is in flight, so the marker is Failed with its operation kept
 # and the source keeps driving the build. One member exits and another is
-# evicted: no pass recreates a terminal pod on a stable name, so the pair
-# waits until the objects are gone, and only then does the source's build
-# refill the names. The foreign group is deleted first, so the names are
-# not withheld on it.
+# evicted: a dead member can never complete the gang, so the source's pass
+# replaces both at once with the marker's phase unread - the shared
+# terminal recycle deletes them under the surge index with the expectation
+# recorded first and the eviction on the source's LastFailure - and the
+# build refills the names once the deletes are observed. The foreign group
+# is deleted first, so the names are not withheld on it.
 scenario: gang-target-failed-verdict-member-terminal
 arrows:
   - T-empty-gang-surge-target
@@ -14,6 +16,10 @@ cells:
   - instance/Failed/GangSurgeTarget/pod.phaseTerminal[Failed]/before
   - instance/Failed/GangSurgeTarget/pod.evicted/before
   - instance/Failed/GangSurgeTarget/pod.deleted[target]/before
+intentional: >-
+  a dead member of the replacement gang is replaced at once by the source's
+  attempt, as a pod of any in-flight update attempt is, whatever the marker's
+  own phase; the pair no longer waits for the dead objects to be collected
 initial:
   spec:
     replicas: 1
@@ -52,15 +58,15 @@ timeline:
     events:
       - gang.podGroup[Deleted]: {instance: 1}
   - tick: 7
-    note: the replacement leader is bound and then evicted under node pressure while the worker exits with a terminal phase; neither is recreated on its stable name, and the marker is untouched
+    note: the replacement leader is bound and then evicted under node pressure while the worker exits with a terminal phase; the source's pass deletes both dead members at once with the eviction on its LastFailure, and the marker is untouched
     events:
       - pod.scheduled[target]: {pod: {index: 1, runner: leader}, message: node-1}
       - pod.evicted: {pod: {index: 1, runner: leader}, message: "The node was low on resource: memory"}
       - pod.phaseTerminal[Failed]: {pod: {index: 1, runner: worker}}
   - tick: 8
-    note: a further pass finds the same two terminal pods and still recreates nothing
+    note: a further pass finds the two deletes still outstanding and creates nothing until they are observed
   - tick: 9
-    note: both terminal pods are gone, so the source's build refills the names at the same index
+    note: both dead pods are gone, so the source's build refills the names at the same index
     events:
       - pod.deleted[target]: {pod: {index: 1, runner: leader}}
       - pod.deleted[target]: {pod: {index: 1, runner: worker}}

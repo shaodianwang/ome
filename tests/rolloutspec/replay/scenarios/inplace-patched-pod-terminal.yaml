@@ -1,0 +1,52 @@
+# The pod an in-place roll is patching dies in a terminal phase. A dead pod
+# can never report the new image, so the attempt frees its name at once
+# instead of polling it to the operation deadline: the occupant is deleted
+# with the expectation recorded first and its diagnostics land on
+# LastFailure; once it is gone the empty set re-resolves the roll to
+# recreate, which renders the replacement at the target revision.
+scenario: inplace-patched-pod-terminal
+arrows:
+  - T-ready-inplace
+  - T-inplace-podlost-recreate
+  - T-drain-ready
+cells:
+  - instance/Update/InPlace/pod.phaseTerminal[Failed]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation, so the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the image patch lands while the pod is out of rotation
+  - tick: 6
+    note: the patched pod dies, so the attempt deletes the dead occupant of its name with the exit on LastFailure and the step stays in place until the delete is observed
+    events:
+      - pod.phaseTerminal[Failed]: {pod: {index: 0}}
+  - tick: 7
+    note: the dead pod is gone, so the roll re-resolves to recreate and the replacement is rendered at the target revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 8
+    note: the rebuilt pod reports Ready, so it is marked serving and the Instance promotes on the target revision
+    events:
+      - pod.ready[target]: {pod: {index: 0}}

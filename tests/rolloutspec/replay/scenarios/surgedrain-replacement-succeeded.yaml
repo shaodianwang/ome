@@ -1,13 +1,20 @@
-# The replacement exits cleanly while the source drains: a terminal pod
-# fails the runtime-readiness check ahead of the drain block, so the source
-# is not deleted even once unrouted and the step holds to the deadline.
+# The replacement exits cleanly while the source drains. A terminal pod can
+# never return to the promote bar, so the attempt frees the surge name at
+# once instead of holding the drain to the deadline: the exited occupant is
+# deleted with the expectation recorded first and its exit on LastFailure,
+# the source stays out of rotation, and the drain goes on once the
+# replacement created in its place is serving.
 scenario: surgedrain-replacement-succeeded
 arrows:
   - T-ready-surge
   - T-surge-target-ready
-  - T-surgedrain-deadline
+  - T-surgedrain-promote
 cells:
   - instance/Update/SurgeDrain/pod.phaseTerminal[Succeeded]/before
+intentional: >-
+  a replacement that exits during the drain is replaced at once, as a pod
+  of any in-flight update attempt is once it is in a terminal phase; the
+  drain no longer holds to the operation deadline
 initial:
   spec:
     replicas: 1
@@ -35,14 +42,20 @@ timeline:
       - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
       - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
   - tick: 5
-    note: the replacement's containers exit with success; the pass returns before the drain block and the step holds
+    note: the replacement's containers exit with success, so the attempt deletes the exited occupant of the surge name with the exit on LastFailure; the source stays out of rotation
     events:
       - pod.phaseTerminal[Succeeded]: {pod: {index: 0, ordinal: 1}}
   - tick: 6
-    note: the source leaves rotation, but the drain block is not reached and the source is not deleted
+    note: the exited replacement is gone, so the replacement is created again under the same name while the source leaves rotation
     events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
       - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
   - tick: 7
-    note: the operation deadline elapses on the held drain and the attempt is disposed
+    note: the new replacement is serving, so the drain block is reached and the unrouted source is deleted
     events:
-      - timer.operationDeadline: {slack: 1s}
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 8
+    note: the drained source is gone and the Instance promotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

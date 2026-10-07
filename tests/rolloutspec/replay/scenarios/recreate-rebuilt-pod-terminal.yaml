@@ -1,0 +1,62 @@
+# The pod a recreate rebuilt dies before it ever became Ready, twice. A dead
+# pod can never clear the promote bar, so Phase B frees its name at once
+# instead of polling it to the operation deadline: each dead occupant is
+# deleted with the expectation recorded first, the recycle is counted on the
+# operation, the exit lands on LastFailure, and the name is rebuilt once the
+# delete is observed.
+scenario: recreate-rebuilt-pod-terminal
+arrows:
+  - T-ready-recreate
+  - T-drain-ready
+cells:
+  - instance/Update/Drain/pod.phaseTerminal[Failed]/before
+  - instance/Update/Drain/pod.phaseTerminal[Succeeded]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the source leaves rotation
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the source is gone, so the rebuild may start
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the rebuilt pod dies, so Phase B deletes the dead occupant of its name with the exit on LastFailure
+    events:
+      - pod.phaseTerminal[Failed]: {pod: {index: 0}}
+  - tick: 7
+    note: the dead pod is gone, so the name is rebuilt
+    events:
+      - pod.deleted[target]: {pod: {index: 0}}
+  - tick: 8
+    note: the second rebuilt pod exits cleanly, which is as terminal as a crash; it is recycled in turn and the recycle count moves to two
+    events:
+      - pod.phaseTerminal[Succeeded]: {pod: {index: 0}}
+  - tick: 9
+    note: the exited pod is gone, so the name is rebuilt once more
+    events:
+      - pod.deleted[target]: {pod: {index: 0}}
+  - tick: 10
+    note: the third rebuilt pod reports Ready, so it is marked serving and the Instance promotes on the target revision
+    events:
+      - pod.ready[target]: {pod: {index: 0}}

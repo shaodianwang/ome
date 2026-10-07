@@ -913,12 +913,13 @@ func TestUpdate_InPlacePausedCompletesThePatch(t *testing.T) {
 // TestUpdateInPlace_PodObservationsThatDecideNothing: the in-place step
 // promotes on one thing only — every changed image confirmed from
 // container status on a pod that is PodReady past its availability
-// window. Everything else the kubelet can report about that pod either
-// is the patch taking effect or is a wait: none of them ends the attempt,
-// bumps the Incarnation, or moves the step off the patch. The roll is
-// bounded by its operation deadline, not by any of these readings.
+// window. Short of a terminal phase, which the attempt recycles,
+// everything else the kubelet can report about that pod either is the
+// patch taking effect or is a wait: none of them ends the attempt, bumps
+// the Incarnation, or moves the step off the patch. The roll is bounded by
+// its operation deadline, not by any of these readings.
 //
-// Cells: instance/Update/InPlace/pod.containerRestart/before, instance/Update/InPlace/pod.stuckTerminating/before, instance/Update/InPlace/pod.nodeLost[NodeGone]/before, instance/Update/InPlace/pod.evicted/before, instance/Update/InPlace/pod.phaseTerminal[Failed]/before, instance/Update/InPlace/pod.phaseTerminal[Succeeded]/before
+// Cells: instance/Update/InPlace/pod.containerRestart/before, instance/Update/InPlace/pod.stuckTerminating/before, instance/Update/InPlace/pod.nodeLost[NodeGone]/before
 func TestUpdateInPlace_PodObservationsThatDecideNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -946,31 +947,6 @@ func TestUpdateInPlace_PodObservationsThatDecideNothing(t *testing.T) {
 			observe: func(t *testing.T, f *nonSurgeFixture) *corev1.Pod {
 				pod := f.pod.DeepCopy()
 				pod.Spec.NodeName = "node-that-no-longer-exists"
-				return pod
-			},
-		},
-		{
-			name: "the pod evicted",
-			observe: func(t *testing.T, f *nonSurgeFixture) *corev1.Pod {
-				pod := f.pod.DeepCopy()
-				pod.Status.Phase = corev1.PodFailed
-				pod.Status.Reason = "Evicted"
-				return pod
-			},
-		},
-		{
-			name: "the pod in a terminal Failed phase",
-			observe: func(t *testing.T, f *nonSurgeFixture) *corev1.Pod {
-				pod := f.pod.DeepCopy()
-				pod.Status.Phase = corev1.PodFailed
-				return pod
-			},
-		},
-		{
-			name: "the pod in a terminal Succeeded phase",
-			observe: func(t *testing.T, f *nonSurgeFixture) *corev1.Pod {
-				pod := f.pod.DeepCopy()
-				pod.Status.Phase = corev1.PodSucceeded
 				return pod
 			},
 		},

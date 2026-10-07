@@ -1,0 +1,21 @@
+# Provenance for the instance-machine cells decided in the owner review of
+# 2026-10-06 on a pod of an in-flight update attempt that ends in a terminal
+# phase or is refused by its node: the attempt replaces that pod at once, as
+# the Create and Restart passes already do, and does not wait for the
+# operation deadline. The per-pod surge at both steps, the recreate's rebuild,
+# the gang surge and the in-place patch all run the shared terminal recycle.
+#
+# Selectors match the cells files exactly: an empty variants, windows or
+# transition matches all of them.
+history:
+  # --- cells-update-inplace-recreate.yaml ---
+  - {state: Update/InPlace, event: pod.phaseTerminal, variants: [Failed, Succeeded], windows: [], transition: "", decision: owner-review-2026-10-06}
+  - {state: Update/InPlace, event: pod.admissionRejected, variants: [], windows: [], transition: "", decision: owner-review-2026-10-06}
+  - {state: Update/Drain, event: pod.phaseTerminal, variants: [Failed, Succeeded], windows: [], transition: "", decision: owner-review-2026-10-06}
+
+  # --- cells-update-surge.yaml ---
+  - {state: Update/Surge, event: pod.phaseTerminal, variants: [Failed, Succeeded], windows: [], transition: "", decision: owner-review-2026-10-06}
+  - {state: Update/SurgeDrain, event: pod.phaseTerminal, variants: [Failed, Succeeded], windows: [], transition: "", decision: owner-review-2026-10-06}
+
+  # --- cells-update-gang.yaml ---
+  - {state: Update/GangSurgeTarget, event: pod.phaseTerminal, variants: [Failed, Succeeded], windows: [], transition: "", decision: owner-review-2026-10-06}

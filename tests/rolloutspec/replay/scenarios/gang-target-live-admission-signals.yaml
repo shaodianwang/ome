@@ -2,10 +2,11 @@
 # outside writers while it builds. A gated member parks both the marker's
 # and the source's deadline and the admission restarts them, a lost node
 # has no handler on the gang surge path, a same-name pod under a new UID is
-# read as present, an evicted member reads as pod loss and is refilled with
-# the PodGroup ensured first, a refill that finds its name taken is adopted
-# by name, and a member already being deleted neither triggers a recreate
-# nor blocks the promote.
+# read as present, an evicted member is deleted at once by the source's
+# attempt with the eviction on its LastFailure and refilled once the delete
+# is observed with the PodGroup ensured first, a refill that finds its name
+# taken is adopted by name, and a member already being deleted neither
+# triggers a recreate nor blocks the promote.
 scenario: gang-target-live-admission-signals
 arrows:
   - T-empty-gang-surge-target
@@ -19,6 +20,10 @@ cells:
   - instance/Update/GangSurgeTarget/pod.evicted/before
   - instance/Update/GangSurgeTarget/api.alreadyExists/before
   - instance/Update/GangSurgeTarget/pod.terminating[target]/before
+intentional: >-
+  an evicted member of the replacement gang is in a terminal phase and is
+  replaced at once by the source's attempt, as a pod of any in-flight update
+  attempt is; the eviction lands on the source's LastFailure
 initial:
   spec:
     replicas: 1
@@ -61,7 +66,7 @@ timeline:
     events:
       - pod.nodeLost[UnreachableTaint]: {pod: {index: 1, runner: leader}}
   - tick: 8
-    note: the leader is evicted under node pressure and the worker reappears under a new UID; the eviction reads as pod loss once the object is gone, and the rotated worker is read as present by name
+    note: the leader is evicted under node pressure and the worker reappears under a new UID; the source's pass deletes the evicted leader at once with the eviction on its LastFailure, and the rotated worker is read as present by name
     events:
       - pod.evicted: {pod: {index: 1, runner: leader}, message: "The node was low on resource: memory"}
       - pod.uidRotated: {pod: {index: 1, runner: worker}}

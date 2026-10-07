@@ -29,20 +29,34 @@ tick=4 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882
 tick=4 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
 tick=4 hold cleared
 tick=4 pass result=after:5s
-tick=5 note the replacement's containers exit with success; the pass returns before the drain block and the step holds
+tick=5 note the replacement's containers exit with success, so the attempt deletes the exited occupant of the surge name with the exit on LastFailure; the source stays out of rotation
 tick=5 apply pod.phaseTerminal[Succeeded] pod=svc-a-engine-0-default-1 now=t+0s
 tick=5 row=0 write no-op precondition=no-change
+tick=5 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain retryCount=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-1 reason=Succeeded container=main exitCode=0} precondition=ok
+tick=5 pod delete name=svc-a-engine-0-default-1 grace=default
+tick=5 event Warning TerminalPodRecycled OMENative component=engine instance=0 deleted terminal pod(s) svc-a-engine-0-default-1 (Succeeded) for recreate (Update recycle 1)
 tick=5 hold cleared
 tick=5 pass result=after:5s
-tick=6 note the source leaves rotation, but the drain block is not reached and the source is not deleted
+tick=6 note the exited replacement is gone, so the replacement is created again under the same name while the source leaves rotation
+tick=6 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+0s
 tick=6 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
 tick=6 row=0 write no-op precondition=no-change
+tick=6 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
 tick=6 hold cleared
 tick=6 pass result=after:5s
-tick=7 note the operation deadline elapses on the held drain and the attempt is disposed
-tick=7 apply timer.operationDeadline to=t+30m1s now=t+30m1s
+tick=7 note the new replacement is serving, so the drain block is reached and the unrouted source is deleted
+tick=7 apply pod.ready[target] pod=svc-a-engine-0-default-1 now=t+0s
+tick=7 apply endpoint.rotationIn[target] pod=svc-a-engine-0-default-1 now=t+0s
 tick=7 row=0 write no-op precondition=no-change
+tick=7 pod status-patch name=svc-a-engine-0-default-1 serving=absent→True
+tick=7 row=0 write no-op precondition=no-change
+tick=7 pod delete name=svc-a-engine-0-default-0 grace=default
 tick=7 hold cleared
-tick=7 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/SurgeDrain exceeded InstanceReadyTimeout} precondition=ok
-tick=7 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/SurgeDrain exceeded InstanceReadyTimeout: attempt disposed terminal (no workload-caused evidence, relocation unavailable); operation-specific recovery decides whether another attempt is safe
 tick=7 pass result=after:5s
+tick=8 note the drained source is gone and the Instance promotes
+tick=8 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=8 row=0 write no-op precondition=no-change
+tick=8 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-6f8b1e6c activeOrdinal=1 readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=Succeeded container=main exitCode=0} precondition=ok
+tick=8 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c complete (activeOrdinal=1)
+tick=8 hold cleared
+tick=8 pass result=requeue

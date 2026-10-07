@@ -3,7 +3,8 @@
 # earlier writer on the way back: a gated pod parks the deadline, admission
 # restarts it, a node's refusal is recycled and the freed name rebuilt, a
 # create that finds its name taken adopts the pod, an evicted replacement
-# is recreated again while the source stays out of rotation, and a
+# is deleted at once with the eviction on LastFailure and recreated once the
+# delete is observed while the source stays out of rotation, and a
 # replacement running unready re-blocks the drain until it clears.
 scenario: surgedrain-recreated-replacement-signals
 arrows:
@@ -17,6 +18,10 @@ cells:
   - instance/Update/SurgeDrain/api.alreadyExists/before
   - instance/Update/SurgeDrain/pod.evicted/before
   - instance/Update/SurgeDrain/pod.runningNotReady[target]/before
+intentional: >-
+  an evicted replacement at the drain step is in a terminal phase and is
+  replaced at once, as a pod of any in-flight update attempt is; the drain
+  no longer waits for the evicted object to be collected
 initial:
   spec:
     replicas: 1
@@ -66,7 +71,7 @@ timeline:
       - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
       - api.alreadyExists: {verb: create}
   - tick: 10
-    note: the adopted replacement is bound and evicted under node pressure; an evicted replacement is recreated at the surge ordinal once it is gone, the source staying out of rotation
+    note: the adopted replacement is bound and evicted under node pressure; the attempt deletes the evicted occupant at once with the eviction on LastFailure, the source staying out of rotation
     events:
       - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}, message: node-2}
       - pod.evicted: {pod: {index: 0, ordinal: 1}, message: "The node was low on resource: memory"}

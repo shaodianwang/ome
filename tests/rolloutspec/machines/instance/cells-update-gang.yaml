@@ -258,11 +258,13 @@ cells:
     status: current
   - state: Update/GangSurgeTarget
     event: pod.evicted
-    outcome: ignore
-    note: an eviction reads as pod loss at this index and the source's surge pass refills the gang at the same index, PodGroup first
+    outcome: transition
+    to: Update/GangSurgeTarget
+    guard: the evicted member holds one of the surge gang's target names, the source's operation deadline has not elapsed, and the surge bucket's outstanding expectations are satisfied
+    note: an eviction leaves the member Failed, which is as terminal as any exit, so the source's pass replaces it at once rather than waiting for the object to be collected - the shared terminal recycle deletes it under the surge index with the expectation recorded first and the Evicted reason lifted onto the source's LastFailure - and refills the gang at the same index, PodGroup first, once the delete is observed; a re-observed eviction lands on the same row and is either paced by the ladder or satisfied by the delete already in flight (pkg/controller/v1beta1/workload/ops/update_gang.go, pkg/controller/v1beta1/workload/ops/terminal_recycle.go)
     invariants: [podgroup.before.pods]
-    placement: kind
-    coverage: {perm: [], unit: [], kind: [], replay: [gang-target-live-admission-signals]}
+    placement: unit
+    coverage: {perm: [], unit: [TestGangSurgeCreate_TerminalMemberIsRecycled], kind: [], replay: [gang-target-live-admission-signals]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.revision
@@ -684,15 +686,25 @@ cells:
     placement: sim
     coverage: {perm: [], unit: [], kind: [], replay: [gang-target-live-admission-signals]}
     status: current
-  # GAP: a terminal pod phase is a definite failure the row waits out; the
-  # recycle the Create and Restart passes gained does not reach this marker.
   - state: Update/GangSurgeTarget
     event: pod.phaseTerminal
     variants: [Failed, Succeeded]
-    outcome: ignore
-    note: the restart trigger in pkg/controller/v1beta1/workload/ops/update.go declines a row whose non-Create operation is preserved, so no pass recreates a terminal replacement pod and the row converges only through the stuck or deadline escalation; the gang surge path is untouched by the terminal-pod recycle, though the readiness gate it shares now rejects such a pod outright rather than reading its stale conditions as healthy
-    placement: sim
-    coverage: {perm: [], unit: [TestDetectRestartTrigger_GangSurgeMarkerIsNotRepairedOnItsOwn], kind: []}
+    windows: [before]
+    outcome: transition
+    to: Update/GangSurgeTarget
+    guard: the dead member holds one of the surge gang's target names, the source's operation deadline has not elapsed, and the surge bucket's outstanding expectations are satisfied
+    note: a dead member can never complete the gang, so the source's pass replaces it at once instead of holding the surge to the operation deadline - the restart trigger still declines the marker, whose pods belong to the surge. The shared terminal recycle deletes the occupant under the surge index with the expectation recorded first; the recycle count, the ladder pacing and the exit on LastFailure land on the source, which owns the operation, and the member is created again under the same name once the delete is observed while the source gang keeps serving (pkg/controller/v1beta1/workload/ops/update_gang.go, pkg/controller/v1beta1/workload/ops/terminal_recycle.go)
+    placement: unit
+    coverage: {perm: [], unit: [TestGangSurgeCreate_TerminalMemberIsRecycled, TestDetectRestartTrigger_GangSurgeMarkerIsNotRepairedOnItsOwn], kind: [], replay: [gang-target-member-terminal]}
+    status: decided
+  - state: Update/GangSurgeTarget
+    event: pod.phaseTerminal
+    variants: [Failed, Succeeded]
+    windows: [boundary, after]
+    outcome: defer
+    note: the recycle is a pod delete that leaves phase and step where they are, so a re-observed terminal phase lands on the same row and is either paced by the ladder or satisfied by the delete already in flight
+    placement: unit
+    coverage: {perm: [], unit: [TestUpdateAttempt_TerminalPodReobservedKeepsPhaseAndStep], kind: []}
     status: decided
   - state: Update/GangSurgeTarget
     event: pod.phaseTerminal
@@ -1920,7 +1932,7 @@ cells:
   - {state: Failed/GangSurgeTarget, event: pod.deleted, variants: [source], windows: [before], outcome: transition, to: Ready, guard: "the paired source is on the SurgeDrain step with its pods gone and this marker still matches the claim for the pinned revision", note: "the promote is driven by the source's pods being gone and matches the claim and the pair's identities, never the phase, so a Failed marker is promoted exactly as the live one: Ready on the pinned revision, the marker operation cleared, that revision's RetryBlock pruned (T-failedgangtarget-ready)", placement: unit, coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-verdict-promoted, gang-draindeadline-continuation-finishes]}, status: current}
   - {state: Failed/GangSurgeTarget, event: pod.deleted, variants: [source], windows: [boundary, after], outcome: ignore, note: "the promote write is landing, or the marker is being retired; a further source pod disappearance adds nothing, and the pair guard rejects the write if either side drifted", placement: perm, coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-verdict-promoted]}, status: current}
   - {state: Failed/GangSurgeTarget, event: pod.deleted, variants: [target], outcome: defer, note: "with a live source the surge pass recreates the missing member at the same index, ensuring the gang PodGroup before the pod, so the replacement is refilled rather than reallocated; with a failed source the abandon deletes the rest and removes the row", placement: perm, coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-verdict-member-lost-refilled, gang-target-failed-verdict-member-terminal]}, status: current}
-  - {state: Failed/GangSurgeTarget, event: pod.phaseTerminal, variants: [Failed, Succeeded], outcome: ignore, note: "no pass recreates a terminal replacement pod on a stable name: the restart trigger declines a row whose non-Create operation is preserved and the terminal-pod recycle does not reach the gang surge, so the pair converges only through the source's deadline or the abandon", placement: perm, coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-verdict-member-terminal, gang-failed-replacement-terminal-member]}, status: current}
+  - {state: Failed/GangSurgeTarget, event: pod.phaseTerminal, variants: [Failed, Succeeded], outcome: transition, to: Failed/GangSurgeTarget, guard: "the paired source is still building on its Surge step - the marker failed on its own verdict - the dead member holds one of the surge gang's target names, the source's operation deadline has not elapsed, and the surge bucket's outstanding expectations are satisfied; once the source has failed, the abandon's cleanup claim deletes the member with the rest instead", note: "a dead member can never complete the gang, so the source's pass replaces it at once whatever the marker's phase: the shared terminal recycle deletes the occupant under the surge index with the expectation recorded first, the recycle count, the ladder pacing and the exit on LastFailure land on the source, which owns the operation, and the member is created again under the same name once the delete is observed; the restart trigger still declines the marker, whose pods belong to the surge, and the recycle recycles nothing past the source's deadline, so a pair whose source has failed converges only through the abandon (pkg/controller/v1beta1/workload/ops/update_gang.go, pkg/controller/v1beta1/workload/ops/terminal_recycle.go)", placement: perm, coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-verdict-member-terminal, gang-failed-replacement-terminal-member]}, status: current}
   - {state: Failed/GangSurgeTarget, event: pod.phaseTerminal, variants: [Unknown], outcome: defer, note: "a member whose kubelet stopped reporting is routed to the force-delete sweep, which frees the name only on proven node death; the source gang keeps serving meanwhile", placement: kind, coverage: {perm: [], unit: [TestGangSurgeUpdate_UnknownMemberSweptOnProvenNodeDeath, TestGangSurgeUpdate_UnknownMemberHeldWithoutForceDeletePolicy], kind: []}, status: decided}
   - {state: Failed/GangSurgeTarget, event: pod.waiting, outcome: ignore, note: "the escalation pass skips a Failed row, so a terminal waiting reason on a replacement member produces no second stamp here; the source row is stamped separately with the replacement as its blame bucket, and the recorded reason is refreshed once when it was the generic deadline", invariants: [failed.is.sticky], placement: perm, coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-verdict-member-wedges]}, status: current}
   - {state: Failed/GangSurgeTarget, event: pod.admissionRejected, outcome: defer, note: "a member the node refused never ran, so the source's pass recycles it immediately, the bookkeeping landing on the source which owns the operation; the marker's phase is not read", placement: unit, coverage: {perm: [], unit: [TestGangSurgeCreate_AdmissionRejectedTargetIsRecycled], kind: [], replay: [gang-target-failed-verdict-admission-rejected]}, status: current}
@@ -1932,7 +1944,7 @@ cells:
   - {state: Failed/GangSurgeTarget, event: pod.nodeLost, outcome: ignore, note: "node-death evidence reaches the row through its pods and the force-delete sweep", placement: perm, coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-verdict-member-stuck-terminating]}, status: current}
   - {state: Failed/GangSurgeTarget, event: pod.schedulingGated, outcome: ignore, note: "a gated replacement member parks the source's deadline, which the escalation reads through the SurgeIndex bucket; the Failed marker's own clock is not re-armed", placement: perm, coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-verdict-member-signals]}, status: current}
   - {state: Failed/GangSurgeTarget, event: pod.admitted, outcome: ignore, note: "an admitted member joins the set the source's pass reads; the deadline reconciler re-arms no clock on a row nobody owns", placement: perm, coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-verdict-member-signals]}, status: current}
-  - {state: Failed/GangSurgeTarget, event: pod.evicted, outcome: ignore, note: "an eviction resolves into the pod being terminal, then gone, and the source's build refills the name", placement: perm, coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-verdict-member-terminal]}, status: current}
+  - {state: Failed/GangSurgeTarget, event: pod.evicted, outcome: transition, to: Failed/GangSurgeTarget, guard: "the paired source is still building on its Surge step, the evicted member holds one of the surge gang's target names, the source's operation deadline has not elapsed, and the surge bucket's outstanding expectations are satisfied; once the source has failed, the abandon deletes the member with the rest instead", note: "an eviction leaves the member Failed, which is as terminal as any exit, so the source's pass replaces it at once whatever the marker's phase: the shared terminal recycle deletes it under the surge index with the expectation recorded first and the Evicted reason lifted onto the source's LastFailure, and the build refills the gang at the same index, PodGroup first, once the delete is observed (pkg/controller/v1beta1/workload/ops/update_gang.go, pkg/controller/v1beta1/workload/ops/terminal_recycle.go)", placement: perm, coverage: {perm: [], unit: [], kind: [], replay: [gang-target-failed-verdict-member-terminal]}, status: current}
   - {state: Failed/GangSurgeTarget, event: gang.podGroup, variants: [Terminating], outcome: defer, note: "the source's build classifies the name before writing and withholds the members it would place; the hold pass records no token on a row nobody owns", placement: unit, coverage: {perm: [], unit: [TestGangSurgeCreate_BlockedPodGroupNameWithholdsMembers], kind: []}, status: current}
   - {state: Failed/GangSurgeTarget, event: gang.podGroup, variants: [OwnershipConflict], outcome: ignore, note: "the verdict needs an attempt in flight to end, and a Failed marker is settled to the table; the row stays as it is, the source's build makes no progress on the foreign name, and the source's own deadline is the bound", placement: unit, coverage: {perm: [], unit: [TestEscalation_GangReadingsOnAFailedRowAreInert], kind: []}, status: decided}
   - {state: Failed/GangSurgeTarget, event: gang.podGroup, variants: [Deleted], outcome: ignore, note: "the surge re-ensures the PodGroup before it creates any missing member, so a deleted group is restored ahead of the pods that reference it", placement: unit, coverage: {perm: [], unit: [TestGangSurgeUpdate_EnsuresPodGroupBeforeSurgePods], kind: [], replay: [gang-target-failed-verdict-member-lost-refilled]}, status: current}

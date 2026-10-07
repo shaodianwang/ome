@@ -211,14 +211,12 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		return false, fmt.Errorf("list surge gang pods (instance=%d): %w", surgeIdx, err)
 	}
 	surgeTargets := expectedPodNamesForInstance(input, plan, surgeInst)
-	// A gang member the kubelet refused to admit never ran and never
-	// will, yet it still holds its name, so the gang can never complete.
-	// Free it now rather than holding the surge to the operation
-	// deadline. The bookkeeping belongs to the SOURCE, which owns the
-	// operation; the pods and their expectations bucket on the surge.
-	if recycling, rerr := recycleAdmissionRejectedTargets(ctx, deps, input, sourceIdx, surgeIdx,
+	// A member in a terminal phase still holds its name, so the gang can
+	// never complete; free it now. The bookkeeping belongs to the SOURCE,
+	// which owns the operation; the pods and expectations bucket on the surge.
+	if recycling, rerr := recycleTerminalTargets(ctx, deps, input, sourceIdx, surgeIdx,
 		workload.InstanceOperationUpdate, surgePods, surgeTargets); rerr != nil {
-		return false, fmt.Errorf("recycle rejected surge gang member (instance=%d): %w", surgeIdx, rerr)
+		return false, fmt.Errorf("recycle terminal surge gang member (instance=%d): %w", surgeIdx, rerr)
 	} else if recycling {
 		return false, nil
 	}

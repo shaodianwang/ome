@@ -58,11 +58,14 @@ tick=7 condition type=GangSchedulingUnavailable status=False reason=GangScheduli
 tick=7 row=1 write no-op precondition=no-change
 tick=7 hold cleared
 tick=7 pass result=after:5s
-tick=8 note the leader is evicted under node pressure and the worker reappears under a new UID; the eviction reads as pod loss once the object is gone, and the rotated worker is read as present by name
+tick=8 note the leader is evicted under node pressure and the worker reappears under a new UID; the source's pass deletes the evicted leader at once with the eviction on its LastFailure, and the rotated worker is read as present by name
 tick=8 apply pod.evicted pod=svc-a-engine-1-leader-0 reason=Evicted now=t+0s
 tick=8 apply pod.uidRotated pod=svc-a-engine-1-worker-0 uid=uid#4→uid#5 now=t+0s
 tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=8 row=1 write no-op precondition=no-change
+tick=8 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 retryCount=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-1-leader-0 reason=Evicted message=The node was low on resource: memory} precondition=ok
+tick=8 pod delete name=svc-a-engine-1-leader-0 grace=default
+tick=8 event Warning TerminalPodRecycled OMENative component=engine instance=1 deleted terminal pod(s) svc-a-engine-1-leader-0 (Failed/Evicted) for recreate (Update recycle 1)
 tick=8 hold cleared
 tick=8 pass result=after:5s
 tick=9 note the evicted leader is gone and its refill finds the name already taken by an earlier writer; the pod is adopted by name
@@ -81,7 +84,7 @@ tick=10 condition type=GangSchedulingUnavailable status=False reason=GangSchedul
 tick=10 row=1 write no-op precondition=no-change
 tick=10 pod status-patch name=svc-a-engine-1-leader-0 serving=absent→True
 tick=10 pod status-patch name=svc-a-engine-1-worker-0 serving=absent→True
-tick=10 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=10 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 retryCount=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-1-leader-0 reason=Evicted message=The node was low on resource: memory} precondition=ok
 tick=10 pod status-patch name=svc-a-engine-0-leader-0 serving=True→False
 tick=10 pod status-patch name=svc-a-engine-0-worker-0 serving=True→False
 tick=10 hold cleared
@@ -109,7 +112,7 @@ tick=13 condition type=GangSchedulingUnavailable status=False reason=GangSchedul
 tick=13 row=1 write no-op precondition=no-change
 tick=13 row=0 write no-op precondition=no-change
 tick=13 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-367ef4b7 readySince=t+0s op=nil precondition=ok
-tick=13 row=0 remove incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=13 row=0 remove incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 retryCount=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-1-leader-0 reason=Evicted message=The node was low on resource: memory} precondition=ok
 tick=13 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 gang surge complete: instance 1 promoted to revision svc-a-engine-367ef4b7
 tick=13 hold cleared
 tick=13 pass result=requeue

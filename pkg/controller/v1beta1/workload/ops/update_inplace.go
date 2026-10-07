@@ -73,6 +73,16 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 			workload.InstanceKey(input.Key.Component, inst.Index), target.Name)
 	}
 
+	// A pod in a terminal phase can never report the new image: free it
+	// now rather than patch and poll it to the deadline; the empty set then
+	// re-resolves the roll to recreate, above.
+	if recycling, err := recycleTerminalTargets(ctx, deps, input, inst.Index, inst.Index,
+		workload.InstanceOperationUpdate, pods, expectedPodNamesForInstance(input, plan, inst)); err != nil {
+		return false, fmt.Errorf("recycle terminal pod (instance=%d): %w", inst.Index, err)
+	} else if recycling {
+		return false, nil
+	}
+
 	markNotReady := true
 	if plan.UpdateStrategy.InPlaceUpdateStrategy != nil &&
 		plan.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle != nil {

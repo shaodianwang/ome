@@ -1,9 +1,11 @@
 # An in-place patch meets a shedding apiserver and then a node that refuses
 # the pod. The patch path classifies only the permanent rejections, so a
 # shed patch propagates verbatim and the next pass lands it; a pod the
-# kubelet refused is phase Failed, the shared readiness gate rejects it
-# outright rather than reading its stale conditions, and the promote waits
-# out the operation deadline, after which the same attempt is re-opened.
+# kubelet refused is phase Failed and never reports the new image, so the
+# attempt deletes it at once with the kubelet's reason on LastFailure. The
+# deleted object is never collected here, so the roll waits on the delete,
+# the operation deadline disposes the attempt, and the re-opened attempt
+# records the recycle of the same deleting occupant again.
 scenario: inplace-patch-shed-then-refused-pod
 arrows:
   - T-ready-inplace
@@ -11,6 +13,11 @@ arrows:
 cells:
   - instance/Update/InPlace/api.throttled[TooManyRequests]/before
   - instance/Update/InPlace/pod.admissionRejected[UnexpectedAdmissionError]/before
+intentional: >-
+  a pod the node refused is in a terminal phase and is replaced at once, as
+  a pod of any in-flight update attempt is; the roll no longer polls it to
+  the operation deadline, which elapses here only because the deleted
+  object is never collected
 initial:
   spec:
     replicas: 1
@@ -45,14 +52,14 @@ timeline:
   - tick: 6
     note: the retried pass lands the image patch and restamps the revision label
   - tick: 7
-    note: the node refuses the pod, which goes Failed, and the readiness gate rejects it outright, so the promote waits
+    note: the node refuses the pod, which goes Failed, so the attempt deletes the refused occupant at once with the kubelet's reason on LastFailure
     events:
       - pod.admissionRejected[UnexpectedAdmissionError]: {pod: {index: 0}, message: "Allocate failed due to device plugin error"}
   - tick: 8
-    note: a tick with nothing changed re-reads the refused pod and waits
+    note: a tick with nothing changed finds the delete still outstanding and waits
   - tick: 9
     note: the operation deadline elapses, so the attempt is disposed with no workload-caused evidence
     events:
       - timer.operationDeadline: {slack: 1s}
   - tick: 10
-    note: with no retry policy configured the same in-place attempt is re-opened
+    note: with no retry policy configured the same in-place attempt is re-opened and records the recycle of the still-deleting occupant again, without a second delete

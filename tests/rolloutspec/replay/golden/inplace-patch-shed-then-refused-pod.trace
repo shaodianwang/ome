@@ -39,12 +39,15 @@ tick=6 pod patch name=svc-a-engine-0-default-0 images=main=registry.example.com/
 tick=6 pod patch name=svc-a-engine-0-default-0 labels=[ome.io/revision-hash:882059bb→6f8b1e6c]
 tick=6 hold cleared
 tick=6 pass result=after:5s
-tick=7 note the node refuses the pod, which goes Failed, and the readiness gate rejects it outright, so the promote waits
+tick=7 note the node refuses the pod, which goes Failed, so the attempt deletes the refused occupant at once with the kubelet's reason on LastFailure
 tick=7 apply pod.admissionRejected[UnexpectedAdmissionError] pod=svc-a-engine-0-default-0 reason=UnexpectedAdmissionError now=t+0s
 tick=7 row=0 write no-op precondition=no-change
+tick=7 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=InPlace target=svc-a-engine-6f8b1e6c strategy=InPlaceIfPossible retryCount=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=UnexpectedAdmissionError message=Allocate failed due to device plugin error} precondition=ok
+tick=7 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=7 event Warning TerminalPodRecycled OMENative component=engine instance=0 deleted terminal pod(s) svc-a-engine-0-default-0 (Failed/UnexpectedAdmissionError) for recreate (Update recycle 1)
 tick=7 hold cleared
 tick=7 pass result=after:5s
-tick=8 note a tick with nothing changed re-reads the refused pod and waits
+tick=8 note a tick with nothing changed finds the delete still outstanding and waits
 tick=8 row=0 write no-op precondition=no-change
 tick=8 hold cleared
 tick=8 pass result=after:5s
@@ -55,8 +58,10 @@ tick=9 hold cleared
 tick=9 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/InPlace exceeded InstanceReadyTimeout} precondition=ok
 tick=9 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/InPlace exceeded InstanceReadyTimeout: attempt disposed terminal (no workload-caused evidence, relocation unavailable); operation-specific recovery decides whether another attempt is safe
 tick=9 pass result=after:5s
-tick=10 note with no retry policy configured the same in-place attempt is re-opened
+tick=10 note with no retry policy configured the same in-place attempt is re-opened and records the recycle of the still-deleting occupant again, without a second delete
 tick=10 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#3{type=Update step=InPlace target=svc-a-engine-6f8b1e6c strategy=InPlaceIfPossible started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/InPlace exceeded InstanceReadyTimeout} precondition=ok
 tick=10 event Normal InPlaceUpdateStarted OMENative component=engine instance=0 in-place update to revision svc-a-engine-6f8b1e6c
+tick=10 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#3{type=Update step=InPlace target=svc-a-engine-6f8b1e6c strategy=InPlaceIfPossible retryCount=1 started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod=svc-a-engine-0-default-0 reason=UnexpectedAdmissionError message=Allocate failed due to device plugin error} precondition=ok
+tick=10 event Warning TerminalPodRecycled OMENative component=engine instance=0 deleted terminal pod(s) svc-a-engine-0-default-0 (Failed/UnexpectedAdmissionError) for recreate (Update recycle 1)
 tick=10 hold cleared
 tick=10 pass result=after:5s

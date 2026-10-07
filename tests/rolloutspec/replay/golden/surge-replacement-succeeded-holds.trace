@@ -20,19 +20,20 @@ tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 
 tick=3 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
 tick=3 hold cleared
 tick=3 pass result=after:5s
-tick=4 note the replacement exits with phase Succeeded; the phase is read nowhere on the surge path, so the step holds with the source in rotation
+tick=4 note the replacement exits with phase Succeeded, which is as terminal as Failed, so the attempt deletes it at once with the exit on LastFailure and the source stays in rotation
 tick=4 apply pod.phaseTerminal[Succeeded] pod=svc-a-engine-0-default-1 now=t+0s
 tick=4 row=0 write no-op precondition=no-change
+tick=4 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain retryCount=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-1 reason=Succeeded container=main exitCode=0} precondition=ok
+tick=4 pod delete name=svc-a-engine-0-default-1 grace=default
+tick=4 event Warning TerminalPodRecycled OMENative component=engine instance=0 deleted terminal pod(s) svc-a-engine-0-default-1 (Succeeded) for recreate (Update recycle 1)
 tick=4 hold cleared
 tick=4 pass result=after:5s
-tick=5 note a further pass finds the replacement still not runtime-ready and keeps holding
+tick=5 note a further pass finds the delete still outstanding and keeps holding
 tick=5 row=0 write no-op precondition=no-change
 tick=5 hold cleared
 tick=5 pass result=after:5s
-tick=6 note the operation deadline elapses with the replacement never Ready, so the escalation pass ends the attempt
+tick=6 note the operation deadline elapses with the replacement still deleting; a deleting pod is skipped at the serving bar, so the source alone keeps the set at bar and the escalation exempts the row as failed-while-serving
 tick=6 apply timer.operationDeadline to=t+30m1s now=t+30m1s
 tick=6 row=0 write no-op precondition=no-change
 tick=6 hold cleared
-tick=6 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Surge exceeded InstanceReadyTimeout} precondition=ok
-tick=6 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/Surge exceeded InstanceReadyTimeout: attempt disposed terminal (no workload-caused evidence, relocation unavailable); operation-specific recovery decides whether another attempt is safe
 tick=6 pass result=after:5s

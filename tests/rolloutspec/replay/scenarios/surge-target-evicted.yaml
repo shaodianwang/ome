@@ -1,9 +1,10 @@
 # The node evicts the surge replacement under pressure before it ever
 # served. The evicted pod is Failed and still holds the replacement's name,
-# and the surge leaves it there: unlike a node's admission refusal, a
-# kubelet eviction is not recycled by the attempt, so the pass waits while
-# the source serves on. Once the evicted object is gone the replacement is
-# created again at the surge ordinal and the surge completes.
+# and a terminal pod can never clear the promote bar, so the attempt frees
+# the name at once instead of waiting on it: the evicted occupant is deleted
+# with the expectation recorded first and the eviction on LastFailure, the
+# source serves on, and the replacement is created again at the surge
+# ordinal once the delete is observed.
 scenario: surge-target-evicted
 arrows:
   - T-ready-surge
@@ -11,6 +12,10 @@ arrows:
   - T-surgedrain-promote
 cells:
   - instance/Update/Surge/pod.evicted/before
+intentional: >-
+  an evicted replacement is in a terminal phase and is replaced at once,
+  as a pod of any in-flight update attempt is; the attempt no longer waits
+  for the evicted object to be collected before it may rebuild the name
 initial:
   spec:
     replicas: 1
@@ -33,13 +38,13 @@ timeline:
     events:
       - spec.revision: {image: registry.example.com/runtime:v2}
   - tick: 4
-    note: the replacement comes up on its node and is evicted under memory pressure before it serves; the Failed pod keeps the replacement's name and the pass waits on it
+    note: the replacement comes up on its node and is evicted under memory pressure before it serves, so the attempt deletes the evicted occupant of the replacement's name with the eviction on LastFailure
     events:
       - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}, message: node-1}
       - pod.containersReady[target]: {pod: {index: 0, ordinal: 1}}
       - pod.evicted: {pod: {index: 0, ordinal: 1}, message: "The node was low on resource: memory."}
   - tick: 5
-    note: the evicted object is gone, so the replacement is created again at the surge ordinal
+    note: the evicted pod is gone, so the replacement is created again at the surge ordinal
     events:
       - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
   - tick: 6

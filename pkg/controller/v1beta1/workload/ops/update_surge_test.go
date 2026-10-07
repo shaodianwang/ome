@@ -2308,12 +2308,13 @@ func TestSurge_OperatorConfigChangesDoNotChangeWhatItDecides(t *testing.T) {
 
 // TestSurge_PodObservationsThatHoldTheStep: the surge advances on one
 // thing — the replacement clearing the promote bar — and the drain on
-// one other — the source's pods disappearing. Everything else the
-// kubelet can report about either slot is a wait: none of them ends the
-// attempt, recreates the occupied slot, or moves the step. The operation
-// deadline is what bounds them.
+// one other — the source's pods disappearing. Short of a terminal phase,
+// which the attempt recycles, everything else the kubelet can report
+// about either slot is a wait: none of them ends the attempt, recreates
+// the occupied slot, or moves the step. The operation deadline is what
+// bounds them.
 //
-// Cells: instance/Update/Surge/pod.containerRestart/before, instance/Update/Surge/pod.stuckTerminating/before, instance/Update/Surge/pod.phaseTerminal[Failed]/before, instance/Update/SurgeDrain/pod.stuckTerminating/before, instance/Update/SurgeDrain/pod.nodeLost[NodeGone]/before
+// Cells: instance/Update/Surge/pod.containerRestart/before, instance/Update/Surge/pod.stuckTerminating/before, instance/Update/SurgeDrain/pod.stuckTerminating/before, instance/Update/SurgeDrain/pod.nodeLost[NodeGone]/before
 func TestSurge_PodObservationsThatHoldTheStep(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -2341,15 +2342,6 @@ func TestSurge_PodObservationsThatHoldTheStep(t *testing.T) {
 			step: workload.UpdateStepSurge, sourceServing: true,
 			observe: func(t *testing.T, f *midSurgeFixture) {
 				terminatingPod(t, f.client, f.surgePod)
-			},
-		},
-		{
-			name: "the replacement in a terminal Failed phase",
-			step: workload.UpdateStepSurge, sourceServing: true,
-			observe: func(t *testing.T, f *midSurgeFixture) {
-				patchPodStatus(t, f, f.surgePod, func(pod *corev1.Pod) {
-					pod.Status.Phase = corev1.PodFailed
-				})
 			},
 		},
 		{

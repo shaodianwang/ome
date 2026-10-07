@@ -1,0 +1,73 @@
+# Members of a replacement gang die before the gang ever served. A dead
+# member can never complete the gang, so the source's surge pass frees its
+# name at once instead of holding the surge to the operation deadline: the
+# dead occupant is deleted with the expectation recorded first under the
+# surge index, the recycle and the exit are booked on the source, which owns
+# the operation, and the member is created again once the delete is
+# observed. The source gang serves on throughout.
+scenario: gang-target-member-terminal
+arrows:
+  - T-empty-gang-surge-target
+  - T-surgedrain-gang-complete
+  - T-gangtarget-ready
+cells:
+  - instance/Update/GangSurgeTarget/pod.phaseTerminal[Failed]/before
+  - instance/Update/GangSurgeTarget/pod.phaseTerminal[Succeeded]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement's worker dies, so the source's pass deletes the dead occupant of its name with the exit booked on the source
+    events:
+      - pod.phaseTerminal[Failed]: {pod: {index: 1, runner: worker}}
+  - tick: 6
+    note: the dead worker is gone, so the member is created again under the same name
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the replacement's leader exits cleanly, which is as terminal as a crash; it is recycled in turn and the source's recycle count moves to two
+    events:
+      - pod.phaseTerminal[Succeeded]: {pod: {index: 1, runner: leader}}
+  - tick: 8
+    note: the exited leader is gone, so the member is created again under the same name
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+  - tick: 9
+    note: the whole replacement reports Ready, so the source advances to the drain and leaves rotation
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 10
+    note: the leader's endpoint goes not-ready, which is the guard the drain waits on, so the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 11
+    note: the source pods are gone, so its row is removed and the replacement is promoted as the Instance
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

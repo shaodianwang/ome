@@ -1,7 +1,8 @@
-# Pods change identity around a recreate. An eviction is a delete: the
-# old-incarnation pod evicted during Phase A only completes the drain, and an
-# evicted bumped-incarnation pod is recreated by Phase B under the same
-# name once it is gone; and the recreate keys identity on the incarnation label and the
+# Pods change identity around a recreate. An old-incarnation pod evicted
+# during Phase A only completes the drain, while an evicted bumped-
+# incarnation pod is in a terminal phase, so Phase B deletes it at once with
+# the eviction on LastFailure and rebuilds the same name once the delete is
+# observed; and the recreate keys identity on the incarnation label and the
 # stable pod name rather than the UID, so a rebuilt pod that reappears under
 # a new UID counts as the recreated member and the Instance promotes on it.
 scenario: recreate-rebuild-eviction-and-uid-rotation
@@ -11,6 +12,10 @@ arrows:
 cells:
   - instance/Update/Drain/pod.evicted/before
   - instance/Update/Drain/pod.uidRotated/before
+intentional: >-
+  an evicted rebuilt pod is in a terminal phase and is replaced at once by
+  the recreate's Phase B, as a pod of any in-flight update attempt is; Phase
+  B no longer waits for the evicted object to be collected
 initial:
   spec:
     replicas: 1
@@ -43,7 +48,7 @@ timeline:
     events:
       - pod.deleted[source]: {pod: {index: 0}}
   - tick: 6
-    note: the rebuilt pod is bound and evicted in turn, a terminal pod Phase B waits on until it is gone
+    note: the rebuilt pod is bound and evicted in turn; Phase B deletes the evicted occupant at once with the eviction on LastFailure
     events:
       - pod.scheduled[source]: {pod: {index: 0}, message: node-1}
       - pod.evicted: {pod: {index: 0}, message: "The node was low on resource: memory."}

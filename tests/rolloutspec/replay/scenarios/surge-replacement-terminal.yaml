@@ -1,0 +1,65 @@
+# The surge replacement dies before it ever served, twice. A dead
+# replacement can never clear the promote bar, so the attempt frees the
+# surge name at once instead of polling it to the operation deadline: each
+# dead occupant is deleted with the expectation recorded first, the recycle
+# is counted on the operation, the exit lands on LastFailure, and the
+# replacement is created again once the delete is observed. The source
+# serves on at the active ordinal throughout.
+scenario: surge-replacement-terminal
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/Surge/pod.phaseTerminal[Failed]/before
+  - instance/Update/Surge/pod.phaseTerminal[Succeeded]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement dies, so the attempt deletes the dead occupant of the surge name with the exit on LastFailure while the source keeps serving
+    events:
+      - pod.phaseTerminal[Failed]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the dead replacement is gone, so the replacement is created again under the same name
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 6
+    note: the second replacement exits cleanly, which is as terminal as a crash; it is recycled in turn and the recycle count moves to two
+    events:
+      - pod.phaseTerminal[Succeeded]: {pod: {index: 0, ordinal: 1}}
+  - tick: 7
+    note: the exited replacement is gone, so the replacement is created once more
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 8
+    note: the third replacement is serving and in rotation, so the step advances and the source leaves rotation
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 9
+    note: the source leaves rotation and is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 10
+    note: the drained source is gone and the Instance promotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

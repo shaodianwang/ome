@@ -1,0 +1,51 @@
+# The node refuses the pod an in-place roll is patching: its kubelet
+# re-admits the pod and turns it away for lack of a resource, so the pod is
+# Failed with the kubelet's reason and still holds its name. The attempt
+# frees the name at once instead of polling it to the operation deadline,
+# with the kubelet's reason on LastFailure; once the pod is gone the empty
+# set re-resolves the roll to recreate at the target revision.
+scenario: inplace-patched-pod-admission-rejected
+arrows:
+  - T-ready-inplace
+  - T-inplace-podlost-recreate
+  - T-drain-ready
+cells:
+  - instance/Update/InPlace/pod.admissionRejected[OutOfResource]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation, so the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the node refuses the pod before the image patch lands, so the attempt deletes the refused occupant of its name with the kubelet's reason on LastFailure
+    events:
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 0}, resource: nvidia.com/gpu, message: "Node didn't have enough resource: nvidia.com/gpu, requested: 1, used: 8, capacity: 8"}
+  - tick: 6
+    note: the refused pod is gone, so the roll re-resolves to recreate and the replacement is rendered at the target revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 7
+    note: the rebuilt pod reports Ready, so it is marked serving and the Instance promotes on the target revision
+    events:
+      - pod.ready[target]: {pod: {index: 0}}
