@@ -1,0 +1,66 @@
+# A Restart whose old pod stays Terminating under a node that stopped
+# reporting, with no force-delete policy configured. Nothing frees the
+# stable name: the drain cannot finish and the rebuild cannot run. The
+# operation deadline is this state's single exit. A pod deleting past its
+# own deletion deadline is not the drain's delete in flight, so the elapsed
+# deadline parks the repair at Failed with the Restart kept and the row is
+# not left Restarting for good. Once the object goes, the spent repair
+# closes and the Create pass rebuilds the row as a fresh start.
+scenario: restart-old-pod-stuck-terminating
+arrows:
+  - T-ready-restart-crash
+  - T-restart-deadline
+  - T-failedrepair-close
+cells:
+  - instance/Restart/Drain/pod.nodeLost[UnreachableTaint]/before
+  - instance/Restart/Drain/pod.stuckTerminating/before
+  - instance/Restart/Drain/timer.operationDeadline/before
+  - instance/Failed/Repair/pod.stuckTerminating/before
+  - instance/Failed/Repair/pod.deleted[source]/boundary@T-failedrepair-close
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: after a minute of steady serving the runner restarts, so the repair opens a Restart and takes the pod out of serving
+    events:
+      - clock.advance: 1m
+      - pod.containerRestart: {pod: {index: 0}, message: OOMKilled}
+  - tick: 3
+    note: the old pod leaves rotation, so the drain deletes it
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the node under the Terminating pod stops reporting; the pod stays Terminating and holds Phase A on the live old-pod check, and with no force-delete policy no node is read for it
+    events:
+      - pod.nodeLost[UnreachableTaint]: {pod: {index: 0}}
+  - tick: 5
+    note: the kubelet never acknowledges the deletion, which leaves the object behind with no finalizer on it; nothing frees the name and the drain stays blocked
+    events:
+      - pod.stuckTerminating: {pod: {index: 0}}
+  - tick: 6
+    note: the operation deadline elapses on a pod deleting past its own deletion deadline, which is live for the stamp, so the row fails with the Restart operation preserved
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 7
+    note: a further pass leaves the parked repair alone and re-asserts no gate; the stuck pod is live until it is gone, so the close waits on it
+  - tick: 8
+    note: the object is finally gone, so no live pod is left and the restart pass closes the spent operation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 9
+    note: the Failed row has no operation and no pod, so the Create pass rebuilds it as a fresh start

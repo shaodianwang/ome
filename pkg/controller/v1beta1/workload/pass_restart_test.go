@@ -4236,6 +4236,160 @@ func TestDeadlineElapsesOnAWedgedRebuild_RepairParksWithItsPodSet(t *testing.T) 
 	}
 }
 
+// A repair's drain deletes the old pod and the node under it then stops
+// reporting, with no force-delete policy configured. The pod stays
+// Terminating past its own deletion deadline: no kubelet is left to remove
+// it, no policy lets the sweep free it, and the stable name it holds keeps
+// the rebuild from running. The operation deadline is this state's single
+// exit, so the repair parks visibly at Failed with its Restart kept, the
+// elapsed deadline on LastFailure and one InstanceFailed warning; it is
+// not left Restarting for good with nothing said. A single pod's park
+// holds, the close waiting on the object; a gang short of its other member
+// re-arms through the lost-member trigger under a fresh deadline, which
+// blocks on the same held name. Either way the Instance serves again once
+// its kubelet returns and the object goes.
+//
+// Cells: instance/Restart/Drain/timer.operationDeadline/before, instance/Restart/Drain/pod.stuckTerminating/before, instance/Restart/Drain/pod.nodeLost[NodeNotReady]/before, instance/Failed/Repair/pod.stuckTerminating/before
+func TestRepairDrainStuckTerminatingOnADeadNode_ParksAtTheDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		gang bool
+		pods int
+	}{
+		{name: "single pod", pods: 1},
+		{name: "gang, the leader's node stops", gang: true, pods: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryHarnessFor(t, tc.gang, constants.MainContainerName)
+			h.recorder = record.NewFakeRecorder(256)
+			policy := workloadtypes.RestartPolicyRecreateInstance
+			h.lifecycle = workloadtypes.Lifecycle{
+				RestartPolicy:        &policy,
+				InstanceReadyTimeout: &metav1.Duration{Duration: 4 * recoveryStepFloor},
+			}
+			// Only the deadline ends the attempt: the fast escalation is off
+			// and no ladder re-arms a park. A deleted pod takes a step to
+			// terminate, and no force-delete policy is configured.
+			h.stuckGrace = 0
+			h.retryPolicy = nil
+			h.podGrace = recoveryStepFloor
+			h.forceDelete = nil
+			h.useNodes("node-a", "node-b", "node-c")
+			h.setTarget(h.revV1, goodImage)
+			if !h.run(30, func() bool { return h.settledOn(h.revV1, 1) }) {
+				h.dumpState("initial create")
+				t.Fatalf("the Instance never settled on v1")
+			}
+			before := h.instance(0).Incarnation
+
+			// A serving runner killed once after Ready opens the repair,
+			// whose drain deletes the set.
+			var victim *corev1.Pod
+			for _, pod := range h.podsOf(0) {
+				if !tc.gang || pod.Labels[query.LabelRunner] == "leader" {
+					victim = pod
+				}
+			}
+			if victim == nil {
+				t.Fatalf("no pod of Instance 0 to kill")
+			}
+			h.killRunnerOnce(victim)
+			if !h.run(10, func() bool { return stillTerminating(h, 0) }) {
+				h.dumpState("drain")
+				t.Fatalf("the repair's drain never deleted the old pod (events=%v)", h.events)
+			}
+			opened := h.instance(0)
+			if opened.Phase != workloadtypes.InstancePhaseRestarting || opened.Operation == nil || opened.Operation.Type != workloadtypes.InstanceOperationRestart {
+				t.Fatalf("the kill opened no repair: %+v", *opened)
+			}
+
+			// The node under the deleted pod stops reporting before its
+			// kubelet finishes the termination: the object stays.
+			node := ""
+			for _, pod := range podObjectsOf(h, 0) {
+				if pod.Name == victim.Name && pod.DeletionTimestamp != nil {
+					node = pod.Spec.NodeName
+				}
+			}
+			if node == "" {
+				t.Fatalf("the killed pod %s is not Terminating on a node", victim.Name)
+			}
+			h.failNode(node)
+
+			heldDark := func() {
+				if h.sawEvent(workloadtypes.EventReasonPodForceDeleted) {
+					t.Fatalf("a pod was force-deleted with no policy configured (events=%v)", h.events)
+				}
+				if !stillTerminating(h, 0) {
+					h.dumpState("object gone")
+					t.Fatalf("the old pod left while its kubelet was stopped")
+				}
+				if n := len(h.podsOf(0)); n != 0 {
+					h.dumpState("rebuilt")
+					t.Fatalf("%d pod(s) rebuilt under a name the Terminating pod still holds", n)
+				}
+			}
+			parked := func() bool { return parkedRepair(h, 0) }
+			h.runWithInvariant(12, parked, heldDark)
+			got := h.instance(0)
+			if !parked() {
+				h.dumpState("past the deadline")
+				t.Fatalf("Instance 0 reads %s %v past the deadline of its repair with the old pod stuck Terminating: the row was left with no exit (events=%v)",
+					got.Phase, h.clk.Now().Sub(opened.Operation.Deadline.Time).Round(time.Second), h.events)
+			}
+			if got.LastFailure == nil || got.LastFailure.Reason != escalation.DeadlineExceededReason {
+				t.Fatalf("the park records %+v, want the elapsed deadline", got.LastFailure)
+			}
+			if got.Incarnation <= before {
+				t.Fatalf("the park holds incarnation %d, want the repair's, above %d", got.Incarnation, before)
+			}
+			if len(h.failedWarnings) != 1 {
+				t.Fatalf("InstanceFailed warnings = %v, want exactly one for the park", h.failedWarnings)
+			}
+			if tc.gang {
+				// The worker is gone and the Terminating leader counts as a
+				// survivor, so the lost-member trigger re-arms the gang under a
+				// fresh deadline; the name stays held, so nothing is rebuilt.
+				rearmed := func() bool {
+					s := h.instance(0)
+					return s != nil && s.Phase == workloadtypes.InstancePhaseRestarting && s.Incarnation > got.Incarnation
+				}
+				if !h.runWithInvariant(3, rearmed, heldDark) {
+					h.dumpState("re-arm")
+					t.Fatalf("the parked gang never re-armed through the lost-member trigger (events=%v)", h.events)
+				}
+				if n := h.restartsRecorded(); n != 2 {
+					t.Fatalf("RestartTriggered events = %d, want 2: the repair and its re-arm", n)
+				}
+				// The kubelet returns and finishes the termination: the drain
+				// completes on the absence and the gang is rebuilt as a whole.
+				h.recoverNode(node)
+				if !h.run(spentRepairExitPasses, func() bool { return servingReady(h, 0, tc.pods) }) {
+					h.dumpState("exit")
+					t.Fatalf("the Instance never served again after its node returned (events=%v)", h.events)
+				}
+				return
+			}
+			// Parked, the row stays put and the name stays held: nothing is
+			// rebuilt and nothing is said twice.
+			for i := 0; i < 3; i++ {
+				h.step()
+				heldDark()
+			}
+			if s := h.instance(0); !parkedRepair(h, 0) || len(h.failedWarnings) != 1 {
+				t.Fatalf("the park did not hold: %+v (warnings=%v)", *s, h.failedWarnings)
+			}
+
+			// The kubelet returns and finishes the termination: no live pod
+			// is left, so the spent repair closes and the Create pass rebuilds
+			// the row as a fresh start under the row's incarnation.
+			parkedKeys := podKeys(h.podsOf(0))
+			h.recoverNode(node)
+			assertFreshStartServes(t, h, got, parkedKeys, tc.pods, 1)
+		})
+	}
+}
+
 // missingKeyReason is the kubelet's waiting reason for a container whose
 // ConfigMap key is gone; the kubelet retries the start in place.
 const missingKeyReason = "CreateContainerConfigError"

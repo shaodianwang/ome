@@ -2349,26 +2349,30 @@ func (h *recoveryHarness) kubeletStopped(pod *corev1.Pod) bool {
 	return h.deadNodes[pod.Spec.NodeName] || h.kubeletGone[pod.Name]
 }
 
-// showTeardown presents a Terminating pod whose kubelet has stopped the
-// way the apiserver would. On a cluster nothing but the kubelet's missing
-// acknowledgement keeps such a pod, so it carries no finalizer: the
-// harness finalizer that stands in for that kubelet is hidden from every
-// read, because a finalizer is exactly the evidence that makes the
-// force-delete sweep decline the pod. Its deletion deadline is the one the
-// termination model recorded on the fake clock - the request plus the
-// grace, as the apiserver stamps it - so the policy's slack is measured
-// from the instant the pass deleted it.
+// showTeardown presents a Terminating pod the way the apiserver would.
+// Its deletion deadline is the one the termination model recorded on the
+// fake clock - the request plus the grace, as the apiserver stamps it -
+// because the fake client stamps the wall clock, which no deadline the
+// engine measures on the injected clock can be compared against. A pod
+// whose kubelet has stopped also carries no finalizer: on a cluster
+// nothing but the kubelet's missing acknowledgement keeps such a pod, and
+// the harness finalizer that stands in for that kubelet is exactly the
+// evidence that makes the force-delete sweep decline the pod, so it is
+// hidden from every read.
 func (h *recoveryHarness) showTeardown(pod *corev1.Pod) {
-	if pod.DeletionTimestamp == nil || !h.kubeletStopped(pod) {
+	if pod.DeletionTimestamp == nil {
+		return
+	}
+	if until, ok := h.terminatingUntil[pod.Name]; ok {
+		deadline := metav1.NewTime(until)
+		pod.DeletionTimestamp = &deadline
+	}
+	if !h.kubeletStopped(pod) {
 		return
 	}
 	pod.Finalizers = removeString(pod.Finalizers, terminationFinalizer)
 	if len(pod.Finalizers) == 0 {
 		pod.Finalizers = nil
-	}
-	if until, ok := h.terminatingUntil[pod.Name]; ok {
-		deadline := metav1.NewTime(until)
-		pod.DeletionTimestamp = &deadline
 	}
 }
 
@@ -2396,16 +2400,18 @@ func (h *recoveryHarness) interceptList(ctx context.Context, cl client.WithWatch
 }
 
 // interceptUpdate puts the stored deletion metadata back on a whole-object
-// write of a pod read through showTeardown: the finalizer is what keeps
-// the object in the fake apiserver at all, only the kubelet model takes it
-// off once its node is back, and the stored deletion timestamp is
-// immutable there.
+// write of a pod read through showTeardown: the stored deletion timestamp
+// is immutable in the fake apiserver, and on a pod whose kubelet has
+// stopped the hidden finalizer is what keeps the object there at all -
+// only the kubelet model takes it off once its node is back.
 func (h *recoveryHarness) interceptUpdate(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-	if pod, ok := obj.(*corev1.Pod); ok && pod.DeletionTimestamp != nil && h.kubeletStopped(pod) {
+	if pod, ok := obj.(*corev1.Pod); ok && pod.DeletionTimestamp != nil {
 		stored := &corev1.Pod{}
 		if err := cl.Get(ctx, client.ObjectKeyFromObject(pod), stored); err == nil {
-			pod.Finalizers = stored.Finalizers
 			pod.DeletionTimestamp = stored.DeletionTimestamp
+			if h.kubeletStopped(pod) {
+				pod.Finalizers = stored.Finalizers
+			}
 		}
 	}
 	return cl.Update(ctx, obj, opts...)

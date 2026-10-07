@@ -732,11 +732,13 @@ func TestEscalation_RestartDeadlineElapsed_FailsInstance(t *testing.T) {
 // A Restart's elapsed deadline parks a set, and the pass reads which set
 // there is off the live pods, not off the observation the deadline was
 // judged on: the repair's drain may have deleted that set since. With the
-// set gone or terminating the stamp waits, and the row keeps its repair;
-// with a pod live — the drain not finished, or the rebuilt set present —
-// the row parks with the Restart preserved.
+// set gone, or deleting inside its own deletion deadline, the stamp waits
+// and the row keeps its repair; with a pod live — the drain not finished,
+// the rebuilt set present, or a pod deleting past its own deletion
+// deadline, which no delete in flight explains and which holds the name
+// the rebuild needs — the row parks with the Restart preserved.
 //
-// Cells: instance/Restart/Drain/timer.operationDeadline/before
+// Cells: instance/Restart/Drain/timer.operationDeadline/before, instance/Restart/Drain/pod.stuckTerminating/before
 func TestEscalation_RestartDeadlineParksOnlyALiveSet(t *testing.T) {
 	now := time.Now()
 	for _, tc := range []struct {
@@ -748,6 +750,7 @@ func TestEscalation_RestartDeadlineParksOnlyALiveSet(t *testing.T) {
 		{name: "the drained set is terminating", live: []*corev1.Pod{terminating(incarnationPod("engine-0-default-0", 1, now))}, parks: false},
 		{name: "the drain has not finished", live: []*corev1.Pod{incarnationPod("engine-0-default-0", 1, now)}, parks: true},
 		{name: "the rebuilt set exists", live: []*corev1.Pod{terminating(incarnationPod("engine-0-default-0", 1, now)), incarnationPod("engine-0-default-0-r", 2, now)}, parks: true},
+		{name: "the drained set is terminating past its own deletion deadline", live: []*corev1.Pod{terminatingOverdue(incarnationPod("engine-0-default-0", 1, now))}, parks: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			insts := []workloadtypes.InstanceStatus{{
@@ -828,12 +831,28 @@ func incarnationPod(name string, incarnation int64, created time.Time) *corev1.P
 }
 
 // terminating marks the pod as deleting: a deletion stamp held open by a
-// finalizer, the way a pod reads between its delete and its removal.
+// finalizer, the way a pod reads between its delete and its removal. The
+// stamp is the pod's own deletion deadline, the request plus its grace,
+// and sits ahead of the pass unless the pod already carries one.
 func terminating(pod *corev1.Pod) *corev1.Pod {
-	now := metav1.Now()
-	pod.DeletionTimestamp = &now
+	if pod.DeletionTimestamp == nil {
+		deadline := metav1.NewTime(time.Now().Add(time.Hour))
+		pod.DeletionTimestamp = &deadline
+	}
 	pod.Finalizers = []string{"example.com/termination"}
 	return pod
+}
+
+// terminatingOverdue marks the pod as deleting past its own deletion
+// deadline: the kubelet behind it stopped before it acknowledged the
+// delete, so only that kubelet, a finalizer owner or the force-delete
+// sweep ever removes the object. The finalizer stands in for the missing
+// acknowledgement, which the fake apiserver cannot hold a pod on; the
+// stamp reads the deadline, never the finalizer.
+func terminatingOverdue(pod *corev1.Pod) *corev1.Pod {
+	deadline := metav1.NewTime(time.Now().Add(-time.Hour))
+	pod.DeletionTimestamp = &deadline
+	return terminating(pod)
 }
 
 // DeadlineExceeded is outside the terminal waiting set, so the fast

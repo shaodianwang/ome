@@ -489,21 +489,25 @@ func singlePodSurgeAttempt(row *types.InstanceStatus, desiredPods int32) bool {
 		row.Operation.Step == types.UpdateStepSurge && row.Operation.SurgeIndex == nil
 }
 
-// repairSetGone reports whether every pod of the Instance is deleting or
-// gone on a live read: the repair's drain has deleted the set it replaces
-// and the rebuild has not run yet. The deadline was judged on the pass's
-// pod observation, which predates that delete, and a spent repair's exits
-// are read off its pods, so a park with no set behind it has none. The
-// repair owns the set until the rebuilt one exists; the elapsed deadline
-// parks that one. A set still live on the read — a drain not finished, or
-// a rebuilt set in any state — parks as the deadline says.
+// repairSetGone reports whether every pod of the Instance is gone, or
+// deleting inside its own deletion deadline, on a live read: the repair's
+// drain has deleted the set it replaces and the rebuild has not run yet.
+// The deadline was judged on the pass's pod observation, which predates
+// that delete, and a spent repair's exits are read off its pods, so a park
+// with no set behind it has none. The repair owns the set until the
+// rebuilt one exists; the elapsed deadline parks that one. A set still
+// live on the read — a drain not finished, or a rebuilt set in any state —
+// parks as the deadline says. So does a pod deleting past its own deadline:
+// a kubelet removes a pod within moments of it, so what stays is a name no
+// delete in flight will free, and the park is what makes that visible.
 func repairSetGone(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, idx int32) (bool, error) {
 	pods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, idx)
 	if err != nil {
 		return false, err
 	}
+	now := input.Now()
 	for _, pod := range pods {
-		if pod.DeletionTimestamp == nil {
+		if pod.DeletionTimestamp == nil || now.After(pod.DeletionTimestamp.Time) {
 			return false, nil
 		}
 	}
