@@ -5041,3 +5041,124 @@ func TestMigrate_FreshRecordWaitsWhileAHandoffStillPinsItsSource(t *testing.T) {
 		t.Fatalf("record must be SurgePending with a surge index; got %+v", *rec)
 	}
 }
+
+// TestMigrate_SurgeCreateWaitsOutTheExpectationsTTL: a surge create the
+// watch never confirms holds the surge index behind its expectation, so
+// the drive re-lists and issues nothing while the entry stands; once the
+// entry's TTL lapses the gate reads satisfied and the missing surge pod is
+// re-created under the same request, with neither pin nor the record phase
+// moving in between.
+//
+// Cells: instance/Migrate/CreateSurge/timer.expectationsTTL/before, instance/Migrate/SurgeTarget/timer.expectationsTTL/before
+func TestMigrate_SurgeCreateWaitsOutTheExpectationsTTL(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	f.finalizeInstanceResources = func(context.Context, int32) (bool, error) { return true, nil }
+	const uuid = "mig-expectations-ttl"
+	f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+	surgePods := driveToSurgePods(t, f, uuid, 1)
+	if len(surgePods) != 1 {
+		t.Fatalf("setup: want one surge pod, got %d", len(surgePods))
+	}
+	// The surge pod is lost, and the cache still owes a create for its
+	// index that no watch event will ever confirm.
+	if err := f.c.Delete(context.Background(), surgePods[0]); err != nil {
+		t.Fatalf("delete surge pod: %v", err)
+	}
+	clk := clocktesting.NewFakeClock(time.Now())
+	cache := workload.NewExpectationsWithClock(clk)
+	in := f.input(t)
+	cache.ExpectCreates(in.Key.Namespace, in.Key.OwnerName, in.Key.Component, 1, 1)
+	rec := f.record(t, uuid)
+	req := &audit.MigrationRequest{SchemaVersion: audit.SchemaV1, Component: string(f.component), Instance: 0, FromNode: rec.FromNode, Reason: rec.Reason}
+	drive := func() {
+		t.Helper()
+		d := f.deps()
+		d.Expectations = cache
+		done, accepted, err := Migrate(context.Background(), d, f.input(t), f.plan, f.target, 0, uuid, req)
+		if err != nil || done || !accepted {
+			t.Fatalf("Migrate: got done=%v accepted=%v err=%v, want in-flight", done, accepted, err)
+		}
+	}
+
+	drive()
+	if pods := migPodsForInstance(t, f, 1); len(pods) != 0 {
+		t.Fatalf("an unsatisfied create expectation must hold the surge create; got %d pod(s)", len(pods))
+	}
+	if rec := f.record(t, uuid); rec.Phase != workload.MigrationPhaseSurgePending {
+		t.Fatalf("the wait moves no record phase; got %s", rec.Phase)
+	}
+
+	clk.Step(3 * time.Minute)
+	drive()
+	if pods := migPodsForInstance(t, f, 1); len(pods) != 1 {
+		t.Fatalf("a lapsed expectation lets the drive re-create the surge; got %d pod(s)", len(pods))
+	}
+	src := findInstanceStatusOnIRForFixture(t, f, 0)
+	if src == nil || src.Phase != v1beta1.OMENativeInstanceMigrating || src.Operation == nil {
+		t.Errorf("the source keeps its pin across the wait; got %+v", src)
+	}
+	surge := findInstanceStatusOnIRForFixture(t, f, 1)
+	if surge == nil || surge.Phase != v1beta1.OMENativeInstanceCreating || surge.Operation == nil {
+		t.Errorf("the surge keeps its pin across the wait; got %+v", surge)
+	}
+}
+
+// TestMigrate_FailedSurgeRowDrivesNothing: a surge row stamped Failed with
+// its Migrate pin kept, the shape the scheduler grace leaves, cannot pass
+// the pair confirmation, which requires the surge to read Creating and runs
+// ahead of every effect. The drive therefore issues no write for the pair:
+// a surge pod that comes up is not marked serving, a lost one is not
+// re-created whatever the expectations cache says, no create reaches the
+// apiserver for any refusal to answer, and both rows and the record stand
+// as they were until the record's deadline.
+//
+// Cells: instance/Failed/MigrateTarget/pod.containersReady[target]/before, instance/Failed/MigrateTarget/timer.expectationsTTL/before, instance/Failed/MigrateTarget/api.quotaDenied/before, instance/Failed/MigrateTarget/api.invalid/before, instance/Failed/MigrateTarget/api.alreadyExists/before, instance/Failed/MigrateTarget/api.notFound/before, instance/Failed/MigrateTarget/api.throttled[TooManyRequests]/before, instance/Failed/MigrateTarget/api.namespaceTerminating/before
+func TestMigrate_FailedSurgeRowDrivesNothing(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	f.finalizeInstanceResources = func(context.Context, int32) (bool, error) { return true, nil }
+	const uuid = "mig-failed-surge-row"
+	f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+	surgePods := driveToSurgePods(t, f, uuid, 1)
+	if len(surgePods) != 1 {
+		t.Fatalf("setup: want one surge pod, got %d", len(surgePods))
+	}
+	ir := f.getIR(t)
+	surge := migrationStatusByIndex(t, ir, 1)
+	surge.Phase = v1beta1.OMENativeInstanceFailed
+	surge.LastFailure = &v1beta1.InstanceTermination{PodName: surgePods[0].Name, Reason: "Unschedulable", Time: metav1.Now()}
+	if err := f.c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("seed Failed surge row: %v", err)
+	}
+	// The fixture's aggregator stand-in refreshes the pod counters; the
+	// snapshot the engine is held to is taken after it.
+	f.react(t)
+	before := f.getIR(t).Status.InstanceStatuses
+
+	t.Run("a surge pod that comes up is not marked serving", func(t *testing.T) {
+		if done, accepted := f.pass(t, uuid); done || !accepted {
+			t.Fatalf("got done=%v accepted=%v, want in-flight", done, accepted)
+		}
+		pods := migPodsForInstance(t, f, 1)
+		if len(pods) != 1 || podreadiness.IsServing(pods[0]) {
+			t.Fatalf("no serving gate is written on a Failed surge row's pod; got %d pod(s), serving=%v", len(pods), len(pods) == 1 && podreadiness.IsServing(pods[0]))
+		}
+	})
+	t.Run("a lost surge pod is not re-created", func(t *testing.T) {
+		if err := f.c.Delete(context.Background(), surgePods[0]); err != nil {
+			t.Fatalf("delete surge pod: %v", err)
+		}
+		if done, accepted := f.pass(t, uuid); done || !accepted {
+			t.Fatalf("got done=%v accepted=%v, want in-flight", done, accepted)
+		}
+		if pods := migPodsForInstance(t, f, 1); len(pods) != 0 {
+			t.Fatalf("no create reaches the apiserver for a Failed surge row; got %d pod(s)", len(pods))
+		}
+	})
+	after := f.getIR(t).Status.InstanceStatuses
+	if diff := cmp.Diff(before, after); diff != "" {
+		t.Errorf("the pair rows stand as they were (-before +after):\n%s", diff)
+	}
+	if rec := f.record(t, uuid); rec.Phase != workload.MigrationPhaseSurgePending {
+		t.Errorf("the record keeps its phase until its deadline; got %s", rec.Phase)
+	}
+}

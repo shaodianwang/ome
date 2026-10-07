@@ -28,6 +28,7 @@ cells:
   - instance/Failed/MigrateTarget/pod.containersNotReady[target]/before
   - instance/Failed/MigrateTarget/pod.runningNotReady[target]/before
   - instance/Failed/MigrateTarget/pod.containerRestart/before
+  - instance/Failed/MigrateTarget/pod.containersReady[target]/before
 initial:
   spec:
     replicas: 1

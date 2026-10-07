@@ -1,0 +1,55 @@
+# The surge pod of a migration at SurgePending is refused by its node, and
+# the refusal is observed again while the recycle's delete is still in
+# flight. A refused pod never ran yet still holds its name, so the migration
+# could never hand over while it stayed: the shared terminal recycle deletes
+# it, the bookkeeping lands on the source row that owns the Migrate
+# operation, and neither pin nor record phase moves. The re-observed
+# refusal lands on the same rows and is satisfied by the delete already in
+# flight; once the object is gone the surge is placed again inside the
+# record's window.
+scenario: migrate-surge-pending-admission-rejected
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+cells:
+  - instance/Migrate/CreateSurge/pod.admissionRejected[OutOfResource]/before
+  - instance/Migrate/SurgeTarget/pod.admissionRejected[OutOfResource]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the surge is bound and its node refuses it for want of an accelerator; the pod never ran, so the drive recycles it with the refusal recorded on the source row and both pins kept
+    events:
+      - pod.scheduled[target]: {pod: {index: 1}, message: node-1}
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 1}, resource: nvidia.com/gpu, message: "Pod Node didn't have enough resource: nvidia.com/gpu"}
+  - tick: 5
+    note: the refusal is observed again on the pod the recycle is already deleting; it lands on the same rows and is satisfied by the delete in flight
+    events:
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 1}, resource: nvidia.com/gpu, message: "Pod Node didn't have enough resource: nvidia.com/gpu"}
+  - tick: 6
+    note: the refused pod is gone, so the surge name is re-created from the source running revision under the same request
+    events:
+      - pod.deleted[target]: {pod: {index: 1}}
+  - tick: 7
+    note: a tick with nothing changed finds the rebuilt surge standing and waits on its gates

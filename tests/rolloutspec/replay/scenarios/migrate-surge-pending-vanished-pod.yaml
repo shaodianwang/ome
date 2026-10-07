@@ -8,6 +8,7 @@ arrows:
   - T-empty-migrate-target
 cells:
   - instance/Migrate/CreateSurge/api.notFound/before
+  - instance/Migrate/SurgeTarget/api.notFound/before
 initial:
   spec:
     replicas: 1
