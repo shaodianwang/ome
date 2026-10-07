@@ -1,0 +1,70 @@
+tick=0 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=1 replicas=2 ready=2 serving=2 updated=2 updatedReady=2 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=1 note a settled service; the policy resolves and the unit reads Stable
+tick=1 pass cache=live generation=1
+tick=1 run outcome=none policies=[canary-policy:valid]
+tick=1 run active=nil
+tick=1 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=1 service create name=svc-a-engine-rev-f332566b stage=dispatch
+tick=1 service create name=svc-a-engine-rev-f332566b-headless stage=dispatch
+tick=1 dispatch unit=engine state=Idle phase=Stable record=nil requeue=none
+tick=1 traffic component=engine nil
+tick=1 coordination conditions RolloutCoordinationReady=absent
+tick=1 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=Stable
+tick=1 flush which=final result=written statusWrites=1 run=desired groups=none
+tick=1 pass result=none
+tick=2 note the template edit lands
+tick=2 apply spec.revision[new] component=engine image=registry.example.com/runtime:v2 generation=2 now=t+0s
+tick=2 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-46e64ada observedGeneration=1 replicas=2 ready=2 serving=2 updated=0 updatedReady=0 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=2 pass cache=live generation=2
+tick=2 run outcome=none requeueAfter=10s policies=[canary-policy:valid]
+tick=2 run active=nil
+tick=2 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=2 ir patch name=svc-a-engine stage=project image=registry.example.com/runtime:v1→registry.example.com/runtime:v2 parentGen=1→2 generation=1→2
+tick=2 dispatch unit=engine state=Idle phase=Stable record=nil requeue=after:10s
+tick=2 traffic component=engine nil
+tick=2 coordination conditions RolloutCoordinationReady=absent
+tick=2 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=Stable
+tick=2 flush which=final result=short-circuit
+tick=2 pass result=after:10s
+tick=3 note the run opens from the live policy and the unit arms at step 0, waiting for its canary Instance
+tick=3 apply ctrl.resync now=t+0s
+tick=3 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-46e64ada observedGeneration=2 replicas=2 ready=2 serving=2 updated=0 updatedReady=0 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=3 pass cache=live generation=2
+tick=3 event Normal RolloutRunOpened run svc-a-2805f3e6cadc opened (rp1:12e6f4139c80)
+tick=3 run outcome=opened stateChanged=true requeueAfter=10s policies=[canary-policy:valid]
+tick=3 run active id=svc-a-2805f3e6cadc openedAt=t+0s pinnedAt=t+0s targets=[engine=46e64ada/stable=f332566b] digests=[Policy:rp1:feaeb0a34064]
+tick=3 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=False(InSync)
+tick=3 bind unit=engine record={targetID=ct1:6f43a43685dd canary=46e64ada stable=f332566b step=0 weight=0 entered=t+0s} phase=Pending
+tick=3 flush which=boundary result=written statusWrites=1 run=desired groups=none
+tick=3 dispatch unit=engine state=Staging phase=Pending record={targetID=ct1:6f43a43685dd canary=46e64ada stable=f332566b step=0 weight=0 entered=t+0s capacityWaitSince=t+0s} requeue=after:10s
+tick=3 traffic component=engine nil
+tick=3 coordination conditions RolloutCoordinationReady=absent
+tick=3 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=Pending
+tick=3 flush which=final result=written statusWrites=1 run=same groups=none
+tick=3 pass result=after:10s
+tick=4 note the pin is lost and the policy is deleted; the run layer parks and the unit is not dispatched
+tick=4 apply clock.advance by=1m0s now=t+1m0s
+tick=4 apply run.lost run=svc-a-2805f3e6cadc now=t+1m0s
+tick=4 apply plan.unresolved policy=canary-policy now=t+1m0s
+tick=4 pass cache=live generation=2
+tick=4 event Warning RolloutPlanParked rollout parked (PolicyNotFound): groups[0].policyRef "canary-policy": RolloutPolicy not found in namespace ns-a — the new revision is held, the previous revision keeps serving
+tick=4 run outcome=parked requeueAfter=1m0s policies=[]
+tick=4 run active=nil
+tick=4 run conditions RolloutPlanReady=False(PolicyNotFound) RolloutPlanDrift=False(InSync)
+tick=4 ir patch name=svc-a-engine stage=project partition=1→2 generation=2→3
+tick=4 coordination conditions RolloutCoordinationReady=absent
+tick=4 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=Pending
+tick=4 flush which=final result=written statusWrites=1 run=same groups=none
+tick=4 pass result=after:1m0s
+tick=5 note a later pass finds the same park; the record still waits at step 0
+tick=5 apply clock.advance by=1m0s now=t+2m0s
+tick=5 apply ctrl.resync now=t+2m0s
+tick=5 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-46e64ada observedGeneration=3 replicas=2 ready=2 serving=2 updated=0 updatedReady=0 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=5 pass cache=live generation=2
+tick=5 run outcome=parked requeueAfter=1m0s policies=[]
+tick=5 run active=nil
+tick=5 run conditions RolloutPlanReady=False(PolicyNotFound) RolloutPlanDrift=False(InSync)
+tick=5 coordination conditions RolloutCoordinationReady=absent
+tick=5 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=Pending
+tick=5 flush which=final result=short-circuit
+tick=5 pass result=after:1m0s

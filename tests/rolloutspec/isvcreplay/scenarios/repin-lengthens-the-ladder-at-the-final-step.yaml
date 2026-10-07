@@ -1,0 +1,83 @@
+scenario: repin-lengthens-the-ladder-at-the-final-step
+cells:
+  - canary/Staging/Final/plan.repin[holdOrTighten]/before
+intentional: >-
+  a repin to a longer ladder while the final step waits for its capacity
+  keeps the step index, which now names an intermediate step at the weight
+  on record; no hold arms and the wait continues under the clamped step's
+  capacity
+initial:
+  service:
+    components:
+      engine: {replicas: 4, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        canary:
+          steps:
+            - {capacity: 1, traffic: 10, pause: {}}
+            - {capacity: 2, traffic: 50, pause: {}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the unit is not armed and reads Stable
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens, the bind arms the unit at step 0 and the first step waits for one canary Instance
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the staged Instance is Ready; the split serves at 10% under the manual pause
+    events:
+      - capacity.reached: {component: engine}
+  - tick: 5
+    note: the operator promotes; the record advances to step 1, which waits for a second canary Instance
+    events:
+      - clock.advance: 1m
+      - verb.promote: {component: engine}
+  - tick: 6
+    note: a current pass projects step 1's partition onto the replica
+    events:
+      - clock.advance: 1m
+      - ctrl.resync
+  - tick: 7
+    note: the second Instance is Ready; the split serves at 50% under the manual pause
+    events:
+      - clock.advance: 1m
+      - capacity.reached: {component: engine}
+  - tick: 8
+    note: the operator promotes; the record advances to the final step, which waits for a third canary Instance
+    events:
+      - clock.advance: 1m
+      - verb.promote: {component: engine}
+  - tick: 9
+    note: a current pass projects the final step's partition onto the replica
+    events:
+      - clock.advance: 1m
+      - ctrl.resync
+  - tick: 10
+    note: the inline ladder gains a third intermediate step at the recorded weight; the pinned plan continues and drift is reported
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[inlineBody]:
+          groups:
+            - components: [engine]
+              canary:
+                steps:
+                  - {capacity: 1, traffic: 10, pause: {}}
+                  - {capacity: 2, traffic: 50, pause: {}}
+                  - {capacity: 3, traffic: 50, pause: {}}
+                  - {capacity: "100%", traffic: 100}
+  - tick: 11
+    note: the repin applies; the index keeps naming step 2, now an intermediate step at the recorded 50%, so no hold arms and the wait continues
+    events:
+      - clock.advance: 1m
+      - verb.repin[matching]
+  - tick: 12
+    note: the third Instance is Ready; the clamped step serves at 50% under its manual pause
+    events:
+      - clock.advance: 1m
+      - capacity.reached: {component: engine}

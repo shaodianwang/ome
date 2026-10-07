@@ -3,6 +3,7 @@ cells:
   - run/Open/ctrl.staleRead[missesRepin]/before
   - canary/Serving/Manual/plan.repin[raise]/before
   - canary/Serving/Manual/capacity.reached/before
+  - canary/PreHold/pass.staleRecord/before
   - revision/Behind/write.canaryReady/before
 intentional: >-
   a repin clamped a serving canary step onto a higher traffic weight and

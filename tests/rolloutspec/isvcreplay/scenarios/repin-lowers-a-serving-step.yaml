@@ -1,0 +1,54 @@
+scenario: repin-lowers-a-serving-step
+cells:
+  - canary/Serving/Manual/plan.repin[holdOrTighten]/before
+intentional: >-
+  a repin whose clamped step carries no more traffic than the weight on
+  record arms no hold: the split serving under the manual pause is written
+  at the clamped weight on the same pass and the pause keeps holding it
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        canary:
+          steps:
+            - {capacity: "50%", traffic: 10, pause: {}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the unit is not armed and reads Stable
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens, the bind arms the unit at step 0 and the first step waits for its canary Instance
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the staged Instance is Ready; the split serves at 10% under the manual pause
+    events:
+      - capacity.reached: {component: engine}
+  - tick: 5
+    note: the inline ladder is edited to lower the first step to 5%; the pinned plan continues and drift is reported
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[inlineBody]:
+          groups:
+            - components: [engine]
+              canary:
+                steps:
+                  - {capacity: "50%", traffic: 5, pause: {}}
+                  - {capacity: "100%", traffic: 100}
+  - tick: 6
+    note: the repin applies; the clamped step tightens the split, so no hold arms and the split is written at 5%
+    events:
+      - clock.advance: 1m
+      - verb.repin[matching]
+  - tick: 7
+    note: a later pass finds the split at 5% under the manual pause
+    events:
+      - clock.advance: 1m
+      - ctrl.resync

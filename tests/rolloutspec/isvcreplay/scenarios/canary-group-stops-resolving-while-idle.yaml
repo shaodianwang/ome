@@ -1,0 +1,35 @@
+scenario: canary-group-stops-resolving-while-idle
+cells:
+  - canary/Idle/plan.unresolved/before
+intentional: >-
+  an unarmed unit whose group references a policy that stops resolving is
+  not dispatched: with no run to pin a body the run layer parks the plan,
+  the projection holds every Instance where it is, and no record is written
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        policyRef: {name: canary-policy, progression: canary}
+  policies:
+    - name: canary-policy
+      spec:
+        canary:
+          steps:
+            - {capacity: "50%", traffic: 10, pause: {}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m, rolloutPolicyEnabled: true}
+timeline:
+  - tick: 1
+    note: a settled service; the policy resolves and the unit reads Stable
+  - tick: 2
+    note: the policy is deleted with no run pinned; the run layer parks the plan and the unit is not dispatched
+    events:
+      - clock.advance: 1m
+      - plan.unresolved: {name: canary-policy}
+  - tick: 3
+    note: a later pass finds the same park and still writes no record
+    events:
+      - clock.advance: 1m
+      - ctrl.resync

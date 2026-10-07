@@ -1,0 +1,74 @@
+scenario: repin-clamps-a-staging-step
+cells:
+  - canary/Staging/plan.repin[holdOrTighten]/before
+  - canary/Staging/plan.repin[raise]/before
+intentional: >-
+  a repin while the first step waits for its capacity clamps the step index
+  into the new ladder; a clamped step whose traffic does not exceed the
+  weight on record arms no hold and the wait continues under it, while a
+  clamped step that would raise traffic arms the pre-step hold, which stands
+  while the capacity still converges and holds the split once it is up
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        canary:
+          steps:
+            - {capacity: 1, traffic: 10, pause: {}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the unit is not armed and reads Stable
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens, the bind arms the unit at step 0 and the first step waits for its canary Instance
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the inline ladder is edited so the first step carries no traffic; the pinned plan continues and drift is reported
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[inlineBody]:
+          groups:
+            - components: [engine]
+              canary:
+                steps:
+                  - {capacity: 1, traffic: 0, pause: {}}
+                  - {capacity: "100%", traffic: 100}
+  - tick: 5
+    note: the repin applies; the clamped step does not raise the recorded weight, so no hold arms and the wait continues
+    events:
+      - clock.advance: 1m
+      - verb.repin[matching]
+  - tick: 6
+    note: the inline ladder is edited to raise the first step to 20%
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[inlineBody]:
+          groups:
+            - components: [engine]
+              canary:
+                steps:
+                  - {capacity: 1, traffic: 20, pause: {}}
+                  - {capacity: "100%", traffic: 100}
+  - tick: 7
+    note: the repin applies; the clamped step would raise traffic, so the pre-step hold arms while the capacity is still short
+    events:
+      - clock.advance: 1m
+      - verb.repin[matching]
+  - tick: 8
+    note: the staged Instance is Ready; the hold keeps the traffic raise waiting for a promote
+    events:
+      - clock.advance: 1m
+      - capacity.reached: {component: engine}
+  - tick: 9
+    note: a later pass finds the hold standing
+    events:
+      - clock.advance: 1m
+      - ctrl.resync

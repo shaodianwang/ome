@@ -1,0 +1,133 @@
+tick=0 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=1 replicas=2 ready=2 serving=2 updated=2 updatedReady=2 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=1 note a settled service; the unit is not armed and reads Stable
+tick=1 pass cache=live generation=1
+tick=1 run outcome=none policies=disabled
+tick=1 run active=nil
+tick=1 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=1 service create name=svc-a-engine-rev-f332566b stage=dispatch
+tick=1 service create name=svc-a-engine-rev-f332566b-headless stage=dispatch
+tick=1 dispatch unit=engine state=Idle phase=Stable record=nil requeue=none
+tick=1 traffic component=engine nil
+tick=1 coordination conditions RolloutCoordinationReady=absent
+tick=1 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=Stable
+tick=1 flush which=final result=written statusWrites=1 run=desired groups=none
+tick=1 pass result=none
+tick=2 note the template edit lands
+tick=2 apply spec.revision[new] component=engine image=registry.example.com/runtime:v2 generation=2 now=t+0s
+tick=2 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-46e64ada observedGeneration=1 replicas=2 ready=2 serving=2 updated=0 updatedReady=0 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=2 pass cache=live generation=2
+tick=2 run outcome=none requeueAfter=10s policies=disabled
+tick=2 run active=nil
+tick=2 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=2 ir patch name=svc-a-engine stage=project image=registry.example.com/runtime:v1→registry.example.com/runtime:v2 parentGen=1→2 generation=1→2
+tick=2 dispatch unit=engine state=Idle phase=Stable record=nil requeue=after:10s
+tick=2 traffic component=engine nil
+tick=2 coordination conditions RolloutCoordinationReady=absent
+tick=2 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=Stable
+tick=2 flush which=final result=short-circuit
+tick=2 pass result=after:10s
+tick=3 note the run opens, the bind arms the unit at step 0 and the first step waits for its canary Instance
+tick=3 apply ctrl.resync now=t+0s
+tick=3 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-46e64ada observedGeneration=2 replicas=2 ready=2 serving=2 updated=0 updatedReady=0 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=3 pass cache=live generation=2
+tick=3 event Normal RolloutRunOpened run svc-a-4cd2b2df2a22 opened (rp1:477efa076a70)
+tick=3 run outcome=opened stateChanged=true requeueAfter=10s policies=disabled
+tick=3 run active id=svc-a-4cd2b2df2a22 openedAt=t+0s pinnedAt=t+0s targets=[engine=46e64ada/stable=f332566b] digests=[Inline:rp1:431ab9cb8fda]
+tick=3 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=False(InSync)
+tick=3 bind unit=engine record={targetID=ct1:6f43a43685dd canary=46e64ada stable=f332566b step=0 weight=0 entered=t+0s} phase=Pending
+tick=3 flush which=boundary result=written statusWrites=1 run=desired groups=none
+tick=3 dispatch unit=engine state=Staging phase=Pending record={targetID=ct1:6f43a43685dd canary=46e64ada stable=f332566b step=0 weight=0 entered=t+0s capacityWaitSince=t+0s} requeue=after:10s
+tick=3 traffic component=engine nil
+tick=3 coordination conditions RolloutCoordinationReady=absent
+tick=3 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=Pending
+tick=3 flush which=final result=written statusWrites=1 run=same groups=none
+tick=3 pass result=after:10s
+tick=4 note the inline ladder is edited so the first step carries no traffic; the pinned plan continues and drift is reported
+tick=4 apply clock.advance by=1m0s now=t+1m0s
+tick=4 apply spec.planEdit[inlineBody] groups=1 generation=3 now=t+1m0s
+tick=4 pass cache=live generation=3
+tick=4 run outcome=none requeueAfter=10s policies=disabled
+tick=4 run active id=svc-a-4cd2b2df2a22 openedAt=t+0s pinnedAt=t+0s targets=[engine=46e64ada/stable=f332566b] digests=[Inline:rp1:431ab9cb8fda]
+tick=4 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=False(InSync)
+tick=4 ir patch name=svc-a-engine stage=project parentGen=2→3
+tick=4 dispatch unit=engine state=Staging phase=Pending record={targetID=ct1:6f43a43685dd canary=46e64ada stable=f332566b step=0 weight=0 entered=t+0s capacityWaitSince=t+0s} requeue=after:10s
+tick=4 traffic component=engine nil
+tick=4 coordination conditions RolloutCoordinationReady=absent
+tick=4 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=Pending
+tick=4 flush which=final result=written statusWrites=1 run=same groups=none
+tick=4 pass result=after:10s
+tick=5 note the repin applies; the clamped step does not raise the recorded weight, so no hold arms and the wait continues
+tick=5 apply clock.advance by=1m0s now=t+2m0s
+tick=5 apply verb.repin[matching] value=now now=t+2m0s
+tick=5 pass cache=live generation=3
+tick=5 event Normal RolloutPlanRepinned run svc-a-4cd2b2df2a22 repinned: rp1:477efa076a70 -> rp1:ca5abfd04125
+tick=5 isvc patch name=svc-a stage=run annotations=[ome.io/rollout-repin:now→nil]
+tick=5 run outcome=stateChanged stateChanged=true requeueAfter=10s policies=disabled
+tick=5 run active id=svc-a-4cd2b2df2a22 openedAt=t+0s pinnedAt=t+2m0s targets=[engine=46e64ada/stable=f332566b] digests=[Inline:rp1:cc45a014d459]
+tick=5 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=False(InSync)
+tick=5 flush which=boundary result=written statusWrites=1 run=desired groups=none
+tick=5 dispatch unit=engine state=Staging phase=Pending record={targetID=ct1:6f43a43685dd canary=46e64ada stable=f332566b step=0 weight=0 entered=t+0s capacityWaitSince=t+0s} requeue=after:10s
+tick=5 traffic component=engine nil
+tick=5 coordination conditions RolloutCoordinationReady=absent
+tick=5 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=Pending
+tick=5 flush which=final result=short-circuit
+tick=5 pass result=after:10s
+tick=6 note the inline ladder is edited to raise the first step to 20%
+tick=6 apply clock.advance by=1m0s now=t+3m0s
+tick=6 apply spec.planEdit[inlineBody] groups=1 generation=4 now=t+3m0s
+tick=6 pass cache=live generation=4
+tick=6 run outcome=none requeueAfter=10s policies=disabled
+tick=6 run active id=svc-a-4cd2b2df2a22 openedAt=t+0s pinnedAt=t+2m0s targets=[engine=46e64ada/stable=f332566b] digests=[Inline:rp1:cc45a014d459]
+tick=6 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=False(InSync)
+tick=6 ir patch name=svc-a-engine stage=project parentGen=3→4
+tick=6 dispatch unit=engine state=Staging phase=Pending record={targetID=ct1:6f43a43685dd canary=46e64ada stable=f332566b step=0 weight=0 entered=t+0s capacityWaitSince=t+0s} requeue=after:10s
+tick=6 traffic component=engine nil
+tick=6 coordination conditions RolloutCoordinationReady=absent
+tick=6 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=Pending
+tick=6 flush which=final result=written statusWrites=1 run=same groups=none
+tick=6 pass result=after:10s
+tick=7 note the repin applies; the clamped step would raise traffic, so the pre-step hold arms while the capacity is still short
+tick=7 apply clock.advance by=1m0s now=t+4m0s
+tick=7 apply verb.repin[matching] value=now now=t+4m0s
+tick=7 pass cache=live generation=4
+tick=7 event Normal RolloutPlanRepinned run svc-a-4cd2b2df2a22 repinned: rp1:ca5abfd04125 -> rp1:72149a6f1103
+tick=7 isvc patch name=svc-a stage=run annotations=[ome.io/rollout-repin:now→nil]
+tick=7 run outcome=stateChanged stateChanged=true requeueAfter=10s policies=disabled
+tick=7 run active id=svc-a-4cd2b2df2a22 openedAt=t+0s pinnedAt=t+4m0s targets=[engine=46e64ada/stable=f332566b] digests=[Inline:rp1:ad4abc873506]
+tick=7 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=False(InSync)
+tick=7 flush which=boundary result=written statusWrites=1 run=desired groups=none
+tick=7 dispatch unit=engine state=PreHold phase=Pending record={targetID=ct1:6f43a43685dd canary=46e64ada stable=f332566b step=0 weight=0 entered=t+0s preStepHold=true capacityWaitSince=t+0s} requeue=after:10s
+tick=7 traffic component=engine nil
+tick=7 coordination conditions RolloutCoordinationReady=absent
+tick=7 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=Pending
+tick=7 flush which=final result=written statusWrites=1 run=same groups=none
+tick=7 pass result=after:10s
+tick=8 note the staged Instance is Ready; the hold keeps the traffic raise waiting for a promote
+tick=8 apply clock.advance by=1m0s now=t+5m0s
+tick=8 apply capacity.reached component=engine partition=1 staged=1 revision=registry.example.com/runtime:v2 now=t+5m0s
+tick=8 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-46e64ada observedGeneration=2 replicas=2 ready=2 serving=2 updated=1 updatedReady=1 rows=[0:Ready@f332566b 1:Ready@46e64ada]
+tick=8 pass cache=live generation=4
+tick=8 run outcome=none policies=disabled
+tick=8 run active id=svc-a-4cd2b2df2a22 openedAt=t+0s pinnedAt=t+4m0s targets=[engine=46e64ada/stable=f332566b] digests=[Inline:rp1:ad4abc873506]
+tick=8 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=False(InSync)
+tick=8 service create name=svc-a-engine-rev-46e64ada stage=dispatch
+tick=8 service create name=svc-a-engine-rev-46e64ada-headless stage=dispatch
+tick=8 dispatch unit=engine state=PreHold phase=Paused record={targetID=ct1:6f43a43685dd canary=46e64ada stable=f332566b step=0 weight=0 entered=t+0s preStepHold=true} requeue=after:10s
+tick=8 traffic component=engine nil
+tick=8 coordination conditions RolloutCoordinationReady=absent
+tick=8 revisions component=engine ready=46e64ada latest=f332566b previous=nil phase=Paused
+tick=8 flush which=final result=written statusWrites=1 run=same groups=none
+tick=8 pass result=after:10s
+tick=9 note a later pass finds the hold standing
+tick=9 apply clock.advance by=1m0s now=t+6m0s
+tick=9 apply ctrl.resync now=t+6m0s
+tick=9 pass cache=live generation=4
+tick=9 run outcome=none policies=disabled
+tick=9 run active id=svc-a-4cd2b2df2a22 openedAt=t+0s pinnedAt=t+4m0s targets=[engine=46e64ada/stable=f332566b] digests=[Inline:rp1:ad4abc873506]
+tick=9 run conditions RolloutPlanReady=True(Pinned) RolloutPlanDrift=False(InSync)
+tick=9 dispatch unit=engine state=PreHold phase=Paused record={targetID=ct1:6f43a43685dd canary=46e64ada stable=f332566b step=0 weight=0 entered=t+0s preStepHold=true} requeue=after:10s
+tick=9 traffic component=engine nil
+tick=9 coordination conditions RolloutCoordinationReady=absent
+tick=9 revisions component=engine ready=46e64ada latest=f332566b previous=nil phase=Paused
+tick=9 flush which=final result=short-circuit
+tick=9 pass result=after:10s

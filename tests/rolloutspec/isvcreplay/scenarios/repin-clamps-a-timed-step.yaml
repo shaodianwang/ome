@@ -1,0 +1,115 @@
+scenario: repin-clamps-a-timed-step
+cells:
+  - canary/Serving/Timed/pass.staleRecord/before
+  - canary/Serving/Timed/plan.repin[holdOrTighten]/before
+  - canary/Serving/Timed/plan.repin[raise]/before
+  - canary/PreHold/plan.repin[holdOrTighten]/before
+  - canary/PreHold/plan.repin[raise]/before
+intentional: >-
+  a split serving under a timed pause keeps its soak anchor through a repin:
+  a clamped step at or below the recorded weight arms no hold and the next
+  pass writes the clamped weight, a clamped step above it arms the pre-step
+  hold; under the hold a further repin re-clamps the index and leaves the
+  hold set whether the clamped step tightens or raises, and a pass that
+  reads a stale copy of the serving record has its decision dropped by the
+  flush and requeues
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        canary:
+          steps:
+            - {capacity: 1, traffic: 10, pause: {duration: 1h}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the unit is not armed and reads Stable
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens, the bind arms the unit at step 0 and the first step waits for its canary Instance
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the staged Instance is Ready; the split serves at 10% and the soak starts
+    events:
+      - capacity.reached: {component: engine}
+  - tick: 5
+    note: the next pass reads the copy from before the split served; the flush keeps the live record and the pass requeues
+    events:
+      - clock.advance: 1m
+      - pass.staleRecord
+  - tick: 6
+    note: the inline ladder is edited to lower the first step to 5%
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[inlineBody]:
+          groups:
+            - components: [engine]
+              canary:
+                steps:
+                  - {capacity: 1, traffic: 5, pause: {duration: 1h}}
+                  - {capacity: "100%", traffic: 100}
+  - tick: 7
+    note: the repin applies; the clamped step tightens the split, so no hold arms, the split is written at 5% and the soak anchor is kept
+    events:
+      - clock.advance: 1m
+      - verb.repin[matching]
+  - tick: 8
+    note: the inline ladder is edited to raise the first step to 20%
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[inlineBody]:
+          groups:
+            - components: [engine]
+              canary:
+                steps:
+                  - {capacity: 1, traffic: 20, pause: {duration: 1h}}
+                  - {capacity: "100%", traffic: 100}
+  - tick: 9
+    note: the repin applies; the clamped step would raise traffic, so the pre-step hold arms and the split stays at 5%
+    events:
+      - clock.advance: 1m
+      - verb.repin[matching]
+  - tick: 10
+    note: the inline ladder is edited to lower the first step to 3%
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[inlineBody]:
+          groups:
+            - components: [engine]
+              canary:
+                steps:
+                  - {capacity: 1, traffic: 3, pause: {duration: 1h}}
+                  - {capacity: "100%", traffic: 100}
+  - tick: 11
+    note: the repin applies under the hold; the clamped step tightens, the index is re-clamped and the hold stays set
+    events:
+      - clock.advance: 1m
+      - verb.repin[matching]
+  - tick: 12
+    note: the inline ladder is edited to raise the first step to 15%
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[inlineBody]:
+          groups:
+            - components: [engine]
+              canary:
+                steps:
+                  - {capacity: 1, traffic: 15, pause: {duration: 1h}}
+                  - {capacity: "100%", traffic: 100}
+  - tick: 13
+    note: the repin applies under the hold; the clamped step would raise traffic and the hold is already armed
+    events:
+      - clock.advance: 1m
+      - verb.repin[matching]
+  - tick: 14
+    note: a later pass finds the hold standing on the record's weight
+    events:
+      - clock.advance: 1m
+      - ctrl.resync

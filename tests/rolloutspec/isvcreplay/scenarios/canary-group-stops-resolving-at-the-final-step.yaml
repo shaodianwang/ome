@@ -1,0 +1,60 @@
+scenario: canary-group-stops-resolving-at-the-final-step
+cells:
+  - canary/Staging/Final/plan.unresolved/before
+intentional: >-
+  a canary waiting for the final step's capacity loses its run and its
+  policy in the same tick; with no pin to fall back on the group has no
+  executable body, so the run layer parks the plan, the projection holds
+  every Instance, and the unit is not dispatched: its record and the held
+  split freeze where they are
+initial:
+  service:
+    components:
+      engine: {replicas: 3, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        policyRef: {name: canary-policy, progression: canary}
+  policies:
+    - name: canary-policy
+      spec:
+        canary:
+          steps:
+            - {capacity: "33%", traffic: 10, pause: {}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m, rolloutPolicyEnabled: true}
+timeline:
+  - tick: 1
+    note: a settled service; the policy resolves and the unit reads Stable
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens from the live policy and the unit arms at step 0
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the staged Instance is Ready; the split serves at 10% under the manual pause
+    events:
+      - capacity.reached: {component: engine}
+  - tick: 5
+    note: the operator promotes; the final step waits for a second canary Instance
+    events:
+      - clock.advance: 1m
+      - verb.promote: {component: engine}
+  - tick: 6
+    note: a current pass projects the final step's partition onto the replica; the step still waits
+    events:
+      - clock.advance: 1m
+      - ctrl.resync
+  - tick: 7
+    note: the pin is lost and the policy is deleted; the run layer parks and the unit is not dispatched
+    events:
+      - clock.advance: 1m
+      - run.lost
+      - plan.unresolved: {name: canary-policy}
+  - tick: 8
+    note: a later pass finds the same park; the record still waits at the final step
+    events:
+      - clock.advance: 1m
+      - ctrl.resync

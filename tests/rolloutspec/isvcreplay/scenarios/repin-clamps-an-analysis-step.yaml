@@ -1,0 +1,80 @@
+scenario: repin-clamps-an-analysis-step
+cells:
+  - canary/Serving/Analysis/analysis.unavailable[noSampler]/before
+  - canary/Serving/Analysis/pass.staleRecord/before
+  - canary/Serving/Analysis/plan.repin[holdOrTighten]/before
+  - canary/Serving/Analysis/plan.repin[raise]/before
+intentional: >-
+  the replay wires no sampler, so a split serving under the metric gate
+  holds on every pass without advancing; a repin whose clamped step tightens
+  the split arms no hold and writes the clamped weight, one whose clamped
+  step raises it arms the pre-step hold, and a pass that reads a stale copy
+  of the serving record has its decision dropped by the flush and requeues
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        canary:
+          steps:
+            - {capacity: 1, traffic: 10, pause: {duration: 1h}, analysis: {interval: 1m, failureLimit: 3, metrics: [{name: err, query: q, operator: LTE, threshold: "0.05"}]}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the unit is not armed and reads Stable
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens, the bind arms the unit at step 0 and the first step waits for its canary Instance
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the staged Instance is Ready; the split serves at 10% and the gate, with no sampler to read, holds
+    events:
+      - capacity.reached: {component: engine}
+  - tick: 5
+    note: the next pass reads the copy from before the split served; the flush keeps the live record and the pass requeues
+    events:
+      - clock.advance: 1m
+      - pass.staleRecord
+  - tick: 6
+    note: the inline ladder is edited to lower the first step to 5%
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[inlineBody]:
+          groups:
+            - components: [engine]
+              canary:
+                steps:
+                  - {capacity: 1, traffic: 5, pause: {duration: 1h}, analysis: {interval: 1m, failureLimit: 3, metrics: [{name: err, query: q, operator: LTE, threshold: "0.05"}]}}
+                  - {capacity: "100%", traffic: 100}
+  - tick: 7
+    note: the repin applies; the clamped step tightens the split, so no hold arms and the split is written at 5% while the gate keeps holding
+    events:
+      - clock.advance: 1m
+      - verb.repin[matching]
+  - tick: 8
+    note: the inline ladder is edited to raise the first step to 20%
+    events:
+      - clock.advance: 1m
+      - spec.planEdit[inlineBody]:
+          groups:
+            - components: [engine]
+              canary:
+                steps:
+                  - {capacity: 1, traffic: 20, pause: {duration: 1h}, analysis: {interval: 1m, failureLimit: 3, metrics: [{name: err, query: q, operator: LTE, threshold: "0.05"}]}}
+                  - {capacity: "100%", traffic: 100}
+  - tick: 9
+    note: the repin applies; the clamped step would raise traffic, so the pre-step hold arms and the split stays at 5%
+    events:
+      - clock.advance: 1m
+      - verb.repin[matching]
+  - tick: 10
+    note: a later pass finds the hold standing
+    events:
+      - clock.advance: 1m
+      - ctrl.resync

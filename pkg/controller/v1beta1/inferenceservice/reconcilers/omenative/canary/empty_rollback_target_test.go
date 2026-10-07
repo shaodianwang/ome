@@ -16,6 +16,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/analysis"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/rollout"
 )
 
@@ -215,6 +216,58 @@ func TestReconcile_OperatorRollbackToAnEmptyStableProceedsWithTheWarning(t *test
 	events := emptyTargetEvents(rec)
 	if len(events) != 1 || !strings.HasPrefix(events[0], "Warning") || !strings.Contains(events[0], "old") || !strings.Contains(events[0], string(v1beta1.EngineComponent)) {
 		t.Fatalf("want one Warning naming the stable revision and the Component, got %v", events)
+	}
+}
+
+// The operator's rollback toward an empty stable revision proceeds the same
+// way from every live state the request can land in: a split serving under
+// a manual, timed or metric gate, the final step waiting for its capacity,
+// and the pre-step hold. The request runs ahead of the step's gate, so the
+// gate kind plays no part. Traffic moves only onto stable capacity that
+// serves: with none, the split the state held stands until the revert
+// brings a stable pod back, so a share keeps naming the stable revision
+// although no pod serves it.
+func TestReconcile_OperatorRollbackToAnEmptyStableFromEveryLiveState(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fixture func(t *testing.T) (*v1beta1.InferenceService, ReconcileInputs)
+	}{
+		{"serving under a manual pause", fixtureServingManual},
+		{"serving under a timed pause", fixtureServingTimed},
+		{"serving under analysis", fixtureServingAnalysis},
+		{"the final step staging", fixtureStagingFinal},
+		{"the pre-step hold", fixturePreHold},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isvc, in := tc.fixture(t)
+			rec := record.NewFakeRecorder(8)
+			in.Recorder = rec
+			evRollbackStableEmpty(isvc, &in)
+
+			res := mustReconcile(t, isvc, in)
+			cs := rollout.CanaryStatusFor(&isvc.Status, v1beta1.EngineComponent)
+			steps := len(isvc.Spec.Rollout.Groups[0].Canary.Steps)
+			if got := rollout.StateOf(cs, phaseOf(isvc), steps); got != rollout.CanaryStateRollingBack {
+				t.Fatalf("state %q, want %q (status %+v)", got, rollout.CanaryStateRollingBack, cs)
+			}
+			if cs.RolledBackRevisionHash != in.CanaryRevisionHash || !res.RolledBack || cs.Failed != nil {
+				t.Fatalf("the operator's rollback must proceed, got %+v rolledBack=%v", cs, res.RolledBack)
+			}
+			events := emptyTargetEvents(rec)
+			if len(events) != 1 || !strings.HasPrefix(events[0], "Warning") || !strings.Contains(events[0], in.StableRevisionHash) || !strings.Contains(events[0], string(v1beta1.EngineComponent)) {
+				t.Fatalf("want one Warning naming the stable revision and the Component, got %v", events)
+			}
+			stableShare := int32(0)
+			for _, target := range isvc.Status.Components[v1beta1.EngineComponent].Traffic {
+				if query.RevisionFromName(target.RevisionName).Hash() == in.StableRevisionHash {
+					stableShare += target.Percent
+				}
+			}
+			if stableShare <= 0 || in.PerRevisionPods[in.StableRevisionHash] != 0 {
+				t.Fatalf("the split held before the request stands until a stable pod serves again, got %+v with pods %v",
+					isvc.Status.Components[v1beta1.EngineComponent].Traffic, in.PerRevisionPods)
+			}
+		})
 	}
 }
 

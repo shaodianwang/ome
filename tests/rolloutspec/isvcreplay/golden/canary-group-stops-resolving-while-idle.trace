@@ -1,0 +1,38 @@
+tick=0 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=1 replicas=2 ready=2 serving=2 updated=2 updatedReady=2 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=1 note a settled service; the policy resolves and the unit reads Stable
+tick=1 pass cache=live generation=1
+tick=1 run outcome=none policies=[canary-policy:valid]
+tick=1 run active=nil
+tick=1 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=1 service create name=svc-a-engine-rev-f332566b stage=dispatch
+tick=1 service create name=svc-a-engine-rev-f332566b-headless stage=dispatch
+tick=1 dispatch unit=engine state=Idle phase=Stable record=nil requeue=none
+tick=1 traffic component=engine nil
+tick=1 coordination conditions RolloutCoordinationReady=absent
+tick=1 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=Stable
+tick=1 flush which=final result=written statusWrites=1 run=desired groups=none
+tick=1 pass result=none
+tick=2 note the policy is deleted with no run pinned; the run layer parks the plan and the unit is not dispatched
+tick=2 apply clock.advance by=1m0s now=t+1m0s
+tick=2 apply plan.unresolved policy=canary-policy now=t+1m0s
+tick=2 pass cache=live generation=1
+tick=2 run outcome=none policies=[]
+tick=2 run active=nil
+tick=2 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=2 ir patch name=svc-a-engine stage=project partition=1→2 generation=1→2
+tick=2 coordination conditions RolloutCoordinationReady=absent
+tick=2 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=Stable
+tick=2 flush which=final result=written statusWrites=1 run=same groups=none
+tick=2 pass result=none
+tick=3 note a later pass finds the same park and still writes no record
+tick=3 apply clock.advance by=1m0s now=t+2m0s
+tick=3 apply ctrl.resync now=t+2m0s
+tick=3 publish component=engine current=svc-a-engine-f332566b update=svc-a-engine-f332566b observedGeneration=2 replicas=2 ready=2 serving=2 updated=2 updatedReady=2 rows=[0:Ready@f332566b 1:Ready@f332566b]
+tick=3 pass cache=live generation=1
+tick=3 run outcome=none policies=[]
+tick=3 run active=nil
+tick=3 run conditions RolloutPlanReady=True(NoActiveRun) RolloutPlanDrift=False(InSync)
+tick=3 coordination conditions RolloutCoordinationReady=absent
+tick=3 revisions component=engine ready=f332566b latest=f332566b previous=nil phase=Stable
+tick=3 flush which=final result=short-circuit
+tick=3 pass result=none

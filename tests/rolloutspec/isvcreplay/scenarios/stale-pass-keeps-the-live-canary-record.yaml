@@ -1,0 +1,79 @@
+scenario: stale-pass-keeps-the-live-canary-record
+cells:
+  - canary/Staging/pass.staleRecord/before
+  - canary/Serving/Manual/pass.staleRecord/before
+  - canary/Staging/Final/pass.staleRecord/before
+intentional: >-
+  a pass that reads a copy of the service from before the previous pass's
+  flush decides from a record one step behind: the flush compares the live
+  record with the one the pass read, keeps the live record, phase and
+  traffic, and the pass requeues to decide again from the current record;
+  the walk stages the stale pass behind an intermediate step's capacity
+  wait, behind a served split under a manual pause, and behind the final
+  step's capacity wait
+initial:
+  service:
+    components:
+      engine: {replicas: 4, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        canary:
+          steps:
+            - {capacity: 1, traffic: 10, pause: {}}
+            - {capacity: 2, traffic: 50, pause: {}}
+            - {capacity: "100%", traffic: 100}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service; the unit is not armed and reads Stable
+  - tick: 2
+    note: the template edit lands
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the run opens, the bind arms the unit at step 0 and the first step waits for one canary Instance
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the staged Instance is Ready; the split serves at 10% under the manual pause
+    events:
+      - capacity.reached: {component: engine}
+  - tick: 5
+    note: the operator promotes; the record advances to step 1, which waits for a second canary Instance
+    events:
+      - clock.advance: 1m
+      - verb.promote: {component: engine}
+  - tick: 6
+    note: the next pass reads the copy from before the advance and re-applies the promote it still shows; the flush keeps the live record at step 1 and the pass requeues
+    events:
+      - clock.advance: 1m
+      - pass.staleRecord
+  - tick: 7
+    note: a current pass projects step 1's partition onto the replica
+    events:
+      - clock.advance: 1m
+      - ctrl.resync
+  - tick: 8
+    note: the second Instance is Ready; the split serves at 50% under the manual pause
+    events:
+      - clock.advance: 1m
+      - capacity.reached: {component: engine}
+  - tick: 9
+    note: the next pass reads the copy from before the split served; the flush keeps the live record and traffic and the pass requeues
+    events:
+      - clock.advance: 1m
+      - pass.staleRecord
+  - tick: 10
+    note: the operator promotes; the record advances to the final step, which waits for a third canary Instance
+    events:
+      - clock.advance: 1m
+      - verb.promote: {component: engine}
+  - tick: 11
+    note: the next pass reads the copy from before the advance; the flush keeps the live record at the final step and the pass requeues
+    events:
+      - clock.advance: 1m
+      - pass.staleRecord
+  - tick: 12
+    note: a current pass finds the final step still waiting on its capacity
+    events:
+      - ctrl.resync
