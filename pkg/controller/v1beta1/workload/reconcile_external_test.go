@@ -2053,6 +2053,24 @@ func (h *recoveryHarness) failReadiness(idx int32, runner string) {
 	}
 }
 
+// restoreReadiness clears the readiness fault failReadiness set on the live
+// pods of runner at index idx (every pod of the Instance when runner is
+// empty): the pods report Ready again from the next kubelet pass on.
+func (h *recoveryHarness) restoreReadiness(idx int32, runner string) {
+	h.t.Helper()
+	restored := 0
+	for _, pod := range h.podsOf(idx) {
+		if runner != "" && pod.Labels[query.LabelRunner] != runner {
+			continue
+		}
+		delete(h.readinessFails, pod.UID)
+		restored++
+	}
+	if restored == 0 {
+		h.t.Fatalf("no pod of instance %d runner %q to restore readiness on", idx, runner)
+	}
+}
+
 // settledOn reports whether the Component is at rest on rev with n
 // Instances: every row Ready on rev with no operation, and every live pod
 // carrying rev's hash, the desired image and no crash image.
@@ -13032,5 +13050,166 @@ func TestRollback_AtTheLastStepOfAMetadataRollOverADarkInstance_Lands(t *testing
 				t.Fatalf("instance %d serves while its cause stays", victim)
 			}
 		})
+	}
+}
+
+// A gang source stamped Failed at its drain step is past the point of no
+// return: it has left rotation behind a replacement gang that is in
+// rotation, so the replacement is the Instance's only serving set. The
+// stories below pin that an operator edit reaching the row there never
+// takes that set down: the cycle finishes on its pin and the edit takes
+// effect from the promoted replacement.
+
+// failedGangSurgeAtDrainStep drives a gang Component through a push whose
+// replacement clears the promote bar and takes the source out of rotation,
+// then fails a replacement member's readiness until the operation deadline
+// stamps the source Failed at its drain step with the operation kept. It
+// returns the harness, the replacement's index and the replacement's pods.
+func failedGangSurgeAtDrainStep(t *testing.T) (*recoveryHarness, int32, []*corev1.Pod) {
+	t.Helper()
+	h := newRecoveryHarness(t, true)
+	h.atomicStatus = true
+	h.routed = true
+	h.useRollingBudget(workloadtypes.UpdateStrategySurgeThenDrain)
+	h.driveToReadyOnV1()
+	h.lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: 4 * time.Minute}
+	h.setTarget(h.revFixed, fixedImage)
+
+	atDrainStep := func() bool {
+		s := h.instance(0)
+		return s != nil && s.Operation != nil && s.Operation.SurgeIndex != nil &&
+			s.Operation.Step == workloadtypes.UpdateStepSurgeDrain
+	}
+	if !h.run(20, atDrainStep) {
+		h.dumpState("surge never reached the drain step")
+		t.Fatalf("the gang surge never took the source out of rotation")
+	}
+	surgeIdx := *h.instance(0).Operation.SurgeIndex
+	replacement := h.podsOf(surgeIdx)
+	if len(replacement) != 2 {
+		h.dumpState("replacement gang")
+		t.Fatalf("replacement gang: got %d pods, want the leader and the worker", len(replacement))
+	}
+	for _, pod := range replacement {
+		if !podreadiness.IsServing(pod) {
+			t.Fatalf("replacement pod %s is not in rotation at the drain step", pod.Name)
+		}
+	}
+
+	h.failReadiness(surgeIdx, "worker")
+	failedAtDrainStep := func() bool {
+		s := h.instance(0)
+		return s != nil && s.Phase == workloadtypes.InstancePhaseFailed && s.Operation != nil &&
+			s.Operation.SurgeIndex != nil && s.Operation.Step == workloadtypes.UpdateStepSurgeDrain
+	}
+	if !h.run(20, failedAtDrainStep) {
+		h.dumpState("deadline never stamped the source Failed")
+		t.Fatalf("the operation deadline never stamped the drain-step source Failed")
+	}
+	return h, surgeIdx, replacement
+}
+
+// gangHandoffKept is the invariant both stories hold from the edit to the
+// end of the handoff: every replacement pod is the same object, alive and
+// in rotation; the replacement's row is never handed to the delete wave;
+// and the source row, while it exists, still carries its surge continuation
+// at the drain step rather than a recreate.
+func (h *recoveryHarness) gangHandoffKept(surgeIdx int32, replacement []*corev1.Pod) func() {
+	return func() {
+		h.t.Helper()
+		live := map[types.UID]*corev1.Pod{}
+		for _, pod := range h.podsOf(surgeIdx) {
+			live[pod.UID] = pod
+		}
+		for _, want := range replacement {
+			pod, ok := live[want.UID]
+			if !ok {
+				h.dumpState("replacement pod gone")
+				h.t.Fatalf("replacement pod %s was deleted behind a drained source", want.Name)
+			}
+			if !podreadiness.IsServing(pod) {
+				h.dumpState("replacement pod unrouted")
+				h.t.Fatalf("replacement pod %s left rotation behind a drained source", want.Name)
+			}
+		}
+		if s := h.instance(surgeIdx); s != nil && s.Operation != nil && s.Operation.Type == workloadtypes.InstanceOperationDelete {
+			h.dumpState("replacement handed to the delete wave")
+			h.t.Fatalf("the replacement's row was handed to the delete wave while it was the only serving set")
+		}
+		if s := h.instance(0); s != nil && (s.Incarnation != 1 || s.Operation == nil || s.Operation.SurgeIndex == nil ||
+			s.Operation.Step == workloadtypes.UpdateStepDrain) {
+			h.dumpState("source left the surge machine")
+			h.t.Fatalf("the drain-step source left the surge machine: %+v", s)
+		}
+	}
+}
+
+// gangHandedOver reports the end of the handoff: the source row is gone and
+// the replacement is Ready on the pinned revision with no operation.
+func (h *recoveryHarness) gangHandedOver(surgeIdx int32, pinned string) func() bool {
+	return func() bool {
+		if h.instance(0) != nil {
+			return false
+		}
+		s := h.instance(surgeIdx)
+		return s != nil && s.Phase == workloadtypes.InstancePhaseReady && s.RunningRevision == pinned && s.Operation == nil
+	}
+}
+
+// The roll is pinned back onto the running revision while a gang source
+// sits Failed at its drain step. Zero revision distance reaches the row
+// through no trigger of its own, and past the Surge step the cycle finishes
+// on its pin: the replacement keeps serving through the rollback, is
+// promoted once the drained source is gone, and the rolled-back target then
+// re-enters with a fresh surge from the promoted gang.
+//
+// Cells: instance/Failed/GangSurgeDrain/spec.rollbackTarget[set]/before
+func TestFailedGangSurgeAtDrainStep_RollbackKeepsTheReplacementAndFinishesTheHandoff(t *testing.T) {
+	h, surgeIdx, replacement := failedGangSurgeAtDrainStep(t)
+	kept := h.gangHandoffKept(surgeIdx, replacement)
+
+	h.setTarget(h.revV1, goodImage)
+	h.step()
+	kept()
+
+	h.restoreReadiness(surgeIdx, "worker")
+	if !h.runWithInvariant(40, h.gangHandedOver(surgeIdx, h.revFixed.Name), kept) {
+		h.dumpState("handoff never finished")
+		t.Fatalf("the handoff never finished on the pinned revision after the rollback")
+	}
+	if !h.run(60, func() bool { return h.converged(h.revV1.Name) }) {
+		h.dumpState("rollback never re-entered")
+		t.Fatalf("the rolled-back target never re-entered from the promoted replacement")
+	}
+}
+
+// The strategy is switched to RecreatePod while a gang source sits Failed
+// at its drain step. The edit pins nothing on an attempt past its point of
+// no return: no recreate opens on the drained source, the replacement keeps
+// serving, the handoff finishes under the pinned strategy, and the failed
+// attempt charges no ladder; the edit reaches the Instance at its next
+// attempt.
+//
+// Cells: instance/Failed/GangSurgeDrain/spec.strategy/before
+func TestFailedGangSurgeAtDrainStep_StrategyEditKeepsTheReplacementAndFinishesTheHandoff(t *testing.T) {
+	h, surgeIdx, replacement := failedGangSurgeAtDrainStep(t)
+	kept := h.gangHandoffKept(surgeIdx, replacement)
+
+	h.useStrategy(workloadtypes.UpdateStrategyRecreatePod)
+	h.step()
+	kept()
+
+	h.restoreReadiness(surgeIdx, "worker")
+	if !h.runWithInvariant(40, h.gangHandedOver(surgeIdx, h.revFixed.Name), kept) {
+		h.dumpState("handoff never finished")
+		t.Fatalf("the handoff never finished under the pinned strategy after the edit")
+	}
+	h.settle(3)
+	if !h.converged(h.revFixed.Name) {
+		h.dumpState("not settled on the pinned revision")
+		t.Fatalf("the Instance did not settle on the pinned revision after the handoff")
+	}
+	if b := h.findBlock(h.revFixed.Name); b != nil {
+		t.Fatalf("the finished handoff charged the revision's ladder: %+v", *b)
 	}
 }

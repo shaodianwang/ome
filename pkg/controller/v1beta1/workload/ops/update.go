@@ -706,7 +706,10 @@ func evaluateUpdateTriggerFast(input workload.ReconcileInput, inst workload.Inst
 	// whichever phase its pods give it: gated by its ladder below and
 	// re-opened as a fresh start.
 	parked := workload.StateOf(s) == workload.StateUpdateParked
-	if s.Phase == workload.InstancePhaseUpdating && !parked {
+	// A gang source Failed past its Surge step is an attempt in flight
+	// whatever the stamp says: the handoff finishes on its pin, a target
+	// equal to the running revision included.
+	if (s.Phase == workload.InstancePhaseUpdating && !parked) || failedGangSurgeDrainContinuation(s) {
 		return UpdateTriggerDecision{Trigger: true}, false
 	}
 	// A Failed Instance must still re-trigger toward a NEW target. Once a
@@ -827,6 +830,14 @@ func gangSurgeSourceClaim(s *workload.InstanceStatus) bool {
 	return surgeClaim(s) && s.Operation.SurgeIndex != nil
 }
 
+// failedGangSurgeDrainContinuation reports a gang source stamped Failed past
+// its Surge step: it is out of rotation behind a replacement that is in
+// rotation, so only the surge machine can finish the handoff, on its pin.
+func failedGangSurgeDrainContinuation(s *workload.InstanceStatus) bool {
+	return gangSurgeSourceClaim(s) && s.Phase == workload.InstancePhaseFailed &&
+		s.Operation.Step != workload.UpdateStepSurge
+}
+
 // isSurgeOwnedStatus reports whether the SurgeThenDrain sub-machine is
 // running on this row, so a mode resolved from a since-edited strategy must
 // not be dispatched over it.
@@ -835,22 +846,27 @@ func gangSurgeSourceClaim(s *workload.InstanceStatus) bool {
 // Failed row is not, since a failed surge has already escalated to operator
 // attention and editing the strategy is one of the levers used to rescue it.
 // Mechanism: of the update pass's sub-machines, the one in flight is the
-// surge cycle.
+// surge cycle. The one Failed row the surge machine keeps is a gang source
+// past its Surge step: its replacement is in rotation and no other mode can
+// finish the handoff.
 func isSurgeOwnedStatus(s *workload.InstanceStatus) bool {
 	switch workload.StateOf(s) {
 	case workload.StateUpdateSurge, workload.StateUpdateSurgeDrain:
 		return true
 	}
-	return false
+	return failedGangSurgeDrainContinuation(s)
 }
 
 // effectiveUpdateStrategy returns the strategy an attempt runs under: the
 // one pinned on the operation in flight, or the desired one when no attempt
 // owns the Instance. A Failed row and a parked attempt hold no attempt —
 // editing the strategy is the operator's way out of a mode that cannot
-// make progress — so their preserved operation does not pin anything.
+// make progress — so their preserved operation does not pin anything,
+// except for a gang source Failed past its Surge step, whose handoff the
+// surge machine still finishes on the pinned strategy.
 func effectiveUpdateStrategy(s *workload.InstanceStatus, desired workload.UpdateStrategyType) workload.UpdateStrategyType {
-	if workload.Owner(s) != workload.OwnerUpdate || s.Operation.Strategy == "" {
+	pinned := workload.Owner(s) == workload.OwnerUpdate || failedGangSurgeDrainContinuation(s)
+	if !pinned || s.Operation.Strategy == "" {
 		return desired
 	}
 	return s.Operation.Strategy
@@ -1232,13 +1248,13 @@ func EvaluateWreckage(s *workload.InstanceStatus, target *appsv1.ControllerRevis
 	return len(alienRevisionPods(s, target.Name, instancePods)) > 0
 }
 
-// failedGangSurgeContinuation reports the gang wreckage shape: a Failed
-// source whose preserved gang-surge operation targets a revision other
-// than the current roll target.
+// failedGangSurgeContinuation reports the gang wreckage shape: a source
+// Failed at its Surge step whose kept gang surge targets a revision other
+// than the roll target; past that step the surge machine finishes the row.
 func failedGangSurgeContinuation(s *workload.InstanceStatus, targetName string) bool {
 	return s.Phase == workload.InstancePhaseFailed &&
 		s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
-		s.Operation.SurgeIndex != nil &&
+		s.Operation.SurgeIndex != nil && s.Operation.Step == workload.UpdateStepSurge &&
 		s.Operation.TargetRevision != targetName
 }
 
