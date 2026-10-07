@@ -98,10 +98,12 @@ func applyPodGroup(ctx context.Context, d *driver, ev TimelineEvent) (string, er
 			return "", fmt.Errorf("replay: reassign podgroup %s: %w", name, err)
 		}
 	case "PhaseFailed":
+		// The fake apiserver serves no status subresource for PodGroups, so
+		// the phase is written through the object itself.
 		if err := d.staging(func() error {
 			group.Status.Phase = schedulingv1alpha1.PodGroupFailed
 			group.Status.Failed = group.Spec.MinMember
-			return d.cli.Status().Update(ctx, group)
+			return d.cli.Update(ctx, group)
 		}); err != nil {
 			return "", fmt.Errorf("replay: fail podgroup %s: %w", name, err)
 		}

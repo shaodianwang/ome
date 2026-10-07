@@ -1,0 +1,73 @@
+tick=1 note the gang's PodGroup is announced before its first member, and the Create pass materializes both
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 2 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-leader-0 revision=4c292506 incarnation=1 ordinal=0
+tick=1 pod create name=svc-a-engine-0-worker-0 revision=4c292506 incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note both members report Ready and the leader enters rotation, so the Instance promotes as one
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-leader-0 serving=absent→True
+tick=2 pod status-patch name=svc-a-engine-0-worker-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-4c292506 readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (2 pod(s) serving)
+tick=2 pass result=none
+tick=3 note the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=3 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-f5f6d007 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 row=1 write incarnation=1 phase=Creating runningRevision=nil targetRevision=svc-a-engine-f5f6d007 readySince=nil op=op#3{type=Update step=GangSurgeTarget target=svc-a-engine-f5f6d007 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 gang surge to revision svc-a-engine-f5f6d007 (surge-index=1)
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the replacement's PodGroup is announced before its first member, and both members are created
+tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=4 podgroup create name=svc-a-engine-1
+tick=4 row=1 write no-op precondition=no-change
+tick=4 pod create name=svc-a-engine-1-leader-0 revision=f5f6d007 incarnation=1 ordinal=0
+tick=4 pod create name=svc-a-engine-1-worker-0 revision=f5f6d007 incarnation=1 ordinal=0
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the replacement group's controller reference is rewritten to another owner; the gang verdict ends the marker alone, Failed with its operation kept, while the source stays Updating and keeps driving the surge
+tick=5 apply gang.podGroup[OwnershipConflict] podGroup=svc-a-engine-1 state=OwnershipConflict now=t+0s
+tick=5 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=5 row=1 write no-op precondition=no-change
+tick=5 hold cleared
+tick=5 row=1 write incarnation=1 phase=Failed runningRevision=nil targetRevision=svc-a-engine-f5f6d007 readySince=nil op=op#3{type=Update step=GangSurgeTarget target=svc-a-engine-f5f6d007 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-1 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=5 warn instanceFailed index=1 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-1 is controlled by StatefulSet/other-owner, not by this owner
+tick=5 pass result=after:5s
+tick=6 note the foreign group is deleted from outside; the surge index is pinned in the plan, so the PodGroup pass restores the group and the names are no longer withheld
+tick=6 apply gang.podGroup[Deleted] podGroup=svc-a-engine-1 state=Deleted now=t+0s
+tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=6 podgroup create name=svc-a-engine-1
+tick=6 row=1 write no-op precondition=no-change
+tick=6 hold cleared
+tick=6 pass result=after:5s
+tick=7 note the replacement worker is lost and the apiserver rejects its refill create as invalid; the 422 is permanent, so the refill is disposed on the marker, whose operation is cleared with the rejection on LastFailure and a RetryBlock recorded against the pinned revision
+tick=7 apply pod.deleted[target] pod=svc-a-engine-1-worker-0 now=t+0s
+tick=7 apply api.invalid verb=create resource=pods count=1 now=t+0s
+tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=7 row=1 write no-op precondition=no-change
+tick=7 pod create-rejected name=svc-a-engine-1-worker-0 rejection=api.invalid
+tick=7 retryblock target=svc-a-engine-f5f6d007 persist nil→{state=Held attempts=1 reason=InvalidPodSpec}
+tick=7 warn retryHeld target=svc-a-engine-f5f6d007 attempts=1 reason=InvalidPodSpec
+tick=7 row=1 write incarnation=1 phase=Failed runningRevision=nil targetRevision=svc-a-engine-f5f6d007 readySince=nil op=nil lastFailure={pod= reason=InvalidPodSpec message=Pod "svc-a" is invalid: spec.containers[0].resources.limits: Invalid value: "-1": must be greater than or equal to 0} precondition=ok
+tick=7 event Warning InstanceRejected OMENative component=engine instance=1: apiserver rejected pod svc-a-engine-1-worker-0 (InvalidPodSpec: Pod "svc-a" is invalid: spec.containers[0].resources.limits: Invalid value: "-1": must be greater than or equal to 0); revision svc-a-engine-f5f6d007 held for retry
+tick=7 hold cleared
+tick=7 pass result=after:5s
+tick=8 note the source's claim finds its target slot occupied by a row that no longer carries its marker, so the source resets to Ready on its running revision; the orphaned index is referenced by no operation
+tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=8 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-4c292506 readySince=t+0s op=nil precondition=ok
+tick=8 hold cleared
+tick=8 pass result=after:5s
+tick=9 note the orphaned index leaves the plan, so the scale-down wave stamps it Deleting and drains the replacement leader it still holds
+tick=9 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=9 row=1 write incarnation=1 phase=Deleting runningRevision=nil targetRevision=svc-a-engine-f5f6d007 readySince=nil op=op#4{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=InvalidPodSpec message=Pod "svc-a" is invalid: spec.containers[0].resources.limits: Invalid value: "-1": must be greater than or equal to 0} precondition=ok
+tick=9 pass result=requeue

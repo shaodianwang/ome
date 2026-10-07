@@ -1,0 +1,62 @@
+# The update strategy is edited to a recreate while a gang surge pair sits
+# Failed with the abandon's cleanup claim on the marker and the retired
+# pods still terminating. A Failed source at its Surge step holds no
+# attempt to the owner table, so the edit is read at once: a fresh recreate
+# replaces the kept continuation, no abandon finishes and the failed wave is
+# not charged, and the cleanup marker, referenced by no operation, leaves
+# the plan and is reaped by the scale-down wave with the pods the
+# retirement had already deleted.
+scenario: gang-cleanup-failed-strategy-edit-reaps-the-marker
+arrows:
+  - T-ready-surge
+  - T-empty-gang-surge-target
+  - T-surge-deadline
+  - T-gangtarget-deadline
+  - T-failedgangtarget-cleanup-failed
+cells:
+  - instance/Failed/GangSurgeTargetCleanup/spec.strategy/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the deadline elapses with the replacement never ready, so the source is stamped Failed at its Surge step and the marker Failed too, both operations kept
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: the abandon claims the cleanup marker and deletes the retired replacement's pods, which stay terminating
+  - tick: 7
+    note: the strategy is edited to a recreate; the Failed source holds no attempt to the owner table, so the edit is read at once and a fresh recreate replaces the kept gang surge, taking the source's serving gates down; the retirement does not finish and nothing is charged to the ladder
+    events:
+      - spec.strategy: {strategy: RecreatePod}
+  - tick: 8
+    note: the cleanup marker is referenced by no operation and leaves the plan, so the scale-down wave stamps it Deleting and the pass ends on the wave
+  - tick: 9
+    note: the retired pods are gone, so the wave removes the marker row
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

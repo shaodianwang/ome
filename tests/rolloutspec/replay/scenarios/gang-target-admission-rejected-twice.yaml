@@ -1,0 +1,55 @@
+# A replacement member is refused by its node while the gang surge builds,
+# and the refusal is observed again while the recycle's delete is still in
+# flight. The first observation has the source's pass delete the refused
+# member at once, with the refusal lifted onto the source's LastFailure;
+# the second lands on the same row and is satisfied by the delete already
+# issued, because the recycle waits on the surge index's expectations
+# before it touches anything. Once the object is gone the member is
+# refilled at the same index, PodGroup first.
+scenario: gang-target-admission-rejected-twice
+arrows:
+  - T-empty-gang-surge-target
+cells:
+  - instance/Update/GangSurgeTarget/pod.admissionRejected[OutOfResource]/before
+  - instance/Update/GangSurgeTarget/pod.admissionRejected[OutOfResource]/boundary@T-gangtarget-ready
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement worker binds and its node refuses it; a refused member never ran, so the source's pass deletes it at once with the refusal on the source's LastFailure
+    events:
+      - pod.scheduled[target]: {pod: {index: 1, runner: worker}, message: node-1}
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 1, runner: worker}, resource: nvidia.com/gpu, message: "Pod Node didn't have enough resource: nvidia.com/gpu"}
+  - tick: 6
+    note: the refusal is observed again on the member the recycle is deleting; the delete is still in flight, so the surge index's expectations hold the recycle and nothing new is written
+    events:
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 1, runner: worker}, resource: nvidia.com/gpu, message: "Pod Node didn't have enough resource: nvidia.com/gpu"}
+  - tick: 7
+    note: the refused member is gone, so the same attempt refills it at the same index with the PodGroup ensured first
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

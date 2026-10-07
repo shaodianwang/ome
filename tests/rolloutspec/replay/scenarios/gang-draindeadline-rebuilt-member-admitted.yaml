@@ -1,0 +1,101 @@
+# A gang source fails on its deadline at the drain step and then loses a
+# replacement member. The continuation rebuilds the member under the same
+# attempt: quota refuses the first create and the refusal is recorded on the
+# marker, the next create lands, the rebuilt member is held behind a
+# scheduling gate and then admitted while no clock runs on a Failed row and
+# a failed PodGroup reading is skipped on a pair the finalization owns, and
+# once the member is Ready the source's pods are deleted behind their
+# endpoints, a rejected delete costing one pass, and the hand-over finishes
+# on the pinned revision.
+scenario: gang-draindeadline-rebuilt-member-admitted
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-surgedrain-deadline
+  - T-failedgangtarget-ready
+  - T-failedgangsurgedrain-complete
+cells:
+  - instance/Failed/GangSurgeDrain/pod.deleted[target]/before
+  - instance/Failed/GangSurgeDrain/api.quotaDenied/before
+  - instance/Failed/GangSurgeDrain/pod.schedulingGated/before
+  - instance/Failed/GangSurgeDrain/pod.admitted/before
+  - instance/Failed/GangSurgeDrain/gang.podGroup[PhaseFailed]/before
+  - instance/Failed/GangSurgeDrain/timer.operationDeadline/before
+  - instance/Failed/GangSurgeDrain/api.invalid/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: both replacement members report Ready and the leader enters rotation, so the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 6
+    note: the replacement worker's readiness regresses while the source is still published, so the pair is no longer fully serving
+    events:
+      - pod.containersNotReady[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the deadline elapses with the replacement short, so the source is stamped Failed at its drain step and the marker Failed too, both operations kept
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 8
+    note: the short worker is lost and quota refuses its rebuild; the continuation rebuilds a lost member under the same attempt, so the refusal is recorded on the marker and the create is retried
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+      - api.quotaDenied: {verb: create}
+  - tick: 9
+    note: quota admits the rebuild, so the member is created at the pinned revision with no retry counted and no wave charged
+  - tick: 10
+    note: the rebuilt worker is held behind a scheduling gate as the elapsed deadline is read again and the replacement group reports a failed phase; a Failed row is skipped by the escalation pass, the finalization owns the pair's groups so the reading is not judged, and the continuation waits
+    events:
+      - pod.schedulingGated: {pod: {index: 1, runner: worker}}
+      - timer.operationDeadline: {slack: 1s}
+      - gang.podGroup[PhaseFailed]: {instance: 1}
+  - tick: 11
+    note: the worker is admitted; the gate exit itself advances nothing and the continuation still waits for the member to be runtime-ready
+    events:
+      - pod.admitted: {pod: {index: 1, runner: worker}}
+  - tick: 12
+    note: the rebuilt worker binds and reports Ready, so the gang is whole again; the source leader is still in the routed Service, so nothing is deleted yet
+    events:
+      - pod.scheduled[target]: {pod: {index: 1, runner: worker}, message: node-1}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 13
+    note: the source leader leaves the routed Service and the apiserver rejects the drain's first delete as invalid; the refusal is not classified, so the pass leaves through its error path
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - api.invalid: {verb: delete}
+  - tick: 14
+    note: the retried pass deletes the source pods
+  - tick: 15
+    note: the source pods are gone, so the Failed marker is promoted Ready on the pinned revision and the source row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

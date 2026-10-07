@@ -1,0 +1,77 @@
+# A gang source fails on its deadline at the drain step, loses a replacement
+# member, and the rebuilt member is refused by its node. A refused member is
+# terminal and holds its name, and the recycle that would free it declines
+# past the attempt's deadline and withholds the build with it, so the
+# continuation neither replaces the member nor finishes the hand-over: the
+# pair stands with the source out of rotation and the replacement short,
+# and a corrective revision changes nothing, because past the Surge step
+# the cycle finishes only on its pin.
+scenario: gang-draindeadline-rebuilt-member-refused
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-surgedrain-deadline
+cells:
+  - instance/Failed/GangSurgeDrain/pod.admissionRejected[OutOfResource]/before
+  - instance/Failed/GangSurgeDrain/pod.phaseTerminal[Failed]/before
+  - instance/Failed/GangSurgeDrain/spec.revision/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: both replacement members report Ready and the leader enters rotation, so the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 6
+    note: the replacement worker's readiness regresses while the source is still published, so the pair is no longer fully serving
+    events:
+      - pod.containersNotReady[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the deadline elapses with the replacement short, so the source is stamped Failed at its drain step and the marker Failed too, both operations kept
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 8
+    note: the short worker is lost, so the continuation rebuilds it under the same attempt at the pinned revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 9
+    note: the rebuilt worker binds and its node refuses it; the refused member is terminal and holds its name, and the recycle declines past the attempt's elapsed deadline and withholds the build, so nothing is deleted or created
+    events:
+      - pod.scheduled[target]: {pod: {index: 1, runner: worker}, message: node-1}
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 1, runner: worker}, resource: nvidia.com/gpu, message: "Pod Node didn't have enough resource: nvidia.com/gpu"}
+  - tick: 10
+    note: a tick with nothing changed finds the refused member still holding its name and waits again
+  - tick: 11
+    note: a corrective revision arrives; past the Surge step the cycle finishes only on its pin, so the continuation reads the same refused member and the pair stays where it is
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 12
+    note: a further tick changes nothing; the pair has no exit of its own

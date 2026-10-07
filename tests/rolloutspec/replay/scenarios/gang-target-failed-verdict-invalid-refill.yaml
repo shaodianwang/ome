@@ -1,0 +1,61 @@
+# The replacement gang's PodGroup is taken over by another controller while
+# the surge is in flight, so the marker is Failed with its operation kept
+# and the source keeps driving the build. The foreign group is deleted, a
+# member is lost, and the apiserver rejects its refill create as invalid.
+# A 422 on a member create is permanent and is disposed on the index the
+# create was issued under, which is the marker: its operation is cleared
+# with the rejection on LastFailure and a RetryBlock recorded against the
+# pinned revision. The source's claim then finds its target slot occupied
+# by a row that is no longer its marker and resets to Ready on its running
+# revision, and the orphaned index leaves the plan to the scale-down wave.
+scenario: gang-target-failed-verdict-invalid-refill
+arrows:
+  - T-empty-gang-surge-target
+cells:
+  - instance/Failed/GangSurgeTarget/api.invalid/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement group's controller reference is rewritten to another owner; the gang verdict ends the marker alone, Failed with its operation kept, while the source stays Updating and keeps driving the surge
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 1}
+  - tick: 6
+    note: the foreign group is deleted from outside; the surge index is pinned in the plan, so the PodGroup pass restores the group and the names are no longer withheld
+    events:
+      - gang.podGroup[Deleted]: {instance: 1}
+  - tick: 7
+    note: the replacement worker is lost and the apiserver rejects its refill create as invalid; the 422 is permanent, so the refill is disposed on the marker, whose operation is cleared with the rejection on LastFailure and a RetryBlock recorded against the pinned revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+      - api.invalid: {verb: create}
+  - tick: 8
+    note: the source's claim finds its target slot occupied by a row that no longer carries its marker, so the source resets to Ready on its running revision; the orphaned index is referenced by no operation
+  - tick: 9
+    note: the orphaned index leaves the plan, so the scale-down wave stamps it Deleting and drains the replacement leader it still holds

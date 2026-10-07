@@ -1,0 +1,57 @@
+# A gang surge is superseded while its replacement is incomplete, so the
+# marker is claimed for cleanup, and the retired replacement's PodGroup
+# then reports a failed phase. A cleanup marker is an index the terminal
+# finalization owns, so the PodGroup pass neither classifies nor resets its
+# group: the retirement deletes the retired pods and removes the marker on
+# the claim alone, and the source, reset Ready, surges again at the new
+# revision.
+scenario: gang-cleanup-podgroup-failed-reading-skipped
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+  - T-gangcleanup-done
+cells:
+  - instance/Update/GangSurgeTargetCleanup/gang.podGroup[PhaseFailed]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the template changes again while the replacement is still incomplete, so the marker is claimed for cleanup and the retired pods are deleted; a spec change is not a failure, so no RetryBlock is recorded
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 6
+    note: the retired replacement's PodGroup reports a failed phase while its pods terminate; the index is owned by the terminal finalization, so the PodGroup pass neither classifies nor resets the group and the retirement waits on the pods alone
+    events:
+      - gang.podGroup[PhaseFailed]: {instance: 1}
+  - tick: 7
+    note: the retired pods are gone, so the marker row is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 8
+    note: the reset source surges again at the new revision and claims a replacement index
