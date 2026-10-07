@@ -23,15 +23,12 @@ tick=4 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Backoff atte
 tick=4 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
 tick=4 warn instanceFailed index=0 pod=svc-a-engine-0-default-1 reason=ImagePullBackOff: workload-caused failure; revision svc-a-engine-6f8b1e6c held for retry — fix the image/config and publish a corrected revision
 tick=4 pass result=after:5s
-tick=5 note something else deletes the wedged replacement and it is gone; the Instance is Ready again on its serving source and its roll is denied by the block
+tick=5 note something else deletes the wedged replacement and it is gone; the row stays Failed on its serving source and its roll is denied by the block
 tick=5 apply pod.terminating[target] pod=svc-a-engine-0-default-1 now=t+2m0s
 tick=5 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+2m0s
-tick=5 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
 tick=5 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): ImagePullBackOff
-tick=5 row=0 write no-op precondition=no-change
-tick=5 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
 tick=5 pass result=after:2m0s
-tick=6 note the block comes due, so it no longer denies the trigger; the roll starts on this pass through the gate and the block flips to RetryInProgress
+tick=6 note the block comes due, so it no longer denies the trigger; the roll starts from Failed on this pass through the gate and the block flips to RetryInProgress
 tick=6 apply timer.retryAt to=t+4m1s now=t+4m1s
 tick=6 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
 tick=6 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+4m1s lastProgressAt=t+4m1s deadline=t+34m1s} lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok

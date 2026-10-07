@@ -14,6 +14,10 @@ cells:
   - instance/Failed/Repair/pod.containersNotReady[source]/before
   - instance/Failed/Repair/pod.containersReady[source]/boundary@T-failedrepair-resume
   - instance/Failed/Repair/pod.containersReady[source]/after@T-failedrepair-resume
+intentional: >-
+  a Failed row another verb still claims is that verb's: the Create pass
+  does not re-prove a spent repair's set, so the restart pass's own promote
+  is the only Ready stamp and the only InstanceReady announcement
 initial:
   spec:
     replicas: 1

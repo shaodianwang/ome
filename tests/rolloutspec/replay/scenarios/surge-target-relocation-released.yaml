@@ -20,7 +20,10 @@ cells:
 intentional: >-
   a node exclusion whose rebuild the scheduler could not place is
   released past the unschedulable grace; the attempt fails
-  environment-caused and the budget the directive spent stays spent
+  environment-caused and the budget the directive spent stays spent. The
+  Failed source whose wedged replacement is removed is no crash-loop park
+  (its record names the replacement, not its own pod) and is not promoted
+  by the Create pass, so it re-surges from Failed rather than from Ready
 initial:
   spec:
     replicas: 2

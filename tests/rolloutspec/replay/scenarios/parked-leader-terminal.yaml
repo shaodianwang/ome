@@ -1,0 +1,73 @@
+# A parked gang's leader exits with phase Failed while the worker stands.
+# The row reads Failed through its set and no Create attempt opens over the
+# parked one: a dead member of a parked set is recycled by the attempt that
+# replaces the set, which the block coming due admits.
+scenario: parked-leader-terminal
+arrows:
+  - T-empty-create
+  - T-ready-recreate
+  - T-drain-deadline
+  - T-failed-parked-serves
+  - T-parked-down
+  - T-parked-retry
+cells:
+  - instance/Update/Parked/pod.phaseTerminal[Failed]/before
+  - instance/Update/Parked/timer.retryAt/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1h, maxDelay: 2h, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes, so the roll drains the gang for a recreate
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation and the drained members are deleted, so the roll recreates them at the new revision
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 5
+    note: the rebuilt leader reports ContainersReady and is gated serving while the worker is still booting, so the set is short of serving
+    events:
+      - pod.containersReady[target]: {pod: {index: 0, runner: leader}}
+  - tick: 6
+    note: the deadline elapses on the live set; the ladder counts the wave and the attempt is parked with the row Failed
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 7
+    note: the worker comes up and both members carry the serving gate, so the parked set serves in full and the row reads as the roll in progress with the attempt still parked
+    events:
+      - pod.containersReady[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 8
+    note: the leader exits with phase Failed; the set serves nothing, so the row reads Failed with the attempt kept, and nothing opens over it
+    events:
+      - pod.phaseTerminal[Failed]: {pod: {index: 0, runner: leader}}
+  - tick: 9
+    note: a further pass finds the dead leader still holding its name and the row Failed with the attempt kept
+  - tick: 10
+    note: the block comes due; the gate admits and a fresh recreate attempt with a new incarnation replaces the parked one, draining the dead leader with the worker
+    events:
+      - timer.retryAt: {slack: 1s}

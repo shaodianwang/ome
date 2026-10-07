@@ -20,11 +20,11 @@ tick=3 apply pod.containersReady[source] pod=svc-a-engine-0-worker-0 now=t+0s
 tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=3 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-4c292506 readySince=t+0s op=nil lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
 tick=3 hold cleared
-tick=3 pod status-patch name=svc-a-engine-0-leader-0 serving=absent→True
-tick=3 pod status-patch name=svc-a-engine-0-worker-0 serving=absent→True
-tick=3 pass result=after:5s
+tick=3 pass result=none
 tick=4 note the leader's readiness is observed again; the adoption stamp is idempotent and the row is already Ready, so nothing is written
 tick=4 apply pod.containersReady[source] pod=svc-a-engine-0-leader-0 now=t+0s
 tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=4 hold cleared
+tick=4 pod status-patch name=svc-a-engine-0-leader-0 serving=absent→True
+tick=4 pod status-patch name=svc-a-engine-0-worker-0 serving=absent→True
 tick=4 pass result=after:5s

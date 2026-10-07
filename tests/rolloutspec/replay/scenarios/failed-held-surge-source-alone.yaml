@@ -1,0 +1,54 @@
+# A single-pod surge wedges on a revision whose ladder allows one attempt,
+# so the revision is held with the wedged replacement beside the serving
+# source. The replacement is then deleted by another hand and is gone. The
+# source alone serving does not return the row to Ready: the row stays
+# Failed with no operation on its running revision for as long as the hold
+# stands, and nothing opens.
+scenario: failed-held-surge-source-alone
+arrows:
+  - T-ready-surge
+  - T-surge-stuckgrace
+cells:
+  - instance/Failed/pod.terminating[target]/before
+  - instance/Failed/pod.deleted[target]/before
+  - instance/Failed/gate.deny[Held]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 1, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the pull wedges immediately, but the replacement is younger than the grace, so the surge keeps polling
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, ordinal: 1}, message: "manifest unknown"}
+  - tick: 4
+    note: the grace elapses on the wedged replacement; the surge is disposed and the one-attempt ladder holds the revision, with the replacement left standing beside the source
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 5
+    note: another hand deletes the wedged replacement; on its way out it changes nothing the Failed row reads
+    events:
+      - pod.terminating[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 6
+    note: the replacement is gone and the source is the Instance's only pod; the row stays Failed on its running revision under the hold
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 7
+    note: a further pass finds the row where the hold left it, the source still serving alone

@@ -11,6 +11,12 @@ arrows:
   - T-failed-recycle-resurge
 cells:
   - instance/Failed/pod.deleted[target]/before
+intentional: >-
+  a Failed single-pod surge source is no crash-loop park: its failure
+  record names the replacement, not a pod of its promoted set, so once the
+  replacement is gone the restart pass does not return the source to Ready
+  and the Create pass does not promote a row that ran another revision; the
+  row leaves Failed only through the roll
 initial:
   spec:
     replicas: 1

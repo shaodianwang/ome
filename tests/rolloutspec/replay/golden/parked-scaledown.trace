@@ -93,7 +93,7 @@ tick=7 condition type=GangSchedulingUnavailable status=False reason=GangScheduli
 tick=7 hold gate=RetryBlock target=svc-a-engine-367ef4b7 reason=update to svc-a-engine-367ef4b7 in backoff after 1 failed attempt(s): ReadinessGateNotSatisfied
 tick=7 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#3{type=Update step=Parked target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 waiting=RetryBlock strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-0-leader-0 reason=ReadinessGateNotSatisfied message=pod containers are ready but a readiness gate keeps it out of its Service; unsatisfied gates: ome.io/serving} precondition=ok
 tick=7 row=1 write incarnation=2 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#4{type=Update step=Parked target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 waiting=RetryBlock strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-1-leader-0 reason=ReadinessGateNotSatisfied message=pod containers are ready but a readiness gate keeps it out of its Service; unsatisfied gates: ome.io/serving} precondition=ok
-tick=7 pass result=after:5s
+tick=7 pass result=after:1h0m0s
 tick=8 note the replica count drops to one, so the second parked row leaves the plan and the wave stamps Deleting over its parked operation
 tick=8 apply spec.replicasDown replicas=1 generation=2 now=t+30m1s
 tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required

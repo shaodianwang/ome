@@ -2251,7 +2251,9 @@ func TestCreate_FirstMaterializationUnderACanaryRendersTheTarget(t *testing.T) {
 
 // A parked attempt is the fresh start a disposed attempt leaves behind: the
 // Create pass opens a first attempt over it once its pods are gone, in
-// whichever phase its pods last gave it.
+// whichever phase its pods last gave it. While a live pod of the set
+// stands the row is the roll's, in either phase; a set left only in dead
+// pods is gone.
 func TestCreateFreshStart_ParkedAttemptIsAFreshStart(t *testing.T) {
 	parked := func(phase workload.InstancePhase) *workload.InstanceStatus {
 		return &workload.InstanceStatus{Index: 0, Phase: phase, Operation: &workload.InstanceOperation{
@@ -2259,15 +2261,23 @@ func TestCreateFreshStart_ParkedAttemptIsAFreshStart(t *testing.T) {
 			Waiting: string(workload.RolloutHoldGateRetryBlock),
 		}}
 	}
+	live := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "live"}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+	dead := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dead"}, Status: corev1.PodStatus{Phase: corev1.PodFailed}}
 	for _, phase := range []workload.InstancePhase{workload.InstancePhaseFailed, workload.InstancePhaseUpdating} {
-		if !createFreshStart(parked(phase)) {
-			t.Errorf("%s: a parked attempt must read as a fresh start", phase)
+		if !createFreshStart(parked(phase), nil) {
+			t.Errorf("%s: a parked attempt whose set is gone must read as a fresh start", phase)
+		}
+		if !createFreshStart(parked(phase), []*corev1.Pod{dead}) {
+			t.Errorf("%s: a parked attempt left only dead pods must read as a fresh start", phase)
+		}
+		if createFreshStart(parked(phase), []*corev1.Pod{live, dead}) {
+			t.Errorf("%s: a parked attempt with a live pod standing is the roll's, not a fresh start", phase)
 		}
 	}
 	inFlight := &workload.InstanceStatus{Index: 0, Phase: workload.InstancePhaseUpdating, Operation: &workload.InstanceOperation{
 		Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepDrain, TargetRevision: "rev-b",
 	}}
-	if createFreshStart(inFlight) {
+	if createFreshStart(inFlight, nil) {
 		t.Errorf("an attempt in flight is not a fresh start")
 	}
 }

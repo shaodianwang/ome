@@ -2970,6 +2970,35 @@ func namesCrashLoop(row v1beta1.OMENativeInstanceStatus) bool {
 	return row.LastFailure != nil && strings.Contains(row.LastFailure.Message, "crash loop")
 }
 
+// A Failed row whose remembered failure is another generation's - the
+// wedged replacement of a surge the ladder holds, recorded on the source
+// row and since deleted - is no crash-loop park: its serving source does
+// not return it to Ready, and the restart pass leaves the row alone.
+//
+// Cells: instance/Failed/pod.containersReady[source]/before, instance/Failed/pod.deleted[target]/before
+func TestRestart_ReplacementFailureOnTheSourceRowIsNoCrashLoopPark(t *testing.T) {
+	h := newHeldCrashLoop(t, v1beta1.OMENativeInstanceFailed, true /* serving */, 30*time.Second)
+	ir := &v1beta1.InferenceReplica{}
+	key := client.ObjectKey{Namespace: h.isvc.Namespace, Name: irName(h.isvc, workload.ComponentEngine)}
+	if err := h.c.Get(context.Background(), key, ir); err != nil {
+		t.Fatalf("get IR: %v", err)
+	}
+	ir.Status.InstanceStatuses[0].LastFailure.PodName = h.pod.Name + "-surge"
+	ir.Status.InstanceStatuses[0].LastFailure.Reason = "ImagePullBackOff"
+	if err := h.c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("record the replacement's failure on the source row: %v", err)
+	}
+
+	selected, _ := h.pass(h.input(true))
+	if selected {
+		t.Fatalf("the restart pass took a Failed row whose record names a pod outside its promoted set")
+	}
+	row := h.row()
+	if row.Phase != v1beta1.OMENativeInstanceFailed || row.Operation != nil {
+		t.Fatalf("row = %s with operation %+v, want Failed with none: a source serving beside its replacement's record stays Failed", row.Phase, row.Operation)
+	}
+}
+
 // A held ladder parks nothing a serving set sits on: the row stays Ready
 // naming the crash loop, no warning fires, and it is not selected again.
 //

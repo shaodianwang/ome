@@ -35,12 +35,12 @@ tick=6 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+30m1
 tick=6 apply pod.servingOn[source] pod=svc-a-engine-0-default-0 now=t+30m1s
 tick=6 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded
 tick=6 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Parked target=svc-a-engine-6f8b1e6c reason=revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c waiting=RetryBlock strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
-tick=6 pass result=after:5s
+tick=6 pass result=after:1h0m0s
 tick=7 note a not-found answer is armed for the next pod delete and an already-exists answer for the next pod create; a parked attempt issues neither, so nothing consumes them
 tick=7 apply api.notFound verb=delete resource=pods count=1 now=t+30m1s
 tick=7 apply api.alreadyExists verb=create resource=pods count=1 now=t+30m1s
 tick=7 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded
-tick=7 pass result=after:5s
+tick=7 pass result=after:1h0m0s
 tick=8 note the block comes due; the gate admits and the fresh recreate attempt's drain meets the not-found answer, behind which the parked pod is already gone
 tick=8 apply timer.retryAt to=t+1h30m2s now=t+1h30m2s
 tick=8 gate consult strategy=RecreatePod surge=0 unavail=0 verdict=allow

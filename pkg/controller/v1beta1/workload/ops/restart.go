@@ -1046,6 +1046,29 @@ func crashRemembered(s *workload.InstanceStatus) bool {
 	return s.LastFailure != nil && s.ReadySince != nil && s.LastFailure.Time.After(s.ReadySince.Time)
 }
 
+// crashOfPromotedSet reports whether the crash the row remembers is its
+// promoted set's: the record names a pod of that set, at the row's
+// incarnation on the running revision. A surge replacement's failure is
+// recorded on its source row as well and names the other generation's
+// pod; the source's set cannot serve its way out of that record.
+func crashOfPromotedSet(s *workload.InstanceStatus, pods []*corev1.Pod) bool {
+	if !crashRemembered(s) {
+		return false
+	}
+	running := query.RevisionFromName(s.RunningRevision)
+	for _, pod := range pods {
+		if pod == nil || pod.Name != s.LastFailure.PodName {
+			continue
+		}
+		if inc, ok := query.InstanceIncarnationFromLabels(pod); ok && inc != s.Incarnation {
+			return false
+		}
+		podRev := query.RevisionFromPod(pod)
+		return podRev.IsZero() || running.IsZero() || podRev.Same(running)
+	}
+	return false
+}
+
 // crashCountedOnBlock reports whether the ladder already counts the
 // remembered crash of this promoted set: the row's record is dated no
 // earlier than the block's first failure. The record and the block's
@@ -1416,7 +1439,7 @@ type crashLoopEpisode struct {
 // remembers a crash of its promoted set: unpark a park whose set serves,
 // name the loop on a held serving row, clear a note that has gone stale.
 func readCrashLoopEpisode(input workload.ReconcileInput, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) crashLoopEpisode {
-	if s == nil || s.Operation != nil || s.RunningRevision == "" || !crashRemembered(s) {
+	if s == nil || s.Operation != nil || s.RunningRevision == "" || !crashOfPromotedSet(s, pods) {
 		return crashLoopEpisode{}
 	}
 	held := revisionHeld(input, s.RunningRevision)

@@ -35,20 +35,20 @@ tick=6 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+30m1
 tick=6 apply pod.servingOn[source] pod=svc-a-engine-0-default-0 now=t+30m1s
 tick=6 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded
 tick=6 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Parked target=svc-a-engine-6f8b1e6c reason=revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c waiting=RetryBlock strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
-tick=6 pass result=after:5s
+tick=6 pass result=after:1h0m0s
 tick=7 note the queue label moves; the edit is outside the revision hash, so the target stands and the parked attempt opens nothing
 tick=7 apply spec.annotationOnly labels=[kueue.x-k8s.io/queue-name:queue-b] generation=2 now=t+30m1s
 tick=7 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded
-tick=7 pass result=after:5s
+tick=7 pass result=after:1h0m0s
 tick=8 note the readiness timeout is shortened; a parked attempt runs no clock, so the knob waits for the next attempt
 tick=8 apply spec.policyTuning[instanceReadyTimeout] instanceReadyTimeout=10m generation=3 now=t+30m1s
 tick=8 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded
-tick=8 pass result=after:5s
+tick=8 pass result=after:1h0m0s
 tick=9 note the stuck-pod grace is shortened; the grace is read afresh every pass and the serving set gives it nothing to measure
 tick=9 apply config.changed[stuckPodGrace] stuckPodGrace=10s now=t+30m1s
 tick=9 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded
-tick=9 pass result=after:5s
+tick=9 pass result=after:1h0m0s
 tick=10 note the cache lags one event behind for this pass; the phase is re-read from the set and nothing is written
 tick=10 apply ctrl.staleRead cache=end-of-tick-9 now=t+30m1s
 tick=10 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded
-tick=10 pass result=after:5s
+tick=10 pass result=after:1h0m0s

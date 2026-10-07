@@ -47,26 +47,28 @@ func Create(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 
 // CreateFreshIndices runs the Create pass for ONLY surge-free Instance
 // indices — those with no in-flight surge state the Update pass owns. It
-// lets a scale-up of brand-new gangs proceed, and a row that lost every
-// pod be rebuilt, even while a rollout is mid-flight or held on another
-// index, instead of starving either behind the rollout.
+// lets a scale-up of brand-new gangs proceed, a row that lost every pod be
+// rebuilt, and a Failed row already on the roll target be re-proved, even
+// while a rollout is mid-flight or held on another index, instead of
+// starving any of them behind the rollout.
 //
 // A surge-free index is immune to both corruption modes the dispatcher's
 // skip-Create-while-updating gate guards against. Its ActiveOrdinal is
 // one no in-flight operation is moving: a genuine 0 for an index that
-// never existed, or the ordinal a demoted row was promoted at, which only
-// an Update flips and none owns such a row. And its promote mis-stamps no
-// revision: its pods are created carrying the target rev-hash, so
+// never existed, the ordinal a demoted row was promoted at, which only an
+// Update flips and none owns such a row, or the ordinal a Failed row with
+// no operation settled on. And its promote mis-stamps no revision: its
+// pods are created carrying the target rev-hash, so
 // existingPodsMatchTargetRevision promotes correctly, onto the revision a
-// demoted row on the target already records. See the surgeFreeIndex
-// predicate.
+// demoted row on the target already records, and a Failed row is admitted
+// only on the target it already records. See the surgeFreeIndex predicate.
 //
 // No-op (returns ctrl.Result{}, nil) when no index qualifies, so pure
 // rollouts are unaffected.
 func CreateFreshIndices(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision) (ctrl.Result, error) {
 	eligible := false
 	for _, inst := range plan.Instances {
-		if surgeFreeIndex(input, inst.Index) {
+		if surgeFreeIndex(input, inst.Index, target) {
 			eligible = true
 			break
 		}
@@ -75,7 +77,7 @@ func CreateFreshIndices(ctx context.Context, deps workload.Deps, input workload.
 		return ctrl.Result{}, nil
 	}
 	return createFiltered(ctx, deps, input, plan, target, func(idx int32) bool {
-		return surgeFreeIndex(input, idx)
+		return surgeFreeIndex(input, idx, target)
 	})
 }
 
@@ -143,23 +145,30 @@ func createFinishableAt(s *workload.InstanceStatus, target *appsv1.ControllerRev
 
 // surgeFreeIndex reports whether the Instance at idx has NO in-flight
 // surge state — i.e. its ObservedState entry is absent (never created),
-// mid-Create (Phase=Creating with no operation, or a Create one), or
-// settled Pending with no operation: the shape a Ready row is demoted to
-// for losing every pod. The Create pass owns that row and no operation
-// is moving it, so it is rebuilt at this scope as the full pass would
-// rebuild it, whether or not the roll around it is admitted — a podless
-// row on the target holds a slot in the roll's budget, and the start
-// that slot denies must not stand between the row and its own rebuild.
-// Updating / Migrating carry an in-flight surge (stale ActiveOrdinal /
-// RunningRevision hazard); Ready-but-degraded is Restart/Recreate
-// territory. A Creating entry carrying an Update or Migrate operation
-// is a surge TARGET marker owned by another index's op — overwriting it
-// with a Create stamp unpins the in-flight replacement gang from the
-// plan and scale-down deletes it mid-surge. All excluded.
-func surgeFreeIndex(input workload.ReconcileInput, idx int32) bool {
+// mid-Create (Phase=Creating with no operation, or a Create one), settled
+// Pending with no operation: the shape a Ready row is demoted to for
+// losing every pod, or Failed with no operation on the roll target. The
+// Create pass owns such a row and no operation is moving it, so it is
+// rebuilt or re-proved at this scope as the full pass would, whether or
+// not the roll around it is admitted — a podless row on the target holds
+// a slot in the roll's budget, and the start that slot denies must not
+// stand between the row and its own rebuild; a Failed row on the target
+// beside the wreckage of a withdrawn revision would otherwise wait on
+// that wreckage's cleanup, which runs for as long as a drained pod of it
+// stands. Updating / Migrating carry an in-flight surge (stale
+// ActiveOrdinal / RunningRevision hazard); Ready-but-degraded is
+// Restart/Recreate territory; a Failed row off the target is the roll's.
+// A Creating entry carrying an Update or Migrate operation is a surge
+// TARGET marker owned by another index's op — overwriting it with a
+// Create stamp unpins the in-flight replacement gang from the plan and
+// scale-down deletes it mid-surge. All excluded.
+func surgeFreeIndex(input workload.ReconcileInput, idx int32, target *appsv1.ControllerRevision) bool {
 	s := input.ObservedState.Instance(idx)
 	if s == nil || workload.StateOf(s) == workload.StatePending {
 		return true
+	}
+	if s.Phase == workload.InstancePhaseFailed && s.Operation == nil {
+		return target != nil && s.RunningRevision == target.Name
 	}
 	return s.Phase == workload.InstancePhaseCreating &&
 		(s.Operation == nil || s.Operation.Type == workload.InstanceOperationCreate)
@@ -279,7 +288,19 @@ func createFilteredBatched(
 			continue
 		}
 		existing := byInstance[inst.Index]
-		missing := missingPodTargets(input, plan, inst, existing)
+		observed := input.ObservedState.Instance(inst.Index)
+		// A parked attempt whose set stands is the roll's: nothing of it is
+		// refilled or promoted here. The pass keeps its cadence while a
+		// pod of the set is still coming up, as for any index it is not
+		// done with.
+		if observed != nil && workload.OperationParked(observed.Operation) && !createFreshStart(observed, existing) {
+			if !query.AllPodsRuntimeReady(existing) {
+				allReady = false
+			}
+			continue
+		}
+		desired := expectedPodNamesForInstance(input, plan, inst)
+		missing := missingPodTargets(desired, existing)
 		// An attempt that is fully materialized and runtime-ready is one
 		// promote away from serving: its pods are already routed, so retiring
 		// it now drops live traffic and throws away a warmed accelerator. Let
@@ -333,7 +354,6 @@ func createFilteredBatched(
 			}
 			now := metav1.NewTime(input.Now())
 			mutation := status.CreatingMutation(inst.Index, inst.Incarnation, plan.InstanceReadyTimeout, rev, now)
-			observed := input.ObservedState.Instance(inst.Index)
 			probe := workload.InstanceStatus{Index: inst.Index}
 			if observed != nil {
 				probe = *observed
@@ -358,20 +378,32 @@ func createFilteredBatched(
 			continue
 		}
 
+		// The index holds every pod it expects. A Failed row is adopted
+		// only through failedRowAdoptable, judged on the pods at its active
+		// ordinals; any other Failed row is the roll's or the ladder's.
+		podSet := existing
+		if workload.StateOf(observed) == workload.StateFailed {
+			podSet = podsAtTargets(existing, desired)
+			if !failedRowAdoptable(input, observed, podSet, target) {
+				if !query.AllPodsRuntimeReady(existing) {
+					allReady = false
+				}
+				continue
+			}
+		}
 		// ContainersReady permits writing the serving gate; the Ready stamp
 		// itself waits for the shared promote bar, which the gate write is a
 		// precondition of (kubelet folds it into PodReady).
-		if !query.AllPodsRuntimeReady(existing) {
+		if !query.AllPodsRuntimeReady(podSet) {
 			allReady = false
 			continue
 		}
 
-		observed := input.ObservedState.Instance(inst.Index)
 		wasReady := observed != nil && observed.Phase == workload.InstancePhaseReady
-		promotable, wait := query.PodSetPromotable(existing, plan.MinReadySeconds, input.Now())
+		promotable, wait := query.PodSetPromotable(podSet, plan.MinReadySeconds, input.Now())
 		action := &createReadyAction{
 			instance: inst,
-			existing: existing,
+			existing: podSet,
 			promote:  promotable,
 			wasReady: wasReady,
 		}
@@ -387,7 +419,7 @@ func createFilteredBatched(
 			continue
 		}
 		var mutation workload.InstanceMutation
-		onTarget := target != nil && existingPodsMatchTargetRevision(existing, target)
+		onTarget := target != nil && existingPodsMatchTargetRevision(podSet, target)
 		if onTarget {
 			mutation = status.ReadyOnRevisionMutation(inst.Index, target.Name, input.Now())
 		} else {
@@ -810,8 +842,7 @@ func applyCreateIntentMutations(ctx context.Context, input workload.ReconcileInp
 // missingPodTargets diffs the desired pod names against the live pods. A
 // terminal pod is absent for this purpose: it still holds its stable name,
 // but nothing will ever run in it again, so the target must be recreated.
-func missingPodTargets(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, existing []*corev1.Pod) []podTarget {
-	desired := expectedPodNamesForInstance(input, plan, inst)
+func missingPodTargets(desired []podTarget, existing []*corev1.Pod) []podTarget {
 	existingByName := query.IndexPodsByName(query.ExcludeTerminalPods(existing))
 	missing := make([]podTarget, 0)
 	for _, target := range desired {
@@ -844,7 +875,7 @@ func allowCreateForMissingInstance(input workload.ReconcileInput, plan workload.
 	if rev != "" {
 		s := input.ObservedState.Instance(inst.Index)
 		if block := workload.FindRetryBlock(input.ObservedState.RetryBlocks, rev); block != nil {
-			if createFreshStart(s) {
+			if createFreshStart(s, existing) {
 				attemptInFlight := anyInFlightUpdateAt(input.ObservedState.InstanceStatuses, rev) ||
 					anyInFlightCreateAttempt(input, allInstances)
 				if denied, wait := evaluateRetryBlockGate(block, input.Now(), attemptInFlight); denied {
@@ -872,21 +903,58 @@ func allowCreateForMissingInstance(input workload.ReconcileInput, plan workload.
 }
 
 // createFreshStart reports whether the row is one the Create pass would open
-// a first attempt on: no row at all, a Failed row whose operation claims no
+// a first attempt on: no row at all; a Failed row whose operation claims no
 // verb — the shape a disposed attempt and the operator reset mailbox both
-// leave behind, and a parked attempt — or a parked attempt whose set
-// serves. Any other row is rebuilding — it holds pods, an attempt, or both.
-func createFreshStart(s *workload.InstanceStatus) bool {
+// leave behind; or an attempt parked after its disposition once no live pod
+// of its set is left. While a pod of a parked set stands the row is the
+// roll's, whatever phase the set gives it: a member refilled or promoted
+// beside the parked ones would put two revisions in one set. Any other row
+// is rebuilding — it holds pods, an attempt, or both.
+func createFreshStart(s *workload.InstanceStatus, existing []*corev1.Pod) bool {
 	if s == nil {
 		return true
 	}
-	switch workload.StateOf(s) {
-	case workload.StateUpdateParked:
-		return true
-	case workload.StateFailed:
-		return workload.ClaimOf(s) == workload.OwnerNone
+	if workload.OperationParked(s.Operation) {
+		return len(query.ExcludeTerminalPods(existing)) == 0
 	}
-	return false
+	return workload.StateOf(s) == workload.StateFailed && workload.ClaimOf(s) == workload.OwnerNone
+}
+
+// failedRowAdoptable reports whether the Create pass may stamp a Failed row
+// Ready on the target from the pods at its active ordinals. The row claims
+// no verb, every one of those pods carries the target's hash, the target's
+// ladder admits, and the row either was never promoted (the adoption) or
+// already runs the target (the re-prove the wreckage cleanup leaves to
+// this pass). A Failed row that ran another revision is never adopted; it
+// returns through the roll, the repair resume or the park's own reading.
+func failedRowAdoptable(input workload.ReconcileInput, row *workload.InstanceStatus, pods []*corev1.Pod, target *appsv1.ControllerRevision) bool {
+	if workload.ClaimOf(row) != workload.OwnerNone || target == nil {
+		return false
+	}
+	if row.RunningRevision != "" && row.RunningRevision != target.Name {
+		return false
+	}
+	return existingPodsMatchTargetRevision(pods, target) && !LadderDeniesStart(input, target.Name)
+}
+
+// podsAtTargets is the subset of existing holding one of the names in
+// targets: the pods at the Instance's active ordinals, the set a promote
+// is judged on. A pod at another ordinal is a surge's the row left behind.
+func podsAtTargets(existing []*corev1.Pod, targets []podTarget) []*corev1.Pod {
+	names := make(map[string]struct{}, len(targets))
+	for _, t := range targets {
+		names[t.Name] = struct{}{}
+	}
+	out := make([]*corev1.Pod, 0, len(existing))
+	for _, pod := range existing {
+		if pod == nil {
+			continue
+		}
+		if _, ok := names[pod.Name]; ok {
+			out = append(out, pod)
+		}
+	}
+	return out
 }
 
 // createRevision names the revision a Create attempt on Instance idx renders

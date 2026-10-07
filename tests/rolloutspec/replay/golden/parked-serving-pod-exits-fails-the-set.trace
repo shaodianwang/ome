@@ -35,7 +35,7 @@ tick=6 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+30m1
 tick=6 apply pod.servingOn[source] pod=svc-a-engine-0-default-0 now=t+30m1s
 tick=6 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded
 tick=6 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Parked target=svc-a-engine-6f8b1e6c reason=revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c waiting=RetryBlock strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
-tick=6 pass result=after:5s
+tick=6 pass result=after:1h0m0s
 tick=7 note the serving pod exits with phase Failed; a dead pod serves nothing, so the parked attempt's phase follows its set back to Failed on this tick with the attempt kept
 tick=7 apply pod.phaseTerminal[Failed] pod=svc-a-engine-0-default-0 now=t+30m1s
 tick=7 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded

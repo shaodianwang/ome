@@ -1,14 +1,22 @@
 # A surge wedges and puts the new revision in Backoff; the wedged
-# replacement is deleted from outside and the Instance is Ready again on its
-# source, its roll denied by the block. When the block comes due the roll
-# starts on that pass, through the gate, and the block flips to RetryInProgress.
+# replacement is deleted from outside and the Instance stays Failed on its
+# serving source, its roll denied by the block. When the block comes due the
+# roll starts on that pass, through the gate, and the block flips to
+# RetryInProgress.
 scenario: idle-ready-retry-due-rolls
 arrows:
   - T-ready-surge
   - T-surge-stuck
 cells:
-  - instance/Ready/timer.retryAt/before
-  - instance/Ready/gate.allow/before
+  - instance/Failed/pod.deleted[target]/before
+  - instance/Failed/timer.retryAt/before
+  - instance/Failed/gate.allow/before
+intentional: >-
+  a Failed single-pod surge source whose wedged replacement is deleted
+  stays Failed: its record names the replacement, so it is no crash-loop
+  park for the restart pass to return to Ready, and a row that ran another
+  revision is not the Create pass's to promote; the due block re-opens the
+  roll from Failed
 initial:
   spec:
     replicas: 1
@@ -40,11 +48,11 @@ timeline:
     events:
       - pod.waiting[ImagePullBackOff]: {pod: {index: 0, ordinal: 1}, message: "manifest unknown"}
   - tick: 5
-    note: something else deletes the wedged replacement and it is gone; the Instance is Ready again on its serving source and its roll is denied by the block
+    note: something else deletes the wedged replacement and it is gone; the row stays Failed on its serving source and its roll is denied by the block
     events:
       - pod.terminating[target]: {pod: {index: 0, ordinal: 1}}
       - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
   - tick: 6
-    note: the block comes due, so it no longer denies the trigger; the roll starts on this pass through the gate and the block flips to RetryInProgress
+    note: the block comes due, so it no longer denies the trigger; the roll starts from Failed on this pass through the gate and the block flips to RetryInProgress
     events:
       - timer.retryAt: {slack: 1s}

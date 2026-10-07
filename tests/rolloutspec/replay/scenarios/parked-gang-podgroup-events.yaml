@@ -10,6 +10,11 @@ arrows:
 cells:
   - instance/Update/Parked/gang.podGroup[Deleted]/before
   - instance/Update/Parked/gang.podGroup[Terminating]/before
+intentional: >-
+  an attempt parked after its disposition is the roll's while a pod of its
+  set stands: the Create pass neither promotes the set nor re-asserts its
+  serving gate, and asks for no wake-up of its own for it, so the pass waits
+  on the ladder's next admission instead of its own cadence
 initial:
   spec:
     replicas: 1

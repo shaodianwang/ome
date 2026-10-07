@@ -93,8 +93,6 @@ tick=12 apply pod.ready[target] pod=svc-a-engine-0-default-1 now=t+1m30s
 tick=12 apply endpoint.rotationIn[target] pod=svc-a-engine-0-default-1 now=t+1m30s
 tick=12 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-c500c9bc activeOrdinal=1 readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=Error container=ome-container exitCode=1} precondition=ok
 tick=12 hold gate=RetryBlock target=svc-a-engine-c500c9bc reason=update to svc-a-engine-c500c9bc in backoff after 1 failed attempt(s): CrashLoopBackOff
-tick=12 row=0 write no-op precondition=no-change
-tick=12 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
 tick=12 pass result=after:5s
 tick=13 note the block comes due, so the fresh start it admits, the second Instance's re-surge at the same target, flips it to RetryInProgress and adopts the replacement that is still crash-looping
 tick=13 apply timer.retryAt to=t+2m21s now=t+2m21s

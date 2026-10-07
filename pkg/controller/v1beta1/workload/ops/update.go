@@ -1308,8 +1308,9 @@ func alienRevisionPods(s *workload.InstanceStatus, targetName string, pods []*co
 //     not-yet-promoted surge pod.
 //
 // The serving source is never touched: no serving-gate flip, no status
-// stamp — after the debris is gone the Create pass re-proves readiness
-// and promotes. done=true means no wreckage remains for this instance.
+// stamp — the Create pass re-proves readiness on the pods at the row's
+// active ordinals and promotes, the debris left to its deletion or to the
+// force-delete sweep. done=true means no wreckage remains for this instance.
 func CleanupWreckage(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, instancePods []*corev1.Pod) (bool, error) {
 	if deps.Client == nil {
 		return false, fmt.Errorf("CleanupWreckage: nil client")

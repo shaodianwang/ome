@@ -44,4 +44,4 @@ tick=6 pass result=none err:follow parked attempt (instance=0): Operation cannot
 tick=7 note the next pass re-reads the set and commits the reading
 tick=7 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded
 tick=7 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Parked target=svc-a-engine-6f8b1e6c reason=revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c waiting=RetryBlock strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
-tick=7 pass result=after:5s
+tick=7 pass result=after:1h0m0s

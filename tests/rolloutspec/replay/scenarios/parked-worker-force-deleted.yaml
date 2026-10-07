@@ -1,0 +1,86 @@
+# A parked set's worker is deleted by another hand on a node whose kubelet
+# has stopped, so it wedges Terminating with no finalizer, and the configured
+# force-delete policy frees its name past the overdue slack. The sweep acts
+# on the pod, not on the row: nothing rebuilds the worker beside the parked
+# leader, the row keeps the parked attempt, and the block coming due is what
+# rebuilds the gang whole.
+scenario: parked-worker-force-deleted
+arrows:
+  - T-empty-create
+  - T-ready-recreate
+  - T-drain-deadline
+  - T-failed-parked-serves
+  - T-parked-retry
+cells:
+  - instance/Update/Parked/pod.terminating[source]/before
+  - instance/Update/Parked/pod.stuckTerminating/before
+  - instance/Update/Parked/timer.forceDelete[overdueSlack]/before
+  - instance/Update/Parked/timer.retryAt/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1h, maxDelay: 2h, multiplier: 2}
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes, so the roll drains the gang for a recreate
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation and the drained members are deleted, so the roll recreates them at the new revision
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 5
+    note: the rebuilt leader reports ContainersReady and is gated serving while the worker is still booting, so the set is short of serving
+    events:
+      - pod.containersReady[target]: {pod: {index: 0, runner: leader}}
+  - tick: 6
+    note: the deadline elapses on the live set; the ladder counts the wave and the attempt is parked with the row Failed
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 7
+    note: the worker comes up and both members carry the serving gate, so the parked set serves in full and the row reads as the roll in progress with the attempt still parked
+    events:
+      - pod.containersReady[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 8
+    note: the worker is bound and then deleted by another hand; on its way out it is live until it is gone and the reading holds
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}}
+      - pod.terminating[source]: {pod: {index: 0, runner: worker}}
+  - tick: 9
+    note: the worker's kubelet stops acknowledging the deletion; inside the overdue slack the policy waits
+    events:
+      - pod.stuckTerminating: {pod: {index: 0, runner: worker}}
+  - tick: 10
+    note: the slack elapses, so the sweep force-deletes the wedged worker; the name it frees is not refilled beside the parked leader and the row keeps the parked attempt
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+  - tick: 11
+    note: a further pass finds the gang short of its worker and the row where its set put it
+  - tick: 12
+    note: the block comes due; the gate admits and a fresh recreate attempt with a new incarnation replaces the parked one
+    events:
+      - timer.retryAt: {slack: 1s}

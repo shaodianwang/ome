@@ -13,6 +13,11 @@ cells:
   - instance/Update/Parked/pod.stuckTerminating/before
   - instance/Update/Parked/pod.waiting[CrashLoopBackOff]/after@T-parked-backoff
   - instance/Update/Parked/pod.deleted[source]/after@T-parked-backoff
+intentional: >-
+  an attempt parked after its disposition is the roll's while a pod of its
+  set stands: the Create pass neither promotes the set nor re-asserts its
+  serving gate, and asks for no wake-up of its own for it, so the pass waits
+  on the ladder's next admission instead of its own cadence
 initial:
   spec:
     replicas: 1

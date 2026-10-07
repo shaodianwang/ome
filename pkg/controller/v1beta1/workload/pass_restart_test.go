@@ -2202,7 +2202,8 @@ func TestSpentRepair_ResetMailboxStillRebuilds(t *testing.T) {
 // A revision Held after its retry budget is spent stays Held when the
 // cause of its failures clears: only a new revision or the release
 // mailbox admits another attempt at it. The Instance keeps serving the
-// revision it ran.
+// revision it ran through the source alone, and the row stays Failed:
+// the healed wreckage of the last attempt is no attempt's to promote.
 //
 // Cells: instance/Failed/gate.deny[Held]/before
 func TestHeldRevision_StaysHeldWhenItsCauseHeals(t *testing.T) {
@@ -2219,9 +2220,13 @@ func TestHeldRevision_StaysHeldWhenItsCauseHeals(t *testing.T) {
 	if b := h.findBlock(h.revBad.Name); b == nil || b.State != workloadtypes.RetryBlockHeld {
 		t.Fatalf("block = %+v, want Held: a healed cause releases nothing on its own", b)
 	}
-	if s := h.instance(0); s == nil || s.Phase != workloadtypes.InstancePhaseReady || s.Operation != nil || s.RunningRevision != h.revV1.Name {
+	if s := h.instance(0); s == nil || s.Phase != workloadtypes.InstancePhaseFailed || s.Operation != nil || s.RunningRevision != h.revV1.Name {
 		h.dumpState("held")
-		t.Fatalf("the Instance must keep serving v1 while the revision is Held: %+v", s)
+		t.Fatalf("the Instance stays Failed on v1 while the revision is Held: %+v", s)
+	}
+	if serving := h.servingPods(); len(serving) != 1 || serving[0].Spec.Containers[0].Image != goodImage {
+		h.dumpState("held")
+		t.Fatalf("the v1 source alone serves while the revision is Held, got %d serving pod(s)", len(serving))
 	}
 	if got := len(h.badPods()); got > badPodsBefore {
 		h.dumpState("held")

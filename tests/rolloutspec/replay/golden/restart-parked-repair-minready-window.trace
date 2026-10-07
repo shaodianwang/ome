@@ -24,6 +24,4 @@ tick=5 apply clock.advance by=30s now=t+2m30s
 tick=5 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+2m30s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
 tick=5 event Normal RestartCompleted OMENative component=engine instance=0 restart complete (incarnation=2)
 tick=5 hold cleared
-tick=5 row=0 write no-op precondition=no-change
-tick=5 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
 tick=5 pass result=none

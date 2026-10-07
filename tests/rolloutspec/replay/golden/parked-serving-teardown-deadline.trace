@@ -35,11 +35,11 @@ tick=6 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+30m1
 tick=6 apply pod.servingOn[source] pod=svc-a-engine-0-default-0 now=t+30m1s
 tick=6 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded
 tick=6 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Parked target=svc-a-engine-6f8b1e6c reason=revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c waiting=RetryBlock strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
-tick=6 pass result=after:5s
+tick=6 pass result=after:1h0m0s
 tick=7 note the namespace begins terminating and would refuse a create; a parked attempt creates nothing, so nothing consumes the refusal
 tick=7 apply api.namespaceTerminating verb=create resource=pods count=1 now=t+30m1s
 tick=7 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded
-tick=7 pass result=after:5s
+tick=7 pass result=after:1h0m0s
 tick=8 note the owner was deleted and its teardown deadline has elapsed before this pass observes either, so the deadline check releases the owner ahead of any teardown wave and the parked row goes with it
 tick=8 apply spec.teardown[deleted] teardown=true now=t+30m1s
 tick=8 apply timer.teardownDeadline to=t+40m2s now=t+40m2s

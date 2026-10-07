@@ -37,6 +37,4 @@ tick=8 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+1h8m0s
 tick=8 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+1h8m0s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=CreateContainerConfigError container=main message=couldn't find key mode in ConfigMap; waiting for the configuration or image the pod needs; the kubelet retries in place} announced=[RepairWaitingOnWorkload@op#1] precondition=ok
 tick=8 event Normal RestartCompleted OMENative component=engine instance=0 restart complete (incarnation=2)
 tick=8 hold cleared
-tick=8 row=0 write no-op precondition=no-change
-tick=8 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
 tick=8 pass result=none

@@ -83,7 +83,7 @@ cells:
     placement: unit
     coverage:
       perm: []
-      unit: [TestRestart_CrashLoopParkReturnsToReadyWhileItsSetServes, TestUnparkServing_ReturnsAParkToReadyKeepingItsAnchor, TestCrashLoopAfterPromotion_HeldRowFollowsItsServingPod, TestDetectUpdate_BackfillAdoptsRuntimeReadyPods, TestDetectUpdate_BackfillAdoptsEngineRenderedPods, TestDetectUpdate_BackfillRefusesWedgedPods, TestDetectUpdate_BackfillRollsPodSetWithAForeignRevision, TestDetectUpdate_WedgedPodsReachHeld, TestDetectUpdate_StuckPodOnTargetRelocates, TestPatchReadyOnRevision_PrunesBlock, TestPlan_Update_AdoptRevision, TestSpentRepair_RebuiltSetComesUp_ResumesThePromote, TestRestart_DeadlineFailedRowResumesItsPromote, TestSpentRepair_KubeletRetriedCause_WaitsForTheFixWithoutReArm, TestRestart_KubeletRetriedCauseClearedResumesThePromote, TestDetectRestartTrigger_SpentRepairWithALivePodIsNotClosed, TestSpentRepair_LiveSetIsNeverClosed, TestFollowParkedAttempts_PhaseFollowsThePodSet, TestCrashBeforePromotion_DisposedRollAttemptFollowsItsPods]
+      unit: [TestRestart_CrashLoopParkReturnsToReadyWhileItsSetServes, TestUnparkServing_ReturnsAParkToReadyKeepingItsAnchor, TestCrashLoopAfterPromotion_HeldRowFollowsItsServingPod, TestDetectUpdate_BackfillAdoptsRuntimeReadyPods, TestDetectUpdate_BackfillAdoptsEngineRenderedPods, TestDetectUpdate_BackfillRefusesWedgedPods, TestDetectUpdate_BackfillRollsPodSetWithAForeignRevision, TestDetectUpdate_WedgedPodsReachHeld, TestDetectUpdate_StuckPodOnTargetRelocates, TestPatchReadyOnRevision_PrunesBlock, TestPlan_Update_AdoptRevision, TestSpentRepair_RebuiltSetComesUp_ResumesThePromote, TestRestart_DeadlineFailedRowResumesItsPromote, TestSpentRepair_KubeletRetriedCause_WaitsForTheFixWithoutReArm, TestRestart_KubeletRetriedCauseClearedResumesThePromote, TestDetectRestartTrigger_SpentRepairWithALivePodIsNotClosed, TestSpentRepair_LiveSetIsNeverClosed, TestFollowParkedAttempts_PhaseFollowsThePodSet, TestCrashBeforePromotion_DisposedRollAttemptFollowsItsPods, TestRestart_ReplacementFailureOnTheSourceRowIsNoCrashLoopPark]
       kind: [failed_repair_heal]
       replay: [failed-runtime-ready-adopt, failed-repair-resume, failed-repair-waits-on-workload]
     status: decided
@@ -95,8 +95,9 @@ cells:
     placement: perm
     coverage:
       perm: []
-      unit: [TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource]
+      unit: [TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource, TestHeldSurge_LateReadyReplacementIsNotAdoptedByTheCreatePass]
       kind: []
+      replay: [surge-held-late-ready-replacement, surge-backoff-late-ready-replacement]
     status: decided
   - state: Failed
     event: pod.ready
@@ -112,7 +113,7 @@ cells:
     outcome: ignore
     note: the replacement's own readiness is consumed by the surge machine, which a Failed source has already left
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestHeldSurge_LateReadyReplacementIsNotAdoptedByTheCreatePass], kind: [], replay: [surge-held-late-ready-replacement]}
     status: current
   - state: Failed
     event: pod.servingOn
@@ -191,9 +192,9 @@ cells:
     placement: perm
     coverage:
       perm: []
-      unit: [TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone, TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource, TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy, TestAbandonFailedGangSurge_WavesHoldAtMaxAttempts, TestCrashLoopBound_NewRevisionCrashesAtStart]
+      unit: [TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone, TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource, TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy, TestAbandonFailedGangSurge_WavesHoldAtMaxAttempts, TestCrashLoopBound_NewRevisionCrashesAtStart, TestHeldSurge_SourceLeftAloneStaysFailedWhileTheHoldStands, TestRestart_ReplacementFailureOnTheSourceRowIsNoCrashLoopPark]
       kind: []
-      replay: [failed-gang-surge-reset, failed-recycle-resurge]
+      replay: [failed-gang-surge-reset, failed-recycle-resurge, failed-held-surge-source-alone, idle-ready-retry-due-rolls]
     status: decided
   - state: Failed
     event: pod.deleted
@@ -298,7 +299,7 @@ cells:
     placement: perm
     coverage:
       perm: []
-      unit: [TestDetectUpdateTrigger_PhaseFailedRetriggersOnMismatch, TestDetectUpdate_NewRevisionPassesGate, TestDetectUpdate_FailedContinuationPassesGate, TestPatchInstanceStatusSurgingForUpdate_FailedStickyOnSameTarget, TestPlan_Update_CleanupOnly_RollBackWreckage, TestCorrectiveRecovery_SinglePod_RollForward, TestCorrectiveRecovery_Gang_RollForward, TestCorrectiveRecovery_SinglePod_RollBack]
+      unit: [TestDetectUpdateTrigger_PhaseFailedRetriggersOnMismatch, TestDetectUpdate_NewRevisionPassesGate, TestDetectUpdate_FailedContinuationPassesGate, TestPatchInstanceStatusSurgingForUpdate_FailedStickyOnSameTarget, TestPlan_Update_CleanupOnly_RollBackWreckage, TestCorrectiveRecovery_SinglePod_RollForward, TestCorrectiveRecovery_Gang_RollForward, TestCorrectiveRecovery_SinglePod_RollBack, TestFailedSurgeSource_RolledBackReturnsToReadyWhileItsWreckageTerminates]
       kind: []
       replay: [failed-corrective-create, failed-corrective-inplace, failed-corrective-recreate, failed-corrective-surge]
     status: decided
@@ -470,7 +471,7 @@ cells:
     outcome: ignore
     note: admission is consulted inside the pass that already decided to re-drive this row, so it only removes a denial; the state change is attributed to the trigger that caused it
     placement: unit
-    coverage: {perm: [], unit: [], kind: [], replay: [failed-corrective-then-reedit]}
+    coverage: {perm: [], unit: [], kind: [], replay: [failed-corrective-then-reedit, idle-ready-retry-due-rolls]}
     status: current
   - state: Failed
     event: gate.deny
@@ -483,6 +484,7 @@ cells:
       perm: []
       unit: [TestDetectUpdate_RetryBlockHeld_Denies, TestCreate_RetryBlockHeld_DeniesFreshStart, TestCorrectiveRecovery_Gang_RollBack_PostHeld, TestEvaluateUpdateTrigger_ParkedAttemptIsGatedByItsLadder, TestFollowParkedAttempts_WaitFollowsTheLadder, TestCrashBeforePromotion_DisposedRollAttemptFollowsItsPods]
       kind: []
+      replay: [surge-held-late-ready-replacement, failed-held-surge-source-alone]
     status: decided
   - state: Failed
     event: gate.deny
@@ -563,7 +565,7 @@ cells:
     coverage:
       perm: []
       unit: [TestDetectUpdate_RetryBlockDue_AllowsWithoutFlip, TestDetectUpdate_RetryBlockDueBoundaryExact, TestCreate_RetryBlockBackoffDue_AllowsAndFlips, TestPatchSurgingForUpdate_FlipsBackoffOnAttemptStart, TestEvaluateUpdateTrigger_ParkedAttemptIsGatedByItsLadder, TestUpdateEntryStamps_OpenANewAttemptOverAParkedOne, TestCrashBeforePromotion_DisposedRollAttemptFollowsItsPods, TestEntryStamps_LadderFlipFollowsTheAttempt]
-      replay: [T-failed-retry, failed-retry-inplace, failed-retry-recreate, failed-retry-surge, surge-crashloop-bound, ladder-backoff-survives-sibling-restamps]
+      replay: [T-failed-retry, failed-retry-inplace, failed-retry-recreate, failed-retry-surge, surge-crashloop-bound, ladder-backoff-survives-sibling-restamps, surge-backoff-late-ready-replacement, idle-ready-retry-due-rolls]
       kind: []
     status: current
   - state: Failed
@@ -644,7 +646,7 @@ cells:
     outcome: defer
     note: the retired replacement entering Terminating is what the abandon path asked for; ops/update_gang.go skips a pod that already carries a deletionTimestamp and re-polls until the pod set is empty
     placement: kind
-    coverage: {perm: [], unit: [], kind: [], replay: [failed-idle-parked-replacement]}
+    coverage: {perm: [], unit: [TestHeldSurge_SourceLeftAloneStaysFailedWhileTheHoldStands, TestFailedSurgeSource_RolledBackReturnsToReadyWhileItsWreckageTerminates], kind: [], replay: [failed-idle-parked-replacement, failed-held-surge-source-alone]}
     status: current
   - state: Failed
     event: pod.unschedulable

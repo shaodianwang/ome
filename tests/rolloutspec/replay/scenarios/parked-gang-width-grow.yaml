@@ -1,0 +1,82 @@
+# The desired gang width grows while an attempt is parked: a parked
+# attempt opens nothing and the Create pass fills no name beside a parked
+# set, so the extra worker waits for the next attempt, which renders the new
+# width whole at the target.
+scenario: parked-gang-width-grow
+arrows:
+  - T-empty-create
+  - T-ready-recreate
+  - T-drain-deadline
+  - T-failed-parked-serves
+  - T-parked-retry
+cells:
+  - instance/Update/Parked/spec.gangWidth[grow]/before
+  - instance/Update/Parked/timer.retryAt/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1h, maxDelay: 2h, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes, so the roll drains the gang for a recreate
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation and the drained members are deleted, so the roll recreates them at the new revision
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 5
+    note: the rebuilt leader reports ContainersReady and is gated serving while the worker is still booting, so the set is short of serving
+    events:
+      - pod.containersReady[target]: {pod: {index: 0, runner: leader}}
+  - tick: 6
+    note: the deadline elapses on the live set; the ladder counts the wave and the attempt is parked with the row Failed
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 7
+    note: the worker comes up and both members carry the serving gate, so the parked set serves in full and the row reads as the roll in progress with the attempt still parked
+    events:
+      - pod.containersReady[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: worker}}
+      - pod.servingOn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 8
+    note: the gang widens by a worker; the parked set stands and nothing renders the new name beside it
+    events:
+      - spec.gangWidth[grow]: {to: 2}
+  - tick: 9
+    note: a further pass finds the row where its set put it and the new name still empty
+  - tick: 10
+    note: the block comes due; the gate admits and a fresh recreate attempt with a new incarnation replaces the parked one, at the new width
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 11
+    note: the block is read as due again; it admitted exactly one attempt and the drain of the parked set goes on
+    events:
+      - timer.retryAt: {slack: 1s}
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 12
+    note: the parked set is gone, so the fresh attempt rebuilds it with the extra worker
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

@@ -37,7 +37,6 @@ tick=5 warn instanceFailed index=0 pod=svc-a-engine-0-default-1 reason=ImagePull
 tick=5 pass result=after:5s
 tick=6 note the wedged replacement is gone
 tick=6 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+5m1s
-tick=6 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
 tick=6 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
 tick=6 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-2dd013c9 readySince=t+0s op=op#3{type=Update step=Surge target=svc-a-engine-2dd013c9 strategy=SurgeThenDrain started=t+5m1s lastProgressAt=t+5m1s deadline=t+35m1s} lastFailure={pod=svc-a-engine-0-default-1 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
 tick=6 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-2dd013c9 (newOrdinal=1)

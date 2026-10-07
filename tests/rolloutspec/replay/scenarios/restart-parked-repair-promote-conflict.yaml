@@ -9,6 +9,10 @@ arrows:
   - T-failedrepair-resume
 cells:
   - instance/Failed/Repair/api.conflict/before
+intentional: >-
+  a Failed row another verb still claims is that verb's: the Create pass
+  does not re-prove a spent repair's set, so the restart pass's own promote
+  is the only Ready stamp and the only InstanceReady announcement
 initial:
   spec:
     replicas: 1
