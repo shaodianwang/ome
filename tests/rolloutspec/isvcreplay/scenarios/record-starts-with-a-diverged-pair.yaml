@@ -1,0 +1,47 @@
+scenario: record-starts-with-a-diverged-pair
+cells:
+  - revision/Empty/run.open[stableFromCurrentOffPin]/before
+  - revision/Empty/read.pinStable[replicaCurrent]/before
+  - revision/Empty/replica.targetBumped/before
+  - revision/Pinned/Stable/write.coordRolledOut/before
+  - revision/Pinned/Stable/write.coordReady/before
+  - revision/Pinned/Stable/replica.currentPromoted[roll]/before
+  - revision/Pinned/Stable/run.close[completed]/before
+  - revision/Settled/write.coordRolledOut/before
+  - revision/Settled/write.coordReady/before
+intentional: >-
+  the first pass finds the replica's pair already diverged and no record:
+  the run pins the replica's current revision as the stable without a
+  record to consult, coordination's first record lands under the pin on
+  the one revision with Ready pods, the record moves under the pin as the
+  roll converges, and after the close a resync re-records nothing
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v2}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+  replicas:
+    engine: {current: registry.example.com/runtime:v1, target: registry.example.com/runtime:v2}
+timeline:
+  - tick: 1
+    note: the pair is diverged before any record exists; the run pins the replica's current revision as the stable and the first record lands under the pin on the one revision with Ready pods
+  - tick: 2
+    note: the target pods exist but are not Ready; the record stays on the one revision with Ready pods and latestReady stays empty because the update revision has none
+    events:
+      - member.surgePodCreated: {component: engine}
+  - tick: 3
+    note: every Instance stands Ready on the target and the old pods are gone; the record moves under the pin before the replica promotes
+    events:
+      - member.readyOnTarget: {component: engine}
+      - member.oldPodsGone: {component: engine}
+  - tick: 4
+    note: the replica promotes its current revision; the run closes Completed and the record is level with it
+    events:
+      - member.converged: {component: engine}
+  - tick: 5
+    note: a resync re-records the revision already recorded and changes nothing
+    events:
+      - ctrl.resync

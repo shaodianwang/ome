@@ -1,0 +1,43 @@
+scenario: stale-copy-resurrects-the-coordination-record
+cells:
+  - revision/Settled/read.staleCopy[coordinationOwned]/before
+  - revision/Ahead/write.coordReady/before
+  - revision/Ahead/write.coordRolledOut/before
+intentional: >-
+  a pass that reads a copy of the service from before the last record
+  write, on a pass where the Component has no Ready pod for coordination
+  to re-derive the record from, flushes the copy's rolled-out revision
+  fields back over the newer live ones: nothing guards a
+  coordination-owned record the way the canary base guards a canary-owned
+  one, so the record comes back naming a revision no Instance runs, and
+  the next pass with Ready pods records the running revision again with
+  the resurrected one demoted to previous
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service records its one revision and no run
+  - tick: 2
+    note: the template edit lands; the projection catches up one pass behind it
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the replica has settled on the new revision before the run layer reads the pair fresh; no run opens and coordination records the new revision with the prior one as previous
+    events:
+      - ir.converged: {component: engine}
+  - tick: 4
+    note: the pass reads the copy from before that record write while every pod of the new revision has dropped out of readiness; coordination has no Ready pod to re-derive the record from and the flush writes the copy's fields back over the live record
+    events:
+      - read.staleCopy[coordinationOwned]
+      - member.capacityLost: {component: engine}
+  - tick: 5
+    note: the pods are Ready again on the one revision the fleet runs; coordination records it again and demotes the resurrected revision to previous
+    events:
+      - member.readyOnTarget: {component: engine}
+      - ctrl.resync

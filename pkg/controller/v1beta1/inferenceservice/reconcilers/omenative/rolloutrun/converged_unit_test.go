@@ -214,6 +214,7 @@ func TestAdoptingRunKeepsRecordsOnlyForTheUnitInFlight(t *testing.T) {
 	}
 }
 
+// Cells: revision/Empty/run.open[stableFromCurrentOffPin]/before, revision/Empty/run.open[stableFromSettledCurrent]/before, revision/Empty/run.open[stableFromCurrentFallback]/before, revision/Empty/run.open[stableFromCanaryRecord]/before, revision/Empty/run.open[stableUnknown]/before, revision/Empty/read.pinStable[none]/before, revision/Settled/run.open[stableFromLatestRolledout]/before, revision/Settled/read.pinStable[latestRolledout]/before
 func TestComponentStableRevision(t *testing.T) {
 	withRecord := func() *v1beta1.InferenceService {
 		isvc := isvcFixture(v1beta1.RolloutGroup{
@@ -225,9 +226,25 @@ func TestComponentStableRevision(t *testing.T) {
 		}
 		return isvc
 	}
+	// withoutRecord is a Component nothing has recorded yet: no rolled-out
+	// revision fields and no canary record.
+	withoutRecord := func() *v1beta1.InferenceService {
+		return isvcFixture(v1beta1.RolloutGroup{
+			Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+			Canary:     canaryBody(10, 100),
+		})
+	}
+	// withCanaryRecord carries both records, so the unit's stable identity
+	// is asked before the rolled-out revision.
+	withCanaryRecord := func() *v1beta1.InferenceService {
+		isvc := withRecord()
+		isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "cccccccc", StableRevisionHash: "77777777"}
+		return isvc
+	}
 
 	cases := []struct {
 		name     string
+		isvc     func() *v1beta1.InferenceService
 		pinned   string
 		target   targetPair
 		adopting bool
@@ -263,11 +280,41 @@ func TestComponentStableRevision(t *testing.T) {
 		pinned: "cccccccc",
 		target: targetPair{},
 		want:   "99999999",
+	}, {
+		name:   "stragglers with no record fall back to the current revision",
+		isvc:   withoutRecord,
+		pinned: "cccccccc",
+		target: targetPair{current: "cccccccc", target: "cccccccc", replicas: 4, updated: 1},
+		want:   "cccccccc",
+	}, {
+		name:   "no IR revision and no record pins no stable",
+		isvc:   withoutRecord,
+		pinned: "cccccccc",
+		target: targetPair{},
+		want:   "",
+	}, {
+		name:     "an adopting run with nothing on record pins no stable",
+		isvc:     withoutRecord,
+		pinned:   "cccccccc",
+		target:   targetPair{current: "cccccccc", target: "cccccccc", replicas: 4, updated: 4},
+		adopting: true,
+		want:     "",
+	}, {
+		name:     "an adopting unit's stable identity answers before the record",
+		isvc:     withCanaryRecord,
+		pinned:   "cccccccc",
+		target:   targetPair{current: "cccccccc", target: "cccccccc", replicas: 4, updated: 4},
+		adopting: true,
+		want:     "77777777",
 	}}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := componentStableRevision(withRecord(), v1beta1.EngineComponent, tc.pinned, tc.target, tc.adopting)
+			isvc := withRecord
+			if tc.isvc != nil {
+				isvc = tc.isvc
+			}
+			got := componentStableRevision(isvc(), v1beta1.EngineComponent, tc.pinned, tc.target, tc.adopting)
 			if got != tc.want {
 				t.Fatalf("componentStableRevision = %q, want %q", got, tc.want)
 			}

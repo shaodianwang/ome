@@ -4,7 +4,7 @@ cells:
   - run/Open/ir.converged/before
   - coordination/Idle/member.targetChanged[first]/before
   - revision/Settled/replica.targetBumped/before
-  - revision/Behind/write.coordRolledOut/before
+  - revision/Pinned/Stable/write.coordRolledOut/before
 intentional: >-
   the plain walk every other scenario builds on: a template edit is first
   read with the projection one generation behind, the next pass opens the

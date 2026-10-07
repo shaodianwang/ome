@@ -3,6 +3,12 @@ cells:
   - canary/RollingBack/stable.crMissing/before
   - canary/Serving/Manual/verb.rollback[stableServes]/before
   - run/Open/canary.parked/before
+  - revision/Empty/write.canarySettled/before
+  - revision/Pinned/Stable/canary.armed/before
+  - revision/Pinned/Stable/write.canaryReady/before
+  - revision/Pinned/Disagrees/read.rollbackStable[activeRun]/before
+  - revision/Pinned/Disagrees/read.stableCR[foreign]/before
+  - revision/Pinned/Disagrees/write.canaryRolledBack/before
 intentional: >-
   the stable revision's ControllerRevision is no longer one the replica
   controls when the operator rolls back; the executor records the

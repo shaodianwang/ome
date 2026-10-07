@@ -1,0 +1,45 @@
+scenario: withdrawn-current-opens-a-run-on-the-record
+cells:
+  - revision/Settled/replica.currentWithdrawn/before
+  - revision/Ahead/write.coordReady/before
+  - revision/Ahead/read.pinStable[latestRolledout]/before
+  - revision/Ahead/run.open[stableFromLatestRolledout]/before
+  - revision/Pinned/Stable/run.close[completed]/before
+intentional: >-
+  a target reverted to the promoted revision while one Instance was
+  mid-surge leaves the replica's current revision withdrawn; the run that
+  opens on it finds no current revision to answer the stable and falls to
+  the record, which names the revision the fleet is returning to, so the
+  pin carries that revision as both target and stable and the run closes
+  Completed once the replica restores its current revision
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service records its one revision and no run
+  - tick: 2
+    note: the template edit lands; the projection catches up one pass behind it
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: one Instance surges onto the new revision and its pod is Ready when the template is reverted to the promoted revision; the replica withdraws its current revision, the edit holds the run layer for a pass, and two revisions have Ready pods so the record stands
+    events:
+      - member.surgePodCreated: {component: engine, index: 0}
+      - member.readyOnTarget: {component: engine}
+      - member.rollback: {component: engine}
+      - replica.currentWithdrawn: {component: engine}
+  - tick: 4
+    note: the pair is fresh and the withdrawn current revision diverges from the target; the run opens, the chooser finds no current revision and takes the record, and the pin names the recorded revision as both target and stable
+    events:
+      - ctrl.resync
+  - tick: 5
+    note: the surged pod is gone and the replica restores its current revision; the run closes Completed
+    events:
+      - member.oldPodsGone: {component: engine}
+      - replica.currentPromoted: {component: engine}

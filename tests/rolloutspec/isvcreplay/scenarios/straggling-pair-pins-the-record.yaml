@@ -1,0 +1,37 @@
+scenario: straggling-pair-pins-the-record
+cells:
+  - revision/Settled/replica.currentPromoted[roll]/before
+  - revision/Behind/read.pinStable[latestRolledout]/before
+  - revision/Behind/run.open[stableFromLatestRolledout]/before
+  - revision/Pinned/Stable/write.coordRolledOut/before
+  - revision/Pinned/Stable/run.close[completed]/before
+intentional: >-
+  a replica whose pair already agrees on the new revision while an
+  Instance still trails it diverges by its straggler count: the run opens,
+  the chooser passes the current revision because the pair trails
+  Instances, and the record, still naming the revision promoted before,
+  answers the stable; the record catches up under the pin when the last
+  Instance rolls and the run closes Completed
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service records its one revision and no run
+  - tick: 2
+    note: the template edit lands; the projection catches up one pass behind it
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the replica has promoted its current revision with one Instance still on the previous one; the straggler opens a run, and with the pair agreeing on the pin the record answers the stable
+    events:
+      - ir.straggling: {component: engine, trailing: 1}
+  - tick: 4
+    note: the trailing Instance rolls; the record moves under the pin and the run closes Completed
+    events:
+      - pod.lastStableRolled: {component: engine}
