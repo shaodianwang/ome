@@ -1,0 +1,59 @@
+# A single-pod surge at its drain step whose replacement reports a container
+# terminated with the DeadlineExceeded reason past the stuck-pod grace. The
+# reason is outside the terminal waiting set the stuck-pod classifier reads,
+# so it is not escalation evidence: the attempt waits with the source held
+# out of rotation, and when the replacement comes up again the drain
+# finishes and the surge promotes as usual.
+scenario: surgedrain-replacement-deadline-exceeded-reason-waits
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/SurgeDrain/pod.waiting[DeadlineExceeded]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation, so the step advances and the source leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: two minutes pass with the source still published, which is longer than the grace but proves nothing on its own
+    events:
+      - clock.advance: 2m
+  - tick: 6
+    note: the replacement reports DeadlineExceeded on a pod older than the grace; the reason is outside the terminal waiting set, so nothing is escalated and the drain waits
+    events:
+      - pod.waiting[DeadlineExceeded]: {pod: {index: 0, ordinal: 1}, message: "context deadline exceeded"}
+  - tick: 7
+    note: a further pass finds the same reason and still writes nothing
+  - tick: 8
+    note: the replacement comes up again and the source leaves rotation, so the drain converges and the source is deleted
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 9
+    note: the drained source is gone and the Instance promotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

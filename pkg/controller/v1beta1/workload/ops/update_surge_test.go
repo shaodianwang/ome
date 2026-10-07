@@ -4187,3 +4187,85 @@ func TestSurgeUpdate_DeletingReplacementIsNotPromotedOnto(t *testing.T) {
 		t.Fatalf("the promote must land on the rebuilt replacement: %+v", got)
 	}
 }
+
+// TestSurgeUpdate_ExpiredExpectationUnblocksTheStep: an expectation the
+// watch never satisfied stops blocking the surge once its TTL elapses. At
+// Step=Surge the replacement's create waits behind an outstanding create
+// expectation and is issued once the entry expires; at Step=SurgeDrain the
+// drained source's delete waits behind an outstanding delete expectation
+// the same way. Either pass re-derives its work from the observed pods.
+//
+// Cells: instance/Update/Surge/timer.expectationsTTL/before, instance/Update/SurgeDrain/timer.expectationsTTL/before
+func TestSurgeUpdate_ExpiredExpectationUnblocksTheStep(t *testing.T) {
+	const pastTTL = 3 * time.Minute
+
+	t.Run("surge create", func(t *testing.T) {
+		legacyResetExpectations(t)
+		isvc, ir := surgeISVCReady("llama-70b", "prod", 1)
+		oldPod := surgePodAtOrdinal(isvc, 0, 1, 0, true, true)
+		target := legacyTargetSpecImage("llama:v2")
+		c := legacyNewFakeClient(t, isvc, ir, oldPod)
+		plan := surgePlan()
+		tcr := legacyEnsureTargetCR(t, c, isvc, target)
+		if err := status.StampSurging(context.Background(), legacyTestInput(isvc, c, workload.ComponentEngine), 0, tcr.Name, workload.UpdateStrategySurgeThenDrain, plan.InstanceReadyTimeout); err != nil {
+			t.Fatalf("pre-stamp: %v", err)
+		}
+		clk := clocktesting.NewFakeClock(time.Now())
+		expectations := workload.NewExpectationsWithClock(clk)
+		expectations.ExpectCreates("prod", "llama-70b", workload.ComponentEngine, 0, 1)
+		deps := workload.Deps{Client: c, Expectations: expectations}
+		surgeName := query.PodName(isvc.Name, workload.ComponentEngine, 0, "default", 1)
+		pass := func() {
+			t.Helper()
+			input := legacyTestInput(isvc, c, workload.ComponentEngine)
+			input.Clock = clk
+			if _, err := surgeUpdate(context.Background(), deps, input, plan, plan.Instances[0], tcr, []*corev1.Pod{oldPod}); err != nil {
+				t.Fatalf("surgeUpdate: %v", err)
+			}
+		}
+		surgePodExists := func() bool {
+			err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: surgeName}, &corev1.Pod{})
+			if err != nil && !apierrors.IsNotFound(err) {
+				t.Fatalf("read surge pod: %v", err)
+			}
+			return err == nil
+		}
+
+		pass()
+		if surgePodExists() {
+			t.Fatalf("the replacement was created behind an outstanding create expectation")
+		}
+		clk.Step(pastTTL)
+		pass()
+		if !surgePodExists() {
+			t.Fatalf("the replacement was not created once the expectation expired")
+		}
+	})
+
+	t.Run("drain delete", func(t *testing.T) {
+		f := newMidSurgeFixture(t, workload.UpdateStepSurgeDrain, true, false)
+		clk := clocktesting.NewFakeClock(time.Now())
+		expectations := workload.NewExpectationsWithClock(clk)
+		expectations.ExpectDeletes("prod", "llama-70b", workload.ComponentEngine, 0, 1)
+		deps := workload.Deps{Client: f.client, Expectations: expectations}
+		plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
+		pass := func() {
+			t.Helper()
+			input := legacyTestInput(f.isvc, f.client, workload.ComponentEngine)
+			input.Clock = clk
+			if _, err := UpdateWithPods(context.Background(), deps, input, plan, plan.Instances[0], f.targetCR, f.targetSpec, f.survivingPods(t)); err != nil {
+				t.Fatalf("UpdateWithPods: %v", err)
+			}
+		}
+
+		pass()
+		if _, found := f.livePod(t, f.sourcePod); !found {
+			t.Fatalf("the drained source was deleted behind an outstanding delete expectation")
+		}
+		clk.Step(pastTTL)
+		pass()
+		if _, found := f.livePod(t, f.sourcePod); found {
+			t.Fatalf("the drained source was not deleted once the expectation expired")
+		}
+	})
+}

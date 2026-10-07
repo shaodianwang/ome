@@ -1,0 +1,63 @@
+# The gang is narrowed by a worker while its surge is still building the
+# replacement. The width is outside the revision payload, so no supersede
+# fires; the replacement keeps the member it already built above the new
+# width, that member is still read by the runtime-ready check, and the
+# hand-over lands at the width the replacement was built at.
+scenario: surge-gang-source-width-shrink
+arrows:
+  - T-empty-gang-surge-target
+  - T-surgedrain-gang-complete
+  - T-gangtarget-ready
+cells:
+  - instance/Update/Surge/spec.gangWidth[shrink]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 2
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes all three
+  - tick: 2
+    note: every member reports Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker, ordinal: 1}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and all three members are created
+  - tick: 5
+    note: the gang is narrowed by a worker at an unchanged revision while the replacement is still coming up; nothing removes the member already built above the new width
+    events:
+      - spec.gangWidth[shrink]: {to: 1}
+  - tick: 6
+    note: a further pass finds the surplus member still standing and the surge still waiting on the whole replacement
+  - tick: 7
+    note: the whole replacement, surplus member included, reports Ready, so the source advances to the drain and leaves rotation
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker, ordinal: 1}}
+  - tick: 8
+    note: the leader's endpoint goes not-ready, which is the guard the drain waits on, so the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 9
+    note: the source pods are gone, so its row is removed and the replacement is promoted as the Instance at the width it was built at
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker, ordinal: 1}}

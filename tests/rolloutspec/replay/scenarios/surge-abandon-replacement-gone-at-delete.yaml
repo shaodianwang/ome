@@ -1,0 +1,42 @@
+# A superseded surge abandons its replacement, and the replacement is
+# already gone when the abandon's delete reaches the apiserver. A delete
+# against a pod that no longer exists is the outcome the abandon wanted, so
+# the attempt treats the answer as done, rolls its expectation back, and the
+# next pass resets the source to Ready on the revision it runs and re-enters
+# through the trigger toward the newest target.
+scenario: surge-abandon-replacement-gone-at-delete
+arrows:
+  - T-ready-surge
+  - T-surge-abandon-superseded
+cells:
+  - instance/Update/Surge/api.notFound/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: a further edit supersedes the pinned target while the replacement is not runtime-ready, and the abandon's delete finds the replacement already gone; the answer is read as done and the expectation rolled back
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - api.notFound: {verb: delete}
+  - tick: 5
+    note: the surge ordinal is empty, so the source is reset to Ready on the revision it runs
+  - tick: 6
+    note: the Ready row re-enters through the trigger and surges toward the newest target

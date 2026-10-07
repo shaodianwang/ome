@@ -1,6 +1,6 @@
 # Open rows of this machine as high-water marks: each number may go down,
 # never up. Lower a number when rows gain coverage or are decided, and
 # refresh set_on. TestCoverageFloorHolds in tests/rolloutspec enforces it.
-uncovered: 98
-undecided: 629
+uncovered: 89
+undecided: 473
 set_on: "2026-10-06"
