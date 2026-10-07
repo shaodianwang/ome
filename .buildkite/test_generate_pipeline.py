@@ -3420,3 +3420,22 @@ class TestPipelineUploads(PipelineTestCase):
                 self.assertEqual(gp._job_count((batch_dir / name).read_text()), int(count))
             total = sum(int(count) for _, count in manifest[1:])
             self.assertIn(f"uploaded {len(manifest) - 1} documents, {total} jobs", result.stdout)
+
+
+class GkeJobPodSpecTest(unittest.TestCase):
+    """Every pod the GKE queue runs for us refuses the kubelet's Service links.
+
+    The agent namespace is shared with workloads that create Services by the
+    thousand; a pod that accepts the links gets all of them as environment
+    variables and its first exec fails with the argument list too long.
+    """
+
+    def test_every_gke_pod_spec_disables_service_links(self):
+        for plugins in (gp._gke_kind_plugins("example/runner:tag"), gp._gke_kind_plugins("example/runner:tag", shared_model=True)):
+            pod_spec = plugins[0]["kubernetes"]["podSpecPatch"]
+            self.assertIs(pod_spec["enableServiceLinks"], False)
+
+    def test_rendered_kind_group_carries_the_setting(self):
+        rendered = gp._gke_kind_group()
+        self.assertIn("enableServiceLinks", rendered)
+        self.assertNotRegex(rendered, r"enableServiceLinks[\"']?:\s*[\"']?true", "a KIND pod must not accept Service links")

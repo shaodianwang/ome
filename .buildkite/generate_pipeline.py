@@ -1032,6 +1032,10 @@ def _gke_kind_plugins(image: str, shared_model: bool = False) -> list[dict]:
         "volumes": volumes,
     }
     pod_spec["nodeSelector"] = {"kubernetes.io/arch": "amd64"}
+    # The agent namespace is shared with workloads that create Services by the
+    # thousand; the environment the kubelet would inject for them exceeds the
+    # exec limit of every container, so no Service links.
+    pod_spec["enableServiceLinks"] = False
     return [{"kubernetes": {"podSpecPatch": pod_spec}}]
 
 
