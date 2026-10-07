@@ -626,3 +626,27 @@ func TestEntryStamps_LadderFlipFollowsTheAttempt(t *testing.T) {
 		}
 	}
 }
+
+// The stuck-pod stamp is decided on the pass's pod observation and applied
+// to the fresh row, and it reads the row's phase and the blamed pod's
+// incarnation alone: a row the restart pass promoted later in the same
+// pass, Ready with the operation cleared at the incarnation the stuck pod
+// carries, is stamped Failed like the Restarting row the observation
+// showed. Only the deadline stamp withholds itself from a cleared
+// operation.
+//
+// Cells: instance/Restart/Drain/pod.containersReady[source]/boundary@T-restart-stuck, instance/Restart/Drain/pod.containersReady[source]/boundary@T-restart-stuckgrace
+func TestStampFailedOnStuckPod_LandsOnARowPromotedSinceTheObservation(t *testing.T) {
+	now := metav1.NewTime(time.Date(2026, time.September, 21, 0, 0, 0, 0, time.UTC))
+	termination := &types.InstanceTermination{PodName: "engine-0-default-0", Reason: "CrashLoopBackOff", Time: now}
+	promoted := types.InstanceStatus{Index: 0, Incarnation: 2, Phase: types.InstancePhaseReady, ReadySince: &now}
+
+	stuck := promoted
+	if !StampFailedOnStuckPod(termination, 2)(&stuck) || stuck.Phase != types.InstancePhaseFailed || stuck.Operation != nil {
+		t.Fatalf("row = %+v, want the promoted row stamped Failed with no operation: the stuck stamp does not read the cleared operation", stuck)
+	}
+	deadline := promoted
+	if StampFailedKeepingOperation(termination)(&deadline) || deadline.Phase != types.InstancePhaseReady {
+		t.Fatalf("row = %+v, want the deadline stamp withheld from a row whose operation the promote cleared", deadline)
+	}
+}

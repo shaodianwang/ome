@@ -11,6 +11,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	clocktesting "k8s.io/utils/clock/testing"
@@ -3758,6 +3759,45 @@ func TestDetectRestartTrigger_ParkedAttemptDoesNotOwnALostMember(t *testing.T) {
 			}
 			if !ops.RepairYieldsToTarget(input, plan, inst, target, []*corev1.Pod{worker}) {
 				t.Fatalf("the repair of a row off a target the roll may start on is the roll's")
+			}
+		})
+	}
+}
+
+// A parked repair issues no pod write; the one write its re-arm makes is
+// the owner status, and a refusal of it that the adapter does not retry -
+// a 422 or a shed 429 - leaves the pass through the error path with the
+// row as it was: still Failed with the spent Restart at its incarnation,
+// the wedged pod untouched. The next pass re-derives the same re-arm.
+//
+// Cells: instance/Failed/Repair/api.invalid/before, instance/Failed/Repair/api.throttled[TooManyRequests]/before, instance/Failed/Repair/api.throttled[ServiceUnavailable]/before
+func TestSpentRepair_RefusedStatusWriteLeavesTheRowParked(t *testing.T) {
+	for name, refusal := range map[string]error{
+		"invalid":             apierrors.NewInvalid(v1beta1.SchemeGroupVersion.WithKind("InferenceReplica").GroupKind(), "llama-70b-engine", nil),
+		"too many requests":   apierrors.NewTooManyRequests("the server is shedding load", 30),
+		"service unavailable": apierrors.NewServiceUnavailable("the server is currently unable to handle the request"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			now := time.Now()
+			input, plan, pod, c, isvc := spentRepairFixture(t, now, 0, 2*time.Minute, retryLadder(3, time.Minute))
+			needs, reason := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], []*corev1.Pod{pod})
+			if !needs {
+				t.Fatalf("restart trigger: got false, want the re-arm now that the ladder is due")
+			}
+			input.MutateInstance = func(context.Context, int32, func(*workload.InstanceStatus) bool) error { return refusal }
+
+			done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], nil, reason)
+			if done || err == nil {
+				t.Fatalf("Restart: (done=%v, err=%v), want the refused status write returned as the pass error", done, err)
+			}
+			s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+			if s == nil || s.Phase != v1beta1.OMENativeInstanceFailed || s.Incarnation != 2 ||
+				s.Operation == nil || s.Operation.Type != v1beta1.InstanceOperationRestart || s.Operation.RetryCount != 0 {
+				t.Fatalf("row = %+v, want the parked repair as it was: Failed at incarnation 2 with the spent Restart", s)
+			}
+			stored := &corev1.Pod{}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), stored); err != nil || stored.DeletionTimestamp != nil {
+				t.Fatalf("pod: (err=%v, deleting=%v), want the wedged pod untouched by a re-arm whose stamp never landed", err, stored.DeletionTimestamp != nil)
 			}
 		})
 	}
