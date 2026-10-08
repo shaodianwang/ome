@@ -129,7 +129,7 @@ func podOutOfService(pod *corev1.Pod, now time.Time, grace time.Duration) bool {
 // out of service: no routed pod is in rotation, and every live routed pod
 // is either in a terminal phase or out of service (podOutOfService). A
 // start that replaces such a set opens no new unavailability, and the
-// coordination gate already counts the outage in its serving-based
+// coordination gate already counts that unavailability in its serving-based
 // unavailability. A pod that is merely not yet Ready, or unready for
 // less than grace, is not counted: its wait may still resolve, so
 // replacing it is charged like any start.
@@ -187,7 +187,7 @@ func PodSetOutOfRotation(pods []*corev1.Pod) bool {
 // kubelet readiness alone: every live routed pod runs with ContainersReady
 // False for the stuck-pod grace (ContainersUnreadyPastGrace), whatever its
 // serving gate reads. It is the reading for a pod set a pass has already
-// drained, which PodSetServesNothing no longer tells from the drain. A gang
+// drained, which PodSetServesNothing cannot tell from the drain. A gang
 // reads its routed members alone, as PodSetServesNothing does.
 func PodSetDarkOnReadiness(pods []*corev1.Pod, now time.Time, grace time.Duration) bool {
 	live, routed := 0, 0

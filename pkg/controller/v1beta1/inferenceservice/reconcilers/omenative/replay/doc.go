@@ -8,5 +8,6 @@
 // pods, the policies, the revisions and the clock, and records what every
 // stage wrote as a normalized trace.
 //
-// The scenarios, goldens and gates live under tests/rolloutspec/isvcreplay.
+// A scenario is a YAML timeline. Parse decodes one against the event
+// vocabulary, and the tests in this package exercise the format end to end.
 package replay

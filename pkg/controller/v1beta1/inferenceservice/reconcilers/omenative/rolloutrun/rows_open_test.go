@@ -14,9 +14,9 @@ import (
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// Row tests for a pinned run, fresh (Open) or adopted around a ladder that
+// Tests for a pinned run, fresh (Open) or adopted around a ladder that
 // was already in flight (Adopted). From the pass after the one that pinned
-// it an adopted run is judged exactly as a fresh one, so most rows run the
+// it an adopted run is judged exactly as a fresh one, so most cases run the
 // same story from both starts.
 
 // pinnedStart opens a run and returns the service with its diverged replica.
@@ -366,7 +366,7 @@ func TestAStagedGroupClosesAPinnedRun(t *testing.T) {
 		// next pass opens again over it, and the staged rest closes that run
 		// in turn.
 		if out := pass(t, isvc, staged); !out.Opened {
-			t.Fatalf("pass after the close = %+v; today the staged member reopens a run", out)
+			t.Fatalf("pass after the close = %+v; want the staged member to reopen a run", out)
 		}
 		if out := pass(t, isvc, staged); !out.StateChanged || v1beta1.RolloutRunActive(isvc) {
 			t.Fatalf("second close = %+v active=%v", out, v1beta1.RolloutRunActive(isvc))
@@ -397,7 +397,7 @@ func TestAStagedGroupClosesAPinnedRun(t *testing.T) {
 			t.Fatalf("lastRun = %+v, want Completed", last)
 		}
 		if out := pass(t, isvc, settledIR(newRev), decoder); !out.Opened {
-			t.Fatalf("pass after the close = %+v; today the staged member reopens a run", out)
+			t.Fatalf("pass after the close = %+v; want the staged member to reopen a run", out)
 		}
 	})
 }

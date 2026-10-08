@@ -235,7 +235,7 @@ func TestTSCVetoedLeaderReplansWithAffinityBoundWorker(t *testing.T) {
 	createNamespace(t, tc, ns)
 	// One node per domain, each with room for two gangs, so the first gang's
 	// domain stays the best fit for the second.
-	for _, n := range []struct{ name, domain string }{{"tw-a1", "a"}, {"tw-b1", "b"}} {
+	for _, n := range []struct{ name, domain string }{{"tsc-a1", "a"}, {"tsc-b1", "b"}} {
 		if _, err := tc.ClientSet.CoreV1().Nodes().Create(tc.Ctx, makeGPUNode(n.name, n.domain, 4), metav1.CreateOptions{}); err != nil {
 			t.Fatalf("create node %s: %v", n.name, err)
 		}

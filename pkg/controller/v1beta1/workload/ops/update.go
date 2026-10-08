@@ -1275,7 +1275,7 @@ func failedGangSurgeContinuation(s *workload.InstanceStatus, targetName string) 
 // roll target. A pod the cleanup has already deleted stays an alien
 // while it terminates: the row is the cleanup's until the object is
 // gone, so no other pass reads the half-gone set as a loss of its own.
-// Unlabeled pods are never selected (legacy pods are the ordinal
+// Unlabeled pods are never selected (a pod without a revision label is the ordinal
 // partition's business). An empty RunningRevision yields no aliens:
 // with no recorded baseline, alienness is undecidable — that state is
 // owned by the trigger's per-pod diff / adoption path, and deleting an

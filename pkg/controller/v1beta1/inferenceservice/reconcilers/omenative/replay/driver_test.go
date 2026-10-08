@@ -7,7 +7,7 @@ import (
 )
 
 const plainWalk = `scenario: plain
-cells: ["run/Open/ctrl.staleRead[missesOpen]/before"]
+cells: ["run/example-cell"]
 initial:
   service:
     components:

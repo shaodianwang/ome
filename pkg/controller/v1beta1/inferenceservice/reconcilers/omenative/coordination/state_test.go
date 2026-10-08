@@ -797,7 +797,7 @@ func TestComputeTransition_SequentialHandsOffOnStaged(t *testing.T) {
 	}
 }
 
-// --- the group machine, one observation per state and event ---
+// --- ComputeTransition from every group state, under every event ---
 
 // settledOn is one member at rest on rev: two Ready, serving pods on its
 // only revision, which is both its current and its update revision, so it
@@ -881,13 +881,13 @@ func ratioBalanced(obs GroupObservation, engine, decoder int32) GroupObservation
 }
 
 // TestComputeTransition_PhaseFollowsTheMembersFromEveryState walks the
-// group machine one authored row at a time: the observation a state and an
+// group machine one case at a time: the observation a state and an
 // event leave behind, and the phase the transition function computes from
 // it. The phase is a pure function of the members, so an event that leaves
 // the facts the state already reads keeps the phase, and one that changes
 // them moves it, whatever phase the previous pass persisted. BlueGreen is
-// the dominant policy; a row whose outcome differs under another policy
-// carries that policy's case beside it.
+// the dominant policy; a case whose outcome differs under another policy
+// carries that policy's variant beside it.
 //
 // Cells: coordination/Idle/member.surgePodCreated/before, coordination/Idle/member.readyOnTarget/before, coordination/Idle/member.capacityLost[newRevision]/before, coordination/Idle/member.capacityLost[oldRevision]/before, coordination/Idle/member.converged/before, coordination/Idle/member.dark/before, coordination/Idle/spec.groupEdited[policyChanged]/before, coordination/Idle/spec.partition[set]/before, coordination/Idle/spec.partition[cleared]/before, coordination/Idle/ir.stale/before
 // Cells: coordination/SeqAwaiting/member.surgePodCreated/before, coordination/SeqAwaiting/member.readyOnTarget/before, coordination/SeqAwaiting/member.capacityLost[newRevision]/before, coordination/SeqAwaiting/member.capacityLost[oldRevision]/before, coordination/SeqAwaiting/member.dark/before, coordination/SeqAwaiting/spec.groupEdited[policyChanged]/before, coordination/SeqAwaiting/spec.partition[set]/before, coordination/SeqAwaiting/spec.partition[cleared]/before, coordination/SeqAwaiting/ir.missing/before, coordination/SeqAwaiting/ir.stale/before, coordination/SeqAwaiting/ctrl.resync/before
@@ -948,7 +948,7 @@ func TestComputeTransition_PhaseFollowsTheMembersFromEveryState(t *testing.T) {
 		{name: "idle-under-independent", obs: groupOf(ind, settled(engine), settled(decoder)), want: idle},
 		{name: "idle-under-sequential", obs: groupOf(seq, settled(decoder), settled(engine)), want: idle, composite: "Idle"},
 
-		// SeqAwaiting: the soak hold is judged before the active member's
+		// Sequential, awaiting the next member: the soak hold is judged before the active member's
 		// pods, so nothing the member does under the window moves the group.
 		{name: "awaiting-surge-pod-under-the-soak-keeps-awaiting", obs: soaking(rollingTo(engine, 3, 1, 0), time.Minute), want: idle, composite: v1beta1.CompositePhaseSequentialAwaiting},
 		{name: "awaiting-ready-target-under-the-soak-keeps-awaiting", obs: soaking(rollingTo(engine, 4, 2, 2), time.Minute), want: idle, composite: v1beta1.CompositePhaseSequentialAwaiting},

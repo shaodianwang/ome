@@ -1037,7 +1037,7 @@ func TestDispose_RowThatMovedOnSinceTheObservationIsLeftAlone(t *testing.T) {
 				t.Fatalf("commits: got %+v want none", rec.commits)
 			}
 			if len(rec.blockCalls) != 0 {
-				t.Fatalf("MutateRetryBlock calls: got %+v want none: a wave is not counted for an attempt that is no longer on the row", rec.blockCalls)
+				t.Fatalf("MutateRetryBlock calls: got %+v want none: a wave is not counted for an attempt that is not on the row", rec.blockCalls)
 			}
 			if got := insts[0]; got.Phase != tc.fresh.Phase || got.LastFailure != nil ||
 				(got.Operation == nil) != (tc.fresh.Operation == nil) {
@@ -1162,7 +1162,7 @@ func TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused(t *testing.T) 
 // expiry + crash-loop pod + Mode=Auto + budget → branch 2: a TERMINAL
 // AutoRecover directive is recorded AND the instance is disposed
 // Failed-with-no-Operation in the same pass (the backstop is
-// unconditional — no more pend-forever wedge).
+// unconditional).
 // TestExpireOperations_SinglePodNodeFaultRecordsDirective: the deadline
 // path of the escalation pass records a relocation directive for a
 // single-pod attempt refused a start on one node while the revision
@@ -2221,7 +2221,7 @@ func TestDispose_GangLeaderCrashLoopBlamesNoNode(t *testing.T) {
 }
 
 // TestDispose_NodeFaultStillRelocates pins the classes the relocation
-// branch keeps once a crash loop is carved out of it: a runtime start
+// branch takes, a crash loop not among them: a runtime start
 // rejection on a served revision, and a pod whose node stopped
 // reporting it, each on one resolvable node under Auto with budget,
 // record a directive against that node, charge no ladder and announce
@@ -2457,7 +2457,7 @@ func TestDispose_UnschedulableRebuildReleasesNodeExclusion(t *testing.T) {
 // on it and its deadline parked, the row reads Failed for the set that is
 // down, the failure is recorded and the ladder is charged exactly as for
 // a cleared attempt. An attempt whose pods are gone, or whose wave no
-// ladder counts, is cleared as before.
+// ladder counts, is cleared.
 //
 // Cells: instance/Update/Drain/timer.operationDeadline/before, instance/Update/Drain/pod.waiting[CrashLoopBackOff]/before, instance/Update/InPlace/pod.waiting[CreateContainerConfigError]/before, instance/Update/Drain/pod.waiting[ImagePullBackOff]/before
 func TestDispose_LiveSetParksTheAttempt(t *testing.T) {

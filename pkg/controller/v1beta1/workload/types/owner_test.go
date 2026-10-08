@@ -351,7 +351,7 @@ func TestUpdateContinuation_ParkedAttemptIsNotAContinuation(t *testing.T) {
 	}
 }
 
-// A parked attempt is a settled row to the table: the parked step is its
+// A parked attempt is a settled row of the ownership table: the parked step is its
 // own state while the set serves and the Failed state while it is down,
 // nobody owns it, it claims no verb, and it is never in flight.
 func TestParkedAttempt_IsSettledAndClaimsNothing(t *testing.T) {

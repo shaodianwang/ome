@@ -634,8 +634,7 @@ func TestGangSurgeCreate_TerminalMemberIsRecycled(t *testing.T) {
 // again while the recycle's delete is still unobserved is the same recycle,
 // not a second one. Every update attempt returns before any bookkeeping
 // until its expectations settle, so the row keeps its phase and step and
-// the recycle count and LastFailure do not move. The boundary and after
-// rows of the recycled events cite this story.
+// the recycle count and LastFailure do not move.
 func TestUpdateAttempt_TerminalPodReobservedKeepsPhaseAndStep(t *testing.T) {
 	crashed := func(pod *corev1.Pod) *corev1.Pod { return exitedPod(pod, corev1.PodFailed, 1, "Error") }
 

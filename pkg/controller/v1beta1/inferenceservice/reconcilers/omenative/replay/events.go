@@ -18,15 +18,15 @@ import (
 )
 
 // eventApplier turns one timeline event into the cluster, spec or replica
-// change the tables say it is, and returns the detail the trace records.
+// change its vocabulary entry names, and returns the detail the trace records.
 type eventApplier func(ctx context.Context, d *driver, ev TimelineEvent) (string, error)
 
-// eventAppliers is the set of table events the driver can stage. An event
-// a table declares but this map does not carry fails to load.
+// eventAppliers is the set of timeline events the driver can stage. An event
+// the vocabulary declares but this map does not carry fails to load.
 var eventAppliers map[string]eventApplier
 
-// producedEvents are the table events the engines produce inside the pass;
-// a scenario stages the facts that make them happen and cites their cells.
+// producedEvents are the events the engines produce inside the pass; a
+// scenario stages the facts that make them happen instead of naming them.
 var producedEvents = map[string]string{
 	"canary.progress":        "the canary executor advances the step; stage the capacity and verb facts that advance it",
 	"canary.completed":       "the canary executor completes the ladder; stage the facts that complete it",
@@ -65,7 +65,7 @@ var producedEvents = map[string]string{
 	"ir.readError":           "the fake apiserver answers every replica read",
 	"analysis.sample":        "the analysis sampler is not modelled",
 	"analysis.unavailable":   "the analysis sampler is not modelled",
-	"record.legacy":          "a persisted record shape from before a field existed is not modelled",
+	"record.legacy":          "a persisted record that lacks an optional field is not modelled",
 	"member.staged":          "a staged member needs the user partition flow, which is not modelled",
 	"ir.missing":             "a replica is never removed in a replay; the projector would recreate it in the same pass",
 	"timer.pauseElapsed":     "a timed soak is not modelled",
@@ -659,7 +659,7 @@ func applyCollected(ctx context.Context, d *driver, ev TimelineEvent) (string, e
 }
 
 // disownRevision rewrites a ControllerRevision's controller reference to
-// another object, so the Component's replica no longer controls it.
+// another object, so the Component's replica does not control it.
 func (d *driver) disownRevision(ctx context.Context, m *member, image string, cr *appsv1.ControllerRevision) (string, error) {
 	live := &appsv1.ControllerRevision{}
 	if err := d.cluster.cli.Get(ctx, client.ObjectKeyFromObject(cr), live); err != nil {
@@ -960,7 +960,7 @@ func revisionFieldsEqual(live, stale *v1beta1.InferenceService) bool {
 }
 
 // applyRunLost drops the pinned run from the live status: the status
-// loss a controller without the run model, or a dropped flush, leaves.
+// loss a dropped flush, or a status written without the run fields, leaves.
 func applyRunLost(ctx context.Context, d *driver, ev TimelineEvent) (string, error) {
 	live, err := d.liveService(ctx)
 	if err != nil {

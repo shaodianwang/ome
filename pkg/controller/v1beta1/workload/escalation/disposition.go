@@ -52,7 +52,7 @@ const (
 	// (UpdateItem.CleanupOnly → ops.CleanupWreckage) when no revision diff
 	// exists to trigger one.
 	DispositionSkippedSuperseded
-	// DispositionWithheld — the fresh row no longer carries the attempt
+	// DispositionWithheld — the fresh row does not carry the attempt
 	// the pass observed, so its end was not written and nothing was
 	// announced. A row that concluded the attempt (a promote got there
 	// first) recorded nothing at all; a row re-opened under another
@@ -227,7 +227,7 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 	// serves. A never-Ready pod on a revision nobody has served is the
 	// revision's own failure until proven otherwise and takes the ladder
 	// the same way, so a bad push leaves no exclusion behind for its fix
-	// to inherit. A revision the ladder has Held is no longer known to
+	// to inherit. A revision the ladder has Held is not known to
 	// work either: the hold is the ladder's verdict that the revision
 	// itself fails, so a further attempt at it blames no node and records
 	// no exclusion — a directive would steer a rebuild the hold never

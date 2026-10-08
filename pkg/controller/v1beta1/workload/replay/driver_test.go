@@ -151,7 +151,7 @@ func TestSeededOperationIsTheEngineStamp(t *testing.T) {
 }
 
 // TestSeededRowOutsideTheMachineFailsTheRun keeps a seed honest: a shape
-// the engine's owner table does not name is nothing any pass drives.
+// the engine's ownership table (types.StateOf) does not name is nothing any pass drives.
 func TestSeededRowOutsideTheMachineFailsTheRun(t *testing.T) {
 	bogusStep := strings.Replace(resumedSurge, "step: Surge", "step: Sideways", 1)
 	if err := driverError(t, bogusStep); err == nil || !strings.Contains(err.Error(), "names no state") {

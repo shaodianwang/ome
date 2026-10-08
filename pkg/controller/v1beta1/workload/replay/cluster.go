@@ -217,7 +217,7 @@ func (d *driver) staging(write func() error) error {
 
 // deleteObject performs one delete against the fake apiserver. A grace-zero
 // delete — the escalation's own — removes a pod at once, as the apiserver
-// removes an object it no longer waits for a kubelet to release; the
+// removes an object it does not wait for a kubelet to release; the
 // driver's finalizer stands in for that kubelet and does not survive it. A
 // pod held Terminating by a dead kubelet is held by the driver rather than
 // by a finalizer, so a graceful delete on it changes nothing, exactly as it

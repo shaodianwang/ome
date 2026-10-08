@@ -665,7 +665,7 @@ const (
 
 // approvedStatusWriters are the InferenceReplica status writes outside the
 // single writer, keyed as the sweep prints a site, each with the reason it
-// stands: today the one stand-in for the replica controller itself.
+// stands: the one stand-in for the replica controller itself.
 var approvedStatusWriters = map[string]string{
 	"pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/replay/members.go:driver.publish (Status().Update)": replicaControllerStandIn,
 }

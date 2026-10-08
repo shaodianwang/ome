@@ -284,7 +284,7 @@ func applyPodDeleted(ctx context.Context, d *driver, ev TimelineEvent) (string, 
 // the object the engine observed is gone, and an identical one — same
 // labels and template, fresh, unscheduled, Pending — stands where it was.
 // The watch sees a delete and an add, so the expectations balance; a
-// delete the engine pinned to the old UID no longer matches anything.
+// delete the engine pinned to the old UID matches nothing.
 func applyUIDRotated(ctx context.Context, d *driver, ev TimelineEvent) (string, error) {
 	ref, err := requirePod(ev)
 	if err != nil {
@@ -937,7 +937,7 @@ func applySpecRevision(ctx context.Context, d *driver, ev TimelineEvent) (string
 // with an edit the revision hasher does not read as intent, so the target
 // revision does not move. The hasher itself is the judge: an edit that
 // mints a new revision is a template change and fails the run, because
-// the table spells that edit spec.revision.
+// the scenario vocabulary spells that edit spec.revision.
 func applyAnnotationOnly(ctx context.Context, d *driver, ev TimelineEvent) (string, error) {
 	if ev.Args.Labels == nil && ev.Args.Annotations == nil {
 		return "", fmt.Errorf("replay: spec.annotationOnly needs the template's new labels, annotations, or both")

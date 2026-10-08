@@ -510,7 +510,7 @@ func (d *driver) seedRows(ctx context.Context, specs []RowSpec) ([]types.Instanc
 				return nil, err
 			}
 		}
-		// The engine's own owner table decides whether the row is a state
+		// The engine's own ownership table (types.StateOf) decides whether the row is a state
 		// of the machine; a shape it does not name is a seed nothing drives.
 		if types.StateOf(&row) == types.StateUnknown {
 			return nil, fmt.Errorf("replay: rows[%d]: phase %q with operation %s names no state of the instance machine",

@@ -12078,7 +12078,7 @@ func TestReconcile_UnreadyVictimPastTheWindow_DrainFirstRollTakesItFirst(t *test
 // rollout group whose run is not pinned, and the highest Instance's pod
 // has been unready past the stuck-pod grace while its row stays Ready. A
 // push moves nothing while the plan is unpinned, the dark Instance
-// included: its outage waives the capacity consults, whose count already
+// included: its loss of service waives the capacity consults, whose count already
 // carries it, not the pin, and the hold reads Plan. Once a run pins the
 // plan the dark Instance rolls first at no cost in capacity and the peers
 // follow within the budget; no repair opens under either restart policy.

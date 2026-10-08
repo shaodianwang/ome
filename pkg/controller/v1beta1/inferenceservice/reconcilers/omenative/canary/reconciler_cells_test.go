@@ -847,8 +847,8 @@ func evRunAdopted(isvc *v1beta1.InferenceService, in *ReconcileInputs) {
 	in.TargetID = activeCanaryTargetID(isvc, g)
 }
 
-// The legacy record shapes: status written before a field existed or by an
-// external writer.
+// Record shapes the controller repairs in place: a status missing a field,
+// or one written by another writer.
 func evRecordNoTargetID(isvc *v1beta1.InferenceService, _ *ReconcileInputs) {
 	rollout.CanaryStatusFor(&isvc.Status, v1beta1.EngineComponent).TargetID = ""
 }
@@ -1286,7 +1286,7 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/Idle/runLost", fixtureIdle, evRetargetWithoutRun, cellWant{state: idle}},
 		// --- Staging: the capacity gate holds in front of everything the step
 		// could do; the records of applied verbs keep their re-shown copies
-		// inert, and a legacy record shape is repaired in place.
+		// inert, and an incomplete record shape is repaired in place.
 		{"canary/Staging/unpause", fixtureStaging, evUnpause, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/Staging/promote[stale]", fixtureStaging, evPromoteStale, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/Staging/promote[applied]", fixtureStagingApplied, evPromoteMatch, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, step: 1, active: true, consume: []string{constants.RolloutPromoteAnnotation}}},
@@ -1722,7 +1722,7 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/Failed[stableMissing]/record[stableEqualsCanary]", fixtureFailedStableMissing, evRecordStableEqualsCanary, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
 		{"canary/Failed[stableMissing]/record[noStable]", fixtureFailedStableMissing, evRecordNoStable, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
 		{"canary/Failed[stableMissing]/record[negativeStep]", fixtureFailedStableMissing, evRecordNegativeStep, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
-		// --- Legacy record shapes and repins the fixtures above do not drive:
+		// --- Incomplete record shapes and repins the fixtures above do not drive:
 		// a negative step on a record past step 0 is clamped to 0, which
 		// re-runs step 0 as a live step; an equal pair at the sentinel is
 		// repaired and the cutover re-recorded; a phase-only Failed over a

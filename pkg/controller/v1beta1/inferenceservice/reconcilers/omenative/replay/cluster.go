@@ -384,7 +384,7 @@ func specChanged(before, after client.Object) bool {
 }
 
 // createDetail names what a created object carries, for the kinds whose
-// creation a golden shows.
+// creation the trace renders in detail.
 func (c *cluster) createDetail(obj client.Object) string {
 	if ir, ok := obj.(*v1beta1.InferenceReplica); ok {
 		return irSpecDetail(nil, ir)
@@ -393,7 +393,7 @@ func (c *cluster) createDetail(obj client.Object) string {
 }
 
 // writeDetail names the fields an update or patch changed, for the kinds
-// whose writes a golden shows: an InferenceReplica's projected spec and an
+// whose writes the trace renders in detail: an InferenceReplica's projected spec and an
 // InferenceService's annotations. Everything else is traced by name alone.
 func (c *cluster) writeDetail(before, after client.Object) string {
 	switch a := after.(type) {
@@ -459,8 +459,7 @@ func irSpecDetail(before, after *v1beta1.InferenceReplica) string {
 
 // laggedClient is the engines' cached client during a stale pass: the
 // service is read as the previous pass found it, while every other object
-// and every write go to the store. The lag is the service's own: the four
-// tables' stale-read events describe a pass whose copy of the service
+// and every write go to the store. The lag is the service's own: a stale-read event describes a pass whose copy of the service
 // predates a status flush, with its replicas, pods, Services and policies
 // read current.
 type laggedClient struct {

@@ -3267,8 +3267,7 @@ func TestGangSurge_PromotionRebindsPendingMovesToTheReplacement(t *testing.T) {
 // gang's drain flip reads the members it listed, and a member can be out
 // of rotation before the flip writes: already terminating, or gone between
 // the list and the write. Such a member is left alone instead of failing
-// the pass, and the members still in rotation are taken out of it as
-// before.
+// the pass, and the members still in rotation are taken out of it.
 //
 // Cells: instance/Update/GangSurgeTarget/pod.terminating[source]/before
 func TestGangSurgeDrain_SkipsSourceMembersAlreadyOutOfRotation(t *testing.T) {
@@ -3277,7 +3276,7 @@ func TestGangSurgeDrain_SkipsSourceMembersAlreadyOutOfRotation(t *testing.T) {
 		// leave takes the source leader out of rotation by other means and
 		// returns the pod as the pass lists it.
 		leave func(t *testing.T, c client.Client, leader *corev1.Pod) *corev1.Pod
-		// gone is true when the leader is no longer in the API.
+		// gone is true when the leader is not in the API.
 		gone bool
 	}{
 		{

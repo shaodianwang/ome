@@ -14,12 +14,12 @@ func testVocabulary() Vocabulary {
 			"canary.parked":  {},
 			"record.legacy":  {"noTargetID"},
 		},
-		Cells: map[string]struct{}{"run/Open/ctrl.staleRead[missesOpen]/before": {}},
+		Cells: map[string]struct{}{"run/example-cell": {}},
 	}
 }
 
 const scenarioHead = `scenario: t
-cells: ["run/Open/ctrl.staleRead[missesOpen]/before"]
+cells: ["run/example-cell"]
 initial:
   service:
     components:
@@ -45,7 +45,7 @@ func TestParseAcceptsTheThreeEventForms(t *testing.T) {
 	}
 }
 
-// The parser refuses what the tables do not declare, what the engines
+// The parser refuses what the vocabulary does not declare, what the engines
 // produce on their own, and what the driver cannot stage.
 func TestParseRefusesWhatCannotBeStaged(t *testing.T) {
 	cases := map[string]string{
@@ -64,8 +64,8 @@ func TestParseRefusesWhatCannotBeStaged(t *testing.T) {
 			}
 		})
 	}
-	_, err := Parse([]byte(strings.Replace(scenarioHead, "\"run/Open/ctrl.staleRead[missesOpen]/before\"", "\"run/Open/no.such/before\"", 1)+"  - tick: 1\n"), testVocabulary())
-	if err == nil || !strings.Contains(err.Error(), "not a key") {
+	_, err := Parse([]byte(strings.Replace(scenarioHead, "\"run/example-cell\"", "\"run/no.such\"", 1)+"  - tick: 1\n"), testVocabulary())
+	if err == nil || !strings.Contains(err.Error(), "not in the vocabulary") {
 		t.Fatalf("unknown cell: %v", err)
 	}
 	_, err = Parse([]byte(scenarioHead+"  - tick: 2\n"), testVocabulary())

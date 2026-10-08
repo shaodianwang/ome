@@ -9,10 +9,10 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 )
 
-// Row tests for RejectedSticky: no run is pinned and a canary unit's record
-// holds a rejected revision a member still targets. The divergence toward
-// that revision is a hold, so the passes below open nothing and park
-// nothing whatever else moved around the hold.
+// Tests for a rejected revision that stays rejected: no run is pinned and a
+// canary unit's record holds a rejected revision a member still targets.
+// The divergence toward that revision is a hold, so the passes below open
+// nothing and park nothing whatever else moved around the hold.
 
 // A standing hold is left alone by everything that is not a different
 // target, a cleared hold or a straggler outside the rejection: a target

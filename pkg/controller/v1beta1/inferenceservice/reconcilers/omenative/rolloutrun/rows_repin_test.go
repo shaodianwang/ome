@@ -12,7 +12,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 )
 
-// Row tests for RepinPending: a run is pinned and the repin annotation is
+// Tests for RepinPending: a run is pinned and the repin annotation is
 // present. The pass consumes the verb before it reads replica freshness,
 // retargets or closes, so everything else waits one pass.
 
@@ -302,7 +302,7 @@ func TestARepinToTheEmptyPlanIsNeverRead(t *testing.T) {
 			t.Fatalf("pass %d = %+v, want the drift pass with its ten-second requeue", i, out)
 		}
 		if isvc.Annotations[constants.RolloutRepinAnnotation] != "now" {
-			t.Fatalf("pass %d read the verb; today it is never reached with no spec group", i)
+			t.Fatalf("pass %d read the verb; it is never reached with no spec group", i)
 		}
 		requireSameRun(t, isvc, id)
 		requireDrift(t, isvc, corev1.ConditionTrue, v1beta1.RolloutPlanDriftReasonSpecNewerThanRun)

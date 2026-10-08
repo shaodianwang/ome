@@ -275,7 +275,7 @@ func ClaimOf(s *InstanceStatus) RowOwner {
 // budget, so a continuation is never admitted or charged again — the
 // exemption and the charge cover the same set. A parked attempt is
 // settled and claims nothing, so the roll starts fresh over it; every
-// other Updating row, an operation the table does not name included, is
+// other Updating row, an operation the ownership table does not name included, is
 // re-derived by the update pass rather than left.
 func UpdateContinuation(s *InstanceStatus) bool {
 	if s == nil {

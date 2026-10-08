@@ -12,19 +12,19 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-// ClockAdvance is the one event id a scenario may use that the behavior
-// tables do not declare. It moves the injected clock and touches nothing
+// ClockAdvance is the one event id a scenario may use that no machine
+// declares in its vocabulary. It moves the injected clock and touches nothing
 // else, so it belongs to the harness rather than to a machine's vocabulary.
 const ClockAdvance = "clock.advance"
 
-// Vocabulary is the union of the behavior tables a scenario is checked
-// against: the run, coordination, canary and revision machines. A zero
-// Vocabulary disables the check.
+// Vocabulary is the set of event ids, variants and cell ids a scenario may
+// cite: the union of what the run, coordination, canary and revision
+// machines declare. A zero Vocabulary disables the check.
 type Vocabulary struct {
 	// Events maps an event id to its declared variants, unioned over the
 	// machines that declare the id.
 	Events map[string][]string
-	// Cells is the set of machine-prefixed grid cell ids.
+	// Cells is the set of machine-prefixed cell ids.
 	Cells map[string]struct{}
 }
 
@@ -33,7 +33,7 @@ type Vocabulary struct {
 type Scenario struct {
 	// Scenario names the run; the file name is the scenario name.
 	Scenario string `json:"scenario"`
-	// Cells lists the machine-prefixed grid cell ids the run drives.
+	// Cells lists the machine-prefixed cell ids the run drives.
 	Cells []string `json:"cells"`
 	// Intentional records why a golden change is expected.
 	Intentional string  `json:"intentional,omitempty"`
@@ -271,7 +271,7 @@ func splitEventKey(key string) (id, variant string, err error) {
 	return key[:open], key[open+1 : len(key)-1], nil
 }
 
-// Parse decodes one scenario and checks it against the tables. Unknown
+// Parse decodes one scenario and checks it against the event vocabulary. Unknown
 // YAML fields are rejected so a mistyped key fails loudly.
 func Parse(data []byte, vocab Vocabulary) (*Scenario, error) {
 	s := &Scenario{}
@@ -310,7 +310,7 @@ func (s *Scenario) validate(vocab Vocabulary) error {
 	if vocab.Cells != nil {
 		for _, cell := range s.Cells {
 			if _, ok := vocab.Cells[cell]; !ok {
-				return fmt.Errorf("replay: %s: cell %q is not a key of any machine's grid", s.Scenario, cell)
+				return fmt.Errorf("replay: %s: cell %q is not in the vocabulary", s.Scenario, cell)
 			}
 		}
 	}

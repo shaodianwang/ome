@@ -18,9 +18,9 @@ import (
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// Fixtures shared by the run machine's row tests: one run-layer pass over a
+// Fixtures shared by the run machine's state tests: one run-layer pass over a
 // service and the objects it reads, with the status carried forward the way
-// the controller's flush carries it, and the small shapes the rows start
+// the controller's flush carries it, and the small shapes each case starts
 // from (a settled or diverged replica, an inline or referenced group, a
 // canary record in one of its states).
 
@@ -591,7 +591,7 @@ func TestASecondPassFindsThePinTheFirstOneWrote(t *testing.T) {
 			},
 		},
 		{
-			// The router's own hold is skipped before the straggler clause;
+			// The router's own hold is skipped before the straggler check;
 			// the engine trailing outside the rejection opens the run, with
 			// the router pinned at its stable revision.
 			name: "RejectedSticky/ir.straggling",
@@ -1002,7 +1002,7 @@ func TestRemovingEveryGroupLeavesTheParkConditionStanding(t *testing.T) {
 		t.Fatalf("outcome = %+v, want nothing", out)
 	}
 	if c := planReady(isvc); c == nil || c.Status != corev1.ConditionFalse || c.Reason != v1beta1.RolloutPlanReasonPolicyNotFound {
-		t.Fatalf("RolloutPlanReady = %+v; the stale park condition is what stands today", c)
+		t.Fatalf("RolloutPlanReady = %+v; want the park condition left standing with no spec group", c)
 	}
 	if isvc.Status.Rollout.Groups != nil {
 		t.Fatalf("resolution view = %+v, want cleared with the groups", isvc.Status.Rollout.Groups)

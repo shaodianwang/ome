@@ -403,7 +403,7 @@ func TestCrashLoopWedgedPodOn_ReadsTheRowAgainstTheRevisionItRuns(t *testing.T) 
 // A promoted pod that has failed readiness past the grace is out of
 // service: a set of such pods serves nothing, and a gang whose routed
 // leader is one does too. Inside the grace, or on a pod that never
-// served, the set keeps today's reading: its wait may still resolve.
+// served, the set keeps its reading: its wait may still resolve.
 func TestPodSetServesNothing_UnreadyPastTheGraceIsDark(t *testing.T) {
 	hash := query.RevisionFromName(clRevision).Hash()
 	runner := func(pod *corev1.Pod, name string) *corev1.Pod {

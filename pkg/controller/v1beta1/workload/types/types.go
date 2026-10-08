@@ -371,10 +371,10 @@ type Key struct {
 //
 // Both are written only by the adapter's status publication, never by a
 // pass, from the previous reconcile's pod observation. The replay driver
-// models the pod count the same way; the available count is an
-// adapter-lane input, so a guard reading it is covered by a Go test naming
-// the arrow. Reading them through one accessor is what marks that at
-// every site. A row the caller has not observed publishes nothing.
+// models the pod count the same way; the available count comes only from
+// the adapter, so a guard reading it is covered by a Go unit test rather
+// than a replay scenario. Reading them through one accessor is what marks
+// that at every site. A row the caller has not observed publishes nothing.
 func AdapterPublished(s *InstanceStatus) (pods, available int32) {
 	if s == nil {
 		return 0, 0

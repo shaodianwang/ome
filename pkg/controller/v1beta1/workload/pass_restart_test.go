@@ -4252,8 +4252,7 @@ func TestDeadlineElapsesOnAWedgedRebuild_RepairParksWithItsPodSet(t *testing.T) 
 // it, no policy lets the sweep free it, and the stable name it holds keeps
 // the rebuild from running. The operation deadline is this state's single
 // exit, so the repair parks visibly at Failed with its Restart kept, the
-// elapsed deadline on LastFailure and one InstanceFailed warning; it is
-// not left Restarting for good with nothing said. A single pod's park
+// elapsed deadline on LastFailure and one InstanceFailed warning. A single pod's park
 // holds, the close waiting on the object; a gang short of its other member
 // re-arms through the lost-member trigger under a fresh deadline, which
 // blocks on the same held name. Either way the Instance serves again once

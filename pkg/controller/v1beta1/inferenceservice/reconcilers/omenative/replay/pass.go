@@ -382,7 +382,7 @@ func groupsByName(rc *v1beta1.RolloutCoordinationStatus) map[string]v1beta1.Roll
 	return out
 }
 
-// groupDiff names the group fields the machine reads back that a write
+// groupDiff names the group fields the coordination machine reads back that a write
 // moved.
 func (d *driver) groupDiff(before, after *v1beta1.RolloutCoordinationGroupStatus) string {
 	var parts []string
@@ -626,7 +626,7 @@ func (d *driver) traceCoordination(passCopy *v1beta1.InferenceServiceStatus, isv
 	d.trace.line("coordination conditions %s", conditionValue(isvc, v1beta1.RolloutCoordinationReady))
 }
 
-// groupEntry renders the group fields the machine reads back.
+// groupEntry renders the group fields the coordination machine reads back.
 func (d *driver) groupEntry(g *v1beta1.RolloutCoordinationGroupStatus) string {
 	if g == nil || g.Name == "" {
 		return "nil"
