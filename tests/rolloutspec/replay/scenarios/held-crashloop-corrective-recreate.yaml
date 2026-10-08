@@ -1,0 +1,134 @@
+# Four single-pod Instances under RecreatePod with maxUnavailable 1 and
+# restart policy None. A pushed revision crashes at start: the first
+# Instance taken is rebuilt, its pod crash-loops past the grace, the
+# attempt is disposed, the ladder rebuilds it at the announced times and
+# Holds the revision at the bound while the other three keep serving. A
+# corrective image is then pushed: the Failed Instance re-enters as a
+# recreate at once, its crash-looping pod is deleted and rebuilt on the
+# fix, the rebuilt pod serves and the Instance promotes, and the others
+# follow one at a time under the budget.
+scenario: held-crashloop-corrective-recreate
+arrows:
+  - T-ready-recreate
+  - T-drain-stuck
+  - T-failed-retry-recreate
+  - T-failed-corrective-recreate
+  - T-drain-ready
+cells:
+  - instance/Failed/timer.retryAt/before
+  - instance/Failed/spec.revision/before
+initial:
+  spec:
+    replicas: 4
+    strategy: RecreatePod
+    maxUnavailable: "1"
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: cold start materializes four Instances on the starting revision
+  - tick: 2
+    note: every pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+      - pod.ready[source]: {pod: {index: 1}}
+      - endpoint.rotationIn[source]: {pod: {index: 1}}
+      - pod.ready[source]: {pod: {index: 2}}
+      - endpoint.rotationIn[source]: {pod: {index: 2}}
+      - pod.ready[source]: {pod: {index: 3}}
+      - endpoint.rotationIn[source]: {pod: {index: 3}}
+  - tick: 3
+    note: a revision that crashes at start is pushed; the budget admits the first Instance's rebuild and holds the other three
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the first pod leaves rotation, so its rebuild may start
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the old pod is gone and the Instance is rebuilt at the bumped incarnation on the pushed revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the rebuilt pod crashes on every start and parks in CrashLoopBackOff
+    events:
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0}, message: "back-off restarting failed container"}
+  - tick: 7
+    note: the crash loop has held past the grace, so the attempt is disposed and the first wave counts on the revision's ladder
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 8
+    note: the block comes due and the recreate re-drives the first Instance at the same target, deleting the crash-looping pod
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 9
+    note: the crash-looping pod is gone and the Instance is rebuilt again on the pushed revision
+    events:
+      - pod.deleted[target]: {pod: {index: 0}}
+  - tick: 10
+    note: the second rebuild crashes on every start as well
+    events:
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0}, message: "back-off restarting failed container"}
+  - tick: 11
+    note: the second wave is disposed past the grace and the block backs off again
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 12
+    note: the block comes due again and the recreate re-drives the first Instance once more
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 13
+    note: the second crash-looping pod is gone and the Instance is rebuilt a third time
+    events:
+      - pod.deleted[target]: {pod: {index: 0}}
+  - tick: 14
+    note: the third rebuild crashes on every start as well
+    events:
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0}, message: "back-off restarting failed container"}
+  - tick: 15
+    note: the third wave is disposed past the grace and the bound Holds the revision while three Instances keep serving
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 16
+    note: nothing re-drives a Held revision
+    events:
+      - clock.advance: 1m
+  - tick: 17
+    note: the operator pushes a fixed image; the Failed Instance re-enters as a recreate at once, its crash-looping pod is deleted and the held block of the crashing revision is removed
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 18
+    note: the crash-looping pod is gone and the Instance is rebuilt on the fix
+    events:
+      - pod.deleted[target]: {pod: {index: 0}}
+  - tick: 19
+    note: the rebuilt pod serves the fix, so the first Instance promotes
+    events:
+      - pod.ready[target]: {pod: {index: 0}}
+  - tick: 20
+    note: the first Instance is back in rotation on the fix, so the budget admits the second Instance's rebuild
+    events:
+      - endpoint.rotationIn[target]: {pod: {index: 0}}
+  - tick: 21
+    note: the second pod leaves rotation, so it is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 22
+    note: the second pod is gone and the Instance is rebuilt on the fix
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}
+  - tick: 23
+    note: the second rebuilt pod serves the fix, so the second Instance promotes
+    events:
+      - pod.ready[target]: {pod: {index: 1}}
+  - tick: 24
+    note: the second Instance is back in rotation on the fix, so the budget admits the third Instance's rebuild
+    events:
+      - endpoint.rotationIn[target]: {pod: {index: 1}}

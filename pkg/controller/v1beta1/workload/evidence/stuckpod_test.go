@@ -507,3 +507,46 @@ func TestContainersUnreadyPastGrace(t *testing.T) {
 		})
 	}
 }
+
+// TestPodStuckInTerminalWaitingSince pins the floor: a waiting episode
+// older than the floor is measured from the floor, so a pod wedged long
+// before an attempt began acting on it is not stuck for that attempt until
+// the grace has run from the floor; an episode younger than the floor and
+// a zero floor measure from the episode alone.
+func TestPodStuckInTerminalWaitingSince(t *testing.T) {
+	now := time.Now()
+	const grace = time.Minute
+	wedgedFor := func(age time.Duration) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(now.Add(-time.Hour))},
+			Status: corev1.PodStatus{
+				Conditions:        []corev1.PodCondition{{Type: corev1.ContainersReady, Status: corev1.ConditionFalse, LastTransitionTime: metav1.NewTime(now.Add(-age))}},
+				ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}}},
+			},
+		}
+	}
+	for _, tc := range []struct {
+		name      string
+		pod       *corev1.Pod
+		floor     time.Time
+		wantStuck bool
+	}{
+		{name: "old episode, floor inside the grace: not stuck", pod: wedgedFor(10 * time.Minute), floor: now.Add(-5 * time.Second)},
+		{name: "old episode, floor past the grace: stuck", pod: wedgedFor(10 * time.Minute), floor: now.Add(-2 * time.Minute), wantStuck: true},
+		{name: "episode younger than the floor: measured from the episode", pod: wedgedFor(5 * time.Second), floor: now.Add(-time.Hour)},
+		{name: "zero floor: measured from the episode", pod: wedgedFor(10 * time.Minute), wantStuck: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reason, stuck := evidence.PodStuckInTerminalWaitingSince(tc.pod, now, grace, tc.floor)
+			if stuck != tc.wantStuck {
+				t.Fatalf("stuck: got %v (%q) want %v", stuck, reason, tc.wantStuck)
+			}
+			if stuck && reason != "CrashLoopBackOff" {
+				t.Errorf("reason: got %q want CrashLoopBackOff", reason)
+			}
+			if pod, _ := evidence.FirstStuckPodForInstanceSince([]*corev1.Pod{tc.pod}, now, grace, tc.floor); (pod != nil) != tc.wantStuck {
+				t.Errorf("FirstStuckPodForInstanceSince: got pod=%v want stuck=%v", pod != nil, tc.wantStuck)
+			}
+		})
+	}
+}

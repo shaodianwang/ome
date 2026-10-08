@@ -1,0 +1,153 @@
+# Four single-pod Instances under InPlaceIfPossible with maxUnavailable 1
+# and restart policy None. A pushed revision crashes at start: the first
+# Instance taken is patched in place, its pod crash-loops past the grace,
+# the attempt is disposed, the ladder re-drives it at the announced times
+# and Holds the revision at the bound while the other three keep serving.
+# A corrective image is then pushed: the Failed Instance re-enters in
+# place at once, its pod is patched and restamped, and the pass that runs
+# before the kubelet has replaced the container reads the old container's
+# crash loop as the attempt's reason, not its failure; the fixed container
+# serves, the Instance promotes, and the other three follow one at a time
+# under the budget.
+scenario: held-crashloop-corrective-inplace
+arrows:
+  - T-ready-inplace
+  - T-inplace-stuck
+  - T-failed-retry-inplace
+  - T-failed-corrective-inplace
+  - T-inplace-ready
+cells:
+  - instance/Failed/timer.retryAt/before
+  - instance/Failed/spec.revision/before
+  - instance/Update/InPlace/pod.waiting[CrashLoopBackOff]/before
+intentional: >-
+  an in-place attempt opened over a pod already parked in a crash loop is
+  judged on that loop only once the grace has run from the attempt's own
+  start, so a pass between the restamp and the kubelet's roll charges the
+  fix with nothing
+initial:
+  spec:
+    replicas: 4
+    strategy: InPlaceIfPossible
+    maxUnavailable: "1"
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: cold start materializes four Instances on the starting revision
+  - tick: 2
+    note: every pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+      - pod.ready[source]: {pod: {index: 1}}
+      - endpoint.rotationIn[source]: {pod: {index: 1}}
+      - pod.ready[source]: {pod: {index: 2}}
+      - endpoint.rotationIn[source]: {pod: {index: 2}}
+      - pod.ready[source]: {pod: {index: 3}}
+      - endpoint.rotationIn[source]: {pod: {index: 3}}
+  - tick: 3
+    note: a revision that crashes at start is pushed; only the image changed, so the budget admits the first Instance in place and holds the other three
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the first pod leaves rotation and two minutes pass, which is longer than the grace
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - clock.advance: 2m
+  - tick: 5
+    note: the image patch lands and the revision label is restamped
+  - tick: 6
+    note: the new image crashes on every start, so the pod parks in CrashLoopBackOff on the pushed revision
+    events:
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0}, message: "back-off restarting failed container"}
+  - tick: 7
+    note: the crash loop has held past the grace, so the attempt is disposed and the first wave counts on the revision's ladder
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 8
+    note: the block comes due and the roll re-drives the first Instance in place at the same target
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 9
+    note: the pod is still crash-looping, so the second wave is disposed and the block backs off again
+    events:
+      - clock.advance: 5m
+  - tick: 10
+    note: the block comes due again and the roll re-drives the first Instance once more
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 11
+    note: the third wave is disposed on the same crash loop and the bound Holds the revision while three Instances keep serving
+    events:
+      - clock.advance: 5m
+  - tick: 12
+    note: nothing re-drives a Held revision
+    events:
+      - clock.advance: 1m
+  - tick: 13
+    note: the operator pushes a fixed image; the Failed Instance re-enters in place toward it and the held block of the crashing revision is removed
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 14
+    note: the image patch lands and the revision label is restamped before the kubelet has acted on the patch
+  - tick: 15
+    note: a pass runs between the restamp and the kubelet's roll; the crash loop it reads is the replaced container's, inside the attempt's grace, so the fix is charged with nothing
+    events:
+      - clock.advance: 5s
+  - tick: 16
+    note: the kubelet has rolled the container with the fixed image and it passes readiness, so the first Instance promotes onto the fix
+    events:
+      - pod.ready[target]: {pod: {index: 0}}
+  - tick: 17
+    note: the first Instance is back in rotation on the fix, so the budget admits the second Instance in place
+    events:
+      - endpoint.rotationIn[target]: {pod: {index: 0}}
+  - tick: 18
+    note: Instance 1 leaves rotation for its patch
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 19
+    note: the image patch lands on Instance 1 and its revision label is restamped
+  - tick: 20
+    note: Instance 1 serves the fix and promotes
+    events:
+      - pod.ready[target]: {pod: {index: 1}}
+  - tick: 21
+    note: Instance 1 is back in rotation on the fix, so the budget admits Instance 2
+    events:
+      - endpoint.rotationIn[target]: {pod: {index: 1}}
+  - tick: 22
+    note: Instance 2 leaves rotation for its patch
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 2}}
+  - tick: 23
+    note: the image patch lands on Instance 2 and its revision label is restamped
+  - tick: 24
+    note: Instance 2 serves the fix and promotes
+    events:
+      - pod.ready[target]: {pod: {index: 2}}
+  - tick: 25
+    note: Instance 2 is back in rotation on the fix, so the budget admits Instance 3
+    events:
+      - endpoint.rotationIn[target]: {pod: {index: 2}}
+  - tick: 26
+    note: Instance 3 leaves rotation for its patch
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 3}}
+  - tick: 27
+    note: the image patch lands on Instance 3 and its revision label is restamped
+  - tick: 28
+    note: Instance 3 serves the fix and promotes
+    events:
+      - pod.ready[target]: {pod: {index: 3}}
+  - tick: 29
+    note: the last Instance is back in rotation and every Instance serves the fix
+    events:
+      - endpoint.rotationIn[target]: {pod: {index: 3}}

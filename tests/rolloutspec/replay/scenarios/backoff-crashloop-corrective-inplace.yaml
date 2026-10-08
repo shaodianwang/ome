@@ -1,0 +1,80 @@
+# Four single-pod Instances under InPlaceIfPossible with maxUnavailable 1
+# and restart policy None. A pushed revision crashes at start on the first
+# Instance taken; the attempt is disposed and the ladder is in Backoff,
+# not yet due, when the operator pushes a corrective image. The Failed
+# Instance re-enters in place at once rather than waiting out the backoff
+# of a revision nobody wants any more, the pass before the kubelet's roll
+# charges the fix with nothing, and the Instance promotes onto the fix.
+scenario: backoff-crashloop-corrective-inplace
+arrows:
+  - T-ready-inplace
+  - T-inplace-stuck
+  - T-failed-corrective-inplace
+  - T-inplace-ready
+cells:
+  - instance/Failed/spec.revision/before
+  - instance/Update/InPlace/pod.waiting[CrashLoopBackOff]/before
+initial:
+  spec:
+    replicas: 4
+    strategy: InPlaceIfPossible
+    maxUnavailable: "1"
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: cold start materializes four Instances on the starting revision
+  - tick: 2
+    note: every pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+      - pod.ready[source]: {pod: {index: 1}}
+      - endpoint.rotationIn[source]: {pod: {index: 1}}
+      - pod.ready[source]: {pod: {index: 2}}
+      - endpoint.rotationIn[source]: {pod: {index: 2}}
+      - pod.ready[source]: {pod: {index: 3}}
+      - endpoint.rotationIn[source]: {pod: {index: 3}}
+  - tick: 3
+    note: a revision that crashes at start is pushed; only the image changed, so the budget admits the first Instance in place and holds the other three
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the first pod leaves rotation and two minutes pass, which is longer than the grace
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - clock.advance: 2m
+  - tick: 5
+    note: the image patch lands and the revision label is restamped
+  - tick: 6
+    note: the new image crashes on every start, so the pod parks in CrashLoopBackOff on the pushed revision
+    events:
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0}, message: "back-off restarting failed container"}
+  - tick: 7
+    note: the crash loop has held past the grace, so the attempt is disposed and the first wave counts on the revision's ladder, which is now in Backoff
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 8
+    note: the operator pushes a fixed image while the backoff is not yet due; the Failed Instance re-enters in place toward it at once and the backoff block of the crashing revision is removed
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 9
+    note: the image patch lands and the revision label is restamped before the kubelet has acted on the patch
+  - tick: 10
+    note: a pass runs between the restamp and the kubelet's roll; the crash loop it reads is the replaced container's, inside the attempt's grace, so the fix is charged with nothing
+    events:
+      - clock.advance: 5s
+  - tick: 11
+    note: the kubelet has rolled the container with the fixed image and it passes readiness, so the first Instance promotes onto the fix
+    events:
+      - pod.ready[target]: {pod: {index: 0}}
+  - tick: 12
+    note: the first Instance is back in rotation on the fix, so the budget admits the second Instance in place
+    events:
+      - endpoint.rotationIn[target]: {pod: {index: 0}}

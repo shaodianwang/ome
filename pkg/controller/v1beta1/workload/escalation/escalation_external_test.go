@@ -2502,6 +2502,96 @@ func TestEscalateStuckPodFailures_UpdateAttemptIgnoresTheWedgedSource(t *testing
 	}
 }
 
+// TestEscalateStuckPodFailures_InPlaceAttemptInheritsNoWedge pins the
+// grace an in-place attempt is given over a pod that was already wedged
+// when the attempt opened. The patch restamps the pod to the attempt's
+// revision before the kubelet has replaced its container, so the old
+// container's waiting reason is still on the pod when the next pass reads
+// it: for one grace from the attempt's start that reason is the attempt's
+// reason, not its failure, and a pod still parked past that grace fails the
+// attempt as its own wedge. Without the floor the pass right after the
+// restamp disposes every corrective roll over a crash-looping pod and
+// charges the fix's ladder for the crash it corrects.
+//
+// Cells: instance/Update/InPlace/pod.waiting[CrashLoopBackOff]/before
+func TestEscalateStuckPodFailures_InPlaceAttemptInheritsNoWedge(t *testing.T) {
+	grace := time.Minute
+	now := time.Now()
+	// Restamped to the attempt's revision, ContainersReady False since the
+	// old revision crashed ten minutes ago, the old container still parked.
+	restamped := func() *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "engine-0-default-0",
+				CreationTimestamp: metav1.NewTime(now.Add(-time.Hour)),
+				Labels:            map[string]string{"ome.io/revision-hash": "newhash"},
+			},
+			Status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{{Type: corev1.ContainersReady, Status: corev1.ConditionFalse, LastTransitionTime: metav1.NewTime(now.Add(-10 * time.Minute))}},
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name:  "main",
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+				}},
+			},
+		}
+	}
+	for _, tc := range []struct {
+		name       string
+		startedAgo time.Duration
+		wantPhase  workloadtypes.InstancePhase
+	}{
+		{name: "inside the attempt's grace: the inherited wedge is not the attempt's failure", startedAgo: 5 * time.Second, wantPhase: workloadtypes.InstancePhaseUpdating},
+		{name: "past the attempt's grace: a pod still parked is the attempt's own wedge", startedAgo: 2 * time.Minute, wantPhase: workloadtypes.InstancePhaseFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			insts := []workloadtypes.InstanceStatus{{
+				Index:           0,
+				Phase:           workloadtypes.InstancePhaseUpdating,
+				PodCount:        1,
+				RunningRevision: "own-engine-oldhash",
+				Operation: &workloadtypes.InstanceOperation{
+					Type:           workloadtypes.InstanceOperationUpdate,
+					Step:           workloadtypes.UpdateStepInPlace,
+					TargetRevision: "own-engine-newhash",
+					StartedAt:      metav1.NewTime(now.Add(-tc.startedAgo)),
+					Deadline:       metav1.NewTime(now.Add(time.Hour)),
+				},
+			}}
+			input := workloadtypes.ReconcileInput{
+				StuckPodGrace: grace,
+				MutateInstance: func(_ context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
+					for i := range insts {
+						if insts[i].Index == idx {
+							mutate(&insts[i])
+						}
+					}
+					return nil
+				},
+				WarnInstanceFailed: func(int32, string, string) {},
+			}
+			input.ObservedState.InstanceStatuses = insts
+			input.ObservedState.CurrentRevision = "own-engine-oldhash"
+
+			if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
+				map[int32][]*corev1.Pod{0: {restamped()}}); err != nil {
+				t.Fatalf("escalation pass: %v", err)
+			}
+			if insts[0].Phase != tc.wantPhase {
+				t.Errorf("Phase: got %q want %q", insts[0].Phase, tc.wantPhase)
+			}
+			if tc.wantPhase == workloadtypes.InstancePhaseUpdating {
+				if lf := insts[0].LastFailure; lf != nil && lf.Reason == "CrashLoopBackOff" {
+					t.Errorf("LastFailure: got %+v, want the wedge the patch replaces left unblamed", lf)
+				}
+				return
+			}
+			if lf := insts[0].LastFailure; lf == nil || lf.PodName != "engine-0-default-0" || lf.Reason != "CrashLoopBackOff" {
+				t.Errorf("LastFailure: got %+v, want the restamped pod blamed for its crash loop", lf)
+			}
+		})
+	}
+}
+
 // TestEscalateStuckPodFailures_AlreadyFailedNoOp pins the idempotency:
 // the escalator must not re-fire on an already-Failed Instance even
 // though the wedged pod is still in front of it.

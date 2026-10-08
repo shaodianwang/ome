@@ -476,11 +476,26 @@ func evidenceFor(insts []types.InstanceStatus, byIdx map[int32][]*corev1.Pod, id
 	if grace <= 0 {
 		return ev
 	}
-	if pod, reason := evidence.FirstStuckPodForInstance(pods, now, grace); pod != nil {
+	if pod, reason := evidence.FirstStuckPodForInstanceSince(pods, now, grace, attemptEvidenceFloor(inst)); pod != nil {
 		ev.StuckPod = pod
 		ev.StuckReason = reason
 	}
 	return ev
+}
+
+// attemptEvidenceFloor is the instant before which a pod's waiting
+// evidence is not the attempt's own. An in-place patch acts on a pod that
+// already exists and restamps it before the kubelet has replaced its
+// container, so a reason the pod held when the attempt opened — the
+// crash loop of the revision the patch replaces — is the attempt's reason,
+// and the grace to clear it runs from the attempt's start. Every other
+// attempt's pods are created after it opens, so its floor is zero.
+func attemptEvidenceFloor(inst *types.InstanceStatus) time.Time {
+	if inst == nil || inst.Operation == nil ||
+		inst.Operation.Type != types.InstanceOperationUpdate || inst.Operation.Step != types.UpdateStepInPlace {
+		return time.Time{}
+	}
+	return inst.Operation.StartedAt.Time
 }
 
 func singlePodSurgeAttempt(row *types.InstanceStatus, desiredPods int32) bool {

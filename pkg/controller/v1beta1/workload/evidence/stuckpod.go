@@ -38,9 +38,21 @@ import (
 // ImagePulling window. A pod with no creation stamp cannot prove any
 // duration and is never stuck.
 func PodStuckInTerminalWaiting(pod *corev1.Pod, now time.Time, grace time.Duration) (string, bool) {
+	return PodStuckInTerminalWaitingSince(pod, now, grace, time.Time{})
+}
+
+// PodStuckInTerminalWaitingSince is PodStuckInTerminalWaiting with the
+// waiting episode's start floored at floor: a reason the pod already held
+// when an attempt began acting on it is that attempt's reason, not yet its
+// failure, so the grace runs from the attempt's own start. A zero floor
+// measures from the episode alone.
+func PodStuckInTerminalWaitingSince(pod *corev1.Pod, now time.Time, grace time.Duration, floor time.Time) (string, bool) {
 	since := WaitingEpisodeStart(pod)
 	if since.IsZero() {
 		return "", false
+	}
+	if floor.After(since) {
+		since = floor
 	}
 	if now.Sub(since) < grace {
 		return "", false
@@ -195,6 +207,12 @@ func terminalWaitingReason(pod *corev1.Pod) (string, bool) {
 // a stable index should sort pods before calling. For event emission
 // the order doesn't matter (the message names the specific pod).
 func FirstStuckPodForInstance(pods []*corev1.Pod, now time.Time, grace time.Duration) (*corev1.Pod, string) {
+	return FirstStuckPodForInstanceSince(pods, now, grace, time.Time{})
+}
+
+// FirstStuckPodForInstanceSince is FirstStuckPodForInstance with each
+// pod's waiting episode floored at floor (PodStuckInTerminalWaitingSince).
+func FirstStuckPodForInstanceSince(pods []*corev1.Pod, now time.Time, grace time.Duration, floor time.Time) (*corev1.Pod, string) {
 	for _, pod := range pods {
 		if pod == nil {
 			continue
@@ -205,7 +223,7 @@ func FirstStuckPodForInstance(pods []*corev1.Pod, now time.Time, grace time.Dura
 		if pod.DeletionTimestamp != nil {
 			continue
 		}
-		if reason, stuck := PodStuckInTerminalWaiting(pod, now, grace); stuck {
+		if reason, stuck := PodStuckInTerminalWaitingSince(pod, now, grace, floor); stuck {
 			return pod, reason
 		}
 	}

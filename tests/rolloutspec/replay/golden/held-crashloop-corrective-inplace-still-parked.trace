@@ -1,0 +1,145 @@
+tick=1 note cold start materializes four Instances on the starting revision
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 row=1 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#2{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 row=2 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#3{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 row=3 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#4{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=1 event Normal InstanceCreated OMENative component=engine instance=1 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-1-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=1 event Normal InstanceCreated OMENative component=engine instance=2 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-2-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=1 event Normal InstanceCreated OMENative component=engine instance=3 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-3-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note every pod becomes Ready and enters rotation
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-2-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-2-default-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-3-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-3-default-0 now=t+0s
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 pod status-patch name=svc-a-engine-1-default-0 serving=absent→True
+tick=2 pod status-patch name=svc-a-engine-2-default-0 serving=absent→True
+tick=2 pod status-patch name=svc-a-engine-3-default-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=2 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=2 row=2 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=2 row=3 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=2 event Normal InstanceReady OMENative component=engine instance=1 is Ready (1 pod(s) serving)
+tick=2 event Normal InstanceReady OMENative component=engine instance=2 is Ready (1 pod(s) serving)
+tick=2 event Normal InstanceReady OMENative component=engine instance=3 is Ready (1 pod(s) serving)
+tick=2 pass result=none
+tick=3 note a revision that crashes at start is pushed; only the image changed, so the budget admits the first Instance in place and holds the other three
+tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=3 gate consult strategy=InPlaceIfPossible surge=0 unavail=0 verdict=allow
+tick=3 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#5{type=Update step=InPlace target=svc-a-engine-6f8b1e6c strategy=InPlaceIfPossible started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal InPlaceUpdateStarted OMENative component=engine instance=0 in-place update to revision svc-a-engine-6f8b1e6c
+tick=3 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the first pod leaves rotation and two minutes pass, which is longer than the grace
+tick=4 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 apply clock.advance by=2m0s now=t+2m0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod patch name=svc-a-engine-0-default-0 annotations=[internal.ome.io/in-place-image-transition:nil→{"targetImages":{"main":"registry.example.com/runtime:v2"},"restartCounts":{"main":0}}]
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the image patch lands and the revision label is restamped
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod patch name=svc-a-engine-0-default-0 images=main=registry.example.com/runtime:v1→main=registry.example.com/runtime:v2
+tick=5 pod patch name=svc-a-engine-0-default-0 labels=[ome.io/revision-hash:882059bb→6f8b1e6c]
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note the new image crashes on every start, so the pod parks in CrashLoopBackOff on the pushed revision
+tick=6 apply pod.waiting[CrashLoopBackOff] pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff now=t+2m0s
+tick=6 row=0 write no-op precondition=no-change
+tick=6 hold cleared
+tick=6 pass result=after:5s
+tick=7 note the crash loop has held past the grace, so the attempt is disposed and the first wave counts on the revision's ladder
+tick=7 apply timer.stuckPodGrace to=t+3m1s now=t+3m1s
+tick=7 row=0 write no-op precondition=no-change
+tick=7 hold cleared
+tick=7 row=0 write no-op precondition=no-change
+tick=7 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Backoff attempts=1 nextRetryAt=t+5m1s reason=CrashLoopBackOff}
+tick=7 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#5{type=Update step=Parked target=svc-a-engine-6f8b1e6c waiting=RetryBlock strategy=InPlaceIfPossible started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=7 warn instanceFailed index=0 pod=nil reason=CrashLoopBackOff: attempt disposed terminal (no workload-caused evidence, relocation unavailable) and counted on the revision's retry ladder
+tick=7 pass result=after:5s
+tick=8 note the block comes due and the roll re-drives the first Instance in place at the same target
+tick=8 apply timer.retryAt to=t+5m2s now=t+5m2s
+tick=8 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#6{type=Update step=InPlace target=svc-a-engine-6f8b1e6c strategy=InPlaceIfPossible started=t+5m2s lastProgressAt=t+5m2s deadline=t+35m2s} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=8 retryblock target=svc-a-engine-6f8b1e6c persist {state=Backoff attempts=1 nextRetryAt=t+5m1s reason=CrashLoopBackOff}→{state=RetryInProgress attempts=1 nextRetryAt=t+5m1s reason=CrashLoopBackOff}
+tick=8 event Normal InPlaceUpdateStarted OMENative component=engine instance=0 in-place update to revision svc-a-engine-6f8b1e6c
+tick=8 hold cleared
+tick=8 pass result=after:5s
+tick=9 note the pod is still crash-looping, so the second wave is disposed and the block backs off again
+tick=9 apply clock.advance by=5m0s now=t+10m2s
+tick=9 row=0 write no-op precondition=no-change
+tick=9 hold cleared
+tick=9 row=0 write no-op precondition=no-change
+tick=9 retryblock target=svc-a-engine-6f8b1e6c persist {state=RetryInProgress attempts=1 nextRetryAt=t+5m1s reason=CrashLoopBackOff}→{state=Backoff attempts=2 nextRetryAt=t+14m2s reason=CrashLoopBackOff}
+tick=9 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#6{type=Update step=Parked target=svc-a-engine-6f8b1e6c waiting=RetryBlock strategy=InPlaceIfPossible started=t+5m2s lastProgressAt=t+5m2s deadline=nil} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=9 pass result=after:5s
+tick=10 note the block comes due again and the roll re-drives the first Instance once more
+tick=10 apply timer.retryAt to=t+14m3s now=t+14m3s
+tick=10 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#7{type=Update step=InPlace target=svc-a-engine-6f8b1e6c strategy=InPlaceIfPossible started=t+14m3s lastProgressAt=t+14m3s deadline=t+44m3s} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=10 retryblock target=svc-a-engine-6f8b1e6c persist {state=Backoff attempts=2 nextRetryAt=t+14m2s reason=CrashLoopBackOff}→{state=RetryInProgress attempts=2 nextRetryAt=t+14m2s reason=CrashLoopBackOff}
+tick=10 event Normal InPlaceUpdateStarted OMENative component=engine instance=0 in-place update to revision svc-a-engine-6f8b1e6c
+tick=10 hold cleared
+tick=10 pass result=after:5s
+tick=11 note the third wave is disposed on the same crash loop and the bound Holds the revision while three Instances keep serving
+tick=11 apply clock.advance by=5m0s now=t+19m3s
+tick=11 row=0 write no-op precondition=no-change
+tick=11 hold cleared
+tick=11 row=0 write no-op precondition=no-change
+tick=11 retryblock target=svc-a-engine-6f8b1e6c persist {state=RetryInProgress attempts=2 nextRetryAt=t+14m2s reason=CrashLoopBackOff}→{state=Held attempts=3 reason=CrashLoopBackOff}
+tick=11 warn retryHeld target=svc-a-engine-6f8b1e6c attempts=3 reason=CrashLoopBackOff
+tick=11 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#7{type=Update step=Parked target=svc-a-engine-6f8b1e6c waiting=Held strategy=InPlaceIfPossible started=t+14m3s lastProgressAt=t+14m3s deadline=nil} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=11 pass result=after:5s
+tick=12 note nothing re-drives a Held revision
+tick=12 apply clock.advance by=1m0s now=t+20m3s
+tick=12 hold gate=Held target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c held after 3 failed attempt(s): CrashLoopBackOff
+tick=12 row=1 write no-op precondition=no-change
+tick=12 row=2 write no-op precondition=no-change
+tick=12 row=3 write no-op precondition=no-change
+tick=12 pass result=after:5s
+tick=13 note the operator pushes a fixed image; the Failed Instance re-enters in place toward it and the held block of the crashing revision is removed
+tick=13 apply spec.revision image=registry.example.com/runtime:v3 generation=2 now=t+20m3s
+tick=13 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-2dd013c9 readySince=t+0s op=op#8{type=Update step=InPlace target=svc-a-engine-2dd013c9 strategy=InPlaceIfPossible started=t+20m3s lastProgressAt=t+20m3s deadline=t+50m3s} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=13 event Normal InPlaceUpdateStarted OMENative component=engine instance=0 in-place update to revision svc-a-engine-2dd013c9
+tick=13 pod patch name=svc-a-engine-0-default-0 annotations=[internal.ome.io/in-place-image-transition:{"targetImages":{"main":"registry.example.com/runtime:v2"},"restartCounts":{"main":0}}→{"targetImages":{"main":"registry.example.com/runtime:v3"},"restartCounts":{"main":0}}]
+tick=13 hold cleared
+tick=13 retryblock target=svc-a-engine-6f8b1e6c remove {state=Held attempts=3 reason=CrashLoopBackOff}→nil
+tick=13 pass result=after:5s
+tick=14 note the image patch lands and the revision label is restamped before the kubelet has acted on the patch
+tick=14 row=0 write no-op precondition=no-change
+tick=14 pod patch name=svc-a-engine-0-default-0 images=main=registry.example.com/runtime:v2→main=registry.example.com/runtime:v3
+tick=14 pod patch name=svc-a-engine-0-default-0 labels=[ome.io/revision-hash:6f8b1e6c→2dd013c9]
+tick=14 hold cleared
+tick=14 pass result=after:5s
+tick=15 note half a minute into the attempt the pod still shows the replaced container's crash loop, inside the attempt's grace, so nothing is charged
+tick=15 apply clock.advance by=30s now=t+20m33s
+tick=15 row=0 write no-op precondition=no-change
+tick=15 hold cleared
+tick=15 pass result=after:5s
+tick=16 note a grace after the attempt opened the pod is still parked, so the attempt is disposed on its own wedge and the first wave counts on the fix's ladder
+tick=16 apply clock.advance by=1m0s now=t+21m33s
+tick=16 row=0 write no-op precondition=no-change
+tick=16 hold cleared
+tick=16 row=0 write no-op precondition=no-change
+tick=16 retryblock target=svc-a-engine-2dd013c9 persist nil→{state=Backoff attempts=1 nextRetryAt=t+23m33s reason=CrashLoopBackOff}
+tick=16 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-2dd013c9 readySince=t+0s op=op#8{type=Update step=Parked target=svc-a-engine-2dd013c9 waiting=RetryBlock strategy=InPlaceIfPossible started=t+20m3s lastProgressAt=t+20m3s deadline=nil} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=16 pass result=after:5s
+tick=17 note the fix's block comes due and the roll re-drives the Instance in place at the fix
+tick=17 apply timer.retryAt to=t+23m34s now=t+23m34s
+tick=17 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-2dd013c9 readySince=t+0s op=op#9{type=Update step=InPlace target=svc-a-engine-2dd013c9 strategy=InPlaceIfPossible started=t+23m34s lastProgressAt=t+23m34s deadline=t+53m34s} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=17 retryblock target=svc-a-engine-2dd013c9 persist {state=Backoff attempts=1 nextRetryAt=t+23m33s reason=CrashLoopBackOff}→{state=RetryInProgress attempts=1 nextRetryAt=t+23m33s reason=CrashLoopBackOff}
+tick=17 event Normal InPlaceUpdateStarted OMENative component=engine instance=0 in-place update to revision svc-a-engine-2dd013c9
+tick=17 hold cleared
+tick=17 pass result=after:5s
