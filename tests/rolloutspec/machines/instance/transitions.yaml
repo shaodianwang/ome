@@ -678,6 +678,14 @@ transitions:
     to: Ready
     effects: [the replacement is rebuilt for no revision the roll has withdrawn - its leftovers go, the marker is removed and the source is reset in one transaction, its drain hold lifted so it returns to rotation on its running revision, or the fresh-start Failed shape on that revision when no source pod stands; no RetryBlock is written]
     decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+  - id: T-surgedrain-withdrawn
+    from: Update/SurgeDrain
+    event: pod.deleted
+    variant: target
+    guard: a single-pod source past the hand-over whose replacement is gone while the roll target has moved off the pinned revision, by a template edit or a rollback pin
+    to: Ready
+    effects: [the replacement is not rebuilt at a revision the roll has withdrawn - the hold the drain put on the source (the mark that keeps it out of rotation) is lifted so it serves again and the row is reset Ready on its running revision, or to the fresh-start Failed shape on that revision when no source pod stands, which the Create pass rebuilds at the target; no RetryBlock is written; SurgeAbandoned event]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
 
   # --- Update/GangSurgeTarget --------------------------------------------
   - id: T-gangtarget-ready

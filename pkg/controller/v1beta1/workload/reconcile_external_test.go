@@ -14621,3 +14621,171 @@ func TestGangVerdict_CorrectiveRevisionResumesTheFailedCreate(t *testing.T) {
 		t.Errorf("the gang was not rebuilt at its own index: %d pod(s) at index 0", len(pods))
 	}
 }
+
+// surgeHandedOver drives a single-pod surge to its drain step and returns
+// the harness there: the replacement serves and the source is out of
+// rotation, draining, with both pods standing.
+func surgeHandedOver(t *testing.T) *recoveryHarness {
+	t.Helper()
+	h := newRecoveryHarness(t, false)
+	h.routed = true
+	h.recorder = record.NewFakeRecorder(256)
+	h.useRollingBudget(workloadtypes.UpdateStrategySurgeThenDrain)
+	h.driveToReadyOnV1()
+	h.lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: 4 * time.Minute}
+	h.setTarget(h.revFixed, fixedImage)
+	handedOver := func() bool {
+		s := h.instance(0)
+		return s != nil && s.Operation != nil && s.Operation.Step == workloadtypes.UpdateStepSurgeDrain && len(h.podsOf(0)) == 2
+	}
+	if !h.run(20, handedOver) {
+		h.dumpState("hand-over")
+		t.Fatalf("the surge never took the source out of rotation behind a serving replacement")
+	}
+	for _, pod := range h.podsOf(0) {
+		if replacement := pod.Spec.Containers[0].Image == fixedImage; replacement != podreadiness.IsServing(pod) {
+			t.Fatalf("pod %s serving=%v after the hand-over; the replacement serves and the source is out of rotation", pod.Name, !replacement)
+		}
+	}
+	return h
+}
+
+// losePod deletes one live pod, the way a node or an operator takes it
+// away.
+func (h *recoveryHarness) losePod(pod *corev1.Pod) {
+	h.t.Helper()
+	if err := h.c.Delete(h.ctx, pod); err != nil {
+		h.t.Fatalf("delete pod %s: %v", pod.Name, err)
+	}
+}
+
+// noLivePodOnRevision fails the test as soon as a live pod carries rev's
+// hash: what a withdrawal leaves behind for the revision it took away.
+func (h *recoveryHarness) noLivePodOnRevision(rev *appsv1.ControllerRevision) func() {
+	hash := query.RevisionOf(rev).Hash()
+	return func() {
+		for _, pod := range h.livePods() {
+			if pod.Labels[query.LabelRevisionHash] == hash {
+				h.dumpState("withdrawn revision rebuilt")
+				h.t.Fatalf("pod %s was created on the withdrawn revision %s", pod.Name, rev.Name)
+			}
+		}
+	}
+}
+
+// A single-pod surge hands over, the operator re-applies the starting
+// revision, and the replacement is lost before the source's drain
+// converges. Nothing is rebuilt at the withdrawn revision: the roll ends,
+// the source returns to rotation on the starting revision with the pod it
+// had, and the row is Ready there.
+//
+// Cells: instance/Update/SurgeDrain/spec.revision/before, instance/Update/SurgeDrain/pod.deleted[target]/before
+func TestSurgeAfterHandover_RollbackThenReplacementLostEndsTheRollOnTheStartingRevision(t *testing.T) {
+	h := surgeHandedOver(t)
+	source, replacement := h.podsOfOnImage(0, goodImage), h.podsOfOnImage(0, fixedImage)
+	if len(source) != 1 || len(replacement) != 1 {
+		t.Fatalf("hand-over shape: %d source pod(s), %d replacement pod(s), want one of each", len(source), len(replacement))
+	}
+	h.setTarget(h.revV1, goodImage)
+	h.losePod(replacement[0])
+	noWithdrawnPod := h.noLivePodOnRevision(h.revFixed)
+	ended := func() bool {
+		s := h.instance(0)
+		return s != nil && s.Phase == workloadtypes.InstancePhaseReady && s.Operation == nil &&
+			s.RunningRevision == h.revV1.Name && h.instanceInRotation(0)
+	}
+	if !h.runWithInvariant(5, ended, noWithdrawnPod) {
+		h.dumpState("roll never ended")
+		t.Fatalf("the rollback did not end the roll whose replacement was lost: %+v", h.instance(0))
+	}
+	if !h.sawEvent(workloadtypes.EventReasonSurgeAbandoned) {
+		t.Fatalf("no SurgeAbandoned event for the ended roll: %v", h.events)
+	}
+	if pods := h.podsOf(0); len(pods) != 1 || pods[0].UID != source[0].UID {
+		t.Fatalf("the source was rebuilt or joined; it runs the starting revision and keeps its pod: %d pod(s)", len(pods))
+	}
+	// The clock passes: nothing re-opens and no repair runs on the source.
+	h.runWithInvariant(15, func() bool { return false }, noWithdrawnPod)
+	if !ended() {
+		h.dumpState("after the clock")
+		t.Fatalf("the Instance left Ready on the starting revision: %+v", h.instance(0))
+	}
+	if n := h.restartsRecorded(); n != 0 {
+		t.Fatalf("restarts recorded = %d, want none: the rollback owns the Instance: %v", n, h.events)
+	}
+}
+
+// A single-pod surge hands over, the operator pushes a corrected revision,
+// and the replacement is lost before the source's drain converges. The roll
+// ends with the source back in rotation on the starting revision, and the
+// corrected revision rolls from there through the ordinary gates until the
+// Instance serves it; no pod of the withdrawn revision is created again.
+//
+// Cells: instance/Update/SurgeDrain/spec.revision/before, instance/Update/SurgeDrain/pod.deleted[target]/before
+func TestSurgeAfterHandover_CorrectivePushThenReplacementLostRollsToTheCorrectedRevision(t *testing.T) {
+	h := surgeHandedOver(t)
+	replacement := h.podsOfOnImage(0, fixedImage)
+	if len(replacement) != 1 {
+		t.Fatalf("hand-over shape: %d replacement pod(s), want one", len(replacement))
+	}
+	const correctedImage = "registry.test/serving:v3"
+	corrected := h.pushRevision(correctedImage)
+	h.losePod(replacement[0])
+	noWithdrawnPod := h.noLivePodOnRevision(h.revFixed)
+	h.step()
+	noWithdrawnPod()
+	if s := h.instance(0); s == nil || s.Phase != workloadtypes.InstancePhaseReady || s.Operation != nil ||
+		s.RunningRevision != h.revV1.Name || !h.instanceInRotation(0) {
+		h.dumpState("roll never ended")
+		t.Fatalf("the corrected push did not end the roll whose replacement was lost with the source back in rotation: %+v", h.instance(0))
+	}
+	if !h.sawEvent(workloadtypes.EventReasonSurgeAbandoned) {
+		t.Fatalf("no SurgeAbandoned event for the ended roll: %v", h.events)
+	}
+	if !h.runWithInvariant(40, func() bool { return h.converged(corrected.Name) && h.instanceInRotation(0) }, noWithdrawnPod) {
+		h.dumpState("never converged")
+		t.Fatalf("the Instance never settled on the corrected revision: %+v", h.instance(0))
+	}
+	h.requirePodsRender(0, corrected, correctedImage)
+	if n := h.restartsRecorded(); n != 0 {
+		t.Fatalf("restarts recorded = %d, want none: the roll owns the Instance: %v", n, h.events)
+	}
+}
+
+// A single-pod surge hands over and the drained source is deleted; the
+// replacement is then lost in the same window in which the operator
+// re-applies the starting revision. The roll ends as a fresh start: the row
+// re-enters Failed with no attempt on the revision it ran, and the Create
+// pass rebuilds the Instance there without a repair; no pod of the
+// withdrawn revision is created again.
+//
+// Cells: instance/Update/SurgeDrain/pod.deleted[target]/before, instance/Update/SurgeDrain/spec.revision/before
+func TestSurgeAfterHandover_ReplacementLostWithSourceGoneThenRollbackRebuildsAtTheStartingRevision(t *testing.T) {
+	h := surgeHandedOver(t)
+	sourceGone := func() bool {
+		s, pods := h.instance(0), h.podsOf(0)
+		return s != nil && s.Operation != nil && s.Operation.Step == workloadtypes.UpdateStepSurgeDrain &&
+			len(pods) == 1 && pods[0].Spec.Containers[0].Image == fixedImage
+	}
+	if !h.run(10, sourceGone) {
+		h.dumpState("source never drained")
+		t.Fatalf("the drained source was never deleted behind the serving replacement")
+	}
+	h.setTarget(h.revV1, goodImage)
+	h.losePod(h.podsOf(0)[0])
+	noWithdrawnPod := h.noLivePodOnRevision(h.revFixed)
+	h.step()
+	noWithdrawnPod()
+	if s := h.instance(0); s == nil || s.Phase != workloadtypes.InstancePhaseFailed || s.Operation != nil || s.RunningRevision != h.revV1.Name {
+		h.dumpState("no fresh start")
+		t.Fatalf("the roll did not end as a fresh start on the revision the source ran: %+v", h.instance(0))
+	}
+	if !h.runWithInvariant(20, func() bool { return h.converged(h.revV1.Name) && h.instanceInRotation(0) }, noWithdrawnPod) {
+		h.dumpState("never rebuilt")
+		t.Fatalf("the Instance was not rebuilt at the starting revision after the rollback: %+v", h.instance(0))
+	}
+	h.requirePodsRender(0, h.revV1, goodImage)
+	if n := h.restartsRecorded(); n != 0 {
+		t.Fatalf("restarts recorded = %d, want none: the fresh start is the Create pass's, not a repair's: %v", n, h.events)
+	}
+}

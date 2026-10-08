@@ -294,14 +294,14 @@ cells:
     outcome: transition
     to: Create/CreatePods
     guard: the corrective revision is a different RetryBlock subject than the held one
-    note: a new target re-drives a Failed row exactly as it re-drives a Ready one; the destination is resolved per pass — the Create pass when no pod remains, otherwise Surge, Drain or InPlace. A re-surge at the SAME target is suppressed so a bad revision cannot storm Failed against Updating, a preserved Update operation is a continuation that skips both the retry gate and the budget charge, an attempt parked after its disposition is no continuation and re-drives as a fresh start whose new operation replaces it, and a corrective edit at zero revision distance routes to wreckage cleanup instead of an update.
+    note: a new target re-drives a Failed row exactly as it re-drives a Ready one; the destination is resolved per pass — the Create pass when no pod remains, otherwise Surge, Drain or InPlace. A re-surge at the SAME target is suppressed so a bad revision cannot storm Failed against Updating, a preserved Update operation is a continuation that skips both the retry gate and the budget charge, an attempt parked after its disposition is no continuation and re-drives as a fresh start whose new operation replaces it, and a corrective edit at zero revision distance routes to wreckage cleanup instead of an update. The Create pass then re-proves the pods at the row's active ordinals and puts them back into service, and a hold a surge's drain step left on a source whose attempt was given up there (the mark that keeps the pod out of rotation) is lifted first, so the source serves again before the row reads Ready (ops/create.go putPodBackIntoService).
     invariants: [retryblock.gates.fresh.attempts, one.operation.per.instance]
     placement: perm
     coverage:
       perm: []
-      unit: [TestDetectUpdateTrigger_PhaseFailedRetriggersOnMismatch, TestDetectUpdate_NewRevisionPassesGate, TestDetectUpdate_FailedContinuationPassesGate, TestPatchInstanceStatusSurgingForUpdate_FailedStickyOnSameTarget, TestPlan_Update_CleanupOnly_RollBackWreckage, TestCorrectiveRecovery_SinglePod_RollForward, TestCorrectiveRecovery_Gang_RollForward, TestCorrectiveRecovery_SinglePod_RollBack, TestFailedSurgeSource_RolledBackReturnsToReadyWhileItsWreckageTerminates]
+      unit: [TestDetectUpdateTrigger_PhaseFailedRetriggersOnMismatch, TestDetectUpdate_NewRevisionPassesGate, TestDetectUpdate_FailedContinuationPassesGate, TestPatchInstanceStatusSurgingForUpdate_FailedStickyOnSameTarget, TestPlan_Update_CleanupOnly_RollBackWreckage, TestCorrectiveRecovery_SinglePod_RollForward, TestCorrectiveRecovery_Gang_RollForward, TestCorrectiveRecovery_SinglePod_RollBack, TestFailedSurgeSource_RolledBackReturnsToReadyWhileItsWreckageTerminates, TestCreate_PutsASourceBackIntoServiceByLiftingTheDrainHoldItsSurgeLeft]
       kind: []
-      replay: [failed-corrective-create, failed-corrective-inplace, failed-corrective-recreate, failed-corrective-surge]
+      replay: [failed-corrective-create, failed-corrective-inplace, failed-corrective-recreate, failed-corrective-surge, surgedrain-replacement-lost-rollback]
     status: decided
   - state: Failed
     event: spec.revision

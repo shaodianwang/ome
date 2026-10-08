@@ -1,0 +1,68 @@
+# A one-pod Instance is pushed to version 2. The new pod (the replacement)
+# serves, the old pod (the source) drains and is deleted. The source goes,
+# the replacement is lost and the operator re-applies version 1, all in
+# one window. Version 2 is withdrawn and no source pod stands, so the roll
+# ends as a fresh start: the row re-enters Failed with no attempt on the
+# version it ran, which is what the service wants again, and the Create
+# pass rebuilds the Instance there without a repair; no pod of the
+# withdrawn version is created again.
+scenario: surgedrain-replacement-lost-rollback-fresh-start
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-withdrawn
+cells:
+  - instance/Update/SurgeDrain/pod.deleted[target]/before
+  - instance/Update/SurgeDrain/spec.revision/before
+intentional: >-
+  with no source pod standing the ended roll is the Create pass's fresh
+  start at the version the service wants, which is the one the source
+  ran: the Instance is rebuilt there, without a repair, and no pod of
+  the withdrawn version is created again
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 1m, maxDelay: 30m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation, so the step advances and the source's serving gate is flipped off
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the source leaves rotation, so the drain has converged and the source is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 6
+    note: the source is gone, the replacement is lost and the operator re-applies the starting revision in the same window; with the pin withdrawn and no source pod standing the roll ends as a fresh start, the row Failed with no attempt on the revision it ran
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+      - spec.revision: {image: registry.example.com/runtime:v1}
+  - tick: 7
+    note: the row has no pod, so the Create pass rebuilds the Instance at the starting revision as a fresh start
+  - tick: 8
+    note: a pass with nothing changed
+  - tick: 9
+    note: the clock passes
+    events:
+      - clock.advance: 5m
+  - tick: 10
+    note: a pass with nothing changed

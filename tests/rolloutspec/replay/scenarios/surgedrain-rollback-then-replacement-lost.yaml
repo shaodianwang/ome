@@ -1,0 +1,64 @@
+# A one-pod Instance is pushed to version 2. The new pod (the replacement)
+# serves and the old pod (the source) is taken out of rotation to drain.
+# The operator then re-applies version 1 with the replacement standing;
+# past the Surge step the cycle finishes on the version it pinned, so
+# nothing is abandoned. The replacement is then lost. Nothing is rebuilt
+# at a version the service no longer wants: the roll ends from the drain
+# step, the source returns to rotation on version 1 and the row is Ready
+# there; no pod of the withdrawn version is created again.
+scenario: surgedrain-rollback-then-replacement-lost
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-withdrawn
+cells:
+  - instance/Update/SurgeDrain/spec.revision/before
+  - instance/Update/SurgeDrain/pod.deleted[target]/before
+intentional: >-
+  a cycle finishes on the version it pinned only while the replacement
+  stands; a replacement lost after the rollback is not rebuilt at the
+  withdrawn version, and the roll ends from the drain step with the
+  source back in rotation
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 1m, maxDelay: 30m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation, so the step advances and the source's serving gate is flipped off
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the operator re-applies the starting revision with the replacement standing; past the Surge step the cycle finishes on its pin, so nothing is abandoned
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v1}
+  - tick: 6
+    note: the replacement is lost with its revision already withdrawn, so the roll ends instead of rebuilding it; the source returns to rotation and the row is Ready on the starting revision
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 7
+    note: a pass with nothing changed
+  - tick: 8
+    note: the source is published again
+    events:
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 9
+    note: a pass with nothing changed
