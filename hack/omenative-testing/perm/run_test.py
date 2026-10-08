@@ -14215,7 +14215,8 @@ class GeneratedFaultFamiliesTest(unittest.TestCase):
                   if f != "gen-ops-held" and "minReadySeconds:" in self.outputs[f"{f}/{n}.yaml"]]
         self.assertEqual({("gen-fault-move", "held", "crash-load")}, {(f, kv.get("stuck"), kv.get("break")) for f, _n, kv in others},
                          "beside these, only the fault-move crash-after-Ready stuck rows carry a soak")
-        self.assertEqual(6, len(others))
+        self.assertEqual(3, len(others))
+        self.assertEqual({"engine", "pd"}, {kv["topo"] for _f, _n, kv in others}, "the single-pod shapes alone")
 
     def test_family_sizes_and_id_blocks(self):
         self.assertEqual(60, len(self.by_folder["gen-readiness"]))
@@ -16778,18 +16779,25 @@ class GeneratedFaultMoveFamilyTest(unittest.TestCase):
     def test_the_crash_after_ready_stuck_rows_soak_the_pushed_instance(self):
         # Under the surge strategy a pushed pod that crashes after Ready is
         # promoted and its source retired before the crash shows, so the strict
-        # floor cannot hold on any fleet; the rows pace the push with the
+        # floor cannot hold; the single-pod rows pace the push with the
         # ops-held rows' readiness soak, past the crash window, so the roll
-        # never promotes the pod. The other breaks carry no soak.
+        # never promotes the pod. The gang rows stay unsoaked: their crash
+        # cycle is paced by the kubelet's restart backoff, so under a soak the
+        # ladder's third wave falls past the held budget. The other breaks
+        # carry no soak.
         outputs, fam = self._more_rows()
         soak = generate_cases.MOVE_STUCK_CRASH_LOAD_SOAK_S
         self.assertEqual(generate_cases.OPS_HELD_CRASH_LOAD_SOAK_S, soak, "the ops-held rows' pacing, one knob")
         self.assertGreater(soak, generate_cases.CRASH_EXIT_AFTER_S)
-        soaked = [(n, kv, m) for n, kv, m in fam if kv.get("stuck") and kv.get("break") == "crash-load"]
-        self.assertEqual(6, len(soaked))
-        self.assertEqual({("engine", 0), ("pd", 2), ("engine-mn", 0), ("engine", 2), ("engine-mn", 2), ("pd-mn", 2)},
-                         {(kv["topo"], kv["Nr"]) for _n, kv, _m in soaked}, "every shape: the surge promotes on any fleet")
-        self.assertEqual({("held", "SurgeThenDrain")}, {(kv["stuck"], m["strat"]) for _n, kv, m in soaked})
+        crash = [(n, kv, m) for n, kv, m in fam if kv.get("stuck") and kv.get("break") == "crash-load"]
+        soaked = [(n, kv, m) for n, kv, m in crash if not kv["topo"].endswith("-mn")]
+        gang = [(n, kv, m) for n, kv, m in crash if kv["topo"].endswith("-mn")]
+        self.assertEqual((3, 3), (len(soaked), len(gang)))
+        self.assertEqual({("engine", 0), ("pd", 2), ("engine", 2)}, {(kv["topo"], kv["Nr"]) for _n, kv, _m in soaked},
+                         "the single-pod shapes")
+        self.assertEqual({("engine-mn", 0), ("engine-mn", 2), ("pd-mn", 2)}, {(kv["topo"], kv["Nr"]) for _n, kv, _m in gang},
+                         "the gang shapes")
+        self.assertEqual({("held", "SurgeThenDrain")}, {(kv["stuck"], m["strat"]) for _n, kv, m in crash})
         for name, kv, _m in soaked:
             text = outputs[f"gen-fault-move/{name}.yaml"]
             header, reason = text.splitlines()[:2]
@@ -16800,11 +16808,13 @@ class GeneratedFaultMoveFamilyTest(unittest.TestCase):
             self.assertIn(f"hold Ready for {soak}s", reason, name)
             self.assertIn(f"{generate_cases.CRASH_EXIT_AFTER_S}s crash window", reason, name)
             self.assertNotIn("instanceReadyTimeout", text, f"{name}: the readiness switch's bound is not the crash's")
+        soaked_names = {n for n, _kv, _m in soaked}
         for name, kv, _m in fam:
-            if kv.get("break") != "crash-load":
+            if name not in soaked_names:
                 text = outputs[f"gen-fault-move/{name}.yaml"]
-                self.assertNotIn("minReadySeconds:", text, f"{name}: the other breaks are unchanged")
+                self.assertNotIn("minReadySeconds:", text, f"{name}: the gang rows and the other breaks carry no soak")
                 self.assertNotIn(f"soak {soak}s", text.splitlines()[0], name)
+                self.assertNotIn("hold Ready for", text.splitlines()[1], name)
 
     def test_every_new_cell_validates_and_lands_on_the_ledger_rows_it_names(self):
         outputs, fam = self._more_rows()

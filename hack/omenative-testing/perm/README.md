@@ -1603,14 +1603,18 @@ the pod set the request found under a move rejected naming that revision
 its crashes is not judged); the
 Instances that served at the request keep serving; the Components neither
 pushed nor moved keep their pods; and the status keeps reporting the push
-that has not landed, the hold itself under `held`. The crash after Ready
-(`break=crash-load`) carries the ops-held rows' readiness soak as the
-pushed engine's `minReadySeconds` (`MOVE_STUCK_CRASH_LOAD_SOAK_S`, the same
-knob): under the surge strategy a pushed pod that is Ready is promoted and
-its source retired before the crash shows, on any fleet, so the floor the
-verdict holds could not be met; the soak outlasts the crash window, so the
-roll never promotes the pod and the running Instances keep serving at the
-floor. The header and the reason line of those cases say so.
+that has not landed, the hold itself under `held`. On the single-pod
+shapes the crash after Ready (`break=crash-load`) carries the ops-held
+rows' readiness soak as the pushed engine's `minReadySeconds`
+(`MOVE_STUCK_CRASH_LOAD_SOAK_S`, the same knob): under the surge strategy a
+pushed pod that is Ready is promoted and its source retired before the
+crash shows, so the floor the verdict holds could not be met; the soak
+outlasts the crash window, so the roll never promotes the pod and the
+running Instances keep serving at the floor. The gang shapes are left
+unsoaked: a crash-looping gang replacement is one pod the kubelet restarts
+under its own growing backoff, so under the soak the ladder sees too few
+failed attempts to reach `held` inside the case's budget. The header and
+the reason line of the soaked cases say so.
 
 ### A fault during a runtime edit (`mode=runtimerev` with a break, `expect=recover`)
 
@@ -3169,6 +3173,6 @@ once its KIND spec settles; until then it stays hand-tested.
   gang surge, RecreatePod, and in-place under a window, and the
   cluster-wide `deploy.minReadySeconds` default, are not yet in the
   matrix. The ops-held crash-after-Ready gang rows and the fault-move
-  crash-after-Ready stuck rows carry a fixed window as pacing
+  crash-after-Ready single-pod stuck rows carry a fixed window as pacing
   (`OPS_HELD_CRASH_LOAD_SOAK_S`, `MOVE_STUCK_CRASH_LOAD_SOAK_S`), not as a
   permuted axis.

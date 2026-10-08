@@ -299,9 +299,10 @@ runners (run.py + the KIND CI lane) already implement:
                           leaves the replacement nowhere to go (taint:all
                           lift=), and a move requested while a push is stuck
                           on a broken revision (stuck=held|failed with img= or
-                          break=, bump=decoder for the sibling's push; the
-                          crash after Ready paced by the ops-held rows'
-                          readiness soak, so the surge never promotes it)
+                          break=, bump=decoder for the sibling's push; on the
+                          single-pod shapes the crash after Ready is paced by
+                          the ops-held rows' readiness soak, so the surge
+                          never promotes it)
     gen-packed-pool/ p8600+ a packed pool: fillers take every node's spare
                           CPU once the service has settled, so the only room
                           is what a broken pod vacates; a push whose revision
@@ -7321,8 +7322,8 @@ MOVE_STUCK_BREAKS = [("imagepull", ["held", "failed"]), ("crash-start", ["held"]
 MOVE_STUCK_STRAT = ("SurgeThenDrain", 1, 0)
 MOVE_STUCK_READY_TIMEOUT = READINESS_NEW_TIMEOUT
 # The crash after Ready under the surge strategy: a pushed pod that is Ready
-# is promoted and its source retired before the crash shows, on any fleet, so
-# the strict floor cannot hold; the ops-held rows' readiness soak paces it.
+# is promoted and its source retired before the crash shows, so the strict
+# floor cannot hold; the ops-held rows' readiness soak paces the single-pod rows.
 MOVE_STUCK_CRASH_LOAD_SOAK_S = OPS_HELD_CRASH_LOAD_SOAK_S
 MOVE_CONFIG_SUFFIX = "-config"
 MOVE_STUCK_HOW = {"imagepull": "an image that cannot be pulled",
@@ -7643,7 +7644,10 @@ def _emit_fault_move_more(add):
                 else:
                     kv["break"] = kind
                 ready_timeout = MOVE_STUCK_READY_TIMEOUT if kind == "stuck" else None
-                soak = MOVE_STUCK_CRASH_LOAD_SOAK_S if kind == "crash-load" else None
+                # The gang rows stay unsoaked: a crash-looping gang replacement is one pod the
+                # kubelet restarts under its own growing backoff, so under a soak the ladder's
+                # third wave falls past the held budget.
+                soak = MOVE_STUCK_CRASH_LOAD_SOAK_S if kind == "crash-load" and not is_mn(topo) else None
                 life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, ready_timeout=ready_timeout, min_ready=soak)
                 d_life = lib.lifecycle() if is_pd(topo) else None
                 meta = dict(strat=strat, verb=f"push:{stuck}:{kind}+move", rp="None", stuck=stuck, victim="engine", at="accept", who="moved")
